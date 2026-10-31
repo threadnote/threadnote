@@ -1,16 +1,21 @@
-import {Effect, Array as EffectArray, String as EffectString} from 'effect';
-
+import {systemError} from 'effect/PlatformError';
+import * as Schema from 'effect/Schema';
+import {Effect, FileSystem, Result, Array as EffectArray, String as EffectString} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-
 import {describe, expect} from 'vitest';
-
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
-
 import {sha256HexSync} from '@threadnote/platform/sha256';
-
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import * as Effect2 from 'effect';
-import {fixture, object, reviewed, run} from './native-cycle-lifecycle-fixture.js';
-
+import {
+  captureNativeCycleSource,
+  completeLocalPhase,
+  fixture,
+  object,
+  reviewed,
+  run,
+} from './native-cycle-lifecycle-fixture.js';
 describe('native cycle lifecycle', () => {
   effectIt.effect('preserves immutable legacy evidence and readiness while refusing current self-review', () =>
     Effect.gen(function* () {
@@ -79,7 +84,6 @@ describe('native cycle lifecycle', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(unchanged);
     }).pipe(run),
   );
-
   effectIt.effect('keeps stable-base incremental patch detail limited to the new source delta', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -104,7 +108,6 @@ describe('native cycle lifecycle', () => {
       expect(object(detail.page).text).not.toContain('Declared-base scope delta');
     }).pipe(run),
   );
-
   effectIt.effect('checks declared-base deletions even when they cancel out of the original baseline diff', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -156,7 +159,6 @@ describe('native cycle lifecycle', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
     }).pipe(run),
   );
-
   effectIt.effect('retains exact shared upstream entries when the declared base advances disjointly', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -188,7 +190,6 @@ describe('native cycle lifecycle', () => {
       expect(object(result.snapshot).files).toEqual(['source.ts', 'upstream.ts']);
     }).pipe(run),
   );
-
   effectIt.effect(
     'includes the declared-base patch when an owned upstream change cancels from the fixed baseline',
     () =>
@@ -229,7 +230,6 @@ describe('native cycle lifecycle', () => {
         expect(object(patch.page).text).toContain('-export const upstreamContract = true;');
       }).pipe(run),
   );
-
   effectIt.effect('retains exact pre-existing unowned staging as separate source evidence', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one', 'two'], 'pr', true);
@@ -284,7 +284,6 @@ describe('native cycle lifecycle', () => {
       expect(yield* f.fs.readFile(indexPath)).toEqual(index);
     }).pipe(run),
   );
-
   effectIt.effect('keeps baseline pins distinct from every valid snapshot identifier', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -297,7 +296,6 @@ describe('native cycle lifecycle', () => {
       expect(snapshot.pinnedRef).not.toBe(runtime.baselines.one?.pinnedRef);
     }).pipe(run),
   );
-
   effectIt.effect('pins the original baseline before implementation and rejects committed unowned source', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -341,7 +339,6 @@ describe('native cycle lifecycle', () => {
       ).toMatchObject({failure: {code: 'review-history'}});
     }).pipe(run),
   );
-
   effectIt.effect('carries unresolved findings across an actual material authoring restart', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -364,7 +361,7 @@ describe('native cycle lifecycle', () => {
         report: {...f.report, findings: [finding]},
       });
       const plan = yield* f.revise({
-        phases: f.document.phases.map(phase =>
+        phases: EffectArray.map(f.document.phases, phase =>
           phase.id === 'one' ? {...phase, outcome: 'Amended approved phase outcome.'} : phase,
         ),
       });
@@ -404,7 +401,6 @@ describe('native cycle lifecycle', () => {
       ).toMatchObject({failure: {code: 'review-blocked'}});
     }).pipe(run),
   );
-
   effectIt.effect(
     'recovers an amended phase from its last accepted ledger while retaining an unreviewed snapshot',
     () =>
@@ -470,7 +466,7 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'review-history'}});
         const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
         const plan = yield* f.revise({
-          phases: f.document.phases.map(phase =>
+          phases: EffectArray.map(f.document.phases, phase =>
             phase.id === 'one'
               ? {...phase, outcome: 'The approved material amendment requires a full current review.'}
               : phase,
@@ -536,7 +532,7 @@ describe('native cycle lifecycle', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "current amended";\n');
         yield* f.git(['add', 'source.ts']);
         yield* f.git(['commit', '-m', 'Current amended source']);
-        const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         const recovery = {
           phaseId: 'one',
           snapshotId: 'current-full-recovery',
@@ -556,7 +552,7 @@ describe('native cycle lifecycle', () => {
         expect(after.snapshots.slice(0, before.snapshots.length)).toEqual(before.snapshots);
         expect(after.reviews).toEqual(before.reviews);
         expect(after.attempts).toEqual(before.attempts);
-        expect(after.reviews.some(item => item.snapshotId === unreviewed.snapshotId)).toBe(false);
+        expect(EffectArray.some(after.reviews, item => item.snapshotId === unreviewed.snapshotId)).toBe(false);
         const report = {
           ...f.report,
           snapshotId: current.snapshotId,
@@ -607,7 +603,6 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'source-drift'}});
       }).pipe(run),
   );
-
   effectIt.effect('does not bypass an unreviewed snapshot when the accepted ledger matches the current contract', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -617,7 +612,7 @@ describe('native cycle lifecycle', () => {
         report: f.report,
       });
       const amended = yield* f.revise({
-        phases: f.document.phases.map(phase =>
+        phases: EffectArray.map(f.document.phases, phase =>
           phase.id === 'one' ? {...phase, outcome: 'Temporary approved material amendment.'} : phase,
         ),
       });
@@ -677,7 +672,6 @@ describe('native cycle lifecycle', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
     }).pipe(run),
   );
-
   for (const field of ['outcome', 'contracts', 'verification'] as const) {
     effectIt.effect(`invalidates a changed authoring ${field} and descendants while retaining unrelated proof`, () =>
       Effect.gen(function* () {
@@ -687,13 +681,13 @@ describe('native cycle lifecycle', () => {
         yield* f.mutate('begin-phase', {phaseId: 'one'});
         yield* completeLocalPhase(f, 'one');
         const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
-        const phases = f.document.phases.map(phase =>
+        const phases = EffectArray.map(f.document.phases, phase =>
           phase.id !== 'one'
             ? phase
             : field === 'verification'
               ? {
                   ...phase,
-                  acceptance: phase.acceptance.map(item => ({
+                  acceptance: EffectArray.map(phase.acceptance, item => ({
                     ...item,
                     verification: 'New approved observable verification.',
                   })),
@@ -714,7 +708,6 @@ describe('native cycle lifecycle', () => {
       }).pipe(run),
     );
   }
-
   effectIt.effect('follows the review-attempt continuation when replay exceeds the response budget', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -724,7 +717,7 @@ describe('native cycle lifecycle', () => {
           id: 'minor-' + index,
           file: 'source.ts',
           line: 1,
-          body: 'Detailed finding. '.repeat(30),
+          body: EffectString.repeat(30)('Detailed finding. '),
           trigger: 'Use the private flow.',
           impact: 'A minor usability gap.',
           evidence: 'Exact current source.',
@@ -758,7 +751,7 @@ describe('native cycle lifecycle', () => {
         content += page.text;
         sourceDigest = page.sourceDigest;
         if (page.nextOffsetBytes === null) break;
-        offsetBytes = page.nextOffsetBytes as number;
+        offsetBytes = yield* Schema.decodeUnknownEffect(Schema.Finite)(page.nextOffsetBytes);
       }
       expect(JSON.parse(content)).toEqual(report);
       const invalidFields = {...fields, attemptId: 'large-invalid-attempt', report: {...report, lanes: []}};
@@ -774,7 +767,6 @@ describe('native cycle lifecycle', () => {
       });
     }).pipe(run),
   );
-
   effectIt.effect(
     'blocks advancement on a changed ready root and retains both plan provenances after explicit reconciliation',
     () =>
@@ -825,7 +817,6 @@ describe('native cycle lifecycle', () => {
         expect(runtime.plans[1]?.source.root.revision).toBe(object(saved.root).revision);
       }).pipe(run),
   );
-
   effectIt.effect('keeps a continuous review budget and persists explicit expansions without resetting history', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -844,8 +835,11 @@ describe('native cycle lifecycle', () => {
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: previous ? 'incremental' : 'full',
-            selected: ['orchestrator'],
-            lanes: [{name: 'orchestrator', status: 'complete'}],
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
             findings: [],
           },
         };
@@ -875,7 +869,6 @@ describe('native cycle lifecycle', () => {
       expect(() => decodeNativeCycleRuntime({...runtime, reviewLimits: {one: 99}})).toThrow();
     }).pipe(run),
   );
-
   effectIt.effect('verifies ready graph, actual anchors, ownership and packet budgets before routine dispatch', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -904,7 +897,7 @@ describe('native cycle lifecycle', () => {
       };
       const packet = yield* f.call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options});
       expect(packet).toMatchObject({available: true, capacity: {effort: 'low'}, acceptanceCriteria: ['one works']});
-      expect(new TextEncoder().encode(JSON.stringify(packet)).byteLength).toBeLessThan(12_288);
+      expect(new TextEncoder().encode(JSON.stringify(packet)).byteLength).toBeLessThan(12288);
       const tiny = yield* f.call({
         ...f.base('cycle'),
         command: 'packet',
@@ -954,7 +947,6 @@ describe('native cycle lifecycle', () => {
       expect(graphPreparations).toBe(0);
     }).pipe(run),
   );
-
   effectIt.effect(
     'admits exact read-only upstream blobs while preserving the original review baseline and rejecting unowned edits',
     () =>
@@ -971,10 +963,10 @@ describe('native cycle lifecycle', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const upstream = true;\n');
         yield* f.git(['add', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Independent upstream']);
-        const upstream = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const upstream = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         yield* f.git(['checkout', 'feature/one']);
         yield* f.git(['merge', '--no-edit', 'main']);
-        const acceptedHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const acceptedHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         const result = yield* f.mutate('snapshot', {
           phaseId: 'one',
           snapshotId: 'after-incoming',
@@ -990,8 +982,8 @@ describe('native cycle lifecycle', () => {
             path: 'upstream.ts',
             mode: '100644',
             source: 'upstream',
-            tree: (yield* f.git(['rev-parse', upstream + '^{tree}'])).stdout.trim(),
-            blob: (yield* f.git(['rev-parse', upstream + ':upstream.ts'])).stdout.trim(),
+            tree: EffectString.trim((yield* f.git(['rev-parse', upstream + '^{tree}'])).stdout),
+            blob: EffectString.trim((yield* f.git(['rev-parse', upstream + ':upstream.ts'])).stdout),
             commit: upstream,
           },
         ]);
@@ -1004,7 +996,7 @@ describe('native cycle lifecycle', () => {
         yield* f.git(['config', 'core.filemode', 'false']);
         yield* f.git(['update-index', '--chmod=+x', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Unowned mode edit']);
-        const modeHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const modeHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         expect(
           yield* f
             .mutate('snapshot', {
@@ -1018,7 +1010,7 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'phase-scope'}});
         yield* f.git(['update-index', '--chmod=-x', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Restore upstream mode']);
-        const restoredHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const restoredHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const tampered = true;\n');
         expect(
           yield* f
@@ -1033,7 +1025,6 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'phase-scope'}});
       }).pipe(run),
   );
-
   effectIt.effect('delivers one phase and immediately permits the next with an open draft PR and pending CI', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -1056,7 +1047,7 @@ describe('native cycle lifecycle', () => {
       ).toMatchObject({failure: {code: 'delivery-pending'}});
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'Phase one']);
-      const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
       const delivered = yield* f.mutate('record-delivery', {
         phaseId: 'one',
         publication: {exemption: 'maintenance', reason: 'Private test, no feature publication.'},
@@ -1101,7 +1092,6 @@ describe('native cycle lifecycle', () => {
       expect(runtime.state.phases.two?.status).toBe('stale');
     }).pipe(run),
   );
-
   effectIt.effect(
     'preserves malformed review evidence, rejects stale source and stale CAS, and recovers failed receipt writes',
     () =>
@@ -1131,8 +1121,15 @@ describe('native cycle lifecycle', () => {
         const failRename = FileSystem.FileSystem.of({
           ...original,
           rename: (from, to) =>
-            to.endsWith('native-run.json')
-              ? Effect.fail(new Error('Synthetic state receipt interruption') as never)
+            EffectString.endsWith('native-run.json')(to)
+              ? Effect.fail(
+                  systemError({
+                    _tag: 'Unknown',
+                    module: 'FileSystem',
+                    method: 'rename',
+                    description: 'Synthetic state receipt interruption',
+                  }),
+                )
               : original.rename(from, to),
         });
         const interrupted = yield* f
@@ -1146,7 +1143,7 @@ describe('native cycle lifecycle', () => {
           report: f.report,
         });
         const state = JSON.parse(yield* f.fs.readFileString(f.statePath()));
-        expect(decodeNativeCycleRuntime(state.cycle).attempts.map(item => item.status)).toEqual([
+        expect(EffectArray.map(decodeNativeCycleRuntime(state.cycle).attempts, item => item.status)).toEqual([
           'invalid',
           'accepted',
         ]);

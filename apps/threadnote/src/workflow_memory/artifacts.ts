@@ -69,7 +69,6 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 const prefix = (state: WorkflowJournal) => `workflow-${state.binding.bindingId}-`;
 const nativeRoot = (config: RuntimeConfig) => `threadnote://user/${uriSegment(config.user)}/memories`;
 const ownedArtifacts = workflowOwnedArtifacts;
@@ -203,7 +202,6 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
     return yield* workflowError('identity-conflict', 'The owned artifact changed memory identity.');
   return {live, record, owned};
 });
-
 export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
@@ -243,7 +241,6 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
     verifiedReadback: true,
   } satisfies WorkflowReadResult;
 });
-
 export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJournal, request: WorkflowRequest) =>
   prepareWorkflowOperationWithCapture(config, state, request, () =>
     captureMemoryCodeCitationsForMcp(
@@ -252,7 +249,6 @@ export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJ
       'workflow-memory',
     ),
   );
-
 const workflowCitationCaptureError = (failure: unknown) =>
   Schema.is(MemoryCodeCitationCaptureError)(failure) && failure.retryable
     ? workflowError(
@@ -262,7 +258,6 @@ const workflowCitationCaptureError = (failure: unknown) =>
           : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
       )
     : failure;
-
 type ProjectionPreparation = (
   state: WorkflowJournal,
   request: WorkflowRequest,
@@ -275,7 +270,8 @@ export function withWorkflowProjectionCitations<A, E, R>(
   use: (prepare: ProjectionPreparation) => Effect.Effect<A, E, R>,
 ) {
   const ordinary: ProjectionPreparation = (state, request) => prepareWorkflowOperation(config, state, request);
-  if (!refs.length || refs.some(ref => ref.trim().startsWith('cgr_'))) return use(ordinary);
+  if (!refs.length || EffectArray.some(refs, ref => EffectString.startsWith('cgr_')(EffectString.trim(ref))))
+    return use(ordinary);
   return Effect.gen(function* () {
     let active = true;
     return yield* withLocalMemoryCodeCitations(
@@ -310,7 +306,6 @@ export function withWorkflowProjectionCitations<A, E, R>(
     );
   });
 }
-
 const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOperation')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
@@ -382,7 +377,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
     const body = request.body;
     if (
       body === undefined ||
-      new TextEncoder().encode(body).byteLength > 60_000 ||
+      new TextEncoder().encode(body).byteLength > 60000 ||
       !Effect2.pipe(body, EffectString.trim)
     )
       return yield* workflowError(
@@ -462,10 +457,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       );
     if (admitted && !promotion && stableJson(request.codeRefs ?? []) !== stableJson(admitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
-    const captured =
-      admitted && !promotion
-        ? {ok: true as const, citations: admitted.citations}
-        : yield* capture();
+    const captured = admitted && !promotion ? {ok: true as const, citations: admitted.citations} : yield* capture();
     if (!captured.ok) {
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
@@ -542,7 +534,6 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
     },
   } satisfies WorkflowOperation;
 });
-
 export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperation')(function* (
   config: RuntimeConfig,
   initial: WorkflowJournal,

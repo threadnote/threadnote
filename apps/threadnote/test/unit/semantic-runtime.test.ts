@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
@@ -18,7 +21,6 @@ import {
   spawnLspWire,
   type LspWire,
 } from '../../src/semantic/lsp_transport.js';
-
 type Message = Parameters<LspWire['send']>[0];
 const fakeWire = Effect.gen(function* () {
   const incoming = yield* Queue.bounded<Message, Cause.Done>(64);
@@ -42,7 +44,6 @@ const fakeWire = Effect.gen(function* () {
   };
   return {wire, sent, incoming, finishes: () => finishes};
 });
-
 const admissionLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, TestSystemInfoLayer);
 const admissionFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -61,15 +62,17 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
         const {first, second} = yield* admissionFixture;
         const held = [];
         for (let i = 0; i < 8; i++) {
-          const reservation = yield* (i % 2 ? first : second).acquire((i < 4 ? 'a' : 'b').repeat(64), 2000);
+          const reservation = yield* (i % 2 ? first : second).acquire(EffectString.repeat(64)(i < 4 ? 'a' : 'b'), 2000);
           yield* reservation.finishImport;
           held.push(reservation);
         }
-        expect(yield* first.acquire('c'.repeat(64), 100).pipe(Effect.flip)).toMatchObject({code: 'timeout'});
+        expect(yield* first.acquire(EffectString.repeat(64)('c'), 100).pipe(Effect.flip)).toMatchObject({
+          code: 'timeout',
+        });
         expect(yield* second.status).toMatchObject({providers: 8, imports: 0, queued: 0});
         const generation = held.at(-1)!.generation;
         for (const reservation of held) yield* reservation.release(true);
-        const next = yield* second.acquire('c'.repeat(64), 2000);
+        const next = yield* second.acquire(EffectString.repeat(64)('c'), 2000);
         expect(next.generation).toBeGreaterThan(generation);
         yield* next.release(true);
       }).pipe(
@@ -79,7 +82,6 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
       ),
     10000,
   );
-
   effectIt.effect(
     'never reclaims an uncertain instance and quarantines an unregistered child after owner reuse',
     () =>
@@ -94,7 +96,7 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
             canonicalProcessStartIdentity: () => Effect.succeed(observed),
           }),
         );
-        const reservation = yield* admission.acquire('a'.repeat(64), 2000);
+        const reservation = yield* admission.acquire(EffectString.repeat(64)('a'), 2000);
         observed = undefined;
         expect(yield* admission.status).toMatchObject({providers: 1, quarantined: 0});
         observed = 'new-instance';
@@ -109,15 +111,14 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
       ),
     10000,
   );
-
   effectIt.effect(
     'bounds imports across two worktree coordinators and releases FIFO capacity',
     () =>
       Effect.gen(function* () {
         const {first, second} = yield* admissionFixture;
-        const a = yield* first.acquire('a'.repeat(64), 2000);
-        const b = yield* second.acquire('b'.repeat(64), 2000);
-        const waiting = yield* Effect.forkChild(second.acquire('c'.repeat(64), 2000));
+        const a = yield* first.acquire(EffectString.repeat(64)('a'), 2000);
+        const b = yield* second.acquire(EffectString.repeat(64)('b'), 2000);
+        const waiting = yield* Effect.forkChild(second.acquire(EffectString.repeat(64)('c'), 2000));
         yield* Effect.sleep(50);
         expect(yield* first.status).toMatchObject({providers: 2, imports: 2, queued: 1});
         yield* a.finishImport;
@@ -132,7 +133,6 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
       ),
     10000,
   );
-
   effectIt.effect(
     'lets an unrelated workspace pass a saturated workspace and removes cancelled tickets',
     () =>
@@ -140,13 +140,13 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
         const {first, second} = yield* admissionFixture;
         const held = [];
         for (let i = 0; i < 4; i++) {
-          const reservation = yield* first.acquire('a'.repeat(64), 2000);
+          const reservation = yield* first.acquire(EffectString.repeat(64)('a'), 2000);
           yield* reservation.finishImport;
           held.push(reservation);
         }
-        const blocked = yield* Effect.forkChild(first.acquire('a'.repeat(64), 2000));
+        const blocked = yield* Effect.forkChild(first.acquire(EffectString.repeat(64)('a'), 2000));
         yield* Effect.sleep(50);
-        const unrelated = yield* second.acquire('b'.repeat(64), 2000);
+        const unrelated = yield* second.acquire(EffectString.repeat(64)('b'), 2000);
         expect(yield* second.status).toMatchObject({providers: 5, queued: 1});
         yield* Fiber.interrupt(blocked);
         expect(yield* first.status).toMatchObject({providers: 5, queued: 0});
@@ -159,13 +159,12 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
       ),
     10000,
   );
-
   effectIt.effect(
     'keeps uncertain cleanup occupied and refuses corrupt ledgers',
     () =>
       Effect.gen(function* () {
         const {first, second, fs, path, directory} = yield* admissionFixture;
-        const reservation = yield* first.acquire('a'.repeat(64), 2000);
+        const reservation = yield* first.acquire(EffectString.repeat(64)('a'), 2000);
         yield* reservation.release(false);
         expect(yield* second.status).toMatchObject({providers: 1, imports: 0, quarantined: 1});
         yield* fs.writeFileString(path.join(directory, 'admission-v1.json'), '{', {mode: 0o600});
@@ -179,7 +178,6 @@ describe.skipIf(process.platform === 'win32')('shared semantic admission', () =>
     10000,
   );
 });
-
 describe('semantic LSP framing', () => {
   it('preserves multiple Unicode frames under arbitrary chunk boundaries', () => {
     fc.assert(
@@ -191,8 +189,8 @@ describe('semantic LSP framing', () => {
             {jsonrpc: '2.0', id: 1, method: 'query', params: {value, text: '🧵\r\n'}},
             {jsonrpc: '2.0', id: 1, result: value},
           ];
-          const parts = expected.map(encodeLspFrame);
-          const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+          const parts = EffectArray.map(expected, encodeLspFrame);
+          const bytes = new Uint8Array(EffectArray.reduce(parts, 0, (size, part) => size + part.length));
           let offset = 0;
           for (const part of parts) {
             bytes.set(part, offset);
@@ -212,7 +210,6 @@ describe('semantic LSP framing', () => {
       {numRuns: 100},
     );
   });
-
   it.each([
     'Content-Length: 1\r\nContent-Length: 1\r\n\r\n0',
     'Content-Length: -1\r\n\r\n',
@@ -237,7 +234,6 @@ describe('semantic LSP framing', () => {
     expect(() => new LspFrameDecoder().push(new Uint8Array(8193).fill(65))).toThrow(LspFault);
   });
 });
-
 describe('semantic LSP request lifecycle', () => {
   effectIt.effect('bounds cancellation even when the provider stops draining stdin', () =>
     Effect.gen(function* () {
@@ -258,7 +254,6 @@ describe('semantic LSP request lifecycle', () => {
       expect((yield* client.close).graceful).toBe(true);
     }),
   );
-
   effectIt.effect('correlates out-of-order responses without sharing pending requests', () =>
     Effect.gen(function* () {
       const fake = yield* fakeWire;
@@ -273,7 +268,6 @@ describe('semantic LSP request lifecycle', () => {
       expect(yield* Fiber.join(second)).toBe('second');
     }),
   );
-
   effectIt.effect('expires one request, sends cancellation and ignores its late response', () =>
     Effect.gen(function* () {
       const fake = yield* fakeWire;
@@ -290,7 +284,6 @@ describe('semantic LSP request lifecycle', () => {
       expect(yield* Fiber.join(current)).toBe('current');
     }),
   );
-
   effectIt.effect('releases bounded pending slots after interruption', () =>
     Effect.gen(function* () {
       const fake = yield* fakeWire;
@@ -309,7 +302,6 @@ describe('semantic LSP request lifecycle', () => {
       expect(yield* Fiber.join(next)).toBe(true);
     }),
   );
-
   effectIt.effect('denies provider edits and performs shutdown exactly once', () =>
     Effect.gen(function* () {
       const fake = yield* fakeWire;
@@ -322,14 +314,13 @@ describe('semantic LSP request lifecycle', () => {
       });
       expect(yield* Queue.take(fake.sent)).toMatchObject({id: 'server-1', result: {applied: false}});
       const results = yield* Effect.all([client.close, client.close], {concurrency: 2});
-      expect(results.every(result => result.graceful)).toBe(true);
+      expect(EffectArray.every(results, result => result.graceful)).toBe(true);
       expect(fake.finishes()).toBe(1);
       expect((yield* Queue.take(fake.sent)).method).toBe('exit');
       expect((yield* client.request('late', {}, 1000).pipe(Effect.flip)).code).toBe('closing');
     }),
   );
 });
-
 describe.skipIf(process.platform === 'win32')('semantic real process transport', () => {
   effectIt.effect.each([
     {mode: '', graceful: true},
@@ -355,14 +346,14 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
         TestClock.withLive,
         Effect.provideService(ChildEnvironmentPolicy, {
           sanitizeExternal: environment =>
-            Object.fromEntries(
-              Object.entries(environment).filter(([key]) =>
+            EffectRecord.fromEntries(
+              EffectArray.filter(EffectRecord.toEntries(environment), ([key]) =>
                 ['PATH', 'TMPDIR', 'LANG', 'SYSTEMROOT', 'SystemRoot', 'WINDIR'].includes(key),
               ),
             ),
           preserveIntendedChild: environment => environment,
         }),
       ),
-    15_000,
+    15000,
   );
 });

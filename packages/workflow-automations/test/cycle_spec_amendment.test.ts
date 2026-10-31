@@ -1,3 +1,5 @@
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -8,17 +10,20 @@ import {
   recordNativeCycleDelivery,
   validateNativeCyclePhase,
 } from '../src/cycle.js';
-
-const digest = 'a'.repeat(64);
-const head = 'b'.repeat(40);
-const tree = 'c'.repeat(40);
+const digest = EffectString.repeat(64)('a');
+const head = EffectString.repeat(40)('b');
+const tree = EffectString.repeat(40)('c');
 const spec = {
   root: {uri: 'threadnote://user/me/spec', memoryId: 'tn_spec', revision: digest},
   binding: {bindingId: digest, runId: 'run', generation: 'gen', profile: 'desktop'},
   documentHash: digest,
   intentHash: digest,
 };
-const amended = {...spec, root: {...spec.root, revision: 'd'.repeat(64)}, intentHash: 'd'.repeat(64)};
+const amended = {
+  ...spec,
+  root: {...spec.root, revision: EffectString.repeat(64)('d')},
+  intentHash: EffectString.repeat(64)('d'),
+};
 const plan = (count = 2) =>
   decodeNativeCyclePlan({
     format: 'threadnote-native-cycle-plan',
@@ -61,11 +66,10 @@ const validate = (state: ReturnType<typeof initializeNativeCycle>) =>
       acceptance: [{criterion: 'works', result: 'passed', evidence: 'Verified fixture.'}],
     },
   );
-
 it('requires explicit amendment authority and retains the original specification identity', () => {
   const state = initializeNativeCycle(plan());
   const before = JSON.stringify(state);
-  for (const authority of [undefined, '', ' ', 'approval\u0000', 'a'.repeat(4097)])
+  for (const authority of [undefined, '', ' ', 'approval\u0000', EffectString.repeat(4097)('a')])
     expect(() => reconcileNativeCyclePlan(state, {...state.plan, spec: amended}, 'Defer Kotlin.', authority)).toThrow(
       'user authority',
     );
@@ -76,7 +80,7 @@ it('requires explicit amendment authority and retains the original specification
     {...amended, root: {...amended.root, memoryId: 'tn_other'}},
     {...amended, binding: {...amended.binding, runId: 'other'}},
     {...amended, binding: {...amended.binding, generation: 'other'}},
-    {...amended, binding: {...amended.binding, bindingId: 'e'.repeat(64)}},
+    {...amended, binding: {...amended.binding, bindingId: EffectString.repeat(64)('e')}},
   ])
     expect(() =>
       reconcileNativeCyclePlan(state, {...state.plan, spec: other}, 'Defer Kotlin.', 'Skip Kotlin for now.'),
@@ -87,7 +91,6 @@ it('requires explicit amendment authority and retains the original specification
   );
   expect(JSON.stringify(state)).toBe(before);
 });
-
 it('invalidates every spec-bound phase and retains prior acceptance and delivery evidence', () => {
   let state = validate(initializeNativeCycle(plan()));
   state = recordNativeCycleDelivery(state, 'p0', {
@@ -106,7 +109,7 @@ it('invalidates every spec-bound phase and retains prior acceptance and delivery
     'Skip Kotlin for now.',
   );
   expect(result.affected).toEqual(['p0', 'p1']);
-  for (const phase of Object.values(result.state.phases)) {
+  for (const phase of EffectRecord.values(result.state.phases)) {
     expect(phase.status).toBe('stale');
     expect(phase.validation).toBeUndefined();
     expect(phase.delivery).toBeUndefined();
@@ -123,11 +126,10 @@ it('invalidates every spec-bound phase and retains prior acceptance and delivery
   expect(decodeNativeCycleState(result.state)).toEqual(result.state);
   expect(JSON.stringify(state)).toBe(before);
 });
-
 it('preserves successive approval records and refuses to truncate exhausted history', () => {
   let state = initializeNativeCycle(plan(1));
   for (let index = 1; index <= 64; index++) {
-    const next = {...spec, root: {...spec.root, revision: index.toString(16).padStart(64, '0')}};
+    const next = {...spec, root: {...spec.root, revision: EffectString.padStart(64, '0')(index.toString(16))}};
     const prior = state;
     state = reconcileNativeCyclePlan(state, {...state.plan, spec: next}, `Amendment ${index}.`, 'Approved.').state;
     expect(state.specAmendments?.slice(0, -1)).toEqual(prior.specAmendments ?? []);
@@ -139,7 +141,6 @@ it('preserves successive approval records and refuses to truncate exhausted hist
   );
   expect(JSON.stringify(state)).toBe(before);
 });
-
 it('does not authorize rewriting merged history', () => {
   let state = validate(initializeNativeCycle({...plan(1), delivery: 'pr'}));
   state = recordNativeCycleDelivery(state, 'p0', {
@@ -155,15 +156,14 @@ it('does not authorize rewriting merged history', () => {
     reconcileNativeCyclePlan(state, {...state.plan, spec: amended}, 'Approved scope amendment.', 'Approved.'),
   ).toThrow('Merged history');
 });
-
 it('never reuses acceptance hashes across generated specification revisions', () => {
   fc.assert(
-    fc.property(fc.integer({min: 1, max: 12}), fc.integer({min: 1, max: 1_000_000}), (count, revision) => {
+    fc.property(fc.integer({min: 1, max: 12}), fc.integer({min: 1, max: 1000000}), (count, revision) => {
       const state = initializeNativeCycle(plan(count));
-      const next = {...spec, root: {...spec.root, revision: revision.toString(16).padStart(64, '0')}};
+      const next = {...spec, root: {...spec.root, revision: EffectString.padStart(64, '0')(revision.toString(16))}};
       const result = reconcileNativeCyclePlan(state, {...state.plan, spec: next}, 'New ready pin.', 'Approved pin.');
       expect(result.affected).toHaveLength(count);
-      for (const id of Object.keys(state.phases)) {
+      for (const id of EffectRecord.keys(state.phases)) {
         expect(result.state.phases[id].phaseHash).not.toBe(state.phases[id].phaseHash);
         expect(result.state.phases[id].status).toBe('stale');
       }

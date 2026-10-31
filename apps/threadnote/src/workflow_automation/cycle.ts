@@ -23,6 +23,8 @@ import {
 } from '@threadnote/workflow-automations/cycle-packet';
 import {
   validateNativeCycleReview,
+  NativeCycleRebaseInputSchema,
+  nativeCycleRebaseReceiptDigest,
   NativeCycleBaseRequalificationInputSchema,
   NativeCycleOrdinaryMergeInputSchema,
   nativeCycleMergeReceiptDigest,
@@ -51,6 +53,7 @@ import {
   pinNativeCycleTree,
   pinNativeCycleCommit,
   nativeCycleIsAncestor,
+  verifyNativeCycleRebase,
   verifyNativeCycleBaseRequalification,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
@@ -105,6 +108,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   snapshotId: Schema.optionalKey(id),
   previous: Schema.optionalKey(id),
   acceptedHead: Schema.optionalKey(text),
+  rebase: Schema.optionalKey(NativeCycleRebaseInputSchema),
   baseRequalification: Schema.optionalKey(NativeCycleBaseRequalificationInputSchema),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeInputSchema),
   base: Schema.optionalKey(text),
@@ -151,6 +155,8 @@ export const nativeCycleSemanticPrerequisites = (command: string) => ({
     ? {
         phaseId: 'A phase from this plan.',
         snapshotId: 'A fresh immutable identifier.',
+        rebase:
+          'Only before this phase has any snapshot: exact preRebaseHead must be its original baseline HEAD; ontoHead and rebasedHead must match the reviewed declared base ancestry. Requires acceptedHead, reason and explicit userAuthority. Existing baseline, scope checks and review budget remain unchanged.',
         ordinaryMergeQualificationV1:
           'Use protocolVersion2 only for an ordinary-merge snapshot, with previous, exact acceptedHead, reason, userAuthority, exact current planDocumentHash and complete explicit phaseOwnedPaths. Requires clean committed source, an ancestry-preserving advanced base and full current-base phase review. Produces manifest version2; legacy readers must reject it. Historical base identity comes from the retained predecessor, including a same-label moved base.',
         baseRequalification:
@@ -283,11 +289,17 @@ export const runNativeCycle = <R>(
     ).pipe(Effect.mapError(() => fail('invalid-request', 'Provide a closed native cycle request.')));
     if (
       (request.protocolVersion === 2) !== !!request.ordinaryMergeQualificationV1 ||
-      (request.ordinaryMergeQualificationV1 && (request.command !== 'snapshot' || request.baseRequalification))
+      (request.ordinaryMergeQualificationV1 &&
+        (request.command !== 'snapshot' || request.baseRequalification || request.rebase))
     )
       return yield* fail(
         'invalid-request',
         'Protocol2 is reserved for a snapshot with only ordinaryMergeQualificationV1.',
+      );
+    if (request.rebase && (request.command !== 'snapshot' || request.baseRequalification))
+      return yield* fail(
+        'invalid-request',
+        'Initial rebase evidence belongs only to a snapshot without another qualification.',
       );
     if (request.baseRequalification && request.command !== 'snapshot')
       return yield* fail('invalid-request', 'Base requalification belongs only to a snapshot request.');
@@ -613,6 +625,24 @@ export const runNativeCycle = <R>(
               existing.snapshot.phaseHash !== state.phases[selected.id].phaseHash
             )
               return yield* fail('snapshot-conflict', 'This snapshot ID belongs to another phase contract.');
+            const receipt = existing.snapshot.rebase;
+            if (
+              (request.rebase && !receipt) ||
+              (receipt &&
+                (!request.rebase ||
+                  receipt.reason !== request.reason ||
+                  receipt.authority !== request.userAuthority ||
+                  stableJson(request.rebase) !==
+                    stableJson({
+                      preRebaseHead: receipt.preRebaseHead,
+                      ontoHead: receipt.ontoHead,
+                      rebasedHead: receipt.rebasedHead,
+                    })))
+            )
+              return yield* fail(
+                'snapshot-conflict',
+                'Keep the immutable rebase witness, reason and authority for this snapshot ID.',
+              );
             const merge = existing.snapshot.ordinaryMergeQualificationV1;
             if (
               !!merge !== !!request.ordinaryMergeQualificationV1 ||
@@ -665,6 +695,11 @@ export const runNativeCycle = <R>(
               )?.snapshot
             : undefined;
           const phaseSnapshots = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === selected.id);
+          if (request.rebase && phaseSnapshots.length)
+            return yield* fail(
+              'rebase-review-history',
+              'Rewritten history is supported only before this phase has any snapshot; preserve its existing review history.',
+            );
           const last = phaseSnapshots.at(-1)?.snapshot;
           const reviewed = new Set(EffectArray.map(runtime.reviews, item => item.snapshotId));
           if (last && prior?.snapshotId !== last.snapshotId) {
@@ -707,10 +742,14 @@ export const runNativeCycle = <R>(
               )
             )
               return yield* fail('head-drift', 'Record the exact changed HEAD and its reconciliation evidence.');
-            if (!request.baseRequalification && !(yield* nativeCycleIsAncestor(repo, priorHead, captured.head)))
+            if (
+              !request.rebase &&
+              !request.baseRequalification &&
+              !(yield* nativeCycleIsAncestor(repo, priorHead, captured.head))
+            )
               return yield* fail(
                 'head-drift',
-                'A non-descendant HEAD requires an approved base-requalification witness; preserve the original baseline and review history.',
+                'A non-descendant HEAD requires an approved initial rebase or base-requalification witness; preserve the original baseline and review history.',
               );
           }
           if (
@@ -747,6 +786,36 @@ export const runNativeCycle = <R>(
               )
             : undefined;
           const scope = merge ?? (yield* readOnlyIncoming(repo, selected, captured, baseline));
+          let rebase: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'> | undefined;
+          if (request.rebase) {
+            const reason = yield* from(() => required(request.reason, 'the exact rebase reconciliation reason'));
+            const authority = yield* from(() => required(request.userAuthority, 'the explicit human rebase authority'));
+            if (!EffectString.trim(reason) || !EffectString.trim(authority) || request.acceptedHead !== captured.head)
+              return yield* fail(
+                'invalid-rebase',
+                'Initial rebase admission requires the exact current HEAD, a reason and explicit human authority.',
+              );
+            yield* verifyNativeCycleRebase(repo, baseline.head, captured.head, scope.declaredBaseHead, request.rebase);
+            rebase = {
+              ...request.rebase,
+              reason,
+              authority,
+              beforeRef: yield* pinNativeCycleCommit(
+                repo,
+                stored.state.bindingId,
+                snapshotId,
+                request.rebase.preRebaseHead,
+                'rebase-before',
+              ),
+              afterRef: yield* pinNativeCycleCommit(
+                repo,
+                stored.state.bindingId,
+                snapshotId,
+                captured.head,
+                'rebase-after',
+              ),
+            };
+          }
           let baseRequalification:
             Omit<NonNullable<NativeCycleSnapshot['baseRequalification']>, 'receiptDigest'> | undefined;
           if (request.baseRequalification) {
@@ -852,30 +921,32 @@ export const runNativeCycle = <R>(
             pinnedRef:
               merge?.pinnedRef ?? (yield* pinNativeCycleTree(repo, stored.state.bindingId, snapshotId, captured.tree)),
           };
-          if (baseRequalification) {
+          if (rebase || baseRequalification) {
             const closing = yield* captureNativeCycleSource(repo, baseline.tree);
             const declared = EffectString.trim(
               yield* git(repo, ['rev-parse', '--verify', '--end-of-options', selected.baseBranch + '^{commit}']),
             );
-            const previousBase = EffectString.trim(
-              yield* git(repo, [
-                'rev-parse',
-                '--verify',
-                '--end-of-options',
-                baseRequalification.fromBaseBranch + '^{commit}',
-              ]),
-            );
+            const previousBase = baseRequalification
+              ? EffectString.trim(
+                  yield* git(repo, [
+                    'rev-parse',
+                    '--verify',
+                    '--end-of-options',
+                    baseRequalification.fromBaseBranch + '^{commit}',
+                  ]),
+                )
+              : undefined;
             const branch = EffectString.trim(yield* git(repo, ['branch', '--show-current']));
             if (
               closing.head !== captured.head ||
               closing.tree !== captured.tree ||
               declared !== scope.declaredBaseHead ||
-              previousBase !== baseRequalification.priorDeclaredBaseHead ||
+              (baseRequalification && previousBase !== baseRequalification.priorDeclaredBaseHead) ||
               branch !== selected.branch
             )
               return yield* fail(
                 'source-drift',
-                'Source, phase branch or declared bases changed during base requalification.',
+                'Source, phase branch or declared bases changed during rebase admission or base requalification.',
               );
           }
           const snapshot: NativeCycleSnapshot = merge
@@ -894,7 +965,12 @@ export const runNativeCycle = <R>(
                     receiptDigest: nativeCycleBaseRequalificationReceiptDigest(sourceSnapshot, baseRequalification),
                   },
                 }
-              : sourceSnapshot;
+              : rebase
+                ? {
+                    ...sourceSnapshot,
+                    rebase: {...rebase, receiptDigest: nativeCycleRebaseReceiptDigest(sourceSnapshot, rebase)},
+                  }
+                : sourceSnapshot;
           const updated: NativeCycleRuntime = {
             ...runtime,
             snapshots: [...runtime.snapshots, {snapshot, incoming: scope.incoming}],

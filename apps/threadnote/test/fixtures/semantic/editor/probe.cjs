@@ -1,5 +1,6 @@
 /* oxlint-disable typescript/no-require-imports, effecttsgo/node-builtin-import -- VS Code extension tests load CommonJS and the host filesystem APIs; Bun/Effect are not present in the editor runtime. */
 /* oxlint-disable eslint/no-undef -- CommonJS exports/require are supplied by the real VS Code extension host. */
+/* oxlint-disable effecttsgo/prefer-effect-array -- This standalone extension fixture declares no Effect dependency and runs in the real editor host. */
 /* Disposable extension-host feasibility experiment. Never loaded by the product. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -8,6 +9,7 @@ const vscode = require('vscode');
 const {probeGuardedExchange} = require('./proposal-wire.cjs');
 
 const original = 'const before = 1;\r\n// unsaved 🧵\r\n';
+// oxlint-disable-next-line effecttsgo/prefer-effect-string -- This standalone editor-host fixture cannot import Effect.
 const changed = original.replace('before', 'after');
 const concurrent = '// concurrent user change 🧵\r\n';
 const whole = doc => new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));

@@ -1,5 +1,7 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {Schema} from 'effect';
-
 const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
 export const ProbeConfig = Schema.Struct({
   id: text,
@@ -24,16 +26,16 @@ export const ProbeConfig = Schema.Struct({
   }),
 );
 export type ProbeConfig = typeof ProbeConfig.Type;
-
 /** Substitute string values without parsing interpolated JSON or rewriting object keys. */
 export function expandProbeScratch(value: Schema.Json, scratch: string): Schema.Json {
-  if (typeof value === 'string') return value.replaceAll('{scratch}', scratch);
-  if (Array.isArray(value)) return value.map(item => expandProbeScratch(item, scratch));
+  if (typeof value === 'string') return EffectString.replaceAll('{scratch}', scratch)(value);
+  if (EffectArray.isArray<Schema.Json>(value)) return EffectArray.map(value, item => expandProbeScratch(item, scratch));
   if (value !== null && typeof value === 'object')
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandProbeScratch(item, scratch)]));
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [key, expandProbeScratch(item, scratch)]),
+    );
   return value;
 }
-
 export function providerFixture(config: Pick<ProbeConfig, 'language' | 'fixture'>): {
   sources: Record<string, string>;
   projectFiles: Record<string, string>;

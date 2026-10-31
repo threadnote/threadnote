@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
+import * as EffectString from 'effect/String';
 import {DateTime, Effect} from 'effect';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -14,7 +17,6 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {serializeNativeWorkflowState} from './store.js';
 import type {NativeCloseoutPlannedDocument} from './closeout_documents.js';
-
 /** Read-only byte model, never a substitute for actual write/identity admission.
  * Real preparation validates body, citation and naming with relations omitted;
  * relation snapshots below are used solely to size the concrete postimages.
@@ -29,13 +31,14 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
 ) {
   const store = yield* ResourceStore;
   const seen = new Set<string>();
-  const planned = documents.map(document => {
+  const planned = EffectArray.map(documents, document => {
     const repeated = seen.has(document.key);
     seen.add(document.key);
     return {
       document,
       repeated,
-      operationId: 'closeout-' + transactionId.slice(0, 24) + '-' + document.key + (repeated ? '-final' : ''),
+      operationId:
+        'closeout-' + EffectString.slice(0, 24)(transactionId) + '-' + document.key + (repeated ? '-final' : ''),
     };
   });
   const project = (
@@ -66,11 +69,13 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
       let maximumNative = initial.native;
       let remaining = 0;
       for (const {document, repeated, operationId} of planned) {
-        const existing = native.operations.find(operation => operation.intent.operationId === operationId);
+        const existing = EffectOption.getOrUndefined(
+          EffectArray.findFirst(native.operations, operation => operation.intent.operationId === operationId),
+        );
         const previous = repeated ? journal.artifacts[document.uri] : undefined;
         const intent: NativeWorkflowState['operations'][number]['intent'] = {
           operationId,
-          artifactKey: 'closeout-' + transactionId.slice(0, 24) + '-' + document.key,
+          artifactKey: 'closeout-' + EffectString.slice(0, 24)(transactionId) + '-' + document.key,
           bindingId: state.bindingId,
           sourceRunId: state.runId,
           role: 'closeout-' + document.key,
@@ -102,8 +107,8 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
           const sharedRoots = yield* readWorkflowSharedRoots(config, journal.binding);
           const scopes = [
             ...sharedRoots,
-            ...workflowOwnedArtifacts(journal).map(item => item.canonicalUri),
-            ...document.relations.map(item => item.uri),
+            ...EffectArray.map(workflowOwnedArtifacts(journal), item => item.canonicalUri),
+            ...EffectArray.map(document.relations, item => item.uri),
           ];
           const targets = [];
           const relations = [];
@@ -118,8 +123,11 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
             targets.push({allowedUriScopes: scopes, content, memoryId: target.metadata.memoryId, uri: relation.uri});
             relations.push({type: relation.type, uri: memoryIdentityAlias(target.metadata.memoryId)});
           }
-          relations.sort((left, right) => left.type.localeCompare(right.type) || left.uri.localeCompare(right.uri));
-          targets.sort((left, right) => left.uri.localeCompare(right.uri));
+          relations.sort(
+            (left, right) =>
+              EffectString.localeCompare(right.type)(left.type) || EffectString.localeCompare(right.uri)(left.uri),
+          );
+          targets.sort((left, right) => EffectString.localeCompare(right.uri)(left.uri));
           const desired = document.relations.length
             ? formatMemoryDocument('MEMORY', {...record.metadata, relations}, record.body)
             : base.desired;
@@ -156,7 +164,7 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
         );
         native = {
           ...pendingNative,
-          operations: pendingNative.operations.map(item =>
+          operations: EffectArray.map(pendingNative.operations, item =>
             item.intent.operationId === operationId
               ? {
                   ...item,
@@ -189,11 +197,13 @@ export const projectNativeCloseoutKnowledge = Effect.fn('workflowAutomation.proj
         maximumNativeBytes: maximumNative + remaining * 4096,
       };
     });
-  const pending = planned.filter(item => original.operations[item.operationId] === undefined);
+  const pending = EffectArray.filter(planned, item => original.operations[item.operationId] === undefined);
   const ordinary =
     pending.length === 0 ||
-    pending.some(({operationId}) => {
-      const existing = state.operations.find(operation => operation.intent.operationId === operationId);
+    EffectArray.some(pending, ({operationId}) => {
+      const existing = EffectOption.getOrUndefined(
+        EffectArray.findFirst(state.operations, operation => operation.intent.operationId === operationId),
+      );
       if (!existing) return false;
       const request = workflowWriteRequest(existing.intent);
       return request.citationPolicy === 'defer' || stableJson(request.codeRefs ?? []) !== stableJson(codeRefs);

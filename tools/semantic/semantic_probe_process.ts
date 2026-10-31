@@ -1,3 +1,4 @@
+import {isJsonObject} from '@threadnote/platform/json';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Disposable process probes own and reap their spawned OS process group. */
 import type {ChildProcess} from 'node:child_process';
 
@@ -69,10 +70,10 @@ export function ownedProbeGroup(child: ChildProcess) {
       process.kill(-child.pid, 0);
       return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      if (isJsonObject(error) && error.code === 'ESRCH') return false;
       // macOS can briefly deny probes while an editor process group is exiting.
       // EPERM establishes neither successful cleanup nor absence; keep waiting.
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
+      if (isJsonObject(error) && error.code === 'EPERM') return true;
       throw error;
     }
   };
@@ -83,7 +84,7 @@ export function ownedProbeGroup(child: ChildProcess) {
       if (grouped) process.kill(-child.pid!, value);
       else child.kill(value);
     } catch (error) {
-      if (!['ESRCH', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      if (!isJsonObject(error) || (error.code !== 'ESRCH' && error.code !== 'EPERM')) throw error;
     }
   };
   const wait = async (milliseconds: number) => {

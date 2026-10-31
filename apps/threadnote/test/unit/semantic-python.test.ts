@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Scoped Effect test entrypoints provide narrow OS layers. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -15,7 +18,6 @@ import {makePythonProject, pythonMetadataResponder} from '../../src/semantic/pro
 import {makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {semanticTreeDigest, semanticCatalogKey, makeSemanticCoordinator} from '../../src/semantic/coordinator.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
-
 const io = BunServices.layer;
 const commands = TestCommandExecutorLayer.pipe(Layer.provide(Layer.merge(io, TestSystemInfoLayer)));
 const initial = (uri: string, text: string, root: string): Observation => ({
@@ -23,8 +25,8 @@ const initial = (uri: string, text: string, root: string): Observation => ({
   repository: 'python-fixture',
   worktree: root,
   project: root,
-  configuration: 'a'.repeat(64),
-  toolchain: 'b'.repeat(64),
+  configuration: EffectString.repeat(64)('a'),
+  toolchain: EffectString.repeat(64)('b'),
   provider: {id: 'basedpyright', version: '1.40.2', generation: 0},
   view: {kind: 'overlay', id: 'python-view', owner: 'test', epoch: 0},
   uri,
@@ -83,7 +85,6 @@ const diagnostic = {
   message: 'Type mismatch',
   severity: 1,
 };
-
 describe('Python session fences and preparation', () => {
   effectIt.effect('fences a multi-request hierarchy when the source changes before incoming calls finish', () =>
     Effect.gen(function* () {
@@ -110,7 +111,6 @@ describe('Python session fences and preparation', () => {
       expect((yield* Fiber.join(pending)).status).toBe('stale');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('rejects an incompatible provider before opening a source view', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -125,7 +125,6 @@ describe('Python session fences and preparation', () => {
       expect((yield* Effect.exit(makePythonSession(client, f.options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect(
     'keeps observation identity on supported completion and hierarchy reads and makes missing features explicit',
     () =>
@@ -199,7 +198,6 @@ describe('Python session fences and preparation', () => {
         expect(missing.evidence?.observation).toEqual(observation);
       }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('hashes original closed-file bytes when the provider text has a UTF-8 BOM', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -224,17 +222,25 @@ describe('Python session fences and preparation', () => {
       expect(Array.from(yield* f.fs.readFile(f.path.join(f.project, 'bom.py')))).toEqual(Array.from(bytes));
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('announces a changed dependency before advancing unchanged document diagnostic versions', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
-      const events: {uri: string; version: number}[] = [];
+      const events: {
+        uri: string;
+        version: number;
+      }[] = [];
       const client = {
         ...fake(),
         notify: (method: string, params: Schema.Json) =>
-          Effect.sync(() => {
-            if (method === 'textDocument/didOpen' || method === 'textDocument/didChange')
-              events.push((params as {textDocument: {uri: string; version: number}}).textDocument);
+          Effect.gen(function* () {
+            if (method === 'textDocument/didOpen' || method === 'textDocument/didChange') {
+              const event = yield* Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  textDocument: Schema.Struct({uri: Schema.String, version: Schema.Finite}),
+                }),
+              )(params).pipe(Effect.orDie);
+              events.push(event.textDocument);
+            }
           }),
       };
       const session = yield* makePythonSession(client, f.options);
@@ -244,17 +250,16 @@ describe('Python session fences and preparation', () => {
       events.length = 0;
       const text = f.text + '# changed\n';
       yield* session.upsert({...b, content: sha256HexSync(text), documentVersion: 2}, text, 'python', 1000);
-      expect(events.map(event => event.uri)).toEqual([b.uri, f.uri]);
+      expect(EffectArray.map(events, event => event.uri)).toEqual([b.uri, f.uri]);
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect.prop(
     'prepares non-overlapping edits deterministically in source order without changing bytes',
     [Schema.Int.check(Schema.isBetween({minimum: 2, maximum: 12}))],
     ([count]) =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const text = 'x\n'.repeat(count);
+        const text = EffectString.repeat(count)('x\n');
         const edits = Array.from({length: count}, (_, line) => ({
           range: {start: {line, character: 0}, end: {line, character: 1}},
           newText: 'renamed',
@@ -278,7 +283,7 @@ describe('Python session fences and preparation', () => {
       const first = yield* session.upsert(f.basis, f.text, 'python', 1000);
       f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: [diagnostic]});
       const a = yield* session.diagnostics(first, 1000);
-      expect(a.added.map(item => item.code)).toEqual(['reportAssignmentType']);
+      expect(EffectArray.map(a.added, item => item.code)).toEqual(['reportAssignmentType']);
       const same = yield* session.diagnostics(first, 1000);
       expect(same.remaining).toEqual(a.items);
       expect(same.added).toEqual([]);
@@ -301,7 +306,6 @@ describe('Python session fences and preparation', () => {
       expect((yield* session.query('hover', first, {line: 0, character: 1}, 1000)).status).toBe('stale');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('rejects delayed reads when another document changes and resynchronizes diagnostic versions', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -324,7 +328,6 @@ describe('Python session fences and preparation', () => {
       expect((yield* session.diagnostics(rebound, 1000)).items).toEqual([]);
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('prepares all cross-file edits with source preconditions and never mutates files', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -359,8 +362,7 @@ describe('Python session fences and preparation', () => {
       expect(yield* f.fs.readFileString(f.path.join(f.project, 'other.py'))).toBe('value = 2\n');
     }).pipe(Effect.provide(io)),
   );
-
-  for (const [name, payload] of Object.entries({
+  for (const [name, payload] of EffectRecord.toEntries({
     'resource operations': {documentChanges: [{kind: 'rename', oldUri: 'file:///a', newUri: 'file:///b'}]},
     'outside targets': {changes: {'file:///etc/passwd': [{range: diagnostic.range, newText: 'x'}]}},
     'overlapping edits': {
@@ -378,7 +380,7 @@ describe('Python session fences and preparation', () => {
     effectIt.effect('rejects ' + name + ' without partial preparation', () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const raw = JSON.parse(JSON.stringify(payload).replaceAll('$URI', f.uri));
+        const raw = JSON.parse(EffectString.replaceAll('$URI', f.uri)(JSON.stringify(payload)));
         const session = yield* makePythonSession(
           fake(() => Effect.succeed(raw)),
           f.options,
@@ -389,7 +391,6 @@ describe('Python session fences and preparation', () => {
         ).toBe('Failure');
       }).pipe(Effect.provide(io)),
     );
-
   effectIt.effect('drops command-bearing actions and preserves the complete safe inline action', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -421,7 +422,6 @@ describe('Python session fences and preparation', () => {
       );
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect.prop(
     'never accepts a diagnostic version other than the current wire version',
     [Schema.Int.check(Schema.isBetween({minimum: 2, maximum: 2000}))],
@@ -441,7 +441,6 @@ describe('Python session fences and preparation', () => {
     {arbitrary: {runs: 30}},
   );
 });
-
 const environmentFixture = Effect.gen(function* () {
   const f = yield* fixture;
   const library = f.path.join(f.root, 'library');
@@ -485,7 +484,6 @@ describe('Python static environment qualification', () => {
       expect((yield* Effect.exit(makePythonProject(options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect.prop(
     'verifies immutable configuration idempotently under concurrent readers',
     [Schema.Int.check(Schema.isBetween({minimum: 2, maximum: 6}))],
@@ -509,7 +507,6 @@ describe('Python static environment qualification', () => {
       }).pipe(Effect.provide(io)),
     {arbitrary: {runs: 8}},
   );
-
   effectIt.effect('rejects URI and backslash paths even when POSIX lookalike directories exist', () =>
     Effect.gen(function* () {
       const f = yield* environmentFixture;
@@ -546,7 +543,6 @@ describe('Python static environment qualification', () => {
       ).toBe('Failure');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('rejects ancestor fallback, conflicting TOML sections and cyclic extends', () =>
     Effect.gen(function* () {
       const f = yield* environmentFixture;
@@ -569,7 +565,6 @@ describe('Python static environment qualification', () => {
       expect((yield* Effect.exit(makePythonProject(options)))._tag).toBe('Failure');
     }).pipe(Effect.provide(io)),
   );
-
   effectIt.effect('rejects a symlink inserted after the first project fingerprint pass', () =>
     Effect.gen(function* () {
       const f = yield* environmentFixture;
@@ -581,7 +576,7 @@ describe('Python static environment qualification', () => {
           Effect.gen(function* () {
             if (directory === f.project && ++projectReads === 2)
               yield* f.fs.symlink(f.root, f.path.join(f.project, 'late-link'));
-            if (directory.endsWith('/late-link')) outsideRead = true;
+            if (EffectString.endsWith('/late-link')(directory)) outsideRead = true;
             return yield* f.fs.readDirectory(directory);
           }),
       };
@@ -599,8 +594,7 @@ describe('Python static environment qualification', () => {
       expect(outsideRead).toBe(false);
     }).pipe(Effect.provide(io)),
   );
-
-  for (const [name, config] of Object.entries({
+  for (const [name, config] of EffectRecord.toEntries({
     'venv override': {venvPath: '/outside', venv: 'unsafe'},
     'execution environment': {executionEnvironments: [{root: '.'}]},
     'external extraPaths': {extraPaths: ['/outside']},
@@ -624,8 +618,7 @@ describe('Python static environment qualification', () => {
         expect(result._tag).toBe('Failure');
       }).pipe(Effect.provide(io), Effect.provideService(CommandExecutor, noExecute)),
     );
-
-  for (const [name, body] of Object.entries({
+  for (const [name, body] of EffectRecord.toEntries({
     'executable pth': 'import malicious\n',
     'escaping pth': '../../outside\n',
   }))
@@ -646,7 +639,6 @@ describe('Python static environment qualification', () => {
         ).toBe('Failure');
       }).pipe(Effect.provide(io), Effect.provideService(CommandExecutor, noExecute)),
     );
-
   effectIt.effect('fences dependency and metadata changes after selection', () =>
     Effect.gen(function* () {
       const f = yield* environmentFixture;
@@ -663,15 +655,18 @@ describe('Python static environment qualification', () => {
       expect(project.profile.interpreterExecution).toBe(false);
     }).pipe(Effect.provide(io), Effect.provideService(CommandExecutor, noExecute)),
   );
-
   it('canonicalizes catalog ordering without merging different environments', () => {
-    const envs = ['a', 'b', 'c'].map(id => ({id, metadataFile: '/host/' + id, metadataDigest: id.repeat(64)}));
+    const envs = EffectArray.map(['a', 'b', 'c'], id => ({
+      id,
+      metadataFile: '/host/' + id,
+      metadataDigest: EffectString.repeat(64)(id),
+    }));
     const python = {
       runtime: '/host/node',
-      runtimeDigest: 'd'.repeat(64),
+      runtimeDigest: EffectString.repeat(64)('d'),
       runtimeVersion: '24.19.0' as const,
       serverDirectory: '/host/server',
-      serverTreeDigest: 'e'.repeat(64),
+      serverTreeDigest: EffectString.repeat(64)('e'),
       environments: envs,
     };
     fc.assert(
@@ -682,7 +677,6 @@ describe('Python static environment qualification', () => {
     );
     expect(semanticCatalogKey({python: {...python, environments: [envs[0]]}})).not.toBe(semanticCatalogKey({python}));
   });
-
   effectIt.effect('rejects unrecognized metadata probe argv without running its payload', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -711,7 +705,6 @@ describe('Python static environment qualification', () => {
     }).pipe(Effect.provide(Layer.merge(io, commands)), TestClock.withLive),
   );
 });
-
 const serverDirectory = process.env.THREADNOTE_PYTHON_PROVIDER_DIRECTORY;
 const node = process.env.THREADNOTE_PYTHON_NODE;
 describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinned basedpyright static profile', () => {
@@ -806,8 +799,29 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
         if (references.status === 'ok') {
           expect(references.evidence.observation.project).toBe(otherUri);
           if (hoverB.status === 'ok') expect(references.evidence.scope).not.toBe(hoverB.evidence.scope);
-          expect(references.items.some(item => (item as {uri: string}).uri === otherUri + '/main.py')).toBe(true);
-          expect(references.items.every(item => (item as {uri: string}).uri !== a.observation.uri)).toBe(true);
+          expect(
+            EffectArray.some(
+              references.items,
+              item =>
+                Schema.decodeUnknownSync(
+                  Schema.Struct({
+                    uri: Schema.String,
+                  }),
+                )(item).uri ===
+                otherUri + '/main.py',
+            ),
+          ).toBe(true);
+          expect(
+            EffectArray.every(
+              references.items,
+              item =>
+                Schema.decodeUnknownSync(
+                  Schema.Struct({
+                    uri: Schema.String,
+                  }),
+                )(item).uri !== a.observation.uri,
+            ),
+          ).toBe(true);
         }
         expect((yield* coordinator.status).providers).toBe(2);
         yield* coordinator.closeView(c.observation);
@@ -823,7 +837,6 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
       ),
     60000,
   );
-
   effectIt.effect(
     'runs real reads, diagnostics, cross-file rename and an inline quick fix without executing Python',
     () =>
@@ -889,7 +902,18 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
         if (completion.status === 'ok') {
           expect(completion.evidence.observation).toEqual(observation);
           expect(
-            (completion.items[0] as {suggestions: {label: string}[]}).suggestions.some(item => item.label === 'run'),
+            EffectArray.some(
+              (yield* Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  suggestions: Schema.Array(
+                    Schema.Struct({
+                      label: Schema.String,
+                    }),
+                  ),
+                }),
+              )(completion.items[0])).suggestions,
+              item => item.label === 'run',
+            ),
           ).toBe(true);
         }
         const hierarchy = yield* session.query('call-hierarchy', observation, {line: 2, character: 7}, 10000);
@@ -907,14 +931,34 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
         expect(references.status).toBe('ok');
         if (references.status === 'ok')
           expect(
-            references.items.map(item => (item as {range: {start: {line: number}}}).range.start.line).sort(),
+            EffectArray.map(
+              references.items,
+              item =>
+                Schema.decodeUnknownSync(
+                  Schema.Struct({
+                    range: Schema.Struct({
+                      start: Schema.Struct({
+                        line: Schema.Finite,
+                      }),
+                    }),
+                  }),
+                )(item).range.start.line,
+            ).sort(),
           ).toEqual([1, 2]);
         const rename = yield* session.prepare('rename', observation, {line: 2, character: 7}, 'exécute', 10000);
         expect(rename.status).toBe('ok');
         if (rename.status === 'ok') {
           expect(rename.items).toHaveLength(1);
-          const files = (rename.items[0] as {files: {uri: string}[]}).files;
-          expect([...files].sort((a, b) => a.uri.localeCompare(b.uri))).toEqual(
+          const files = (yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              files: Schema.Array(
+                Schema.Struct({
+                  uri: Schema.String,
+                }),
+              ),
+            }),
+          )(rename.items[0])).files;
+          expect([...files].sort((a, b) => EffectString.localeCompare(b.uri)(a.uri))).toEqual(
             [
               {
                 uri: f.uri,
@@ -930,15 +974,23 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
                 source: 'disk',
                 edits: [{range: {start: {line: 1, character: 8}, end: {line: 1, character: 11}}, newText: 'exécute'}],
               },
-            ].sort((a, b) => a.uri.localeCompare(b.uri)),
+            ].sort((a, b) => EffectString.localeCompare(b.uri)(a.uri)),
           );
         }
         const bomRename = yield* session.prepare('rename', observation, {line: 6, character: 7}, 'initial', 10000);
         expect(bomRename.status).toBe('ok');
         if (bomRename.status === 'ok') {
           expect(bomRename.items).toHaveLength(1);
-          const files = (bomRename.items[0] as {files: {uri: string}[]}).files;
-          expect([...files].sort((a, b) => a.uri.localeCompare(b.uri))).toEqual(
+          const files = (yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              files: Schema.Array(
+                Schema.Struct({
+                  uri: Schema.String,
+                }),
+              ),
+            }),
+          )(bomRename.items[0])).files;
+          expect([...files].sort((a, b) => EffectString.localeCompare(b.uri)(a.uri))).toEqual(
             [
               {
                 uri: f.uri,
@@ -957,11 +1009,11 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
                 source: 'disk',
                 edits: [{range: {start: {line: 0, character: 1}, end: {line: 0, character: 6}}, newText: 'initial'}],
               },
-            ].sort((a, b) => a.uri.localeCompare(b.uri)),
+            ].sort((a, b) => EffectString.localeCompare(b.uri)(a.uri)),
           );
         }
         const diagnostics = yield* session.diagnostics(observation, 10000);
-        expect(diagnostics.items.some(d => d.code === 'reportUnusedCallResult')).toBe(true);
+        expect(EffectArray.some(diagnostics.items, d => d.code === 'reportUnusedCallResult')).toBe(true);
         const actions = yield* session.prepare('code-action', observation, {line: 2, character: 0}, undefined, 10000);
         expect(actions.status).toBe('ok');
         if (actions.status === 'ok') expect(actions.items.length).toBeGreaterThan(0);

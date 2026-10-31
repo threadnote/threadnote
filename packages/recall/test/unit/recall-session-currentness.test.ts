@@ -1,3 +1,5 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectString from 'effect/String';
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it} from '@effect/vitest';
@@ -12,7 +14,6 @@ import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-inva
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndexData, recallIndexDatabaseFilename, withRecallDatabaseSession} from '@threadnote/recall/index';
 import {useRecallDatabase} from '../../src/index/database.js';
-
 const system = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -33,7 +34,6 @@ const dependencies = Layer.merge(base, ResourceStore.layer.pipe(Layer.provide(ba
 const provideServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(dependencies).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 const memory = (text: string) => `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_session_duplicate\n\n${text}`;
-
 it.effect('observes canonical mutations and new identity conflicts within the same session', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -60,13 +60,12 @@ it.effect('observes canonical mutations and new identity conflicts within the sa
         yield* store.write(location, second, memory('conflicting needle'), {mode: 'create'});
         const conflict = yield* loadRecallIndexData(config, {includeInactive: false});
         expect(conflict.candidates).toHaveLength(2);
-        expect(conflict.candidates.every(candidate => candidate.identityConflict)).toBe(true);
+        expect(EffectArray.every(conflict.candidates, candidate => !!candidate.identityConflict)).toBe(true);
         expect(close).toHaveBeenCalledTimes(0);
       }),
     ).pipe(Effect.ensuring(Effect.sync(() => close.mockRestore())));
   }).pipe(TestClock.withLive, provideServices),
 );
-
 it.effect(
   'closes recovery replacements and removes auxiliaries before publishing the pointer, then resolves it again',
   () =>
@@ -93,7 +92,7 @@ it.effect(
         ...fs,
         rename: (source, target) =>
           Effect.gen(function* () {
-            if (target.endsWith('.pointer.json')) {
+            if (EffectString.endsWith('.pointer.json')(target)) {
               const pointer = yield* Schema.decodeUnknownEffect(Schema.Struct({database: Schema.String}))(
                 JSON.parse(yield* fs.readFileString(source)),
               ).pipe(Effect.orDie);

@@ -1,3 +1,7 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
+import * as EffectString from 'effect/String';
 import {Clock, Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope, Semaphore} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
@@ -31,9 +35,7 @@ import {makePythonProject, PythonEnvironment} from './providers/python_project.j
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {boundedFileDigest, readBoundedText, semanticTreeDigest} from './fingerprint.js';
 export {semanticTreeDigest} from './fingerprint.js';
-
 const Instance = Schema.Struct({pid: Counter, identity: Identifier});
-
 type Instance = typeof Instance.Type;
 const Reservation = Schema.Struct({
   token: Digest,
@@ -44,7 +46,6 @@ const Reservation = Schema.Struct({
   importing: Schema.Boolean,
   quarantined: Schema.Boolean,
 });
-
 export interface TypeScriptHostCandidate {
   readonly runtime: string;
   readonly runtimeDigest: string;
@@ -82,9 +83,10 @@ export const semanticCatalogKey = (options: {candidate?: TypeScriptHostCandidate
           options.python.runtimeVersion,
           options.python.serverDirectory,
           options.python.serverTreeDigest,
-          [...options.python.environments]
-            .sort((a, b) => a.id.localeCompare(b.id))
-            .map(e => [e.id, e.metadataFile, e.metadataDigest]),
+          EffectArray.map(
+            [...options.python.environments].sort((a, b) => EffectString.localeCompare(b.id)(a.id)),
+            e => [e.id, e.metadataFile, e.metadataDigest],
+          ),
         ]
       : null,
   ]);
@@ -119,7 +121,6 @@ const sessionIdentity = (o: Observation) =>
     o.view.owner,
     o.view.epoch,
   ]);
-
 /** Host-only construction. Repository requests can select a source view, never an executable, plugin or build policy. */
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
   options: SemanticCoordinatorOptions,
@@ -186,13 +187,13 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           )) !== '3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33' ||
           candidate.environments.length < 1 ||
           candidate.environments.length > 16 ||
-          new Set(candidate.environments.map(e => e.id)).size !== candidate.environments.length
+          new Set(EffectArray.map(candidate.environments, e => e.id)).size !== candidate.environments.length
         )
           return yield* LspFault.make({code: 'prerequisite'});
         for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
       }
     });
-  const configured = [catalog.candidate, catalog.python].filter(c => c !== undefined);
+  const configured = EffectArray.filter([catalog.candidate, catalog.python], c => c !== undefined);
   if (!configured.length) return yield* LspFault.make({code: 'prerequisite'});
   for (const candidate of configured) {
     yield* verifyCandidate(candidate);
@@ -201,7 +202,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
       timeoutMs: 2000,
       maxOutputBytes: 128,
     });
-    if (version.stdout.trim() !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
+    if (EffectString.trim(version.stdout) !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
   }
   const retire = (id: string, session: AnalysisSession) =>
     Effect.uninterruptible(
@@ -226,7 +227,14 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         const candidate = language === 'python' ? catalog.python : catalog.candidate;
         const providerId = language === 'python' ? 'basedpyright' : 'typescript-language-server';
         const selected =
-          language === 'python' ? catalog.python?.environments.find(e => e.id === environment) : undefined;
+          language === 'python'
+            ? (effectOptionalValue =>
+                effectOptionalValue == null
+                  ? undefined
+                  : EffectOption.getOrUndefined(EffectArray.findFirst(effectOptionalValue, e => e.id === environment)))(
+                catalog.python?.environments,
+              )
+            : undefined;
         if (
           !candidate ||
           input.provider.id !== providerId ||
@@ -245,9 +253,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
         const file = yield* path.fromFileUrl(new URL(fixed.uri));
         if (
-          !(project === worktree || project.startsWith(worktree + path.sep)) ||
-          !file.startsWith(project + path.sep) ||
-          file.split(path.sep).includes('.git') ||
+          !(project === worktree || EffectString.startsWith(worktree + path.sep)(project)) ||
+          !EffectString.startsWith(project + path.sep)(file) ||
+          EffectString.split(path.sep)(file).includes('.git') ||
           (yield* fs.realPath(project)) !== project ||
           (yield* fs.realPath(worktree)) !== worktree
         )
@@ -278,7 +286,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             yield* verifyCandidate(candidate);
             const reservation = yield* admission.acquire(
               sha256HexSync(fixed.repository + '\0' + fixed.worktree),
-              10_000,
+              10000,
             );
             fixed = {
               ...fixed,
@@ -289,7 +297,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               },
               projectEpoch: reservation.generation,
             };
-            const wireState: {current?: LspWire} = {};
+            const wireState: {
+              current?: LspWire;
+            } = {};
             yield* Effect.addFinalizer(() =>
               wireState.current
                 ? wireState.current.finish.pipe(
@@ -351,7 +361,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   l === 'python' ? Effect.fail(LspFault.make({code: 'rejected'})) : ts.upsert(o, t, l, ms),
               };
             }
-            fixed = yield* api.upsert(fixed, text, language, 10_000);
+            fixed = yield* api.upsert(fixed, text, language, 10000);
             yield* reservation.finishImport;
             return {
               scope: owned,
@@ -383,7 +393,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           fixed = {...fixed, provider: session.basis.provider, projectEpoch: session.basis.projectEpoch};
           const active = session;
           fixed = yield* active.api
-            .upsert(fixed, text, language, 10_000)
+            .upsert(fixed, text, language, 10000)
             .pipe(
               Effect.onError(() =>
                 active.api.available.pipe(
@@ -418,7 +428,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     f: (api: SemanticSession) => Effect.Effect<A, E, R>,
   ) =>
     Effect.gen(function* () {
-      if (!Number.isSafeInteger(milliseconds) || milliseconds < 1 || milliseconds > 45_000)
+      if (!Number.isSafeInteger(milliseconds) || milliseconds < 1 || milliseconds > 45000)
         return yield* LspFault.make({code: 'protocol'});
       const fixed = structuredClone(yield* Schema.decodeEffect(Observation)(observation));
       const id = sessionIdentity(fixed);
@@ -473,7 +483,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
       yield* Effect.sleep(1000);
       const now = yield* Clock.currentTimeMillis;
       for (const [id, session] of sessions)
-        if (session.queued === 0 && now - session.lastUsed >= 600_000) yield* retire(id, session);
+        if (session.queued === 0 && now - session.lastUsed >= 600000) yield* retire(id, session);
     }
   }).pipe(Effect.forkScoped);
   yield* Effect.addFinalizer(() =>
@@ -488,12 +498,13 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         experimental: true,
         readOnly: true,
         sessions: sessions.size,
-        providerProfiles: configured.map(candidate => ({
+        providerProfiles: EffectArray.map(configured, candidate => ({
           id: 'sdkDirectory' in candidate ? 'typescript-language-server' : 'basedpyright',
           version: 'sdkDirectory' in candidate ? '6.0.2' : '1.40.2',
           status: 'experimental',
           prerequisites: 'host-qualified-candidate',
-          environments: 'environments' in candidate ? candidate.environments.map(environment => environment.id) : [],
+          environments:
+            'environments' in candidate ? EffectArray.map(candidate.environments, environment => environment.id) : [],
           capabilities: {
             reads: 'experimental',
             diagnostics: 'experimental',
@@ -514,7 +525,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           projectFiles: 20000,
           projectBytes: 256 * 1024 * 1024,
         },
-        failures: [...failures].map(([id, attempts]) => ({
+        failures: EffectArray.map([...failures], ([id, attempts]) => ({
           attempts,
           cause: causes.get(id),
           nextAction:
@@ -590,7 +601,14 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
     return yield* LspFault.make({code: 'prerequisite'});
   const socket = path.join(options.directory, 'rpc.sock');
   if (new TextEncoder().encode(socket).length > 100) return yield* LspFault.make({code: 'prerequisite'});
-  const grants = new Map<string, {token: string; lastUsed: number; gate: Semaphore.Semaphore}>();
+  const grants = new Map<
+    string,
+    {
+      token: string;
+      lastUsed: number;
+      gate: Semaphore.Semaphore;
+    }
+  >();
   let requests = 0;
   let shutdown = false;
   let lastUsed = yield* Clock.currentTimeMillis;
@@ -731,7 +749,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       for (const [id, grant] of grants) {
         yield* grant.gate.withPermitsIfAvailable(1)(
           Effect.sync(() => {
-            if (grants.get(id) === grant && now - grant.lastUsed >= 600_000) grants.delete(id);
+            if (grants.get(id) === grant && now - grant.lastUsed >= 600000) grants.delete(id);
           }),
         );
       }
@@ -741,12 +759,11 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
     socket,
     idle: Effect.sync(() => requests === 0).pipe(
       Effect.flatMap(empty =>
-        Clock.currentTimeMillis.pipe(Effect.map(now => empty && (shutdown || now - lastUsed >= 600_000))),
+        Clock.currentTimeMillis.pipe(Effect.map(now => empty && (shutdown || now - lastUsed >= 600000))),
       ),
     ),
   };
 });
-
 /** Promise conversion is limited to this local OS IPC boundary; cancellation aborts the HTTP request. */
 export function requestSemanticEndpoint(socket: string, token: string, body: SemanticRequest, capability?: string) {
   return fromPromiseInterruptible(
@@ -787,7 +804,7 @@ export function requestSemanticEndpoint(socket: string, token: string, body: Sem
     },
     error => (Schema.is(LspFault)(error) ? error : LspFault.make({code: 'protocol'})),
   ).pipe(
-    Effect.timeoutOption(45_000),
+    Effect.timeoutOption(45000),
     Effect.flatMap(result =>
       Option.isSome(result)
         ? Schema.decodeUnknownEffect(Schema.Json)(result.value).pipe(
@@ -797,7 +814,6 @@ export function requestSemanticEndpoint(socket: string, token: string, body: Sem
     ),
   );
 }
-
 const HostCandidate = Schema.Struct({
   runtime: Schema.String,
   runtimeDigest: Digest,
@@ -830,7 +846,6 @@ export interface SemanticEndpointLaunch extends SemanticCoordinatorOptions {
   /** Exact application/runtime identity supplied by the host, independent of provider selection. */
   readonly runtimeIdentity: string;
 }
-
 /** Starts one runtime/worktree coordinator lazily. Capabilities/source text never enter process arguments. */
 export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(function* (options: SemanticEndpointLaunch) {
   if (!options.enabled || !Schema.is(Digest)(options.runtimeIdentity) || !Schema.is(FileUri)(options.worktree))
@@ -842,7 +857,7 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
   const home = yield* fs.realPath(options.dataHome);
   if (home !== path.resolve(options.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
   const key = sha256HexSync(JSON.stringify([home, options.worktree, options.runtimeIdentity]));
-  const directory = path.join(home, 'semantic', key.slice(0, 20));
+  const directory = path.join(home, 'semantic', EffectString.slice(0, 20)(key));
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   if ((yield* fs.realPath(directory)) !== directory || (yield* fs.stat(directory)).mode & 0o077)
     return yield* LspFault.make({code: 'prerequisite'});
@@ -854,8 +869,8 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
     {
       createParentDirectory: false,
       retryIntervalMilliseconds: 25,
-      waitTimeoutMilliseconds: 15_000,
-      staleAfterMilliseconds: 60_000,
+      waitTimeoutMilliseconds: 15000,
+      staleAfterMilliseconds: 60000,
       useCanonicalProcessStartIdentity: true,
     },
     Effect.gen(function* () {
@@ -894,7 +909,10 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
         Effect.orElseSucceed(() => false),
       );
       if (!(yield* probe)) {
-        const name = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+        const name = (effectOptionalValue =>
+          effectOptionalValue == null ? undefined : EffectString.toLowerCase(effectOptionalValue))(
+          EffectString.split('/')(EffectString.replaceAll('\\', '/')(system.executablePath)).at(-1),
+        );
         const args = [
           ...(name === 'bun' || name === 'bun.exe' ? [system.developmentEntrypoint] : []),
           '__semantic-coordinator',
@@ -905,7 +923,7 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
           env: system.intendedChildEnvironment(system.environment(), 'semantic-coordinator'),
         });
         if (!started) return yield* LspFault.make({code: 'prerequisite'});
-        const until = (yield* Clock.currentTimeMillis) + 10_000;
+        const until = (yield* Clock.currentTimeMillis) + 10000;
         while (!(yield* probe)) {
           if ((yield* Clock.currentTimeMillis) >= until) return yield* LspFault.make({code: 'timeout'});
           yield* Effect.sleep(100);
@@ -918,7 +936,6 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
     }),
   );
 });
-
 const readSemanticBootstrap = Effect.fn('semantic.readBootstrap')(function* (file: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -934,7 +951,6 @@ const readSemanticBootstrap = Effect.fn('semantic.readBootstrap')(function* (fil
   const raw = yield* Effect.try({try: () => JSON.parse(text), catch: () => LspFault.make({code: 'protocol'})});
   return yield* Schema.decodeUnknownEffect(Bootstrap)(raw);
 });
-
 export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(function* (arguments_: readonly string[]) {
   if (arguments_.length !== 2 || arguments_[0] !== '--config') return yield* LspFault.make({code: 'protocol'});
   const fs = yield* FileSystem.FileSystem;
@@ -948,7 +964,7 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
       createParentDirectory: false,
       retryIntervalMilliseconds: 25,
       waitTimeoutMilliseconds: 250,
-      staleAfterMilliseconds: 60_000,
+      staleAfterMilliseconds: 60000,
       useCanonicalProcessStartIdentity: true,
     },
     Effect.scoped(
@@ -971,7 +987,6 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
     ),
   );
 });
-
 const Ticket = Schema.Struct({token: Digest, workspace: Digest, owner: Instance});
 const Ledger = Schema.Struct({
   version: Schema.Literal(1),
@@ -979,16 +994,20 @@ const Ledger = Schema.Struct({
   slots: Schema.Array(Reservation).check(Schema.isMaxLength(8)),
   tickets: Schema.Array(Ticket).check(Schema.isMaxLength(32)),
 });
-type Ledger = {version: 1; nextGeneration: number; slots: (typeof Reservation.Type)[]; tickets: (typeof Ticket.Type)[]};
+type Ledger = {
+  version: 1;
+  nextGeneration: number;
+  slots: (typeof Reservation.Type)[];
+  tickets: (typeof Ticket.Type)[];
+};
 const limits = Object.freeze({providersPerHome: 8, providersPerWorkspace: 4, importsPerHome: 2, queued: 32});
-
 /** Probe only. Unknown/EPERM remains occupied; no PID-only signalling or recovery. */
 function processGroupPresent(pid: number): boolean {
   try {
     process.kill(-pid, 0);
     return true;
   } catch (cause) {
-    return (cause as NodeJS.ErrnoException).code !== 'ESRCH';
+    return !isJsonObject(cause) || cause.code !== 'ESRCH';
   }
 }
 export interface SemanticAdmissionOptions {
@@ -1003,7 +1022,6 @@ export interface SemanticReservation {
   /** A positive group-drain receipt is required; failure conserves/quarantines the reservation. */
   readonly release: (drained: boolean) => Effect.Effect<void, unknown>;
 }
-
 /** File-locked FIFO admission is shared by every worktree coordinator, rather than a per-process counter. */
 export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(function* (options: SemanticAdmissionOptions) {
   const fs = yield* FileSystem.FileSystem;
@@ -1035,7 +1053,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
         createParentDirectory: false,
         retryIntervalMilliseconds: 20,
         waitTimeoutMilliseconds: 2000,
-        staleAfterMilliseconds: 10_000,
+        staleAfterMilliseconds: 10000,
         useCanonicalProcessStartIdentity: true,
       },
       Effect.gen(function* () {
@@ -1090,10 +1108,10 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
     Effect.succeed({
       limits,
       providers: ledger.slots.length,
-      imports: ledger.slots.filter(slot => slot.importing).length,
+      imports: EffectArray.filter(ledger.slots, slot => slot.importing).length,
       queued: ledger.tickets.length,
-      quarantined: ledger.slots.filter(slot => slot.quarantined).length,
-      nextAction: ledger.slots.some(slot => slot.quarantined)
+      quarantined: EffectArray.filter(ledger.slots, slot => slot.quarantined).length,
+      nextAction: EffectArray.some(ledger.slots, slot => slot.quarantined)
         ? 'Inspect owned process trees; uncertain reservations remain occupied'
         : 'Ready',
     }),
@@ -1104,7 +1122,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
         !Schema.is(Digest)(workspace) ||
         !Number.isSafeInteger(milliseconds) ||
         milliseconds < 1 ||
-        milliseconds > 120_000
+        milliseconds > 120000
       )
         return yield* LspFault.make({code: 'protocol'});
       const id = yield* token();
@@ -1113,8 +1131,10 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
       yield* Effect.addFinalizer(() =>
         transaction(ledger =>
           Effect.sync(() => {
-            ledger.tickets = ledger.tickets.filter(ticket => ticket.token !== id);
-            ledger.slots = ledger.slots.map(slot => (slot.token === id ? {...slot, quarantined: true} : slot));
+            ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
+            ledger.slots = EffectArray.map(ledger.slots, slot =>
+              slot.token === id ? {...slot, quarantined: true} : slot,
+            );
           }),
         ).pipe(Effect.ignore),
       );
@@ -1131,18 +1151,21 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
             Effect.sync(() => {
               if (
                 ledger.slots.length >= limits.providersPerHome ||
-                ledger.slots.filter(slot => slot.importing).length >= limits.importsPerHome
+                EffectArray.filter(ledger.slots, slot => slot.importing).length >= limits.importsPerHome
               )
                 return false;
               // Skip a ticket blocked by its own workspace cap so another workspace can progress.
-              const eligible = ledger.tickets.find(
-                ticket =>
-                  ledger.slots.filter(slot => slot.workspace === ticket.workspace).length <
-                  limits.providersPerWorkspace,
+              const eligible = EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  ledger.tickets,
+                  ticket =>
+                    EffectArray.filter(ledger.slots, slot => slot.workspace === ticket.workspace).length <
+                    limits.providersPerWorkspace,
+                ),
               );
               if (eligible?.token !== id || ledger.nextGeneration >= Number.MAX_SAFE_INTEGER) return false;
               generation = ++ledger.nextGeneration;
-              ledger.tickets = ledger.tickets.filter(ticket => ticket.token !== id);
+              ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
               ledger.slots.push({
                 token: id,
                 workspace,
@@ -1164,7 +1187,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
         Effect.ensuring(
           transaction(ledger =>
             Effect.sync(() => {
-              ledger.tickets = ledger.tickets.filter(ticket => ticket.token !== id);
+              ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
             }),
           ).pipe(Effect.ignore),
         ),
@@ -1174,8 +1197,12 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
         transaction(ledger =>
           Effect.gen(function* () {
             if (released) return;
-            const index = ledger.slots.findIndex(
-              slot => slot.token === id && slot.owner.pid === owner.pid && slot.owner.identity === owner.identity,
+            const index = EffectOption.getOrElse(
+              EffectArray.findFirstIndex(
+                ledger.slots,
+                slot => slot.token === id && slot.owner.pid === owner.pid && slot.owner.identity === owner.identity,
+              ),
+              () => -1,
             );
             if (index < 0) return yield* LspFault.make({code: 'closing'});
             const next = f(ledger.slots[index]);

@@ -1,3 +1,7 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {fileURLToPath} from 'node:url';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Static checked-in fixture bytes for the inventory contract.
 import {readFileSync} from 'node:fs';
@@ -23,7 +27,6 @@ import {
   checkProbeRename,
   checkProbeShutdown,
 } from '../../../../tools/semantic/semantic_probe_assertions.js';
-
 describe('disposable semantic provider qualification', () => {
   it('denies unqualified and forged bridge clients over framed JSON-RPC', async () => {
     // Local socket boundary; real host fixtures additionally perform conditional buffer mutations.
@@ -36,58 +39,76 @@ describe('disposable semantic provider qualification', () => {
     });
     expect(applyCalls).toBe(2);
   });
-
   it('covers the release inventory without advertising pilot evidence as production support', () => {
-    const ledger = JSON.parse(
-      readFileSync(new URL('../../../../config/semantic-providers/qualification-lock.json', import.meta.url), 'utf8'),
-    ) as {
-      automaticDownloadOrExecution: boolean;
-      requiredPlatforms: string[];
-      releaseLanguages: string[];
-      selectedProviders: Record<string, string>;
-      providers: {
-        id: string;
-        languages: string[];
-        productionQualified: boolean;
-        platforms: Record<string, unknown>;
-        pilotEvidence?: {reportSha256: string; configSha256: string; sourceHashes: Record<string, string>}[];
-      }[];
-    };
+    const ledger = Schema.decodeUnknownSync(
+      Schema.Struct({
+        automaticDownloadOrExecution: Schema.Boolean,
+        requiredPlatforms: Schema.Array(Schema.String),
+        releaseLanguages: Schema.Array(Schema.String),
+        selectedProviders: Schema.Record(Schema.String, Schema.String),
+        providers: Schema.Array(
+          Schema.Struct({
+            id: Schema.String,
+            languages: Schema.Array(Schema.String),
+            productionQualified: Schema.Boolean,
+            platforms: Schema.Record(Schema.String, Schema.Unknown),
+            pilotEvidence: Schema.optional(
+              Schema.Array(
+                Schema.Struct({
+                  reportSha256: Schema.String,
+                  configSha256: Schema.String,
+                  sourceHashes: Schema.Record(Schema.String, Schema.String),
+                }),
+              ),
+            ),
+          }),
+        ),
+      }),
+    )(
+      JSON.parse(
+        readFileSync(new URL('../../../../config/semantic-providers/qualification-lock.json', import.meta.url), 'utf8'),
+      ),
+    );
     expect(ledger.automaticDownloadOrExecution).toBe(false);
     const targetSource = readFileSync(new URL('../../../../scripts/release-targets.ts', import.meta.url), 'utf8');
-    const targets = [...targetSource.matchAll(/['"]bun-([a-z0-9-]+)['"]/gu)].map(match => match[1]);
+    const targets = EffectArray.map(
+      [...EffectString.matchAll(/['"]bun-([a-z0-9-]+)['"]/gu)(targetSource)],
+      match => match[1],
+    );
     expect(targets.length).toBeGreaterThan(0);
     expect([...ledger.requiredPlatforms].sort()).toEqual(targets.sort());
     expect([...ledger.releaseLanguages].sort()).toEqual(
       ['typescript', 'javascript', 'python', 'go', 'rust', 'java'].sort(),
     );
-    expect(Object.keys(ledger.selectedProviders).sort()).toEqual([...ledger.releaseLanguages].sort());
-    expect(new Set(ledger.providers.map(x => x.id)).size).toBe(ledger.providers.length);
+    expect(EffectRecord.keys(ledger.selectedProviders).sort()).toEqual([...ledger.releaseLanguages].sort());
+    expect(new Set(EffectArray.map(ledger.providers, x => x.id)).size).toBe(ledger.providers.length);
     for (const provider of ledger.providers) {
       expect(provider.productionQualified).toBe(false);
-      expect(Object.keys(provider.platforms).sort()).toEqual([...ledger.requiredPlatforms].sort());
+      expect(EffectRecord.keys(provider.platforms).sort()).toEqual([...ledger.requiredPlatforms].sort());
     }
-    for (const [language, id] of Object.entries(ledger.selectedProviders)) {
-      const provider = ledger.providers.find(x => x.id === id);
+    for (const [language, id] of EffectRecord.toEntries(ledger.selectedProviders)) {
+      const provider = EffectOption.getOrUndefined(EffectArray.findFirst(ledger.providers, x => x.id === id));
       expect(provider?.languages).toContain(language);
       expect(provider?.pilotEvidence?.length).toBeGreaterThan(0);
       for (const evidence of provider?.pilotEvidence ?? []) {
         expect(evidence.reportSha256).toMatch(/^[a-f0-9]{64}$/u);
         expect(evidence.configSha256).toMatch(/^[a-f0-9]{64}$/u);
-        expect(Object.keys(evidence.sourceHashes).sort()).toEqual(
+        expect(EffectRecord.keys(evidence.sourceHashes).sort()).toEqual(
           ['harness', 'fixtures', 'transport', 'assertions', 'process'].sort(),
         );
-        for (const hash of Object.values(evidence.sourceHashes)) expect(hash).toMatch(/^[a-f0-9]{64}$/u);
+        for (const hash of EffectRecord.values(evidence.sourceHashes)) expect(hash).toMatch(/^[a-f0-9]{64}$/u);
       }
     }
   });
-
   it('clamps each readiness request to the remaining overall deadline', async () => {
     // Promise/timer boundary: no real provider or wall-clock wait is involved.
     vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
     try {
       const start = performance.now();
-      const requests: {at: number; budget: number}[] = [];
+      const requests: {
+        at: number;
+        budget: number;
+      }[] = [];
       let result: Awaited<ReturnType<typeof observeProbeReadiness>> | undefined;
       const pending = observeProbeReadiness(
         budget => {
@@ -95,30 +116,29 @@ describe('disposable semantic provider qualification', () => {
           return new Promise(resolve => setTimeout(() => resolve(null), budget));
         },
         () => false,
-        25_000,
+        25000,
       ).then(value => {
         result = value;
       });
-      await vi.advanceTimersByTimeAsync(25_000);
+      await vi.advanceTimersByTimeAsync(25000);
       expect(result?.ready).toBe(false);
       expect(requests).toHaveLength(2);
-      for (const request of requests) expect(request.at + request.budget).toBeLessThanOrEqual(start + 25_000);
+      for (const request of requests) expect(request.at + request.budget).toBeLessThanOrEqual(start + 25000);
       await pending;
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
   });
-
   it('bounds retained readiness observations without hiding the total attempt count', async () => {
     vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
     try {
       const pending = observeProbeReadiness(
         async () => null,
         () => false,
-        10_000,
+        10000,
       );
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(10000);
       const result = await pending;
       expect(result.ready).toBe(false);
       expect(result.attemptCount).toBeGreaterThan(32);
@@ -128,7 +148,6 @@ describe('disposable semantic provider qualification', () => {
       vi.useRealTimers();
     }
   });
-
   it('rejects a logged provider panic or failed shutdown even with exit code zero', () => {
     const clean = {
       code: 0,
@@ -155,7 +174,6 @@ describe('disposable semantic provider qualification', () => {
     expect(checkProbeShutdown({...clean, stdioClosed: false})).toBe(false);
     expect(checkProbeShutdown({...clean, panicObserved: true})).toBe(false);
   });
-
   it('retains panic observations across arbitrary stderr chunks and bounded tails', () => {
     fc.assert(
       fc.property(
@@ -163,15 +181,17 @@ describe('disposable semantic provider qualification', () => {
           maxLength: 20,
         }),
         chunks => {
-          const result = chunks.reduce(appendProbeStderr, {stderr: '', panicObserved: false});
-          const complete = chunks.join('');
-          expect(result).toEqual({stderr: complete.slice(-4096), panicObserved: complete.includes('panicked at')});
+          const result = EffectArray.reduce(chunks, {stderr: '', panicObserved: false}, appendProbeStderr);
+          const complete = EffectArray.join(chunks, '');
+          expect(result).toEqual({
+            stderr: EffectString.slice(-4096)(complete),
+            panicObserved: EffectString.includes('panicked at')(complete),
+          });
         },
       ),
       {numRuns: 100},
     );
   });
-
   it('rejects a final panic whose header has fallen outside the retained stderr tail', async () => {
     const peer = startSemanticProbe(
       process.execPath,
@@ -188,7 +208,6 @@ describe('disposable semantic provider qualification', () => {
       expect(checkProbeShutdown(stopped)).toBe(false);
     }
   });
-
   it('rejects an exit-zero provider that terminates before the shutdown handshake', async () => {
     const peer = startSemanticProbe(
       process.execPath,
@@ -205,7 +224,6 @@ describe('disposable semantic provider qualification', () => {
       expect(checkProbeShutdown(stopped)).toBe(false);
     }
   });
-
   it.skipIf(process.platform === 'win32')('rejects final writes after the provider closes its input', async () => {
     const peer = startSemanticProbe(
       process.execPath,
@@ -222,7 +240,6 @@ describe('disposable semantic provider qualification', () => {
       expect(checkProbeShutdown(stopped)).toBe(false);
     }
   });
-
   it('observes provider notification payloads used for quiescence qualification', async () => {
     const observed: unknown[] = [];
     const peer = startSemanticProbe(
@@ -240,7 +257,6 @@ describe('disposable semantic provider qualification', () => {
       expect(await peer.stop()).toMatchObject({code: 0, forced: false});
     }
   });
-
   it.each([
     ['typescript', 3],
     ['javascript', 3],
@@ -250,22 +266,21 @@ describe('disposable semantic provider qualification', () => {
     ['java', 3],
   ] as const)('authors a deterministic two-file %s fixture with %i occurrences', (language, count) => {
     const fixture = providerFixture({language});
-    expect(Object.keys(fixture.sources)).toHaveLength(2);
+    expect(EffectRecord.keys(fixture.sources)).toHaveLength(2);
     expect(
-      Object.values(fixture.sources)
-        .join('')
-        .match(/SavedName/gu),
+      EffectOption.getOrNull(
+        EffectString.match(/SavedName/gu)(EffectArray.join(EffectRecord.values(fixture.sources), '')),
+      ),
     ).toHaveLength(count);
-    expect(Object.values(fixture.sources).join('')).toContain('🧵');
-    for (const source of Object.values(fixture.sources)) {
-      expect(source.endsWith('\r\n')).toBe(true);
-      expect(source.replaceAll('\r\n', '')).not.toContain('\n');
+    expect(EffectArray.join(EffectRecord.values(fixture.sources), '')).toContain('🧵');
+    for (const source of EffectRecord.values(fixture.sources)) {
+      expect(EffectString.endsWith('\r\n')(source)).toBe(true);
+      expect(EffectString.replaceAll('\r\n', '')(source)).not.toContain('\n');
     }
     const original = structuredClone(fixture);
-    fixture.sources[Object.keys(fixture.sources)[0]] = 'changed';
+    fixture.sources[EffectRecord.keys(fixture.sources)[0]] = 'changed';
     expect(providerFixture({language})).toEqual(original);
   });
-
   it('requires explicit build/import expectations and rejects mismatched fixture settings', () => {
     const decode = Schema.decodeUnknownSync(ProbeConfig, {onExcessProperty: 'error'});
     const base = {id: 'test', version: '1', command: 'provider', args: [], language: 'rust'};
@@ -299,7 +314,6 @@ describe('disposable semantic provider qualification', () => {
     expect(gradle.projectFiles).not.toHaveProperty('pom.xml');
     expect(providerFixture({language: 'java'}).projectFiles).toHaveProperty('pom.xml');
   });
-
   it('expands settings string values without corrupting Windows paths or JSON syntax', () => {
     const scratch = 'C:\\temp\\"quoted"';
     expect(expandProbeScratch({'{scratch}': ['{scratch}/cache', null, 3]}, scratch)).toEqual({
@@ -316,34 +330,35 @@ describe('disposable semantic provider qualification', () => {
       {numRuns: 100},
     );
   });
-
   it('does not qualify an incomplete reference set or rename preview', () => {
     const files = {'a.py': 'UnsavedName\r\n', 'b.py': 'UnsavedName\r\n'};
     const range = {start: {line: 0, character: 0}, end: {line: 0, character: 11}};
-    const references = Object.keys(files).map(name => ({uri: `file:///fixture/${name}`, range}));
+    const references = EffectArray.map(EffectRecord.keys(files), name => ({uri: `file:///fixture/${name}`, range}));
     expect(checkProbeReferences(files, references)).toBe(true);
     expect(checkProbeReferences(files, references.slice(0, 1))).toBe(false);
     expect(checkProbeReferences(files, [...references, references[0]])).toBe(false);
     expect(
       checkProbeReferences(
         files,
-        references.map(x => ({...x, uri: x.uri.replace('/fixture/', '/another/')})),
+        EffectArray.map(references, x => ({...x, uri: EffectString.replace('/fixture/', '/another/')(x.uri)})),
       ),
     ).toBe(false);
-    const changes = Object.fromEntries(references.map(x => [x.uri, [{range, newText: 'RenamedName'}]]));
+    const changes = EffectRecord.fromEntries(
+      EffectArray.map(references, x => [x.uri, [{range, newText: 'RenamedName'}]]),
+    );
     expect(checkProbeRename(files, {changes})).toBe(true);
     expect(checkProbeRename(files, {changes: {'file:///fixture/a.py': changes['file:///fixture/a.py']}})).toBe(false);
     expect(checkProbeRename(files, {changes: {...changes, 'file:///fixture/escape.py': []}})).toBe(false);
     expect(checkProbeRename(files, {changes: {'file:///fixture/a.py': [{range, newText: 'SavedName'}]}})).toBe(false);
     expect(checkProbeRename(files, {changes, documentChanges: []})).toBe(false);
-    const documentChanges = references.map(x => ({
+    const documentChanges = EffectArray.map(references, x => ({
       textDocument: {uri: x.uri, version: 2},
       edits: [{range, newText: 'RenamedName'}],
     }));
     expect(checkProbeRename(files, {documentChanges})).toBe(true);
     expect(
       checkProbeRename(files, {
-        documentChanges: documentChanges.map(x => ({...x, textDocument: {...x.textDocument, version: 1}})),
+        documentChanges: EffectArray.map(documentChanges, x => ({...x, textDocument: {...x.textDocument, version: 1}})),
       }),
     ).toBe(false);
     expect(checkProbeRename(files, {documentChanges: [{kind: 'delete', uri: references[0].uri}]})).toBe(false);
@@ -360,8 +375,8 @@ describe('disposable semantic provider qualification', () => {
         fc.array(fc.jsonValue(), {maxLength: 5}),
         fc.array(fc.integer({min: 1, max: 31}), {minLength: 1, maxLength: 10}),
         (values, sizes) => {
-          const expected = values.map((value, id) => ({jsonrpc: '2.0', id, result: value}));
-          const bytes = Buffer.concat(expected.map(encodeProbeFrame));
+          const expected = EffectArray.map(values, (value, id) => ({jsonrpc: '2.0', id, result: value}));
+          const bytes = Buffer.concat(EffectArray.map(expected, encodeProbeFrame));
           const decoder = new ProbeFrameDecoder();
           const actual = [];
           let step = 0;
@@ -377,12 +392,11 @@ describe('disposable semantic provider qualification', () => {
       {numRuns: 100},
     );
   });
-
   it('counts UTF-8 bytes independently of UTF-16 positions and preserves CRLF', () => {
     const message = {jsonrpc: '2.0', id: 1, result: '🧵\r\n漢字'};
     const encoded = encodeProbeFrame(message);
     const decoder = new ProbeFrameDecoder();
-    const actual = [...encoded].flatMap(byte => decoder.push(Buffer.from([byte])));
+    const actual = EffectArray.flatMap([...encoded], byte => decoder.push(Buffer.from([byte])));
     expect(actual).toEqual([message]);
     const files = {'a.ts': '/* 🧵 */ UnsavedName\r\n'};
     const range = {start: {line: 0, character: 9}, end: {line: 0, character: 20}};
@@ -395,7 +409,6 @@ describe('disposable semantic provider qualification', () => {
       }),
     ).toBe(false);
   });
-
   it.each([
     'Content-Length: 1\r\nContent-Length: 1\r\n\r\n0',
     'Content-Length: -1\r\n\r\n',
@@ -404,11 +417,9 @@ describe('disposable semantic provider qualification', () => {
   ])('rejects malformed or excessive framing', bytes => {
     expect(() => new ProbeFrameDecoder(256).push(Buffer.from(bytes))).toThrow();
   });
-
   it('bounds an unfinished header', () => {
     expect(() => new ProbeFrameDecoder().push(Buffer.alloc(8193, 65))).toThrow('header');
   });
-
   it('cancels a timed-out request and cleanly stops the owned process', async () => {
     // OS child-process boundary: this deliberately uses plain async Vitest.
     const peer = startSemanticProbe(
@@ -424,7 +435,6 @@ describe('disposable semantic provider qualification', () => {
     }
     expect(peer.events).toContain('probe/cancelled');
   });
-
   it.skipIf(process.platform === 'win32')('reaps an owned descendant after its provider leader exits', async () => {
     const peer = startSemanticProbe(
       process.execPath,
@@ -433,7 +443,7 @@ describe('disposable semantic provider qualification', () => {
     );
     let pid: number | undefined;
     try {
-      pid = (await peer.request('spawn-descendant', {})) as number;
+      pid = Schema.decodeUnknownSync(Schema.Finite)(await peer.request('spawn-descendant', {}));
     } finally {
       expect(await peer.stop()).toMatchObject({
         code: 0,

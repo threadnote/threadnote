@@ -1,6 +1,7 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
 import {Schema} from 'effect';
 import {Counter, Digest, Evidence, Identifier, Observation, observationKey} from './contracts.js';
-
 export const Continuation = Schema.Struct({
   version: Schema.Literal(1),
   snapshot: Identifier,
@@ -33,35 +34,35 @@ export type PageResult =
   | {
       readonly status: 'stale' | 'invalid-cursor' | 'invalid-budget' | 'budget-exceeded';
     };
-
 const snapshotSchema = Schema.Struct({
   id: Identifier,
   query: Digest,
   evidence: Evidence,
-  items: Schema.Array(Schema.Json).check(Schema.isMaxLength(100_000)),
+  items: Schema.Array(Schema.Json).check(Schema.isMaxLength(100000)),
 });
 function freeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
+    for (const child of EffectRecord.values(value)) freeze(child);
     Object.freeze(value);
   }
   return value;
 }
-
 /** The coordinator retains this snapshot; a caller-supplied cursor never supplies result data. */
 export function createQuerySnapshot(value: QuerySnapshot): QuerySnapshot {
   return freeze(structuredClone(Schema.decodeSync(snapshotSchema)(value)));
 }
-
 export function queryPage(
   snapshot: QuerySnapshot,
   current: Observation,
   query: string,
-  budget: {readonly maxItems: number; readonly maxBytes: number},
+  budget: {
+    readonly maxItems: number;
+    readonly maxBytes: number;
+  },
   cursor?: Continuation,
 ): PageResult {
   if (
-    ![budget.maxItems, budget.maxBytes].every(n => Number.isSafeInteger(n) && n > 0) ||
+    !EffectArray.every([budget.maxItems, budget.maxBytes], n => Number.isSafeInteger(n) && n > 0) ||
     budget.maxItems > 1000 ||
     budget.maxBytes > 8 * 1024 * 1024
   )
@@ -142,7 +143,6 @@ export function queryPage(
     };
   return selected;
 }
-
 export const OwnedView = Schema.Struct({
   observation: Observation,
   authority: Identifier,

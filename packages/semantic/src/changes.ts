@@ -1,7 +1,8 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
 import {Schema} from 'effect';
 import {Counter, Digest, Identifier} from './contracts.js';
 import {sameOwnedView, OwnedView} from './views.js';
-
 export const ChangeTarget = Schema.Struct({before: OwnedView, after: Digest});
 export const ChangeProposal = Schema.Struct({
   version: Schema.Literal(1),
@@ -19,7 +20,10 @@ export const ChangeState = Schema.Struct({
   pendingIntent: Schema.Boolean,
 }).check(
   Schema.makeFilter(state => {
-    if (new Set(state.proposal.targets.map(t => t.before.observation.uri)).size !== state.proposal.targets.length)
+    if (
+      new Set(EffectArray.map(state.proposal.targets, t => t.before.observation.uri)).size !==
+      state.proposal.targets.length
+    )
       return false;
     if (state.status === 'applied') return state.written === state.proposal.targets.length && !state.pendingIntent;
     if (state.written >= state.proposal.targets.length) return false;
@@ -31,7 +35,10 @@ export const ChangeState = Schema.Struct({
 );
 export type ChangeState = typeof ChangeState.Type;
 export type ChangeEvent =
-  | {readonly type: 'begin'; readonly current: readonly OwnedView[]}
+  | {
+      readonly type: 'begin';
+      readonly current: readonly OwnedView[];
+    }
   | {
       readonly type: 'intent';
       readonly index: number;
@@ -53,24 +60,30 @@ export type ChangeEvent =
       readonly index: number;
       readonly outcome: 'unknown';
     }
-  | {readonly type: 'interrupted'};
+  | {
+      readonly type: 'interrupted';
+    };
 export type ChangeTransition =
-  | {readonly status: 'accepted'; readonly state: ChangeState}
-  | {readonly status: 'invalid-transition'; readonly state: ChangeState};
-
+  | {
+      readonly status: 'accepted';
+      readonly state: ChangeState;
+    }
+  | {
+      readonly status: 'invalid-transition';
+      readonly state: ChangeState;
+    };
 function freeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
+    for (const child of EffectRecord.values(value)) freeze(child);
     Object.freeze(value);
   }
   return value;
 }
-
 /** A state model, not authorization, a lock, a durable journal, or a filesystem writer. */
 export function prepareChange(operation: string, proposal: ChangeProposal): ChangeState {
   Schema.decodeSync(Identifier)(operation);
   Schema.decodeSync(ChangeProposal)(proposal);
-  const resources = proposal.targets.map(t => t.before.observation.uri);
+  const resources = EffectArray.map(proposal.targets, t => t.before.observation.uri);
   if (new Set(resources).size !== resources.length) throw new Error('Duplicate change target.');
   // Copy nested values so a caller cannot change the retained preconditions.
   return freeze({
@@ -82,7 +95,6 @@ export function prepareChange(operation: string, proposal: ChangeProposal): Chan
     pendingIntent: false,
   });
 }
-
 export function advanceChange(state: ChangeState, event: ChangeEvent): ChangeTransition {
   if (!Schema.is(ChangeState)(state)) return {status: 'invalid-transition', state};
   const accepted = (change: Partial<ChangeState>): ChangeTransition => ({
@@ -103,7 +115,7 @@ export function advanceChange(state: ChangeState, event: ChangeEvent): ChangeTra
     if (state.status !== 'prepared') return invalid();
     if (
       event.current.length !== state.proposal.targets.length ||
-      state.proposal.targets.some((t, i) => !sameOwnedView(t.before, event.current[i]))
+      EffectArray.some(state.proposal.targets, (t, i) => !sameOwnedView(t.before, event.current[i]))
     )
       return conflict();
     return accepted({status: 'applying'});

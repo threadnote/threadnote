@@ -1,17 +1,22 @@
+import * as EffectArray from 'effect/Array';
 import {Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {advanceChange, prepareChange, ChangeState} from '../../src/changes.js';
 import {hash, owned, proposal, step} from '../fixtures.js';
-
 describe('guarded change state model', () => {
   it('owns nested preconditions and expected content after restoring persisted state', () => {
     const restored = Schema.decodeUnknownSync(ChangeState)(
       JSON.parse(JSON.stringify(prepareChange('operation', proposal(1)))),
     );
     // This mutable alias represents the caller retaining the decoded persistence value.
-    const target = restored.proposal.targets[0] as {before: {fence: number}; after: string};
-    const begun = step(restored, {type: 'begin', current: restored.proposal.targets.map(t => t.before)});
+    const target = restored.proposal.targets[0] as {
+      before: {
+        fence: number;
+      };
+      after: string;
+    };
+    const begun = step(restored, {type: 'begin', current: EffectArray.map(restored.proposal.targets, t => t.before)});
     target.before.fence = 2;
     target.after = hash('f');
     expect(begun.proposal.targets[0].before.fence).toBe(1);
@@ -26,17 +31,16 @@ describe('guarded change state model', () => {
     );
     expect(step(intended, {type: 'ack', index: 0, outcome: 'applied', content: hash('e')}).status).toBe('applied');
   });
-
   it('rejects malformed persisted states and never dereferences a nonexistent target', () => {
     const state = prepareChange('operation', proposal(1));
     for (const malformed of [
-      {...state, status: 'applying', written: 1},
-      {...state, status: 'applied'},
-      {...state, status: 'indeterminate', pendingIntent: false},
+      {...state, status: 'applying' as const, written: 1},
+      {...state, status: 'applied' as const},
+      {...state, status: 'indeterminate' as const, pendingIntent: false},
     ]) {
       expect(Schema.is(ChangeState)(malformed)).toBe(false);
       expect(
-        advanceChange(malformed as ChangeState, {
+        advanceChange(malformed, {
           type: 'intent',
           index: 1,
           current: owned,
@@ -64,7 +68,6 @@ describe('guarded change state model', () => {
       }).status,
     ).toBe('invalid-transition');
   });
-
   it('stops after a concurrent change at any target and never schedules later targets', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 20}), fc.nat({max: 100}), (count, fault) => {
@@ -72,7 +75,7 @@ describe('guarded change state model', () => {
         const stop = fault % count;
         let state = step(prepareChange('operation', p), {
           type: 'begin',
-          current: p.targets.map(t => t.before),
+          current: EffectArray.map(p.targets, t => t.before),
         });
         for (let i = 0; i < stop; i++) {
           state = step(state, {
@@ -106,12 +109,11 @@ describe('guarded change state model', () => {
       {numRuns: 100},
     );
   });
-
   it('never promotes a lost acknowledgement to success or replays an unknown write', () => {
     const p = proposal(2);
     let state = step(prepareChange('operation', p), {
       type: 'begin',
-      current: p.targets.map(t => t.before),
+      current: EffectArray.map(p.targets, t => t.before),
     });
     state = step(state, {
       type: 'intent',
@@ -132,12 +134,11 @@ describe('guarded change state model', () => {
       }).status,
     ).toBe('invalid-transition');
   });
-
   it('makes duplicate acknowledgements idempotent without issuing another intent', () => {
     const p = proposal(2);
     let state = step(prepareChange('operation', p), {
       type: 'begin',
-      current: p.targets.map(t => t.before),
+      current: EffectArray.map(p.targets, t => t.before),
     });
     state = step(state, {
       type: 'intent',

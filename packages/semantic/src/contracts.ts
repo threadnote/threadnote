@@ -1,5 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectString from 'effect/String';
 import {Schema} from 'effect';
-
 /** Versioned, provider-neutral data. Decode at the transport boundary. */
 export const Identifier = Schema.String.check(
   Schema.isMinLength(1),
@@ -17,7 +18,7 @@ export function canonicalFileUri(value: string): string {
   const uri = new URL(value);
   if (
     uri.protocol !== 'file:' ||
-    !uri.pathname.startsWith('/') ||
+    !EffectString.startsWith('/')(uri.pathname) ||
     uri.search ||
     uri.hash ||
     uri.username ||
@@ -27,14 +28,15 @@ export function canonicalFileUri(value: string): string {
     throw new Error('Invalid file URI.');
   const decoded = decodeURIComponent(uri.pathname);
   if (/\p{Cc}|\\/u.test(decoded)) throw new Error('Invalid file URI path.');
-  const parts = decoded.split('/').filter(Boolean);
+  const parts = EffectArray.filter(EffectString.split('/')(decoded), Boolean);
   uri.pathname =
     '/' +
-    parts
-      .map((part, index) =>
-        index === 0 && /^[a-z]:$/iu.test(part) ? part[0].toUpperCase() + ':' : encodeURIComponent(part),
-      )
-      .join('/') +
+    EffectArray.join(
+      EffectArray.map(parts, (part, index) =>
+        index === 0 && /^[a-z]:$/iu.test(part) ? EffectString.toUpperCase(part[0]) + ':' : encodeURIComponent(part),
+      ),
+      '/',
+    ) +
     (parts.length === 1 && /^[a-z]:$/iu.test(parts[0]) ? '/' : '');
   return uri.href;
 }
@@ -74,7 +76,6 @@ export const Observation = Schema.Struct({
 });
 export type Observation = typeof Observation.Type;
 export type SourceView = typeof SourceView.Type;
-
 export const Capability = Schema.Struct({
   operation: Schema.Literals([
     'symbols',
@@ -119,7 +120,6 @@ export const QueryOutcome = Schema.Union([
   }),
 ]);
 export type QueryOutcome = typeof QueryOutcome.Type;
-
 /** Deliberately explicit: display names and property insertion order are not identity. */
 export function observationKey(o: Observation): string {
   return JSON.stringify([
@@ -142,7 +142,6 @@ export function observationKey(o: Observation): string {
     o.projectEpoch,
   ]);
 }
-
 export const Position = Schema.Struct({line: Counter, character: Counter});
 export type Position = typeof Position.Type;
 export interface SymbolCandidate {
@@ -150,7 +149,10 @@ export interface SymbolCandidate {
   readonly name: string;
   readonly observation: Observation;
   /** The actual occurrence validated by the provider, not just the declaration range. */
-  readonly occurrence: {readonly start: Position; readonly end: Position};
+  readonly occurrence: {
+    readonly start: Position;
+    readonly end: Position;
+  };
   readonly verifiedAnchor?: string;
 }
 export type SymbolLocator =
@@ -164,19 +166,25 @@ export type SymbolLocator =
       readonly observation: Observation;
       readonly anchor: string;
     }
-  | {readonly kind: 'name'; readonly name: string};
+  | {
+      readonly kind: 'name';
+      readonly name: string;
+    };
 export type SymbolResolution =
-  | {readonly status: 'exact'; readonly candidate: SymbolCandidate}
+  | {
+      readonly status: 'exact';
+      readonly candidate: SymbolCandidate;
+    }
   | {
       readonly status: 'candidates';
       readonly candidates: readonly SymbolCandidate[];
     }
-  | {readonly status: 'stale' | 'unresolved'};
-
+  | {
+      readonly status: 'stale' | 'unresolved';
+    };
 function compare(a: Position, b: Position): number {
   return a.line - b.line || a.character - b.character;
 }
-
 /** Classification of provider/verified-anchor evidence; this does not perform lexical resolution. */
 export function resolveSymbol(
   locator: SymbolLocator,
@@ -185,7 +193,7 @@ export function resolveSymbol(
 ): SymbolResolution {
   const key = observationKey(current);
   if (locator.kind !== 'name' && observationKey(locator.observation) !== key) return {status: 'stale'};
-  const matches = candidates.filter(candidate => {
+  const matches = EffectArray.filter(candidates, candidate => {
     if (observationKey(candidate.observation) !== key) return false;
     if (locator.kind === 'name') return candidate.name === locator.name;
     if (locator.kind === 'anchor') return candidate.verifiedAnchor === locator.anchor;

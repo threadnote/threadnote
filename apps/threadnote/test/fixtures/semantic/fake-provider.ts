@@ -1,8 +1,8 @@
+import * as EffectString from 'effect/String';
 import {ProbeFrameDecoder, encodeProbeFrame} from '../../../../../tools/semantic/semantic_lsp_probe.js';
 /* oxlint-disable effecttsgo/node-builtin-import -- Fixture deliberately leaves an owned child alive to exercise process cleanup. */
 import {spawn} from 'node:child_process';
 import {closeSync, writeFileSync} from 'node:fs';
-
 const mode = process.argv[2];
 if (mode === 'deny-exit' || mode === 'interrupt-provider' || mode === 'interrupt-editor') {
   const descendant =
@@ -20,7 +20,6 @@ if (mode === 'deny-exit' || mode === 'interrupt-provider' || mode === 'interrupt
   );
   setInterval(() => {}, 1000);
 }
-
 const decoder = new ProbeFrameDecoder();
 process.stdin.on('data', chunk => {
   for (const message of decoder.push(Buffer.from(chunk))) {
@@ -36,7 +35,9 @@ process.stdin.on('data', chunk => {
       if (mode === 'deny-exit') continue;
       if (mode === 'panic-on-exit') {
         process.stderr.write("thread 'Worker9' pani", () => {
-          process.stderr.write('cked at fixture.rs:1\n' + 'backtrace\n'.repeat(1500), () => process.exit(0));
+          process.stderr.write('cked at fixture.rs:1\n' + EffectString.repeat(1500)('backtrace\n'), () =>
+            process.exit(0),
+          );
         });
         continue;
       }

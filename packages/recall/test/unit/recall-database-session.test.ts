@@ -108,7 +108,7 @@ it.effect('falls back to fresh scopes when normalized and native handle identity
   fixture(path =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      for (const ino of [Option.none<number>(), Option.some(0), Option.some(Number.MAX_SAFE_INTEGER + 1)]) {
+      for (const ino of [Option.none<bigint>(), Option.some(0n), Option.some(-1n)]) {
         const uncertain = FileSystem.make({
           ...fs,
           stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino}))),
@@ -144,7 +144,7 @@ it.effect('retains when Effect omits an inode but the native handle and path pro
       const fs = yield* FileSystem.FileSystem;
       const omitted = FileSystem.make({
         ...fs,
-        stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<number>()}))),
+        stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<bigint>()}))),
         open: (value, options) =>
           fs.open(value, options).pipe(
             Effect.map(
@@ -152,7 +152,7 @@ it.effect('retains when Effect omits an inode but the native handle and path pro
                 new Proxy(file, {
                   get: (target, key, receiver) =>
                     key === 'stat'
-                      ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<number>()})))
+                      ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<bigint>()})))
                       : Reflect.get(target, key, receiver),
                 }),
             ),
@@ -202,7 +202,7 @@ it.effect.prop(
         });
         const omitted = FileSystem.make({
           ...fs,
-          stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<number>()}))),
+          stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<bigint>()}))),
           open: (value, options) =>
             fs.open(value, options).pipe(
               Effect.map(
@@ -210,7 +210,7 @@ it.effect.prop(
                   new Proxy(file, {
                     get: (target, key, receiver) =>
                       key === 'stat'
-                        ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<number>()})))
+                        ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<bigint>()})))
                         : Reflect.get(target, key, receiver),
                   }),
               ),

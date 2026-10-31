@@ -684,7 +684,8 @@ function citationFixture(
     _expected,
     options,
     use,
-  ) => Effect.sync(() => void ++statusSessions).pipe(Effect.andThen(readStatus(home, cwd, options)), Effect.flatMap(use));
+  ) =>
+    Effect.sync(() => void ++statusSessions).pipe(Effect.andThen(readStatus(home, cwd, options)), Effect.flatMap(use));
   const query = {
     status: (_home: string, cwd: string, options?: {readonly observeWorktree?: boolean}) =>
       Effect.sync(() => statusOptions.statusFor?.(cwd, options?.observeWorktree) ?? status),

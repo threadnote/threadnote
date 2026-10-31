@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Disposable qualification harness owns explicit OS process and evidence-file boundaries. */
 import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -12,7 +15,6 @@ import {
   releaseProbeHandles,
 } from '../tools/semantic/semantic_probe_process.js';
 import type {ChildProcess} from 'node:child_process';
-
 const {values} = parseArgs({
   options: {probe: {type: 'boolean'}, editor: {type: 'string'}, output: {type: 'string'}},
   strict: true,
@@ -20,25 +22,26 @@ const {values} = parseArgs({
 if (!values.probe || !values.editor || !values.output) {
   throw new Error('Usage: bun scripts/qualify-semantic-editors.ts --probe --editor <CLI> --output <report.json>');
 }
-
 const editor = resolve(values.editor);
 const extension = resolve('apps/threadnote/test/fixtures/semantic/editor');
-const sourceHashes = Object.fromEntries(
+const sourceHashes = EffectRecord.fromEntries(
   await Promise.all(
-    [
-      ['runner', fileURLToPath(import.meta.url)],
-      ['probe', join(extension, 'probe.cjs')],
-      ['wire', join(extension, 'proposal-wire.cjs')],
-      ['process', resolve('tools/semantic/semantic_probe_process.ts')],
-    ].map(async ([name, path]) => [
-      name,
-      createHash('sha256')
-        .update(await readFile(path))
-        .digest('hex'),
-    ]),
+    EffectArray.map(
+      [
+        ['runner', fileURLToPath(import.meta.url)],
+        ['probe', join(extension, 'probe.cjs')],
+        ['wire', join(extension, 'proposal-wire.cjs')],
+        ['process', resolve('tools/semantic/semantic_probe_process.ts')],
+      ],
+      async ([name, path]) => [
+        name,
+        createHash('sha256')
+          .update(await readFile(path))
+          .digest('hex'),
+      ],
+    ),
   ),
 );
-
 const scratch = await mkdtemp(join(tmpdir(), 'threadnote-semantic-editor-'));
 const workspace = join(scratch, 'workspace');
 await mkdir(workspace);
@@ -100,10 +103,10 @@ try {
     }
   });
   child.stdout.on('data', data => {
-    output = (output + String(data)).slice(-4096);
+    output = EffectString.slice(-4096)(output + String(data));
   });
   child.stderr.on('data', data => {
-    output = (output + String(data)).slice(-4096);
+    output = EffectString.slice(-4096)(output + String(data));
   });
   let completedHostProbe = false;
   const stop = (signal: NodeJS.Signals) => {
@@ -135,7 +138,7 @@ try {
       stop('SIGKILL');
       clear();
       reject(new Error('Editor feasibility probe exceeded 90 seconds'));
-    }, 90_000);
+    }, 90000);
     child.once('error', error => {
       clear();
       reject(error);
@@ -180,7 +183,7 @@ try {
     const logs = join(scratch, 'user', 'logs');
     for (const name of await readdir(logs, {recursive: true}).catch(() => [])) {
       if (typeof name === 'string' && /(?:main|exthost|renderer)\.log$/u.test(name)) {
-        diagnostics[name] = (await readFile(join(logs, name), 'utf8')).slice(-4096);
+        diagnostics[name] = EffectString.slice(-4096)(await readFile(join(logs, name), 'utf8'));
       }
     }
     await writeFile(

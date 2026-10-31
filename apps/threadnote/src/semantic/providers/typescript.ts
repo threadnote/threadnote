@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectOption from 'effect/Option';
+import * as EffectString from 'effect/String';
 import {Effect, Exit, Option, Schema, Semaphore} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -21,7 +24,6 @@ import {
 } from '../provider.js';
 export {SemanticSessionFault, validTextPosition} from '../provider.js';
 export type {SemanticDiagnostic, DiagnosticSnapshot, DiagnosticDelta} from '../provider.js';
-
 const Location = Schema.Struct({uri: FileUri, range: Range});
 const LocationLink = Schema.Struct({
   targetUri: FileUri,
@@ -47,7 +49,10 @@ interface OpenDocument {
   ready: boolean;
   diagnosticRequest: number;
   diagnostics?: DiagnosticSnapshot;
-  project?: {configuration: string; fileCount: number};
+  project?: {
+    configuration: string;
+    fileCount: number;
+  };
 }
 export interface TypeScriptSessionOptions {
   readonly basis: Observation;
@@ -59,7 +64,6 @@ export interface TypeScriptSessionOptions {
 const invalid = () => SemanticSessionFault.make({reason: 'invalid'});
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown) =>
   Schema.decodeUnknownEffect(schema)(input).pipe(Effect.mapError(invalid));
-
 const sameBasis = (a: Observation, b: Observation) =>
   observationKey({
     ...a,
@@ -68,7 +72,6 @@ const sameBasis = (a: Observation, b: Observation) =>
     documentVersion: b.documentVersion,
     projectEpoch: b.projectEpoch,
   }) === observationKey(b);
-
 /** One isolated provider process per worktree/project/source-view owner. No edit or arbitrary command surface. */
 export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')(function* (
   client: LspClient,
@@ -76,7 +79,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
 ) {
   const basis = structuredClone(yield* decode(Observation, options.basis));
   if (
-    !options.tsserver.startsWith('/') ||
+    !EffectString.startsWith('/')(options.tsserver) ||
     !Number.isSafeInteger(options.maxMemoryMb) ||
     options.maxMemoryMb < 128 ||
     options.maxMemoryMb > 4096
@@ -138,13 +141,16 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     );
   const allowedRoots = [
     decodeURIComponent(new URL(basis.worktree).pathname),
-    options.tsserver.slice(0, options.tsserver.lastIndexOf('/')),
+    EffectString.slice(
+      0,
+      EffectOption.getOrElse(EffectString.lastIndexOf('/')(options.tsserver), () => -1),
+    )(options.tsserver),
   ];
   const contained = (file: string) =>
-    file.startsWith('/') &&
-    !file.includes('//') &&
-    !file.split('/').some(part => part === '.' || part === '..') &&
-    allowedRoots.some(root => file.startsWith(root + '/'));
+    EffectString.startsWith('/')(file) &&
+    !EffectString.includes('//')(file) &&
+    !EffectArray.some(EffectString.split('/')(file), part => part === '.' || part === '..') &&
+    EffectArray.some(allowedRoots, root => EffectString.startsWith(root + '/')(file));
   const projectInfo = (uri: string, milliseconds: number) =>
     Effect.gen(function* () {
       const project = yield* custom('projectInfo', {file: uri, needFileNameList: true}, milliseconds);
@@ -164,7 +170,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         invalidated ||
         (!contained(result.body.configFileName) &&
           !/^\/dev\/null\/inferredProject[0-9]+\*$/u.test(result.body.configFileName)) ||
-        result.body.fileNames.some(file => !contained(file))
+        EffectArray.some(result.body.fileNames, file => !contained(file))
       )
         return yield* SemanticSessionFault.make({reason: 'not-ready'});
       return {configuration: result.body.configFileName, fileCount: result.body.fileNames.length};
@@ -291,7 +297,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       let items: Schema.Json[];
       if (operation === 'definition' || operation === 'references') {
         const locations = yield* decode(Navigation, response);
-        items = locations === null ? [] : Array.isArray(locations) ? [...locations] : [locations];
+        items = locations === null ? [] : Schema.is(Location)(locations) ? [locations] : [...locations];
       } else if (operation === 'symbols') {
         items = [...((yield* decode(Schema.NullOr(Schema.Array(Schema.Json)), response)) ?? [])];
       } else {
@@ -351,16 +357,22 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         )
           return yield* SemanticSessionFault.make({reason: 'stale'});
         const previous = document.diagnostics;
-        const old = new Map(previous?.items.map(item => [item.id, item]) ?? []);
+        const old = new Map(
+          (effectOptionalValue =>
+            effectOptionalValue == null ? undefined : EffectArray.map(effectOptionalValue, item => [item.id, item]))(
+            previous?.items,
+          ) ?? [],
+        );
         const snapshot: DiagnosticSnapshot = {observation: fixed, items: [...items.values()]};
         const delta: DiagnosticDelta = {
           ...snapshot,
-          added: snapshot.items.filter(item => !old.has(item.id)),
-          remaining: snapshot.items.filter(item => old.has(item.id)),
+          added: EffectArray.filter(snapshot.items, item => !old.has(item.id)),
+          remaining: EffectArray.filter(snapshot.items, item => old.has(item.id)),
           resolved: previous
-            ? previous.items
-                .filter(item => !items.has(item.id))
-                .map(item => ({item, observation: previous.observation, resolvedIn: fixed}))
+            ? EffectArray.map(
+                EffectArray.filter(previous.items, item => !items.has(item.id)),
+                item => ({item, observation: previous.observation, resolvedIn: fixed}),
+              )
             : [],
         };
         document.diagnostics = structuredClone(snapshot);
