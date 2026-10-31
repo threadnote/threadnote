@@ -473,6 +473,41 @@ it('reads the canonical handoff only on opening its dialog', async () => {
   expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/memory?uri=');
   expect(document.body.textContent).toContain('All next steps.');
 });
+it.each([
+  ['MEMORY', '\n'],
+  ['HANDOFF', '\r\n'],
+])('previews the authored body of a %s document and preserves Library navigation', async (marker, newline) => {
+  const uri = 'threadnote://user/tester/memories/handoff.md';
+  const relatedUri = 'threadnote://user/tester/memories/related.md';
+  const header = EffectArray.join(
+    [
+      marker,
+      'kind: handoff',
+      'memory_id: internal-preview-identity',
+      'code_citation: {"id":"internal-preview-citation"}',
+      '',
+      '',
+    ],
+    newline,
+  );
+  const body = `# Next steps\n\nKeep **optional discounts** unchanged.\n\n[Related context](${relatedUri})`;
+  const content = header + body + '\n\n<!-- MEMORY_FIELDS\nlegacy-preview-fields\n-->\n';
+  const onOpenLibrary = vi.fn();
+  fetchMock.mockResolvedValue(response({content}));
+  await render(<MemoryDetailModal title="Handoff" uri={uri} onClose={() => undefined} onOpenLibrary={onOpenLibrary} />);
+
+  expect(document.querySelector('article h1')?.textContent).toBe('Next steps');
+  expect(document.querySelector('article strong')?.textContent).toBe('optional discounts');
+  expect(document.body.textContent).not.toContain('kind: handoff');
+  expect(document.body.textContent).not.toContain('internal-preview-identity');
+  expect(document.body.textContent).not.toContain('internal-preview-citation');
+  expect(document.body.textContent).not.toContain('legacy-preview-fields');
+  await act(async () => document.querySelector<HTMLAnchorElement>('article a')?.click());
+  expect(onOpenLibrary).toHaveBeenLastCalledWith(relatedUri);
+  await click('Open in Library');
+  expect(onOpenLibrary).toHaveBeenLastCalledWith(uri);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
 it('renders an actionable project overview without fabricated trends', async () => {
   fetchMock.mockResolvedValue(
     response(
