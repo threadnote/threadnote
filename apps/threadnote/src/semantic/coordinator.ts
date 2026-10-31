@@ -2,7 +2,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
-import {Clock, Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope, Semaphore} from 'effect';
+import {Cause, Clock, Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope, Semaphore} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
@@ -25,15 +25,27 @@ import {LspFault, makeLspClient, spawnLspWire, type LspWire} from './lsp_transpo
 import {makeTypeScriptSession} from './providers/typescript.js';
 import {
   SemanticSessionFault,
+  SemanticSetupFault,
   SemanticLanguage,
   SemanticQuery,
   isCoreSemanticQuery,
+  makeSemanticNotifications,
   type SemanticSession,
+  type SdkHostCandidate,
 } from './provider.js';
-import {makePythonSession, makePythonNotifications} from './providers/python.js';
+import {makePythonSession} from './providers/python.js';
 import {makePythonProject, PythonEnvironment} from './providers/python_project.js';
+import {makeGoProject, makeGoSession, goProviderVersion, goExecutableDigest, goToolDigest} from './providers/go.js';
+import {
+  makeRustProject,
+  makeRustSession,
+  rustProviderVersion,
+  rustExecutableDigest,
+  rustToolDigest,
+  cargoToolDigest,
+} from './providers/rust.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {boundedFileDigest, readBoundedText, semanticTreeDigest} from './fingerprint.js';
+import {boundedFileDigest, readBoundedText, semanticTreeDigest, semanticSdkDigest} from './fingerprint.js';
 export {semanticTreeDigest} from './fingerprint.js';
 const Instance = Schema.Struct({pid: Counter, identity: Identifier});
 type Instance = typeof Instance.Type;
@@ -73,7 +85,7 @@ export interface PythonHostCandidate {
   readonly serverTreeDigest: string;
   readonly environments: readonly PythonEnvironment[];
 }
-export const semanticCatalogKey = (options: {candidate?: TypeScriptHostCandidate; python?: PythonHostCandidate}) =>
+export const semanticCatalogKey = (options: Pick<SemanticCoordinatorOptions, 'candidate' | 'python' | 'go' | 'rust'>) =>
   JSON.stringify([
     options.candidate ? semanticCandidateKey(options.candidate) : null,
     options.python
@@ -89,12 +101,19 @@ export const semanticCatalogKey = (options: {candidate?: TypeScriptHostCandidate
           ),
         ]
       : null,
+    ...EffectArray.map([options.go, options.rust], candidate =>
+      candidate
+        ? [candidate.executable, candidate.executableDigest, candidate.sdkDirectory, candidate.sdkTreeDigest]
+        : null,
+    ),
   ]);
 export interface SemanticCoordinatorOptions {
   readonly enabled: boolean;
   readonly dataHome: string;
   readonly candidate?: TypeScriptHostCandidate;
   readonly python?: PythonHostCandidate;
+  readonly go?: SdkHostCandidate;
+  readonly rust?: SdkHostCandidate;
 }
 interface AnalysisSession {
   readonly scope: Scope.Closeable;
@@ -121,6 +140,79 @@ const sessionIdentity = (o: Observation) =>
     o.view.owner,
     o.view.epoch,
   ]);
+type NativeProviderId = 'gopls' | 'rust-analyzer';
+const nativeSetupFault = (
+  providerId: NativeProviderId,
+  reason: SemanticSetupFault['reason'],
+  component: SemanticSetupFault['component'],
+) =>
+  SemanticSetupFault.make({
+    providerId,
+    reason,
+    component,
+    requiredVersion: providerId === 'gopls' ? goProviderVersion : rustProviderVersion,
+    requiredSdkVersion: providerId === 'gopls' ? '1.27.3' : '1.99.1',
+    nextAction:
+      reason === 'unavailable'
+        ? 'Check host filesystem access and supported artifact size limits, then retry semantic setup with the required provider and SDK versions'
+        : providerId === 'gopls'
+          ? 'Configure the host-approved gopls v0.24.0 and Go 1.27.3 artifacts with their verified SHA-256 digests, then retry semantic setup'
+          : 'Configure the host-approved rust-analyzer 0.3.3097 and Rust 1.99.1 artifacts with their verified SHA-256 digests, then retry semantic setup',
+  });
+/** Shared cold-start preflight and worker trust boundary; no provider or repository process is launched here. */
+export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCandidate')(function* (
+  candidate: SdkHostCandidate | undefined,
+  id: NativeProviderId,
+) {
+  if (!candidate) return yield* nativeSetupFault(id, 'missing', 'provider');
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const expected = id === 'gopls' ? goExecutableDigest : rustExecutableDigest;
+  yield* Effect.gen(function* () {
+    if (candidate.executableDigest !== expected || !path.isAbsolute(candidate.executable))
+      return yield* nativeSetupFault(id, 'incompatible', 'provider');
+    if (!(yield* fs.exists(candidate.executable))) return yield* nativeSetupFault(id, 'missing', 'provider');
+    if (
+      (yield* fs.realPath(candidate.executable)) !== candidate.executable ||
+      (yield* fs.stat(candidate.executable)).type !== 'File' ||
+      (yield* sha256FileHex(candidate.executable)) !== expected
+    )
+      return yield* nativeSetupFault(id, 'incompatible', 'provider');
+  }).pipe(
+    Effect.mapError(error =>
+      Schema.is(SemanticSetupFault)(error) ? error : nativeSetupFault(id, 'unavailable', 'provider'),
+    ),
+  );
+  yield* Effect.gen(function* () {
+    if (!Schema.is(Digest)(candidate.sdkTreeDigest) || !path.isAbsolute(candidate.sdkDirectory))
+      return yield* nativeSetupFault(id, 'incompatible', 'sdk');
+    if (!(yield* fs.exists(candidate.sdkDirectory))) return yield* nativeSetupFault(id, 'missing', 'sdk');
+    if (
+      (yield* fs.realPath(candidate.sdkDirectory)) !== candidate.sdkDirectory ||
+      (yield* fs.stat(candidate.sdkDirectory)).type !== 'Directory'
+    )
+      return yield* nativeSetupFault(id, 'incompatible', 'sdk');
+    const tools =
+      id === 'gopls'
+        ? [['bin/go', goToolDigest]]
+        : [
+            ['bin/rustc', rustToolDigest],
+            ['bin/cargo', cargoToolDigest],
+          ];
+    for (const [file, digest] of tools) {
+      const tool = path.join(candidate.sdkDirectory, file);
+      if (!(yield* fs.exists(tool))) return yield* nativeSetupFault(id, 'missing', 'sdk');
+      if ((yield* boundedFileDigest(tool, 64 * 1024 * 1024)) !== digest)
+        return yield* nativeSetupFault(id, 'incompatible', 'sdk');
+    }
+    if ((yield* semanticSdkDigest(candidate.sdkDirectory)) !== candidate.sdkTreeDigest)
+      return yield* nativeSetupFault(id, 'incompatible', 'sdk');
+  }).pipe(
+    Effect.mapError(error =>
+      Schema.is(SemanticSetupFault)(error) ? error : nativeSetupFault(id, 'unavailable', 'sdk'),
+    ),
+  );
+});
 /** Host-only construction. Repository requests can select a source view, never an executable, plugin or build policy. */
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
   options: SemanticCoordinatorOptions,
@@ -144,7 +236,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     causes.set(id, reason);
   };
   const catalog = structuredClone(options);
-  const verifyCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate) =>
+  const verifyNodeCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate) =>
     Effect.gen(function* () {
       if (
         candidate.runtimeVersion !== '24.19.0' ||
@@ -193,10 +285,24 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
       }
     });
-  const configured = EffectArray.filter([catalog.candidate, catalog.python], c => c !== undefined);
+  // Full SDK hashing has a fixed, larger per-file allocation; serialize it across this worker's sessions.
+  const sdkVerification = yield* Semaphore.make(1);
+  const verifyCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate, id: string) =>
+    'runtime' in candidate
+      ? verifyNodeCandidate(candidate)
+      : id === 'gopls' || id === 'rust-analyzer'
+        ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
+        : Effect.fail(LspFault.make({code: 'prerequisite'}));
+  const configured = [
+    ...(catalog.candidate ? [{candidate: catalog.candidate, id: 'typescript-language-server', version: '6.0.2'}] : []),
+    ...(catalog.python ? [{candidate: catalog.python, id: 'basedpyright', version: '1.40.2'}] : []),
+    ...(catalog.go ? [{candidate: catalog.go, id: 'gopls', version: goProviderVersion}] : []),
+    ...(catalog.rust ? [{candidate: catalog.rust, id: 'rust-analyzer', version: rustProviderVersion}] : []),
+  ];
   if (!configured.length) return yield* LspFault.make({code: 'prerequisite'});
-  for (const candidate of configured) {
-    yield* verifyCandidate(candidate);
+  for (const {candidate, id} of configured) {
+    yield* verifyCandidate(candidate, id);
+    if (!('runtime' in candidate)) continue;
     const version = yield* command.execute(candidate.runtime, ['--version'], {
       env: {},
       timeoutMs: 2000,
@@ -224,8 +330,20 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
       Effect.gen(function* () {
         const input = structuredClone(yield* Schema.decodeEffect(Observation)(observation));
         if (sha256HexSync(text) !== input.content) return yield* LspFault.make({code: 'protocol'});
-        const candidate = language === 'python' ? catalog.python : catalog.candidate;
-        const providerId = language === 'python' ? 'basedpyright' : 'typescript-language-server';
+        const providerId =
+          language === 'python'
+            ? 'basedpyright'
+            : language === 'go'
+              ? 'gopls'
+              : language === 'rust'
+                ? 'rust-analyzer'
+                : 'typescript-language-server';
+        const provider = EffectOption.getOrUndefined(
+          EffectArray.findFirst(configured, entry => entry.id === providerId),
+        );
+        const candidate = provider?.candidate;
+        if (!candidate && (providerId === 'gopls' || providerId === 'rust-analyzer'))
+          return yield* nativeSetupFault(providerId, 'missing', 'provider');
         const selected =
           language === 'python'
             ? (effectOptionalValue =>
@@ -236,6 +354,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               )
             : undefined;
         if (
+          !provider ||
           !candidate ||
           input.provider.id !== providerId ||
           (language === 'python' ? !selected : environment !== undefined)
@@ -243,8 +362,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           return yield* LspFault.make({code: 'prerequisite'});
         const toolchain = sha256HexSync(
           JSON.stringify([
-            candidate.runtimeDigest,
-            candidate.serverTreeDigest,
+            'runtime' in candidate ? candidate.runtimeDigest : candidate.executableDigest,
+            'runtime' in candidate ? candidate.serverTreeDigest : candidate.sdkTreeDigest,
             'sdkTreeDigest' in candidate ? candidate.sdkTreeDigest : selected,
           ]),
         );
@@ -264,7 +383,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           return yield* LspFault.make({code: 'rejected'});
         const id = sessionIdentity(fixed);
         let session = sessions.get(id);
-        const diskBasis = yield* semanticTreeDigest(worktree, providerId !== 'basedpyright');
+        const diskBasis = yield* semanticTreeDigest(worktree, providerId === 'typescript-language-server');
         fixed = {...fixed, configuration: diskBasis};
         if (session && (session.diskBasis !== diskBasis || session.basis.toolchain !== toolchain)) {
           yield* retire(id, session);
@@ -274,16 +393,34 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           if ((failures.get(id) ?? 0) >= 2 || failures.size >= 256) return yield* LspFault.make({code: 'prerequisite'});
           const owned = yield* Scope.fork(scope);
           const create = Effect.gen(function* () {
-            const projectOptions = selected
-              ? yield* makePythonProject({
-                  project,
-                  worktree,
-                  privateDirectory: path.join(home, 'semantic', 'environments'),
-                  runtime: candidate.runtime,
-                  environment: selected,
-                })
-              : undefined;
-            yield* verifyCandidate(candidate);
+            yield* verifyCandidate(candidate, providerId);
+            const pythonProject =
+              selected && 'runtime' in candidate
+                ? yield* makePythonProject({
+                    project,
+                    worktree,
+                    privateDirectory: path.join(home, 'semantic', 'environments'),
+                    runtime: candidate.runtime,
+                    environment: selected,
+                  })
+                : undefined;
+            const nativeProject =
+              'executable' in candidate
+                ? language === 'go'
+                  ? yield* makeGoProject({
+                      project,
+                      worktree,
+                      sdk: candidate.sdkDirectory,
+                      privateDirectory: path.join(home, 'semantic', 'environments'),
+                    }).pipe(Effect.timeout(10000), Effect.provideService(CommandExecutor, command))
+                  : yield* makeRustProject({
+                      project,
+                      worktree,
+                      sdk: candidate.sdkDirectory,
+                      privateDirectory: path.join(home, 'semantic', 'environments'),
+                    }).pipe(Effect.timeout(10000), Effect.provideService(CommandExecutor, command))
+                : undefined;
+            const projectOptions = pythonProject ?? nativeProject;
             const reservation = yield* admission.acquire(
               sha256HexSync(fixed.repository + '\0' + fixed.worktree),
               10000,
@@ -292,7 +429,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               ...fixed,
               provider: {
                 id: providerId,
-                version: language === 'python' ? '1.40.2' : '6.0.2',
+                version: provider.version,
                 generation: reservation.generation,
               },
               projectEpoch: reservation.generation,
@@ -308,38 +445,61 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   )
                 : Effect.void,
             );
-            const verify = verifyCandidate(candidate).pipe(
+            const verify = verifyCandidate(candidate, providerId).pipe(
               Effect.andThen(projectOptions?.verify ?? Effect.void),
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(Path.Path, path),
               Effect.provideService(Crypto.Crypto, crypto),
             );
             const wire = yield* spawnLspWire({
-              command: candidate.runtime,
-              args: [
-                path.join(candidate.serverDirectory, language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs'),
-                '--stdio',
-              ],
+              command: 'runtime' in candidate ? candidate.runtime : candidate.executable,
+              args:
+                'runtime' in candidate
+                  ? [
+                      path.join(
+                        candidate.serverDirectory,
+                        language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs',
+                      ),
+                      '--stdio',
+                    ]
+                  : [],
               cwd: project,
               // No repository PATH, NODE_OPTIONS, Python startup hooks, plugins or inherited execution settings.
-              environment: {},
+              environment: nativeProject?.environment ?? {},
             });
             wireState.current = wire;
             yield* reservation.bindProvider(wire.pid);
-            const notifications = makePythonNotifications();
+            const notifications = makeSemanticNotifications();
             const client = yield* makeLspClient(wire, notifications.receive, projectOptions?.settings);
             let api: SemanticSession;
-            if (projectOptions) {
+            if (pythonProject && 'runtime' in candidate) {
               api = yield* makePythonSession(client, {
                 basis: fixed,
                 notifications,
-                roots: [...projectOptions.roots, candidate.serverDirectory],
-                profile: projectOptions.profile,
-                environmentReady: projectOptions.ready,
+                roots: [...pythonProject.roots, candidate.serverDirectory],
+                profile: pythonProject.profile,
+                environmentReady: pythonProject.ready,
                 startupMilliseconds: 10000,
               });
+            } else if (nativeProject) {
+              api = yield* (language === 'go' ? makeGoSession : makeRustSession)(client, {
+                basis: fixed,
+                notifications,
+                roots: nativeProject.roots,
+                profile: nativeProject.profile,
+                ready: nativeProject.ready,
+                initializationOptions: nativeProject.initializationOptions,
+                startupMilliseconds: 20000,
+              }).pipe(
+                Effect.mapError(error =>
+                  Schema.is(SemanticSessionFault)(error) && error.reason === 'provider'
+                    ? nativeSetupFault(language === 'go' ? 'gopls' : 'rust-analyzer', 'incompatible', 'provider')
+                    : error,
+                ),
+              );
             } else {
-              if (!('sdkDirectory' in candidate)) return yield* LspFault.make({code: 'prerequisite'});
+              if (!('runtime' in candidate) || !('sdkDirectory' in candidate))
+                return yield* LspFault.make({code: 'prerequisite'});
               const ts = yield* makeTypeScriptSession(client, {
                 basis: fixed,
                 tsserver: path.join(candidate.sdkDirectory, 'lib/tsserver.js'),
@@ -358,7 +518,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                         evidence: null,
                       }),
                 upsert: (o, t, l, ms) =>
-                  l === 'python' ? Effect.fail(LspFault.make({code: 'rejected'})) : ts.upsert(o, t, l, ms),
+                  l === 'python' || l === 'go' || l === 'rust'
+                    ? Effect.fail(LspFault.make({code: 'rejected'}))
+                    : ts.upsert(o, t, l, ms),
               };
             }
             fixed = yield* api.upsert(fixed, text, language, 10000);
@@ -384,6 +546,11 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           );
           if (Exit.isFailure(created)) {
             yield* Scope.close(owned, created);
+            const error = Cause.findErrorOption(created.cause);
+            if (Option.isSome(error) && Schema.is(SemanticSetupFault)(error.value)) {
+              recordFailure(id, `setup-${error.value.component}-${error.value.reason}`);
+              return yield* error.value;
+            }
             recordFailure(id, 'startup');
             return yield* LspFault.make({code: 'prerequisite'});
           }
@@ -407,7 +574,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           const info = yield* active.api.project(fixed.uri);
           if (
             (fixed.view.kind === 'disk' && (yield* boundedFileDigest(file, 32 * 1024 * 1024)) !== fixed.content) ||
-            (yield* semanticTreeDigest(worktree, providerId !== 'basedpyright')) !== diskBasis
+            (yield* semanticTreeDigest(worktree, providerId === 'typescript-language-server')) !== diskBasis
           )
             return yield* LspFault.make({code: 'rejected'});
           return info;
@@ -417,7 +584,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           observation: structuredClone(fixed),
           status: 'experimental' as const,
           completeness: 'partial' as const,
-          edits: language === 'python' ? ('preparation-only' as const) : ('disabled' as const),
+          edits: providerId !== 'typescript-language-server' ? ('preparation-only' as const) : ('disabled' as const),
           project: projectInfo,
         };
       }),
@@ -441,7 +608,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           Effect.gen(function* () {
             if (session.closing) return yield* LspFault.make({code: 'closing'});
             const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
-            const before = yield* semanticTreeDigest(worktree, fixed.provider.id !== 'basedpyright');
+            const before = yield* semanticTreeDigest(worktree, fixed.provider.id === 'typescript-language-server');
             if (before !== session.diskBasis) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
@@ -452,7 +619,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
             if (
               session.closing ||
-              (yield* semanticTreeDigest(worktree, fixed.provider.id !== 'basedpyright')) !== before
+              (yield* semanticTreeDigest(worktree, fixed.provider.id === 'typescript-language-server')) !== before
             ) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
@@ -498,19 +665,28 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         experimental: true,
         readOnly: true,
         sessions: sessions.size,
-        providerProfiles: EffectArray.map(configured, candidate => ({
-          id: 'sdkDirectory' in candidate ? 'typescript-language-server' : 'basedpyright',
-          version: 'sdkDirectory' in candidate ? '6.0.2' : '1.40.2',
+        providerProfiles: EffectArray.map(configured, ({candidate, id, version}) => ({
+          id,
+          version,
           status: 'experimental',
           prerequisites: 'host-qualified-candidate',
+          ...(id === 'gopls' || id === 'rust-analyzer'
+            ? {
+                license: {
+                  expression: id === 'gopls' ? 'BSD-3-Clause' : 'MIT OR Apache-2.0',
+                  entitlement: 'not-required',
+                  redistribution: 'release-gated',
+                },
+              }
+            : {}),
           environments:
             'environments' in candidate ? EffectArray.map(candidate.environments, environment => environment.id) : [],
           capabilities: {
             reads: 'experimental',
             diagnostics: 'experimental',
-            rename: 'sdkDirectory' in candidate ? 'unsupported' : 'preparation-only',
-            codeActions: 'sdkDirectory' in candidate ? 'unsupported' : 'inline-preparation-only',
-            optional: 'sdkDirectory' in candidate ? 'unsupported-unqualified' : 'provider-advertised-reads',
+            rename: id === 'typescript-language-server' ? 'unsupported' : 'preparation-only',
+            codeActions: id === 'typescript-language-server' ? 'unsupported' : 'inline-preparation-only',
+            optional: id === 'typescript-language-server' ? 'unsupported-unqualified' : 'provider-advertised-reads',
             apply: 'unsupported',
             commands: 'unsupported',
           },
@@ -719,9 +895,23 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
                 ? error.code
                 : Schema.is(SemanticSessionFault)(error)
                   ? error.reason
-                  : 'prerequisite',
-              nextAction:
-                'Inspect semantic status and source-view readiness; structural graph and memory remain available',
+                  : Schema.is(SemanticSetupFault)(error)
+                    ? 'setup'
+                    : 'prerequisite',
+              ...(Schema.is(SemanticSetupFault)(error)
+                ? {
+                    setup: {
+                      providerId: error.providerId,
+                      reason: error.reason,
+                      component: error.component,
+                      requiredVersion: error.requiredVersion,
+                      requiredSdkVersion: error.requiredSdkVersion,
+                    },
+                  }
+                : {}),
+              nextAction: Schema.is(SemanticSetupFault)(error)
+                ? error.nextAction
+                : 'Inspect semantic status and source-view readiness; structural graph and memory remain available',
             },
             {status: 409},
           ),
@@ -823,6 +1013,12 @@ const HostCandidate = Schema.Struct({
   sdkDirectory: Schema.String,
   sdkTreeDigest: Digest,
 });
+const SdkCandidate = Schema.Struct({
+  executable: Schema.String,
+  executableDigest: Digest,
+  sdkDirectory: Schema.String,
+  sdkTreeDigest: Digest,
+});
 const Bootstrap = Schema.Struct({
   version: Schema.Literal(1),
   runtimeIdentity: Digest,
@@ -830,6 +1026,8 @@ const Bootstrap = Schema.Struct({
   worktree: FileUri,
   dataHome: Schema.String,
   candidate: Schema.optional(HostCandidate),
+  go: Schema.optional(SdkCandidate),
+  rust: Schema.optional(SdkCandidate),
   python: Schema.optional(
     Schema.Struct({
       runtime: Schema.String,
@@ -875,7 +1073,8 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
     },
     Effect.gen(function* () {
       let bootstrap: typeof Bootstrap.Type;
-      if (yield* fs.exists(bootstrapFile)) {
+      const existing = yield* fs.exists(bootstrapFile);
+      if (existing) {
         bootstrap = yield* readSemanticBootstrap(bootstrapFile);
         if (
           bootstrap.worktree !== options.worktree ||
@@ -893,8 +1092,9 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
           dataHome: home,
           ...(options.candidate ? {candidate: options.candidate} : {}),
           ...(options.python ? {python: options.python} : {}),
+          ...(options.go ? {go: options.go} : {}),
+          ...(options.rust ? {rust: options.rust} : {}),
         };
-        yield* fs.writeFileString(bootstrapFile, JSON.stringify(bootstrap), {flag: 'wx', mode: 0o600});
       }
       const probe = requestSemanticEndpoint(socket, bootstrap.token, {operation: 'status'}).pipe(
         Effect.timeoutOption(250),
@@ -909,6 +1109,10 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
         Effect.orElseSucceed(() => false),
       );
       if (!(yield* probe)) {
+        // Surface native setup causes in the parent before publishing bootstrap or waiting for a worker that cannot start.
+        if (options.go) yield* verifyNativeSemanticCandidate(options.go, 'gopls');
+        if (options.rust) yield* verifyNativeSemanticCandidate(options.rust, 'rust-analyzer');
+        if (!existing) yield* fs.writeFileString(bootstrapFile, JSON.stringify(bootstrap), {flag: 'wx', mode: 0o600});
         const name = (effectOptionalValue =>
           effectOptionalValue == null ? undefined : EffectString.toLowerCase(effectOptionalValue))(
           EffectString.split('/')(EffectString.replaceAll('\\', '/')(system.executablePath)).at(-1),
@@ -976,6 +1180,8 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
           dataHome: bootstrap.dataHome,
           candidate: bootstrap.candidate,
           python: bootstrap.python,
+          go: bootstrap.go,
+          rust: bootstrap.rust,
         });
         const endpoint = yield* serveSemanticEndpoint(coordinator, {
           directory,

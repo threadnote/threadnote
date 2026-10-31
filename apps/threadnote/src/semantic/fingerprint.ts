@@ -1,6 +1,6 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Crypto, Effect, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -32,9 +32,10 @@ export const boundedFileDigest = Effect.fn('semantic.boundedFileDigest')(functio
   );
 });
 /** Bounded conservative pilot invalidation. No build/config code is evaluated to compute this basis. */
-export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
+const treeDigest = Effect.fn('semantic.treeDigest')(function* (
   root: string,
-  projectConfiguration = false,
+  projectConfiguration: boolean,
+  sdk: boolean,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -85,39 +86,46 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
           return yield* LspFault.make({code: 'prerequisite'});
       }
     });
+  const largeReads = sdk ? yield* Semaphore.make(1) : undefined;
   while (pending.length) {
     const directory = pending.pop()!;
     const names = (yield* fs.readDirectory(directory)).sort();
     if (names.length + files > 20000) return yield* LspFault.make({code: 'capacity'});
-    for (const name of names) {
-      const file = path.join(directory, name);
-      const relative = path.relative(canonical, file);
-      if (relative === '.git' || EffectString.startsWith('.git/')(relative)) continue;
-      if (++files > 20000) return yield* LspFault.make({code: 'capacity'});
-      // Symlinked or external project roots need explicit provider qualification; never silently omit them.
-      if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
-        return yield* LspFault.make({code: 'prerequisite'});
-      const before = yield* fs.stat(file);
-      if (before.type === 'Directory') {
-        pending.push(file);
-        entries.push([relative, 'directory']);
-        continue;
-      }
-      if (before.type !== 'File' || Number(before.size) > 32 * 1024 * 1024)
-        return yield* LspFault.make({code: 'capacity'});
-      totalBytes += Number(before.size);
-      if (totalBytes > 256 * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
-      const hash = yield* boundedFileDigest(file, Number(before.size));
-      if (projectConfiguration && /^(?:tsconfig|jsconfig)(?:\..+)?\.json$/u.test(name))
-        yield* validateConfiguration(file);
-      const after = yield* fs.stat(file);
-      if (
-        after.size !== before.size ||
-        Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(before.mtime)?.getTime()
-      )
-        return yield* LspFault.make({code: 'rejected'});
-      entries.push([relative, hash]);
-    }
+    yield* Effect.forEach(
+      names,
+      name =>
+        Effect.gen(function* () {
+          const file = path.join(directory, name);
+          const relative = path.relative(canonical, file);
+          if (relative === '.git' || EffectString.startsWith('.git/')(relative)) return;
+          if (++files > 20000) return yield* LspFault.make({code: 'capacity'});
+          // Symlinked or external project roots need explicit provider qualification; never silently omit them.
+          if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
+            return yield* LspFault.make({code: 'prerequisite'});
+          const before = yield* fs.stat(file);
+          if (before.type === 'Directory') {
+            pending.push(file);
+            entries.push([relative, 'directory']);
+            return;
+          }
+          if (before.type !== 'File' || Number(before.size) > (sdk ? 256 : 32) * 1024 * 1024)
+            return yield* LspFault.make({code: 'capacity'});
+          totalBytes += Number(before.size);
+          if (totalBytes > (sdk ? 1024 : 256) * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
+          const read = boundedFileDigest(file, Number(before.size));
+          const hash = yield* largeReads && Number(before.size) > 1024 * 1024 ? largeReads.withPermit(read) : read;
+          if (projectConfiguration && /^(?:tsconfig|jsconfig)(?:\..+)?\.json$/u.test(name))
+            yield* validateConfiguration(file);
+          const after = yield* fs.stat(file);
+          if (
+            after.size !== before.size ||
+            Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(before.mtime)?.getTime()
+          )
+            return yield* LspFault.make({code: 'rejected'});
+          entries.push([relative, hash]);
+        }),
+      {concurrency: sdk ? 8 : 1, discard: true},
+    );
   }
   // Include worktree and common branch metadata without traversing Git object storage.
   const git = path.join(canonical, '.git');
@@ -155,3 +163,7 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
   }
   return sha256HexSync(JSON.stringify(entries.sort(([a], [b]) => EffectString.localeCompare(b)(a))));
 });
+export const semanticTreeDigest = (root: string, projectConfiguration = false) =>
+  treeDigest(root, projectConfiguration, false);
+/** Fixed host SDK bound; repository requests cannot choose or widen source limits. */
+export const semanticSdkDigest = (root: string) => treeDigest(root, false, true);
