@@ -10,7 +10,7 @@
     "linux-arm64",
     "linux-arm64-musl",
     "linux-x64-baseline",
-    "linux-x64-musl-baseline",
+    "linux-x64-baseline-musl",
     "windows-arm64",
     "windows-x64-baseline"
   ],
@@ -67,7 +67,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -153,7 +153,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -214,7 +214,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -337,7 +337,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -401,7 +401,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -533,7 +533,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -660,7 +660,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },
@@ -776,7 +776,7 @@
           "status": "unqualified",
           "evidence": []
         },
-        "linux-x64-musl-baseline": {
+        "linux-x64-baseline-musl": {
           "status": "unqualified",
           "evidence": []
         },

@@ -1,9 +1,12 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 /* oxlint-disable effecttsgo/node-builtin-import, threadnote/no-node-runtime -- This scoped OS stdio boundary retains late write errors through close; the standard process sink loses them on Bun. */
 import {spawn, type ChildProcess} from 'node:child_process';
 import {Cause, Clock, Deferred, Effect, Option, Queue, Schema, Stream} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
-
-export class LspFault extends Schema.TaggedError<LspFault>()('LspFault', {
+import {isJsonObject} from '@threadnote/platform/json';
+export class LspFault extends Schema.TaggedError<LspFault, {readonly brand: unique symbol}>()('LspFault', {
   code: Schema.Literals(['protocol', 'capacity', 'write', 'exit', 'timeout', 'closing', 'rejected', 'prerequisite']),
 }) {}
 type Message = Record<string, unknown>;
@@ -17,7 +20,6 @@ export function encodeLspFrame(message: Message): Uint8Array {
   frame.set(body, header.length);
   return frame;
 }
-
 export class LspFrameDecoder {
   private buffered = new Uint8Array();
   constructor(private readonly maxBytes = 32 * 1024 * 1024) {
@@ -33,7 +35,7 @@ export class LspFrameDecoder {
     while (this.buffered.length) {
       let end = -1;
       for (let i = 0; i + 3 < Math.min(this.buffered.length, 8196); i++) {
-        if ([13, 10, 13, 10].every((byte, offset) => this.buffered[i + offset] === byte)) {
+        if (EffectArray.every([13, 10, 13, 10], (byte, offset) => this.buffered[i + offset] === byte)) {
           end = i;
           break;
         }
@@ -44,20 +46,19 @@ export class LspFrameDecoder {
       }
       const header = this.buffered.subarray(0, end);
       if (end > 8192 || header.some(byte => byte > 127)) throw LspFault.make({code: 'protocol'});
-      const lengths = decoder
-        .decode(header)
-        .split('\r\n')
-        .filter(line => /^content-length:/iu.test(line));
+      const lengths = EffectArray.filter(EffectString.split('\r\n')(decoder.decode(header)), line =>
+        /^content-length:/iu.test(line),
+      );
       if (lengths.length !== 1 || !/^content-length: *[0-9]+$/iu.test(lengths[0]))
         throw LspFault.make({code: 'protocol'});
-      const size = Number(lengths[0].split(':')[1]);
+      const size = Number(EffectString.split(':')(lengths[0])[1]);
       if (!Number.isSafeInteger(size) || size < 1 || size > this.maxBytes) throw LspFault.make({code: 'protocol'});
       if (this.buffered.length < end + 4 + size) break;
       const value: unknown = JSON.parse(decoder.decode(this.buffered.subarray(end + 4, end + 4 + size)));
       if (
         !value ||
         typeof value !== 'object' ||
-        Array.isArray(value) ||
+        EffectArray.isArray(value) ||
         !('jsonrpc' in value) ||
         value.jsonrpc !== '2.0'
       )
@@ -65,19 +66,19 @@ export class LspFrameDecoder {
       const message = value as Message;
       const id = message.id;
       const validId = typeof id === 'string' ? id.length > 0 && id.length <= 512 : Number.isSafeInteger(id);
-      if (Object.hasOwn(message, 'method')) {
+      if (EffectRecord.has(message, 'method')) {
         if (
           typeof message.method !== 'string' ||
           message.method.length < 1 ||
           message.method.length > 256 ||
           (id !== undefined && !validId) ||
-          Object.hasOwn(message, 'result') ||
-          Object.hasOwn(message, 'error')
+          EffectRecord.has(message, 'result') ||
+          EffectRecord.has(message, 'error')
         )
           throw LspFault.make({code: 'protocol'});
       } else if (
-        (!validId && !(id === null && Object.hasOwn(message, 'error'))) ||
-        Object.hasOwn(message, 'result') === Object.hasOwn(message, 'error')
+        (!validId && !(id === null && EffectRecord.has(message, 'error'))) ||
+        EffectRecord.has(message, 'result') === EffectRecord.has(message, 'error')
       ) {
         throw LspFault.make({code: 'protocol'});
       }
@@ -90,7 +91,6 @@ export class LspFrameDecoder {
     if (this.buffered.length) throw LspFault.make({code: 'protocol'});
   }
 }
-
 export interface WireStop {
   readonly code: number | null;
   readonly drained: boolean;
@@ -113,7 +113,6 @@ export interface LspLaunch {
   readonly environment: NodeJS.ProcessEnv;
   readonly maxMessageBytes?: number;
 }
-
 export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (options: LspLaunch) {
   // Windows process-tree containment remains a mandatory release qualification gate.
   if (process.platform === 'win32') return yield* LspFault.make({code: 'prerequisite'});
@@ -122,7 +121,13 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     catch: () => LspFault.make({code: 'protocol'}),
   });
   const policy = yield* ChildEnvironmentPolicy;
-  const incoming = yield* Queue.bounded<{message: Message; bytes: number}, Cause.Done>(64);
+  const incoming = yield* Queue.bounded<
+    {
+      message: Message;
+      bytes: number;
+    },
+    Cause.Done
+  >(64);
   const spawned = Deferred.makeUnsafe<void, LspFault>();
   const exited = Deferred.makeUnsafe<void>();
   const closed = Deferred.makeUnsafe<void>();
@@ -146,7 +151,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
       process.kill(-child.pid, 0);
       return true;
     } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+      return !isJsonObject(error) || error.code !== 'ESRCH';
     }
   };
   const signal = (signal: NodeJS.Signals) =>
@@ -156,7 +161,7 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
       try {
         process.kill(-child!.pid!, signal);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') fail('exit');
+        if (!isJsonObject(error) || error.code !== 'ESRCH') fail('exit');
       }
     });
   const waitGroup = (milliseconds: number) =>
@@ -252,8 +257,8 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
         child.stderr!.on('error', () => fail('exit'));
         child.stderr!.on('data', bytes => {
           const text = stderrTail + new TextDecoder().decode(bytes);
-          if (text.includes('panicked at')) fail('exit');
-          stderrTail = text.slice(-4096);
+          if (EffectString.includes('panicked at')(text)) fail('exit');
+          stderrTail = EffectString.slice(-4096)(text);
         });
         return child;
       },
@@ -323,7 +328,6 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     finish,
   } satisfies LspWire;
 });
-
 export interface LspClient {
   readonly pid: number;
   readonly request: (
@@ -332,9 +336,12 @@ export interface LspClient {
     milliseconds: number,
   ) => Effect.Effect<Schema.Json, LspFault>;
   readonly notify: (method: string, params: Schema.Json) => Effect.Effect<void, LspFault>;
-  readonly close: Effect.Effect<WireStop & {readonly graceful: boolean}>;
+  readonly close: Effect.Effect<
+    WireStop & {
+      readonly graceful: boolean;
+    }
+  >;
 }
-
 export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
   wire: LspWire,
   onNotification: (method: string, params: unknown) => void = () => {},
@@ -346,9 +353,15 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
   const setting = (section: unknown): Schema.Json => {
     if (typeof section !== 'string' || section === '') return fixedSettings;
     let value = fixedSettings;
-    for (const key of section.split('.')) {
-      if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, key)) return null;
-      value = (value as Record<string, Schema.Json>)[key];
+    for (const key of EffectString.split('.')(section)) {
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        EffectArray.isArray<Schema.Json>(value) ||
+        !EffectRecord.has<string, Schema.Json>(value, key)
+      )
+        return null;
+      value = value[key];
     }
     return value;
   };
@@ -368,7 +381,7 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
       if (
         !Number.isSafeInteger(milliseconds) ||
         milliseconds < 1 ||
-        milliseconds > 120_000 ||
+        milliseconds > 120000 ||
         nextId >= Number.MAX_SAFE_INTEGER
       )
         return Effect.fail(LspFault.make({code: 'protocol'}));
@@ -398,10 +411,11 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
     Stream.runForEach(message =>
       Effect.gen(function* () {
         if (typeof message.method === 'string') {
+          const method = message.method;
           if (message.method.length > 256) return yield* fail(LspFault.make({code: 'protocol'}));
           if (message.id === undefined) {
             yield* Effect.try({
-              try: () => onNotification(message.method as string, message.params),
+              try: () => onNotification(method, message.params),
               catch: () => LspFault.make({code: 'protocol'}),
             });
           } else {
@@ -410,7 +424,7 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
               typeof message.params === 'object' &&
               message.params !== null &&
               'items' in message.params &&
-              Array.isArray(message.params.items)
+              EffectArray.isArray(message.params.items)
                 ? message.params.items
                 : undefined;
             const configurationAllowed = items !== undefined && items.length <= 64;
@@ -418,7 +432,7 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
               message.method === 'workspace/applyEdit'
                 ? {applied: false, failureReason: 'Read-only semantic session'}
                 : configurationAllowed
-                  ? items.map(item =>
+                  ? EffectArray.map(items, item =>
                       setting(
                         typeof item === 'object' && item !== null && 'section' in item ? item.section : undefined,
                       ),
@@ -447,10 +461,10 @@ export const makeLspClient = Effect.fn('semantic.makeLspClient')(function* (
         } else if (typeof message.id === 'number') {
           const entry = pending.get(message.id);
           if (entry) {
-            const response = Object.hasOwn(message, 'error')
+            const response = EffectRecord.has(message, 'error')
               ? Effect.fail(LspFault.make({code: 'rejected'}))
-              : Object.hasOwn(message, 'result')
-                ? Effect.succeed(message.result as Schema.Json)
+              : EffectRecord.has(message, 'result') && Schema.is(Schema.Json)(message.result)
+                ? Effect.succeed(message.result)
                 : Effect.fail(LspFault.make({code: 'protocol'}));
             Deferred.doneUnsafe(entry, response);
           }

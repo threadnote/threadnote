@@ -1,10 +1,13 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {parse as parseJsonc, type ParseError} from 'jsonc-parser';
 import {parse as parseToml} from 'smol-toml';
 import {Digest, Identifier} from '@threadnote/semantic/contracts';
 import {boundedFileDigest, readBoundedText, semanticTreeDigest} from '../fingerprint.js';
 import {LspFault} from '../lsp_transport.js';
-
 export const PythonEnvironment = Schema.Struct({id: Identifier, metadataFile: Schema.String, metadataDigest: Digest});
 export type PythonEnvironment = typeof PythonEnvironment.Type;
 const Metadata = Schema.Struct({
@@ -20,12 +23,12 @@ const Metadata = Schema.Struct({
 });
 const fail = () => LspFault.make({code: 'prerequisite'});
 const staticPath = (value: string) =>
-  value.length > 0 && value.length <= 8192 && !/[\p{Cc}:\\$]/u.test(value) && !value.startsWith('~');
-const inside = (root: string, file: string, separator: string) => file === root || file.startsWith(root + separator);
+  value.length > 0 && value.length <= 8192 && !/[\p{Cc}:\\$]/u.test(value) && !EffectString.startsWith('~')(value);
+const inside = (root: string, file: string, separator: string) =>
+  file === root || EffectString.startsWith(root + separator)(file);
 const pathProbe = 'd8a7c87965c4ad49200fda06dd4fb09f6229e65c4a188553889562c01c615510';
 const versionProbe = '5811c668ec7eb72ffad07fa10823ada5a40e9392137033a876850ac30ebd1230';
-const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-
+const quote = (value: string) => "'" + EffectString.replaceAll("'", "'\\''")(value) + "'";
 /** Only the two intrinsic FullAccessHost probes in basedpyright 1.40.2 are supported. No Python code runs. */
 export function pythonMetadataResponder(metadata: {
   path: readonly string[];
@@ -44,7 +47,6 @@ writeFileSync(new URL('./'+kind+'.ok',import.meta.url),JSON.stringify(value),{mo
 process.stdout.write(JSON.stringify(value));
 `;
 }
-
 /** Conservative static profile. Unsupported config/import-hook environments fail explicitly, without guessing. */
 export const makePythonProject = Effect.fn('semantic.makePythonProject')(function* (options: {
   readonly project: string;
@@ -70,7 +72,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
     Effect.flatMap(text => Effect.try({try: () => JSON.parse(text) as unknown, catch: fail})),
     Effect.flatMap(Schema.decodeUnknownEffect(Metadata)),
   );
-  const roots = metadata.roots.map(root => root.directory);
+  const roots = EffectArray.map(metadata.roots, root => root.directory);
   if (
     new Set(roots).size !== roots.length ||
     !staticPath(metadata.prefix) ||
@@ -82,7 +84,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
   const canonicalDirectory = (directory: string) =>
     Effect.gen(function* () {
       if (
-        directory.split(path.sep).includes('.git') ||
+        EffectString.split(path.sep)(directory).includes('.git') ||
         !staticPath(directory) ||
         !path.isAbsolute(directory) ||
         (yield* fs.realPath(directory)) !== directory ||
@@ -103,14 +105,15 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
           if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option))) return yield* fail();
           const stat = yield* fs.stat(file);
           if (stat.type === 'Directory') pending.push(file);
-          else if (name.endsWith('.pth')) {
-            for (const raw of (yield* readBoundedText(file, 64 * 1024)).split(/\r?\n/u)) {
-              const line = raw.trim();
-              if (!line || line.startsWith('#')) continue;
+          else if (EffectString.endsWith('.pth')(name)) {
+            for (const raw of EffectString.split(/\r?\n/u)(yield* readBoundedText(file, 64 * 1024))) {
+              const line = EffectString.trim(raw);
+              if (!line || EffectString.startsWith('#')(line)) continue;
               if (/^import(?:\s|$)/u.test(line)) return yield* fail();
               if (!staticPath(line)) return yield* fail();
               const target = path.resolve(directory, line);
-              if (![options.worktree, ...roots].some(base => inside(base, target, path.sep))) return yield* fail();
+              if (!EffectArray.some([options.worktree, ...roots], base => inside(base, target, path.sep)))
+                return yield* fail();
               yield* canonicalDirectory(target);
             }
           }
@@ -128,7 +131,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
         if (configurations.has(file)) return;
         if (
           configurations.size + activeConfigurations.size >= 64 ||
-          file.split(path.sep).includes('.git') ||
+          EffectString.split(path.sep)(file).includes('.git') ||
           !inside(options.worktree, file, path.sep) ||
           (yield* fs.realPath(file)) !== file
         )
@@ -137,9 +140,9 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
         const text = yield* readBoundedText(file, 1024 * 1024);
         const raw = yield* Effect.try({
           try: () => {
-            if (file.endsWith('.toml')) {
+            if (EffectString.endsWith('.toml')(file)) {
               const toml = parseToml(text);
-              const tool = toml.tool as Record<string, unknown> | undefined;
+              const tool = isJsonObject(toml.tool) ? toml.tool : undefined;
               if (tool?.basedpyright && tool?.pyright) throw new Error('Conflicting analysis sections');
               return tool?.basedpyright ?? tool?.pyright ?? {};
             }
@@ -151,7 +154,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
           catch: fail,
         });
         const config = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown))(raw);
-        for (const [key, value] of Object.entries(config)) {
+        for (const [key, value] of EffectRecord.toEntries(config)) {
           if (key === 'extends') {
             if (typeof value !== 'string' || !staticPath(value)) return yield* fail();
             const base = path.resolve(path.dirname(file), value);
@@ -159,12 +162,12 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
             if (explicitVersions.has(base)) explicitVersions.add(file);
           } else if (['extraPaths', 'stubPath', 'typeshedPath'].includes(key)) {
             const values = key === 'extraPaths' ? value : [value];
-            if (!Array.isArray(values) || values.length > 64) return yield* fail();
+            if (!EffectArray.isArray(values) || values.length > 64) return yield* fail();
             for (const item of values) {
               if (
                 typeof item !== 'string' ||
                 !staticPath(item) ||
-                [...item].some(character => '*?[]{}'.includes(character))
+                EffectArray.some([...item], character => EffectString.includes(character)('*?[]{}'))
               )
                 return yield* fail();
               const target = path.resolve(path.dirname(file), item);
@@ -173,15 +176,16 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
             }
           } else if (['include', 'exclude', 'ignore', 'strict'].includes(key)) {
             if (
-              !Array.isArray(value) ||
+              !EffectArray.isArray(value) ||
               value.length > 256 ||
-              value.some(
+              EffectArray.some(
+                value,
                 item =>
                   typeof item !== 'string' ||
                   !staticPath(item) ||
                   path.isAbsolute(item) ||
-                  item.split('/').includes('..') ||
-                  (['include', 'strict'].includes(key) && item.split('/').includes('.git')),
+                  EffectString.split('/')(item).includes('..') ||
+                  (['include', 'strict'].includes(key) && EffectString.split('/')(item).includes('.git')),
               )
             )
               return yield* fail();
@@ -194,7 +198,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
             if (!['off', 'basic', 'standard', 'strict', 'recommended', 'all'].includes(String(value)))
               return yield* fail();
           } else if (
-            key.startsWith('report') ||
+            EffectString.startsWith('report')(key) ||
             [
               'analyzeUnannotatedFunctions',
               'strictListInference',
@@ -214,7 +218,6 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
         activeConfigurations.delete(file);
         configurations.add(file);
       });
-
     yield* semanticTreeDigest(options.worktree);
     yield* canonicalDirectory(metadata.prefix);
     if ((yield* fs.realPath(selected.metadataFile)) !== selected.metadataFile) return yield* fail();

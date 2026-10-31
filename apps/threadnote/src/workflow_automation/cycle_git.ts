@@ -10,15 +10,14 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
+import type {NativeCycleRebaseInput} from '@threadnote/workflow-automations/cycle-review';
 import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
-const outputLimit = 4 * 1_048_576;
-
+const outputLimit = 4 * 1048576;
 export function nativeCycleRelativePath(value: string): boolean {
   return (
     value.length > 0 &&
@@ -32,13 +31,11 @@ export function nativeCycleRelativePath(value: string): boolean {
     )
   );
 }
-
 const cycleTreeModes = new Set(['100644', '100755', '120000', '160000']);
 const absentTreeMode = '000000';
-
 const git = (repo: string, args: readonly string[], temporaryIndex?: string) =>
   runBinaryCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args], {
-    timeoutMs: 30_000,
+    timeoutMs: 30000,
     maxOutputBytes: outputLimit,
     ...(temporaryIndex ? {trustedGitIndexFile: temporaryIndex} : {}),
   }).pipe(
@@ -50,7 +47,6 @@ const git = (repo: string, args: readonly string[], temporaryIndex?: string) =>
       }),
     ),
   );
-
 const resolveObject = Effect.fn('workflowAutomation.cycle.resolveObject')(function* (
   repo: string,
   reference: string,
@@ -137,10 +133,10 @@ const resolveSourceObjects = Effect.fn('workflowAutomation.cycle.resolveSourceOb
   repo: string,
   base: string,
 ) {
-  if (!base.trim() || base.length > 512 || nativeCycleHasControl(base))
+  if (!EffectString.trim(base) || base.length > 512 || nativeCycleHasControl(base))
     return yield* fail('invalid-snapshot', 'Use one bounded Git revision.');
   const output = yield* git(repo, ['rev-parse', '--revs-only', '--end-of-options', 'HEAD^{commit}', `${base}^{tree}`]);
-  const records = output.split(/\r?\n/u);
+  const records = EffectString.split(/\r?\n/u)(output);
   if (
     records.length !== 3 ||
     records[2] !== '' ||
@@ -151,7 +147,6 @@ const resolveSourceObjects = Effect.fn('workflowAutomation.cycle.resolveSourceOb
     return yield* fail('invalid-snapshot', 'Git did not return two complete object identities.');
   return {head: records[0], baseTree: records[1]};
 });
-
 /** Read one exact Git tree entry, including its executable/symlink/submodule mode. */
 export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.readTreeEntry')(function* (
   repo: string,
@@ -161,7 +156,6 @@ export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.read
   const entries = yield* readNativeCycleTreeEntries(repo, reference, [file]);
   return entries[file];
 });
-
 const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(function* (repo: string) {
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.realPath(repo);
@@ -179,7 +173,6 @@ const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(functi
   }
   return canonicalReported;
 });
-
 /** A private index captures worktree bytes; the contributor's index is never written. */
 export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.captureSource')(function* (
   repo: string,
@@ -233,10 +226,16 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
         ),
         Boolean,
       );
-      if (raw.length % 2 !== 0 || raw.length > 16_384)
+      if (raw.length % 2 !== 0 || raw.length > 16384)
         return yield* fail('snapshot-capacity', 'Snapshot changes exceed the bounded file manifest.');
       const files: Record<string, string> = Object.create(null);
-      const entries: Record<string, {mode: string; blob: string}> = Object.create(null);
+      const entries: Record<
+        string,
+        {
+          mode: string;
+          blob: string;
+        }
+      > = Object.create(null);
       for (let index = 0; index < raw.length; index += 2) {
         const header = Effect2.pipe(raw[index], EffectString.split(' '));
         const file = raw[index + 1];
@@ -255,7 +254,15 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
         entries[file] = {mode: newMode, blob};
       }
       return {head, tree, files, entries} satisfies WorkflowSourceSnapshot & {
-        readonly entries: Readonly<Record<string, {readonly mode: string; readonly blob: string}>>;
+        readonly entries: Readonly<
+          Record<
+            string,
+            {
+              readonly mode: string;
+              readonly blob: string;
+            }
+          >
+        >;
       };
     }),
   );
@@ -268,7 +275,27 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
     return yield* fail('source-drift', 'The contributor index or HEAD changed during snapshot capture.');
   return {...captured, baseTree, repo: root};
 });
-
+const pinNativeCycleReference = Effect.fn('workflowAutomation.cycle.pinReference')(function* (
+  repo: string,
+  reference: string,
+  object: string,
+  kind: 'tree' | 'commit',
+) {
+  const existing = yield* runCommandEffect(
+    'git',
+    ['--no-optional-locks', '-C', repo, 'show-ref', '--verify', '--hash', reference],
+    {allowFailure: true, timeoutMs: 10000, maxOutputBytes: 4096},
+  );
+  if (existing.exitCode === 0) {
+    if (Effect2.pipe(existing.stdout, EffectString.trim) !== object)
+      return yield* fail('snapshot-conflict', `This immutable snapshot ID already pins another ${kind}.`);
+    return reference;
+  }
+  if (existing.exitCode !== 1 && existing.exitCode !== 128)
+    return yield* fail('invalid-snapshot', 'The snapshot reference could not be inspected.');
+  yield* git(repo, ['update-ref', reference, object, EffectString.repeat(object.length)('0')]);
+  return reference;
+});
 export const pinNativeCycleTree = Effect.fn('workflowAutomation.cycle.pinTree')(function* (
   repo: string,
   bindingId: string,
@@ -279,23 +306,78 @@ export const pinNativeCycleTree = Effect.fn('workflowAutomation.cycle.pinTree')(
   if (!/^[a-f0-9]{64}$/u.test(bindingId) || !objectId.test(tree))
     return yield* fail('invalid-snapshot', 'Snapshot pin identity is invalid.');
   const reference = `refs/threadnote/cycles/${purpose}/${sha256HexSync(JSON.stringify([bindingId, purpose, snapshotId]))}`;
-  const existing = yield* runCommandEffect(
-    'git',
-    ['--no-optional-locks', '-C', repo, 'show-ref', '--verify', '--hash', reference],
-    {allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 4096},
-  );
-  if (existing.exitCode === 0) {
-    if (Effect2.pipe(existing.stdout, EffectString.trim) !== tree)
-      return yield* fail('snapshot-conflict', 'This immutable snapshot ID already pins another tree.');
-    return reference;
-  }
-  if (existing.exitCode !== 1 && existing.exitCode !== 128)
-    return yield* fail('invalid-snapshot', 'The snapshot reference could not be inspected.');
-  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
-  yield* git(repo, ['update-ref', reference, tree, '0'.repeat(tree.length)]);
-  return reference;
+  return yield* pinNativeCycleReference(repo, reference, tree, 'tree');
+});
+export const pinNativeCycleCommit = Effect.fn('workflowAutomation.cycle.pinCommit')(function* (
+  repo: string,
+  bindingId: string,
+  snapshotId: string,
+  commit: string,
+  purpose: 'rebase-before' | 'rebase-after',
+) {
+  if (
+    !/^[a-f0-9]{64}$/u.test(bindingId) ||
+    !objectId.test(commit) ||
+    (yield* resolveObject(repo, commit, 'commit')) !== commit
+  )
+    return yield* fail('invalid-rebase', 'Rebase retention requires exact commit identities.');
+  const reference = `refs/threadnote/cycles/${purpose}/${sha256HexSync(JSON.stringify([bindingId, purpose, snapshotId]))}`;
+  return yield* pinNativeCycleReference(repo, reference, commit, 'commit');
 });
 
+export const nativeCycleIsAncestor = Effect.fn('workflowAutomation.cycle.isAncestor')(function* (
+  repo: string,
+  before: string,
+  after: string,
+) {
+  if (!objectId.test(before) || !objectId.test(after))
+    return yield* fail('invalid-rebase', 'Source ancestry requires exact commit identities.');
+  const result = yield* runCommandEffect(
+    'git',
+    ['--no-optional-locks', '-C', repo, 'merge-base', '--is-ancestor', before, after],
+    {
+      allowFailure: true,
+      timeoutMs: 30000,
+      maxOutputBytes: 4096,
+    },
+  );
+  if (result.exitCode === 0) return true;
+  if (result.exitCode === 1) return false;
+  return yield* fail('invalid-rebase', 'Git could not verify the source ancestry.');
+});
+
+export const verifyNativeCycleRebase = Effect.fn('workflowAutomation.cycle.verifyRebase')(function* (
+  repo: string,
+  baselineHead: string,
+  currentHead: string,
+  declaredBaseHead: string,
+  witness: NativeCycleRebaseInput,
+) {
+  if (witness.preRebaseHead !== baselineHead)
+    return yield* fail('invalid-rebase', 'This initial rebase must start at the preserved original baseline HEAD.');
+  for (const commit of new Set([baselineHead, currentHead, declaredBaseHead, witness.ontoHead, witness.rebasedHead])) {
+    if (
+      !objectId.test(commit) ||
+      (yield* resolveObject(repo, commit, 'commit').pipe(
+        Effect.mapError(() => fail('invalid-rebase', 'A witnessed commit is unavailable in this repository.')),
+      )) !== commit
+    )
+      return yield* fail('invalid-rebase', 'Every rebase witness identity must resolve to its exact commit.');
+  }
+  if (
+    (yield* nativeCycleIsAncestor(repo, baselineHead, currentHead)) ||
+    !(yield* nativeCycleIsAncestor(repo, witness.ontoHead, witness.rebasedHead)) ||
+    !(yield* nativeCycleIsAncestor(repo, witness.rebasedHead, declaredBaseHead)) ||
+    !(yield* nativeCycleIsAncestor(repo, declaredBaseHead, currentHead))
+  )
+    return yield* fail('invalid-rebase', 'Rebase ancestry does not match the reviewed declared base and current HEAD.');
+  const common = EffectString.trim(
+    yield* git(repo, ['merge-base', baselineHead, witness.ontoHead]).pipe(
+      Effect.mapError(() => fail('invalid-rebase', 'The rebase must retain a common repository history.')),
+    ),
+  );
+  if (!objectId.test(common)) return yield* fail('invalid-rebase', 'Git did not return a common repository history.');
+});
 export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAdapter')(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -321,11 +403,11 @@ export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAda
           if (
             !Effect2.pipe(actual, EffectString.startsWith(root + path.sep)) ||
             stat.type !== 'File' ||
-            Number(stat.size) > 1_000_000
+            Number(stat.size) > 1000000
           )
             return yield* fail('invalid-scope', 'Source inspection requires bounded files inside the checkout.');
           const bytes = yield* fs.readFile(actual);
-          if (bytes.byteLength > 1_000_000)
+          if (bytes.byteLength > 1000000)
             return yield* fail('invalid-scope', 'Source bytes changed beyond their admitted limit.');
           files[file] = sha256HexSync(bytes);
         }

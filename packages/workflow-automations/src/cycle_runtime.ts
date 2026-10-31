@@ -7,7 +7,12 @@ import {
   decodeNativeCycleState,
   nativeCyclePhaseHash,
 } from './cycle.js';
-import {NativeCycleSnapshotSchema, NativeCycleReviewSchema, validateNativeCycleReviewHistory} from './cycle_review.js';
+import {
+  NativeCycleSnapshotSchema,
+  NativeCycleReviewSchema,
+  validateNativeCycleReviewHistory,
+  nativeCycleRebaseReceiptDigest,
+} from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -107,10 +112,25 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     if (!runtime.state.phases[phaseId] || new Set(baseline.preservedFiles).size !== baseline.preservedFiles.length)
       fail('The pre-implementation baseline lost its phase or preserved-work manifest.');
   }
+  const capturedPhases = new Set<string>();
   for (const {snapshot, incoming} of runtime.snapshots) {
     const baseline = runtime.baselines[snapshot.phaseId];
     if (!baseline || baseline.tree !== snapshot.baseTree || baseline.repo !== snapshot.repo)
       fail('Snapshot baseline differs from its pre-implementation source pin.');
+    if (
+      snapshot.rebase &&
+      (capturedPhases.has(snapshot.phaseId) ||
+        snapshot.previous ||
+        snapshot.supersedes ||
+        snapshot.rebase.preRebaseHead !== baseline.head ||
+        snapshot.acceptedHead !== snapshot.head ||
+        snapshot.rebase.preRebaseHead === snapshot.head ||
+        snapshot.rebase.receiptDigest !== nativeCycleRebaseReceiptDigest(snapshot, snapshot.rebase) ||
+        !EffectString.trim(snapshot.rebase.reason) ||
+        !EffectString.trim(snapshot.rebase.authority))
+    )
+      fail('Rebase evidence belongs only to the original phase baseline and its first snapshot.');
+    capturedPhases.add(snapshot.phaseId);
     if (
       !runtime.state.phases[snapshot.phaseId] ||
       !EffectArray.some(

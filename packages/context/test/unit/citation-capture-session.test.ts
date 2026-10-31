@@ -1,3 +1,5 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectString from 'effect/String';
 import {describe, expect, it} from '@effect/vitest';
 import {Clock, Context, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -23,7 +25,6 @@ import {
   withLocalMemoryCodeCitations,
 } from '../../src/citation/capture.js';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
-
 const unexpected = () => Effect.die('Citation capture must not index or request maintenance');
 const packs = createCodeGraphLanguagePackRegistry([]);
 const base = Layer.mergeAll(
@@ -51,7 +52,7 @@ const base = Layer.mergeAll(
 );
 const dependencies = CodeGraphStore.layer.pipe(Layer.provideMerge(base));
 const source = 'export const value = 1;\n';
-const moduleId = 'cgs_' + 'b'.repeat(40);
+const moduleId = 'cgs_' + EffectString.repeat(40)('b');
 const offsetClock = (clock: Clock.Clock, offset: () => bigint): Clock.Clock => ({
   currentTimeMillis: clock.currentTimeMillis,
   currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
@@ -61,7 +62,6 @@ const offsetClock = (clock: Clock.Clock, offset: () => bigint): Clock.Clock => (
   monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe() + offset(),
   sleep: duration => clock.sleep(duration),
 });
-
 const fixture = (
   options: {
     legacy?: boolean;
@@ -99,7 +99,7 @@ const fixture = (
     const layout = codeGraphLayout(paths, home, identity.checkoutId, identity.worktreeId);
     const bytes = new TextEncoder().encode(source);
     const snapshot: CodeGraphSnapshot = {
-      id: `cgsn_${'1'.repeat(40)}`,
+      id: `cgsn_${EffectString.repeat(40)('1')}`,
       commit: identity.headCommit,
       repositoryId: identity.repositoryId,
       worktreeId: identity.worktreeId,
@@ -117,7 +117,7 @@ const fixture = (
       snapshot,
       [
         {
-          blobId: (yield* git(['rev-parse', 'HEAD:source.ts'])).stdout.trim(),
+          blobId: EffectString.trim((yield* git(['rev-parse', 'HEAD:source.ts'])).stdout),
           contentHash: codeGraphCommittedFileContentHash('sha1', bytes),
           path: 'source.ts',
           language: 'typescript',
@@ -259,7 +259,6 @@ const fixture = (
       ),
     };
   });
-
 describe('repository citation capture session', () => {
   it.layer(dependencies)(test => {
     test.effect(
@@ -292,7 +291,6 @@ describe('repository citation capture session', () => {
           expect(f.clients[0]).not.toBe(f.clients[2]);
         }).pipe(TestClock.withLive),
     );
-
     test.effect('runs normalized citations and all projection work before the real closing observation', () =>
       Effect.gen(function* () {
         const f = yield* fixture();
@@ -301,17 +299,16 @@ describe('repository citation capture session', () => {
             Effect.sync(() => {
               expect(citations).toHaveLength(1);
               f.events.push('callback');
-              return citations.map(citation => citation.id);
+              return EffectArray.map(citations, citation => citation.id);
             }),
           [moduleId, ' source.ts ', 'source.ts'],
         );
         expect(output).toHaveLength(1);
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'callback', 'closing', 'release', 'session-end']);
         yield* f.capture;
-        expect(f.events.filter(event => event === 'lease')).toHaveLength(2);
+        expect(EffectArray.filter(f.events, event => event === 'lease')).toHaveLength(2);
       }).pipe(TestClock.withLive),
     );
-
     test.effect('preserves callback error identity and releases without publishing a projection', () =>
       Effect.gen(function* () {
         const f = yield* fixture();
@@ -320,7 +317,6 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-
     test.effect('rejects late projection drift and cleans up an interrupted continuation', () =>
       Effect.gen(function* () {
         const drift = yield* fixture({drift: true});
@@ -338,7 +334,6 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-
     test.effect('counts evidence time against the same 60-second lease budget as the callback', () =>
       Effect.gen(function* () {
         const clock = yield* Clock.Clock;
@@ -346,13 +341,13 @@ describe('repository citation capture session', () => {
         const f = yield* fixture({
           beforeEvidence: () =>
             Effect.sync(() => {
-              offset += 59_000_000_000n;
+              offset += 59000000000n;
             }),
         });
         const failure = yield* f
           .withCitations(() =>
             Effect.sync(() => {
-              offset += 2_000_000_000n;
+              offset += 2000000000n;
               return 'discarded';
             }),
           )
@@ -368,7 +363,6 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-
     test.effect(
       'enforces the local eight-reference limit before admission and includes closing in the lease budget',
       () =>
@@ -393,7 +387,7 @@ describe('repository citation capture session', () => {
           const closing = yield* fixture({
             beforeClosing: () =>
               Effect.sync(() => {
-                offset += 61_000_000_000n;
+                offset += 61000000000n;
               }),
           });
           const failure = yield* closing
@@ -409,7 +403,6 @@ describe('repository citation capture session', () => {
           expect(closing.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
         }).pipe(TestClock.withLive),
     );
-
     test.effect('preserves the independent closing fence and releases the real lease when source changes', () =>
       Effect.gen(function* () {
         const f = yield* fixture({drift: true});
@@ -417,7 +410,6 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-
     test.effect('releases the real lease before closing an interrupted capture session', () =>
       Effect.gen(function* () {
         const f = yield* fixture({interrupt: true});
@@ -425,7 +417,6 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-
     test.effect('retains the original observation path when the optional query session API is absent', () =>
       Effect.gen(function* () {
         const f = yield* fixture({legacy: true});

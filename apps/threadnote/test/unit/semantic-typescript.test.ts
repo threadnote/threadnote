@@ -1,3 +1,6 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
@@ -12,7 +15,7 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {Observation, type Position} from '@threadnote/semantic/contracts';
+import {Observation, Position} from '@threadnote/semantic/contracts';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {makeTypeScriptSession, validTextPosition} from '../../src/semantic/providers/typescript.js';
 import {
@@ -23,14 +26,13 @@ import {
   requestSemanticEndpoint,
 } from '../../src/semantic/coordinator.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
-
 const observation = (text: string, overrides: Partial<Observation> = {}): Observation => ({
   version: 1,
   repository: 'test-repository',
   worktree: 'file:///test',
   project: 'file:///test',
-  configuration: 'a'.repeat(64),
-  toolchain: 'b'.repeat(64),
+  configuration: EffectString.repeat(64)('a'),
+  toolchain: EffectString.repeat(64)('b'),
   provider: {id: 'typescript-language-server', version: '6.0.2', generation: 0},
   view: {kind: 'overlay', id: 'test-view', owner: 'test-owner', epoch: 0},
   uri: 'file:///test/example.ts',
@@ -55,7 +57,7 @@ const fakeClient = (request: (method: string, params: Schema.Json | undefined) =
         typeof params === 'object' &&
         params !== null &&
         'arguments' in params &&
-        Array.isArray(params.arguments) &&
+        EffectArray.isArray(params.arguments) &&
         params.arguments[0] === 'projectInfo'
       )
         return Effect.succeed({success: true, body: {configFileName: '/test/tsconfig.json', fileNames: []}});
@@ -73,7 +75,6 @@ const tsDiagnostic = {
   category: 'error',
   code: 2322,
 };
-
 describe('TypeScript observation fences', () => {
   effectIt.effect('keeps disk observations versionless while using monotonic wire versions', () =>
     Effect.gen(function* () {
@@ -99,7 +100,6 @@ describe('TypeScript observation fences', () => {
       expect((yield* session.query('definition', a, {line: 0, character: 0}, 1000)).status).toBe('stale');
     }),
   );
-
   effectIt.effect('invalidates unchanged documents when another overlay document changes', () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
@@ -133,31 +133,38 @@ describe('TypeScript observation fences', () => {
       expect((yield* session.query('definition', current, {line: 0, character: 4}, 1000)).status).toBe('ok');
     }),
   );
-
   it('candidate identity ignores object insertion order without merging different installations', () => {
     const candidate = {
       runtime: '/host/node',
-      runtimeDigest: 'a'.repeat(64),
+      runtimeDigest: EffectString.repeat(64)('a'),
       runtimeVersion: '24.19.0' as const,
       serverDirectory: '/host/tls',
-      serverTreeDigest: 'b'.repeat(64),
+      serverTreeDigest: EffectString.repeat(64)('b'),
       sdkDirectory: '/host/sdk',
-      sdkTreeDigest: 'c'.repeat(64),
+      sdkTreeDigest: EffectString.repeat(64)('c'),
     };
-    const entries = Object.entries(candidate);
+    const entries = EffectRecord.toEntries(candidate);
     fc.assert(
       fc.property(fc.shuffledSubarray(entries, {minLength: entries.length, maxLength: entries.length}), shuffled => {
-        expect(semanticCandidateKey(Object.fromEntries(shuffled) as typeof candidate)).toBe(
-          semanticCandidateKey(candidate),
-        );
+        const reordered = EffectRecord.fromEntries(shuffled);
+        const candidateSchema = Schema.Struct({
+          runtime: Schema.String,
+          runtimeDigest: Schema.String,
+          runtimeVersion: Schema.Literal('24.19.0'),
+          serverDirectory: Schema.String,
+          serverTreeDigest: Schema.String,
+          sdkDirectory: Schema.String,
+          sdkTreeDigest: Schema.String,
+        });
+        if (!Schema.is(candidateSchema)(reordered)) throw new Error('Incomplete candidate permutation');
+        expect(semanticCandidateKey(reordered)).toBe(semanticCandidateKey(candidate));
       }),
       {numRuns: 100},
     );
-    expect(semanticCandidateKey({...candidate, sdkTreeDigest: 'd'.repeat(64)})).not.toBe(
+    expect(semanticCandidateKey({...candidate, sdkTreeDigest: EffectString.repeat(64)('d')})).not.toBe(
       semanticCandidateKey(candidate),
     );
   });
-
   it('uses UTF-16 positions without splitting surrogate pairs under CRLF', () => {
     expect(validTextPosition('a🧵\r\nb', {line: 0, character: 1})).toBe(true);
     expect(validTextPosition('a🧵\r\nb', {line: 0, character: 2})).toBe(false);
@@ -169,8 +176,11 @@ describe('TypeScript observation fences', () => {
       fc.property(
         fc.array(fc.array(fc.integer({min: 32, max: 126}), {maxLength: 50}), {minLength: 1, maxLength: 10}),
         rows => {
-          const text = rows.map(row => String.fromCharCode(...row)).join('\r\n');
-          rows.forEach((row, line) => {
+          const text = EffectArray.join(
+            EffectArray.map(rows, row => String.fromCharCode(...row)),
+            '\r\n',
+          );
+          EffectArray.forEach(rows, (row, line) => {
             for (let character = 0; character <= row.length; character++)
               expect(validTextPosition(text, {line, character})).toBe(true);
             expect(validTextPosition(text, {line, character: row.length + 1})).toBe(false);
@@ -222,7 +232,12 @@ describe('TypeScript observation fences', () => {
       expect(cleared.resolved).toMatchObject([{observation: a, resolvedIn: b}]);
       const exposed = yield* session.observation(b.uri);
       expect(exposed).toEqual(b);
-      if (exposed) (exposed as {projectEpoch: number}).projectEpoch = 99;
+      if (exposed)
+        (
+          exposed as {
+            projectEpoch: number;
+          }
+        ).projectEpoch = 99;
       expect(yield* session.observation(b.uri)).toEqual(b);
     }),
   );
@@ -261,9 +276,9 @@ describe('TypeScript observation fences', () => {
       );
       for (const changed of [
         observation('x', {view: {...a.view, owner: 'other'}}),
-        observation('x', {configuration: 'c'.repeat(64)}),
+        observation('x', {configuration: EffectString.repeat(64)('c')}),
         observation('x', {project: 'file:///other'}),
-        observation('x', {content: 'd'.repeat(64)}),
+        observation('x', {content: EffectString.repeat(64)('d')}),
       ])
         expect(yield* session.upsert(changed, 'x', 'typescript', 1000).pipe(Effect.flip)).toMatchObject({
           reason: 'invalid',
@@ -274,7 +289,6 @@ describe('TypeScript observation fences', () => {
     }),
   );
 });
-
 const io = Layer.merge(BunFileSystem.layer, BunPath.layer);
 const coordinatorIo = Layer.mergeAll(io, BunCrypto.layer, TestSystemInfoLayer);
 // Runtime coordination tests inject the version probe and run the real engine on Bun.
@@ -335,7 +349,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       TestClock.withLive,
     ),
   );
-
   effectIt.effect.prop(
     'gives concurrent first attachments exactly one durable view capability',
     [Schema.Int.check(Schema.isBetween({minimum: 2, maximum: 6}))],
@@ -366,14 +379,18 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
                 };
               }),
           },
-          {directory: root + '/ipc', token: 'c'.repeat(64), worktree: input.worktree},
+          {directory: root + '/ipc', token: EffectString.repeat(64)('c'), worktree: input.worktree},
         );
         const body = {operation: 'attach' as const, observation: input, text: 'x', language: 'typescript' as const};
         yield* Effect.gen(function* () {
-          const first = yield* Effect.forkChild(requestSemanticEndpoint(endpoint.socket, 'c'.repeat(64), body));
+          const first = yield* Effect.forkChild(
+            requestSemanticEndpoint(endpoint.socket, EffectString.repeat(64)('c'), body),
+          );
           yield* Deferred.await(entered);
           const denied = yield* Effect.all(
-            Array.from({length: contenders - 1}, () => requestSemanticEndpoint(endpoint.socket, 'c'.repeat(64), body)),
+            Array.from({length: contenders - 1}, () =>
+              requestSemanticEndpoint(endpoint.socket, EffectString.repeat(64)('c'), body),
+            ),
             {concurrency: 'unbounded'},
           ).pipe(Effect.timeout(1000));
           expect(denied).toEqual(
@@ -387,7 +404,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
           expect(
             yield* requestSemanticEndpoint(
               endpoint.socket,
-              'c'.repeat(64),
+              EffectString.repeat(64)('c'),
               {operation: 'close', observation: input},
               grant.capability,
             ),
@@ -405,7 +422,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     {arbitrary: {runs: 8}, timeout: 30000},
   );
-
   effectIt.effect('rolls back a failed initial attachment before another client claims its view', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -433,20 +449,22 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
               });
             }),
         },
-        {directory: root + '/ipc', token: 'c'.repeat(64), worktree: input.worktree},
+        {directory: root + '/ipc', token: EffectString.repeat(64)('c'), worktree: input.worktree},
       );
       const body = {operation: 'attach' as const, observation: input, text: 'x', language: 'typescript' as const};
-      expect(yield* requestSemanticEndpoint(endpoint.socket, 'c'.repeat(64), body)).toMatchObject({reason: 'rejected'});
+      expect(yield* requestSemanticEndpoint(endpoint.socket, EffectString.repeat(64)('c'), body)).toMatchObject({
+        reason: 'rejected',
+      });
       expect(closes).toBe(1);
       const grant = yield* Schema.decodeUnknownEffect(Schema.Struct({capability: Schema.String}))(
-        yield* requestSemanticEndpoint(endpoint.socket, 'c'.repeat(64), body),
+        yield* requestSemanticEndpoint(endpoint.socket, EffectString.repeat(64)('c'), body),
       );
       expect(grant.capability).toMatch(/^[a-f0-9]{64}$/u);
       expect(attaches).toBe(2);
       expect(
         yield* requestSemanticEndpoint(
           endpoint.socket,
-          'c'.repeat(64),
+          EffectString.repeat(64)('c'),
           {operation: 'close', observation: input},
           grant.capability,
         ),
@@ -459,7 +477,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       TestClock.withLive,
     ),
   );
-
   effectIt.effect(
     'rejects a disk change between the initial content check and project fingerprint and drains its provider',
     () =>
@@ -515,7 +532,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     30000,
   );
-
   effectIt.effect('reads project configuration and Git metadata without an unbounded text read', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -527,7 +543,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       const wrapped = {...fs, readFileString: () => Effect.die('Unbounded text read')};
       const digest = yield* semanticTreeDigest(root, true).pipe(Effect.provideService(FileSystem.FileSystem, wrapped));
       expect(digest).toMatch(/^[a-f0-9]{64}$/u);
-      yield* fs.writeFileString(path.join(root, 'tsconfig.json'), ' '.repeat(1024 * 1024 + 1));
+      yield* fs.writeFileString(path.join(root, 'tsconfig.json'), EffectString.repeat(1024 * 1024 + 1)(' '));
       expect(yield* semanticTreeDigest(root, true).pipe(Effect.flip)).toMatchObject({code: 'capacity'});
     }).pipe(
       // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow filesystem test entrypoint.
@@ -535,7 +551,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       TestClock.withLive,
     ),
   );
-
   effectIt.effect(
     'caps crash retries, reports their cause and releases each proven dead provider',
     () =>
@@ -575,7 +590,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     20000,
   );
-
   effectIt.effect(
     'selects each monorepo dependency version and denies repository plugin/build execution',
     () =>
@@ -674,7 +688,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
       ),
     45000,
   );
-
   effectIt.effect(
     'isolates worktrees and client overlays, authenticates IPC and fences disk changes',
     () =>
@@ -711,13 +724,15 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
         );
         expect(JSON.stringify(hoverA)).toContain('number');
         expect(JSON.stringify(hoverB)).toContain('string');
-        const token = 'c'.repeat(64);
+        const token = EffectString.repeat(64)('c');
         const endpoint = yield* serveSemanticEndpoint(coordinator, {
           directory: path.join(root, 'ipc'),
           token,
           worktree: aUri,
         });
-        expect(yield* requestSemanticEndpoint(endpoint.socket, 'd'.repeat(64), {operation: 'status'})).toEqual({
+        expect(
+          yield* requestSemanticEndpoint(endpoint.socket, EffectString.repeat(64)('d'), {operation: 'status'}),
+        ).toEqual({
           status: 'unavailable',
         });
         const overlayText = 'const x: boolean = true;\nx;\n';
@@ -802,7 +817,6 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
     45000,
   );
 });
-
 describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pilot', () => {
   effectIt.effect(
     'resolves aliases and typed occurrences while excluding unrelated same-name members',
@@ -846,7 +860,11 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         const references = yield* session.query('references', basis, position, 5000);
         expect(references.status).toBe('ok');
         if (references.status === 'ok') {
-          const lines = references.items.map(item => (item as {range: {start: Position}}).range.start.line);
+          const lines = EffectArray.map(
+            references.items,
+            item =>
+              Schema.decodeUnknownSync(Schema.Struct({range: Schema.Struct({start: Position})}))(item).range.start.line,
+          );
           expect(lines.sort()).toEqual([0, 3]);
           expect(references.evidence.completeness).toBe('partial');
         }
@@ -858,7 +876,7 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
           5000,
         );
         const diagnostics = yield* session.diagnostics(next, 10000);
-        expect(diagnostics.added.some(item => item.code === 2322)).toBe(true);
+        expect(EffectArray.some(diagnostics.added, item => item.code === 2322)).toBe(true);
         const fixed = yield* session.upsert(
           observation(source, {...basis, documentVersion: 3}),
           source,
@@ -866,9 +884,12 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
           5000,
         );
         const delta = yield* session.diagnostics(fixed, 10000);
-        expect(delta.resolved.some(({item}) => item.code === 2322)).toBe(true);
+        expect(EffectArray.some(delta.resolved, ({item}) => item.code === 2322)).toBe(true);
         expect(
-          delta.resolved.every(item => item.observation.documentVersion === 2 && item.resolvedIn.documentVersion === 3),
+          EffectArray.every(
+            delta.resolved,
+            item => item.observation.documentVersion === 2 && item.resolvedIn.documentVersion === 3,
+          ),
         ).toBe(true);
         const javascript =
           '// @ts-check\n/** @param {number} value */\nfunction twice(value) { return value * 2; }\ntwice("bad");\n';
@@ -878,7 +899,7 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
           content: sha256HexSync(javascript),
         });
         const js = yield* session.upsert(jsInput, javascript, 'javascript', 5000);
-        expect((yield* session.diagnostics(js, 10000)).items.some(item => item.code === 2345)).toBe(true);
+        expect(EffectArray.some((yield* session.diagnostics(js, 10000)).items, item => item.code === 2345)).toBe(true);
         expect(yield* client.close).toEqual({
           graceful: true,
           code: 0,

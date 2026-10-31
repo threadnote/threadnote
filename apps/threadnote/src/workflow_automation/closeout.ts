@@ -48,9 +48,7 @@ import {
   writeNativeCloseoutJournal,
   withNativeCloseoutLock,
 } from './closeout_store.js';
-
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
-
 /** Reobserve HEAD and cleanliness together at each closeout mutation boundary. */
 export const verifyNativeCloseoutSource = Effect.fn('workflowAutomation.closeout.verifySource')(function* (
   repo: string,
@@ -69,16 +67,18 @@ export const verifyNativeCloseoutSource = Effect.fn('workflowAutomation.closeout
       '--no-ahead-behind',
       '--ignore-submodules=none',
     ],
-    {timeoutMs: 30_000},
+    {timeoutMs: 30000},
   );
-  const records = result.stdout.endsWith('\0') ? result.stdout.slice(0, -1).split('\0') : [];
+  const records = EffectString.endsWith('\0')(result.stdout)
+    ? EffectString.split('\0')(EffectString.slice(0, -1)(result.stdout))
+    : [];
   let head: string | undefined;
   let branch = false;
   let dirty = false;
   let malformed = records.length === 0;
   const metadata = new Set<string>();
   for (const record of records) {
-    if (record.startsWith('# ')) {
+    if (EffectString.startsWith('# ')(record)) {
       const match = /^# branch\.(oid|head|upstream|ab) (.+)$/u.exec(record);
       if (!match || nativeCycleHasControl(record) || metadata.has(match[1])) {
         malformed = true;
@@ -157,7 +157,6 @@ const summary = (journal: Journal, revision: string) => ({
       : {}),
   },
 });
-
 /** Every changed path needs a newly accepted current phase; historical merged owners may overlap it. */
 export const freshCloseoutChangedPathCoverage = (
   changed: readonly string[],
@@ -172,7 +171,6 @@ export const freshCloseoutChangedPathCoverage = (
   }
   return [...covered];
 };
-
 const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission')(function* (
   previous: Journal,
   current: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
@@ -232,7 +230,7 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
                   previous.source.head,
                   source.head,
                 ],
-                {timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024},
+                {timeoutMs: 30000, maxOutputBytes: 4 * 1024 * 1024},
               )).stdout,
               '\0',
             ),
@@ -257,7 +255,6 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
     );
   return [...affected];
 });
-
 export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nativeCall: NativeAuthoringCall<R>) =>
   Effect.gen(function* () {
     let activeTransactionId: string | undefined;
@@ -934,7 +931,10 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
         const write = (
           key: string,
           body: string,
-          relations: readonly {type: string; uri: string}[] = [],
+          relations: readonly {
+            type: string;
+            uri: string;
+          }[] = [],
           replacing = false,
         ) =>
           Effect.gen(function* () {

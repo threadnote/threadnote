@@ -1,3 +1,5 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
 import {Effect, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
@@ -13,7 +15,6 @@ import {
 import {sameOwnedView} from '../../src/views.js';
 import {prepareChange} from '../../src/changes.js';
 import {hash, observation, evidence, owned, candidate, proposal} from '../fixtures.js';
-
 describe('semantic contracts', () => {
   effectIt.effect('decodes versioned observation contracts and rejects invalid counters', () =>
     Effect.gen(function* () {
@@ -26,7 +27,6 @@ describe('semantic contracts', () => {
       expect(invalid).toBeDefined();
     }),
   );
-
   it('keeps empty, partial, unsupported and timeout outcomes distinct', () => {
     const decode = Schema.decodeUnknownSync(QueryOutcome);
     const empty = decode({version: 1, status: 'ok', evidence, items: []});
@@ -52,11 +52,10 @@ describe('semantic contracts', () => {
       evidence: null,
       reason: 'deadline',
     });
-    expect(new Set([empty, partial, unsupported, timeout].map(x => JSON.stringify(x))).size).toBe(4);
+    expect(new Set(EffectArray.map([empty, partial, unsupported, timeout], x => JSON.stringify(x))).size).toBe(4);
     expect(() => decode({version: 2, status: 'ok', evidence, items: []})).toThrow();
     expect(() => decode({version: 1, status: 'ok', items: []})).toThrow();
   });
-
   it('does not turn lexical candidates, ambiguous occurrences or stale anchors into exact symbols', () => {
     expect(resolveSymbol({kind: 'name', name: 'Name'}, observation, [candidate]).status).toBe('candidates');
     const locator = {
@@ -77,7 +76,6 @@ describe('semantic contracts', () => {
       'unresolved',
     );
   });
-
   it('separates every worktree, project, configuration, provider and source-view identity dimension', () => {
     const variants: Observation[] = [
       {...observation, repository: 'other'},
@@ -97,12 +95,11 @@ describe('semantic contracts', () => {
       {...observation, documentVersion: 2},
       {...observation, projectEpoch: 2},
     ];
-    expect(new Set([observation, ...variants].map(observationKey)).size).toBe(variants.length + 1);
+    expect(new Set(EffectArray.map([observation, ...variants], observationKey)).size).toBe(variants.length + 1);
     for (const changed of variants) expect(sameOwnedView(owned, {...owned, observation: changed})).toBe(false);
     expect(sameOwnedView(owned, {...owned, fence: 2})).toBe(false);
     expect(sameOwnedView(owned, {...owned, authority: 'other'})).toBe(false);
   });
-
   it('identity is independent of serialization order and delimiter-like strings', () => {
     fc.assert(
       fc.property(fc.string({minLength: 1, maxLength: 60}), name => {
@@ -111,7 +108,21 @@ describe('semantic contracts', () => {
           repository: name,
           view: {...observation.view, owner: `${name}:suffix`},
         };
-        const right = Object.fromEntries(Object.entries(left).reverse()) as Observation;
+        const right: Observation = {
+          projectEpoch: left.projectEpoch,
+          documentVersion: left.documentVersion,
+          content: left.content,
+          uri: left.uri,
+          view: left.view,
+          provider: left.provider,
+          toolchain: left.toolchain,
+          configuration: left.configuration,
+          project: left.project,
+          worktree: left.worktree,
+          repository: left.repository,
+          version: left.version,
+        };
+        expect(EffectRecord.keys(right)).toEqual(EffectRecord.keys(left).reverse());
         expect(observationKey(left)).toBe(observationKey(right));
         expect(observationKey(left)).not.toBe(
           observationKey({
@@ -124,7 +135,6 @@ describe('semantic contracts', () => {
       {numRuns: 100},
     );
   });
-
   it('rejects URI aliases before raw strings can become different target identities', () => {
     const canonical = 'file:///worktree/a/project/main.ts';
     for (const alias of [
@@ -139,7 +149,7 @@ describe('semantic contracts', () => {
       expect(() =>
         prepareChange('op', {
           ...p,
-          targets: p.targets.map((t, i) => ({
+          targets: EffectArray.map(p.targets, (t, i) => ({
             ...t,
             before: {
               ...t.before,

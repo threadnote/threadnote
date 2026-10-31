@@ -1,3 +1,5 @@
+import * as Schema from 'effect/Schema';
+import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -5,10 +7,9 @@ import {expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
-
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object') throw new Error('Expected object response.');
-  return value as Record<string, unknown>;
+  return Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(value);
 };
 const common = {
   format: 'threadnote-native-authoring',
@@ -22,7 +23,6 @@ const common = {
   sourceFreeReason: 'Exercise native approval and reconciliation using a private synthetic project.',
   review: {required: false, reason: 'Synthetic fixture with independently asserted protocol outcomes.'},
 };
-
 effectIt.effect('admits a verified approved spec revision without replacing cycle identity or its baseline', () =>
   Effect.gen(function* () {
     const f = yield* nativeFixture();
@@ -163,7 +163,7 @@ effectIt.effect('admits a verified approved spec revision without replacing cycl
     const missingAuthority = yield* mutate('reconcile', {plan: amended, reason}).pipe(Effect.flip);
     expect(missingAuthority).toMatchObject({code: 'invalid-cycle', message: expect.stringContaining('user authority')});
     expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
-    const forged = {...amended, spec: {...object(amended.spec), intentHash: '0'.repeat(64)}};
+    const forged = {...amended, spec: {...object(amended.spec), intentHash: EffectString.repeat(64)('0')}};
     const drift = yield* mutate('reconcile', {plan: forged, reason, userAuthority: 'Approved.'}).pipe(Effect.flip);
     expect(drift).toMatchObject({code: 'plan-drift'});
     expect(yield* f.fs.readFileString(f.statePath())).toBe(before);

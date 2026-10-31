@@ -1,10 +1,11 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectString from 'effect/String';
 import {Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it, vi} from 'vitest';
 import {observationKey} from '../../src/contracts.js';
 import {createQuerySnapshot, queryPage, type Continuation} from '../../src/views.js';
 import {hash, observation, evidence} from '../fixtures.js';
-
 describe('semantic pagination', () => {
   it('preserves order, duplicates and coverage across bounded pages against an independent array model', () => {
     fc.assert(
@@ -22,13 +23,13 @@ describe('semantic pagination', () => {
           const actual: Schema.Json[] = [];
           let pages = 0;
           do {
-            const result = queryPage(snapshot, observation, hash('d'), {maxItems: pageSize, maxBytes: 30_000}, cursor);
+            const result = queryPage(snapshot, observation, hash('d'), {maxItems: pageSize, maxBytes: 30000}, cursor);
             expect(result.status).toBe('page');
             if (result.status !== 'page') throw new Error('Expected page');
             expect(result.page.items.length).toBeLessThanOrEqual(pageSize);
             expect(result.page.evidence).toEqual(evidence);
             expect(result.encodedBytes).toBe(new TextEncoder().encode(JSON.stringify(result.page)).length);
-            expect(result.encodedBytes).toBeLessThanOrEqual(30_000);
+            expect(result.encodedBytes).toBeLessThanOrEqual(30000);
             actual.push(...result.page.items);
             expect(result.page.remaining).toBe(items.length - actual.length);
             cursor = result.page.next ?? undefined;
@@ -40,7 +41,6 @@ describe('semantic pagination', () => {
       {numRuns: 100},
     );
   });
-
   it('rejects stale observations, changed queries and forged cursor identity without mixing snapshots', () => {
     const snapshot = createQuerySnapshot({
       id: 'snapshot',
@@ -50,10 +50,10 @@ describe('semantic pagination', () => {
     });
     const first = queryPage(snapshot, observation, hash('d'), {
       maxItems: 1,
-      maxBytes: 30_000,
+      maxBytes: 30000,
     });
     if (first.status !== 'page' || !first.page.next) throw new Error('Expected cursor');
-    const budget = {maxItems: 1, maxBytes: 30_000};
+    const budget = {maxItems: 1, maxBytes: 30000};
     expect(queryPage(snapshot, {...observation, documentVersion: 2}, hash('d'), budget, first.page.next).status).toBe(
       'stale',
     );
@@ -72,13 +72,12 @@ describe('semantic pagination', () => {
       }).status,
     ).toBe('invalid-cursor');
   });
-
   it('protects retained data from caller mutation and reports budgets too small for progress', () => {
     const input = {
       id: 'snapshot',
       query: hash('d'),
       evidence: structuredClone(evidence),
-      items: [{text: '😀\r\n'.repeat(200)}],
+      items: [{text: EffectString.repeat(200)('😀\r\n')}],
     };
     const snapshot = createQuerySnapshot(input);
     input.items[0].text = 'changed';
@@ -92,11 +91,10 @@ describe('semantic pagination', () => {
       }).status,
     ).toBe('invalid-budget');
   });
-
   it('selects the longest fitting prefix under tight UTF-8 budgets', () => {
     fc.assert(
       fc.property(
-        fc.array(fc.constantFrom('😀', '\r\n', 'é', 'x'.repeat(40)), {
+        fc.array(fc.constantFrom('😀', '\r\n', 'é', EffectString.repeat(40)('x')), {
           minLength: 1,
           maxLength: 30,
         }),
@@ -108,29 +106,30 @@ describe('semantic pagination', () => {
             evidence,
             items,
           });
-          const expected = Array.from({length: items.length}, (_, i) => {
-            const count = i + 1;
-            return {
-              version: 1,
-              status: 'ok',
-              evidence,
-              items: items.slice(0, count),
-              offset: 0,
-              remaining: items.length - count,
-              next:
-                count === items.length
-                  ? null
-                  : {
-                      version: 1,
-                      snapshot: 'snapshot',
-                      query: hash('d'),
-                      observation: observationKey(observation),
-                      offset: count,
-                    },
-            };
-          })
-            .filter(page => new TextEncoder().encode(JSON.stringify(page)).length <= maxBytes)
-            .at(-1);
+          const expected = EffectArray.filter(
+            Array.from({length: items.length}, (_, i) => {
+              const count = i + 1;
+              return {
+                version: 1,
+                status: 'ok',
+                evidence,
+                items: items.slice(0, count),
+                offset: 0,
+                remaining: items.length - count,
+                next:
+                  count === items.length
+                    ? null
+                    : {
+                        version: 1,
+                        snapshot: 'snapshot',
+                        query: hash('d'),
+                        observation: observationKey(observation),
+                        offset: count,
+                      },
+              };
+            }),
+            page => new TextEncoder().encode(JSON.stringify(page)).length <= maxBytes,
+          ).at(-1);
           const result = queryPage(snapshot, observation, hash('d'), {
             maxItems: 1000,
             maxBytes,
@@ -148,9 +147,8 @@ describe('semantic pagination', () => {
       {numRuns: 100},
     );
   });
-
   it('serializes item data once instead of every growing prefix', () => {
-    const items = Array.from({length: 1000}, () => 'x'.repeat(16 * 1024));
+    const items = Array.from({length: 1000}, () => EffectString.repeat(16 * 1024)('x'));
     const snapshot = createQuerySnapshot({
       id: 'snapshot',
       query: hash('d'),
@@ -164,11 +162,11 @@ describe('semantic pagination', () => {
         maxItems: 1000,
         maxBytes: 8 * 1024 * 1024,
       });
-      calls = spy.mock.calls.map(([value]) => value);
+      calls = EffectArray.map(spy.mock.calls, ([value]) => value);
     } finally {
       spy.mockRestore();
     }
-    expect(calls.reduce<number>((total, value) => total + JSON.stringify(value).length, 0)).toBeLessThan(
+    expect(EffectArray.reduce(calls, 0, (total, value) => total + JSON.stringify(value).length)).toBeLessThan(
       17 * 1024 * 1024,
     );
   });

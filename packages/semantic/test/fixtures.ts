@@ -1,9 +1,9 @@
+import * as EffectString from 'effect/String';
 import {expect} from 'vitest';
 import type {Observation, SymbolCandidate} from '../src/contracts.js';
 import type {OwnedView} from '../src/views.js';
 import {advanceChange, type ChangeState, type ChangeEvent} from '../src/changes.js';
-
-export const hash = (character: string) => character.repeat(64);
+export const hash = (character: string) => EffectString.repeat(64)(character);
 export const observation: Observation = {
   version: 1,
   repository: 'repo',

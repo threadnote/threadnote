@@ -1,3 +1,5 @@
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 import {it, expect} from '@effect/vitest';
 import {Clock, Context, DateTime, Effect, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -27,7 +29,6 @@ import {workflowWriteRequest} from '../../src/workflow_automation/memory.js';
 import {projectNativeCloseoutKnowledge} from '../../src/workflow_automation/closeout_projection.js';
 import type {NativeCloseoutPlannedDocument} from '../../src/workflow_automation/closeout_documents.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
-
 const mode = vi.hoisted(() => ({ordinary: false}));
 vi.mock('../../src/workflow_memory/artifacts.js', async importOriginal => {
   const original = await importOriginal<typeof import('../../src/workflow_memory/artifacts.js')>();
@@ -41,8 +42,7 @@ vi.mock('../../src/workflow_memory/artifacts.js', async importOriginal => {
       ),
   };
 });
-const transaction = 'a'.repeat(64);
-
+const transaction = EffectString.repeat(64)('a');
 const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
   const f = yield* nativeFixture();
   const system = yield* SystemInfo;
@@ -51,8 +51,8 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
   const fixedClock: Clock.Clock = {
     currentTimeMillis: Effect.succeed(fixed),
     currentTimeMillisUnsafe: () => fixed,
-    currentTimeNanos: Effect.succeed(BigInt(fixed) * 1_000_000n),
-    currentTimeNanosUnsafe: () => BigInt(fixed) * 1_000_000n,
+    currentTimeNanos: Effect.succeed(BigInt(fixed) * 1000000n),
+    currentTimeNanosUnsafe: () => BigInt(fixed) * 1000000n,
     monotonicTimeNanos: clock.monotonicTimeNanos,
     monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
     sleep: duration => clock.sleep(duration),
@@ -79,7 +79,7 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
   const layout = codeGraphLayout(f.path, f.home, identity.checkoutId, identity.worktreeId);
   const bytes = yield* f.fs.readFile(f.path.join(f.repo, 'source.ts'));
   const snapshot: CodeGraphSnapshot = {
-    id: 'cgsn_' + '1'.repeat(40),
+    id: 'cgsn_' + EffectString.repeat(40)('1'),
     commit: identity.headCommit,
     repositoryId: identity.repositoryId,
     worktreeId: identity.worktreeId,
@@ -97,7 +97,9 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     snapshot,
     [
       {
-        blobId: (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD:source.ts'])).stdout.trim(),
+        blobId: EffectString.trim(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD:source.ts'])).stdout,
+        ),
         contentHash: codeGraphCommittedFileContentHash('sha1', bytes),
         path: 'source.ts',
         language: 'typescript',
@@ -157,8 +159,8 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     );
   const request = (key: string, body: string, refs: readonly string[] = []) =>
     workflowWriteRequest({
-      operationId: `closeout-${transaction.slice(0, 24)}-${key}`,
-      artifactKey: `closeout-${transaction.slice(0, 24)}-${key}`,
+      operationId: `closeout-${EffectString.slice(0, 24)(transaction)}-${key}`,
+      artifactKey: `closeout-${EffectString.slice(0, 24)(transaction)}-${key}`,
       bindingId: journal.binding.bindingId,
       sourceRunId: stored.state.runId,
       role: 'closeout-' + key,
@@ -198,7 +200,6 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     ) => projectNativeCloseoutKnowledge(f.config, state, original, transaction, documents, refs).pipe(apply),
   };
 });
-
 it.effect(
   'admits one real capture for D=3, preserves repeated-key relations and admits a following actual write afresh',
   () =>
@@ -217,9 +218,11 @@ it.effect(
       const nativeBytes = yield* f.fs.readFile(f.statePath());
       const journalBytes = yield* f.fs.readFile(f.journalPath(f.journal.binding.bindingId));
       const projected = yield* f.project(documents);
-      expect(Object.keys(projected.journal.operations).length - Object.keys(f.journal.operations).length).toBe(3);
+      expect(
+        EffectRecord.keys(projected.journal.operations).length - EffectRecord.keys(f.journal.operations).length,
+      ).toBe(3);
       expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
-      for (const operation of Object.values(projected.journal.operations))
+      for (const operation of EffectRecord.values(projected.journal.operations))
         expect(
           parseMemoryDocument(operation.artifact.canonicalUri, operation.desired)?.metadata.codeCitations,
         ).toHaveLength(1);
@@ -242,15 +245,17 @@ it.effect(
       expect(f.counts).toEqual({opening: 4, closing: 4, leases: 4, releases: 4});
     }).pipe(provideNative, TestClock.withLive),
 );
-
 fcEffectProp(
   it,
   'batched and ordinary projection postimages and byte maxima agree across bounded bodies',
-  [fc.integer({min: 1, max: 58_000}), fc.boolean()],
+  [fc.integer({min: 1, max: 58000}), fc.boolean()],
   ([length, unicode]) =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const first = yield* f.document('first', (unicode ? 'β' : 'x').repeat(unicode ? Math.ceil(length / 2) : length));
+      const first = yield* f.document(
+        'first',
+        EffectString.repeat(unicode ? Math.ceil(length / 2) : length)(unicode ? 'β' : 'x'),
+      );
       const second = {
         ...(yield* f.document('second', 'Second output.\n')),
         relations: [{type: 'references' as const, uri: first.uri}],
@@ -277,7 +282,6 @@ fcEffectProp(
     }).pipe(provideNative, TestClock.withLive),
   {fastCheck: {numRuns: 3}},
 );
-
 it.effect('uses zero admissions for empty refs and D=0 and rejects late drift before returning modeled output', () =>
   Effect.gen(function* () {
     const f = yield* fixture();
@@ -295,7 +299,6 @@ it.effect('uses zero admissions for empty refs and D=0 and rejects late drift be
     expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
   }).pipe(provideNative, TestClock.withLive),
 );
-
 it.effect('preserves per-document invalid-body and relation failure classifications', () =>
   Effect.gen(function* () {
     const f = yield* fixture();
@@ -316,13 +319,12 @@ it.effect('preserves per-document invalid-body and relation failure classificati
     expect(f.counts.leases).toBe(f.counts.releases);
   }).pipe(provideNative, TestClock.withLive),
 );
-
 it.effect('preserves ownership, identity and CAS errors inside the shared fence', () =>
   Effect.gen(function* () {
     const f = yield* fixture();
     const document = yield* f.document('first', 'Owned output.\n');
     const projection = yield* f.project([document]);
-    const operation = Object.values(projection.journal.operations)[0];
+    const operation = EffectRecord.values(projection.journal.operations)[0];
     if (!operation) throw new Error('Expected projected operation');
     yield* f.store.write(f.location, operation.artifact.canonicalUri, operation.desired, {mode: 'create'});
     const request = {
@@ -330,7 +332,7 @@ it.effect('preserves ownership, identity and CAS errors inside the shared fence'
       action: 'replace' as const,
       operationId: 'check-cas',
       uri: operation.artifact.canonicalUri,
-      expectedRevision: '0'.repeat(64),
+      expectedRevision: EffectString.repeat(64)('0'),
       body: 'Replacement.\n',
       bodySha256: sha256HexSync('Replacement.\n'),
     };
@@ -344,18 +346,17 @@ it.effect('preserves ownership, identity and CAS errors inside the shared fence'
     yield* f.store.write(
       f.location,
       operation.artifact.canonicalUri,
-      operation.desired.replace(operation.artifact.memoryId, 'tn_changed_identity'),
+      EffectString.replace(operation.artifact.memoryId, 'tn_changed_identity')(operation.desired),
       {mode: 'replace'},
     );
     expect(yield* captured(projection.journal)).toMatchObject({_tag: 'WorkflowMemoryError', code: 'identity-conflict'});
     expect(f.counts).toEqual({opening: 3, closing: 0, leases: 3, releases: 3});
   }).pipe(provideNative, TestClock.withLive),
 );
-
 it.effect('uses ordinary preparation for unsupported refs and revokes a captured preparer on return', () =>
   Effect.gen(function* () {
     const f = yield* fixture();
-    const refs = ['cgr_' + 'f'.repeat(40)];
+    const refs = ['cgr_' + EffectString.repeat(40)('f')];
     const unsupported = yield* withWorkflowProjectionCitations(f.config, f.journal.binding, refs, prepare =>
       prepare(f.journal, f.request('first', '', refs)),
     ).pipe(f.apply, Effect.flip);
@@ -372,7 +373,6 @@ it.effect('uses ordinary preparation for unsupported refs and revokes a captured
     expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
   }).pipe(provideNative, TestClock.withLive),
 );
-
 it.effect('preserves saved intent refs before common admission and ignores skipped lower-present vectors', () =>
   Effect.gen(function* () {
     const f = yield* fixture();
@@ -398,7 +398,6 @@ it.effect('preserves saved intent refs before common admission and ignores skipp
     const optimized = yield* f.project([document], ['unresolved-common.ts'], f.journal, pending);
     expect(optimized).toEqual(ordinary);
     expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
-
     // This differing vector belongs to a skipped lower-present operation. Only
     // the two new operations need the common fence, preserving D=2 -> 1 capture.
     const second = yield* f.document('second', 'Second output.\n');
@@ -410,7 +409,9 @@ it.effect('preserves saved intent refs before common admission and ignores skipp
       reserved.journal,
       reserved.native,
     );
-    expect(Object.keys(continued.journal.operations).length - Object.keys(reserved.journal.operations).length).toBe(2);
+    expect(
+      EffectRecord.keys(continued.journal.operations).length - EffectRecord.keys(reserved.journal.operations).length,
+    ).toBe(2);
     expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
   }).pipe(provideNative, TestClock.withLive),
 );

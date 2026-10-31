@@ -1,3 +1,4 @@
+import * as EffectArray from 'effect/Array';
 import {Context, Effect, Exit, FileSystem, Layer, Option, Path, Scope} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -6,22 +7,28 @@ import {
   readPathFileSystemIdentity,
   type FileSystemIdentity,
 } from '@threadnote/platform/system';
-
 type DatabaseContext = Context.Context<SqliteClient.SqliteClient | SqlClient.SqlClient>;
-type Identity = {readonly database: string; readonly files: string};
+type Identity = {
+  readonly database: string;
+  readonly files: string;
+};
 type Entry = {
   readonly path: string;
   readonly identity: Identity;
   readonly context: DatabaseContext;
   readonly scope: Scope.Closeable;
 };
-type Session = {readonly owner: number; active: boolean; busy: boolean; entry?: Entry};
+type Session = {
+  readonly owner: number;
+  active: boolean;
+  busy: boolean;
+  entry?: Entry;
+};
 const closeDatabase = (scope: Scope.Closeable, exit: Exit.Exit<unknown, unknown>) =>
   Scope.close(scope, exit).pipe(Effect.withSpan('recall.closeDatabase'));
 const CurrentSession = Context.Reference<Session | undefined>('threadnote/RecallDatabaseSession', {
   defaultValue: () => undefined,
 });
-
 const releaseEntry = (session: Session, exit: Exit.Exit<unknown, unknown>) =>
   Effect.suspend(() => {
     const entry = session.entry;
@@ -29,7 +36,6 @@ const releaseEntry = (session: Session, exit: Exit.Exit<unknown, unknown>) =>
     session.entry = undefined;
     return entry ? closeDatabase(entry.scope, exit) : Effect.void;
   });
-
 /** One sequential native request may retain one connection through its normal flush. */
 export const withRecallDatabaseSession = <A, E, R>(program: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
   Effect.acquireUseRelease(
@@ -41,7 +47,6 @@ export const withRecallDatabaseSession = <A, E, R>(program: Effect.Effect<A, E, 
         return releaseEntry(session, exit);
       }),
   );
-
 function identity(value: Option.Option<FileSystemIdentity>): string | undefined {
   // Effect's File.Info omits inodes beyond Number.MAX_SAFE_INTEGER. The platform
   // readers recover precise bigint identities from this handle and path; never
@@ -50,7 +55,6 @@ function identity(value: Option.Option<FileSystemIdentity>): string | undefined 
     ? `${value.value.dev}:${value.value.ino}`
     : undefined;
 }
-
 const probe = (path: string, requireAuxiliaries = false) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -77,14 +81,12 @@ const probe = (path: string, requireAuxiliaries = false) =>
         if (opened === undefined || opened !== current) return undefined;
         files.push(opened);
       }
-      return {database: opened, files: files.join('|')};
+      return {database: opened, files: EffectArray.join(files, '|')};
     }),
   ).pipe(Effect.orElseSucceed(() => undefined));
-
 const databaseLayer = (path: string) => SqliteClient.layer({filename: path}).pipe(Layer.orDie);
 const body = <A, E, R>(effect: Effect.Effect<A, E, R | SqlClient.SqlClient>, context: DatabaseContext) =>
   effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'));
-
 export function useRecallDatabase<A, E, R>(
   path: string,
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,

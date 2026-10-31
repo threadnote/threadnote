@@ -2,6 +2,7 @@ import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeCycleHasControl} from './cycle.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -15,6 +16,21 @@ const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const fail = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-cycle-review', message});
 };
+
+export const NativeCycleRebaseInputSchema = Schema.Struct({
+  preRebaseHead: gitObject,
+  ontoHead: gitObject,
+  rebasedHead: gitObject,
+});
+export type NativeCycleRebaseInput = typeof NativeCycleRebaseInputSchema.Type;
+const rebaseReceipt = Schema.Struct({
+  ...NativeCycleRebaseInputSchema.fields,
+  reason: text(),
+  authority: text(),
+  receiptDigest: digest,
+  beforeRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-before\/[a-f0-9]{64}$/u)),
+  afterRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-after\/[a-f0-9]{64}$/u)),
+});
 
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
@@ -33,10 +49,40 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   supersedes: Schema.optionalKey(id),
   previousTree: Schema.optionalKey(gitObject),
   acceptedHead: Schema.optionalKey(gitObject),
+  rebase: Schema.optionalKey(rebaseReceipt),
   files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
   pinnedRef: text(),
 });
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
+
+export function nativeCycleRebaseReceiptDigest(
+  snapshot: NativeCycleSnapshot,
+  receipt: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'>,
+): string {
+  return sha256HexSync(
+    JSON.stringify([
+      'threadnote-native-initial-rebase-v1',
+      snapshot.snapshotId,
+      snapshot.phaseId,
+      snapshot.phaseHash,
+      snapshot.repo,
+      snapshot.head,
+      snapshot.baseTree,
+      snapshot.tree,
+      snapshot.scopeBase,
+      snapshot.declaredBaseHead,
+      snapshot.files,
+      snapshot.scopeFiles,
+      receipt.preRebaseHead,
+      receipt.ontoHead,
+      receipt.rebasedHead,
+      receipt.reason,
+      receipt.authority,
+      receipt.beforeRef,
+      receipt.afterRef,
+    ]),
+  );
+}
 
 const findingSchema = Schema.Struct({
   id,

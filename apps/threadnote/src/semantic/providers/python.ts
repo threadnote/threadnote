@@ -1,3 +1,7 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import {isJsonObject} from '@threadnote/platform/json';
 import {Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {
   Counter,
@@ -21,7 +25,6 @@ import {
   type DiagnosticDelta,
   type SemanticQuery,
 } from '../provider.js';
-
 const invalid = () => SemanticSessionFault.make({reason: 'invalid'});
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown) =>
   Schema.decodeUnknownEffect(schema)(value).pipe(Effect.mapError(invalid));
@@ -94,7 +97,6 @@ export interface PythonSessionOptions {
   readonly environmentReady: Effect.Effect<void, unknown>;
   readonly startupMilliseconds: number;
 }
-
 /** One project/environment/view. Reads and preparation only; no command or apply-edit entry point exists. */
 export const makePythonSession = Effect.fn('semantic.makePythonSession')(function* (
   client: LspClient,
@@ -147,7 +149,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
   if (
     (init.capabilities.positionEncoding !== undefined && init.capabilities.positionEncoding !== 'utf-16') ||
     init.serverInfo?.version !== '1.40.2' ||
-    !init.serverInfo.name.toLowerCase().includes('basedpyright')
+    !EffectString.includes('basedpyright')(EffectString.toLowerCase(init.serverInfo.name))
   )
     return yield* SemanticSessionFault.make({reason: 'provider'});
   const capabilities = init.capabilities;
@@ -242,7 +244,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
           // Publish the changed buffer before reannouncing dependent buffers with their new diagnostic versions.
           for (const [uri, entry] of [
             [fixed.uri, document] as const,
-            ...[...documents].filter(([uri]) => uri !== fixed.uri),
+            ...EffectArray.filter([...documents], ([uri]) => uri !== fixed.uri),
           ]) {
             entry.observation = {...entry.observation, projectEpoch: epoch};
             entry.ready = false;
@@ -295,8 +297,8 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
       const file = yield* path.fromFileUrl(new URL(uri));
       const roots = editsOnly ? [worktree] : allowedRoots;
       if (
-        file.split(path.sep).includes('.git') ||
-        !roots.some(root => file.startsWith(root + path.sep)) ||
+        EffectString.split(path.sep)(file).includes('.git') ||
+        !EffectArray.some(roots, root => EffectString.startsWith(root + path.sep)(file)) ||
         (yield* fs.realPath(file)) !== file ||
         (yield* fs.stat(file)).type !== 'File'
       )
@@ -325,7 +327,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
         Schema.NullOr(Schema.Union([Location, Schema.Array(Location), Schema.Array(LocationLink)])),
         response,
       );
-      const items = decoded === null ? [] : Array.isArray(decoded) ? [...decoded] : [decoded];
+      const items = decoded === null ? [] : EffectArray.isArray<typeof decoded>(decoded) ? [...decoded] : [decoded];
       for (const item of items) {
         const target = yield* source('targetUri' in item ? item.targetUri : item.uri);
         if (
@@ -378,11 +380,12 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
           for (const call of incoming ?? []) {
             yield* validateHierarchyItem(call.from);
             const from = yield* source(call.from.uri);
-            if (call.fromRanges.some(range => !validRange(from.text, range))) return yield* invalid();
+            if (EffectArray.some(call.fromRanges, range => !validRange(from.text, range))) return yield* invalid();
           }
           for (const call of outgoing ?? []) {
             yield* validateHierarchyItem(call.to);
-            if (call.fromRanges.some(range => !validRange(rootSource.text, range))) return yield* invalid();
+            if (EffectArray.some(call.fromRanges, range => !validRange(rootSource.text, range)))
+              return yield* invalid();
           }
           value = {root, incoming: incoming ?? [], outgoing: outgoing ?? []};
         } else {
@@ -526,16 +529,22 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
         return yield* SemanticSessionFault.make({reason: 'stale'});
       const snapshot = received.value;
       const previous = document.delivered;
-      const old = new Set(previous?.items.map(item => item.id));
-      const present = new Set(snapshot.items.map(item => item.id));
+      const old = new Set(
+        (effectOptionalValue =>
+          effectOptionalValue == null ? undefined : EffectArray.map(effectOptionalValue, item => item.id))(
+          previous?.items,
+        ),
+      );
+      const present = new Set(EffectArray.map(snapshot.items, item => item.id));
       const delta: DiagnosticDelta = {
         ...snapshot,
-        added: snapshot.items.filter(item => !old.has(item.id)),
-        remaining: snapshot.items.filter(item => old.has(item.id)),
+        added: EffectArray.filter(snapshot.items, item => !old.has(item.id)),
+        remaining: EffectArray.filter(snapshot.items, item => old.has(item.id)),
         resolved: previous
-          ? previous.items
-              .filter(item => !present.has(item.id))
-              .map(item => ({item, observation: previous.observation, resolvedIn: fixed}))
+          ? EffectArray.map(
+              EffectArray.filter(previous.items, item => !present.has(item.id)),
+              item => ({item, observation: previous.observation, resolvedIn: fixed}),
+            )
           : [],
       };
       document.delivered = structuredClone(snapshot);
@@ -560,14 +569,28 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
       if (typeof raw !== 'object' || raw === null || (edit.changes !== undefined && edit.documentChanges !== undefined))
         return yield* invalid();
       const entries =
-        edit.documentChanges?.map(change => ({
-          uri: change.textDocument.uri,
-          version: change.textDocument.version,
-          edits: change.edits,
-        })) ?? Object.entries(edit.changes ?? {}).map(([uri, edits]) => ({uri, version: null, edits}));
-      if (!entries.length || entries.length > 10000 || new Set(entries.map(entry => entry.uri)).size !== entries.length)
+        (effectOptionalValue =>
+          effectOptionalValue == null
+            ? undefined
+            : EffectArray.map(effectOptionalValue, change => ({
+                uri: change.textDocument.uri,
+                version: change.textDocument.version,
+                edits: change.edits,
+              })))(edit.documentChanges) ??
+        EffectArray.map(EffectRecord.toEntries(edit.changes ?? {}), ([uri, edits]) => ({uri, version: null, edits}));
+      if (
+        !entries.length ||
+        entries.length > 10000 ||
+        new Set(EffectArray.map(entries, entry => entry.uri)).size !== entries.length
+      )
         return yield* invalid();
-      const files: Schema.Json[] = [];
+      const files: {
+        uri: string;
+        content: string;
+        documentVersion: number | null;
+        source: 'disk' | 'overlay';
+        edits: (typeof TextEdit.Type)[];
+      }[] = [];
       let count = 0;
       for (const entry of entries) {
         const original = yield* source(entry.uri, true);
@@ -599,8 +622,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
       }
       // Re-read every closed file; retain all provider edits or fail the whole preparation.
       for (const entry of files) {
-        const file = entry as {uri: string; content: string};
-        if ((yield* source(file.uri, true)).content !== file.content)
+        if ((yield* source(entry.uri, true)).content !== entry.content)
           return yield* SemanticSessionFault.make({reason: 'stale'});
       }
       return files;
@@ -651,16 +673,13 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
             evidence: evidence(fixed),
           } satisfies QueryOutcome;
         if (
-          typeof response === 'object' &&
-          response !== null &&
-          !Array.isArray(response) &&
-          (Object.keys(response).length === 0 ||
+          isJsonObject(response) &&
+          (EffectRecord.keys<string, Schema.Json>(response).length === 0 ||
             ('changes' in response &&
-              response.changes !== null &&
-              typeof response.changes === 'object' &&
-              Object.keys(response.changes).length === 0) ||
+              isJsonObject(response.changes) &&
+              EffectRecord.keys<string, Schema.Json>(response.changes).length === 0) ||
             ('documentChanges' in response &&
-              Array.isArray(response.documentChanges) &&
+              EffectArray.isArray(response.documentChanges) &&
               response.documentChanges.length === 0))
         )
           return {
@@ -677,7 +696,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
           if (
             !raw ||
             typeof raw !== 'object' ||
-            Array.isArray(raw) ||
+            EffectArray.isArray(raw) ||
             'command' in raw ||
             'disabled' in raw ||
             !('edit' in raw) ||

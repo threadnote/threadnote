@@ -1,10 +1,11 @@
+import * as EffectArray from 'effect/Array';
+import * as EffectString from 'effect/String';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parse as parseJsonc, type ParseError} from 'jsonc-parser';
 import {LspFault} from './lsp_transport.js';
-
 export const readBounded = (file: string, maximumBytes: number) =>
   fromPromiseInterruptibleAwaiting(
     () => runtimeReadBoundedStableRegularFile(file, maximumBytes),
@@ -25,7 +26,10 @@ export const boundedFileDigest = Effect.fn('semantic.boundedFileDigest')(functio
 ) {
   const crypto = yield* Crypto.Crypto;
   const hash = yield* crypto.digest('SHA-256', yield* readBounded(file, maximumBytes));
-  return Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('');
+  return EffectArray.join(
+    Array.from(hash, byte => EffectString.padStart(2, '0')(byte.toString(16))),
+    '',
+  );
 });
 /** Bounded conservative pilot invalidation. No build/config code is evaluated to compute this basis. */
 export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
@@ -44,7 +48,11 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
   const validateConfiguration = (file: string): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       if (configurations.has(file)) return;
-      if (configurations.size >= 256 || !file.startsWith(canonical + path.sep) || (yield* fs.realPath(file)) !== file)
+      if (
+        configurations.size >= 256 ||
+        !EffectString.startsWith(canonical + path.sep)(file) ||
+        (yield* fs.realPath(file)) !== file
+      )
         return yield* LspFault.make({code: 'prerequisite'});
       configurations.add(file);
       if (Number((yield* fs.stat(file)).size) > 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
@@ -61,31 +69,31 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
         typeof configuration.extends === 'string' ? [configuration.extends] : (configuration.extends ?? []);
       for (const base of extensions) {
         let resolved: string;
-        if (base.startsWith('.'))
-          resolved = path.resolve(path.dirname(file), base.endsWith('.json') ? base : base + '.json');
+        if (EffectString.startsWith('.')(base))
+          resolved = path.resolve(path.dirname(file), EffectString.endsWith('.json')(base) ? base : base + '.json');
         else
           resolved = yield* Effect.try({
             try: () => Bun.resolveSync(base, path.dirname(file)),
             catch: () => LspFault.make({code: 'prerequisite'}),
           });
-        if (!resolved.endsWith('.json')) return yield* LspFault.make({code: 'prerequisite'});
+        if (!EffectString.endsWith('.json')(resolved)) return yield* LspFault.make({code: 'prerequisite'});
         yield* validateConfiguration(resolved);
       }
       for (const reference of configuration.references ?? []) {
         const resolved = path.resolve(path.dirname(file), reference.path);
-        if (!resolved.startsWith(canonical + path.sep) || (yield* fs.realPath(resolved)) !== resolved)
+        if (!EffectString.startsWith(canonical + path.sep)(resolved) || (yield* fs.realPath(resolved)) !== resolved)
           return yield* LspFault.make({code: 'prerequisite'});
       }
     });
   while (pending.length) {
     const directory = pending.pop()!;
     const names = (yield* fs.readDirectory(directory)).sort();
-    if (names.length + files > 20_000) return yield* LspFault.make({code: 'capacity'});
+    if (names.length + files > 20000) return yield* LspFault.make({code: 'capacity'});
     for (const name of names) {
       const file = path.join(directory, name);
       const relative = path.relative(canonical, file);
-      if (relative === '.git' || relative.startsWith('.git/')) continue;
-      if (++files > 20_000) return yield* LspFault.make({code: 'capacity'});
+      if (relative === '.git' || EffectString.startsWith('.git/')(relative)) continue;
+      if (++files > 20000) return yield* LspFault.make({code: 'capacity'});
       // Symlinked or external project roots need explicit provider qualification; never silently omit them.
       if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
         return yield* LspFault.make({code: 'prerequisite'});
@@ -118,19 +126,23 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
     let directory = git;
     if (info.type === 'File') {
       if (Number(info.size) > 8192) return yield* LspFault.make({code: 'prerequisite'});
-      const text = (yield* readBoundedText(git, 8192)).trim();
-      if (!text.startsWith('gitdir: ')) return yield* LspFault.make({code: 'prerequisite'});
-      directory = yield* fs.realPath(path.resolve(canonical, text.slice(8)));
+      const text = EffectString.trim(yield* readBoundedText(git, 8192));
+      if (!EffectString.startsWith('gitdir: ')(text)) return yield* LspFault.make({code: 'prerequisite'});
+      directory = yield* fs.realPath(path.resolve(canonical, EffectString.slice(8)(text)));
     }
     const head = yield* readBoundedText(path.join(directory, 'HEAD'), 8192);
     entries.push(['git:HEAD', head]);
     const commonFile = path.join(directory, 'commondir');
     const common = (yield* fs.exists(commonFile))
-      ? path.resolve(directory, (yield* readBoundedText(commonFile, 8192)).trim())
+      ? path.resolve(directory, EffectString.trim(yield* readBoundedText(commonFile, 8192)))
       : directory;
-    if (head.startsWith('ref: ')) {
-      const ref = head.slice(5).trim();
-      if (!ref.startsWith('refs/') || ref.includes('..') || ref.includes('\\'))
+    if (EffectString.startsWith('ref: ')(head)) {
+      const ref = EffectString.trim(EffectString.slice(5)(head));
+      if (
+        !EffectString.startsWith('refs/')(ref) ||
+        EffectString.includes('..')(ref) ||
+        EffectString.includes('\\')(ref)
+      )
         return yield* LspFault.make({code: 'prerequisite'});
       const file = path.join(common, ref);
       if (yield* fs.exists(file)) entries.push(['git:ref', yield* readBoundedText(file, 8192)]);
@@ -141,5 +153,5 @@ export const semanticTreeDigest = Effect.fn('semantic.treeDigest')(function* (
       }
     }
   }
-  return sha256HexSync(JSON.stringify(entries.sort(([a], [b]) => a.localeCompare(b))));
+  return sha256HexSync(JSON.stringify(entries.sort(([a], [b]) => EffectString.localeCompare(b)(a))));
 });

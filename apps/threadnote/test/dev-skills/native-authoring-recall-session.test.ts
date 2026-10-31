@@ -1,3 +1,4 @@
+import * as EffectString from 'effect/String';
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it} from '@effect/vitest';
@@ -15,7 +16,6 @@ import {
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import {makeWorkflowRecallRefresh} from '../../src/workflow_memory/recall_refresh.js';
-
 const system = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -34,7 +34,6 @@ const dependencies = Layer.mergeAll(
 );
 const provideServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(dependencies).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
-
 it.effect('retains through the normal flush and closes before failure cleanup begins', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -48,11 +47,11 @@ it.effect('retains through the normal flush and closes before failure cleanup be
       if (diagnostics.length > 24) diagnostics.shift();
     };
     const kind = (value: string) =>
-      value.endsWith('.sqlite')
+      EffectString.endsWith('.sqlite')(value)
         ? 'database'
-        : value.endsWith('-wal')
+        : EffectString.endsWith('-wal')(value)
           ? 'wal'
-          : value.endsWith('-shm')
+          : EffectString.endsWith('-shm')(value)
             ? 'shm'
             : undefined;
     const identity = (value: Option.Option<FileSystemIdentity>) =>

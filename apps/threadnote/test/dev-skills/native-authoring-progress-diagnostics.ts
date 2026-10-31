@@ -2,7 +2,6 @@ import {Array as EffectArray} from 'effect';
 import {Context, Effect, Exit, type FileSystem, Option, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
 import * as EffectRecord from 'effect/Record';
-
 // Test-only vocabulary: fixed primitive refresh counters and a fixed commit-event timestamp only.
 // Input, output, arbitrary attributes, IDs, paths and errors never enter this recorder.
 export const nativeProgressBoundaries = [
@@ -57,7 +56,7 @@ export const nativeProgressSpanLabels = [
   'CommandExecutor.execute',
 ] as const;
 const selectedLabels = new Set<string>(nativeProgressSpanLabels);
-const ceiling = 2_147_483_647;
+const ceiling = 2147483647;
 const bounded = (n: number) => (Number.isNaN(n) ? 0 : Math.min(ceiling, Math.max(0, Math.round(n))));
 const safely = (observe: () => void) => {
   try {
@@ -73,13 +72,28 @@ type BoundaryRecord = {
   outcome: Outcome | 'Started';
   elapsedMs: number;
 };
-type SpanRecord = {label: string; sequence: number; startedMs: number};
-type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
-type Counts = {started: number; succeeded: number; failed: number};
+type SpanRecord = {
+  label: string;
+  sequence: number;
+  startedMs: number;
+};
+type SpanEnd = SpanRecord & {
+  outcome: Outcome;
+  inclusiveMs: number;
+};
+type Counts = {
+  started: number;
+  succeeded: number;
+  failed: number;
+};
 type RefreshTransaction = {
   start: bigint;
   invalid: boolean;
-  body?: {start: bigint; end?: bigint; succeeded?: boolean};
+  body?: {
+    start: bigint;
+    end?: bigint;
+    succeeded?: boolean;
+  };
 };
 const transactionIntervals = (span: Tracer.Span, transaction: RefreshTransaction, end: bigint) => {
   try {
@@ -103,7 +117,7 @@ const transactionIntervals = (span: Tracer.Span, transaction: RefreshTransaction
       commit > end
     )
       return undefined;
-    const milliseconds = (duration: bigint) => bounded(Number(duration) / 1_000_000);
+    const milliseconds = (duration: bigint) => bounded(Number(duration) / 1000000);
     return {
       acquireAndBeginMs: milliseconds(body.start - transaction.start),
       bodyMs: milliseconds(body.end - body.start),
@@ -133,7 +147,7 @@ const refreshDecision = (span: Tracer.Span) => {
     typeof scannedSources !== 'number' ||
     typeof changedSources !== 'number' ||
     typeof removedSources !== 'number' ||
-    ![scannedSources, changedSources, removedSources].every(value => Number.isInteger(value) && value >= 0)
+    !EffectArray.every([scannedSources, changedSources, removedSources], value => Number.isInteger(value) && value >= 0)
   )
     return undefined;
   return {
@@ -147,7 +161,6 @@ const refreshDecision = (span: Tracer.Span) => {
     removedSources: bounded(removedSources),
   };
 };
-
 export const classifyNativeProgress = (input: unknown): NativeProgressBoundary => {
   try {
     if (typeof input !== 'object' || input === null) return 'other';
@@ -172,7 +185,6 @@ export const classifyNativeProgress = (input: unknown): NativeProgressBoundary =
     return 'other';
   }
 };
-
 export const makeNativeProgressDiagnostics = (
   delegate: Tracer.Tracer,
   options: {
@@ -203,7 +215,15 @@ export const makeNativeProgressDiagnostics = (
     (label): readonly [NativeProgressBoundary, Counts] => [label, {started: 0, succeeded: 0, failed: 0}],
   );
   const counters = EffectRecord.fromEntries(counterEntries);
-  const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
+  const totals: Record<
+    string,
+    {
+      started: number;
+      ended: number;
+      failed: number;
+      inclusiveMs: number;
+    }
+  > = {};
   const refreshWrites = new WeakSet<Tracer.Span>();
   const refreshTransactions = new WeakMap<Tracer.Span, RefreshTransaction>();
   const transactionBoundaries = {
@@ -312,7 +332,7 @@ export const makeNativeProgressDiagnostics = (
             active.delete(span);
             total.ended = bounded(total.ended + 1);
             if (Exit.isFailure(exit)) total.failed = bounded(total.failed + 1);
-            const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1_000_000);
+            const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1000000);
             total.inclusiveMs = bounded(total.inclusiveMs + inclusiveMs);
             recent.push({...entry, inclusiveMs, outcome: exit._tag});
             if (recent.length > 32) {
@@ -429,12 +449,12 @@ export const makeNativeProgressDiagnostics = (
       safely(() => {
         const packet = {...observer.snapshot(), outerFailure: true};
         let json = serialize(packet);
-        while (json.length > 16_000 && packet.recent.length > 0) {
+        while (json.length > 16000 && packet.recent.length > 0) {
           packet.recent.shift();
           packet.recentDropped = bounded(packet.recentDropped + 1);
           json = serialize(packet);
         }
-        if (json.length <= 16_000) sink('NATIVE_AUTHORING_PROGRESS_DIAGNOSTICS ' + json);
+        if (json.length <= 16000) sink('NATIVE_AUTHORING_PROGRESS_DIAGNOSTICS ' + json);
       });
     },
   };
@@ -445,7 +465,6 @@ export const CurrentNativeProgress = Context.Reference<NativeProgressDiagnostics
   'test/CurrentNativeProgress',
   {defaultValue: () => undefined},
 );
-
 export const observeNativeBoundary = <A, E, R>(
   program: Effect.Effect<A, E, R>,
   observer: NativeProgressDiagnostics,
@@ -466,7 +485,6 @@ export const observeNativeBoundary = <A, E, R>(
       ),
     );
   }).pipe(Effect.withSpan(`native.progress.${label}`));
-
 // Construct the original Effect once before classification/observation. A delegate throw stays a throw.
 export const nativeProgressMethod =
   <S, Args extends unknown[], A, E, R>(
@@ -483,7 +501,6 @@ export const nativeProgressMethod =
     });
     return label ? observeNativeBoundary(program, observer, label) : program;
   };
-
 export const observeNativeBody = <A, E, R>(program: Effect.Effect<A, E, R>, observer: NativeProgressDiagnostics) =>
   Effect.suspend(() => {
     safely(() => observer.enterBody());
@@ -497,7 +514,6 @@ export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, ob
       }),
     ),
   );
-
 // These returned facades are never provided back into the application service graph.
 const storeFacades = new WeakMap<NativeProgressDiagnostics, WeakMap<object, object>>();
 const storeFacadeSources = new WeakMap<object, object>();
@@ -528,7 +544,10 @@ export const nativeProgressFacades = <
   fs: F,
   defaultStatePath: string,
   observer: NativeProgressDiagnostics | undefined,
-): {store: S; fs: F} =>
+): {
+  store: S;
+  fs: F;
+} =>
   observer
     ? {
         store: progressStore(store, observer),

@@ -1,6 +1,7 @@
 /* oxlint-disable typescript/no-require-imports, effecttsgo/node-builtin-import -- Disposable editor-host protocol fixture cannot load the Bun/TypeScript probe transport. */
 /* oxlint-disable eslint/no-undef -- CommonJS is supplied by the desktop extension host. */
 /* oxlint-disable effecttsgo/new-promise -- Native socket callbacks run inside the editor host without an Effect runtime. */
+/* oxlint-disable effecttsgo/prefer-effect-string -- This standalone editor-host fixture declares no Effect dependency. */
 const assert = require('node:assert/strict');
 const net = require('node:net');
 const {randomUUID} = require('node:crypto');

@@ -43,19 +43,20 @@ import {
   compactPersonalMemoryStructuredReferences,
   requiredResourceUriList,
 } from '../../src/mcp/server/common.js';
-
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
-
-type TextContent = Extract<CallToolResult['content'][number], {readonly type: 'text'}>;
-
+type TextContent = Extract<
+  CallToolResult['content'][number],
+  {
+    readonly type: 'text';
+  }
+>;
 interface ThreadnoteProgress {
   readonly _meta?: Readonly<Record<string, unknown>>;
   readonly message?: string;
   readonly progress: number;
   readonly total?: number;
 }
-
 const ReadStructuredContentSchema = Schema.StructWithRest(
   Schema.Struct({
     canonicalUri: Schema.optional(Schema.String),
@@ -72,87 +73,68 @@ const ReadStructuredContentSchema = Schema.StructWithRest(
   }),
   [Schema.Record(Schema.String, Schema.Unknown)],
 );
-
 const RepairProposalsSchema = Schema.Array(
   Schema.StructWithRest(Schema.Struct({proposalId: Schema.String, revision: Schema.String}), [
     Schema.Record(Schema.String, Schema.Unknown),
   ]),
 );
-
 type ReadStructuredContent = typeof ReadStructuredContentSchema.Type;
-
 const JsonObjectSchema = Schema.Record(Schema.String, Schema.Unknown);
-
 function decodeJsonObject(value: unknown): Record<string, unknown> {
   return Schema.decodeUnknownSync(JsonObjectSchema)(value);
 }
-
 function decodeOptionalJsonObject(value: unknown): Record<string, unknown> | undefined {
   return value === undefined ? undefined : decodeJsonObject(value);
 }
-
 function decodeReadStructuredContent(value: unknown): ReadStructuredContent {
   return Schema.decodeUnknownSync(ReadStructuredContentSchema)(value);
 }
-
 function textContent(content: CallToolResult['content'][number] | undefined): TextContent | undefined {
   return content?.type === 'text' ? content : undefined;
 }
-
 function textContents(content: CallToolResult['content']): readonly TextContent[] {
   return EffectArray.filter(content, (block): block is TextContent => block.type === 'text');
 }
-
 function contentText(content: CallToolResult['content']): string {
   return EffectArray.join(
     EffectArray.map(textContents(content), item => item.text),
     '\n',
   );
 }
-
 function readTextAt(content: CallToolResult['content'], index: number): string | undefined {
   return textContent(content[index])?.text;
 }
-
 class NativeToolClient extends Client {
   override async callTool(...arguments_: Parameters<Client['callTool']>): Promise<CallToolResult> {
     return CallToolResultSchema.parse(await super.callTool(...arguments_));
   }
 }
-
 function mcpError(error: unknown): McpError | undefined {
   return error instanceof McpError ? error : undefined;
 }
-
 function recordField(value: unknown, key: string): unknown {
   return decodeJsonObject(value)[key];
 }
-
 function optionalRecordField(value: unknown, key: string): unknown {
   return value === undefined ? undefined : recordField(value, key);
 }
-
 function arrayField(value: unknown, key: string): readonly unknown[] | undefined {
   const field = recordField(value, key);
   return EffectArray.isArray(field) ? field : undefined;
 }
-
 function recordArray(value: unknown): Record<string, unknown>[] {
   if (!EffectArray.isArray(value)) throw new TypeError('Expected an array of JSON objects.');
   return EffectArray.map(value, decodeJsonObject);
 }
-
 function recordArrayField(value: unknown, key: string): Record<string, unknown>[] | undefined {
   const field = arrayField(value, key);
   return field === undefined ? undefined : EffectArray.map(field, decodeJsonObject);
 }
-
 function requiredRecordArrayField(value: unknown, key: string): Record<string, unknown>[] {
   const result = recordArrayField(value, key);
   if (result === undefined) throw new TypeError(`Expected array field ${key}.`);
   return result;
 }
-
 function mapRecordArrayField<T>(
   value: unknown,
   key: string,
@@ -161,7 +143,6 @@ function mapRecordArrayField<T>(
   const records = recordArrayField(value, key);
   return records === undefined ? undefined : EffectArray.map(records, map);
 }
-
 function findRecordArrayField(
   value: unknown,
   key: string,
@@ -170,7 +151,6 @@ function findRecordArrayField(
   for (const item of recordArrayField(value, key) ?? []) if (predicate(item)) return item;
   return undefined;
 }
-
 function stringArray(value: unknown): string[] {
   if (!EffectArray.isArray(value)) throw new TypeError('Expected an array of strings.');
   const result: string[] = [];
@@ -180,7 +160,6 @@ function stringArray(value: unknown): string[] {
   }
   return result;
 }
-
 function readRequiredStringField(value: unknown, key: string): string {
   const field = recordField(value, key);
   if (typeof field !== 'string') throw new TypeError(`Expected string field ${key}.`);
@@ -193,7 +172,6 @@ async function listDeferredCodeAnchorIntentRelativePaths(root: string): Promise<
     (name, index) => index in names && isDeferredCodeAnchorIntentFilename(basename(name)),
   ).sort();
 }
-
 const RECALL_PROGRESS_PHASES = [
   'recall.shared-sync',
   'recall.obsidian-sync',
@@ -201,9 +179,7 @@ const RECALL_PROGRESS_PHASES = [
   'recall.semantic-retrieval',
   'recall.lexical-ranking',
 ] as const;
-
-const COLD_BUILD_TOOL_TIMEOUT_MILLISECONDS = 10_000;
-
+const COLD_BUILD_TOOL_TIMEOUT_MILLISECONDS = 10000;
 const CORE_TOOL_NAMES = [
   'complete_activation_retrieval_proof',
   'recall_context',
@@ -236,7 +212,6 @@ const CORE_TOOL_NAMES = [
   'procedure_publish_apply',
   'share_publish',
 ];
-
 const ADVANCED_TOOL_NAMES = [
   'context_topic_enrollment',
   'context_topic_dependency_expansion',
@@ -267,7 +242,6 @@ const ADVANCED_TOOL_NAMES = [
   'list_shared_skills',
   'install_shared_skill',
 ];
-
 const LIFECYCLE_TOOL_NAMES = [
   'context_health',
   'context_health_aggregate',
@@ -280,18 +254,15 @@ const LIFECYCLE_TOOL_NAMES = [
   'procedure_publish_preview',
   'procedure_publish_apply',
 ];
-
 interface McpFixture {
   readonly home: string;
   readonly root: string;
 }
-
 interface McpClientOptions {
   readonly environment?: Readonly<Record<string, string>>;
   readonly maxBufferSize?: number;
   readonly toolset?: 'core' | 'full' | null;
 }
-
 async function withMcpClient<T>(
   fn: (client: NativeToolClient, fixture: McpFixture) => Promise<T>,
   options: McpClientOptions = {},
@@ -306,7 +277,6 @@ async function withMcpClient<T>(
     await rm(root, {force: true, recursive: true});
   }
 }
-
 async function withMcpClientForFixture<T>(
   fixture: McpFixture,
   fn: (client: NativeToolClient, fixture: McpFixture) => Promise<T>,
@@ -319,7 +289,6 @@ async function withMcpClientForFixture<T>(
     await client.close().catch(() => undefined);
   }
 }
-
 async function connectMcpClient(fixture: McpFixture, options: McpClientOptions = {}): Promise<NativeToolClient> {
   const repoRoot = process.cwd();
   const environment = {
@@ -353,15 +322,14 @@ async function connectMcpClient(fixture: McpFixture, options: McpClientOptions =
     throw error;
   }
 }
-
 async function callCodeGraphUntilReady(client: NativeToolClient, arguments_: Readonly<Record<string, unknown>>) {
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + 90000;
   for (;;) {
     const result = await client.callTool(
       {arguments: {responseFormat: 'dual', ...arguments_}, name: 'inspect_code_graph'},
       undefined,
       {
-        timeout: 30_000,
+        timeout: 30000,
       },
     );
     const structured = decodeOptionalJsonObject(result.structuredContent);
@@ -376,10 +344,9 @@ async function callCodeGraphUntilReady(client: NativeToolClient, arguments_: Rea
     }
     const requestedDelay =
       typeof structured?.retryAfterMilliseconds === 'number' ? structured.retryAfterMilliseconds : 250;
-    await new Promise(resolve => setTimeout(resolve, Math.max(50, Math.min(1_000, requestedDelay))));
+    await new Promise(resolve => setTimeout(resolve, Math.max(50, Math.min(1000, requestedDelay))));
   }
 }
-
 function indexCodeGraph(fixture: McpFixture, repository: string): void {
   execFileSync(
     process.execPath,
@@ -398,11 +365,9 @@ function indexCodeGraph(fixture: McpFixture, repository: string): void {
     },
   );
 }
-
 function isRetryableCodeGraphState(state: unknown): boolean {
   return state === 'indexing' || state === 'timed-out' || state === 'timed_out';
 }
-
 function canonicalMemoryContent(topic: string, body: string): string {
   return EffectArray.join(
     [
@@ -419,7 +384,6 @@ function canonicalMemoryContent(topic: string, body: string): string {
     '\n',
   );
 }
-
 function largeReadBody(label: string, lineCount: number): string {
   return EffectArray.join(
     Array.from(
@@ -430,13 +394,11 @@ function largeReadBody(label: string, lineCount: number): string {
     '\n',
   );
 }
-
 async function writeCanonicalMemory(home: string, filename: string, content: string): Promise<void> {
   const directory = join(home, 'data', 'local', 'user', 'test-user', 'memories', 'durable', 'projects', 'threadnote');
   await mkdir(directory, {recursive: true});
   await writeFile(join(directory, filename), content, 'utf8');
 }
-
 function recallProgressPhases(updates: readonly ThreadnoteProgress[]): string[] {
   return EffectArray.map(updates, update => {
     const metadata = decodeOptionalJsonObject(update._meta?.['threadnote.io/progress']);
@@ -446,11 +408,9 @@ function recallProgressPhases(updates: readonly ThreadnoteProgress[]): string[] 
     return metadata.phase;
   });
 }
-
 function collapseConsecutive<T>(values: readonly T[]): T[] {
   return EffectArray.filter(values, (value, index) => index === 0 || value !== values[index - 1]);
 }
-
 function expectOrderedRecallProgress(updates: readonly ThreadnoteProgress[]): string[] {
   expect(updates.length).toBeGreaterThanOrEqual(RECALL_PROGRESS_PHASES.length);
   expect(EffectArray.map(updates, update => update.progress)).toEqual(
@@ -460,7 +420,6 @@ function expectOrderedRecallProgress(updates: readonly ThreadnoteProgress[]): st
   expect(collapseConsecutive(phases)).toEqual(RECALL_PROGRESS_PHASES);
   return phases;
 }
-
 function expectRequestLocalRecallProgress(updates: readonly ThreadnoteProgress[]): void {
   expect(updates.length).toBeGreaterThan(0);
   expect(EffectArray.map(updates, update => update.progress)).toEqual(
@@ -469,7 +428,6 @@ function expectRequestLocalRecallProgress(updates: readonly ThreadnoteProgress[]
   const phases = collapseConsecutive(recallProgressPhases(updates));
   expect(phases).toEqual(RECALL_PROGRESS_PHASES.slice(0, phases.length));
 }
-
 describe('Threadnote MCP toolsets', () => {
   it('compacts only exact raw and canonical personal memory references for the active user', () => {
     const currentUser = 'test user';
@@ -484,7 +442,6 @@ describe('Threadnote MCP toolsets', () => {
       ],
       '\n',
     );
-
     expect(compactPersonalMemoryReferences(text, currentUser)).toBe(
       EffectArray.join(
         [
@@ -511,9 +468,8 @@ describe('Threadnote MCP toolsets', () => {
       value: ['threadnote://user/test-user/memories/durable/projects/threadnote/current.md'],
     });
   });
-
   it('preserves Markdown delimiters around compacted personal memory references', () => {
-    const trailingPunctuation = Effect.pipe(',', EffectString.repeat(10_000));
+    const trailingPunctuation = Effect.pipe(',', EffectString.repeat(10000));
     const text = EffectArray.join(
       [
         '`threadnote://user/test-user/memories/durable/projects/threadnote/inline.md`',
@@ -524,7 +480,6 @@ describe('Threadnote MCP toolsets', () => {
       ],
       '\n',
     );
-
     expect(compactPersonalMemoryReferences(text, 'test user')).toBe(
       EffectArray.join(
         [
@@ -538,7 +493,6 @@ describe('Threadnote MCP toolsets', () => {
       ),
     );
   });
-
   it('compacts canonical current-user memory references deterministically', () => {
     const word = fc.stringMatching(/^[a-z]{1,8}$/u);
     const topic = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/u);
@@ -562,11 +516,9 @@ describe('Threadnote MCP toolsets', () => {
           ],
           '\n',
         );
-
         const compacted = compactPersonalMemoryReferences(input, currentUser);
         expect(compacted).toBe(expected);
         expect(compactPersonalMemoryReferences(compacted, currentUser)).toBe(expected);
-
         const sharedCurrentUri = Effect.pipe(
           rawCurrentUri,
           EffectString.replace('/memories/', '/memories/shared/default/'),
@@ -593,7 +545,6 @@ describe('Threadnote MCP toolsets', () => {
       {numRuns: 50},
     );
   });
-
   it('keeps the core server instructions compact and self-contained', async () => {
     await withMcpClient(
       async client => {
@@ -618,7 +569,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('advertises only the core tools by default', async () => {
     await withMcpClient(
       async client => {
@@ -632,7 +582,7 @@ describe('Threadnote MCP toolsets', () => {
         }
         const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         // Includes the five revisioned source-evidence tools; search-capable hosts can defer definitions.
-        expect(serializedToolsBytes).toBeLessThanOrEqual(36_000);
+        expect(serializedToolsBytes).toBeLessThanOrEqual(36000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
@@ -674,13 +624,11 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: null},
     );
   });
-
   it('advertises bounded Threadnote resource discovery without enumerating private memories', async () => {
     await withMcpClient(
       async client => {
         expect(client.getServerCapabilities()?.resources).toEqual({listChanged: true, subscribe: false});
         await expect(client.listResources()).resolves.toEqual({resources: []});
-
         const templates = await client.listResourceTemplates();
         expect(templates.resourceTemplates).toEqual([
           expect.objectContaining({
@@ -696,14 +644,12 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('reads one canonical Threadnote URI through the standard MCP resource protocol', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/protocol-resource.md';
         const content = canonicalMemoryContent('protocol-resource', 'Protocol resource body.');
         await writeCanonicalMemory(fixture.home, 'protocol-resource.md', content);
-
         await expect(client.readResource({uri})).resolves.toEqual({
           contents: [{mimeType: 'text/plain; charset=utf-8', text: content, uri}],
         });
@@ -711,7 +657,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('rejects invalid, missing, and oversized protocol resources with bounded privacy-safe errors', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -728,7 +673,7 @@ describe('Threadnote MCP toolsets', () => {
           'oversized-protocol-resource.md',
           canonicalMemoryContent(
             'oversized-protocol-resource',
-            `LOCAL_RESOURCE_PRIVATE_SENTINEL\n${Effect.pipe('x', EffectString.repeat(1_000_000))}`,
+            `LOCAL_RESOURCE_PRIVATE_SENTINEL\n${Effect.pipe('x', EffectString.repeat(1000000))}`,
           ),
         );
         const foreignAccountResources = join(fixture.home, 'data', 'other-account', 'resources');
@@ -741,7 +686,6 @@ describe('Threadnote MCP toolsets', () => {
         const activeAccountResources = join(fixture.home, 'data', 'local', 'resources');
         await mkdir(activeAccountResources, {recursive: true});
         await writeFile(join(activeAccountResources, 'invalid-utf8-protocol-resource.txt'), Uint8Array.of(0xc3, 0x28));
-
         const invalidError = await client.readResource({uri: 'file:///tmp/private-memory.md'}).then(
           () => undefined,
           error => mcpError(error),
@@ -829,7 +773,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('emits and enforces Effect Schema inputs over stdio', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -840,7 +783,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(recall?.inputSchema).toMatchObject({
           additionalProperties: false,
           properties: {
-            budgetTokens: {maximum: 1_500, minimum: 700, type: 'integer'},
+            budgetTokens: {maximum: 1500, minimum: 700, type: 'integer'},
             callerCwd: {type: 'string'},
             explain: {type: 'boolean'},
             nodeLimit: {maximum: 100, minimum: 1, type: 'integer'},
@@ -926,7 +869,6 @@ describe('Threadnote MCP toolsets', () => {
             },
           },
         });
-
         const validationError = await callErrorText(client, 'recall_context', {
           nodeLimit: 0,
           query: 'threadnote',
@@ -993,7 +935,6 @@ describe('Threadnote MCP toolsets', () => {
           text: 'task: No PR has merged to main.',
         });
         expect(handoffRegeneration).toContain('Keyword regeneration is not supported for handoff memories');
-
         const unanchoredHandoff = await client.callTool(
           {
             arguments: {
@@ -1013,7 +954,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(unanchoredHandoff.structuredContent).toMatchObject({
           exactCurrentResume: {eligible: false, reason: 'missing-code-refs'},
         });
-
         const pendingHandoff = await client.callTool(
           {
             arguments: {
@@ -1040,7 +980,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('returns a budgeted unread queue and gates full ranking explanations behind explain', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1065,11 +1004,10 @@ describe('Threadnote MCP toolsets', () => {
         const compactRead = await client.callTool(
           {arguments: {uri: 'memories/durable/projects/threadnote/structured-recall.md'}, name: 'read_context'},
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(compactRead.isError, JSON.stringify(compactRead)).not.toBe(true);
         expect(textContents(compactRead.content)[0]?.text ?? '').toContain('qz-structured-7788');
-
         const result = await client.callTool(
           {
             arguments: {
@@ -1083,13 +1021,12 @@ describe('Threadnote MCP toolsets', () => {
           undefined,
           {timeout: 5000},
         );
-
         expect(result.structuredContent).toMatchObject({
           confidence: {
             level: expect.stringMatching(/^(?:high|medium|low|no_answer)$/),
           },
           nextAction: {tool: 'read_context', uris: expect.any(Array)},
-          output: {budgetTokens: 1_500, explain: false, returnedResults: expect.any(Number)},
+          output: {budgetTokens: 1500, explain: false, returnedResults: expect.any(Number)},
           rankerVersion: 'hybrid-v8',
           results: expect.any(Array),
         });
@@ -1110,9 +1047,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(compactText).not.toContain('threadnote://user/test-user/');
         expect(
           Buffer.byteLength(JSON.stringify(result.structuredContent)) + Buffer.byteLength(compactText),
-        ).toBeLessThanOrEqual(1_500 * 3);
+        ).toBeLessThanOrEqual(1500 * 3);
         expect(result.structuredContent).not.toHaveProperty('codeGraph');
-
         const explained = await client.callTool(
           {
             arguments: {
@@ -1129,7 +1065,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         const explainedResults = requiredRecordArrayField(explained.structuredContent, 'results');
         expect(explainedResults[0]).toMatchObject({reasons: expect.any(Array), signals: expect.any(Object)});
-
         const tooSmall = await callErrorText(client, 'recall_context', {
           budgetTokens: 699,
           project: 'threadnote',
@@ -1141,7 +1076,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('supports pure seed-only navigation with coherent confidence and next action', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1177,7 +1111,6 @@ describe('Threadnote MCP toolsets', () => {
           'mcp-connection-target.md',
           memory('mcp-connection-target', 'tn_mcp_connection_target', 'Direct neighbor is also lexically unrelated.'),
         );
-
         const result = await client.callTool(
           {
             arguments: {
@@ -1189,9 +1122,8 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
-
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const structured = decodeJsonObject(result.structuredContent);
         const memoryConnections = decodeJsonObject(structured.memoryConnections);
@@ -1226,7 +1158,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('returns a typed identity-conflict warning in the default compact recall result', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1267,7 +1198,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, memory('identity-conflict-alias', 'A divergent body.'), 'utf8');
-
         const result = await client.callTool(
           {
             arguments: {
@@ -1279,9 +1209,8 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
-
         expect(result.isError).not.toBe(true);
         const structured = decodeJsonObject(result.structuredContent);
         const output = decodeJsonObject(structured.output);
@@ -1298,7 +1227,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('honors THREADNOTE_RECALL_THRESHOLD as the topical relevanceScore floor', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1307,17 +1235,15 @@ describe('Threadnote MCP toolsets', () => {
           'environment-threshold.md',
           canonicalMemoryContent('environment-threshold', 'Environment threshold anchor qz-environment-8811.'),
         );
-
         const configured = await client.callTool(
           {
             arguments: {project: 'threadnote', query: 'qz-environment-8811', responseFormat: 'dual'},
             name: 'recall_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(arrayField(configured.structuredContent, 'results')).toEqual([]);
-
         const broadened = await client.callTool(
           {
             arguments: {
@@ -1329,14 +1255,13 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(arrayField(broadened.structuredContent, 'results')?.length).toBeGreaterThan(0);
       },
       {environment: {THREADNOTE_RECALL_THRESHOLD: '1'}, toolset: 'core'},
     );
   });
-
   it('keeps progress opt-in and leaves unrelated tool handlers unchanged', async () => {
     await withMcpClient(
       async client => {
@@ -1346,14 +1271,12 @@ describe('Threadnote MCP toolsets', () => {
           resetTimeoutOnProgress: true,
           timeout: 5000,
         });
-
         expect(result.isError).not.toBe(true);
         expect(progressUpdates).toEqual([]);
       },
       {toolset: 'core'},
     );
   });
-
   it('records one-time recall pre-sync and read-only retrieval phases without private inputs', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1369,7 +1292,6 @@ describe('Threadnote MCP toolsets', () => {
           'phase-timing.md',
           canonicalMemoryContent('phase-timing', `Lexical anchor ${privateQuery}.`),
         );
-
         const result = await client.callTool(
           {arguments: {project: 'threadnote', query: privateQuery}, name: 'recall_context'},
           undefined,
@@ -1380,10 +1302,8 @@ describe('Threadnote MCP toolsets', () => {
           },
         );
         expect(result.isError).not.toBe(true);
-
         expectOrderedRecallProgress(progressUpdates);
         expect(JSON.stringify(progressUpdates)).not.toContain(privateQuery);
-
         const productionLog = await readFile(join(fixture.home, 'logs', 'threadnote.log'), 'utf8');
         const entries = EffectArray.map(EffectString.split('\n')(EffectString.trim(productionLog)), line =>
           decodeJsonObject(JSON.parse(line)),
@@ -1393,7 +1313,6 @@ describe('Threadnote MCP toolsets', () => {
           entry => entry.event === 'invocation.finished' && entry.operation === 'recall_context',
         ).at(-1);
         const phaseTimings = finished === undefined ? undefined : recordArray(finished.phaseTimings);
-
         expect(
           EffectOption.getOrUndefined(
             EffectOption.map(EffectOption.fromNullishOr(phaseTimings), __phaseTimingArray =>
@@ -1465,7 +1384,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('returns a typed degraded warning when exact and ranked lexical recovery both fail', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1473,7 +1391,6 @@ describe('Threadnote MCP toolsets', () => {
         await mkdir(lexicalRoot, {recursive: true});
         await writeFile(join(lexicalRoot, recallIndexDatabaseFilename(false)), 'not a sqlite database', 'utf8');
         await writeFile(join(lexicalRoot, 'generations'), 'blocks index recovery', 'utf8');
-
         const result = await client.callTool(
           {
             arguments: {
@@ -1484,7 +1401,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(result.isError).not.toBe(true);
         const structured = decodeJsonObject(result.structuredContent);
@@ -1499,7 +1416,6 @@ describe('Threadnote MCP toolsets', () => {
         const text = contentText(result.content);
         expect(text).toContain('Recall index warning:');
         expect(text).toContain('Recall returned 0/0 unread pointer(s)');
-
         const hookQueue = renderSessionStartRecallQueue('threadnote', text);
         expect(hookQueue).toContain('recall ran in degraded mode');
         expect(hookQueue).toContain('Do not treat this empty queue as proof that no memory exists.');
@@ -1508,7 +1424,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('keeps eight concurrent recall progress streams request-local under load', async () => {
     await withMcpClient(
       async client => {
@@ -1522,13 +1437,12 @@ describe('Threadnote MCP toolsets', () => {
               {
                 onprogress: update => progressUpdates.push(update),
                 resetTimeoutOnProgress: true,
-                timeout: 10_000,
+                timeout: 10000,
               },
             );
             return {privateQuery, progressUpdates, result};
           }),
         );
-
         for (const {privateQuery, progressUpdates, result} of calls) {
           expect(result.isError).not.toBe(true);
           expectRequestLocalRecallProgress(progressUpdates);
@@ -1538,7 +1452,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('repeats real stdio heartbeats until response or cancellation without reordering phases', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1555,7 +1468,6 @@ describe('Threadnote MCP toolsets', () => {
             ),
           ),
         );
-
         const protocolErrors: Error[] = [];
         const originalOnError = client.onerror;
         client.onerror = error => protocolErrors.push(error);
@@ -1565,10 +1477,10 @@ describe('Threadnote MCP toolsets', () => {
             {arguments: {project: 'threadnote', query: privateQuery}, name: 'recall_context'},
             undefined,
             {
-              maxTotalTimeout: 10_000,
+              maxTotalTimeout: 10000,
               onprogress: update => completedUpdates.push(update),
               resetTimeoutOnProgress: true,
-              timeout: 5_000,
+              timeout: 5000,
             },
           );
           expect(completed.isError).not.toBe(true);
@@ -1579,35 +1491,32 @@ describe('Threadnote MCP toolsets', () => {
           expect(JSON.stringify(completedUpdates)).not.toContain(privateQuery);
           await new Promise(resolve => setTimeout(resolve, 150));
           expect(protocolErrors).toEqual([]);
-
           const controller = new AbortController();
           const cancelledUpdates: ThreadnoteProgress[] = [];
           const cancelled = client.callTool(
             {arguments: {project: 'threadnote', query: privateQuery}, name: 'recall_context'},
             undefined,
             {
-              maxTotalTimeout: 10_000,
+              maxTotalTimeout: 10000,
               onprogress: update => {
                 cancelledUpdates.push(update);
                 if (!controller.signal.aborted) controller.abort();
               },
               resetTimeoutOnProgress: true,
               signal: controller.signal,
-              timeout: 5_000,
+              timeout: 5000,
             },
           );
-
           await expect(cancelled).rejects.toMatchObject({
-            code: -32_001,
+            code: -32001,
             message: expect.stringContaining('AbortError'),
           });
           expect(controller.signal.aborted).toBe(true);
           expect(recallProgressPhases(cancelledUpdates)).toEqual(['recall.shared-sync']);
           await new Promise(resolve => setTimeout(resolve, 400));
           expect(protocolErrors).toEqual([]);
-
           const followUp = await client.callTool({arguments: {}, name: 'list_context'}, undefined, {
-            timeout: 5_000,
+            timeout: 5000,
           });
           expect(followUp.isError).not.toBe(true);
         } finally {
@@ -1624,21 +1533,19 @@ describe('Threadnote MCP toolsets', () => {
       },
     );
   });
-
   it('returns exact Unicode content in one complete read_context result', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/bounded-read.md';
         const content = canonicalMemoryContent(
           'bounded-read',
-          `${Effect.pipe('Unicode evidence 🙂漢字\n', EffectString.repeat(1_000))}terminal`,
+          `${Effect.pipe('Unicode evidence 🙂漢字\n', EffectString.repeat(1000))}terminal`,
         );
         await writeCanonicalMemory(fixture.home, 'bounded-read.md', content);
-
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -1655,8 +1562,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('returns complete body and compact metadata once in the default read_context agent format', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1689,11 +1595,10 @@ describe('Threadnote MCP toolsets', () => {
           body,
         );
         await writeCanonicalMemory(fixture.home, 'text-read.md', content);
-
         const result = await client.callTool(
           {arguments: {uri: 'memories/durable/projects/threadnote/text-read.md'}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -1715,26 +1620,23 @@ describe('Threadnote MCP toolsets', () => {
         });
         expect(structured).not.toHaveProperty('uri');
         expect(structured).not.toHaveProperty('content');
-
         const canonical = await client.callTool(
           {arguments: {responseFormat: 'text', uri}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         const canonicalOutput = isReadonlyArray(canonical.content) ? canonical.content : [];
         expect(readTextAt(canonicalOutput, 0)).toBe(content);
-
         for (const invalidUri of ['projects/threadnote/text-read.md', 'memories/../durable/text-read.md']) {
           const invalid = await client.callTool({arguments: {uri: invalidUri}, name: 'read_context'}, undefined, {
-            timeout: 5_000,
+            timeout: 5000,
           });
           expect(invalid.isError).toBe(true);
         }
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('returns complete text for a formerly paged memory even when image projection is enabled', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1749,12 +1651,11 @@ describe('Threadnote MCP toolsets', () => {
           `${Effect.pipe('ASCII evidence line for image projection.\n', EffectString.repeat(400))}terminal tn_imagedread`,
         );
         await writeCanonicalMemory(fixture.home, 'imaged-read.md', content);
-
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri}, name: 'read_context'},
           undefined,
           {
-            timeout: 30_000,
+            timeout: 30000,
           },
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
@@ -1768,8 +1669,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('refuses an over-cap memory with an outline instead of a truncated first page', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1777,12 +1677,11 @@ describe('Threadnote MCP toolsets', () => {
         const sentinel = 'HUGE_READ_PRIVATE_SENTINEL';
         const content = canonicalMemoryContent(
           'huge-read',
-          `# Ledger\n## Open\n${sentinel}\n${Effect.pipe('x', EffectString.repeat(70_000))}`,
+          `# Ledger\n## Open\n${sentinel}\n${Effect.pipe('x', EffectString.repeat(70000))}`,
         );
         await writeCanonicalMemory(fixture.home, 'huge-read.md', content);
-
         const result = await client.callTool({arguments: {uri}, name: 'read_context'}, undefined, {
-          timeout: 30_000,
+          timeout: 30000,
         });
         expect(result.isError).toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -1795,19 +1694,17 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('explicitly pages a 110 KB heading-less memory without losing Unicode or hiding incompleteness', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/headingless-read.md';
-        const content = canonicalMemoryContent('headingless-read', Effect.pipe('🙂', EffectString.repeat(28_000)));
+        const content = canonicalMemoryContent('headingless-read', Effect.pipe('🙂', EffectString.repeat(28000)));
         await writeCanonicalMemory(fixture.home, 'headingless-read.md', content);
         const refusal = await client.callTool({arguments: {uri}, name: 'read_context'});
         expect(refusal.isError).toBe(true);
         const refusalContent = isReadonlyArray(refusal.content) ? refusal.content : [];
         expect(readTextAt(refusalContent, 0)).toContain('offsetBytes=0');
-
         let offsetBytes = 0;
         let sourceHash: string | undefined;
         const parts: string[] = [];
@@ -1837,8 +1734,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('resolves a relocated memory with requested and canonical URIs in both MCP result channels', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1878,11 +1774,10 @@ describe('Threadnote MCP toolsets', () => {
           )}\n`,
           {mode: 0o600},
         );
-
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: requestedUri}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -1904,14 +1799,14 @@ describe('Threadnote MCP toolsets', () => {
         const recalled = await client.callTool(
           {arguments: {project: 'threadnote', query: 'Canonical relocated evidence'}, name: 'recall_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(recalled.isError, JSON.stringify(recalled)).not.toBe(true);
         const identityAlias = `threadnote://memory/${memoryId}`;
         const aliasRead = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: identityAlias}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(aliasRead.isError, JSON.stringify(aliasRead)).not.toBe(true);
         expect(aliasRead.structuredContent).toMatchObject({content, requestedUri: identityAlias});
@@ -1923,7 +1818,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('reads stable identity aliases through tools and resources without leaking a canonical URI', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -1938,14 +1832,13 @@ describe('Threadnote MCP toolsets', () => {
         const recalled = await client.callTool(
           {arguments: {project: 'threadnote', query: 'qz-alias-4411'}, name: 'recall_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(recalled.isError, JSON.stringify(recalled)).not.toBe(true);
-
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: alias}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -1954,7 +1847,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(structured.requestedUri).toBe(alias);
         expect(structured.canonicalUri).toBeUndefined();
         expect(JSON.stringify(result)).not.toContain(canonicalUri);
-
         const replacement = await client.callTool(
           {
             arguments: {
@@ -1969,7 +1861,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(replacement.isError, JSON.stringify(replacement)).not.toBe(true);
         expect(replacement.structuredContent).toMatchObject({
@@ -1993,7 +1885,6 @@ describe('Threadnote MCP toolsets', () => {
             'utf8',
           ),
         ).resolves.toContain('Identity alias replacement evidence.');
-
         await expect(client.readResource({uri: alias})).resolves.toEqual({
           contents: [
             expect.objectContaining({
@@ -2003,10 +1894,9 @@ describe('Threadnote MCP toolsets', () => {
             }),
           ],
         });
-
         const missingAlias = 'threadnote://memory/tn_mcp_identity_missing';
         const missing = await client.callTool({arguments: {uri: missingAlias}, name: 'read_context'}, undefined, {
-          timeout: 30_000,
+          timeout: 30000,
         });
         expect(missing.isError).toBe(true);
         const missingOutput = isReadonlyArray(missing.content) ? missing.content : [];
@@ -2022,8 +1912,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('gives content- and structured-first clients recovery for a legacy moved pointer without a receipt', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2055,9 +1944,8 @@ describe('Threadnote MCP toolsets', () => {
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, content, 'utf8');
         const result = await client.callTool({arguments: {uri: requestedUri}, name: 'read_context'}, undefined, {
-          timeout: 30_000,
+          timeout: 30000,
         });
-
         expect(result.isError).toBe(true);
         const output = EffectArray.isArray(result.content) ? result.content : [];
         const recovery = {
@@ -2076,22 +1964,20 @@ describe('Threadnote MCP toolsets', () => {
         };
         expect(JSON.parse(readTextAt(output, 0) ?? '')).toEqual(recovery);
         expect(result.structuredContent).toEqual(recovery);
-
         const recalled = await client.callTool(
           {arguments: {...recovery.nextAction.arguments, responseFormat: 'dual'}, name: recovery.nextAction.tool},
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(recalled.isError).not.toBe(true);
         const recalledUris = mapRecordArrayField(recalled.structuredContent, 'results', entry => entry.uri);
         expect(recalledUris, JSON.stringify(recalled.structuredContent)).toContain(
           'memories/shared/default/durable/projects/my-product/legacy-published-pointer.md',
         );
-
         const canonical = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: canonicalUri}, name: 'read_context'},
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(canonical.isError).not.toBe(true);
         expect(decodeReadStructuredContent(canonical.structuredContent).content).toBe(content);
@@ -2099,7 +1985,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('keeps the old URI readable after remember_context relocates a personal memory', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2110,7 +1995,6 @@ describe('Threadnote MCP toolsets', () => {
           EffectString.replace('source_agent_client:', 'memory_id: tn_mcp_replace\nsource_agent_client:'),
         );
         await writeCanonicalMemory(fixture.home, 'mcp-replace-old.md', original);
-
         const replaced = await client.callTool(
           {
             arguments: {
@@ -2125,15 +2009,14 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(replaced.isError, JSON.stringify(replaced)).not.toBe(true);
         expect(replaced.structuredContent).toMatchObject({memoryUri: canonicalUri, replacementCleanupPending: false});
-
         const read = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: requestedUri}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(read.isError, JSON.stringify(read)).not.toBe(true);
         const output = isReadonlyArray(read.content) ? read.content : [];
@@ -2145,7 +2028,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('normalizes remember_context relations to stable identities and rejects duplicate or self links', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2155,7 +2037,6 @@ describe('Threadnote MCP toolsets', () => {
           EffectString.replace('source_agent_client:', 'memory_id: tn_relation_target\nsource_agent_client:'),
         );
         await writeCanonicalMemory(fixture.home, 'relation-target.md', target);
-
         const stored = await client.callTool(
           {
             arguments: {
@@ -2167,22 +2048,20 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
         const storedUri = readRequiredStringField(stored.structuredContent, 'memoryUri');
         expect(storedUri).toBe('threadnote://user/test-user/memories/durable/projects/threadnote/relation-source.md');
-
         const read = await client.callTool(
           {arguments: {responseFormat: 'text', uri: storedUri}, name: 'read_context'},
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         const readContent = isReadonlyArray(read.content) ? read.content : [];
         expect(readTextAt(readContent, 0)).toContain(
           `relation: depends_on ${memoryIdentityAlias('tn_relation_target')}`,
         );
-
         const failedClear = await client.callTool({
           arguments: {
             citationPolicy: 'defer',
@@ -2195,7 +2074,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         expect(failedClear.isError).toBe(true);
         expect(optionalRecordField(failedClear.structuredContent, 'clearedMemoryRelations')).toBeUndefined();
-
         const cleared = await client.callTool({
           arguments: {
             project: 'threadnote',
@@ -2214,7 +2092,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(cleared.structuredContent).toMatchObject({clearedMemoryRelations: 1});
         const clearedRead = await callText(client, 'read_context', {uri: storedUri});
         expect(clearedRead).not.toContain('relation:');
-
         const duplicate = await callErrorText(client, 'remember_context', {
           project: 'threadnote',
           relations: [
@@ -2225,7 +2102,6 @@ describe('Threadnote MCP toolsets', () => {
           topic: 'duplicate-relation-source',
         });
         expect(duplicate).toContain('Duplicate memory relations');
-
         const self = await callErrorText(client, 'remember_context', {
           project: 'threadnote',
           relations: [{type: 'related_to', uri: memoryIdentityAlias('tn_relation_target')}],
@@ -2238,7 +2114,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('preserves a memory project while resolving its graph root alias for code citations', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2301,7 +2176,6 @@ describe('Threadnote MCP toolsets', () => {
             stdio: 'pipe',
           },
         );
-
         const stored = await client.callTool(
           {
             arguments: {
@@ -2316,7 +2190,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
         expect(stored.structuredContent).toMatchObject({
@@ -2358,7 +2232,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(anchoredHandoff.isError, JSON.stringify(anchoredHandoff)).not.toBe(true);
         expect(contentText(anchoredHandoff.content)).not.toContain('compact exact-current resume');
@@ -2378,7 +2252,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'review_session_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(closeout.isError, JSON.stringify(closeout)).not.toBe(true);
         expect(closeout.structuredContent).toMatchObject({
@@ -2394,8 +2268,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 60_000);
-
+  }, 60000);
   it('lets remember_context relate to a shared durable that has no memory_id', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2417,7 +2290,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(targetPath, '..'), {recursive: true});
         await writeFile(targetPath, canonicalMemoryContent('shared-legacy-target', 'Shared legacy target.'), 'utf8');
-
         const stored = await client.callTool(
           {
             arguments: {
@@ -2429,7 +2301,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'remember_context',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(stored.isError, JSON.stringify(stored)).not.toBe(true);
         const storedUri = readRequiredStringField(stored.structuredContent, 'memoryUri');
@@ -2439,7 +2311,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('joins multiple under-cap URIs into one complete read_context result', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2456,7 +2327,6 @@ describe('Threadnote MCP toolsets', () => {
         for (const [index, name] of names.entries()) {
           await writeCanonicalMemory(fixture.home, `${name}.md`, contents[index]);
         }
-
         const result = await client.callTool({arguments: {responseFormat: 'dual', uris}, name: 'read_context'});
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const output = isReadonlyArray(result.content) ? result.content : [];
@@ -2473,14 +2343,12 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('keeps a large canonical read bounded while healthy auto-sync contention is quietly deferred', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/sync-contention-read.md';
         const content = canonicalMemoryContent('sync-contention-read', largeReadBody('Large-sync-contention-read', 80));
         await writeCanonicalMemory(fixture.home, 'sync-contention-read.md', content);
-
         const ready = join(fixture.root, 'share-lock-owner.ready');
         const release = join(fixture.root, 'share-lock-owner.release');
         const helper = join(import.meta.dirname, '../helpers/share-lock-receipt-owner.ts');
@@ -2499,7 +2367,7 @@ describe('Threadnote MCP toolsets', () => {
         });
         let ownerExitCode: number | undefined;
         try {
-          const readyDeadline = Date.now() + 10_000;
+          const readyDeadline = Date.now() + 10000;
           while (!(await Bun.file(ready).exists())) {
             if (owner.exitCode !== null) {
               throw TestError.make({
@@ -2510,18 +2378,16 @@ describe('Threadnote MCP toolsets', () => {
               throw TestError.make({message: 'Timed out waiting for the shared repository lock owner.'});
             await Bun.sleep(10);
           }
-
           const result = await client.callTool(
             {arguments: {responseFormat: 'dual', uri}, name: 'read_context'},
             undefined,
             {
-              timeout: 30_000,
+              timeout: 30000,
             },
           );
           const output = isReadonlyArray(result.content) ? result.content : [];
           const primary = textContent(output[0]);
           const structured = decodeReadStructuredContent(result.structuredContent);
-
           expect(result.isError, JSON.stringify(result)).not.toBe(true);
           expect(primary?.type).toBe('text');
           expect(primary?.text).toBe(content);
@@ -2530,7 +2396,7 @@ describe('Threadnote MCP toolsets', () => {
           expect(structured).not.toHaveProperty('cursor');
         } finally {
           await writeFile(release, 'release\n', 'utf8');
-          const exited = await Promise.race([owner.exited, Bun.sleep(5_000).then(() => undefined)]);
+          const exited = await Promise.race([owner.exited, Bun.sleep(5000).then(() => undefined)]);
           if (exited === undefined) owner.kill(9);
           ownerExitCode = await owner.exited;
         }
@@ -2542,8 +2408,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('persists nested package scope and uses it to rank otherwise similar monorepo memories', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2556,7 +2421,6 @@ describe('Threadnote MCP toolsets', () => {
         await writeFile(join(workspace, 'apps', 'search', 'package.json'), '{"name":"@acme/search"}\n', 'utf8');
         await writeFile(join(workspace, 'apps', 'billing', 'package.json'), '{"name":"@acme/billing"}\n', 'utf8');
         execFileSync('git', ['init', '-q'], {cwd: workspace});
-
         for (const [callerCwd, topic] of [
           [searchCwd, 'search-implementation'],
           [billingCwd, 'billing-implementation'],
@@ -2571,13 +2435,11 @@ describe('Threadnote MCP toolsets', () => {
             topic,
           });
         }
-
         const stored = await callText(client, 'read_context', {
           responseFormat: 'text',
           uri: 'threadnote://user/test-user/memories/durable/projects/monorepo/search-implementation.md',
         });
         expect(stored).toContain('workspace_scope: apps/search');
-
         await callText(client, 'remember_context', {
           callerCwd: billingCwd,
           kind: 'durable',
@@ -2594,7 +2456,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         expect(replacedSearch).toContain('workspace_scope: apps/search');
         expect(replacedSearch).not.toContain('workspace_scope: apps/billing');
-
         const repoWideUri = 'threadnote://user/test-user/memories/durable/projects/monorepo/repo-wide.md';
         await callText(client, 'remember_context', {
           kind: 'durable',
@@ -2616,7 +2477,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         const replacedRepoWide = await callText(client, 'read_context', {responseFormat: 'text', uri: repoWideUri});
         expect(replacedRepoWide).not.toContain('workspace_scope:');
-
         const recalled = await client.callTool(
           {
             arguments: {
@@ -2639,7 +2499,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('uses structured current-branch affinity to outrank a newer sibling handoff', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2686,7 +2545,6 @@ describe('Threadnote MCP toolsets', () => {
           handoff('feature/billing', '2026-08-20T00:00:00.000Z'),
           'utf8',
         );
-
         const recalled = await client.callTool(
           {
             arguments: {
@@ -2709,7 +2567,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('treats explicit project as a boundary and scopes omitted project to the caller workspace', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2733,7 +2590,6 @@ describe('Threadnote MCP toolsets', () => {
           ),
           'utf8',
         );
-
         await callText(client, 'remember_context', {
           kind: 'handoff',
           project: 'requested-project',
@@ -2750,7 +2606,6 @@ describe('Threadnote MCP toolsets', () => {
           text: 'Current repo latest handoff: workspace caller-workspace-anchor.',
           topic: 'project-precedence',
         });
-
         const result = await client.callTool(
           {
             arguments: {
@@ -2764,7 +2619,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(result.isError).not.toBe(true);
         const uris = mapRecordArrayField(result.structuredContent, 'results', item => item.uri);
@@ -2772,7 +2627,6 @@ describe('Threadnote MCP toolsets', () => {
         const workspaceUri = 'memories/handoffs/active/workspace/project-precedence.md';
         expect(uris?.[0]).toBe(requestedUri);
         expect(uris).not.toContain(workspaceUri);
-
         const defaultScoped = await client.callTool(
           {
             arguments: {
@@ -2785,7 +2639,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'recall_context',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(defaultScoped.isError).not.toBe(true);
         const defaultScopedUris = mapRecordArrayField(defaultScoped.structuredContent, 'results', item => item.uri);
@@ -2795,7 +2649,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('returns a transport-bounded Context Brief without starting a cold graph build', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -2818,7 +2671,6 @@ describe('Threadnote MCP toolsets', () => {
           ),
         );
         const checkoutId = createHash('sha256').update(`checkout-v1\n${gitCommonDirectory}`).digest('hex');
-
         const contextTool = EffectOption.getOrUndefined(
           EffectArray.findFirst((await client.listTools()).tools, tool => tool.name === 'context_brief'),
         );
@@ -2834,7 +2686,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(contextTool?.inputSchema).toMatchObject({
           additionalProperties: false,
           properties: {
-            budgetTokens: {maximum: 1_500, minimum: 800, type: 'integer'},
+            budgetTokens: {maximum: 1500, minimum: 800, type: 'integer'},
             callerCwd: {type: 'string'},
             codeRefs: {
               anyOf: expect.arrayContaining([{type: 'string'}, {items: {type: 'string'}, maxItems: 8, type: 'array'}]),
@@ -2847,7 +2699,6 @@ describe('Threadnote MCP toolsets', () => {
           },
           type: 'object',
         });
-
         const worksetOnly = await client.callTool(
           {
             arguments: {
@@ -2858,13 +2709,12 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(worksetOnly.isError, JSON.stringify(worksetOnly)).not.toBe(true);
         expect(worksetOnly.structuredContent).toBeUndefined();
         const worksetOnlyText = textContent(worksetOnly.content[0])?.text;
         expect(worksetOnlyText).toMatch(/^THREADNOTE BRIEF\nTrust: untrusted evidence; verify source\./u);
-
         const dualWorksetOnly = await client.callTool(
           {
             arguments: {
@@ -2877,7 +2727,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(dualWorksetOnly.isError, JSON.stringify(dualWorksetOnly)).not.toBe(true);
         expect(dualWorksetOnly.structuredContent).toMatchObject({
@@ -2894,7 +2744,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(worksetOnlyText ?? '')).toBeLessThanOrEqual(
           800 * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
         );
-
         const tooSmall = await client.callTool(
           {
             arguments: {
@@ -2905,11 +2754,10 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(tooSmall.isError).toBe(true);
         expect(JSON.stringify(tooSmall.content)).toContain('800');
-
         const tooManyCodeRefs = await client.callTool(
           {
             arguments: {
@@ -2920,10 +2768,9 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(tooManyCodeRefs.isError).toBe(true);
-
         for (const [codeRef, expectedMessage] of [
           ['./src/index.ts', 'canonical'],
           [`cgs_${Effect.pipe('a', EffectString.repeat(31))}`, 'cgs_<32 lowercase hex>'],
@@ -2939,12 +2786,11 @@ describe('Threadnote MCP toolsets', () => {
               name: 'context_brief',
             },
             undefined,
-            {timeout: 10_000},
+            {timeout: 10000},
           );
           expect(malformed.isError, JSON.stringify(malformed)).toBe(true);
           expect(JSON.stringify(malformed.content)).toContain(expectedMessage);
         }
-
         const budgetTokens = 800;
         const taskOnly = await client.callTool(
           {
@@ -2959,7 +2805,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(taskOnly.isError, JSON.stringify(taskOnly)).not.toBe(true);
         expect(taskOnly.structuredContent).toMatchObject({type: 'context-brief', version: 2});
@@ -2967,7 +2813,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(parseContextBriefJsonText(taskOnlyText ?? '')).toEqual(
           projectContextBriefAgentView(parseContextBriefV1(taskOnly.structuredContent)),
         );
-
         const startedAt = Date.now();
         const result = await client.callTool(
           {
@@ -2983,9 +2828,9 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
-        expect(Date.now() - startedAt).toBeLessThan(5_000);
+        expect(Date.now() - startedAt).toBeLessThan(5000);
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.structuredContent).toMatchObject({
           coverage: {gaps: expect.arrayContaining(['graph-ready-snapshot-missing'])},
@@ -3022,7 +2867,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('routes named-workset graph operations without falling through to local cold indexing', async () => {
     await withMcpClient(
       async client => {
@@ -3059,7 +2903,7 @@ describe('Threadnote MCP toolsets', () => {
         ] as const;
         for (const fixture of cases) {
           const result = await client.callTool({arguments: fixture.arguments, name: 'inspect_code_graph'}, undefined, {
-            timeout: 5_000,
+            timeout: 5000,
           });
           expect(result.isError).toBe(true);
           expect(Effect.pipe(JSON.stringify(result.content), EffectString.toLowerCase)).toContain(
@@ -3070,7 +2914,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('exposes current-source search through a separate read-only code graph tool', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -3109,7 +2952,7 @@ describe('Threadnote MCP toolsets', () => {
           required: ['operation'],
           properties: {
             base: {type: 'string'},
-            budgetTokens: {maximum: 1_500, minimum: 1, type: 'integer'},
+            budgetTokens: {maximum: 1500, minimum: 1, type: 'integer'},
             callerCwd: {type: 'string'},
             cursor: {type: 'string'},
             depth: {maximum: 8, minimum: 0, type: 'integer'},
@@ -3140,7 +2983,7 @@ describe('Threadnote MCP toolsets', () => {
             callerCwd: {type: 'string'},
             communityId: {type: 'string'},
             freshness: {enum: ['current', 'ready', 'allow-stale'], type: 'string'},
-            memberLimit: {maximum: 5_000, minimum: 0, type: 'integer'},
+            memberLimit: {maximum: 5000, minimum: 0, type: 'integer'},
             operation: {
               enum: ['stats', 'communities', 'community', 'groups', 'hubs', 'surprises', 'confidence', 'full'],
             },
@@ -3148,7 +2991,6 @@ describe('Threadnote MCP toolsets', () => {
           },
           type: 'object',
         });
-
         const impactRepository = join(fixture.root, 'impact-repository');
         await mkdir(join(impactRepository, 'src', 'code_graph'), {recursive: true});
         await writeFile(join(impactRepository, 'package.json'), '{"name":"impact-repository"}\n', 'utf8');
@@ -3168,7 +3010,6 @@ describe('Threadnote MCP toolsets', () => {
         execFileSync('git', ['add', '.'], {cwd: impactRepository});
         execFileSync('git', ['commit', '-qm', 'fixture base'], {cwd: impactRepository});
         indexCodeGraph(fixture, impactRepository);
-
         const result = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           nodeLimit: 5,
@@ -3203,11 +3044,10 @@ describe('Threadnote MCP toolsets', () => {
             name: 'inspect_code_graph',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(defaultGraph.structuredContent).toBeUndefined();
         expect(textContents(defaultGraph.content)[0]?.text ?? '').toMatch(/^TN-GRAPH\/1\n/);
-
         await writeFile(
           join(impactRepository, 'src', 'index.ts'),
           EffectArray.join(
@@ -3222,7 +3062,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         execFileSync('git', ['add', '.'], {cwd: impactRepository});
         execFileSync('git', ['commit', '-qm', 'fixture change'], {cwd: impactRepository});
-
         const impact = await callCodeGraphUntilReady(client, {
           base: 'HEAD~1',
           callerCwd: impactRepository,
@@ -3231,7 +3070,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         expect(impact.isError).not.toBe(true);
         expect(impact.structuredContent).toMatchObject({freshness: 'current', operation: 'impact'});
-
         const beforeLookup = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           operation: 'query',
@@ -3258,7 +3096,6 @@ describe('Threadnote MCP toolsets', () => {
           throw TestError.make({message: 'Expected exact code graph fixture node IDs.'});
         const beforeId = beforeNode.id;
         const afterId = afterNode.id;
-
         const exactNode = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           nodeId: beforeId,
@@ -3269,7 +3106,6 @@ describe('Threadnote MCP toolsets', () => {
           nodes: [expect.objectContaining({id: beforeId, name: 'beforeImpact'})],
           operation: 'node',
         });
-
         const neighbors = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           depth: 1,
@@ -3294,7 +3130,6 @@ describe('Threadnote MCP toolsets', () => {
           ]),
           operation: 'neighbors',
         });
-
         const stableIdPath = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           from: afterId,
@@ -3306,7 +3141,6 @@ describe('Threadnote MCP toolsets', () => {
           edges: [expect.objectContaining({sourceId: afterId, targetId: beforeId})],
           operation: 'path',
         });
-
         const missingNode = await callCodeGraphUntilReady(client, {
           callerCwd: impactRepository,
           nodeId: `cgs_${Effect.pipe('f', EffectString.repeat(32))}`,
@@ -3318,22 +3152,21 @@ describe('Threadnote MCP toolsets', () => {
           operation: 'node',
           warnings: [expect.stringContaining('was not found in the selected snapshot')],
         });
-
         const analysis = await client.callTool(
           {
             arguments: {callerCwd: impactRepository, operation: 'stats', responseFormat: 'dual'},
             name: 'analyze_code_graph',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(analysis.isError).not.toBe(true);
         expect(analysis.structuredContent).toMatchObject({
           operation: 'stats',
           output: {
             analysisCoverage: {topology: 'not-requested'},
-            structuredContent: {budgetBytes: 24 * 1_024, truncated: false},
-            text: {budgetBytes: 24 * 1_024, truncated: false},
+            structuredContent: {budgetBytes: 24 * 1024, truncated: false},
+            text: {budgetBytes: 24 * 1024, truncated: false},
           },
           result: {
             statistics: {
@@ -3351,35 +3184,33 @@ describe('Threadnote MCP toolsets', () => {
           version: 1,
         });
         expect(new TextEncoder().encode(JSON.stringify(analysis.structuredContent)).byteLength).toBeLessThanOrEqual(
-          24 * 1_024,
+          24 * 1024,
         );
         expect(new TextEncoder().encode(readTextAt(analysis.content, 0) ?? '').byteLength).toBeLessThanOrEqual(
-          24 * 1_024,
+          24 * 1024,
         );
         const analysisText = readTextAt(analysis.content, 0) ?? '';
         expect(analysisText).toContain('Graph analysis:');
         expect(analysisText).not.toContain('Read:');
         expect(analysisText).not.toContain('repositoryId');
         expect(analysisText).not.toContain('instructionPolicy');
-
         const defaultAnalysis = await client.callTool(
           {
             arguments: {callerCwd: impactRepository, operation: 'stats'},
             name: 'analyze_code_graph',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(defaultAnalysis.structuredContent).toBeUndefined();
         expect(textContents(defaultAnalysis.content)[0]?.text ?? '').toContain('Graph analysis:');
-
         const communities = await client.callTool(
           {
             arguments: {callerCwd: impactRepository, operation: 'communities', responseFormat: 'dual'},
             name: 'analyze_code_graph',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         const graphResult = optionalRecordField(communities.structuredContent, 'result');
         const communityId = recordArrayField(graphResult, 'communities')?.[0]?.id;
@@ -3396,7 +3227,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'analyze_code_graph',
           },
           undefined,
-          {timeout: 30_000},
+          {timeout: 30000},
         );
         expect(community.isError).not.toBe(true);
         expect(community.structuredContent).toMatchObject({
@@ -3412,8 +3243,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 90_000);
-
+  }, 90000);
   it('returns a cold no-ready result without starting a background graph build', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -3430,7 +3260,6 @@ describe('Threadnote MCP toolsets', () => {
         execFileSync('git', ['config', 'user.name', 'Threadnote Test'], {cwd: repository});
         execFileSync('git', ['add', '.'], {cwd: repository});
         execFileSync('git', ['commit', '-qm', 'fixture'], {cwd: repository});
-
         const gitCommonDirectory = await realpath(
           Effect.pipe(
             execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -3455,7 +3284,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(graphLock, '..'), {recursive: true});
         await writeFile(graphLock, `${process.pid}:cold-build-test\n`, {encoding: 'utf8', mode: 0o600});
-
         const startedAt = Date.now();
         const unavailable = await client.callTool(
           {
@@ -3475,7 +3303,6 @@ describe('Threadnote MCP toolsets', () => {
           version: 1,
         });
         expect(JSON.stringify(unavailable.content)).toContain('did not start a background build');
-
         const repeated = await client.callTool(
           {
             arguments: {callerCwd: repository, operation: 'query', query: 'coldGraphSymbol'},
@@ -3493,8 +3320,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 20_000);
-
+  }, 20000);
   it('serves ready stale graphs and rejects cited replacements with typed recovery before mutation', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -3518,7 +3344,6 @@ describe('Threadnote MCP toolsets', () => {
           }),
           EffectString.trim,
         );
-
         indexCodeGraph(fixture, repository);
         const first = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
@@ -3559,7 +3384,6 @@ describe('Threadnote MCP toolsets', () => {
           topic: citationTopic,
         });
         const citationBefore = await readFile(citationPath, 'utf8');
-
         const gitCommonDirectory = await realpath(
           Effect.pipe(
             execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -3584,7 +3408,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(graphLock, '..'), {recursive: true});
         await writeFile(graphLock, `${process.pid}:stale-ready-test\n`, {encoding: 'utf8', mode: 0o600});
-
         try {
           await writeFile(
             join(repository, 'src', 'after-pull.ts'),
@@ -3600,7 +3423,6 @@ describe('Threadnote MCP toolsets', () => {
               ),
             ),
           );
-
           const dirtyStale = await client.callTool(
             {
               arguments: {
@@ -3612,7 +3434,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           expect(dirtyStale.isError).not.toBe(true);
           expect(dirtyStale.structuredContent).toMatchObject({
@@ -3622,7 +3444,6 @@ describe('Threadnote MCP toolsets', () => {
             snapshot: {commit: indexedCommit, id: firstSnapshotId},
           });
           expect(optionalRecordField(dirtyStale.structuredContent, 'state')).toBeUndefined();
-
           const rejectedCitation = await client.callTool(
             {
               arguments: {
@@ -3638,7 +3459,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'remember_context',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           expect(rejectedCitation.isError).toBe(true);
           expect(rejectedCitation.structuredContent).toMatchObject({
@@ -3665,7 +3486,6 @@ describe('Threadnote MCP toolsets', () => {
           expect(JSON.stringify(rejectedCitation.content)).toContain('threadnote graph index --no-vectors');
           expect(JSON.stringify(rejectedCitation)).not.toContain(repository);
           await expect(readFile(citationPath, 'utf8')).resolves.toBe(citationBefore);
-
           const deferredCitation = await client.callTool(
             {
               arguments: {
@@ -3680,7 +3500,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'remember_context',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           expect(deferredCitation.isError).not.toBe(true);
           expect(deferredCitation.structuredContent).toMatchObject({
@@ -3730,7 +3550,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'recall_context',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           const privateOutboxRecallUris = mapRecordArrayField(
             privateOutboxRecall.structuredContent,
@@ -3738,7 +3558,6 @@ describe('Threadnote MCP toolsets', () => {
             result => result.uri,
           );
           expect(privateOutboxRecallUris).not.toContain(citationUri);
-
           const cancellationTopic = 'deferred-anchor-cancellation';
           const cancellationUri = `threadnote://user/test-user/memories/durable/projects/threadnote/${cancellationTopic}.md`;
           await callText(client, 'remember_context', {
@@ -3766,7 +3585,6 @@ describe('Threadnote MCP toolsets', () => {
             topic: cancellationTopic,
           });
           expect(await listDeferredCodeAnchorIntentRelativePaths(pendingRoot)).toHaveLength(1);
-
           const archiveTopic = 'deferred-anchor-archive';
           const archiveUri = `threadnote://user/test-user/memories/durable/projects/threadnote/${archiveTopic}.md`;
           await callText(client, 'remember_context', {
@@ -3781,7 +3599,6 @@ describe('Threadnote MCP toolsets', () => {
           expect(await listDeferredCodeAnchorIntentRelativePaths(pendingRoot)).toHaveLength(2);
           await callText(client, 'archive_context', {uri: archiveUri});
           expect(await listDeferredCodeAnchorIntentRelativePaths(pendingRoot)).toHaveLength(1);
-
           const forgetTopic = 'deferred-anchor-forget';
           const forgetUri = `threadnote://user/test-user/memories/durable/projects/threadnote/${forgetTopic}.md`;
           await callText(client, 'remember_context', {
@@ -3796,10 +3613,8 @@ describe('Threadnote MCP toolsets', () => {
           expect(await listDeferredCodeAnchorIntentRelativePaths(pendingRoot)).toHaveLength(2);
           await callText(client, 'forget', {uri: forgetUri});
           expect(await listDeferredCodeAnchorIntentRelativePaths(pendingRoot)).toHaveLength(1);
-
           execFileSync('git', ['add', '.'], {cwd: repository});
           execFileSync('git', ['commit', '-qm', 'clean pulled commit'], {cwd: repository});
-
           const stale = await client.callTool(
             {
               arguments: {
@@ -3811,7 +3626,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           expect(stale.isError).not.toBe(true);
           expect(stale.structuredContent).toMatchObject({
@@ -3832,7 +3647,7 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
           expect(repeatedStale.isError).not.toBe(true);
           expect(repeatedStale.structuredContent).toMatchObject({
@@ -3845,7 +3660,6 @@ describe('Threadnote MCP toolsets', () => {
         } finally {
           await rm(graphLock, {force: true});
         }
-
         indexCodeGraph(fixture, repository);
         await callCodeGraphUntilReady(client, {
           callerCwd: repository,
@@ -3871,7 +3685,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(automaticBacklink.isError).not.toBe(true);
         const automaticBrief = parseContextBriefV1(automaticBacklink.structuredContent);
@@ -3908,7 +3722,7 @@ describe('Threadnote MCP toolsets', () => {
         const boundedRecovery = await client.callTool(
           {
             arguments: {
-              budgetTokens: 1_500,
+              budgetTokens: 1500,
               callerCwd: repository,
               codeRefs: recoveryCodeRefs,
               mode: 'locate',
@@ -3919,7 +3733,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(boundedRecovery.isError, JSON.stringify(boundedRecovery)).not.toBe(true);
         const boundedRecoveryBrief = parseContextBriefV1(boundedRecovery.structuredContent);
@@ -3950,7 +3764,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(
           Buffer.byteLength(JSON.stringify(boundedRecovery.structuredContent)) +
             Buffer.byteLength(boundedRecoveryText ?? ''),
-        ).toBeLessThanOrEqual(1_500 * 3);
+        ).toBeLessThanOrEqual(1500 * 3);
         const compactFloor = await client.callTool(
           {
             arguments: {
@@ -3965,7 +3779,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(compactFloor.isError, JSON.stringify(compactFloor)).not.toBe(true);
         expect(compactFloor.structuredContent).toBeUndefined();
@@ -3997,7 +3811,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'context_brief',
           },
           undefined,
-          {timeout: 10_000},
+          {timeout: 10000},
         );
         expect(evaluationFloor.isError, JSON.stringify(evaluationFloor)).not.toBe(true);
         expect(evaluationFloor.structuredContent).toBeUndefined();
@@ -4019,7 +3833,7 @@ describe('Threadnote MCP toolsets', () => {
         const idempotent = await client.callTool(
           {arguments: {uri: citationUri}, name: 'finalize_code_refs'},
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(idempotent.structuredContent).toMatchObject({
           conflictCount: 0,
@@ -4032,8 +3846,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'full'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('serves a divergent-HEAD new worktree from stale shared evidence while its builder is blocked', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4051,7 +3864,6 @@ describe('Threadnote MCP toolsets', () => {
         execFileSync('git', ['add', '.'], {cwd: repository});
         execFileSync('git', ['commit', '-qm', 'shared graph base'], {cwd: repository});
         indexCodeGraph(fixture, repository);
-
         const first = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
           operation: 'query',
@@ -4061,7 +3873,6 @@ describe('Threadnote MCP toolsets', () => {
         const firstSnapshotRecord = decodeOptionalJsonObject(firstSnapshot);
         expect(typeof firstSnapshotRecord?.id).toBe('string');
         expect(typeof firstSnapshotRecord?.commit).toBe('string');
-
         const branch = 'divergent-linked';
         const worktree = join(fixture.root, 'divergent-linked-worktree');
         execFileSync('git', ['branch', branch], {cwd: repository});
@@ -4073,7 +3884,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         execFileSync('git', ['add', '.'], {cwd: worktree});
         execFileSync('git', ['commit', '-qm', 'divergent graph head'], {cwd: worktree});
-
         const gitCommonDirectory = await realpath(
           Effect.pipe(
             execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -4098,7 +3908,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(graphLock, '..'), {recursive: true});
         await writeFile(graphLock, `${process.pid}:divergent-worktree-test\n`, {encoding: 'utf8', mode: 0o600});
-
         try {
           const startedAt = Date.now();
           const borrowed = await client.callTool(
@@ -4112,9 +3921,9 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 5_000},
+            {timeout: 5000},
           );
-          expect(Date.now() - startedAt).toBeLessThan(5_000);
+          expect(Date.now() - startedAt).toBeLessThan(5000);
           expect(borrowed.isError).not.toBe(true);
           expect(borrowed.structuredContent).toMatchObject({
             freshness: 'stale',
@@ -4130,8 +3939,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {environment: {THREADNOTE_CODE_GRAPH_PREWARM: '0'}, toolset: 'core'},
     );
-  }, 40_000);
-
+  }, 40000);
   it('keeps graphs immediately available across new TypeScript, Python, and Rust worktrees and edits', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4167,7 +3975,6 @@ describe('Threadnote MCP toolsets', () => {
             sourcePath: 'src/lib.rs',
           },
         ] as const;
-
         for (const repositoryFixture of repositories) {
           const repository = join(fixture.root, `${repositoryFixture.name}-repository`);
           // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
@@ -4182,7 +3989,6 @@ describe('Threadnote MCP toolsets', () => {
           execFileSync('git', ['add', '.'], {cwd: repository});
           execFileSync('git', ['commit', '-qm', 'fixture'], {cwd: repository});
           indexCodeGraph(fixture, repository);
-
           const first = await callCodeGraphUntilReady(client, {
             callerCwd: repository,
             operation: 'query',
@@ -4195,12 +4001,10 @@ describe('Threadnote MCP toolsets', () => {
           });
           const firstSnapshot = decodeOptionalJsonObject(optionalRecordField(firstStructured, 'snapshot'));
           expect(typeof firstSnapshot?.id).toBe('string');
-
           const branch = `${repositoryFixture.name}-linked`;
           const worktree = join(fixture.root, `${repositoryFixture.name}-worktree`);
           execFileSync('git', ['branch', branch], {cwd: repository});
           execFileSync('git', ['worktree', 'add', worktree, branch], {cwd: repository});
-
           const attachedStartedAt = Date.now();
           const attached = await client.callTool(
             {
@@ -4213,9 +4017,9 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 10_000},
+            {timeout: 10000},
           );
-          expect(Date.now() - attachedStartedAt).toBeLessThan(5_000);
+          expect(Date.now() - attachedStartedAt).toBeLessThan(5000);
           expect(attached.isError).not.toBe(true);
           expect(attached.structuredContent).toMatchObject({
             freshness: 'deferred',
@@ -4223,7 +4027,6 @@ describe('Threadnote MCP toolsets', () => {
             snapshot: {id: firstSnapshot?.id},
           });
           expect(optionalRecordField(attached.structuredContent, 'state')).toBeUndefined();
-
           const source = join(worktree, repositoryFixture.sourcePath);
           await writeFile(
             source,
@@ -4245,21 +4048,19 @@ describe('Threadnote MCP toolsets', () => {
               name: 'inspect_code_graph',
             },
             undefined,
-            {timeout: 10_000},
+            {timeout: 10000},
           );
           const editedStructured = decodeOptionalJsonObject(edited.structuredContent);
-          expect(Date.now() - editedStartedAt).toBeLessThan(5_000);
+          expect(Date.now() - editedStartedAt).toBeLessThan(5000);
           expect(edited.isError).not.toBe(true);
           expect(editedStructured?.state).toBeUndefined();
           expect(editedStructured?.freshness).toBe('deferred');
-
           const refresh = await callCodeGraphUntilReady(client, {
             base: 'HEAD',
             callerCwd: worktree,
             operation: 'impact',
           });
           expect(refresh.structuredContent).toMatchObject({freshness: 'current', operation: 'impact'});
-
           const refreshed = await callCodeGraphUntilReady(client, {
             callerCwd: worktree,
             operation: 'query',
@@ -4276,8 +4077,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {environment: {THREADNOTE_CODE_GRAPH_PREWARM: '0'}, toolset: 'core'},
     );
-  }, 120_000);
-
+  }, 120000);
   it('keeps ordinary watched reads deferred until an explicit current inspection', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4295,7 +4095,6 @@ describe('Threadnote MCP toolsets', () => {
         execFileSync('git', ['add', '.'], {cwd: repository});
         execFileSync('git', ['commit', '-qm', 'fixture'], {cwd: repository});
         indexCodeGraph(fixture, repository);
-
         const first = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
           operation: 'query',
@@ -4318,10 +4117,9 @@ describe('Threadnote MCP toolsets', () => {
             name: 'inspect_code_graph',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(hot.structuredContent).toMatchObject({freshness: 'deferred', snapshot: {id: firstSnapshotId}});
-
         await writeFile(
           join(repository, 'src', 'index.ts'),
           'export function afterSessionWatch(): string { return "after"; }\n',
@@ -4339,20 +4137,18 @@ describe('Threadnote MCP toolsets', () => {
             name: 'inspect_code_graph',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(deferred.structuredContent).toMatchObject({
           freshness: 'deferred',
           snapshot: {id: firstSnapshotId},
         });
-
         const refresh = await callCodeGraphUntilReady(client, {
           base: 'HEAD',
           callerCwd: repository,
           operation: 'impact',
         });
         expect(refresh.structuredContent).toMatchObject({freshness: 'current', operation: 'impact'});
-
         const refreshed = await callCodeGraphUntilReady(client, {
           callerCwd: repository,
           operation: 'query',
@@ -4365,7 +4161,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(optionalRecordField(optionalRecordField(refreshed.structuredContent, 'snapshot'), 'id')).not.toBe(
           firstSnapshotId,
         );
-
         const removed = await client.callTool(
           {
             arguments: {
@@ -4377,7 +4172,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'inspect_code_graph',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         const removedNodes = recordArrayField(removed.structuredContent, 'nodes');
         expect(
@@ -4390,8 +4185,7 @@ describe('Threadnote MCP toolsets', () => {
       },
       {toolset: 'core'},
     );
-  }, 60_000);
-
+  }, 60000);
   it('reviews task-closeout candidates and records a deferred decision without writing memory', async () => {
     await withMcpClient(
       async client => {
@@ -4410,20 +4204,17 @@ describe('Threadnote MCP toolsets', () => {
         expect(review).toContain('Do not write these additional candidates until the user decides');
         expect(reviewId).toBeDefined();
         expect(candidateId).toBeDefined();
-
         const deferred = await callText(client, 'apply_memory_candidates', {
           action: 'defer',
           candidateId,
           reviewId,
           revision: 1,
         });
-
         expect(deferred).toContain(`Deferred candidate ${candidateId}`);
       },
       {toolset: 'core'},
     );
   });
-
   it('preserves defer and reject for legacy generic candidates without writing memory', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4454,7 +4245,6 @@ describe('Threadnote MCP toolsets', () => {
           delete candidate.kind;
           review.candidates = candidates;
           await writeFile(reviewPath, `${JSON.stringify(review, undefined, 2)}\n`, 'utf8');
-
           const result = await callText(client, 'apply_memory_candidates', {
             action,
             candidateId,
@@ -4473,7 +4263,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('includes the current bounded KnowledgeDeltaV1 in review and decision results', async () => {
     await withMcpClient(
       async client => {
@@ -4497,7 +4286,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'review_session_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(review.isError, JSON.stringify(review)).not.toBe(true);
         const reviewStructured = decodeJsonObject(review.structuredContent);
@@ -4519,7 +4308,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         const deltaItems = recordArray(knowledgeDelta.items);
         const candidateId = readRequiredStringField(deltaItems[0], 'candidateId');
-
         const deferred = await client.callTool(
           {
             arguments: {
@@ -4531,7 +4319,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'apply_memory_candidates',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(deferred.isError, JSON.stringify(deferred)).not.toBe(true);
         expect(deferred.structuredContent).toMatchObject({
@@ -4549,7 +4337,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('does not form durable candidates from empty structured closeout fields', async () => {
     await withMcpClient(
       async client => {
@@ -4569,7 +4356,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'review_session_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.content).toEqual([
@@ -4580,7 +4367,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('keeps structured durable fields disabled by the handoff-only candidate policy', async () => {
     await withMcpClient(
       async client => {
@@ -4600,7 +4386,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'review_session_context',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         const structured = decodeJsonObject(result.structuredContent);
@@ -4610,7 +4396,6 @@ describe('Threadnote MCP toolsets', () => {
       {environment: {THREADNOTE_CANDIDATE_POLICY: 'handoff-only'}, toolset: 'core'},
     );
   });
-
   it('writes an approved candidate only with explicit approval and the current revision', async () => {
     await withMcpClient(
       async client => {
@@ -4625,7 +4410,6 @@ describe('Threadnote MCP toolsets', () => {
         });
         const reviewId = /Review (review-[a-f0-9]+)/.exec(review)?.[1];
         const candidateId = /candidate: (review-[a-f0-9]+-1)/.exec(review)?.[1];
-
         await expect(
           callErrorText(client, 'apply_memory_candidates', {
             action: 'approve',
@@ -4634,7 +4418,6 @@ describe('Threadnote MCP toolsets', () => {
             revision: 1,
           }),
         ).resolves.toContain('approved=true');
-
         const editedText =
           '## Decisions\n- Use a stable candidate review identifier as canonical approved candidates guidance.';
         const appliedResult = await client.callTool(
@@ -4650,10 +4433,9 @@ describe('Threadnote MCP toolsets', () => {
             name: 'apply_memory_candidates',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         const applied = contentText(appliedResult.content);
-
         expect(appliedResult.isError, applied).not.toBe(true);
         expect(applied).toContain(
           'Stored memory: threadnote://user/test-user/memories/durable/projects/threadnote/approved-candidates.md',
@@ -4668,7 +4450,6 @@ describe('Threadnote MCP toolsets', () => {
             ],
           },
         });
-
         const approvedUri = 'memories/durable/projects/threadnote/approved-candidates.md';
         const unreviewedUri = 'memories/durable/projects/threadnote/approved-candidates-shadow.md';
         await callText(client, 'remember_context', {
@@ -4679,7 +4460,6 @@ describe('Threadnote MCP toolsets', () => {
           text: Effect.pipe('Unreviewed speculation about approved candidates. ', EffectString.repeat(8)),
           topic: 'approved-candidates-shadow',
         });
-
         const approvedRecall = await client.callTool({
           arguments: {
             nodeLimit: 12,
@@ -4693,7 +4473,6 @@ describe('Threadnote MCP toolsets', () => {
         const approvedUris = mapRecordArrayField(approvedRecall.structuredContent, 'results', result => result.uri);
         expect(approvedUris).toContain(approvedUri);
         expect(approvedUris).not.toContain(unreviewedUri);
-
         const ordinaryRecall = await client.callTool({
           arguments: {
             nodeLimit: 12,
@@ -4710,7 +4489,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('records an applying-state content mismatch as a recoverable conflict', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4775,7 +4553,6 @@ describe('Threadnote MCP toolsets', () => {
           ),
           'utf8',
         );
-
         await expect(
           callErrorText(client, 'apply_memory_candidates', {
             action: 'approve',
@@ -4791,7 +4568,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('requires explicit destructive approval before legacy cross-URI cleanup', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4834,7 +4610,6 @@ describe('Threadnote MCP toolsets', () => {
           ),
           'utf8',
         );
-
         const reviewText = await callText(client, 'review_session_context', {
           evidence: ['apps/threadnote/test/integration/mcp.native-tools.test.ts'],
           handoff: ['Continue after the remaining release check.'],
@@ -4900,7 +4675,6 @@ describe('Threadnote MCP toolsets', () => {
         };
         review.candidates = candidates;
         await writeFile(reviewPath, `${JSON.stringify(review, undefined, 2)}\n`, 'utf8');
-
         await expect(
           callErrorText(client, 'apply_memory_candidates', {
             action: 'approve',
@@ -4912,7 +4686,6 @@ describe('Threadnote MCP toolsets', () => {
         ).resolves.toContain('allowDestructiveReplacement=true');
         expect(existsSync(replacementPath)).toBe(true);
         expect(existsSync(destinationPath)).toBe(true);
-
         const recovered = await client.callTool(
           {
             arguments: {
@@ -4926,7 +4699,7 @@ describe('Threadnote MCP toolsets', () => {
             name: 'apply_memory_candidates',
           },
           undefined,
-          {timeout: 5_000},
+          {timeout: 5000},
         );
         expect(recovered.isError, JSON.stringify(recovered)).not.toBe(true);
         expect(existsSync(replacementPath)).toBe(false);
@@ -4937,7 +4710,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('allows a reviewed shared-memory conflict to create a personal candidate', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -4988,7 +4760,6 @@ describe('Threadnote MCP toolsets', () => {
         const candidateId = /candidate: (review-[a-f0-9]+-1)/.exec(review)?.[1];
         expect(review).toContain('[replace]');
         expect(review).toContain('/memories/shared/team/');
-
         const applied = await callText(client, 'apply_memory_candidates', {
           action: 'approve',
           approved: true,
@@ -4997,7 +4768,6 @@ describe('Threadnote MCP toolsets', () => {
           reviewId,
           revision: 1,
         });
-
         expect(applied).toContain(
           `Stored memory: threadnote://user/test-user/memories/durable/projects/threadnote/${topic}.md`,
         );
@@ -5005,7 +4775,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('requires evidence before proposing durable candidates', async () => {
     await withMcpClient(
       async client => {
@@ -5023,7 +4792,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('preserves v4 citations and rejects malformed or future schemas through archive_context', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5088,7 +4856,6 @@ describe('Threadnote MCP toolsets', () => {
           'Public MCP archive must retain precise source evidence.',
         );
         await writeFile(validPath, validContent, 'utf8');
-
         await expect(
           callText(client, 'archive_context', {
             kind: 'handoff',
@@ -5130,7 +4897,6 @@ describe('Threadnote MCP toolsets', () => {
         );
         expect(archived?.body).not.toContain(citation.id);
         expect(archived?.body).not.toContain(citation.fileContentHash.value);
-
         const blocked = [
           {
             message: 'newer than supported',
@@ -5173,7 +4939,6 @@ describe('Threadnote MCP toolsets', () => {
             candidate.newline ?? '\n',
           );
           await writeFile(path, content, 'utf8');
-
           await expect(
             callErrorText(client, 'archive_context', {
               kind: 'handoff',
@@ -5189,7 +4954,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('names replaceUri on rejected writes and preserves the canonical memory before a full URI replacement', async () => {
     await withMcpClient(async (client, fixture) => {
       const compact = 'memories/handoffs/active/threadnote/uri-validation.md';
@@ -5199,7 +4963,6 @@ describe('Threadnote MCP toolsets', () => {
       await callText(client, 'remember_context', {...input, text: 'Original synthetic memory.'});
       const original = await readFile(memoryPath, 'utf8');
       const files = (await readdir(join(fixture.home, 'data'), {recursive: true})).sort();
-
       for (const replaceUri of [
         compact,
         'https://example.invalid/status.md',
@@ -5211,14 +4974,12 @@ describe('Threadnote MCP toolsets', () => {
         await expect(readFile(memoryPath, 'utf8')).resolves.toBe(original);
         expect((await readdir(join(fixture.home, 'data'), {recursive: true})).sort()).toEqual(files);
       }
-
       await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
       const replaced = await readFile(memoryPath, 'utf8');
       expect(replaced).toContain('Accepted synthetic replacement.');
       expect(replaced).not.toContain('Original synthetic memory.');
     });
   });
-
   it('requires remember_context replaceUri for same-topic schema rewrites and citation clearing', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5251,7 +5012,6 @@ describe('Threadnote MCP toolsets', () => {
           '\n',
         );
         await writeFile(futurePath, future, 'utf8');
-
         await expect(
           callErrorText(client, 'remember_context', {
             project: 'threadnote',
@@ -5260,7 +5020,6 @@ describe('Threadnote MCP toolsets', () => {
           }),
         ).resolves.toContain('newer than supported');
         await expect(readFile(futurePath, 'utf8')).resolves.toBe(future);
-
         const citationTopic = 'remember-implicit-citation-clear';
         const citationUri = `threadnote://user/test-user/memories/durable/projects/threadnote/${citationTopic}.md`;
         const citationPath = join(directory, `${citationTopic}.md`);
@@ -5291,7 +5050,6 @@ describe('Threadnote MCP toolsets', () => {
           'Citation-bearing MCP memory.',
         );
         await writeFile(citationPath, cited, 'utf8');
-
         await expect(
           callErrorText(client, 'remember_context', {
             project: 'threadnote',
@@ -5300,7 +5058,6 @@ describe('Threadnote MCP toolsets', () => {
           }),
         ).resolves.toContain(`replaceUri: "${citationUri}"`);
         await expect(readFile(citationPath, 'utf8')).resolves.toBe(cited);
-
         const replaced = await callText(client, 'remember_context', {
           project: 'threadnote',
           replaceUri: citationUri,
@@ -5315,7 +5072,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-
   it('advertises the complete toolset when requested', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5331,7 +5087,6 @@ describe('Threadnote MCP toolsets', () => {
         expect(readAlias?.inputSchema.properties).toMatchObject({
           responseFormat: {enum: ['agent', 'dual', 'text']},
         });
-
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/read-alias.md';
         const citation = createMemoryCodeCitation({
           extractorSet: 'mcp-read-alias-projection',
@@ -5443,7 +5198,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('preserves raw maintenance date input for validation while normalizing owner labels', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5473,7 +5227,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('requires the advertised recall feedback core inputs without recording rejected calls', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5486,7 +5239,6 @@ describe('Threadnote MCP toolsets', () => {
           uri: {type: 'string', minLength: 1},
           project: {type: 'string'},
         });
-
         const query = 'sensitive fixture feedback query';
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/feedback-input.md';
         const feedbackPath = join(fixture.home, 'feedback', 'recall-events-v1.jsonl');
@@ -5506,7 +5258,6 @@ describe('Threadnote MCP toolsets', () => {
           expect(JSON.stringify(rejected)).not.toContain(query);
           await expect(readFile(feedbackPath, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
         }
-
         const arguments_ = {action: 'useful', query, uri};
         const recorded = await client.callTool({arguments: arguments_, name: 'recall_feedback'});
         expect(recorded.isError).not.toBe(true);
@@ -5516,7 +5267,6 @@ describe('Threadnote MCP toolsets', () => {
         const duplicate = await client.callTool({arguments: arguments_, name: 'recall_feedback'});
         expect(duplicate.isError).not.toBe(true);
         expect(await readFile(feedbackPath, 'utf8')).toBe(stored);
-
         const pinned = await client.callTool({
           arguments: {...arguments_, action: 'pin', project: 'threadnote'},
           name: 'recall_feedback',
@@ -5529,7 +5279,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('records applied recall feedback through the full MCP tool without persisting the raw query', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5539,7 +5288,6 @@ describe('Threadnote MCP toolsets', () => {
           arguments: {action: 'applied', project: 'threadnote', query, uri},
           name: 'recall_feedback',
         });
-
         expect(result.isError).not.toBe(true);
         expect(result.content).toEqual(
           expect.arrayContaining([
@@ -5557,7 +5305,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('returns read-only structured context health from the full toolset', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5577,7 +5324,6 @@ describe('Threadnote MCP toolsets', () => {
           arguments: {callerCwd: fixture.root, kind: 'durable', project: 'threadnote'},
           name: 'context_health',
         });
-
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent).toMatchObject({
           findings: [],
@@ -5609,7 +5355,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('returns read-only aggregate health and a provider-neutral schedule plan from the full toolset', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5624,7 +5369,6 @@ describe('Threadnote MCP toolsets', () => {
           project: 'threadnote',
           status: 'clean',
         });
-
         const shareDirectory = join(fixture.home, 'share');
         await mkdir(shareDirectory, {recursive: true});
         await writeFile(
@@ -5644,7 +5388,6 @@ describe('Threadnote MCP toolsets', () => {
           ]),
           status: 'unknown',
         });
-
         const schedule = await client.callTool({
           arguments: {cadenceMinutes: 60, project: 'threadnote', team: ['runtime', 'platform']},
           name: 'context_health_schedule',
@@ -5670,7 +5413,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('previews structured context-health repairs without writing state', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5678,7 +5420,6 @@ describe('Threadnote MCP toolsets', () => {
           arguments: {callerCwd: fixture.root, kind: 'durable', project: 'threadnote'},
           name: 'context_health_repair_preview',
         });
-
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent).toMatchObject({
           knowledgeDelta: {
@@ -5703,21 +5444,25 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('applies an MCP repair only with the exact normalized preview selector', async () => {
     const repairFailureMessage = (stage: 'pause' | 'preview' | 'apply', result: Readonly<Record<string, unknown>>) =>
       JSON.stringify({
         stage,
         ...(typeof result.code === 'string' || (typeof result.code === 'number' && Number.isFinite(result.code))
-          ? {code: String(result.code).slice(0, 80)}
+          ? {code: EffectString.slice(0, 80)(String(result.code))}
           : {}),
-        ...(typeof result.message === 'string' ? {message: result.message.slice(0, 400)} : {}),
-        text: Array.isArray(result.content)
-          ? result.content
-              .slice(0, 3)
-              .flatMap((item: {readonly type?: unknown; readonly text?: unknown} | null) =>
-                item?.type === 'text' && typeof item.text === 'string' ? [item.text.slice(0, 400)] : [],
-              )
+        ...(typeof result.message === 'string' ? {message: EffectString.slice(0, 400)(result.message)} : {}),
+        text: EffectArray.isArray(result.content)
+          ? EffectArray.flatMap(result.content.slice(0, 3), (item: unknown) =>
+              typeof item === 'object' &&
+              item !== null &&
+              'type' in item &&
+              'text' in item &&
+              item.type === 'text' &&
+              typeof item.text === 'string'
+                ? [EffectString.slice(0, 400)(item.text)]
+                : [],
+            )
           : [],
       });
     await withMcpClient(
@@ -5753,7 +5498,6 @@ describe('Threadnote MCP toolsets', () => {
         )[0];
         expect(proposal).toBeDefined();
         if (proposal === undefined) throw new Error('expected MCP selector repair proposal');
-
         const missingSelector = await client.callTool({
           arguments: {
             approved: true,
@@ -5794,7 +5538,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('refreshes shared audit provenance and leaves shared bytes unchanged while applying personal hygiene', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5847,13 +5590,11 @@ describe('Threadnote MCP toolsets', () => {
         const sharedContent = canonicalMemoryContent(topic, 'Reviewed shared notes.');
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, sharedContent, 'utf8');
-
         const output = await callText(client, 'compact_context', {
           apply: true,
           project: 'threadnote',
           topic,
         });
-
         expect(output).toContain('Records scanned: 2');
         expect(output).toContain('same project/topic spans multiple memory scopes');
         expect(output).toContain('threadnote://user/test-user/memories/shared/platform/');
@@ -5867,7 +5608,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('applies an exact-duplicate survivor update and retirement through compact_context', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5889,13 +5629,11 @@ describe('Threadnote MCP toolsets', () => {
         await mkdir(memoryDirectory, {recursive: true});
         await writeFile(survivorPath, content, 'utf8');
         await writeFile(duplicatePath, content, 'utf8');
-
         const output = await callText(client, 'compact_context', {
           apply: true,
           project: 'threadnote',
           topic,
         });
-
         expect(output).toContain('Updated kept memory:');
         expect(output).toContain('Forgot exact duplicate:');
         expect(existsSync(duplicatePath)).toBe(false);
@@ -5910,7 +5648,6 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('imports distinct portable filenames without collisions', async () => {
     await withMcpClient(
       async (client, fixture) => {
@@ -5918,7 +5655,6 @@ describe('Threadnote MCP toolsets', () => {
         await mkdir(importRoot, {recursive: true});
         await writeFile(join(importRoot, 'a b.txt'), 'alpha-42 immediate recall anchor', 'utf8');
         await writeFile(join(importRoot, 'a+b.txt'), 'beta-99 distinct portable filename', 'utf8');
-
         await client.callTool({arguments: {query: 'alpha-42'}, name: 'recall_context'}, undefined, {timeout: 5000});
         const imported = await client.callTool(
           {
@@ -5935,7 +5671,6 @@ describe('Threadnote MCP toolsets', () => {
             'threadnote://resources/import-collision-test/a%2Bb.txt',
           ]),
         });
-
         await callText(client, 'recall_context', {
           pinnedUri: 'threadnote://resources/import-collision-test',
           query: 'alpha-42',
@@ -5944,16 +5679,13 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'full'},
     );
   });
-
   it('rejects generic imports into managed memory namespaces', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const source = join(fixture.root, 'attempted-memory-import.md');
         await writeFile(source, 'unlocked replacement attempt', 'utf8');
         const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/import-race.md';
-
         const error = await callErrorText(client, 'add_resource', {path: source, to: uri});
-
         expect(error).toContain('cannot write Threadnote memory namespaces');
         expect(error).toContain('remember_context');
         await expect(
@@ -5978,7 +5710,6 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 });
-
 function contextBriefAgentTextAnswer(text: string): string {
   return (
     Effect.pipe(
@@ -5995,14 +5726,15 @@ function contextBriefAgentTextAnswer(text: string): string {
     ) ?? ''
   );
 }
-
-function contextBriefAgentTextCards(text: string): readonly {readonly path: string; readonly ref: string}[] {
+function contextBriefAgentTextCards(text: string): readonly {
+  readonly path: string;
+  readonly ref: string;
+}[] {
   return EffectArray.flatMap(Effect.pipe(text, EffectString.split('\n')), line => {
     const match = /^(?:\d+)\. (cgs_[a-f0-9]{32}) — .*? — (.+):\d+ — .* — /u.exec(line);
     return match?.[1] === undefined || match[2] === undefined ? [] : [{path: match[2], ref: match[1]}];
   });
 }
-
 async function callText(client: NativeToolClient, name: string, args: Record<string, unknown>): Promise<string> {
   const result = await client.callTool({arguments: args, name}, undefined, {timeout: 5000});
   expect(isReadonlyArray(result.content)).toBe(true);
@@ -6010,7 +5742,6 @@ async function callText(client: NativeToolClient, name: string, args: Record<str
   expect(result.isError, text).not.toBe(true);
   return text;
 }
-
 async function callErrorText(client: NativeToolClient, name: string, args: Record<string, unknown>): Promise<string> {
   const result = await client.callTool({arguments: args, name}, undefined, {timeout: 5000});
   expect(isReadonlyArray(result.content)).toBe(true);
