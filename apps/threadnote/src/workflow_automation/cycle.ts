@@ -34,7 +34,7 @@ import {
   pinNativeCycleTree,
   makeWorkflowGitAdapter,
   nativeCycleRelativePath,
-  readNativeCycleTreeEntry,
+  readNativeCycleTreeEntries,
 } from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
 import type {NativeAuthoringCall} from './authoring_artifacts.js';
@@ -158,12 +158,22 @@ const readOnlyIncoming = Effect.fn('workflowAutomation.cycle.incoming')(function
     return yield* fail('source-drift', 'Source changed during declared-base scope verification.');
   const files = [...new Set([...EffectRecord.keys(captured.files), ...EffectRecord.keys(scope.files)])].sort();
   const paths = EffectArray.filter(files, file => !checkNativeCycleScope(phase, [file]));
+  const preservedPaths = new Set(baseline.preservedFiles);
+  const preservedEntries = yield* readNativeCycleTreeEntries(
+    repo,
+    baseline.tree,
+    EffectArray.filter(paths, file => preservedPaths.has(file)),
+  );
+  const upstreamEntries = yield* readNativeCycleTreeEntries(
+    repo,
+    common,
+    EffectArray.filter(paths, file => !preservedPaths.has(file)),
+  );
   const incoming = [];
   for (const file of paths) {
     const actual = captured.entries[file] ?? scope.entries[file];
-    const preserved = baseline.preservedFiles.includes(file);
-    const sourceTree = preserved ? baseline.tree : common;
-    const expected = yield* readNativeCycleTreeEntry(repo, sourceTree, file);
+    const preserved = preservedPaths.has(file);
+    const expected = (preserved ? preservedEntries : upstreamEntries)[file];
     if (!actual || expected.blob !== actual.blob || expected.mode !== actual.mode)
       return yield* fail(
         'phase-scope',

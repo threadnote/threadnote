@@ -66,43 +66,80 @@ const resolveObject = Effect.fn('workflowAutomation.cycle.resolveObject')(functi
   return value;
 });
 
+/** Read exact entries in bounded literal-path batches from one immutable tree. */
+export const readNativeCycleTreeEntries = Effect.fn('workflowAutomation.cycle.readTreeEntries')(function* (
+  repo: string,
+  reference: string,
+  files: readonly string[],
+) {
+  if (files.length > 8192) return yield* fail('snapshot-capacity', 'Tree lookup exceeds the bounded file manifest.');
+  for (const file of files)
+    if (!nativeCycleRelativePath(file)) return yield* fail('invalid-scope', 'Source paths must be relative.');
+  const entries: Record<string, {mode: string; blob: string}> = Object.create(null);
+  if (!files.length) return entries;
+  const root = yield* canonicalRepo(repo);
+  const tree = yield* resolveObject(root, reference, 'tree');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Object identity length is validated above; retain native zero identity semantics.
+  const absent = {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
+  const paths = [...new Set(files)];
+  for (const file of paths) entries[file] = absent;
+  let offset = 0;
+  while (offset < paths.length) {
+    const batch: string[] = [];
+    let argumentBytes = 0;
+    while (offset < paths.length && batch.length < 128) {
+      const file = paths[offset];
+      const size = new TextEncoder().encode(`:(literal)${file}`).byteLength + 1;
+      if (batch.length && argumentBytes + size > 24_576) break;
+      batch.push(file);
+      argumentBytes += size;
+      offset++;
+    }
+    const requested = new Set(batch);
+    const seen = new Set<string>();
+    const records = yield* git(root, [
+      'ls-tree',
+      '-r',
+      '-z',
+      tree,
+      '--',
+      ...EffectArray.map(batch, file => `:(literal)${file}`),
+    ]);
+    for (const record of Effect2.pipe(records, EffectString.split('\0'))) {
+      if (!record) continue;
+      const tab = Effect2.pipe(
+        record,
+        EffectString.indexOf('\t'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      if (tab < 0) return yield* fail('invalid-snapshot', 'Git returned an unsupported tree entry.');
+      const file = Effect2.pipe(record, EffectString.slice(tab + 1));
+      if (!requested.has(file)) continue;
+      const [mode, type, blob] = Effect2.pipe(record, EffectString.slice(0, tab), EffectString.split(' '));
+      if (
+        !mode ||
+        !cycleTreeModes.has(mode) ||
+        type !== (mode === '160000' ? 'commit' : 'blob') ||
+        !blob ||
+        !objectId.test(blob)
+      )
+        return yield* fail('invalid-snapshot', 'Git returned an unsupported tree entry.');
+      if (seen.has(file)) return yield* fail('invalid-snapshot', 'Git returned duplicate exact tree entries.');
+      seen.add(file);
+      entries[file] = {mode, blob};
+    }
+  }
+  return entries;
+});
+
 /** Read one exact Git tree entry, including its executable/symlink/submodule mode. */
 export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.readTreeEntry')(function* (
   repo: string,
   reference: string,
   file: string,
 ) {
-  if (!nativeCycleRelativePath(file)) return yield* fail('invalid-scope', 'Source paths must be relative.');
-  const root = yield* canonicalRepo(repo);
-  const tree = yield* resolveObject(root, reference, 'tree');
-  const records = yield* git(root, ['ls-tree', '-r', '-z', tree, '--', `:(literal)${file}`]);
-  const entries = EffectArray.filter(Effect2.pipe(records, EffectString.split('\0')), Boolean);
-  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
-  if (!entries.length) return {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
-  let entry: {mode: string; blob: string} | undefined;
-  for (const record of entries) {
-    const tab = Effect2.pipe(
-      record,
-      EffectString.indexOf('\t'),
-      Effect2.Option.getOrElse(() => -1),
-    );
-    if (tab < 0) return yield* fail('invalid-snapshot', 'Git returned an unsupported tree entry.');
-    const [mode, type, blob] = Effect2.pipe(record, EffectString.slice(0, tab), EffectString.split(' '));
-    const path = Effect2.pipe(record, EffectString.slice(tab + 1));
-    if (path !== file) continue;
-    if (
-      !mode ||
-      !cycleTreeModes.has(mode) ||
-      type !== (mode === '160000' ? 'commit' : 'blob') ||
-      !blob ||
-      !objectId.test(blob)
-    )
-      return yield* fail('invalid-snapshot', 'Git returned an unsupported tree entry.');
-    if (entry) return yield* fail('invalid-snapshot', 'Git returned duplicate exact tree entries.');
-    entry = {mode, blob};
-  }
-  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
-  return entry ?? {mode: absentTreeMode, blob: '0'.repeat(tree.length)};
+  const entries = yield* readNativeCycleTreeEntries(repo, reference, [file]);
+  return entries[file];
 });
 
 const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(function* (repo: string) {
