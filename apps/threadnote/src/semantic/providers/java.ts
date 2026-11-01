@@ -27,7 +27,7 @@ import {
   type JavaDiagnosticModel,
 } from './java_diagnostics.js';
 import {javaDiagnosticBundle} from './java_diagnostics_bundle.js';
-import {javaTypeDefinitionCommand} from './java_snapshot.js';
+import {captureJavaSnapshotModel, javaTypeDefinitionCommand} from './java_snapshot.js';
 import {makeJavaProject} from './java_project.js';
 
 class JavaSourceTargetFault extends Schema.TaggedError<JavaSourceTargetFault, {readonly brand: unique symbol}>()(
@@ -229,15 +229,14 @@ export interface JavaSessionOptions extends Omit<LspSessionOptions, 'policy' | '
 /** The shared session alone owns documents, versions and epochs; Java adds readiness and checked URI translation. */
 export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
   function* (client: LspClient, options: JavaSessionOptions) {
+    const diagnosticModel = captureJavaSnapshotModel(options.diagnosticModel);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const crypto = yield* Crypto.Crypto;
     const serviceReady = yield* Deferred.make<void, LspFault>();
     const basis = structuredClone(options.basis);
     const settings = structuredClone(options.prepared.settings);
-    if (
-      options.diagnosticModel.javaHomeUri !== (yield* path.toFileUrl(options.runtime.projectJavaHome + path.sep)).href
-    )
+    if (diagnosticModel.javaHomeUri !== (yield* path.toFileUrl(options.runtime.projectJavaHome + path.sep)).href)
       return yield* LspFault.make({code: 'prerequisite'});
     const sourceUri = yield* makeJavaSourceUri(options.prepared.sourceRoots);
     let retire: Effect.Effect<void> = Effect.void;
@@ -295,10 +294,10 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
           extendedClientCapabilities: {classFileContentsSupport: false, progressReportProvider: true},
         },
         requiredCommands: [javaDiagnosticBundle.command, javaTypeDefinitionCommand],
-        requestDiagnostics: requestJavaDiagnostics(client, options.diagnosticModel, verify),
+        requestDiagnostics: requestJavaDiagnostics(client, diagnosticModel, verify),
         requestTypeDefinition: (request, position, milliseconds) =>
           Effect.gen(function* () {
-            const result = yield* requestJavaTypeDefinition(client, options.diagnosticModel, sourceVerify)(
+            const result = yield* requestJavaTypeDefinition(client, diagnosticModel, sourceVerify)(
               request,
               position,
               milliseconds,
