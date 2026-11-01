@@ -1230,6 +1230,23 @@ const sessionFixture = makeSessionFixture();
 const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
 
 describe('Java session source targets', () => {
+  effectIt.effect('refuses an oversized UTF-16 Java attachment before changing the current view', () =>
+    Effect.gen(function* () {
+      const f = yield* sessionFixture;
+      const {session, current, calls} = yield* f.create([]);
+      const before = calls.length;
+      const text = EffectString.repeat(1024 * 1024)('𐐀') + 'a';
+      const changed = {...current, documentVersion: 2, content: sha256HexSync(text)};
+      expect(yield* Effect.flip(session.upsert(changed, text, 'java', 1000))).toMatchObject({
+        _tag: 'LspFault',
+        code: 'capacity',
+      });
+      expect(calls).toHaveLength(before);
+      expect(yield* session.observation(current.uri)).toEqual(current);
+      expect(yield* session.available).toBe(true);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   for (const operation of ['query', 'rename', 'diagnostics', 'upsert'] as const) {
     effectIt.effect(`checks SDK integrity after a rejected Java ${operation}`, () =>
       Effect.gen(function* () {

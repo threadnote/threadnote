@@ -11,7 +11,12 @@ import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Observation} from '@threadnote/semantic/contracts';
-import {makeLspSession, makeSemanticNotifications, type LspDiagnosticRequest} from '../../src/semantic/provider.js';
+import {
+  makeLspSession,
+  makeSemanticNotifications,
+  type LspDiagnosticRequest,
+  type LspSessionPolicy,
+} from '../../src/semantic/provider.js';
 import {LspFault, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {javaDiagnosticBundle} from '../../src/semantic/providers/java_diagnostics_bundle.js';
 import {
@@ -204,8 +209,150 @@ const sharedPolicy = {
   limitations: [],
   requiredCommands: [javaDiagnosticBundle.command],
 };
+const limitedSession = Effect.fn('test.limitedJavaSession')(function* (limits?: LspSessionPolicy['documentLimits']) {
+  const f = yield* sharedFixture;
+  const requests: string[] = [];
+  const notices: string[] = [];
+  const native = {
+    ...client(method =>
+      Effect.sync(() => {
+        requests.push(method);
+        return method === 'initialize' ? {capabilities} : [];
+      }),
+    ),
+    notify: (method: string) =>
+      Effect.sync(() => {
+        notices.push(method);
+      }),
+  };
+  const session = yield* makeLspSession(native, {
+    basis: f.basis,
+    notifications: f.notifications,
+    roots: [],
+    profile: {},
+    ready: Effect.void,
+    startupMilliseconds: 1000,
+    policy: {...sharedPolicy, ...(limits === undefined ? {} : {documentLimits: limits})},
+  });
+  const uri = (slot: number) => new URL('Source' + slot + '.java', f.projectUri + '/').href;
+  const attach = (slot: number, text: string, version: number) =>
+    session.upsert(
+      {...f.basis, uri: uri(slot), content: sha256HexSync(text), documentVersion: version},
+      text,
+      'java',
+      1000,
+    );
+  return {session, requests, notices, uri, attach};
+});
 
 describe('Java request diagnostics', () => {
+  effectIt.effect.prop(
+    'preserves the prospective view model and refuses capacity without changing state or wire history',
+    [
+      Schema.Array(
+        Schema.Struct({
+          slot: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 4})),
+          units: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 12})),
+          supplementary: Schema.Boolean,
+        }),
+      ).check(Schema.isBetweenLength(1, 16)),
+    ],
+    ([commands]) =>
+      Effect.gen(function* () {
+        const f = yield* limitedSession({maxDocuments: 3, maxTextLength: 8, maxTotalTextLength: 12});
+        const model = new Map<number, string>();
+        for (const [index, command] of commands.entries()) {
+          const text = EffectString.repeat(command.units)(command.supplementary ? '𐐀' : 'a');
+          const prospective = new Map(model);
+          prospective.set(command.slot, text);
+          const allowed =
+            prospective.size <= 3 &&
+            text.length <= 8 &&
+            EffectArray.reduce([...prospective.values()], 0, (total, value) => total + value.length) <= 12;
+          const before = yield* Effect.forEach([...model.keys()], slot => f.session.observation(f.uri(slot)));
+          const noticeCount = f.notices.length,
+            requestCount = f.requests.length;
+          const result = yield* Effect.exit(f.attach(command.slot, text, index + 1));
+          if (allowed) {
+            expect((yield* result).content).toBe(sha256HexSync(text));
+            model.set(command.slot, text);
+          } else {
+            expect(yield* Effect.flip(result)).toMatchObject({_tag: 'LspFault', code: 'capacity'});
+            expect(f.notices).toHaveLength(noticeCount);
+            expect(f.requests).toHaveLength(requestCount);
+            expect(yield* Effect.forEach([...model.keys()], slot => f.session.observation(f.uri(slot)))).toEqual(
+              before,
+            );
+            if (!model.has(command.slot)) expect(yield* f.session.observation(f.uri(command.slot))).toBeUndefined();
+          }
+          for (const [slot, value] of model)
+            expect((yield* f.session.observation(f.uri(slot)))?.content).toBe(sha256HexSync(value));
+          expect(yield* f.session.available).toBe(true);
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 32}},
+  );
+
+  effectIt.effect('accepts exact limits, reuses replacement capacity and keeps captured policy limits', () =>
+    Effect.gen(function* () {
+      const limits = {maxDocuments: 2, maxTextLength: 8, maxTotalTextLength: 12};
+      const f = yield* limitedSession(limits);
+      limits.maxDocuments = 9;
+      limits.maxTextLength = 99;
+      limits.maxTotalTextLength = 999;
+      yield* f.attach(0, 'aaaaaaaa', 1);
+      yield* f.attach(1, 'bbbb', 1);
+      expect(yield* Effect.flip(f.attach(0, 'aaaaaaaaa', 2))).toMatchObject({code: 'capacity'});
+      expect(yield* Effect.flip(f.attach(2, '', 1))).toMatchObject({code: 'capacity'});
+      yield* f.attach(0, 'aaaa', 3);
+      yield* f.attach(1, 'bbbbbbbb', 2);
+      expect(yield* Effect.flip(f.attach(0, 'aaaaa', 4))).toMatchObject({code: 'capacity'});
+      expect(yield* f.session.available).toBe(true);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect('retains the shared default text limit when a backend does not select smaller limits', () =>
+    Effect.gen(function* () {
+      const f = yield* limitedSession();
+      const text = EffectString.repeat(2 * 1024 * 1024 + 1)('a');
+      expect((yield* f.attach(0, text, 1)).content).toBe(sha256HexSync(text));
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect('refuses invalid host limits before initializing the provider', () =>
+    Effect.gen(function* () {
+      const f = yield* sharedFixture;
+      for (const limits of [
+        {maxDocuments: 0, maxTextLength: 8, maxTotalTextLength: 12},
+        {maxDocuments: 257, maxTextLength: 8, maxTotalTextLength: 12},
+        {maxDocuments: 2, maxTextLength: 0.5, maxTotalTextLength: 12},
+        {maxDocuments: 2, maxTextLength: 8, maxTotalTextLength: NaN},
+      ]) {
+        let initialized = false;
+        const native = client(() =>
+          Effect.sync(() => {
+            initialized = true;
+            return {capabilities};
+          }),
+        );
+        expect(
+          (yield* Effect.exit(
+            makeLspSession(native, {
+              basis: f.basis,
+              notifications: f.notifications,
+              roots: [],
+              profile: {},
+              ready: Effect.void,
+              startupMilliseconds: 1000,
+              policy: {...sharedPolicy, documentLimits: limits},
+            }),
+          ))._tag,
+        ).toBe('Failure');
+        expect(initialized).toBe(false);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   it('uses Java literal tilde spelling without decoding a physical percent sequence', () => {
     expect(javaFileUri(new URL('file:///project%7E/Main.java'))).toBe('file:///project~/Main.java');
     expect(javaFileUri(new URL('file:///project%257E/Main.java'))).toBe('file:///project%257E/Main.java');
