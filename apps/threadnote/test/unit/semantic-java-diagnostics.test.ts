@@ -27,6 +27,7 @@ import {
   JavaProjectionImage,
   javaProjectionDigest,
   javaTypeDefinitionCommand,
+  javaFileUri,
 } from '../../src/semantic/providers/java_snapshot.js';
 
 const model: JavaDiagnosticModel = {
@@ -205,6 +206,49 @@ const sharedPolicy = {
 };
 
 describe('Java request diagnostics', () => {
+  it('uses Java literal tilde spelling without decoding a physical percent sequence', () => {
+    expect(javaFileUri(new URL('file:///project%7E/Main.java'))).toBe('file:///project~/Main.java');
+    expect(javaFileUri(new URL('file:///project%257E/Main.java'))).toBe('file:///project%257E/Main.java');
+    expect(javaFileUri(new URL('file:///project%25%7E/Main.java'))).toBe('file:///project%25~/Main.java');
+  });
+  it('preserves decoded file identity and URL input under repeated Java tilde normalization', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('a', '~', '%', '7', 'E', '?', '#', '[', ']', '|', '^', ' ', 'é', '𐐀'), {
+          minLength: 1,
+          maxLength: 24,
+        }),
+        parts => {
+          const name = EffectArray.join(parts, '');
+          const url = new URL(
+            'file:///source/' + EffectString.replaceAll('~', '%7E')(encodeURIComponent(name)) + '.java',
+          );
+          const before = url.href;
+          const uri = javaFileUri(url);
+          expect(decodeURIComponent(new URL(uri).pathname)).toBe('/source/' + name + '.java');
+          expect(javaFileUri(new URL(uri))).toBe(uri);
+          expect(url.href).toBe(before);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+  effectIt.effect('uses Java tilde spelling for project, SDK, source and library snapshot identities', () =>
+    Effect.gen(function* () {
+      const selected = yield* makeJavaDiagnosticModel({
+        project: '/private/projection~',
+        javaHome: '/sdk/java21~',
+        sourceRoots: ['/project/source~'],
+        libraries: ['/cache/dependency~.jar'],
+      });
+      expect(selected).toMatchObject({
+        projectUri: 'file:///private/projection~/',
+        javaHomeUri: 'file:///sdk/java21~/',
+        sourceRoots: ['file:///project/source~/'],
+        libraries: ['file:///cache/dependency~.jar'],
+      });
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
   it('binds full projection metadata and refuses missing, unsolicited or changed model evidence', () => {
     const projection = projectionImage();
     const selected = {

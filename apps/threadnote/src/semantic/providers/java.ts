@@ -27,7 +27,7 @@ import {
   type JavaDiagnosticModel,
 } from './java_diagnostics.js';
 import {javaDiagnosticBundle} from './java_diagnostics_bundle.js';
-import {captureJavaSnapshotModel, javaTypeDefinitionCommand} from './java_snapshot.js';
+import {captureJavaSnapshotModel, javaTypeDefinitionCommand, javaFileUri} from './java_snapshot.js';
 import {makeJavaProject} from './java_project.js';
 
 class JavaSourceTargetFault extends Schema.TaggedError<JavaSourceTargetFault, {readonly brand: unique symbol}>()(
@@ -107,7 +107,7 @@ export const makeJavaSourceUri = Effect.fn('semantic.makeJavaSourceUri')(functio
             identity(yield* fs.stat(file)) !== id
           )
             return yield* unsupported();
-          return (yield* path.toFileUrl(canonical)).href;
+          return javaFileUri(yield* path.toFileUrl(canonical));
         }
         const next = path.dirname(ancestor);
         if (next === ancestor) break;
@@ -236,7 +236,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
     const serviceReady = yield* Deferred.make<void, LspFault>();
     const basis = structuredClone(options.basis);
     const settings = structuredClone(options.prepared.settings);
-    if (diagnosticModel.javaHomeUri !== (yield* path.toFileUrl(options.runtime.projectJavaHome + path.sep)).href)
+    if (diagnosticModel.javaHomeUri !== javaFileUri(yield* path.toFileUrl(options.runtime.projectJavaHome + path.sep)))
       return yield* LspFault.make({code: 'prerequisite'});
     const sourceUri = yield* makeJavaSourceUri(options.prepared.sourceRoots);
     let retire: Effect.Effect<void> = Effect.void;
