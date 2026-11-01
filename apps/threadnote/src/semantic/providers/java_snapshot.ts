@@ -15,7 +15,7 @@ const Input = Schema.Struct({
   contentSha256: Digest,
   utf16Length: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2 * 1024 * 1024})),
 });
-const CompilerOptions = Schema.Record(
+export const JavaCompilerOptions = Schema.Record(
   Schema.String.check(Schema.isMaxLength(8192), Schema.isPattern(/^org\.eclipse\.jdt\.core\.compiler\./u)),
   Schema.String.check(Schema.isMaxLength(8192), Schema.makeFilter(wellFormed)),
 ).check(
@@ -119,7 +119,7 @@ export const JavaSnapshotHeader = Schema.Struct({
     javaHomeUri: Schema.String,
     sourceRoots: Schema.Array(Schema.String).check(Schema.isBetweenLength(1, 32)),
     libraries: Schema.Array(Schema.String).check(Schema.isMaxLength(128)),
-    compilerOptions: CompilerOptions,
+    compilerOptions: JavaCompilerOptions,
     annotationProcessing: Schema.Literal('disabled-for-snapshot'),
     projection: Schema.optional(JavaProjectionImage),
   }),
@@ -158,7 +158,7 @@ export const makeJavaSnapshotModel = Effect.fn('semantic.makeJavaSnapshotModel')
   const compilerOptions =
     selected.compilerOptions === undefined
       ? undefined
-      : Object.freeze(yield* Schema.decodeEffect(CompilerOptions)({...selected.compilerOptions}));
+      : Object.freeze(yield* Schema.decodeEffect(JavaCompilerOptions)({...selected.compilerOptions}));
   const projectionDigest =
     selected.projectionDigest === undefined ? undefined : yield* Schema.decodeEffect(Digest)(selected.projectionDigest);
   if (projectionDigest !== undefined && compilerOptions === undefined) return yield* protocol();
