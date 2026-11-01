@@ -588,67 +588,68 @@ describe('Java request diagnostics', () => {
       }).pipe(Effect.provide(BunServices.layer)),
     );
 
-    effectIt.effect.prop(
-      'never returns a partial Java edit set when any target is excluded',
-      [
-        Schema.Literals(['changes', 'documentChanges']),
-        Schema.Literals(['Excluded.java', 'Readme.txt']),
-        Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
-        Schema.Boolean,
-      ],
-      ([representation, excluded, position, reverse]) =>
-        Effect.gen(function* () {
-          const f = yield* preparedSessionFixture();
-          const before = yield* semanticTreeDigest(f.project);
-          const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
-          const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
-          const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
-          const edits = [{range, newText: 'Next'}];
-          const edit: Schema.Json =
-            representation === 'changes'
-              ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
-              : {
-                  documentChanges: EffectArray.map(targets, name => ({
-                    textDocument: {uri: f.uris[name], version: null},
-                    edits,
-                  })),
-                };
-          const safeAction = {
-            title: 'Safe',
-            edit: {changes: {[f.uris['Included.java']]: edits}},
-          };
-          for (const operation of ['rename', 'code-action'] as const) {
-            const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
-            const wireBefore = JSON.stringify(response);
-            const made = yield* f.create(response);
-            const session = yield* made.result;
-            const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
-            const result = yield* session.prepare(
-              operation,
-              current,
-              {line: 0, character: 15},
-              operation === 'rename' ? 'Next' : undefined,
-              1000,
-            );
-            if (operation === 'rename') expect(result.status).toBe('unsupported');
-            else {
-              expect(result.status).toBe('ok');
-              if (result.status === 'ok')
-                expect(result.items).toEqual([
-                  expect.objectContaining({
-                    title: 'Safe',
-                    files: [expect.objectContaining({uri: f.uris['Included.java']})],
-                  }),
-                ]);
+    for (const representation of ['changes', 'documentChanges'] as const) {
+      effectIt.effect.prop(
+        `never returns a partial Java edit set when any target is excluded (${representation})`,
+        [
+          Schema.Literals(['Excluded.java', 'Readme.txt']),
+          Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
+          Schema.Boolean,
+        ],
+        ([excluded, position, reverse]) =>
+          Effect.gen(function* () {
+            const f = yield* preparedSessionFixture();
+            const before = yield* semanticTreeDigest(f.project);
+            const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
+            const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
+            const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
+            const edits = [{range, newText: 'Next'}];
+            const edit: Schema.Json =
+              representation === 'changes'
+                ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
+                : {
+                    documentChanges: EffectArray.map(targets, name => ({
+                      textDocument: {uri: f.uris[name], version: null},
+                      edits,
+                    })),
+                  };
+            const safeAction = {
+              title: 'Safe',
+              edit: {changes: {[f.uris['Included.java']]: edits}},
+            };
+            for (const operation of ['rename', 'code-action'] as const) {
+              const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
+              const wireBefore = JSON.stringify(response);
+              const made = yield* f.create(response);
+              const session = yield* made.result;
+              const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+              const result = yield* session.prepare(
+                operation,
+                current,
+                {line: 0, character: 15},
+                operation === 'rename' ? 'Next' : undefined,
+                1000,
+              );
+              if (operation === 'rename') expect(result.status).toBe('unsupported');
+              else {
+                expect(result.status).toBe('ok');
+                if (result.status === 'ok')
+                  expect(result.items).toEqual([
+                    expect.objectContaining({
+                      title: 'Safe',
+                      files: [expect.objectContaining({uri: f.uris['Included.java']})],
+                    }),
+                  ]);
+              }
+              expect(JSON.stringify(response)).toBe(wireBefore);
+              expect(yield* session.available).toBe(true);
+              expect(yield* session.observation(current.uri)).toEqual(current);
             }
-            expect(JSON.stringify(response)).toBe(wireBefore);
-            expect(yield* session.available).toBe(true);
-            expect(yield* session.observation(current.uri)).toEqual(current);
-          }
-          expect(yield* semanticTreeDigest(f.project)).toBe(before);
-        }).pipe(Effect.provide(BunServices.layer)),
-      {arbitrary: {runs: 32}},
-    );
+            expect(yield* semanticTreeDigest(f.project)).toBe(before);
+          }).pipe(Effect.provide(BunServices.layer)),
+        {arbitrary: {runs: 16}},
+      );
+    }
 
     effectIt.effect('refuses an entire result or edit when one physical target is logically excluded', () =>
       Effect.gen(function* () {
