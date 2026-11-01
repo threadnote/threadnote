@@ -110,6 +110,7 @@ describe('native request schema discovery', () => {
         expectedRevision: expect.stringContaining('cycle inspect'),
         phaseId: expect.any(String),
         snapshotId: expect.stringContaining('fresh immutable'),
+        rebase: expect.stringContaining('Requires acceptedHead, reason and explicit userAuthority'),
       },
     ],
     [
