@@ -531,7 +531,17 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
     for (const route of resolution.routes) {
       attemptedSteps.push('current-source');
       const current = yield* Effect.gen(function* () {
-        const status = yield* query.status(config.agentContextHome, route.identity.repoRoot, statusOptions);
+        // Revalidate the discovered route without publishing its association again.
+        const readStatus = () =>
+          typeof query.statusForPublishedIdentity === 'function'
+            ? query.statusForPublishedIdentity(
+                config.agentContextHome,
+                route.identity.repoRoot,
+                route.identity,
+                statusOptions,
+              )
+            : query.status(config.agentContextHome, route.identity.repoRoot, statusOptions);
+        const status = yield* readStatus();
         if (
           status.stale ||
           status.freshness !== 'current' ||
@@ -584,7 +594,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
               !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
             )
               return undefined;
-            const after = yield* query.status(config.agentContextHome, route.identity.repoRoot, statusOptions);
+            const after = yield* readStatus();
             if (!sameExactSnapshot(status, after)) return undefined;
             return citationSourceExcerpt(
               bytes,

@@ -181,7 +181,14 @@ const codeTopicFixture = Effect.gen(function* () {
   const original = parseMemoryDocument(uri, accepted)!;
   const caseId = topicMaintenanceCaseId(original);
   const stateFile = path.join(home, 'context-maintenance/state-v2.json');
-  for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
+  let baseline: ReturnType<typeof publicStatus>['cases'][number] | undefined;
+  for (let tick = 0; tick < 8; tick++) {
+    yield* runContextMaintenance(config, {cwd: repository});
+    const status = yield* readContextMaintenanceStatus(config, 'fixture');
+    baseline = Option.getOrUndefined(EffectArray.findFirst(status.cases, item => item.caseId === caseId));
+    if (baseline?.disposition === 'resolved' && baseline.reason === 'topic-unchanged') break;
+  }
+  expect(baseline).toMatchObject({caseId, disposition: 'resolved', reason: 'topic-unchanged'});
   return {
     fs,
     path,
