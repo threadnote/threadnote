@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
-import {Cause, Context, Deferred, Effect, Fiber, Result, Schema} from 'effect';
+import {Cause, Context, Deferred, Effect, Fiber, Logger, Result, Schema} from 'effect';
 import {expect} from 'vitest';
 import {TestClock} from 'effect/testing';
 import {
@@ -211,6 +211,10 @@ it.effect('allocates fresh state for a reused Effect and concurrent requests', (
 
 it.effect('bounds stalled failure cleanup and retains the original failure or interruption', () =>
   Effect.gen(function* () {
+    const logs: string[] = [];
+    const logger = Logger.make<unknown, void>(options => {
+      logs.push(String(options.message));
+    });
     for (const interrupted of [false, true]) {
       const entered = yield* Deferred.make<void>();
       let attempts = 0;
@@ -226,7 +230,7 @@ it.effect('bounds stalled failure cleanup and retains the original failure or in
           config,
           f.track(config, ['written']).pipe(Effect.andThen(interrupted ? Effect.interrupt : Effect.fail('original'))),
         )
-        .pipe(Effect.exit, Effect.forkChild);
+        .pipe(Effect.exit, Effect.provideService(Logger.CurrentLoggers, new Set([logger])), Effect.forkChild);
       yield* Deferred.await(entered);
       yield* TestClock.adjust('5 seconds');
       const exit = yield* Fiber.join(child);
@@ -237,6 +241,11 @@ it.effect('bounds stalled failure cleanup and retains the original failure or in
       }
       expect(attempts).toBe(1);
     }
+    expect(logs).toEqual(
+      new Array(2).fill(
+        'Canonical memory was committed, but derived recall indexes could not be refreshed [workflow-cleanup:timeout]. Run threadnote repair.',
+      ),
+    );
   }),
 );
 
@@ -365,4 +374,25 @@ it.effect('deduplicates aliases within a hook while counting repeated mutations 
       expect(covered).toBe(transitions === calls);
     }
   }),
+);
+
+it.effect.prop(
+  'cleanup warnings retain the original failure and exclude arbitrary defect payloads',
+  {payload: Schema.String},
+  ({payload}) =>
+    Effect.gen(function* () {
+      const logs: string[] = [];
+      const logger = Logger.make<unknown, void>(options => {
+        logs.push(String(options.message));
+      });
+      const f = makeWorkflowRecallRefresh(() => Effect.die(payload));
+      const result = yield* f
+        .withBatch(config, f.track(config, ['committed']).pipe(Effect.andThen(Effect.fail('original'))))
+        .pipe(Effect.result, Effect.provideService(Logger.CurrentLoggers, new Set([logger])));
+      expect(result).toEqual(Result.fail('original'));
+      expect(logs).toEqual([
+        'Canonical memory was committed, but derived recall indexes could not be refreshed [workflow-cleanup:failed]. Run threadnote repair.',
+      ]);
+    }),
+  {arbitrary: {runs: 30}},
 );

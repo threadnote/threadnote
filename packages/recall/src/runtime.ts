@@ -769,14 +769,24 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   if (vectorReadiness === 'missing' || vectorReadiness === 'stale') {
     return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
-  const scores = yield* selectedSemanticScores(config, query, {
+  return yield* selectedSemanticScores(config, query, {
     corpusGeneration,
     currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
     allowedUriScopes,
     eligibility,
     limit,
-  });
-  return {corpusGeneration, scores, state: 'available'} satisfies McpReadOnlySemanticScoresAttempt;
+  }).pipe(
+    Effect.map(scores => ({corpusGeneration, scores, state: 'available' as const})),
+    Effect.catchCauseIf(
+      cause =>
+        cause.reasons.length > 0 &&
+        EffectArray.every(
+          cause.reasons,
+          reason => Cause.isFailReason(reason) && Schema.is(VectorCorpusGenerationChanged)(reason.error),
+        ),
+      () => Effect.succeed({manifest, state: 'refreshable' as const}),
+    ),
+  );
 });
 
 const semanticResultMatchesLexicalSnapshot = Effect.fn('recall.semanticResultMatchesLexicalSnapshot')(function* (

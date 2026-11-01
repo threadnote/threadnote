@@ -190,7 +190,7 @@ export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
   );
   if (outcome.state === 'deferred') {
     yield* Effect.logWarning(
-      'Canonical memory was committed, but derived recall indexes could not be refreshed. Run threadnote repair.',
+      'Canonical memory was committed, but derived recall indexes could not be refreshed [recall-refresh:deferred]. Run threadnote repair.',
     );
   }
   return outcome;
