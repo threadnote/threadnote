@@ -12,6 +12,7 @@ import {
   Exit,
   Fiber,
   FileSystem,
+  Layer,
   Option,
   Path,
   Queue,
@@ -24,7 +25,10 @@ import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import * as fingerprints from '../../src/semantic/fingerprint.js';
 import {LspFault, makeLspClient, type LspWire} from '../../src/semantic/lsp_transport.js';
+import {SemanticSetupFault} from '../../src/semantic/provider.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
+import * as javaPreparation from '../../src/semantic/providers/java_preparation.js';
+import {makeJavaPreparation, type JavaPreparationHost} from '../../src/semantic/providers/java.js';
 import {
   finishJavaPreparation,
   javaRuntimeQualification,
@@ -35,6 +39,7 @@ import {
 } from '../../src/semantic/providers/java_runtime.js';
 import {semanticSdkDigest, semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {makeJavaPreparedProject, javaPreparedProjection} from '../../src/semantic/providers/java_project.js';
 import {javaFileUri} from '../../src/semantic/providers/java_snapshot.js';
 import {
@@ -76,6 +81,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly encodingDigest?: string;
     readonly passiveProject?: boolean;
     readonly noFilters?: boolean;
+    readonly separateWorkspaceParent?: boolean;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
@@ -104,7 +110,9 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     yield* fs.makeDirectory(path.dirname(path.join(project, relative)), {recursive: true});
     yield* fs.writeFileString(path.join(project, relative), 'captured input: ' + relative);
   }
-  const workspace = yield* makeJavaWorkspace(parent);
+  const workspaceParent = control.separateWorkspaceParent ? path.join(parent, 'setup') : parent;
+  if (control.separateWorkspaceParent) yield* fs.makeDirectory(workspaceParent, {mode: 0o700});
+  const workspace = yield* makeJavaWorkspace(workspaceParent);
   const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build: 'maven'});
   const copiedProject = inputs.copiedProject;
   const runtimeDirectory = path.join(workspace.directory, 'jdt-fixture');
@@ -373,6 +381,492 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     observe,
     methods,
   };
+});
+
+const preparationCompositionLayer = Layer.merge(
+  BunServices.layer,
+  Layer.succeed(ChildEnvironmentPolicy, {
+    sanitizeExternal: environment => environment,
+    preserveIntendedChild: environment => environment,
+  }),
+);
+const preparationCompositionFixture = Effect.fn('test.javaPreparationCompositionFixture')(function* () {
+  const fixture = yield* modelFixture({
+    deferImport: true,
+    passiveProject: true,
+    noFilters: true,
+    separateWorkspaceParent: true,
+  });
+  const events: string[] = [];
+  let drained = false;
+  const sdkControl = {rejectAfterModelLoad: false};
+  const mark = (event: string) => Effect.sync(() => void events.push(event));
+  const options = {
+    project: fixture.project,
+    worktree: fixture.project,
+    candidate: {...candidate(), projectJavaHome: fixture.javaHome, projectSdkDigest: fixture.options.javaSdkDigest},
+    privateDirectory: fixture.path.dirname(fixture.workspace.directory),
+    artifactDirectory: fixture.artifactDirectory,
+    build: 'maven' as const,
+  };
+  const host: JavaPreparationHost = {
+    verifySetup: mark('authorize'),
+    onProviderStarted: pid =>
+      Effect.sync(() => expect(pid).toBe(fixture.runtime.pid)).pipe(Effect.andThen(mark('admit'))),
+    provisionOfflineCache: context =>
+      Effect.sync(() => {
+        expect(Object.isFrozen(context)).toBe(true);
+        expect(context.gradleUserHome).toBe(fixture.path.join(fixture.runtimeDirectory, 'gradle'));
+      }).pipe(Effect.andThen(mark('cache'))),
+    drainBuildProcesses: () => mark('drain-build').pipe(Effect.as({drained: true})),
+  };
+  // Reuse preallocated genuine copied inputs; mock native launch and composition allocation, retaining real import/seal/read.
+  const workspace = vi.spyOn(javaRuntime, 'makeJavaWorkspace').mockReturnValue(Effect.succeed(fixture.workspace));
+  const copied = vi
+    .spyOn(javaPreparation, 'copyJavaPreparationInputs')
+    .mockReturnValue(Effect.succeed(fixture.options.inputs));
+  const genuine = vi
+    .spyOn(javaRuntime, 'isJavaPreparationRuntime')
+    .mockImplementation(value => value === fixture.runtime);
+  const connect = vi
+    .spyOn(javaRuntime, 'makeJavaPreparationClient')
+    .mockImplementation((owned, admission, onNotification, settings) =>
+      consumeJavaPreparationConnection(owned, admission).pipe(
+        Effect.andThen(mark('initialize')),
+        Effect.andThen(makeLspClient(fixture.wire, onNotification, settings)),
+      ),
+    );
+  const runtime = vi.spyOn(javaRuntime, 'makeJavaRuntime').mockReturnValue(
+    Effect.succeed({
+      identity: 'fixture',
+      projectJavaHome: fixture.javaHome,
+      verify: Effect.suspend(() =>
+        sdkControl.rejectAfterModelLoad && events.includes('load-model')
+          ? SemanticSetupFault.make({
+              providerId: 'jdtls',
+              component: 'sdk',
+              reason: 'incompatible',
+              requiredVersion: javaRuntimeQualification.serverVersion,
+              requiredSdkVersion: javaRuntimeQualification.runtimeVersion,
+              nextAction: 'Restore the fixture SDK',
+            })
+          : mark('verify-sdk'),
+      ),
+      analysis: () => Effect.die('Analysis must not launch during preparation'),
+      preparation: launch =>
+        Effect.gen(function* () {
+          yield* fixture.workspace.hold;
+          yield* Effect.addFinalizer(() =>
+            finishJavaPreparation(
+              fixture.workspace,
+              mark('stop-provider').pipe(Effect.andThen(fixture.wire.finish)),
+              Effect.suspend(() =>
+                launch.drainBuildProcesses({
+                  runtimeDirectory: fixture.runtimeDirectory,
+                  gradleUserHome: fixture.path.join(fixture.runtimeDirectory, 'gradle'),
+                }),
+              ),
+            ).pipe(Effect.andThen(Effect.sync(() => void (drained = true))), Effect.orDie),
+          );
+          yield* mark('spawn');
+          return fixture.runtime;
+        }),
+    }),
+  );
+  const originalLoad = loadJavaPreparedModel;
+  const load = vi.spyOn(javaPreparation, 'loadJavaPreparedModel').mockImplementation(selected =>
+    Effect.sync(() => {
+      expect(drained).toBe(true);
+      events.push('load-model');
+    }).pipe(Effect.andThen(originalLoad(selected))),
+  );
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      for (const spy of [workspace, copied, genuine, connect, runtime, load]) spy.mockRestore();
+    }),
+  );
+  return {
+    ...fixture,
+    options,
+    host,
+    events,
+    runtimeFactory: runtime,
+    workspaceFactory: workspace,
+    load,
+    sdkControl,
+    drained: () => drained,
+  };
+});
+
+describe('Java preparation composition', () => {
+  effectIt.effect('returns a frozen, independently readable model after provider and build drain', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const input = structuredClone(f.options);
+      const original = JSON.stringify(input);
+      const host = {...f.host};
+      host.onProviderStarted = pid =>
+        f.host.onProviderStarted(pid).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              input.project = '/substituted';
+              input.candidate.projectJavaHome = '/substituted-jdk';
+              host.provisionOfflineCache = () => Effect.die('Caller mutated captured host callback');
+            }),
+          ),
+        );
+      expect(JSON.stringify(input)).toBe(original);
+      const descriptor = yield* makeJavaPreparation(input, host);
+      expect(Object.isFrozen(descriptor)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.events.indexOf('admit')).toBeLessThan(f.events.indexOf('initialize'));
+      expect(f.events.indexOf('cache')).toBeLessThan(f.events.indexOf('initialize'));
+      expect(f.events.indexOf('stop-provider')).toBeLessThan(f.events.indexOf('drain-build'));
+      expect(f.events.indexOf('drain-build')).toBeLessThan(f.events.indexOf('load-model'));
+      expect(f.load).toHaveBeenCalledOnce();
+      const loaded = yield* loadJavaPreparedModel({
+        ...descriptor,
+        project: f.project,
+        worktree: f.project,
+        javaHome: f.javaHome,
+      });
+      yield* loaded.verify;
+      expect(loaded.model.build).toBe('maven');
+      expect(loaded.model.libraries).toHaveLength(1);
+      expect(yield* semanticTreeDigest(f.project)).toBe(f.runtime.inputs.sourceDigest);
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(2);
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('denied host authority cannot allocate or launch setup', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {...f.host, verifySetup: LspFault.make({code: 'prerequisite'})}),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.runtimeFactory).not.toHaveBeenCalled();
+      expect(f.events).toEqual([]);
+      expect(f.methods).toEqual([]);
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('registration refusal drains before any cache provisioning or import', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          onProviderStarted: () => LspFault.make({code: 'capacity'}),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.events).not.toContain('cache');
+      expect(f.methods).toEqual([]);
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('authority lost during cache provisioning refuses import and still drains', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      let permitted = true;
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.suspend(() => (permitted ? Effect.void : LspFault.make({code: 'prerequisite'}))),
+          provisionOfflineCache: () => Effect.sync(() => void (permitted = false)),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.methods).toEqual([]);
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('source drift during shutdown prevents descriptor publication', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          drainBuildProcesses: () =>
+            f.fs.writeFileString(f.path.join(f.project, 'pom.xml'), 'changed during setup shutdown').pipe(
+              Effect.mapError(() => LspFault.make({code: 'prerequisite'})),
+              Effect.as({drained: true}),
+            ),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.load).toHaveBeenCalledOnce();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('source drift during the final host authorization check prevents descriptor publication', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          verifySetup: Effect.suspend(() =>
+            f.load.mock.calls.length
+              ? f.fs.writeFileString(f.path.join(f.project, 'pom.xml'), 'changed during final host check')
+              : Effect.void,
+          ),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.load).toHaveBeenCalledOnce();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('SDK verification runs after the persisted model loader before descriptor publication', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      f.sdkControl.rejectAfterModelLoad = true;
+      const result = yield* Effect.exit(makeJavaPreparation(f.options, f.host));
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.load).toHaveBeenCalledOnce();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('a linked worktree spelling is rejected before runtime or workspace acquisition', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const alias = f.path.join(f.path.dirname(f.project), 'source-alias');
+      yield* f.fs.symlink(f.project, alias);
+      const result = yield* Effect.exit(
+        makeJavaPreparation({...f.options, project: alias, worktree: alias, privateDirectory: f.project}, f.host),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.workspaceFactory).not.toHaveBeenCalled();
+      expect(f.runtimeFactory).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('a canonical project outside the selected worktree is rejected before allocation', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(
+          {...f.options, project: f.artifactDirectory, privateDirectory: f.artifactDirectory},
+          f.host,
+        ),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.workspaceFactory).not.toHaveBeenCalled();
+      expect(f.runtimeFactory).not.toHaveBeenCalled();
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('a linked Gradle SDK spelling is rejected before runtime or workspace acquisition', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const root = f.path.join(f.path.dirname(f.project), 'gradle-sdk');
+      const alias = f.path.join(f.path.dirname(f.project), 'gradle-alias');
+      yield* f.fs.makeDirectory(root, {mode: 0o700});
+      yield* f.fs.symlink(root, alias);
+      const result = yield* Effect.exit(
+        makeJavaPreparation(
+          {
+            ...f.options,
+            build: 'gradle',
+            gradle: {
+              sdkDirectory: alias,
+              sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+            },
+            privateDirectory: root,
+          },
+          f.host,
+        ),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.workspaceFactory).not.toHaveBeenCalled();
+      expect(f.runtimeFactory).not.toHaveBeenCalled();
+      expect(yield* f.fs.readDirectory(root)).toEqual([]);
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('unconfirmed build shutdown prevents returning a sealed descriptor', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const result = yield* Effect.exit(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          drainBuildProcesses: () => Effect.succeed({drained: false}),
+        }),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(false);
+      expect(f.methods).toContain('workspace/executeCommand');
+      expect(f.load).not.toHaveBeenCalled();
+      // The fixture owns no actual child; production retains the held workspace on this failure.
+      yield* f.workspace.confirmDrained({drained: true, stdioClosed: true});
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('interruption during cache provisioning awaits owned cleanup', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const entered = yield* Deferred.make<void>();
+      const child = yield* makeJavaPreparation(f.options, {
+        ...f.host,
+        provisionOfflineCache: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(child);
+      expect(f.drained()).toBe(true);
+      expect(f.methods).toEqual([]);
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('stalled cache provisioning times out and drains without initializing', () =>
+    Effect.gen(function* () {
+      const f = yield* preparationCompositionFixture();
+      const entered = yield* Deferred.make<void>();
+      const child = yield* makeJavaPreparation(f.options, {
+        ...f.host,
+        provisionOfflineCache: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      }).pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(180001);
+      const result = yield* Fiber.join(child);
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.drained()).toBe(true);
+      expect(f.methods).toEqual([]);
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect.prop(
+    'neither output parent can overlap source or any selected SDK before host execution',
+    [
+      Schema.Literals(['privateDirectory', 'artifactDirectory']),
+      Schema.Literals(['worktree', 'serverDirectory', 'runtimeJavaHome', 'projectJavaHome', 'gradle']),
+      Schema.Literals(['same', 'parent', 'child']),
+    ],
+    ([output, protectedRoot, relation]) =>
+      Effect.gen(function* () {
+        const f = yield* preparationCompositionFixture();
+        const root =
+          protectedRoot === 'worktree'
+            ? f.project
+            : protectedRoot === 'gradle'
+              ? '/host/gradle'
+              : f.options.candidate[protectedRoot];
+        const directory =
+          relation === 'same' ? root : relation === 'parent' ? f.path.dirname(root) : f.path.join(root, 'output');
+        const result = yield* Effect.exit(
+          makeJavaPreparation(
+            {
+              ...f.options,
+              build: 'gradle',
+              gradle: {
+                sdkDirectory: '/host/gradle',
+                sdkDigest: '6da4ff86101bec03978e03b6acdb2d8ae958759c1da1dc69aa8e1d83f78ff9bc',
+              },
+              [output]: directory,
+            },
+            f.host,
+          ),
+        );
+        expect(Exit.isFailure(result)).toBe(true);
+        expect(f.runtimeFactory).not.toHaveBeenCalled();
+        expect(f.events).toEqual([]);
+      }).pipe(Effect.provide(preparationCompositionLayer)),
+    {arbitrary: {runs: 24}},
+  );
+
+  effectIt.effect.prop(
+    'caller JSON cannot select execution authority, JVMs, bundles or commands',
+    [Schema.Literals(['authorized', 'verifySetup', 'command', 'jvmArgs', 'bundle', 'policy'])],
+    ([key]) =>
+      Effect.gen(function* () {
+        const f = yield* preparationCompositionFixture();
+        const result = yield* Effect.exit(makeJavaPreparation({...f.options, [key]: true}, f.host));
+        expect(Exit.isFailure(result)).toBe(true);
+        expect(f.runtimeFactory).not.toHaveBeenCalled();
+        expect(f.events).toEqual([]);
+      }).pipe(Effect.provide(preparationCompositionLayer)),
+    {arbitrary: {runs: 12}},
+  );
+});
+
+describe('Java qualified JRE container spelling', () => {
+  effectIt.effect('preserves the imported trailing separator through a passive projection', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({passiveProject: true});
+      const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+      const jre =
+        'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+      const bindings = yield* Effect.forEach(
+        EffectArray.filter(sealed.model.rawClasspath, entry => entry.kind === 3),
+        entry =>
+          f.path
+            .toFileUrl(f.path.join(f.project, entry.path))
+            .pipe(Effect.map(url => ({path: entry.path, uri: url.href}))),
+      );
+      const documentationUri = 'file:///threadnote-test-documentation/';
+      const plain = javaPreparedProjection(sealed.model, bindings, documentationUri);
+      const trailing = javaPreparedProjection(
+        {
+          ...sealed.model,
+          rawClasspath: EffectArray.map(sealed.model.rawClasspath, entry =>
+            entry.path === jre ? {...entry, path: jre + '/'} : entry,
+          ),
+        },
+        bindings,
+        documentationUri,
+      );
+      expect(trailing.image.resolvedClasspath).toEqual(plain.image.resolvedClasspath);
+      expect(trailing.image.links).toEqual(plain.image.links);
+      const expected = EffectArray.map(
+        EffectArray.filter(plain.image.rawClasspath, entry => entry.path === jre),
+        entry => ({...entry, path: jre + '/'}),
+      );
+      expect(expected).toHaveLength(1);
+      expect(EffectArray.filter(trailing.image.rawClasspath, entry => entry.path === jre + '/')).toEqual(expected);
+      expect(trailing.metadata['.classpath']).toContain(jre + '/');
+      expect(trailing.digest).not.toBe(plain.digest);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect.prop(
+    'accepts only the two exact qualified spellings, not other containers or nested paths',
+    [Schema.String.check(Schema.isMaxLength(12))],
+    ([suffix]) =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture({passiveProject: true});
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const jre =
+          'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+        const bindings = yield* Effect.forEach(
+          EffectArray.filter(sealed.model.rawClasspath, entry => entry.kind === 3),
+          entry =>
+            f.path
+              .toFileUrl(f.path.join(f.project, entry.path))
+              .pipe(Effect.map(url => ({path: entry.path, uri: url.href}))),
+        );
+        for (const extra of [suffix, '//', '/other', '-other']) {
+          const model = {
+            ...sealed.model,
+            rawClasspath: EffectArray.map(sealed.model.rawClasspath, entry =>
+              entry.path === jre ? {...entry, path: jre + extra} : entry,
+            ),
+          };
+          const projection = () => javaPreparedProjection(model, bindings, 'file:///threadnote-test-documentation/');
+          if (extra === '' || extra === '/') expect(projection).not.toThrow();
+          else expect(projection).toThrow();
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
 });
 
 describe('Java passive prepared project', () => {

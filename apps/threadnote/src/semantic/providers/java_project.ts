@@ -107,6 +107,12 @@ export function javaProjectMetadata(sourceUris: readonly string[], libraries: re
   };
 }
 
+const isJava21JreContainer = (value: string) => {
+  const qualified =
+    'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+  return value === qualified || value === qualified + '/';
+};
+
 /** Serialize an already transformed passive image. Filesystem ownership and reconstructed metadata need separate proofs. */
 export function javaProjectionMetadata(
   image: typeof JavaProjectionImage.Type,
@@ -185,8 +191,7 @@ export function javaProjectionMetadata(
       if (entry.inclusions.length || entry.exclusions.length || entry.outputPath !== undefined) throw fail();
       if (entry.kind === 5) {
         if (
-          entry.path !==
-            'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21' ||
+          !isJava21JreContainer(entry.path) ||
           entry.contentKind !== 1 ||
           !entry.combineAccessRules ||
           entry.sourceAttachmentPath !== undefined ||
@@ -392,8 +397,6 @@ export function javaPreparedProjection(
       attributes,
     };
   };
-  const jre =
-    'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
   const importer =
     fixed.build === 'maven'
       ? 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER'
@@ -436,7 +439,7 @@ export function javaPreparedProjection(
       }
       continue;
     }
-    if (entry.path === jre) {
+    if (isJava21JreContainer(entry.path)) {
       if (++jres !== 1 || entry.exported || entry.accessRules.length) throw fail();
       raw.push(transformed(entry));
       const sdk = take();

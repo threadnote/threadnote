@@ -31,7 +31,174 @@ import {
 import {javaDiagnosticBundle} from './java_diagnostics_bundle.js';
 import {captureJavaSnapshotModel, javaTypeDefinitionCommand, javaFileUri} from './java_snapshot.js';
 import {JavaEnvironment, makeJavaProject, makeJavaPreparedProject, javaPreparedSourceMember} from './java_project.js';
-import {JavaRuntimeCandidate, makeJavaRuntime} from './java_runtime.js';
+import {
+  JavaRuntimeCandidate,
+  makeJavaRuntime,
+  makeJavaWorkspace,
+  type JavaPreparationDrainContext,
+} from './java_runtime.js';
+import {
+  copyJavaPreparationInputs,
+  JavaPreparationGradle,
+  loadJavaPreparedModel,
+  observeJavaPreparedImport,
+  sealJavaPreparedModel,
+} from './java_preparation.js';
+
+const verifyJavaOutputDirectories = Effect.fn('semantic.verifyJavaOutputDirectories')(function* (
+  outputs: readonly string[],
+  protectedRoots: readonly string[],
+) {
+  const path = yield* Path.Path;
+  for (const output of outputs) {
+    const directory = path.resolve(output);
+    if (
+      EffectArray.some(protectedRoots, value => {
+        const root = path.resolve(value);
+        return (
+          root === directory ||
+          EffectString.startsWith(root + path.sep)(directory) ||
+          EffectString.startsWith(directory + path.sep)(root)
+        );
+      })
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+  }
+});
+
+const JavaPreparationOptions = Schema.Struct({
+  project: Schema.String,
+  worktree: Schema.String,
+  candidate: JavaRuntimeCandidate,
+  privateDirectory: Schema.String,
+  artifactDirectory: Schema.String,
+  build: Schema.Literals(['maven', 'gradle']),
+  gradle: Schema.optional(JavaPreparationGradle),
+});
+export type JavaPreparationOptions = typeof JavaPreparationOptions.Type;
+export interface JavaPreparationHost {
+  /** Existing host authorization must cover the build code's OS authority throughout setup. This is not a sandbox. */
+  readonly verifySetup: Effect.Effect<void, unknown>;
+  readonly onProviderStarted: (pid: number) => Effect.Effect<void, unknown>;
+  readonly provisionOfflineCache: (context: JavaPreparationDrainContext) => Effect.Effect<void, unknown>;
+  readonly drainBuildProcesses: (
+    context: JavaPreparationDrainContext,
+  ) => Effect.Effect<{readonly drained: boolean}, LspFault>;
+}
+
+/** Host-only setup composition. A model is exposed only after the owned provider and build processes have drained. */
+export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
+  function* (options: JavaPreparationOptions, host: JavaPreparationHost) {
+    const {verifySetup, onProviderStarted, provisionOfflineCache, drainBuildProcesses} = host;
+    const captured = yield* Effect.try({
+      try: () => structuredClone(options),
+      catch: () => LspFault.make({code: 'prerequisite'}),
+    }).pipe(
+      Effect.flatMap(Schema.decodeEffect(JavaPreparationOptions, {onExcessProperty: 'error'})),
+      Effect.mapError(() => LspFault.make({code: 'prerequisite'})),
+    );
+    if (
+      !Effect.isEffect(verifySetup) ||
+      typeof onProviderStarted !== 'function' ||
+      typeof provisionOfflineCache !== 'function' ||
+      typeof drainBuildProcesses !== 'function' ||
+      (captured.build === 'gradle') !== (captured.gradle !== undefined)
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+    yield* verifyJavaOutputDirectories(
+      [captured.privateDirectory, captured.artifactDirectory],
+      [
+        captured.worktree,
+        captured.candidate.serverDirectory,
+        captured.candidate.runtimeJavaHome,
+        captured.candidate.projectJavaHome,
+        ...(captured.gradle ? [captured.gradle.sdkDirectory] : []),
+      ],
+    );
+    yield* verifySetup;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    for (const directory of [
+      captured.project,
+      captured.worktree,
+      ...(captured.gradle ? [captured.gradle.sdkDirectory] : []),
+    ])
+      if (
+        !path.isAbsolute(directory) ||
+        path.resolve(directory) !== directory ||
+        (yield* fs.realPath(directory)) !== directory ||
+        (yield* fs.stat(directory)).type !== 'Directory'
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
+    if (
+      captured.project !== captured.worktree &&
+      !EffectString.startsWith(captured.worktree + path.sep)(captured.project)
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+    const runtime = yield* makeJavaRuntime(captured.candidate);
+    const sealed = yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* verifySetup;
+        const workspace = yield* makeJavaWorkspace(captured.privateDirectory);
+        const inputs = yield* copyJavaPreparationInputs({
+          project: captured.project,
+          worktree: captured.worktree,
+          build: captured.build,
+          workspace,
+        });
+        yield* verifySetup;
+        const launched = yield* runtime.preparation({
+          workspace,
+          project: inputs.copiedProject,
+          worktree: captured.worktree,
+          build: captured.build,
+          inputs,
+          drainBuildProcesses,
+        });
+        yield* onProviderStarted(launched.pid);
+        yield* verifySetup;
+        yield* provisionOfflineCache(
+          Object.freeze({
+            runtimeDirectory: launched.directory,
+            gradleUserHome: path.join(launched.directory, 'gradle'),
+          }),
+        );
+        yield* verifySetup;
+        const observed = yield* observeJavaPreparedImport({runtime: launched, gradle: captured.gradle});
+        yield* verifySetup;
+        return yield* sealJavaPreparedModel(observed, {
+          requestToken: observed.requestToken,
+          build: captured.build,
+          inputs,
+          runtimeDirectory: launched.directory,
+          artifactDirectory: captured.artifactDirectory,
+          javaHome: runtime.projectJavaHome,
+          javaSdkDigest: captured.candidate.projectSdkDigest,
+          verify: verifySetup.pipe(Effect.andThen(runtime.verify)),
+        });
+      }),
+    );
+    yield* verifySetup;
+    const loaded = yield* loadJavaPreparedModel({
+      metadataFile: sealed.metadataFile,
+      metadataDigest: sealed.metadataDigest,
+      project: captured.project,
+      worktree: captured.worktree,
+      javaHome: runtime.projectJavaHome,
+    });
+    yield* verifySetup;
+    yield* runtime.verify;
+    yield* loaded.verify;
+    return Object.freeze({metadataFile: sealed.metadataFile, metadataDigest: sealed.metadataDigest});
+  },
+  effect =>
+    effect.pipe(
+      Effect.timeoutOption(180000),
+      Effect.flatMap(result =>
+        Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+      ),
+    ),
+);
 
 const JavaAnalysisOptions = Schema.Struct({
   basis: Observation,
@@ -57,19 +224,15 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
     const path = yield* Path.Path;
     const worktree = yield* path.fromFileUrl(new URL(captured.basis.worktree));
     const project = yield* path.fromFileUrl(new URL(captured.basis.project));
-    const privateDirectory = path.resolve(captured.privateDirectory);
-    const overlaps = (root: string) =>
-      root === privateDirectory ||
-      EffectString.startsWith(root + path.sep)(privateDirectory) ||
-      EffectString.startsWith(privateDirectory + path.sep)(root);
-    if (
-      captured.candidate &&
-      EffectArray.some(
-        [captured.candidate.serverDirectory, captured.candidate.runtimeJavaHome, captured.candidate.projectJavaHome],
-        root => overlaps(path.resolve(root)),
-      )
-    )
-      return yield* LspFault.make({code: 'prerequisite'});
+    yield* verifyJavaOutputDirectories(
+      [captured.privateDirectory],
+      [
+        worktree,
+        ...(captured.candidate
+          ? [captured.candidate.serverDirectory, captured.candidate.runtimeJavaHome, captured.candidate.projectJavaHome]
+          : []),
+      ],
+    );
     const owned = yield* Scope.fork(yield* Effect.scope);
     return yield* Effect.gen(function* () {
       const runtime = yield* makeJavaRuntime(captured.candidate);
