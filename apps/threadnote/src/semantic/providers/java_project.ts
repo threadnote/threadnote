@@ -9,6 +9,7 @@ import {LspFault} from '../lsp_transport.js';
 import {wellFormed} from '../provider.js';
 import {makeJavaWorkspace} from './java_runtime.js';
 import {JavaCompilerOptions, JavaProjectionImage, javaProjectionDigest} from './java_snapshot.js';
+import {JavaPreparedModel, javaPreparedEntryJson, javaPreparedModelJson} from './java_preparation.js';
 
 export const JavaEnvironment = Schema.Struct({id: Identifier, metadataFile: Schema.String, metadataDigest: Digest});
 export type JavaEnvironment = typeof JavaEnvironment.Type;
@@ -255,6 +256,248 @@ export function javaProjectionMetadata(
   if (EffectRecord.reduce(files, 0, (bytes, value) => bytes + new TextEncoder().encode(value).length) > 2 * 1024 * 1024)
     throw fail();
   return files;
+}
+
+/** Pure A0 translation of sealed facts. URI bindings and documentation ownership require filesystem verification by the consumer. */
+export function javaPreparedProjection(
+  model: JavaPreparedModel,
+  sourceUris: readonly {readonly path: string; readonly uri: string}[],
+  documentationUri: string,
+) {
+  let fixed: JavaPreparedModel;
+  try {
+    fixed = Schema.decodeSync(JavaPreparedModel, {onExcessProperty: 'error'})(model);
+  } catch {
+    throw fail();
+  }
+  if (new TextEncoder().encode(javaPreparedModelJson(fixed)).length > 256 * 1024) throw fail();
+  // Java URL treats four leading slashes as UNC spelling rather than a local URI prefix.
+  if (EffectString.startsWith('file:////')(documentationUri)) throw fail();
+  const relative = (value: string) => {
+    if (
+      !value ||
+      /[:\\]/u.test(value) ||
+      EffectArray.some(
+        EffectString.split('/')(value),
+        part => !part || part === '.' || part === '..' || part === '.git',
+      )
+    )
+      throw fail();
+    return value;
+  };
+  const absolute = (value: string) => {
+    if (!EffectString.startsWith('/')(value)) throw fail();
+    relative(EffectString.slice(1)(value));
+    return value;
+  };
+  absolute(fixed.project);
+  absolute(fixed.javaHome);
+  const overlaps = (a: string, b: string) => inside(a, b, '/') || inside(b, a, '/');
+  const sources = EffectArray.filter(fixed.rawClasspath, entry => entry.kind === 3);
+  if (!sources.length || sources.length > 32 || sources.length !== sourceUris.length) throw fail();
+  const outputs = [relative(fixed.output)];
+  const aliases = new Map<string, string>();
+  const links = EffectArray.map(sources, (entry, index) => {
+    relative(entry.path);
+    if (
+      entry.exists === undefined ||
+      (!entry.exists &&
+        !EffectArray.some(
+          entry.attributes,
+          attr => attr.name === 'optional' && 'value' in attr && attr.value === 'true',
+        )) ||
+      EffectArray.some(EffectString.split('/')(entry.path), part =>
+        ['node_modules', '__CREATED_BY_JAVA_LANGUAGE_SERVER__'].includes(part),
+      ) ||
+      EffectArray.some(Array.from(aliases.keys()), name => overlaps(name, entry.path))
+    )
+      throw fail();
+    const binding = sourceUris[index];
+    if (binding.path !== entry.path) throw fail();
+    try {
+      const physical = decodeURIComponent(new URL(binding.uri).pathname);
+      const expected = fixed.project + '/' + entry.path;
+      if (physical !== expected && physical !== expected + '/') throw fail();
+    } catch {
+      throw fail();
+    }
+    const name = 'source-' + index;
+    aliases.set(entry.path, '/threadnote-java/' + name);
+    if (entry.output !== undefined && !outputs.includes(relative(entry.output))) outputs.push(entry.output);
+    return {path: name, uri: binding.uri, type: 2 as const};
+  });
+  if (!EffectArray.some(sources, entry => entry.exists === true)) throw fail();
+  for (const [index, output] of outputs.entries())
+    if (
+      EffectArray.some(sources, source => overlaps(source.path, output)) ||
+      EffectArray.some(outputs.slice(0, index), previous => overlaps(previous, output))
+    )
+      throw fail();
+  const libraries = new Set<string>();
+  for (const library of fixed.libraries) {
+    absolute(library.file);
+    if (inside(fixed.javaHome, library.file, '/') || libraries.has(library.file)) throw fail();
+    libraries.add(library.file);
+  }
+  const transformed = (entry: JavaPreparedModel['rawClasspath'][number], flatten = false) => {
+    const {exists: _exists, output, ...rest} = entry;
+    // JRE documentation attributes use Java URL.toExternalForm; raw .classpath attributes retain URI text.
+    const documentationValue =
+      entry.path === fixed.javaHome + '/lib/jrt-fs.jar'
+        ? EffectString.replace(/^file:\/\/\//u, 'file:/')(documentationUri)
+        : documentationUri;
+    if (entry.sourceAttachmentPath !== undefined) {
+      absolute(entry.sourceAttachmentPath);
+      if (!inside(fixed.javaHome, entry.sourceAttachmentPath, '/')) throw fail();
+    }
+    const names = new Set<string>();
+    const attributes: JavaPreparedModel['rawClasspath'][number]['attributes'][number][] = [];
+    for (const attr of entry.attributes) {
+      if (attr.name === 'javadoc_location' && !('valueSha256' in attr)) throw fail();
+      if (names.has(attr.name)) {
+        if (
+          flatten &&
+          attr.name === 'maven.pomderived' &&
+          'value' in attr &&
+          attr.value === 'true' &&
+          EffectArray.some(
+            attributes,
+            previous => previous.name === attr.name && 'value' in previous && previous.value === 'true',
+          )
+        )
+          continue;
+        throw fail();
+      }
+      names.add(attr.name);
+      attributes.push(
+        attr.name === 'javadoc_location'
+          ? {
+              name: 'javadoc_location' as const,
+              valueSha256: sha256HexSync(documentationValue),
+              access: 'disabled' as const,
+            }
+          : attr,
+      );
+    }
+    if (entry.kind !== 3 && (entry.exists !== undefined || output !== undefined)) throw fail();
+    return {
+      ...rest,
+      path: entry.kind === 3 ? (aliases.get(entry.path) ?? '') : entry.path,
+      ...(output === undefined ? {} : {outputPath: '/threadnote-java/output-' + outputs.indexOf(output)}),
+      attributes,
+    };
+  };
+  const jre =
+    'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+  const importer =
+    fixed.build === 'maven'
+      ? 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER'
+      : 'org.eclipse.buildship.core.gradleclasspathcontainer';
+  const raw: (typeof JavaProjectionImage.Type)['rawClasspath'][number][] = [];
+  const resolved: (typeof JavaProjectionImage.Type)['resolvedClasspath'][number][] = [];
+  const rawPaths = new Set<string>();
+  const resolvedPaths = new Set<string>();
+  const explicit = new Set(
+    EffectArray.map(
+      EffectArray.filter(fixed.rawClasspath, entry => entry.kind === 1),
+      entry => entry.path,
+    ),
+  );
+  let cursor = 0;
+  let jres = 0;
+  let importers = 0;
+  const take = () => {
+    const entry = fixed.resolvedClasspath[cursor++];
+    if (!entry || resolvedPaths.has(entry.path)) throw fail();
+    resolvedPaths.add(entry.path);
+    return entry;
+  };
+  const binary = (entry: JavaPreparedModel['rawClasspath'][number], flatten = true) => {
+    if (entry.kind !== 1 || !libraries.delete(entry.path)) throw fail();
+    const projected = transformed(entry, flatten);
+    raw.push(projected);
+    resolved.push(projected);
+  };
+  for (const entry of fixed.rawClasspath) {
+    if (rawPaths.has(entry.path)) throw fail();
+    rawPaths.add(entry.path);
+    if (entry.kind !== 5) {
+      if (javaPreparedEntryJson(entry) !== javaPreparedEntryJson(take())) throw fail();
+      if (entry.kind === 1) binary(entry, false);
+      else {
+        const projected = transformed(entry);
+        raw.push(projected);
+        resolved.push(projected);
+      }
+      continue;
+    }
+    if (entry.path === jre) {
+      if (++jres !== 1 || entry.exported || entry.accessRules.length) throw fail();
+      raw.push(transformed(entry));
+      const sdk = take();
+      const {sourceAttachmentPath, attributes, ...sdkFacts} = sdk;
+      const expected = {
+        ...entry,
+        kind: 1 as const,
+        contentKind: 2 as const,
+        combineAccessRules: false,
+        path: fixed.javaHome + '/lib/jrt-fs.jar',
+      };
+      if (
+        sourceAttachmentPath !== fixed.javaHome + '/lib/src.zip' ||
+        javaPreparedEntryJson({
+          ...sdkFacts,
+          attributes: EffectArray.filter(attributes, attr => attr.name !== 'javadoc_location'),
+        }) !== javaPreparedEntryJson(expected)
+      )
+        throw fail();
+      resolved.push(transformed(sdk));
+    } else if (entry.path === importer) {
+      if (
+        ++importers !== 1 ||
+        entry.contentKind !== 1 ||
+        !entry.combineAccessRules ||
+        entry.exported ||
+        entry.inclusions.length ||
+        entry.exclusions.length ||
+        entry.accessRules.length ||
+        entry.sourceAttachmentPath !== undefined ||
+        entry.sourceAttachmentRoot !== undefined
+      )
+        throw fail();
+      transformed(entry);
+      while (cursor < fixed.resolvedClasspath.length) {
+        const next = fixed.resolvedClasspath[cursor];
+        if (next.kind !== 1 || explicit.has(next.path) || inside(fixed.javaHome, next.path, '/')) break;
+        if (
+          !EffectArray.every(entry.attributes, inherited =>
+            EffectArray.some(
+              next.attributes,
+              attr =>
+                inherited.name === attr.name &&
+                ('value' in inherited
+                  ? 'value' in attr && attr.value === inherited.value
+                  : 'valueSha256' in attr && attr.valueSha256 === inherited.valueSha256),
+            ),
+          )
+        )
+          throw fail();
+        binary(take());
+      }
+    } else throw fail();
+  }
+  if (jres !== 1 || importers !== 1 || cursor !== fixed.resolvedClasspath.length || libraries.size) throw fail();
+  const image: typeof JavaProjectionImage.Type = {
+    format: 'threadnote-passive-java-projection-v1',
+    projectCharset: fixed.projectCharset,
+    outputPath: '/threadnote-java/output-0',
+    rawClasspath: raw,
+    resolvedClasspath: resolved,
+    links,
+    resourceFilters: fixed.resourceFilters,
+  };
+  const metadata = javaProjectionMetadata(image, fixed.compilerOptions, documentationUri);
+  return {image, metadata, digest: javaProjectionDigest(image)};
 }
 
 /** One prepared Java 21 source project. Unprepared, changed or ambiguous models fail before provider startup. */

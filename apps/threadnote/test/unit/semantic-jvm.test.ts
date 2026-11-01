@@ -30,8 +30,10 @@ import {
   javaCompilerPreferences,
   javaProjectMetadata,
   javaProjectionMetadata,
+  javaPreparedProjection,
   type JavaProjectModel,
 } from '../../src/semantic/providers/java_project.js';
+import {javaPreparedModelJson, JavaPreparedModel} from '../../src/semantic/providers/java_preparation.js';
 
 const decodeXmlEntities = (text: string) => {
   const entities: Record<string, string> = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"};
@@ -419,6 +421,345 @@ describe('Java prepared project boundary', () => {
     };
     return {image, compiler};
   };
+
+  const preparedFixture = () => {
+    const {compiler} = projectionFixture();
+    const fields = {
+      exported: false,
+      combineAccessRules: false,
+      inclusions: [],
+      exclusions: [],
+      accessRules: [],
+      attributes: [{name: 'maven.pomderived', value: 'true'}],
+    };
+    const main = {
+      ...fields,
+      kind: 3 as const,
+      contentKind: 1 as const,
+      path: 'src/main/java',
+      exists: true,
+      output: 'target/classes',
+    };
+    const resources = {
+      ...main,
+      path: 'src/main/resources',
+      exists: false,
+      exclusions: ['**'],
+      attributes: [{name: 'optional', value: 'true'}, ...fields.attributes],
+    };
+    const tests = {
+      ...resources,
+      path: 'src/test/java',
+      exclusions: [],
+      output: 'target/test-classes',
+      attributes: [...resources.attributes, {name: 'test', value: 'true'}],
+    };
+    const generated = {...resources, path: 'target/generated-sources/annotations', exclusions: []};
+    const {output: _output, ...defaultGenerated} = generated;
+    const jre = {
+      ...fields,
+      kind: 5 as const,
+      contentKind: 1 as const,
+      combineAccessRules: true,
+      path: 'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21',
+    };
+    const importer = {...jre, path: 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER'};
+    const sdk = {
+      ...fields,
+      kind: 1 as const,
+      contentKind: 2 as const,
+      path: '/sdk/lib/jrt-fs.jar',
+      sourceAttachmentPath: '/sdk/lib/src.zip',
+      attributes: [
+        {
+          name: 'javadoc_location' as const,
+          access: 'disabled' as const,
+          valueSha256: sha256HexSync('original SDK documentation'),
+        },
+        ...fields.attributes,
+      ],
+    };
+    const library = {
+      ...fields,
+      kind: 1 as const,
+      contentKind: 2 as const,
+      path: '/sealed/library.jar',
+      exported: true,
+      accessRules: [{pattern: 'internal/**', kind: 2 as const, ignoreIfBetter: true}],
+      attributes: [
+        ...fields.attributes,
+        {name: 'maven.scope', value: 'test'},
+        {name: 'test', value: 'true'},
+        ...fields.attributes,
+      ],
+    };
+    const model: JavaPreparedModel = {
+      format: 'threadnote-prepared-java-project-v2',
+      provider: 'jdtls-1.63.0-202610191322',
+      build: 'maven',
+      project: '/original',
+      worktree: '/original',
+      sourceDigest: sha256HexSync('sources'),
+      javaHome: '/sdk',
+      javaSdkDigest: sha256HexSync('SDK'),
+      projectCharset: 'UTF-8',
+      sourceInputEncoding: 'utf8-original-inputs-v1',
+      sourceEncoding: {policy: 'utf8-no-bom-v1', sourceCount: 1, sourceDigest: sha256HexSync('encoding')},
+      compilerOptions: compiler,
+      output: 'target/classes',
+      resourceFilters: [
+        {
+          id: '123456789',
+          path: '',
+          type: 30,
+          matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
+          arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
+        },
+      ],
+      rawClasspath: [main, resources, tests, jre, importer, defaultGenerated],
+      resolvedClasspath: [main, resources, tests, sdk, library, defaultGenerated],
+      libraries: [{file: library.path, digest: sha256HexSync('library'), bytes: 42}],
+    };
+    const bindings = EffectArray.map([main, resources, tests, defaultGenerated], entry => ({
+      path: entry.path,
+      uri: 'file:///original/' + entry.path,
+    }));
+    return {model, bindings, documentationUri: 'file:///private/empty-docs/'};
+  };
+
+  it('translates sealed source/output identities and combined library facts without changing the original model', () => {
+    const {model, bindings, documentationUri} = preparedFixture();
+    const original = javaPreparedModelJson(model);
+    const projected = javaPreparedProjection(model, bindings, documentationUri);
+    expect(javaPreparedModelJson(model)).toBe(original);
+    expect(EffectArray.map(projected.image.rawClasspath, entry => entry.path)).toEqual([
+      '/threadnote-java/source-0',
+      '/threadnote-java/source-1',
+      '/threadnote-java/source-2',
+      model.rawClasspath[3].path,
+      '/sealed/library.jar',
+      '/threadnote-java/source-3',
+    ]);
+    expect(EffectArray.map(projected.image.resolvedClasspath, entry => entry.path)).toEqual([
+      '/threadnote-java/source-0',
+      '/threadnote-java/source-1',
+      '/threadnote-java/source-2',
+      '/sdk/lib/jrt-fs.jar',
+      '/sealed/library.jar',
+      '/threadnote-java/source-3',
+    ]);
+    expect(EffectArray.map(projected.image.rawClasspath.slice(0, 3), entry => entry.outputPath)).toEqual([
+      '/threadnote-java/output-0',
+      '/threadnote-java/output-0',
+      '/threadnote-java/output-1',
+    ]);
+    expect(projected.image.rawClasspath[5]).not.toHaveProperty('outputPath');
+    expect(projected.image.rawClasspath[1].exclusions).toEqual(['**']);
+    expect(projected.image.rawClasspath[4]).toMatchObject({
+      exported: true,
+      accessRules: model.resolvedClasspath[4].accessRules,
+      attributes: [
+        {name: 'maven.pomderived', value: 'true'},
+        {name: 'maven.scope', value: 'test'},
+        {name: 'test', value: 'true'},
+      ],
+    });
+    expect(projected.image.resolvedClasspath[3].attributes[0]).toEqual({
+      name: 'javadoc_location',
+      access: 'disabled',
+      valueSha256: sha256HexSync('file:/private/empty-docs/'),
+    });
+    expect(projected.image.resourceFilters).toEqual(model.resourceFilters);
+    expect(projected.image.links).toEqual(
+      EffectArray.map(bindings, (binding, index) => ({path: 'source-' + index, uri: binding.uri, type: 2})),
+    );
+    expect(projected.metadata['.classpath']).not.toContain('MAVEN2_CLASSPATH_CONTAINER');
+    expect(javaPreparedProjection(model, bindings, documentationUri)).toEqual(projected);
+  });
+
+  it('distinguishes SDK Java URL documentation spelling from raw classpath URI spelling', () => {
+    for (const documentationUri of ['file:///private/empty-docs/', 'file:///private/encoded%20%C3%A9%F0%90%90%80/']) {
+      const {model, bindings} = preparedFixture();
+      const library = model.resolvedClasspath[4];
+      const selected = {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry === library
+            ? {
+                ...entry,
+                attributes: [
+                  ...entry.attributes,
+                  {
+                    name: 'javadoc_location' as const,
+                    valueSha256: sha256HexSync('unreplayable original'),
+                    access: 'disabled' as const,
+                  },
+                ],
+              }
+            : entry,
+        ),
+      };
+      const {image, metadata} = javaPreparedProjection(selected, bindings, documentationUri);
+      expect(image.rawClasspath[4].attributes.at(-1)).toEqual({
+        name: 'javadoc_location',
+        access: 'disabled',
+        valueSha256: sha256HexSync(documentationUri),
+      });
+      expect(image.resolvedClasspath[3].attributes[0]).toEqual({
+        name: 'javadoc_location',
+        access: 'disabled',
+        valueSha256: sha256HexSync('file:' + EffectString.slice('file://'.length)(documentationUri)),
+      });
+      expect(metadata['.classpath']).toContain('value="' + documentationUri + '"');
+    }
+  });
+
+  it('preserves explicit library anchors and accepts the closed Gradle container shape without claiming Gradle qualification', () => {
+    const {model, bindings, documentationUri} = preparedFixture();
+    const library = {...model.resolvedClasspath[4], attributes: model.resolvedClasspath[4].attributes.slice(0, -1)};
+    const selected: JavaPreparedModel = {
+      ...model,
+      build: 'gradle',
+      rawClasspath: [
+        ...model.rawClasspath.slice(0, 3),
+        library,
+        model.rawClasspath[3],
+        {...model.rawClasspath[4], path: 'org.eclipse.buildship.core.gradleclasspathcontainer'},
+        model.rawClasspath[5],
+      ],
+      resolvedClasspath: [
+        ...model.resolvedClasspath.slice(0, 3),
+        library,
+        model.resolvedClasspath[3],
+        model.resolvedClasspath[5],
+      ],
+    };
+    expect(javaPreparedProjection(selected, bindings, documentationUri).image.rawClasspath[3]).toEqual(library);
+    const duplicate = {...library, attributes: [...library.attributes, {name: 'maven.pomderived', value: 'true'}]};
+    expect(() =>
+      javaPreparedProjection(
+        {
+          ...selected,
+          rawClasspath: EffectArray.map(selected.rawClasspath, entry => (entry === library ? duplicate : entry)),
+          resolvedClasspath: EffectArray.map(selected.resolvedClasspath, entry =>
+            entry === library ? duplicate : entry,
+          ),
+        },
+        bindings,
+        documentationUri,
+      ),
+    ).toThrow();
+  });
+
+  it('preserves dependency order, flags and nonduplicate attribute order under A0 projection', () => {
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 12}), flags => {
+        const {model, bindings, documentationUri} = preparedFixture();
+        const dependencies = EffectArray.map(flags, (exported, index) => ({
+          ...model.resolvedClasspath[4],
+          path: '/sealed/library-' + index + '.jar',
+          exported,
+        }));
+        const selected = {
+          ...model,
+          libraries: EffectArray.map(dependencies, entry => ({
+            file: entry.path,
+            digest: sha256HexSync(entry.path),
+            bytes: 42,
+          })),
+          resolvedClasspath: [...model.resolvedClasspath.slice(0, 4), ...dependencies, model.resolvedClasspath[5]],
+        };
+        const original = JSON.stringify(selected);
+        const {image} = javaPreparedProjection(selected, bindings, documentationUri);
+        expect(EffectArray.map(image.rawClasspath.slice(4, -1), entry => entry.path)).toEqual(
+          EffectArray.map(dependencies, entry => entry.path),
+        );
+        expect(EffectArray.map(image.rawClasspath.slice(4, -1), entry => entry.exported)).toEqual(flags);
+        expect(EffectArray.map(image.rawClasspath.slice(4, -1), entry => entry.attributes)).toEqual(
+          EffectArray.map(dependencies, entry => entry.attributes.slice(0, -1)),
+        );
+        expect(JSON.stringify(selected)).toBe(original);
+        const reordered = Schema.decodeSync(JavaPreparedModel)(
+          JSON.parse(
+            JSON.stringify(selected, (_key, value) =>
+              value && !EffectArray.isArray(value) && typeof value === 'object'
+                ? EffectRecord.fromEntries(EffectRecord.toEntries(value).reverse())
+                : value,
+            ),
+          ),
+        );
+        expect(javaPreparedProjection(reordered, bindings, documentationUri).image).toEqual(image);
+      }),
+      {numRuns: 32},
+    );
+  });
+
+  it('refuses ambiguous classpath expansion, source bindings, outputs and duplicate metadata', () => {
+    const {model, bindings, documentationUri} = preparedFixture();
+    const main = model.rawClasspath[0];
+    const library = model.resolvedClasspath[4];
+    const invalid: JavaPreparedModel[] = [
+      {...model, rawClasspath: [...model.rawClasspath, main]},
+      {...model, resolvedClasspath: [model.resolvedClasspath[1], main, ...model.resolvedClasspath.slice(2)]},
+      {...model, resolvedClasspath: [...model.resolvedClasspath, library]},
+      {...model, resolvedClasspath: model.resolvedClasspath.slice(0, -1)},
+      {...model, rawClasspath: EffectArray.filter(model.rawClasspath, entry => entry.kind !== 5)},
+      {
+        ...model,
+        libraries: [...model.libraries, {file: '/sealed/unreferenced.jar', digest: sha256HexSync('other'), bytes: 1}],
+      },
+      {...model, output: 'src/main/java/output'},
+      {...model, output: 'target'},
+      {...model, output: '../outside'},
+      {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry === main ? {...entry, exists: false} : entry,
+        ),
+      },
+      {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry === library
+            ? {...entry, attributes: [...entry.attributes, {name: 'maven.scope', value: 'test'}]}
+            : entry,
+        ),
+      },
+      {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry === library
+            ? {...entry, attributes: [...entry.attributes, {name: 'maven.pomderived', value: 'false'}]}
+            : entry,
+        ),
+      },
+      {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry === library ? {...entry, attributes: []} : entry,
+        ),
+      },
+      {
+        ...model,
+        resolvedClasspath: EffectArray.map(model.resolvedClasspath, entry =>
+          entry.path === '/sdk/lib/jrt-fs.jar' ? {...entry, path: '/sdk/other.jar'} : entry,
+        ),
+      },
+    ];
+    for (const candidate of invalid)
+      expect(() => javaPreparedProjection(candidate, bindings, documentationUri)).toThrow();
+    expect(() =>
+      javaPreparedProjection(
+        model,
+        [{...bindings[0], uri: 'file:///other/src/main/java'}, ...bindings.slice(1)],
+        documentationUri,
+      ),
+    ).toThrow();
+    expect(() => javaPreparedProjection(model, bindings.slice(1), documentationUri)).toThrow();
+    expect(() => javaPreparedProjection(model, bindings, 'https://example.invalid/docs/')).toThrow();
+    for (const uri of ['file:////private/empty-docs/', 'file://///private/empty-docs/'])
+      expect(() => javaPreparedProjection(model, bindings, uri)).toThrow();
+  });
 
   it('preserves projected XML facts, semantic order and inputs across reserved Unicode values', () => {
     const name = fc

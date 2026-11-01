@@ -525,6 +525,11 @@ export function javaPreparedModelJson(model: JavaPreparedModel): string {
   return canonicalJson(model);
 }
 
+/** Compare captured entry facts independently of JSON object-key insertion order. */
+export function javaPreparedEntryJson(entry: JavaPreparedModel['rawClasspath'][number]): string {
+  return canonicalJson(entry);
+}
+
 export const javaPreparedModelCommand = 'threadnote.java.preparedProjectModel.v1';
 export const JavaPreparationGradle = Schema.Struct({
   sdkDirectory: text,
