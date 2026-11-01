@@ -30,6 +30,7 @@ import {
   observeJavaPreparedImport,
   sealJavaPreparedModel,
   verifyJavaPreparationInputs,
+  verifyJavaSourceEncoding,
 } from '../../src/semantic/providers/java_preparation.js';
 
 const candidate = (): JavaRuntimeCandidate => ({
@@ -49,6 +50,8 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly changeSecondModel?: boolean;
     readonly afterSecondModel?: Effect.Effect<void>;
     readonly hostVerify?: Effect.Effect<void, LspFault>;
+    readonly sourceBytes?: Uint8Array;
+    readonly resourcePreferences?: string;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
@@ -62,7 +65,15 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   const uri = (file: string) => path.toFileUrl(file).pipe(Effect.map(url => url.href));
   for (const root of [project]) {
     yield* fs.makeDirectory(path.join(root, 'src/main/java'), {recursive: true});
-    yield* fs.writeFileString(path.join(root, 'src/main/java/Main.java'), 'class Main {}\n');
+    const main = path.join(root, 'src/main/java/Main.java');
+    yield* control.sourceBytes ? fs.writeFile(main, control.sourceBytes) : fs.writeFileString(main, 'class Main {}\n');
+  }
+  if (control.resourcePreferences !== undefined) {
+    yield* fs.makeDirectory(path.join(project, '.settings'), {mode: 0o700});
+    yield* fs.writeFileString(
+      path.join(project, '.settings/org.eclipse.core.resources.prefs'),
+      control.resourcePreferences,
+    );
   }
   yield* fs.writeFileString(path.join(project, 'pom.xml'), '<project>captured build configuration</project>');
   for (const relative of ['settings.gradle', 'build.gradle', 'gradle.properties', '.mvn/maven.config', '.project']) {
@@ -313,6 +324,116 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
 });
 
 describe('Java prepared model sealing', () => {
+  effectIt.effect('rejects transient UTF8 reads that do not match the admitted source bytes', () =>
+    Effect.gen(function* () {
+      const baseline = new Uint8Array([0x2f, 0x2a, 0xe9, 0x2a, 0x2f]);
+      const f = yield* modelFixture({sourceBytes: baseline});
+      const original = f.path.join(f.project, 'src/main/java/Main.java');
+      const copied = f.path.join(f.copiedProject, 'src/main/java/Main.java');
+      const read = fingerprints.readBounded;
+      let encodingReads = 0;
+      const spy = vi.spyOn(fingerprints, 'readBounded').mockImplementation((file, maximum) => {
+        if (maximum !== 4 * 1024 * 1024 || (file !== original && file !== copied)) return read(file, maximum);
+        return Effect.gen(function* () {
+          encodingReads++;
+          yield* f.fs.writeFileString(file, 'class Main {}\n').pipe(Effect.orDie);
+          return yield* read(file, maximum).pipe(Effect.ensuring(f.fs.writeFile(file, baseline).pipe(Effect.orDie)));
+        });
+      });
+      const result = yield* sealJavaPreparedModel(f.observation, f.options).pipe(
+        Effect.flip,
+        Effect.ensuring(Effect.sync(() => spy.mockRestore())),
+      );
+      expect(encodingReads).toBeGreaterThan(0);
+      expect(result).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+      expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+      expect(sha256HexSync(yield* f.fs.readFile(original))).toBe(sha256HexSync(baseline));
+      expect(sha256HexSync(yield* f.fs.readFile(copied))).toBe(sha256HexSync(baseline));
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('binds observed preference absence to the original captured input inventory', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({resourcePreferences: 'encoding/src/main/java/Main.java=ISO-8859-1\n'});
+      const original = f.path.join(f.project, '.settings/org.eclipse.core.resources.prefs');
+      const copied = f.path.join(f.copiedProject, '.settings/org.eclipse.core.resources.prefs');
+      let observations = 0;
+      const result = yield* sealJavaPreparedModel(f.observation, f.options).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...f.fs,
+          exists: file => {
+            if (file !== original && file !== copied) return f.fs.exists(file);
+            const backup = f.path.join(
+              f.runtimeDirectory,
+              file === original ? 'original-prefs-held' : 'copied-prefs-held',
+            );
+            return Effect.gen(function* () {
+              observations++;
+              yield* f.fs.rename(file, backup);
+              return yield* f.fs.exists(file).pipe(Effect.ensuring(f.fs.rename(backup, file).pipe(Effect.orDie)));
+            });
+          },
+        }),
+        Effect.flip,
+      );
+      expect(observations).toBeGreaterThan(0);
+      expect(result).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+      expect(yield* f.fs.exists(original)).toBe(true);
+      expect(yield* f.fs.exists(copied)).toBe(true);
+      expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses non-UTF8 sources and resource encoding overrides despite a UTF8 project default', () =>
+    Effect.gen(function* () {
+      for (const control of [
+        {sourceBytes: new Uint8Array([0xff, 0xfe, 0x63, 0, 0x6c, 0])},
+        {sourceBytes: new Uint8Array([0x2f, 0x2a, 0xe9, 0x2a, 0x2f])},
+        {
+          resourcePreferences:
+            'eclipse.preferences.version=1\nencoding/<project>=UTF-8\nencoding/src/main/java/Main.java=ISO-8859-1\n',
+        },
+        {resourcePreferences: 'eclipse.preferences.version=1\nencoding/src/main/java/Main.java=\\u0055TF-8\n'},
+        {resourcePreferences: 'encoding/src/main/java/Main.java=UTF-8 \n'},
+        {resourcePreferences: 'encoding/src/main/java/Main.java ISO-8859-1=UTF-8\n'},
+        {resourcePreferences: '\uFEFFencoding/src/main/java/Main.java=UTF-8\n'},
+      ]) {
+        const f = yield* modelFixture(control);
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('records validated original UTF8 bytes and preference inputs without retaining setup paths', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({
+        resourcePreferences:
+          '# controlled preferences\n\teclipse.preferences.version=1\n encoding/<project>=UTF-8\n\fencoding/src/main/java=UTF-8\nencoding/src/main/java/Main.java=UTF-8\n',
+      });
+      const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+      expect(sealed.model.sourceInputEncoding).toBe('utf8-original-inputs-v1');
+      expect(sealed.model.projectCharset).toBe('UTF-8');
+      expect(yield* f.fs.readFileString(sealed.metadataFile)).not.toContain(f.runtimeDirectory);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'validates well-formed UTF8 source bytes without changing them',
+    [Schema.Array(Schema.Literals(['a', 'é', '😀', '\r', '\n', '\uFEFF'])).check(Schema.isMaxLength(64))],
+    ([characters]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const project = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-utf8-'}));
+        const root = path.join(project, 'src');
+        yield* fs.makeDirectory(root);
+        const file = path.join(root, 'Main.java');
+        const bytes = new TextEncoder().encode('class Main { /*' + EffectArray.join(characters, '') + '*/ }\n');
+        yield* fs.writeFile(file, bytes);
+        yield* verifyJavaSourceEncoding(project, [root]);
+        expect(sha256HexSync(yield* fs.readFile(file))).toBe(sha256HexSync(bytes));
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
   effectIt.effect('refuses SDK drift during the final native observation before issuing a witness', () =>
     Effect.gen(function* () {
       let sdkIntact = true;
