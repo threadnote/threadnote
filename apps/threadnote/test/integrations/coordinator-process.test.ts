@@ -449,7 +449,12 @@ describe('integration coordinator process composition', () => {
             ),
           'Accepted demand did not finish without another client call',
         );
-        expect(persistedJob(home)).toEqual([{generation: 2, state: 'idle'}]);
+        // The provider's end event precedes the coordinator's durable completion transaction.
+        const settled = await until(async () => {
+          const rows = persistedJob(home);
+          return rows.length === 1 && rows[0].generation === 2 && rows[0].state === 'idle' ? rows : undefined;
+        }, 'Accepted demand did not commit generation 2 idle after provider completion');
+        expect(settled).toEqual([{generation: 2, state: 'idle'}]);
       } finally {
         await proxy.stop(true);
       }
