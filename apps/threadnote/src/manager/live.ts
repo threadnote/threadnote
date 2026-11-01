@@ -13,6 +13,7 @@ import {
   String as Str,
 } from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
+import type * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import * as Socket from 'effect/socket/Socket';
@@ -607,3 +608,10 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
 });
 
 export type ManagerLive = Effect.Success<ReturnType<typeof makeManagerLive>>;
+
+/** Close owned live channels before the HTTP server's graceful drain, in the caller's Scope. */
+export const serveManagerLive = <E, R>(
+  server: HttpServer.HttpServer['Service'],
+  handler: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
+  live: ManagerLive,
+) => Effect.acquireRelease(server.serve(handler), () => live.invalidateScope);
