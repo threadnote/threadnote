@@ -356,13 +356,14 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
         check(expectedUri != null && folder.getLocationURI() != null
             && sourceFolderIdentity(new URI(expectedUri), monitor).equals(sourceFolderIdentity(folder.getLocationURI(), monitor)),
             "Source link changed");
-        if (!folder.exists()) {
+        // A linked resource can exist in Eclipse while its optional physical target is absent.
+        if (Files.notExists(Path.of(new URI(expectedUri)), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
           boolean optional = false;
           for (Object item : (List<?>) entry.get("attributes")) {
             Map<?, ?> attribute = (Map<?, ?>) item;
             if ("optional".equals(attribute.get("name")) && "true".equals(attribute.get("value"))) optional = true;
           }
-          check(optional && !Files.exists(Path.of(new URI(expectedUri)), java.nio.file.LinkOption.NOFOLLOW_LINKS),
+          check(optional && Files.notExists(Path.of(new URI(expectedUri)), java.nio.file.LinkOption.NOFOLLOW_LINKS),
               "Source root unavailable");
           continue;
         }

@@ -24,13 +24,20 @@ import {
   makeJavaDiagnosticModel,
 } from '../../src/semantic/providers/java_diagnostics.js';
 import {javaDiagnosticBundle} from '../../src/semantic/providers/java_diagnostics_bundle.js';
-import {javaTypeDefinitionCommand} from '../../src/semantic/providers/java_snapshot.js';
+import {javaTypeDefinitionCommand, JavaProjectionImage} from '../../src/semantic/providers/java_snapshot.js';
 import {
   makeJavaProject,
   javaCompilerPreferences,
   javaProjectMetadata,
+  javaProjectionMetadata,
   type JavaProjectModel,
 } from '../../src/semantic/providers/java_project.js';
+
+const decodeXmlEntities = (text: string) => {
+  const entities: Record<string, string> = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"};
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Each XML entity needs a distinct callback replacement; Effect String.replace accepts a fixed string.
+  return text.replace(/&(amp|lt|gt|quot|apos);/gu, (_, entity: string) => entities[entity]);
+};
 
 const fixture = (libraryName = 'dependency') =>
   Effect.gen(function* () {
@@ -329,17 +336,13 @@ describe('Java prepared project boundary', () => {
         const libraries = EffectArray.map(names, value => '/dependencies/' + value + '.jar');
         const before = JSON.stringify([sources, libraries]);
         const files = javaProjectMetadata(sources, libraries);
-        const entities: Record<string, string> = {amp: '&', lt: '<', gt: '>', quot: '"', apos: "'"};
-        const decode = (text: string) =>
-          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Each XML entity needs a distinct callback replacement; Effect String.replace accepts a fixed string.
-          text.replace(/&(amp|lt|gt|quot|apos);/gu, (_, entity: string) => entities[entity]);
         const paths = Array.from(
           EffectString.matchAll(/<classpathentry kind="lib" path="([^"]*)"\/>/gu)(files['.classpath']),
-          match => decode(match[1]),
+          match => decodeXmlEntities(match[1]),
         );
         const links = Array.from(
           EffectString.matchAll(/<locationURI>([^<]*)<\/locationURI>/gu)(files['.project']),
-          match => decode(match[1]),
+          match => decodeXmlEntities(match[1]),
         );
         expect(paths).toEqual(libraries);
         expect(links).toEqual(sources);
@@ -348,6 +351,292 @@ describe('Java prepared project boundary', () => {
       }),
       {numRuns: 32},
     );
+  });
+
+  const projectionFixture = (value = 'élève&<"𐐀') => {
+    const fields = {
+      exported: false,
+      inclusions: [],
+      exclusions: [],
+      attributes: [{name: 'scope', value}],
+      accessRules: [],
+    };
+    const source = {
+      ...fields,
+      kind: 3 as const,
+      contentKind: 1 as const,
+      path: '/threadnote-java/source-0',
+      combineAccessRules: false,
+      outputPath: '/threadnote-java/output-1',
+      inclusions: ['demo/**'],
+      exclusions: ['ignored/'],
+    };
+    const library = {
+      ...fields,
+      kind: 1 as const,
+      contentKind: 2 as const,
+      path: '/libraries/' + value + '.jar',
+      combineAccessRules: false,
+      exported: true,
+      sourceAttachmentPath: '/sdk/source.zip',
+      sourceAttachmentRoot: '',
+      accessRules: [
+        {kind: 2 as const, pattern: 'hidden/**', ignoreIfBetter: true},
+        {kind: 0 as const, pattern: 'public/**', ignoreIfBetter: false},
+      ],
+    };
+    const jre = {
+      ...fields,
+      kind: 5 as const,
+      contentKind: 1 as const,
+      path: 'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21',
+      combineAccessRules: true,
+    };
+    const image: typeof JavaProjectionImage.Type = {
+      format: 'threadnote-passive-java-projection-v1',
+      projectCharset: 'UTF-8',
+      outputPath: '/threadnote-java/output-0',
+      rawClasspath: [source, library, jre],
+      resolvedClasspath: [source, library],
+      links: [{path: 'source-0', uri: 'file:///original/' + encodeURIComponent(value), type: 2}],
+      resourceFilters: [
+        {
+          id: '123456789',
+          path: '',
+          type: 30,
+          matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
+          arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
+        },
+      ],
+    };
+    const compiler = {
+      'org.eclipse.jdt.core.compiler.compliance': '21',
+      'org.eclipse.jdt.core.compiler.source': '21',
+      'org.eclipse.jdt.core.compiler.codegen.targetPlatform': '21',
+      'org.eclipse.jdt.core.compiler.release': 'enabled',
+      'org.eclipse.jdt.core.compiler.processAnnotations': 'disabled',
+      'org.eclipse.jdt.core.compiler.annotation.nonnull': value,
+    };
+    return {image, compiler};
+  };
+
+  it('preserves projected XML facts, semantic order and inputs across reserved Unicode values', () => {
+    const name = fc
+      .array(fc.constantFrom('a', '&', '<', '>', '"', "'", 'é', '𐐀', '$', '?', '#', '%', '[', ']', '|', '^'), {
+        minLength: 1,
+        maxLength: 12,
+      })
+      .map(parts => EffectArray.join(parts, ''));
+    fc.assert(
+      fc.property(name, value => {
+        const {image, compiler} = projectionFixture(value);
+        const before = JSON.stringify([image, compiler]);
+        const files = javaProjectionMetadata(image, compiler);
+        // These extract the fixed serializer fields; the pinned native fixture verifies Eclipse reconstruction.
+        const entries = Array.from(
+          EffectString.matchAll(/<classpathentry\b[^>]*>/gu)(files['.classpath']),
+          match => match[0],
+        );
+        const attribute = (tag: string, name: string) => {
+          const match = Array.from(EffectString.matchAll(new RegExp(' ' + name + '="([^"]*)"', 'gu'))(tag))[0];
+          return match ? decodeXmlEntities(match[1]) : null;
+        };
+        expect(EffectArray.map(entries, entry => attribute(entry, 'path'))).toEqual([
+          'source-0',
+          image.rawClasspath[1].path,
+          image.rawClasspath[2].path,
+          'output-0',
+        ]);
+        expect(attribute(entries[0], 'output')).toBe('output-1');
+        expect(attribute(entries[0], 'including')).toBe('demo/**');
+        expect(attribute(entries[0], 'excluding')).toBe('ignored/');
+        expect(attribute(entries[1], 'exported')).toBe('true');
+        expect(attribute(entries[1], 'sourcepath')).toBe('/sdk/source.zip');
+        expect(attribute(entries[1], 'rootpath')).toBe('');
+        expect(
+          Array.from(EffectString.matchAll(/<accessrule\b[^>]*>/gu)(files['.classpath']), rule => [
+            attribute(rule[0], 'kind'),
+            attribute(rule[0], 'pattern'),
+            attribute(rule[0], 'ignoreifbetter'),
+          ]),
+        ).toEqual([
+          ['discouraged', 'hidden/**', 'true'],
+          ['accessible', 'public/**', null],
+        ]);
+        expect(
+          Array.from(EffectString.matchAll(/<attribute\b[^>]*>/gu)(files['.classpath']), item =>
+            attribute(item[0], 'value'),
+          ),
+        ).toEqual([value, value, value]);
+        expect(
+          Array.from(EffectString.matchAll(/<locationURI>([^<]*)<\/locationURI>/gu)(files['.project']), match =>
+            decodeXmlEntities(match[1]),
+          ),
+        ).toEqual([image.links[0].uri]);
+        expect(
+          Array.from(EffectString.matchAll(/<filter><id>([^<]*)<\/id>/gu)(files['.project']), match => match[1]),
+        ).toEqual([image.resourceFilters[0].id]);
+        expect(
+          Array.from(EffectString.matchAll(/<arguments>([^<]*)<\/arguments>/gu)(files['.project']), match =>
+            decodeXmlEntities(match[1]),
+          ),
+        ).toEqual([image.resourceFilters[0].arguments]);
+        expect(files['.settings/org.eclipse.jdt.core.prefs']).toBe(javaCompilerPreferences(compiler));
+        expect(files['.settings/org.eclipse.core.resources.prefs']).toContain('encoding/<project>=UTF-8\n');
+        expect(
+          javaProjectionMetadata(image, EffectRecord.fromEntries(EffectRecord.toEntries(compiler).reverse())),
+        ).toEqual(files);
+        expect(JSON.stringify([image, compiler])).toBe(before);
+      }),
+      {numRuns: 32},
+    );
+  });
+
+  it('refuses lossy projected metadata and constructor fields instead of dropping them', () => {
+    const {image, compiler} = projectionFixture();
+    for (const source of [
+      {...image.rawClasspath[0], inclusions: ['']},
+      {...image.rawClasspath[0], exclusions: ['left|right']},
+      {...image.rawClasspath[0], exported: true},
+      {...image.rawClasspath[0], combineAccessRules: true},
+      {...image.rawClasspath[0], contentKind: 2 as const},
+      {
+        ...image.rawClasspath[0],
+        attributes: [
+          {name: 'test', value: 'true'},
+          {name: 'test', value: 'true'},
+        ],
+      },
+      {...image.rawClasspath[0], path: '/threadnote-java/source-32'},
+      {...image.rawClasspath[0], outputPath: '/threadnote-java/output-33'},
+      {...image.rawClasspath[0], sourceAttachmentPath: '/sdk/source.zip'},
+      {...image.rawClasspath[0], accessRules: [{kind: 0 as const, pattern: '**', ignoreIfBetter: false}]},
+    ])
+      expect(() =>
+        javaProjectionMetadata({...image, rawClasspath: [source, ...image.rawClasspath.slice(1)]}, compiler),
+      ).toThrow();
+    expect(() =>
+      javaProjectionMetadata({...image, links: [{...image.links[0], path: 'source-1'}]}, compiler),
+    ).toThrow();
+    const unexpected = {...image, unexpected: true};
+    expect(() => javaProjectionMetadata(unexpected, compiler)).toThrow();
+    expect(() =>
+      javaProjectionMetadata(image, {...compiler, 'org.eclipse.jdt.core.compiler.processAnnotations': 'enabled'}),
+    ).toThrow();
+  });
+
+  it('serializes redacted raw documentation only with its exact supplied local URI', () => {
+    const {image, compiler} = projectionFixture();
+    const uri = 'file:///private/documentation/';
+    const selected = {
+      ...image,
+      rawClasspath: EffectArray.map(image.rawClasspath, entry =>
+        entry.kind === 1
+          ? {
+              ...entry,
+              attributes: [
+                {name: 'javadoc_location' as const, valueSha256: sha256HexSync(uri), access: 'disabled' as const},
+              ],
+            }
+          : entry,
+      ),
+    };
+    expect(() => javaProjectionMetadata(selected, compiler)).toThrow();
+    expect(() => javaProjectionMetadata(selected, compiler, 'file:///private/other/')).toThrow();
+    expect(javaProjectionMetadata(selected, compiler, uri)['.classpath']).toContain('value="' + uri + '"');
+    expect(() => javaProjectionMetadata(selected, compiler, 'https://example.invalid/docs/')).toThrow();
+  });
+
+  it('requires absent URI components while preserving escaped filename delimiters', () => {
+    const {image, compiler} = projectionFixture();
+    for (const component of ['?', '#', '?query', '#fragment']) {
+      const sourceUri = 'file:///original/src' + component;
+      expect(() =>
+        javaProjectionMetadata({...image, links: [{...image.links[0], uri: sourceUri}]}, compiler),
+      ).toThrow();
+      const documentationUri = 'file:///private/documentation/' + component;
+      const selected = {
+        ...image,
+        rawClasspath: EffectArray.map(image.rawClasspath, entry =>
+          entry.kind === 1
+            ? {
+                ...entry,
+                attributes: [
+                  {
+                    name: 'javadoc_location' as const,
+                    valueSha256: sha256HexSync(documentationUri),
+                    access: 'disabled' as const,
+                  },
+                ],
+              }
+            : entry,
+        ),
+      };
+      expect(() => javaProjectionMetadata(selected, compiler, documentationUri)).toThrow();
+    }
+    const encodedUri = 'file:///original/question%3Fhash%23';
+    expect(
+      javaProjectionMetadata({...image, links: [{...image.links[0], uri: encodedUri}]}, compiler)['.project'],
+    ).toContain(encodedUri);
+  });
+
+  it('requires Java-compatible URI path spelling and well-formed decoded filenames', () => {
+    const {image, compiler} = projectionFixture();
+    for (const path of [
+      'tail%',
+      'bad%GG',
+      'short%0',
+      'nul%00',
+      'control%0A',
+      'utf8%80',
+      'surrogate%ED%A0%80',
+      'raw[bracket]',
+      'raw|pipe',
+      'raw^caret',
+    ]) {
+      const uri = 'file:///original/' + path;
+      expect(() => javaProjectionMetadata({...image, links: [{...image.links[0], uri}]}, compiler)).toThrow();
+      const selected = {
+        ...image,
+        rawClasspath: EffectArray.map(image.rawClasspath, entry =>
+          entry.kind === 1
+            ? {
+                ...entry,
+                attributes: [
+                  {name: 'javadoc_location' as const, valueSha256: sha256HexSync(uri), access: 'disabled' as const},
+                ],
+              }
+            : entry,
+        ),
+      };
+      expect(() => javaProjectionMetadata(selected, compiler, uri)).toThrow();
+    }
+    for (const path of [
+      'percent%25',
+      'literal%2500',
+      'question%3Fhash%23',
+      '%5Bbracket%5D%7Cpipe%5E',
+      '%C3%A9%F0%90%90%80',
+    ]) {
+      const uri = 'file:///original/' + path;
+      expect(javaProjectionMetadata({...image, links: [{...image.links[0], uri}]}, compiler)['.project']).toContain(
+        uri,
+      );
+      const selected = {
+        ...image,
+        rawClasspath: EffectArray.map(image.rawClasspath, entry =>
+          entry.kind === 1
+            ? {
+                ...entry,
+                attributes: [
+                  {name: 'javadoc_location' as const, valueSha256: sha256HexSync(uri), access: 'disabled' as const},
+                ],
+              }
+            : entry,
+        ),
+      };
+      expect(javaProjectionMetadata(selected, compiler, uri)['.classpath']).toContain('value="' + uri + '"');
+    }
   });
 });
 
