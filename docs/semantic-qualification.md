@@ -1,6 +1,6 @@
 # Semantic provider and editor qualification
 
-This dossier records disposable P00 feasibility probes and a candidate ledger. It does not enable a Threadnote semantic
+This dossier records disposable P00 feasibility probes, later phase-labelled component evidence and a candidate ledger. It does not enable a Threadnote semantic
 service, ship providers, certify production support, or complete a release gate on its own. Native cycle receipts own
 phase acceptance; every provider's `productionQualified` flag remains false.
 
@@ -183,3 +183,46 @@ and non-mutating, idempotent settings expansion. Regressions cover the overall r
 logged panics despite exit zero, malformed frames, cancellation, Unicode/CRLF, incomplete results and owned descendants.
 The ledger test covers all release platform/language cells and prohibits advertising a pilot as production support. Full
 product/platform suites belong to their implementation phases and CI; these checks do not certify the release.
+
+## P05 private Java component evidence
+
+The Java ledger preserves the P00 observations and records later evidence separately under `phaseEvidence`. These
+observations use the source-pinned private coordinator and actual JDT LS 1.63.0-202610191322 on macOS arm64, with separate
+Temurin runtime Java 25.0.5+8 and project Java 21.0.13+9 SDKs. They contribute to P05; native phase acceptance remains
+pending and `productionQualified` remains false for every provider.
+
+The retained Maven 1.0 and Gradle 2.0 dependency fixtures each import existing main and test roots into a sealed prepared
+model before private analysis. Actual results cover definition, references, unapplied rename previews, hover, symbols,
+completion, signature, source type definition, call hierarchy, diagnostics and complete inline import-action previews.
+A separate Maven fixture uses typed Alpha and Beta receivers in the same file and requires the exact Alpha declaration
+and call-site reference locations. A retained-result audit also rejects a deliberate substitution of the same-file Beta
+call, which a count-and-filename check would miss.
+
+The focused diagnostic sequence observes one added error, the identical error in a nonempty `remaining` delta, then one
+resolution after an unsaved document-version-2 import fix. The resolution binds the prior and current observations; the
+prior observation is refused as stale and a repeated fixed-view read does not duplicate the resolution. The prepared
+quickfix remains unapplied. Source, SDK and offline-cache digests are conserved, admission is empty, and the known owned
+processes are positively absent before the disposable fixture is removed. Endpoint child OS exit codes are not exposed;
+parent command exit and known-process absence are separate evidence.
+
+Report hashes in the ledger identify private operator evidence. They are not phase receipts or public benchmark claims.
+These fixtures establish bounded component behavior, with no general repository execution authorization, OS sandbox,
+public setup issuer, editor integration, edit application, additional platform or aggregate-memory qualification. Kotlin
+remains deferred and P09 editor work is skipped; shared guarded-edit safety remains required.
+
+### Selected Java distribution licensing
+
+The exact selected-artifact inventory covers 111 JDT distribution JARs, the legal trees of both Temurin SDKs, and Gradle
+9.8.2 with its 348 JARs. It records file/entry hashes, packaged legal notices and declared manifest/POM license metadata.
+A missing conventional license filename is a review gap, not proof that an artifact has no license. Wrapped/transitive
+components still require mapping to the applicable notices and permitted-use evidence.
+
+The upstream [JDT LS source license](https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE) is EPL-2.0.
+[Adoptium describes Temurin binaries](https://adoptium.net/docs/faq) as GPLv2 with the Classpath Exception and directs users
+to the included licenses. Both exact local SDKs include their own NOTICE and third-party legal trees. The
+[Gradle 9.8.2 root license](https://github.com/gradle/gradle/blob/v9.8.2/LICENSE) is Apache-2.0; its packaged LICENSE and
+NOTICE also identify third-party terms. A source project's root license alone does not qualify every bundled component.
+
+Selected-profile license review remains pending; redistribution is release-gated. The runtime's Java status reports that
+pending state alongside its exact platform and separate SDK requirements. No distribution approval or paid-entitlement
+claim follows from the component probes or this inventory.

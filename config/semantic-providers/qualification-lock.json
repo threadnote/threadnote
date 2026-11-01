@@ -609,7 +609,21 @@
         "reported": "EPL-2.0",
         "evidence": ["https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE"],
         "redistribution": "not bundled; distribution obligations remain a release gate",
-        "inspectedSourceSha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+        "inspectedSourceSha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c",
+        "selectedProfileInventory": {
+          "status": "review-pending",
+          "reportSha256": "1e67f20751aef5f3b2c6b741ca7f2b4521cf1fba9a87f646735802e0193fc39d",
+          "jdtDistributionJars": 111,
+          "runtimeJava": "25.0.5+8",
+          "projectJava": "21.0.13+9",
+          "gradle": "9.8.2",
+          "scope": "Exact local JDT/SDK/Gradle legal files, JAR legal entries and declared metadata; not a blanket distribution license expression",
+          "remaining": [
+            "Map wrapped and transitive components to applicable license/notice evidence",
+            "Review selected-profile permitted use and source/notice obligations",
+            "Redistribution and other platform decisions remain release-gated"
+          ]
+        }
       },
       "artifacts": [
         {
@@ -675,7 +689,7 @@
       },
       "productionQualified": false,
       "blockers": [
-        "Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred."
+        "P00 historical scope: Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred."
       ],
       "pilotEvidence": [
         {
@@ -716,6 +730,43 @@
             "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
           },
           "outcome": "passed"
+        }
+      ],
+      "phaseEvidence": [
+        {
+          "phase": "P05",
+          "status": "experimental-component-evidence",
+          "nativePhaseAccepted": false,
+          "productionQualified": false,
+          "platform": "darwin-arm64",
+          "sourceCommit": "f6f3c6823624bb8bb8b24576646d6a03c1ea2f18",
+          "reports": [
+            {
+              "purpose": "Actual private Maven1.0 and Gradle2.0 preparation and Java operations",
+              "sha256": "91ca6ee9f43265fd62e4714956534e4b000984e3a668f396b564bd75fe61d70b"
+            },
+            {
+              "purpose": "Actual typed-receiver references and added/remaining/resolved diagnostic lifecycle",
+              "sha256": "4ca28375cdf92cd84b86043bee2ac0e5d2220289fb584a7aa30173919e70d6b2"
+            },
+            {
+              "purpose": "Exact reference-location audit against retained results, including wrong same-file call negative control; no new native run",
+              "sha256": "4447e0d2d42cd2103463e70eab06b60cf5cc2437d000e2ab30d1f8140149e581"
+            }
+          ],
+          "coverage": [
+            "Two existing main/test source roots and two pinned dependency versions",
+            "Definition, exact references, typed receiver separation and complete unapplied rename previews",
+            "Hover, document symbols, completion, signature, source type definition and call hierarchy",
+            "Added, nonempty remaining and resolved diagnostic deltas with prior/current observation binding",
+            "Complete unapplied inline import actions and stale prior-view refusal after unsaved overlay fix",
+            "Source, SDK and offline-cache conservation; empty admission and positive known-owned process absence"
+          ],
+          "limits": [
+            "Fixed private synthetic offline fixtures only; no general repository execution permission or OS sandbox",
+            "No public setup issuer, edit application, editor integration, aggregate RSS or additional platform qualification",
+            "No selected-distribution license approval or native P05 acceptance; Kotlin remains deferred"
+          ]
         }
       ]
     },
