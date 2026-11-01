@@ -226,6 +226,12 @@ export interface LspDiagnosticRequest {
 /** Backend-owned policy; never decoded from repository requests. */
 export interface LspSessionPolicy {
   readonly language: 'python' | 'go' | 'rust' | 'java';
+  /** Host-selected UTF-16 view limits, enforced before document state or notifications change. */
+  readonly documentLimits?: {
+    readonly maxDocuments: number;
+    readonly maxTextLength: number;
+    readonly maxTotalTextLength: number;
+  };
   readonly workspaceName: string;
   readonly acceptsServer: (
     server:
@@ -269,6 +275,11 @@ export interface LspSessionOptions {
 export type LspSessionClient = Omit<LspClient, 'request'> & {
   readonly request: (...args: Parameters<LspClient['request']>) => Effect.Effect<Schema.Json, unknown>;
 };
+const DocumentLimits = Schema.Struct({
+  maxDocuments: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 256})),
+  maxTextLength: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4 * 1024 * 1024})),
+  maxTotalTextLength: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 256 * 4 * 1024 * 1024})),
+});
 /** One project/environment/view. Reads and preparation only; no command or apply-edit entry point exists. */
 export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
   client: LspSessionClient,
@@ -277,6 +288,12 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const basis = structuredClone(yield* decode(Observation, options.basis));
+  const {maxDocuments, maxTextLength, maxTotalTextLength} = yield* decode(
+    DocumentLimits,
+    options.policy.documentLimits === undefined
+      ? {maxDocuments: 256, maxTextLength: 4 * 1024 * 1024, maxTotalTextLength: 256 * 4 * 1024 * 1024}
+      : options.policy.documentLimits,
+  );
   const worktree = yield* path.fromFileUrl(new URL(basis.worktree));
   const allowedRoots = [worktree, ...options.roots];
   options.notifications.subscribe((method, params) => options.policy.receive?.(method, params));
@@ -425,6 +442,17 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         )
           return yield* invalid();
         const previous = documents.get(fixed.uri);
+        const totalTextLength = EffectArray.reduce(
+          [...documents],
+          text.length,
+          (total, [uri, document]) => total + (uri === fixed.uri ? 0 : document.text.length),
+        );
+        if (
+          text.length > maxTextLength ||
+          documents.size + (previous ? 0 : 1) > maxDocuments ||
+          totalTextLength > maxTotalTextLength
+        )
+          return yield* LspFault.make({code: 'capacity'});
         if (
           previous?.ready &&
           previous.text === text &&
@@ -439,7 +467,6 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
           fixed.documentVersion <= previous.observation.documentVersion
         )
           return yield* SemanticSessionFault.make({reason: 'conflict'});
-        if (!previous && documents.size >= 256) return yield* LspFault.make({code: 'capacity'});
         if (documents.size && ++epoch >= Number.MAX_SAFE_INTEGER)
           return yield* SemanticSessionFault.make({reason: 'not-ready'});
         fixed = {...fixed, projectEpoch: epoch};

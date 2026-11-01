@@ -286,6 +286,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       ready: sourceVerify,
       policy: {
         language: 'java',
+        documentLimits: {maxDocuments: 128, maxTextLength: 2 * 1024 * 1024, maxTotalTextLength: 8 * 1024 * 1024},
         workspaceName: 'threadnote-private-java21',
         acceptsServer: server =>
           server?.name === 'JDT Language Server (Standard)' && server.version === '1.63.0-SNAPSHOT',
