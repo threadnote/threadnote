@@ -727,45 +727,51 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
       }
       yield* verifyInventory;
     });
-    const verifyFingerprints = Effect.gen(function* () {
-      if (
-        (yield* semanticTreeDigest(selected.worktree)) !== model.sourceDigest ||
-        (yield* semanticSdkDigest(selected.javaHome)) !== model.javaSdkDigest
-      )
-        return yield* fail();
-    });
-    const verify = Effect.gen(function* () {
-      for (const owner of owners) yield* owner.verify;
-      yield* verifyArtifacts;
-      yield* verifyFingerprints;
-      for (const owner of rootOwners) yield* owner.verify;
-      for (const root of absentSourceRoots) yield* absent(root);
-      const encoding = yield* verifyJavaSourceEncoding(selected.project, sourceRoots);
-      const image = javaSourceEncodingImage(
-        EffectArray.map(encoding.sources, source => ({
-          name: EffectArray.join(EffectString.split(path.sep)(path.relative(selected.project, source.file)), '/'),
-          digest: source.digest,
-        })),
-      );
-      if (
-        image.sourceCount !== model.sourceEncoding.sourceCount ||
-        image.sourceDigest !== model.sourceEncoding.sourceDigest
-      )
-        return yield* fail();
-      yield* verifyArtifacts;
-      yield* verifyFingerprints;
-      for (const file of expected.keys()) yield* verifyFile(file);
-      for (const owner of owners) yield* owner.verify;
-      for (const owner of rootOwners) yield* owner.verify;
-      for (const root of absentSourceRoots) yield* absent(root);
-      yield* verifyInventory;
-    }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
+    const verifySdk = Effect.gen(function* () {
+      if ((yield* semanticSdkDigest(selected.javaHome)) !== model.javaSdkDigest) return yield* fail();
+    }).pipe(Effect.asVoid);
+    const verifyFingerprints = (sdk: typeof verifySdk) =>
+      Effect.gen(function* () {
+        if ((yield* semanticTreeDigest(selected.worktree)) !== model.sourceDigest) return yield* fail();
+        yield* sdk;
+      });
+    const verifyUsing = (sdk: typeof verifySdk) =>
+      Effect.gen(function* () {
+        for (const owner of owners) yield* owner.verify;
+        yield* verifyArtifacts;
+        yield* verifyFingerprints(sdk);
+        for (const owner of rootOwners) yield* owner.verify;
+        for (const root of absentSourceRoots) yield* absent(root);
+        const encoding = yield* verifyJavaSourceEncoding(selected.project, sourceRoots);
+        const image = javaSourceEncodingImage(
+          EffectArray.map(encoding.sources, source => ({
+            name: EffectArray.join(EffectString.split(path.sep)(path.relative(selected.project, source.file)), '/'),
+            digest: source.digest,
+          })),
+        );
+        if (
+          image.sourceCount !== model.sourceEncoding.sourceCount ||
+          image.sourceDigest !== model.sourceEncoding.sourceDigest
+        )
+          return yield* fail();
+        yield* verifyArtifacts;
+        yield* verifyFingerprints(sdk);
+        for (const file of expected.keys()) yield* verifyFile(file);
+        for (const owner of owners) yield* owner.verify;
+        for (const owner of rootOwners) yield* owner.verify;
+        for (const root of absentSourceRoots) yield* absent(root);
+        yield* verifyInventory;
+      }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
+    const verify = verifyUsing(verifySdk);
+    // Per-exchange source checks compose with the full SDK guards at public operation boundaries.
+    const verifySource = verifyUsing(Effect.void);
     yield* verify;
     return Object.freeze({
       model,
       sourceRoots: Object.freeze(sourceRoots),
       absentSourceRoots: Object.freeze(absentSourceRoots),
       verify,
+      verifySource,
     });
   },
   effect =>

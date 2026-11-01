@@ -24,11 +24,12 @@ import {
   materializeJavaDiagnosticBundle,
   requestJavaDiagnostics,
   requestJavaTypeDefinition,
+  makeJavaDiagnosticModel,
   type JavaDiagnosticModel,
 } from './java_diagnostics.js';
 import {javaDiagnosticBundle} from './java_diagnostics_bundle.js';
 import {captureJavaSnapshotModel, javaTypeDefinitionCommand, javaFileUri} from './java_snapshot.js';
-import {makeJavaProject} from './java_project.js';
+import {makeJavaProject, makeJavaPreparedProject, javaPreparedSourceMember} from './java_project.js';
 
 class JavaSourceTargetFault extends Schema.TaggedError<JavaSourceTargetFault, {readonly brand: unique symbol}>()(
   'JavaSourceTargetFault',
@@ -218,7 +219,8 @@ export const mapJavaSourceResponse = Effect.fn('semantic.mapJavaSourceResponse')
 });
 
 export interface JavaSessionOptions extends Omit<LspSessionOptions, 'policy' | 'ready'> {
-  readonly prepared: Effect.Success<ReturnType<typeof makeJavaProject>>;
+  readonly prepared:
+    Effect.Success<ReturnType<typeof makeJavaProject>> | Effect.Success<ReturnType<typeof makeJavaPreparedProject>>;
   readonly bundle: Effect.Success<ReturnType<typeof materializeJavaDiagnosticBundle>>;
   readonly diagnosticModel: JavaDiagnosticModel;
   readonly runtime: {
@@ -229,27 +231,76 @@ export interface JavaSessionOptions extends Omit<LspSessionOptions, 'policy' | '
 /** The shared session alone owns documents, versions and epochs; Java adds readiness and checked URI translation. */
 export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
   function* (client: LspClient, options: JavaSessionOptions) {
+    const prepared = options.prepared;
+    const preparedModel = 'model' in prepared ? prepared : undefined;
     const diagnosticModel = captureJavaSnapshotModel(options.diagnosticModel);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     const crypto = yield* Crypto.Crypto;
     const serviceReady = yield* Deferred.make<void, LspFault>();
     const basis = structuredClone(options.basis);
-    const settings = structuredClone(options.prepared.settings);
+    const settings = structuredClone(prepared.settings);
     if (diagnosticModel.javaHomeUri !== javaFileUri(yield* path.toFileUrl(options.runtime.projectJavaHome + path.sep)))
       return yield* LspFault.make({code: 'prerequisite'});
-    const sourceUri = yield* makeJavaSourceUri(options.prepared.sourceRoots);
+    if (preparedModel) {
+      if (!Schema.is(FileUri)(basis.project) || !Schema.is(FileUri)(basis.worktree))
+        return yield* LspFault.make({code: 'prerequisite'});
+      if (
+        path.resolve(yield* path.fromFileUrl(new URL(basis.project))) !== preparedModel.model.project ||
+        path.resolve(yield* path.fromFileUrl(new URL(basis.worktree))) !== preparedModel.model.worktree
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
+      const expected = yield* makeJavaDiagnosticModel({
+        project: prepared.project,
+        javaHome: preparedModel.model.javaHome,
+        sourceRoots: prepared.sourceRoots,
+        libraries: EffectArray.map(preparedModel.model.libraries, library => library.file),
+        compilerOptions: preparedModel.model.compilerOptions,
+        projectionDigest: preparedModel.projectionDigest,
+      });
+      const compilerOptions = diagnosticModel.compilerOptions;
+      if (
+        diagnosticModel.projectUri !== expected.projectUri ||
+        diagnosticModel.javaHomeUri !== expected.javaHomeUri ||
+        diagnosticModel.projectionDigest !== expected.projectionDigest ||
+        diagnosticModel.sourceRoots.length !== expected.sourceRoots.length ||
+        !EffectArray.every(expected.sourceRoots, (uri, index) => diagnosticModel.sourceRoots[index] === uri) ||
+        diagnosticModel.libraries.length !== expected.libraries.length ||
+        !EffectArray.every(expected.libraries, (uri, index) => diagnosticModel.libraries[index] === uri) ||
+        compilerOptions === undefined ||
+        EffectRecord.keys(compilerOptions).length !== EffectRecord.keys(preparedModel.model.compilerOptions).length ||
+        !EffectRecord.every(preparedModel.model.compilerOptions, (value, key) => compilerOptions[key] === value)
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
+    } else if (diagnosticModel.projectionDigest !== undefined) return yield* LspFault.make({code: 'prerequisite'});
+    const physicalSourceUri = yield* makeJavaSourceUri(prepared.sourceRoots);
+    const sourceUri = (uri: string) =>
+      Effect.gen(function* () {
+        const canonical = yield* physicalSourceUri(uri);
+        if (preparedModel) {
+          const file = yield* path.fromFileUrl(new URL(canonical));
+          if (!EffectString.endsWith('.java')(file)) return yield* unsupported();
+          const member = yield* Effect.try({
+            try: () => javaPreparedSourceMember(preparedModel.model, file),
+            catch: error => (Schema.is(LspFault)(error) ? error : protocol()),
+          });
+          if (!member) return yield* unsupported();
+        }
+        return canonical;
+      });
     let retire: Effect.Effect<void> = Effect.void;
     // Full SDK reads bound public operations; source and project checks also guard each transport exchange.
-    const sourceVerify = Effect.all([options.prepared.verify, options.bundle.verify]).pipe(
-      Effect.asVoid,
-      Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.provideService(Path.Path, path),
-      Effect.provideService(Crypto.Crypto, crypto),
-      Effect.onExit(exit => (Exit.isFailure(exit) ? retire : Effect.void)),
-    );
+    const checkSource = (check: typeof prepared.verify) =>
+      Effect.all([check, options.bundle.verify]).pipe(
+        Effect.asVoid,
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.onExit(exit => (Exit.isFailure(exit) ? retire : Effect.void)),
+      );
+    const sourceVerify = checkSource(preparedModel ? preparedModel.verifySource : prepared.verify);
     const verify = options.runtime.verify.pipe(
-      Effect.andThen(sourceVerify),
+      Effect.andThen(preparedModel ? checkSource(prepared.verify) : sourceVerify),
       Effect.onExit(exit => (Exit.isFailure(exit) ? retire : Effect.void)),
     );
     const mapped: LspSessionClient = {
@@ -291,7 +342,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         acceptsServer: server =>
           server?.name === 'JDT Language Server (Standard)' && server.version === '1.63.0-SNAPSHOT',
         limitations,
-        initializationRoot: (yield* path.toFileUrl(options.prepared.project)).href,
+        initializationRoot: (yield* path.toFileUrl(prepared.project)).href,
         initializationOptions: {
           settings,
           bundles: [options.bundle.file],
@@ -405,7 +456,21 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         Effect.gen(function* () {
           const fixed = structuredClone(args[0]);
           yield* verify;
-          const completed = yield* Effect.exit(session.upsert(fixed, args[1], args[2], args[3]));
+          const completed = yield* Effect.exit(
+            Effect.gen(function* () {
+              let uri = fixed.uri;
+              if (preparedModel) {
+                if (!Schema.is(FileUri)(uri)) return yield* SemanticSessionFault.make({reason: 'invalid'});
+                uri = yield* sourceUri(uri).pipe(
+                  Effect.catchIf(Schema.is(JavaSourceTargetFault), () =>
+                    SemanticSessionFault.make({reason: 'invalid'}),
+                  ),
+                );
+                yield* sourceVerify;
+              }
+              return yield* session.upsert({...fixed, uri}, args[1], args[2], args[3]);
+            }),
+          );
           yield* verify;
           const result = yield* completed;
           const current = yield* session.observation(result.uri);
