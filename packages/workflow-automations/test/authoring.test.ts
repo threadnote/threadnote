@@ -143,6 +143,26 @@ const caught = (run: () => unknown): unknown => {
 const issueCodes = (document: NativeAuthoringDocument) =>
   EffectArray.map(validateNativeAuthoring(document).issues, issue => issue.code);
 
+const alternativesPlan = (count: number, index = 0, marker = 'private-fixture') => {
+  const plan = asPlan(validPlan());
+  const decision = plan.decisions[0];
+  if (!decision) throw new Error('Expected the decision fixture.');
+  return {
+    ...plan,
+    decisions: Array.from({length: index + 1}, (_, position) => ({
+      ...decision,
+      id: `${marker}-decision-${position}`,
+      selection: 'adapt',
+      selected: `${marker} selected design 漢🧭`,
+      alternatives: Array.from({length: position === index ? count : 2}, (_, item) => ({
+        id: `${marker}-alternative-${item}`,
+        design: `${marker} alternative design 漢🧭`,
+        tradeoffs: `${marker} alternative tradeoff`,
+      })),
+    })),
+  };
+};
+
 describe('native authoring documents', () => {
   it('strictly decodes versioned spec and plan shapes, safe source paths, and the canonical byte ceiling', () => {
     expect(decodeNativeAuthoringDocument(validSpec())).toEqual(validSpec());
@@ -160,6 +180,69 @@ describe('native authoring documents', () => {
       {...validSpec(), observations: Array.from({length: 128}, () => Effect.pipe('x', EffectString.repeat(8192)))},
     ])
       expect(caught(() => decodeNativeAuthoringDocument(invalid))).toMatchObject({code: 'invalid-document'});
+  });
+
+  it('keeps the alternatives boundary and reports only its rejected location, count and maximum', () => {
+    for (const count of [0, 1, 2]) {
+      const input = alternativesPlan(count);
+      const before = JSON.stringify(input);
+      const decoded = decodeNativeAuthoringDocument(input);
+      expect(decoded).toEqual(input);
+      expect(JSON.stringify(input)).toBe(before);
+      expect(validateNativeAuthoring(decoded)).toMatchObject({ready: false, issues: []});
+    }
+    expect(caught(() => decodeNativeAuthoringDocument(alternativesPlan(3)))).toMatchObject({
+      code: 'invalid-document',
+      message: 'decisions[0].alternatives has 3 items; maximum 2.',
+    });
+  });
+
+  it('reports the actual alternatives failure without exposing authored content or mutating input', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 63}), fc.integer({min: 3, max: 12}), fc.uuid(), (index, count, token) => {
+        const marker = `private-${token}`;
+        const input = alternativesPlan(count, index, marker);
+        const before = JSON.stringify(input);
+        const error = caught(() => decodeNativeAuthoringDocument(input));
+        expect(error).toMatchObject({
+          code: 'invalid-document',
+          message: `decisions[${index}].alternatives has ${count} items; maximum 2.`,
+        });
+        if (!(error instanceof Error)) throw new Error('Expected a rejected authoring document.');
+        expect(error.message).not.toContain(marker);
+        expect(new TextEncoder().encode(error.message).byteLength).toBeLessThanOrEqual(256);
+        expect(JSON.stringify(input)).toBe(before);
+      }),
+      {numRuns: 40},
+    );
+  });
+
+  it('keeps unrelated, malformed and unknown-field failures generic without inventing alternatives diagnostics', () => {
+    const input = alternativesPlan(2);
+    const decision = input.decisions[0];
+    if (!decision) throw new Error('Expected the decision fixture.');
+    const marker = 'private-field-and-value';
+    for (const invalid of [
+      {...input, [marker]: marker},
+      {...input, context: {...input.context, codeRefs: Array.from({length: 9}, (_, i) => `src/${i}.ts`)}},
+      {...input, decisions: [{...decision, alternatives: {length: 3, [marker]: marker}}]},
+      {...input, decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}]}]},
+      {
+        ...input,
+        decisions: [{...decision, alternatives: [{id: 'a', design: 0, tradeoffs: marker}, ...decision.alternatives]}],
+      },
+      {
+        ...input,
+        decisions: [{...decision, alternatives: [{id: 'a', design: marker, tradeoffs: marker, [marker]: marker}]}],
+      },
+    ]) {
+      const before = JSON.stringify(invalid);
+      expect(caught(() => decodeNativeAuthoringDocument(invalid))).toMatchObject({
+        code: 'invalid-document',
+        message: 'The native authoring document is malformed or contains unsupported fields.',
+      });
+      expect(JSON.stringify(invalid)).toBe(before);
+    }
   });
 
   it('canonicalizes recursively, omits undefined object fields, and roundtrips bounded Unicode', () => {

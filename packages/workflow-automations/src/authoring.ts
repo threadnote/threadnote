@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Schema} from 'effect';
+import {Schema, type SchemaIssue} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -162,12 +162,14 @@ const phase = Schema.Struct({
   safeBoundary: prose,
 });
 const alternative = Schema.Struct({id: portableId, design: prose, tradeoffs: prose});
+const maximumDecisionAlternatives = 2;
+const decisionAlternativesLimit = Schema.isMaxLength(maximumDecisionAlternatives);
 const decision = Schema.Struct({
   id: portableId,
   question: prose,
   selection: Schema.Literals(['retain', 'adapt', 'no-better-alternative']),
   selected: prose,
-  alternatives: Schema.Array(alternative).check(Schema.isMaxLength(2)),
+  alternatives: Schema.Array(alternative).check(decisionAlternativesLimit),
   rationale: prose,
   affectedPhases: idList(0, 128),
   authority: Schema.Literal('orchestrator'),
@@ -204,12 +206,52 @@ export const NativeAuthoringPlanDocumentSchema = nativePlanSchema;
 export const NativeAuthoringDocumentSchema = Schema.Union([nativeSpecSchema, nativePlanSchema]);
 export type NativeAuthoringDocument = typeof NativeAuthoringDocumentSchema.Type;
 
+const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
+  if (
+    path.length > 3 ||
+    (path.length > 0 && path[0] !== 'decisions') ||
+    (path.length > 1 && (typeof path[1] !== 'number' || !Number.isSafeInteger(path[1]) || path[1] < 0)) ||
+    (path.length > 2 && path[2] !== 'alternatives')
+  )
+    return undefined;
+  switch (issue._tag) {
+    case 'Pointer':
+      return alternativesDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'AnyOf':
+    case 'Composite':
+      for (const child of issue.issues) {
+        const diagnostic = alternativesDiagnostic(child, path);
+        if (diagnostic !== undefined) return diagnostic;
+      }
+      return undefined;
+    case 'Filter':
+      if (
+        path.length === 3 &&
+        typeof path[1] === 'number' &&
+        issue.filter === decisionAlternativesLimit &&
+        EffectArray.isArray(issue.input)
+      )
+        return `decisions[${path[1]}].alternatives has ${issue.input.length} items; maximum ${maximumDecisionAlternatives}.`;
+      return undefined;
+    default:
+      return undefined;
+  }
+};
+
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
   let document: NativeAuthoringDocument;
   try {
-    document = Schema.decodeUnknownSync(NativeAuthoringDocumentSchema, {onExcessProperty: 'error'})(input);
-  } catch {
-    throw invalid('The native authoring document is malformed or contains unsupported fields.');
+    document = Schema.decodeUnknownSync(NativeAuthoringDocumentSchema, {onExcessProperty: 'error', reportInput: true})(
+      input,
+    );
+  } catch (error) {
+    let message = 'The native authoring document is malformed or contains unsupported fields.';
+    try {
+      if (Schema.isSchemaError(error)) message = alternativesDiagnostic(error.issue) ?? message;
+    } catch {
+      // Optional diagnostics must preserve the original rejection if projection fails.
+    }
+    throw invalid(message);
   }
   if (new TextEncoder().encode(canonicalAuthoringJson(document)).byteLength > 1_000_000)
     throw invalid('The native authoring document exceeds 1000000 canonical UTF-8 bytes.');
