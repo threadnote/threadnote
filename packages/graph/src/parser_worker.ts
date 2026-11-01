@@ -945,7 +945,7 @@ async function completesBeforeDeadline(promise: Promise<unknown>, timeoutMillise
     return await Promise.race([
       promise.then(
         () => true,
-        () => true,
+        () => false,
       ),
       timeoutDeferred.promise,
     ]);
