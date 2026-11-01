@@ -100,6 +100,7 @@ export const JavaPreparedModel = Schema.Struct({
   javaHome: text,
   javaSdkDigest: Digest,
   projectCharset: Schema.Literal('UTF-8'),
+  sourceInputEncoding: Schema.Literal('utf8-original-inputs-v1'),
   compilerOptions,
   resourceFilters,
   output: text,
@@ -156,6 +157,7 @@ export interface JavaPreparationInputs {
 interface JavaInputProof {
   readonly workspace: JavaWorkspace;
   readonly verifyPreparedOutputs: Effect.Effect<void, unknown>;
+  readonly originalFiles: ReadonlyMap<string, string>;
   stage: 'copied' | 'preparing-import' | 'importing' | 'observed' | 'failed';
   runtime?: JavaPreparationRuntime;
   observationDigest?: string;
@@ -164,6 +166,76 @@ interface JavaInputProof {
 }
 const inputProofs = new WeakMap<JavaPreparationInputs, JavaInputProof>();
 const connectionAdmissions = new WeakMap<object, JavaPreparationRuntime>();
+
+/** Validate persisted UTF-8 preferences and source bytes. Live per-resource charset attestation is a separate model fence. */
+export const verifyJavaSourceEncoding = Effect.fn('semantic.verifyJavaSourceEncoding')(function* (
+  project: string,
+  sourceRoots: readonly string[],
+) {
+  const roots = [...sourceRoots];
+  if (!roots.length || roots.length > 32) return yield* fail();
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const owner = yield* ownDirectory(project);
+  const sources: {readonly file: string; readonly digest: string}[] = [];
+  let preferencesDigest: string | undefined;
+  const preferences = path.join(project, '.settings/org.eclipse.core.resources.prefs');
+  if (yield* fs.exists(preferences)) {
+    if ((yield* fs.realPath(preferences)) !== preferences || (yield* fs.stat(preferences)).type !== 'File')
+      return yield* fail();
+    const bytes = yield* readBounded(preferences, 64 * 1024);
+    preferencesDigest = sha256HexSync(bytes);
+    const content = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+      catch: fail,
+    });
+    for (const raw of EffectString.split(/\r\n|\r|\n/u)(content)) {
+      const line = EffectString.replace(/^[ \t\f]*/u, '')(raw);
+      if (!line || EffectString.startsWith('#')(line) || EffectString.startsWith('!')(line)) continue;
+      if (line !== 'eclipse.preferences.version=1' && !/^encoding\/[^\\:= \p{Cc}]*=UTF-8$/u.test(line))
+        return yield* fail();
+    }
+    if (
+      (yield* fs.realPath(preferences)) !== preferences ||
+      (yield* boundedFileDigest(preferences, 64 * 1024)) !== preferencesDigest
+    )
+      return yield* fail();
+  }
+  const pending = [...roots];
+  const visited = new Set<string>();
+  let entries = 0;
+  let bytesRead = 0;
+  while (pending.length) {
+    const directory = pending.pop()!;
+    if (visited.has(directory)) continue;
+    if (!EffectString.startsWith(project + path.sep)(directory)) return yield* fail();
+    yield* ownDirectory(directory);
+    visited.add(directory);
+    for (const name of yield* fs.readDirectory(directory)) {
+      if (++entries > 20000) return yield* LspFault.make({code: 'capacity'});
+      const file = path.join(directory, name);
+      if ((yield* fs.realPath(file)) !== file) return yield* fail();
+      const info = yield* fs.stat(file);
+      if (info.type === 'Directory') pending.push(file);
+      else if (info.type === 'File' && EffectString.endsWith('.java')(EffectString.toLowerCase(name))) {
+        const bytes = yield* readBounded(file, 4 * 1024 * 1024);
+        const digest = sha256HexSync(bytes);
+        if ((bytesRead += bytes.length) > 256 * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
+        const text = yield* Effect.try({
+          try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+          catch: fail,
+        });
+        if (text.length > 2 * 1024 * 1024 || !wellFormed(text)) return yield* LspFault.make({code: 'capacity'});
+        sources.push({file, digest});
+      } else if (info.type !== 'File') return yield* fail();
+    }
+  }
+  yield* owner.verify;
+  return Object.freeze({
+    preferencesDigest,
+    sources: Object.freeze(EffectArray.map(sources, source => Object.freeze(source))),
+  });
+});
 
 /** Runtime prelaunch admission checks the original copy receipt, including its cleanup owner. */
 export const verifyJavaPreparationInputs = Effect.fn('semantic.verifyJavaPreparationInputs')(function* (
@@ -365,7 +437,15 @@ export const copyJavaPreparationInputs = Effect.fn('semantic.copyJavaPreparation
       sourceDigest,
       verify,
     });
-    inputProofs.set(proof, {workspace: selected.workspace, verifyPreparedOutputs: verifyImage(true), stage: 'copied'});
+    const originalFiles = new Map<string, string>();
+    for (const entry of entries)
+      if (entry.digest !== undefined) originalFiles.set(path.join(selected.worktree, entry.relative), entry.digest);
+    inputProofs.set(proof, {
+      workspace: selected.workspace,
+      verifyPreparedOutputs: verifyImage(true),
+      originalFiles,
+      stage: 'copied',
+    });
     return proof;
   },
   effect =>
@@ -919,6 +999,34 @@ export function sealJavaPreparedModel(input: unknown, options: JavaPreparedModel
                 });
               const rawClasspath = yield* Effect.forEach(observation.model.rawClasspath, normalize);
               const resolvedClasspath = yield* Effect.forEach(observation.model.resolvedClasspath, normalize);
+              const existingSources = EffectArray.map(
+                EffectArray.filter(Array.from(sources), ([, exists]) => exists),
+                ([name]) => name,
+              );
+              const originalRoots = EffectArray.map(existingSources, name => path.join(selected.project, name));
+              const encoding = yield* verifyJavaSourceEncoding(selected.project, originalRoots);
+              const expectedSources = new Set(
+                EffectArray.filter(
+                  Array.from(importProof.originalFiles.keys()),
+                  file =>
+                    EffectString.endsWith('.java')(EffectString.toLowerCase(file)) &&
+                    EffectArray.some(originalRoots, root => EffectString.startsWith(root + path.sep)(file)),
+                ),
+              );
+              for (const source of encoding.sources)
+                if (
+                  !expectedSources.delete(source.file) ||
+                  importProof.originalFiles.get(source.file) !== source.digest
+                )
+                  return yield* fail();
+              if (
+                expectedSources.size ||
+                encoding.preferencesDigest !==
+                  importProof.originalFiles.get(
+                    path.join(selected.project, '.settings/org.eclipse.core.resources.prefs'),
+                  )
+              )
+                return yield* fail();
               const containers = EffectArray.filter(rawClasspath, entry => entry.kind === 5);
               if (
                 containers.length !== 2 ||
@@ -944,6 +1052,7 @@ export function sealJavaPreparedModel(input: unknown, options: JavaPreparedModel
                 javaHome: selected.javaHome,
                 javaSdkDigest: selected.javaSdkDigest,
                 projectCharset: observation.model.projectCharset,
+                sourceInputEncoding: 'utf8-original-inputs-v1',
                 compilerOptions: compiler,
                 resourceFilters: observation.model.resourceFilters,
                 output,
