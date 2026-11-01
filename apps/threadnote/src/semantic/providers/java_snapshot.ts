@@ -259,29 +259,31 @@ export const requestJavaSnapshot = (
       if (operation.kind === 'type-definition' && !validTextPosition(request.target.text, operation.position))
         return yield* protocol();
       yield* verify;
-      const report = yield* client.request(
-        'workspace/executeCommand',
-        {
-          command: operation.kind === 'diagnostics' ? javaDiagnosticBundle.command : javaTypeDefinitionCommand,
-          arguments: [
-            {
-              protocolVersion: 1,
-              requestToken: request.requestToken,
-              uri: request.target.uri,
-              ...model,
-              inputs: EffectArray.map(request.inputs, input => ({
-                uri: input.uri,
-                contentSha256: sha256HexSync(input.text),
-                utf16Length: input.text.length,
-              })),
-              ...(operation.kind === 'type-definition' ? {position: operation.position} : {}),
-            },
-          ],
-        },
-        milliseconds,
+      const report = yield* Effect.exit(
+        client.request(
+          'workspace/executeCommand',
+          {
+            command: operation.kind === 'diagnostics' ? javaDiagnosticBundle.command : javaTypeDefinitionCommand,
+            arguments: [
+              {
+                protocolVersion: 1,
+                requestToken: request.requestToken,
+                uri: request.target.uri,
+                ...model,
+                inputs: EffectArray.map(request.inputs, input => ({
+                  uri: input.uri,
+                  contentSha256: sha256HexSync(input.text),
+                  utf16Length: input.text.length,
+                })),
+                ...(operation.kind === 'type-definition' ? {position: operation.position} : {}),
+              },
+            ],
+          },
+          milliseconds,
+        ),
       );
       yield* verify;
-      return report;
+      return yield* report;
     }).pipe(
       Effect.timeoutOption(milliseconds),
       Effect.flatMap(result =>
