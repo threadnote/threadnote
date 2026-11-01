@@ -505,6 +505,130 @@ export function javaPreparedProjection(
   return {image, metadata, digest: javaProjectionDigest(image)};
 }
 
+/** Logical membership in verified prepared facts; callers must separately verify physical identity and source characters. */
+export function javaPreparedSourceMember(model: JavaPreparedModel, file: string) {
+  let remaining = 1_000_000;
+  const step = () => {
+    if (--remaining < 0) throw LspFault.make({code: 'capacity'});
+  };
+  const segment = (pattern: string, name: string) => {
+    let previous = EffectArray.replicate(false, name.length + 1);
+    previous[0] = true;
+    // Java's case-sensitive char[] matcher treats '?' as one UTF-16 unit.
+    for (let p = 0; p < pattern.length; p++) {
+      const next = EffectArray.replicate(false, name.length + 1);
+      for (let n = 0; n <= name.length; n++) {
+        step();
+        if (pattern[p] === '*') next[n] = previous[n] || (n > 0 && next[n - 1]);
+        else if (n > 0) next[n] = previous[n - 1] && (pattern[p] === '?' || pattern[p] === name[n - 1]);
+      }
+      previous = next;
+    }
+    return previous[name.length];
+  };
+  // Compatibility target: Eclipse JDT CharOperation.pathMatch, source commit5a4dd839342e057849b378ec912c47035db65dbb.
+  const pathMatch = (pattern: string, target: string) => {
+    const trailing = EffectString.endsWith('/')(pattern);
+    const pieces = EffectString.split('/')(pattern);
+    const patterns = trailing ? EffectArray.take(pieces, pieces.length - 1) : pieces;
+    const names = EffectString.split('/')(target);
+    let p = 0,
+      n = 0;
+    while (p < patterns.length && patterns[p] !== '**') {
+      step();
+      if (n >= names.length || !segment(patterns[p], names[n])) return false;
+      p++;
+      n++;
+    }
+    if (p === patterns.length) return trailing || n === names.length;
+    let restartPattern = ++p,
+      restartName = n;
+    while (n < names.length) {
+      step();
+      if (p >= patterns.length) {
+        if (trailing) return true;
+        p = restartPattern;
+        n = ++restartName;
+      } else if (patterns[p] === '**') {
+        restartPattern = ++p;
+        restartName = n;
+        if (p === patterns.length) return true;
+      } else if (segment(patterns[p], names[n])) {
+        p++;
+        n++;
+      } else {
+        p = restartPattern;
+        n = ++restartName;
+      }
+    }
+    // Preserve pinned JDT's terminal recursive-segment behavior, including a trailing separator.
+    return (
+      p >= patterns.length ||
+      restartPattern >= patterns.length ||
+      (!trailing && p === patterns.length - 1 && patterns[p] === '**')
+    );
+  };
+  const pathText = (value: string) =>
+    value.length > 0 && value.length <= 8192 && wellFormed(value) && !/[\p{Cc}\uFFFE\uFFFF]/u.test(value);
+  if (
+    !pathText(file) ||
+    !pathText(model.project) ||
+    model.project === '/' ||
+    !EffectString.startsWith('/')(model.project) ||
+    EffectString.endsWith('/')(model.project)
+  )
+    throw fail();
+  if (!EffectString.startsWith(model.project + '/')(file)) return false;
+  const relative = EffectString.slice(model.project.length + 1)(file);
+  const parts = EffectString.split('/')(relative);
+  if (EffectArray.some(parts, part => !part || part === '.' || part === '..')) throw fail();
+  if (model.rawClasspath.length > 162 || model.resourceFilters.length > 1) throw fail();
+  for (const filter of model.resourceFilters) {
+    if (
+      filter.path !== '' ||
+      filter.type !== 30 ||
+      filter.matcherId !== 'org.eclipse.core.resources.regexFilterMatcher' ||
+      filter.arguments !== 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__'
+    )
+      throw fail();
+    if (
+      EffectArray.some(parts, (part: string) =>
+        ['node_modules', '.git', '__CREATED_BY_JAVA_LANGUAGE_SERVER__'].includes(part),
+      )
+    )
+      return false;
+  }
+  const roots = EffectArray.filter(model.rawClasspath, entry => entry.kind === 3);
+  if (roots.length > 32) throw fail();
+  const matches = EffectArray.filter(
+    EffectArray.map(roots, (entry, index) => ({entry, index})),
+    ({entry}) => entry.exists === true && EffectString.startsWith(entry.path + '/')(relative),
+  );
+  if (matches.length > 1) throw fail();
+  if (!matches.length) return false;
+  const {entry, index} = matches[0];
+  const root = '/threadnote-java/source-' + index;
+  const target = root + '/' + EffectString.slice(entry.path.length + 1)(relative);
+  const fullPattern = (pattern: string) => {
+    if (
+      !pathText(pattern) ||
+      /[:\\|]/u.test(pattern) ||
+      EffectString.includes('//')(pattern) ||
+      EffectArray.some(EffectString.split('/')(pattern), part => part === '.' || part === '..')
+    )
+      throw fail();
+    // Eclipse IPath.append ignores a leading separator; a lone '/' contributes no segments.
+    const value = EffectString.startsWith('/')(pattern) ? EffectString.slice(1)(pattern) : pattern;
+    return value ? root + '/' + value : root;
+  };
+  if (entry.inclusions.length > 128 || entry.exclusions.length > 128) throw fail();
+  const matchesPattern = (pattern: string) => pathMatch(fullPattern(pattern), target);
+  return (
+    (!entry.inclusions.length || EffectArray.some(entry.inclusions, matchesPattern)) &&
+    !EffectArray.some(entry.exclusions, matchesPattern)
+  );
+}
+
 /** One prepared Java 21 source project. Unprepared, changed or ambiguous models fail before provider startup. */
 export const makeJavaProject = Effect.fn('semantic.makeJavaProject')(function* (options: {
   readonly project: string;

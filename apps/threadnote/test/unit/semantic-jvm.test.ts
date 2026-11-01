@@ -31,6 +31,7 @@ import {
   javaProjectMetadata,
   javaProjectionMetadata,
   javaPreparedProjection,
+  javaPreparedSourceMember,
   type JavaProjectModel,
 } from '../../src/semantic/providers/java_project.js';
 import {javaPreparedModelJson, JavaPreparedModel} from '../../src/semantic/providers/java_preparation.js';
@@ -526,6 +527,98 @@ describe('Java prepared project boundary', () => {
     }));
     return {model, bindings, documentationUri: 'file:///private/empty-docs/'};
   };
+
+  it('matches the pinned JDT source-pattern and UTF-16 boundary cases', () => {
+    const {model} = preparedFixture();
+    const check = (inclusions: readonly string[], exclusions: readonly string[], file: string) =>
+      javaPreparedSourceMember(
+        {
+          ...model,
+          rawClasspath: EffectArray.map(model.rawClasspath, (entry, i) =>
+            i === 0 ? {...entry, inclusions, exclusions} : entry,
+          ),
+        },
+        '/original/src/main/java/' + file,
+      );
+    // Developer-only oracle831 uses the exact pinned compiler Util.isExcluded and Eclipse IPath.append.
+    for (const [pattern, file, expected] of [
+      ['**/*.java', 'Main.java', true],
+      ['/**/*.java', 'demo/Main.java', true],
+      ['?.java', 'é.java', true],
+      ['?.java', '𐐀.java', false],
+      ['??.java', '𐐀.java', true],
+      ['a/', 'a/Main.java', true],
+      ['*/', 'Main.java', true],
+      ['/', 'Main.java', false],
+      ['**/*/**/', 'Main.java', false],
+      ['*/**/**/', 'Main.java', false],
+      ['**/?*/**/**', 'Main.java', false],
+      ['a/**', 'a/Main.java', true],
+      ['[a].java', '[a].java', true],
+      ['**/Main.java', 'demo/main.java', false],
+    ] as const)
+      expect(check([pattern], [], file), pattern + ' :: ' + file).toBe(expected);
+    expect(check(['**/*.java'], ['**/Excluded.java'], 'demo/Excluded.java')).toBe(false);
+    expect(check(['**/*.java'], ['**/Excluded.java'], 'demo/Main.java')).toBe(true);
+    expect(javaPreparedSourceMember(model, '/original/src/test/java/Main.java')).toBe(false);
+    expect(javaPreparedSourceMember(model, '/unrelated/src/main/java/Main.java')).toBe(false);
+    for (const name of ['node_modules', '.git', '__CREATED_BY_JAVA_LANGUAGE_SERVER__'])
+      expect(check([], [], 'demo/' + name + '/Main.java')).toBe(false);
+    expect(check([], [], 'node_modules_extra/Main.java')).toBe(true);
+    expect(
+      javaPreparedSourceMember({...model, resourceFilters: []}, '/original/src/main/java/node_modules/Main.java'),
+    ).toBe(true);
+    expect(() => check(['a//b'], [], 'Main.java')).toThrow();
+    expect(() => check(['a/../b'], [], 'Main.java')).toThrow();
+    expect(() => javaPreparedSourceMember(model, '/original/src/main/java/../Main.java')).toThrow();
+  });
+
+  it('bounds adversarial source-pattern work and refuses ambiguous roots', () => {
+    const {model} = preparedFixture();
+    const source = {...model.rawClasspath[0], inclusions: ['*' + EffectString.repeat(4096)('a')], exclusions: []};
+    const expensive = {...model, rawClasspath: [source, ...model.rawClasspath.slice(1)]};
+    let code: string | undefined;
+    try {
+      javaPreparedSourceMember(expensive, '/original/src/main/java/' + EffectString.repeat(4096)('b') + '.java');
+    } catch (error) {
+      if (Schema.is(LspFault)(error)) code = error.code;
+      else throw error;
+    }
+    expect(code).toBe('capacity');
+    const duplicate = {...model, rawClasspath: [model.rawClasspath[0], ...model.rawClasspath]};
+    expect(() => javaPreparedSourceMember(duplicate, '/original/src/main/java/Main.java')).toThrow();
+  });
+
+  it('keeps exclusion monotonicity, case and input facts across generated source paths', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('a', 'b', 'é', '𐐀'), {minLength: 1, maxLength: 8}),
+        fc.constantFrom('**', '**/*.java', '**/Never.java', '**/*/**/', '*/'),
+        (parts, pattern) => {
+          const {model} = preparedFixture();
+          const name = EffectArray.join(parts, '') + '.java';
+          const file = '/original/src/main/java/demo/' + name;
+          const before = JSON.stringify(model);
+          const withExclusions = (exclusions: readonly string[]) => ({
+            ...model,
+            rawClasspath: EffectArray.map(model.rawClasspath, (entry, i) => (i === 0 ? {...entry, exclusions} : entry)),
+          });
+          for (const exclusions of [[], ['demo/' + name]]) {
+            const baseline = withExclusions(exclusions);
+            const baselineBefore = JSON.stringify(baseline);
+            const base = javaPreparedSourceMember(baseline, file);
+            expect(base).toBe(exclusions.length === 0);
+            const after = javaPreparedSourceMember(withExclusions([...exclusions, pattern]), file);
+            expect(after && !base).toBe(false);
+            expect(javaPreparedSourceMember(baseline, file)).toBe(base);
+            expect(JSON.stringify(baseline)).toBe(baselineBefore);
+          }
+          expect(JSON.stringify(model)).toBe(before);
+        },
+      ),
+      {numRuns: 64},
+    );
+  });
 
   it('translates sealed source/output identities and combined library facts without changing the original model', () => {
     const {model, bindings, documentationUri} = preparedFixture();
