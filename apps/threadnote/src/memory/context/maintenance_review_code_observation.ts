@@ -25,11 +25,10 @@ export function withAutomaticReviewCodeObservations<A, E, R>(read: Effect.Effect
     const service = yield* Effect.serviceOption(CodeGraphQueryService);
     if (Option.isNone(service)) return yield* read;
     const query = service.value;
-    type Arguments = Parameters<typeof query.status>;
-    const observations = new Map<string, {readonly args: Arguments; readonly status: CodeGraphStatus}>();
-    const status: typeof query.status = (...args) =>
+    type Read = () => Effect.Effect<CodeGraphStatus, unknown>;
+    const observations = new Map<string, {readonly read: Read; readonly status: CodeGraphStatus}>();
+    const observe = (key: () => string, options: Parameters<typeof query.status>[2], read: Read) =>
       Effect.gen(function* () {
-        const [home, cwd, options] = args;
         // Preserve observers and maintenance behavior, and never turn unavailable/stale evidence into authority.
         if (
           options?.observeWorktree !== true ||
@@ -39,18 +38,52 @@ export function withAutomaticReviewCodeObservations<A, E, R>(read: Effect.Effect
           options.telemetryPhase ||
           options.telemetryWorktreeDisposition
         )
-          return yield* query.status(...args);
-        const key = JSON.stringify([home, cwd, options.manifestPath, options.project]);
-        const prior = observations.get(key);
+          return yield* read();
+        const currentKey = key();
+        const prior = observations.get(currentKey);
         if (prior) return prior.status;
-        const current = yield* query.status(...args);
+        const current = yield* read();
         if (!current.stale && current.freshness === 'current' && current.readySnapshot && observations.size < 32)
-          observations.set(key, {args, status: current});
+          observations.set(currentKey, {read, status: current});
         return current;
       });
-    const result = yield* read.pipe(Effect.provideService(CodeGraphQueryService, {...query, status}));
+    const status: typeof query.status = (...args) => {
+      const [home, cwd, options] = args;
+      return observe(
+        () => JSON.stringify(['status', home, cwd, options?.manifestPath, options?.project]),
+        options,
+        () => query.status(...args),
+      );
+    };
+    const observed = {
+      ...query,
+      status,
+      ...(typeof query.statusForPublishedIdentity !== 'function'
+        ? {}
+        : {
+            statusForPublishedIdentity: ((...args) => {
+              const [home, cwd, expected, options] = args;
+              return observe(
+                () =>
+                  JSON.stringify([
+                    'published-identity',
+                    home,
+                    cwd,
+                    expected.checkoutId,
+                    expected.repositoryId,
+                    expected.worktreeId,
+                    options?.manifestPath,
+                    options?.project,
+                  ]),
+                options,
+                () => query.statusForPublishedIdentity(...args),
+              );
+            }) satisfies typeof query.statusForPublishedIdentity,
+          }),
+    };
+    const result = yield* read.pipe(Effect.provideService(CodeGraphQueryService, observed));
     for (const observation of observations.values()) {
-      const current = yield* query.status(...observation.args);
+      const current = yield* observation.read();
       if (current.stale || current.freshness !== 'current' || identity(current) !== identity(observation.status))
         return yield* AutomaticReviewCodeObservationChanged.make({
           message: 'The reviewed code source or its current project access changed. Reload the exact review.',
