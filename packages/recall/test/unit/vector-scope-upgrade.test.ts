@@ -363,27 +363,29 @@ describe('MCP recall generation races', () => {
       'canonical refresh warnings identify their emitter without exposing arbitrary failure payloads',
       {payload: fc.string({maxLength: 200})},
       ({payload}) =>
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const home = yield* fs.makeTempDirectoryScoped({prefix: 'canonical-refresh-warning-'});
-          yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
-          const store = yield* LocalModelStore;
-          const logs: string[] = [];
-          const logger = Logger.make<unknown, void>(options => {
-            logs.push(String(options.message));
-          });
-          const result = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(
-            {account: 'local', agentContextHome: home, user: 'tester'},
-            [],
-          ).pipe(
-            Effect.provideService(LocalModelStore, LocalModelStore.of({...store, status: () => Effect.die(payload)})),
-            Effect.provideService(Logger.CurrentLoggers, new Set([logger])),
-          );
-          expect(result.state).toBe('deferred');
-          expect(logs).toEqual([
-            'Canonical memory was committed, but derived recall indexes could not be refreshed [recall-refresh:deferred]. Run threadnote repair.',
-          ]);
-        }).pipe(TestClock.withLive),
+        withRuntime(() =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const home = yield* fs.makeTempDirectoryScoped({prefix: 'canonical-refresh-warning-'});
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+            const store = yield* LocalModelStore;
+            const logs: string[] = [];
+            const logger = Logger.make<unknown, void>(options => {
+              logs.push(String(options.message));
+            });
+            const result = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(
+              {account: 'local', agentContextHome: home, user: 'tester'},
+              [],
+            ).pipe(
+              Effect.provideService(LocalModelStore, LocalModelStore.of({...store, status: () => Effect.die(payload)})),
+              Effect.provideService(Logger.CurrentLoggers, new Set([logger])),
+            );
+            expect(result.state).toBe('deferred');
+            expect(logs).toEqual([
+              'Canonical memory was committed, but derived recall indexes could not be refreshed [recall-refresh:deferred]. Run threadnote repair.',
+            ]);
+          }),
+        ).pipe(TestClock.withLive),
       {fastCheck: {numRuns: 10}},
     );
   });
