@@ -3,6 +3,7 @@ import React, {useEffect, useId, useRef, useState} from 'react';
 import {MarkdownViewer} from './ui/controls.js';
 import {api, errorMessage} from './ui/support.js';
 import {Array as EffectArray} from 'effect';
+import {memoryDocumentParts} from './library_model.js';
 
 export function DetailModal(props: {
   readonly title: string;
@@ -93,7 +94,7 @@ export function MemoryDetailModal(props: {
       ) : content === undefined ? (
         <p role="status">Loading memory…</p>
       ) : (
-        <MemoryBody content={content} onOpenMemory={props.onOpenLibrary} />
+        <MemoryBody content={memoryDocumentParts(content).body} onOpenMemory={props.onOpenLibrary} />
       )}
       <footer>
         <button onClick={() => props.onOpenLibrary(props.uri)} type="button">
