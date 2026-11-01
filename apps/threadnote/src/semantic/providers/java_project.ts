@@ -8,8 +8,13 @@ import {boundedFileDigest, readBounded, semanticSdkDigest, semanticTreeDigest} f
 import {LspFault} from '../lsp_transport.js';
 import {wellFormed} from '../provider.js';
 import {makeJavaWorkspace} from './java_runtime.js';
-import {JavaCompilerOptions, JavaProjectionImage, javaProjectionDigest} from './java_snapshot.js';
-import {JavaPreparedModel, javaPreparedEntryJson, javaPreparedModelJson} from './java_preparation.js';
+import {JavaCompilerOptions, JavaProjectionImage, javaProjectionDigest, javaFileUri} from './java_snapshot.js';
+import {
+  JavaPreparedModel,
+  javaPreparedEntryJson,
+  javaPreparedModelJson,
+  loadJavaPreparedModel,
+} from './java_preparation.js';
 
 export const JavaEnvironment = Schema.Struct({id: Identifier, metadataFile: Schema.String, metadataDigest: Digest});
 export type JavaEnvironment = typeof JavaEnvironment.Type;
@@ -664,3 +669,180 @@ export const makeJavaProject = Effect.fn('semantic.makeJavaProject')(function* (
     },
   };
 });
+
+/** Construct a passive v2 project only; source eligibility and session admission remain separate gates. */
+export const makeJavaPreparedProject = Effect.fn('semantic.makeJavaPreparedProject')(
+  function* (options: {
+    readonly project: string;
+    readonly worktree: string;
+    readonly privateDirectory: string;
+    readonly javaHome: string;
+    readonly environment: JavaEnvironment;
+  }) {
+    const selected = yield* Schema.decodeEffect(
+      Schema.Struct({
+        project: Schema.String,
+        worktree: Schema.String,
+        privateDirectory: Schema.String,
+        javaHome: Schema.String,
+        environment: JavaEnvironment,
+      }),
+      {onExcessProperty: 'error'},
+    )({...options, environment: {...options.environment}}).pipe(Effect.mapError(fail));
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    // The caller supplies an existing private parent, disjoint from every observed input and persisted artifact.
+    for (const input of [selected.worktree, selected.javaHome, path.dirname(selected.environment.metadataFile)])
+      if (inside(input, selected.privateDirectory, path.sep) || inside(selected.privateDirectory, input, path.sep))
+        return yield* fail();
+    const loaded = yield* loadJavaPreparedModel({
+      project: selected.project,
+      worktree: selected.worktree,
+      javaHome: selected.javaHome,
+      metadataFile: selected.environment.metadataFile,
+      metadataDigest: selected.environment.metadataDigest,
+    });
+    const model = loaded.model;
+    const workspace = yield* makeJavaWorkspace(selected.privateDirectory);
+    const directories = new Map<string, FileSystem.File.Info>();
+    const sameIdentity = (original: FileSystem.File.Info, current: FileSystem.File.Info) =>
+      Option.isSome(original.ino) &&
+      Option.isSome(current.ino) &&
+      original.ino.value === current.ino.value &&
+      original.dev === current.dev;
+    const verifyDirectories = Effect.gen(function* () {
+      yield* workspace.verify;
+      for (const [directory, original] of directories) {
+        const current = yield* fs.lstat(directory);
+        if (
+          current.type !== 'Directory' ||
+          (current.mode & 0o777) !== 0o700 ||
+          !sameIdentity(original, current) ||
+          (yield* fs.realPath(directory)) !== directory
+        )
+          return yield* fail();
+      }
+    });
+    const createDirectory = (directory: string) =>
+      Effect.gen(function* () {
+        yield* verifyDirectories;
+        yield* fs.makeDirectory(directory, {mode: 0o700});
+        const current = yield* fs.lstat(directory);
+        if (
+          current.type !== 'Directory' ||
+          Option.isNone(current.ino) ||
+          (current.mode & 0o777) !== 0o700 ||
+          (yield* fs.realPath(directory)) !== directory
+        )
+          return yield* fail();
+        directories.set(directory, current);
+        yield* verifyDirectories;
+      });
+    const project = path.join(workspace.directory, 'project');
+    const documentationDirectory = path.join(workspace.directory, 'documentation');
+    yield* createDirectory(project);
+    yield* createDirectory(path.join(project, '.settings'));
+    yield* createDirectory(documentationDirectory);
+    const documentationUri = javaFileUri(yield* path.toFileUrl(documentationDirectory + path.sep));
+    const bindings = yield* Effect.forEach(
+      EffectArray.filter(model.rawClasspath, entry => entry.kind === 3),
+      entry =>
+        path
+          .toFileUrl(path.join(model.project, entry.path))
+          .pipe(Effect.map(url => ({path: entry.path, uri: javaFileUri(url)}))),
+    );
+    const projected = yield* Effect.try({
+      try: () => javaPreparedProjection(model, bindings, documentationUri),
+      catch: fail,
+    });
+    const files = Object.freeze(projected.metadata);
+    const outputs = new Set([projected.image.outputPath]);
+    for (const entry of projected.image.rawClasspath) if (entry.outputPath !== undefined) outputs.add(entry.outputPath);
+    const outputNames = EffectArray.map(Array.from(outputs), output => path.basename(output));
+    for (const output of outputNames) yield* createDirectory(path.join(project, output));
+    const artifacts = new Map<string, FileSystem.File.Info>();
+    for (const [name, content] of EffectRecord.toEntries(files)) {
+      yield* verifyDirectories;
+      yield* fs.writeFileString(path.join(project, name), content, {flag: 'wx', mode: 0o600});
+      artifacts.set(path.join(project, name), yield* fs.lstat(path.join(project, name)));
+    }
+    const inventories = new Map<string, readonly string[]>([
+      [project, ['.project', '.classpath', '.settings', ...outputNames]],
+      [path.join(project, '.settings'), ['org.eclipse.jdt.core.prefs', 'org.eclipse.core.resources.prefs']],
+      [documentationDirectory, []],
+      ...EffectArray.map(outputNames, name => [path.join(project, name), []] as const),
+    ]);
+    const verifyFile = (file: string, content: string) =>
+      Effect.gen(function* () {
+        const original = artifacts.get(file)!;
+        const current = yield* fs.lstat(file);
+        if (
+          current.type !== 'File' ||
+          (current.mode & 0o777) !== 0o600 ||
+          !sameIdentity(original, current) ||
+          (yield* fs.realPath(file)) !== file ||
+          Number(current.size) !== new TextEncoder().encode(content).length ||
+          Option.getOrUndefined(current.mtime)?.getTime() !== Option.getOrUndefined(original.mtime)?.getTime()
+        )
+          return yield* fail();
+      });
+    const verifyOwnership = Effect.gen(function* () {
+      yield* verifyDirectories;
+      for (const [directory, names] of inventories) {
+        const actual = yield* fs.readDirectory(directory);
+        if (actual.length !== names.length || EffectArray.some(actual, name => !names.includes(name)))
+          return yield* fail();
+      }
+      for (const [name, content] of EffectRecord.toEntries(files)) yield* verifyFile(path.join(project, name), content);
+    });
+    const verify = Effect.gen(function* () {
+      yield* loaded.verify;
+      yield* verifyOwnership;
+      for (const [name, content] of EffectRecord.toEntries(files)) {
+        const file = path.join(project, name);
+        if (sha256HexSync(yield* readBounded(file, 2 * 1024 * 1024)) !== sha256HexSync(content)) return yield* fail();
+      }
+      yield* loaded.verify;
+      yield* verifyOwnership;
+    }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
+    yield* verify;
+    return Object.freeze({
+      directory: workspace.directory,
+      workspace,
+      project,
+      documentationUri,
+      model,
+      sourceRoots: loaded.sourceRoots,
+      absentSourceRoots: loaded.absentSourceRoots,
+      compilerOptions: model.compilerOptions,
+      projectionDigest: projected.digest,
+      verify,
+      settings: {
+        java: {
+          compile: {nullAnalysis: {mode: 'interactive', nonnull: [], nullable: [], nonnullbydefault: []}},
+          // JDT appends its own marker to nonempty preferences; the sealed schema admits only this exact filter.
+          project: {resourceFilters: model.resourceFilters.length ? ['node_modules', '\\.git'] : []},
+          autobuild: {enabled: false},
+          import: {
+            maven: {enabled: false},
+            gradle: {enabled: false, wrapper: {enabled: false}, offline: {enabled: true}},
+          },
+          configuration: {
+            updateBuildConfiguration: 'disabled',
+            runtimes: [{name: 'JavaSE-21', path: model.javaHome, default: true, javadoc: documentationUri}],
+            annotationProcessing: {enabled: false},
+          },
+          maven: {downloadSources: false},
+        },
+      },
+    });
+  },
+  effect =>
+    effect.pipe(
+      Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())),
+      Effect.timeoutOption(45000),
+      Effect.flatMap(result =>
+        Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+      ),
+    ),
+);

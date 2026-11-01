@@ -35,6 +35,8 @@ import {
 } from '../../src/semantic/providers/java_runtime.js';
 import {semanticSdkDigest, semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {makeJavaPreparedProject, javaPreparedProjection} from '../../src/semantic/providers/java_project.js';
+import {javaFileUri} from '../../src/semantic/providers/java_snapshot.js';
 import {
   JavaPreparedModel,
   JavaPreparedObservation,
@@ -72,6 +74,8 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly jarText?: string;
     readonly encodingCount?: number;
     readonly encodingDigest?: string;
+    readonly passiveProject?: boolean;
+    readonly noFilters?: boolean;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
@@ -108,6 +112,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   yield* fs.makeDirectory(path.join(javaHome, 'lib'));
   const jrt = path.join(javaHome, 'lib/jrt-fs.jar');
   yield* fs.writeFileString(jrt, 'synthetic SDK artifact');
+  if (control.passiveProject) yield* fs.writeFileString(path.join(javaHome, 'lib/src.zip'), 'synthetic sources');
   yield* fs.makeDirectory(path.join(runtimeDirectory, 'm2'), {mode: 0o700});
   const jar = path.join(runtimeDirectory, 'm2/library.jar');
   const jarText = control.jarText ?? 'synthetic pinned library';
@@ -184,24 +189,39 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
         'org.eclipse.jdt.core.compiler.problem.unusedImport': 'error',
       },
       outputUri: yield* uri(path.join(copiedProject, 'target/classes')),
-      resourceFilters: [
-        {
-          id: '123',
-          path: '',
-          type: 30,
-          matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
-          arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
-        },
-      ],
+      resourceFilters: control.noFilters
+        ? []
+        : [
+            {
+              id: '123',
+              path: '',
+              type: 30,
+              matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
+              arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
+            },
+          ],
       rawClasspath: [
         source,
-        {...common, kind: 5, contentKind: 1, path: jrePath},
-        {...common, kind: 5, contentKind: 1, path: 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER'},
+        {...common, kind: 5, contentKind: 1, path: jrePath, combineAccessRules: control.passiveProject ?? false},
+        {
+          ...common,
+          kind: 5,
+          contentKind: 1,
+          path: 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER',
+          combineAccessRules: control.passiveProject ?? false,
+        },
         absent,
       ],
       resolvedClasspath: [
         source,
-        {...common, kind: 1, contentKind: 2, path: jrt, uri: yield* uri(jrt)},
+        {
+          ...common,
+          kind: 1,
+          contentKind: 2,
+          path: jrt,
+          uri: yield* uri(jrt),
+          ...(control.passiveProject ? {sourceAttachmentPath: path.join(javaHome, 'lib/src.zip')} : {}),
+        },
         {
           ...common,
           kind: 1,
@@ -353,6 +373,170 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     observe,
     methods,
   };
+});
+
+describe('Java passive prepared project', () => {
+  const fixture = Effect.fn('test.javaPassiveProject')(function* (noFilters = false, jarText?: string) {
+    const f = yield* modelFixture({passiveProject: true, noFilters, jarText});
+    const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+    const privateDirectory = f.path.join(f.artifactDirectory, 'analysis');
+    yield* f.fs.makeDirectory(privateDirectory, {mode: 0o700});
+    const options = {
+      project: f.project,
+      worktree: f.project,
+      javaHome: f.javaHome,
+      privateDirectory,
+      environment: {id: 'java-v2', metadataFile: sealed.metadataFile, metadataDigest: sealed.metadataDigest},
+    };
+    return {...f, sealed, materializerOptions: options};
+  });
+  for (const noFilters of [false, true])
+    effectIt.effect(`preserves prepared metadata with ${noFilters ? 'no' : 'the standard'} resource filter`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(noFilters);
+        const methods = [...f.methods];
+        const original = yield* f.fs.readFileString(f.sealed.metadataFile);
+        const prepared = yield* makeJavaPreparedProject(f.materializerOptions);
+        const bindings = yield* Effect.forEach(
+          EffectArray.filter(f.sealed.model.rawClasspath, entry => entry.kind === 3),
+          entry =>
+            f.path
+              .toFileUrl(f.path.join(f.project, entry.path))
+              .pipe(Effect.map(url => ({path: entry.path, uri: javaFileUri(url)}))),
+        );
+        const expected = javaPreparedProjection(f.sealed.model, bindings, prepared.documentationUri);
+        for (const [name, content] of EffectRecord.toEntries(expected.metadata))
+          expect(yield* f.fs.readFileString(f.path.join(prepared.project, name))).toBe(content);
+        expect(prepared.projectionDigest).toBe(expected.digest);
+        expect(prepared.compilerOptions).toEqual(f.sealed.model.compilerOptions);
+        expect(prepared.sourceRoots).toEqual([f.path.join(f.project, 'src/main/java')]);
+        expect(prepared.absentSourceRoots).toEqual([f.path.join(f.project, 'src/test/java')]);
+        expect(yield* f.fs.exists(prepared.absentSourceRoots[0])).toBe(false);
+        for (const name of ['output-0', 'output-1']) {
+          expect(yield* f.fs.readDirectory(f.path.join(prepared.project, name))).toEqual([]);
+          expect((yield* f.fs.stat(f.path.join(prepared.project, name))).mode & 0o777).toBe(0o700);
+        }
+        expect(yield* f.fs.readDirectory(f.path.join(prepared.directory, 'documentation'))).toEqual([]);
+        expect(prepared.settings.java.project.resourceFilters).toEqual(noFilters ? [] : ['node_modules', '\\.git']);
+        expect(prepared.settings.java.configuration.runtimes[0].javadoc).toBe(prepared.documentationUri);
+        expect(prepared.settings.java.compile.nullAnalysis).toEqual({
+          mode: 'interactive',
+          nonnull: [],
+          nullable: [],
+          nonnullbydefault: [],
+        });
+        yield* prepared.verify;
+        expect(f.methods).toEqual(methods);
+        expect(yield* f.fs.readFileString(f.sealed.metadataFile)).toBe(original);
+        expect(yield* semanticTreeDigest(f.project)).toBe(f.sealed.model.sourceDigest);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  for (const mutation of [
+    'metadata',
+    'extra-file',
+    'output',
+    'documentation',
+    'mode',
+    'directory-inode',
+    'file-inode',
+  ] as const)
+    effectIt.effect(`refuses passive project ${mutation} drift`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const prepared = yield* makeJavaPreparedProject(f.materializerOptions);
+        const file = f.path.join(prepared.project, '.classpath');
+        if (mutation === 'metadata') yield* f.fs.writeFileString(file, '<changed/>');
+        else if (mutation === 'extra-file')
+          yield* f.fs.writeFileString(f.path.join(prepared.project, 'extra'), 'extra', {mode: 0o600});
+        else if (mutation === 'output')
+          yield* f.fs.writeFileString(f.path.join(prepared.project, 'output-0/Main.class'), 'unexpected', {
+            mode: 0o600,
+          });
+        else if (mutation === 'documentation')
+          yield* f.fs.writeFileString(f.path.join(prepared.directory, 'documentation/index.html'), 'unexpected', {
+            mode: 0o600,
+          });
+        else if (mutation === 'mode') yield* f.fs.chmod(file, 0o644);
+        else if (mutation === 'directory-inode') {
+          const directory = f.path.join(prepared.directory, 'documentation');
+          yield* f.fs.rename(directory, f.path.join(prepared.directory, 'held-documentation'));
+          yield* f.fs.makeDirectory(directory, {mode: 0o700});
+        } else {
+          const content = yield* f.fs.readFileString(file);
+          yield* f.fs.rename(file, f.path.join(prepared.directory, 'held-classpath'));
+          yield* f.fs.writeFileString(file, content, {mode: 0o600});
+        }
+        expect(Exit.isFailure(yield* Effect.exit(prepared.verify))).toBe(true);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  for (const replaced of ['project', '.settings'])
+    effectIt.effect(`refuses ${replaced} substitution before writing outside the private project`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const sdkDigest = yield* semanticSdkDigest(f.javaHome);
+        let substituted = false;
+        const fs = FileSystem.makeNoop({
+          ...f.fs,
+          makeDirectory: (directory, options) =>
+            f.fs.makeDirectory(directory, options).pipe(
+              Effect.tap(() =>
+                Effect.gen(function* () {
+                  if (f.path.basename(directory) !== replaced || substituted) return;
+                  substituted = true;
+                  yield* f.fs.rename(directory, directory + '-held');
+                  yield* f.fs.symlink(f.javaHome, directory);
+                }),
+              ),
+            ),
+        });
+        const result = yield* Effect.exit(
+          makeJavaPreparedProject(f.materializerOptions).pipe(Effect.provideService(FileSystem.FileSystem, fs)),
+        );
+        expect(substituted).toBe(true);
+        expect(Exit.isFailure(result)).toBe(true);
+        expect(yield* semanticSdkDigest(f.javaHome)).toBe(sdkDigest);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  effectIt.effect.prop(
+    'isolates independent passive copies while conserving the prepared input',
+    {
+      payload: Arbitrary.map(
+        Arbitrary.array(Arbitrary.schema(Schema.Literals(['a', '0', '&', '~', 'é', '𐐀'])), {
+          minLength: 1,
+          maxLength: 24,
+        }),
+        parts => EffectArray.join(parts, ''),
+      ),
+    },
+    ({payload}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, payload);
+        const original = yield* f.fs.readFileString(f.sealed.metadataFile);
+        const first = yield* makeJavaPreparedProject(f.materializerOptions);
+        const second = yield* makeJavaPreparedProject(f.materializerOptions);
+        expect(first.directory).not.toBe(second.directory);
+        expect(first.documentationUri).not.toBe(second.documentationUri);
+        expect(first.model).toEqual(second.model);
+        yield* f.fs.writeFileString(f.path.join(first.directory, 'documentation/index.html'), payload, {mode: 0o600});
+        expect(Exit.isFailure(yield* Effect.exit(first.verify))).toBe(true);
+        yield* second.verify;
+        expect(yield* f.fs.readDirectory(f.path.join(second.directory, 'documentation'))).toEqual([]);
+        expect(yield* f.fs.readFileString(f.sealed.metadataFile)).toBe(original);
+        expect(yield* f.fs.readFileString(f.sealed.model.libraries[0].file)).toBe(payload);
+        expect(yield* semanticTreeDigest(f.project)).toBe(f.sealed.model.sourceDigest);
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 8}},
+  );
+  effectIt.effect('refuses overlapping private roots before constructing a project', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      for (const privateDirectory of [f.project, f.javaHome, f.sealed.directory, f.path.dirname(f.project)])
+        expect(
+          Exit.isFailure(yield* Effect.exit(makeJavaPreparedProject({...f.materializerOptions, privateDirectory}))),
+        ).toBe(true);
+      expect(yield* f.fs.readDirectory(f.materializerOptions.privateDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
 });
 
 describe('Java prepared model sealing', () => {
