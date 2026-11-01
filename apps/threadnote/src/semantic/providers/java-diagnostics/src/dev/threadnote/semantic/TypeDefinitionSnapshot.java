@@ -35,17 +35,20 @@ final class TypeDefinitionSnapshot {
       if (source != null) source.verify(model);
     }
   }
-  private record SourceImage(ICompilationUnit unit, String uri, String text, BasicFileAttributes attributes) {
+  private record SourceImage(ICompilationUnit unit, String uri, String text, BasicFileAttributes attributes,
+      String charset) {
     void verify(Model model) throws Exception {
       check(unit.getJavaProject().equals(model.project()) && DiagnosticSnapshot.sourceMember(unit, uri, model)
           && unit.getOptions(true).equals(model.options()), "Type source model changed");
       check(unit.getResource() instanceof IFile resource && resource.isAccessible()
           && DiagnosticSnapshot.fileUri(resource.getLocationURI().toString()).equals(uri), "Type source identity changed");
+      if (charset != null)
+        check(charset.equals(DiagnosticSnapshot.sourceCharset(unit)), "Type source charset changed");
       if (attributes == null) {
         check(unit.equals(unit.getPrimary()) && unit.isWorkingCopy(), "Type working copy changed");
       } else {
         check(!unit.isWorkingCopy(), "Type source ownership changed");
-        SourceImage after = closedSource(unit, uri, text.length());
+        SourceImage after = closedSource(unit, uri, text.length(), model);
         check(sameFile(attributes, after.attributes()) && text.equals(after.text()), "Closed type source changed");
       }
     }
@@ -99,10 +102,10 @@ final class TypeDefinitionSnapshot {
     if (!contained) return unsupported(position, "unrepresentable-source");
     Input captured = inputs.stream().filter(input -> input.unit().equals(unit)).findFirst().orElse(null);
     SourceImage source;
-    if (captured != null) source = new SourceImage(unit, uri, captured.text(), null);
+    if (captured != null) source = new SourceImage(unit, uri, captured.text(), null, captured.charset());
     else {
       check(!unit.isWorkingCopy(), "Uncaptured type working copy");
-      source = closedSource(unit, uri, Math.min(DiagnosticSnapshot.MAX_TEXT, remainingCharacters));
+      source = closedSource(unit, uri, Math.min(DiagnosticSnapshot.MAX_TEXT, remainingCharacters), model);
     }
     check(source.text().length() <= DiagnosticSnapshot.MAX_TEXT && !monitor.isCanceled(), "Type source capacity or cancellation");
     CompilationUnit declarationAst = unit.equals(target.unit()) ? ast
@@ -132,8 +135,10 @@ final class TypeDefinitionSnapshot {
     return number.intValue();
   }
 
-  private static SourceImage closedSource(ICompilationUnit unit, String uri, int maximumCharacters) throws Exception {
+  private static SourceImage closedSource(ICompilationUnit unit, String uri, int maximumCharacters,
+      Model model) throws Exception {
     check(maximumCharacters >= 0, "Type source capacity");
+    String charset = model.projection() == null ? null : DiagnosticSnapshot.sourceCharset(unit);
     Path file = Path.of(URI.create(uri));
     BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
     check(before.isRegularFile() && before.fileKey() != null && before.size() <= 4L * maximumCharacters,
@@ -150,7 +155,14 @@ final class TypeDefinitionSnapshot {
         "Type source changed during capture");
     String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
     check(text.length() <= maximumCharacters, "Type source capacity");
-    return new SourceImage(unit, uri, text, after);
+    if (charset != null) {
+      check(charset.equals(DiagnosticSnapshot.sourceCharset(unit)), "Closed type source charset changed");
+      BasicFileAttributes verified = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      check(verified.isRegularFile() && sameFile(after, verified) && file.toRealPath().equals(file),
+          "Type source changed after charset capture");
+      after = verified;
+    }
+    return new SourceImage(unit, uri, text, after, charset);
   }
 
   private static boolean sameFile(BasicFileAttributes left, BasicFileAttributes right) {
