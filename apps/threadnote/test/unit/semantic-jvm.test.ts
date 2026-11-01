@@ -324,6 +324,12 @@ const sessionFixture = Effect.gen(function* () {
     javaHome: f.javaHome,
     sourceRoots: prepared.sourceRoots,
     libraries: [f.library],
+    compilerOptions: {
+      'org.eclipse.jdt.core.compiler.compliance': '21',
+      'org.eclipse.jdt.core.compiler.source': '21',
+      'org.eclipse.jdt.core.compiler.codegen.targetPlatform': '21',
+      'org.eclipse.jdt.core.compiler.release': 'enabled',
+    },
   });
   const uri = (yield* f.path.toFileUrl(f.path.join(f.source, 'Main.java'))).href;
   const text = 'class Main {}\n';
@@ -428,7 +434,7 @@ const sessionFixture = Effect.gen(function* () {
           fault: undefined,
         }),
       };
-      const session = yield* makeJavaSession(client, {
+      const options: JavaSessionOptions = {
         basis,
         notifications,
         roots: [],
@@ -436,18 +442,52 @@ const sessionFixture = Effect.gen(function* () {
         startupMilliseconds: 1000,
         prepared,
         bundle,
-        diagnosticModel,
+        diagnosticModel: structuredClone(diagnosticModel),
         runtime,
-      });
+      };
+      const session = yield* makeJavaSession(client, options);
       if (timing) yield* Deferred.succeed(timing.returned, undefined);
       const current = yield* session.upsert(basis, text, 'java', 1000);
-      return {session, current, calls};
+      return {session, current, calls, options};
     });
   return {...f, prepared, basis, uri, text, create};
 });
 const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
 
 describe('Java session source targets', () => {
+  effectIt.effect('keeps one admitted diagnostic model after caller-owned model replacement or nested changes', () =>
+    Effect.gen(function* () {
+      const f = yield* sessionFixture;
+      const source = {
+        status: 'source',
+        location: {uri: f.uri, range, contentSha256: sha256HexSync(f.text), utf16Length: f.text.length},
+      };
+      for (const replacement of [false, true]) {
+        const {session, current, calls, options} = yield* f.create({typeDefinition: source});
+        const admitted = structuredClone(options.diagnosticModel);
+        if (replacement) {
+          Reflect.set(options, 'diagnosticModel', {...admitted, projectUri: 'file:///different-project/'});
+        } else {
+          Reflect.set(options.diagnosticModel, 'projectUri', 'file:///different-project/');
+          Reflect.set(options.diagnosticModel.sourceRoots, '0', 'file:///different-source/');
+          Reflect.set(options.diagnosticModel.libraries, '0', 'file:///different-library.jar');
+          Reflect.set(
+            options.diagnosticModel.compilerOptions!,
+            'org.eclipse.jdt.core.compiler.problem.unusedImport',
+            'error',
+          );
+        }
+        expect(yield* session.query('type-definition', current, range.start, 1000)).toMatchObject({
+          status: 'ok',
+          items: [{uri: f.uri, range}],
+        });
+        expect(EffectArray.findLast(calls, call => call.method === 'workspace/executeCommand')).toMatchObject({
+          value: {params: {arguments: [{...admitted}]}},
+        });
+        expect(yield* session.available).toBe(true);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
   effectIt.effect('refuses attachment when the runtime project SDK differs from the prepared model', () =>
     Effect.gen(function* () {
       const f = yield* sessionFixture;
