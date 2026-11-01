@@ -241,6 +241,42 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
 
 describe.skipIf(process.platform === 'win32')('Java coordinator registration', () => {
   effectIt.layer(JavaCoordinatorTestLayer, {buildPerTest: true})(layerIt => {
+    layerIt.effect('reports separate Java SDK requirements without starting a provider', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const first = yield* coordinator.status;
+        const expected = {
+          platform: 'darwin-arm64',
+          runtimeSdk: {language: 'java', version: '25.0.5+8'},
+          projectSdk: {language: 'java', version: '21.0.13+9'},
+          nextAction: expect.stringContaining(
+            'server Java 25.0.5+8 and separate project Java 21.0.13+9 SDKs with their qualified full-tree digests',
+          ),
+        };
+        expect(first).toMatchObject({
+          providers: 0,
+          imports: 0,
+          sessions: 0,
+          providerProfiles: [
+            {
+              id: 'jdtls',
+              version: '1.63.0-202610191322',
+              status: 'experimental',
+              prerequisites: 'host-qualified-candidate',
+              requirements: expected,
+              license: {qualification: 'pending', redistribution: 'release-gated'},
+              capabilities: {apply: 'unsupported', commands: 'unsupported'},
+            },
+          ],
+        });
+        const requirements = first.providerProfiles[0].requirements;
+        if (requirements) Reflect.set(requirements.runtimeSdk, 'version', 'caller mutation');
+        expect((yield* coordinator.status).providerProfiles[0].requirements).toEqual(expected);
+        expect(f.factory).not.toHaveBeenCalled();
+      }).pipe(TestClock.withLive),
+    );
+
     layerIt.effect('refuses existing semantic-parent links before they can redirect writes into source or SDKs', () =>
       Effect.gen(function* () {
         for (const role of ['source', 'serverDirectory', 'runtimeJavaHome', 'projectJavaHome', 'missing'] as const)

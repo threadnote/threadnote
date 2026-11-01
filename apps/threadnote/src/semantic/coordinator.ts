@@ -37,7 +37,12 @@ import {makePythonSession} from './providers/python.js';
 import {makePythonProject, PythonEnvironment} from './providers/python_project.js';
 import {makeJavaAnalysis, verifyJavaOutputDirectories} from './providers/java.js';
 import {JavaEnvironment} from './providers/java_project.js';
-import {JavaRuntimeCandidate, javaRuntimeQualification, makeJavaRuntime} from './providers/java_runtime.js';
+import {
+  JavaRuntimeCandidate,
+  javaRuntimeQualification,
+  javaRuntimeSetupAction,
+  makeJavaRuntime,
+} from './providers/java_runtime.js';
 import {makeGoProject, makeGoSession, goProviderVersion, goExecutableDigest, goToolDigest} from './providers/go.js';
 import {
   makeRustProject,
@@ -815,6 +820,17 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           version,
           status: 'experimental',
           prerequisites: 'host-qualified-candidate',
+          ...(id === 'jdtls'
+            ? {
+                requirements: {
+                  platform: javaRuntimeQualification.platform,
+                  runtimeSdk: {language: 'java', version: javaRuntimeQualification.runtimeVersion},
+                  projectSdk: {language: 'java', version: javaRuntimeQualification.projectVersion},
+                  nextAction: javaRuntimeSetupAction,
+                },
+                license: {qualification: 'pending', redistribution: 'release-gated'},
+              }
+            : {}),
           ...(id === 'gopls' || id === 'rust-analyzer'
             ? {
                 license: {
