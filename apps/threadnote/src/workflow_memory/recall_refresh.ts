@@ -1,4 +1,4 @@
-import {Context, Effect} from 'effect';
+import {Context, Effect, Option} from 'effect';
 import {
   CurrentResourceRecallInvalidationObserver,
   makeResourceRecallInvalidationObservation,
@@ -43,6 +43,10 @@ export const makeWorkflowRecallRefresh = <R>(
     receipt?: ResourceRecallInvalidationReceipt,
   ) => Effect.Effect<unknown, never, R>,
 ) => {
+  const warnCleanup = (reason: 'timeout' | 'failed') =>
+    Effect.logWarning(
+      `Canonical memory was committed, but derived recall indexes could not be refreshed [workflow-cleanup:${reason}]. Run threadnote repair.`,
+    );
   const flush = (batch: Batch, cleanup: boolean) =>
     Effect.suspend(() => {
       // Revoke inherited tokens before scanning; release must not retry a normal flush.
@@ -55,12 +59,9 @@ export const makeWorkflowRecallRefresh = <R>(
       return cleanup
         ? complete.pipe(
             Effect.interruptible,
-            Effect.timeout('5 seconds'),
-            Effect.catchCause(() =>
-              Effect.logWarning(
-                'Canonical memory was committed, but derived recall indexes could not be refreshed. Run threadnote repair.',
-              ),
-            ),
+            Effect.timeoutOption('5 seconds'),
+            Effect.flatMap(outcome => (Option.isNone(outcome) ? warnCleanup('timeout') : Effect.void)),
+            Effect.catchCause(() => warnCleanup('failed')),
           )
         : complete.pipe(Effect.asVoid);
     });
