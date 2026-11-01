@@ -1,7 +1,7 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {Digest, Identifier} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundedFileDigest, readBounded, semanticSdkDigest, semanticTreeDigest} from '../fingerprint.js';
@@ -50,6 +50,29 @@ const xml = (value: string) =>
     ),
   );
 
+/** ASCII Java Properties preserve validated compiler strings independently of the preference reader's charset. */
+export function javaCompilerPreferences(options: Readonly<Record<string, string>>) {
+  const property = (value: string) => {
+    let encoded = '';
+    // Properties Unicode escapes represent UTF-16 units, including both halves of supplementary characters.
+    for (let index = 0; index < value.length; index++) {
+      const unit = Option.getOrThrow(EffectString.charCodeAt(index)(value));
+      const character = value[index];
+      if (unit < 0x20 || unit > 0x7e) encoded += '\\u' + EffectString.padStart(4, '0')(unit.toString(16));
+      else encoded += /[\\ =:#!]/u.test(character) ? '\\' + character : character;
+    }
+    return encoded;
+  };
+  const entries = EffectRecord.toEntries(options).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return (
+    'eclipse.preferences.version=1\n' +
+    EffectArray.join(
+      EffectArray.map(entries, ([key, value]) => property(key) + '=' + property(value) + '\n'),
+      '',
+    )
+  );
+}
+
 /** Deterministic Eclipse serialization preserves the prepared classpath order. */
 export function javaProjectMetadata(sourceUris: readonly string[], libraries: readonly string[]) {
   const links: string[] = [];
@@ -67,8 +90,13 @@ export function javaProjectMetadata(sourceUris: readonly string[], libraries: re
   return {
     '.project': `<projectDescription><name>threadnote-java</name><comment/><projects/><buildSpec/><natures><nature>org.eclipse.jdt.core.javanature</nature></natures><linkedResources>${EffectArray.join(links, '')}</linkedResources></projectDescription>`,
     '.classpath': `<classpath>${EffectArray.join(classpath, '')}</classpath>`,
-    '.settings/org.eclipse.jdt.core.prefs':
-      'eclipse.preferences.version=1\norg.eclipse.jdt.core.compiler.compliance=21\norg.eclipse.jdt.core.compiler.source=21\norg.eclipse.jdt.core.compiler.codegen.targetPlatform=21\norg.eclipse.jdt.core.compiler.release=enabled\norg.eclipse.jdt.core.compiler.processAnnotations=disabled\n',
+    '.settings/org.eclipse.jdt.core.prefs': javaCompilerPreferences({
+      'org.eclipse.jdt.core.compiler.compliance': '21',
+      'org.eclipse.jdt.core.compiler.source': '21',
+      'org.eclipse.jdt.core.compiler.codegen.targetPlatform': '21',
+      'org.eclipse.jdt.core.compiler.release': 'enabled',
+      'org.eclipse.jdt.core.compiler.processAnnotations': 'disabled',
+    }),
   };
 }
 

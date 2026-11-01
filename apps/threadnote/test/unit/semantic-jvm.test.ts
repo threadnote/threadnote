@@ -2,6 +2,7 @@
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Path, Schema, Scope} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -26,6 +27,7 @@ import {javaDiagnosticBundle} from '../../src/semantic/providers/java_diagnostic
 import {javaTypeDefinitionCommand} from '../../src/semantic/providers/java_snapshot.js';
 import {
   makeJavaProject,
+  javaCompilerPreferences,
   javaProjectMetadata,
   type JavaProjectModel,
 } from '../../src/semantic/providers/java_project.js';
@@ -78,6 +80,40 @@ const fixture = (libraryName = 'dependency') =>
   });
 
 describe('Java prepared project boundary', () => {
+  it('escapes compiler preferences using ASCII Java Properties syntax', () => {
+    const prefix = 'eclipse.preferences.version=1\n';
+    expect(javaCompilerPreferences({'compiler key:=#!\\': 'é😀'})).toBe(
+      prefix + 'compiler\\ key\\:\\=\\#\\!\\\\=\\u00e9\\ud83d\\ude00\n',
+    );
+    expect(javaCompilerPreferences({compiler: ' \t\r\n\f:=#!\\ '})).toBe(
+      prefix + 'compiler=\\ \\u0009\\u000d\\u000a\\u000c\\:\\=\\#\\!\\\\\\ \n',
+    );
+    expect(javaCompilerPreferences({z: '', a: '21'})).toBe(prefix + 'a=21\nz=\n');
+  });
+  it('keeps compiler preference framing deterministic, ASCII and independent of caller insertion order', () => {
+    const value = fc
+      .array(fc.constantFrom('a', 'é', '𐐀', '😀', ' ', '\\', '=', ':', '#', '!', '\t', '\n', '\0'), {
+        minLength: 0,
+        maxLength: 32,
+      })
+      .map(characters => EffectArray.join(characters, ''));
+    fc.assert(
+      fc.property(fc.array(value, {maxLength: 12}), values => {
+        const options: Record<string, string> = {};
+        for (const [index, value] of values.entries()) options['compiler.' + index + ' é:=#!\\'] = value;
+        const before = JSON.stringify(options);
+        Object.freeze(options);
+        const encoded = javaCompilerPreferences(options);
+        const reversed: Record<string, string> = {};
+        for (const key of EffectRecord.keys(options).reverse()) reversed[key] = options[key];
+        expect(javaCompilerPreferences(reversed)).toBe(encoded);
+        expect(encoded).not.toMatch(/[^\x20-\x7e\n]/u);
+        expect(EffectString.split('\n')(encoded)).toHaveLength(values.length + 2);
+        expect(JSON.stringify(options)).toBe(before);
+      }),
+      {numRuns: 32},
+    );
+  });
   effectIt.effect(
     'retains the whole prepared project and runtime when a scope closes without confirmed process drain',
     () =>
