@@ -3,6 +3,8 @@ package dev.threadnote.semantic;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -12,11 +14,14 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.IResourceFilterDescription;
@@ -259,11 +264,81 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
         "outputUri", physical(org.eclipse.core.runtime.Path.fromPortableString(cache.outputPath()), project, host, budget),
         "projectCharset", charset, "rawTimestamp", cache.timestamp(), "cachedOptionsSha256", cache.optionsDigest()));
     model.put("resourceFilters", resourceFilters);
+    model.put("sourceEncoding", sourceEncoding(project.getProject(), host, resolved, budget));
     var finalLinks = description.getLinks();
     require(pinnedProject.internalGetDescription() == description && (finalLinks == null || finalLinks.isEmpty())
         && resourceFilters.equals(resourceFilters(description, project.getProject(), new Budget(budget.monitor)))
         && cache.equals(cacheImage(info, new Budget(budget.monitor))), "model-changed");
     return Map.copyOf(model);
+  }
+
+  /** Conservative superset: check every physical .java below source roots, including classpath exclusions. */
+  private static Map<String, Object> sourceEncoding(IProject project, Host host,
+      List<Map<String, Object>> entries, Budget budget) throws Exception {
+    List<Path> pending = new ArrayList<>();
+    for (Map<String, Object> entry : entries)
+      if (Integer.valueOf(IClasspathEntry.CPE_SOURCE).equals(entry.get("kind")) && Boolean.TRUE.equals(entry.get("exists")))
+        pending.add(Path.of(new URI((String) entry.get("uri"))));
+    Set<Path> visited = new HashSet<>();
+    Map<String, String> sources = new TreeMap<>();
+    int count = 0;
+    long totalBytes = 0;
+    while (!pending.isEmpty()) {
+      budget.check();
+      Path directory = pending.remove(pending.size() - 1);
+      if (!visited.add(directory)) continue;
+      require(!directory.equals(host.project()) && directory.startsWith(host.project())
+          && canonical(directory).equals(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS), "unsafe-source");
+      try (var children = Files.newDirectoryStream(directory)) {
+        for (Path file : children) {
+          budget.check();
+          require(++count <= 20000, "capacity");
+          canonical(file);
+          BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+          if (before.isDirectory()) { pending.add(file); continue; }
+          require(before.isRegularFile(), "unsafe-source");
+          if (!file.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".java")) continue;
+          require(before.fileKey() != null && before.size() <= 4 * 1024 * 1024, "capacity");
+          totalBytes += before.size();
+          require(totalBytes <= 256L * 1024 * 1024, "capacity");
+          ByteBuffer bytes = ByteBuffer.allocate((int) before.size());
+          try (SeekableByteChannel channel = Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            while (bytes.hasRemaining()) {
+              budget.check();
+              require(channel.read(bytes) != -1, "source-changed");
+            }
+            require(channel.read(ByteBuffer.allocate(1)) == -1, "source-changed");
+          }
+          bytes.flip();
+          // BOM stripping differs between provider and host text APIs; qualify it separately before supporting it.
+          require(bytes.remaining() < 3 || bytes.get(0) != (byte) 0xef
+              || bytes.get(1) != (byte) 0xbb || bytes.get(2) != (byte) 0xbf, "unsupported-source-bom");
+          var decoded = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+              .onUnmappableCharacter(CodingErrorAction.REPORT).decode(bytes.asReadOnlyBuffer());
+          require(decoded.length() <= 2 * 1024 * 1024, "capacity");
+          String relative = budget.text(host.project().relativize(file).toString().replace(java.io.File.separatorChar, '/'), 8192);
+          IFile resource = project.getFile(org.eclipse.core.runtime.Path.fromPortableString(relative));
+          require(resource instanceof org.eclipse.core.internal.resources.File && resource.isAccessible()
+              && !resource.isLinked(IResource.CHECK_ANCESTORS) && !resource.isVirtual()
+              && resource.getLocationURI() != null && Path.of(resource.getLocationURI()).equals(file), "unsafe-source");
+          // This is admitted setup observation. The pinned IFile implementation includes per-file, detected and inherited charset.
+          String charset = resource.getCharset(true);
+          require("UTF-8".equalsIgnoreCase(charset), "unsupported-source-charset");
+          BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+          require(after.isRegularFile() && before.fileKey().equals(after.fileKey()) && before.size() == after.size()
+              && before.lastModifiedTime().equals(after.lastModifiedTime()) && canonical(file).equals(file)
+              && charset.equals(resource.getCharset(true)), "source-changed");
+          MessageDigest digest = MessageDigest.getInstance("SHA-256");
+          digest.update(bytes);
+          sources.put(relative, HexFormat.of().formatHex(digest.digest()));
+        }
+      }
+    }
+    StringBuilder image = new StringBuilder("threadnote-java-source-encoding-v1\n");
+    for (var source : sources.entrySet())
+      image.append(source.getKey().length()).append(':').append(source.getKey()).append(source.getValue());
+    return Map.of("policy", "utf8-no-bom-v1", "sourceCount", sources.size(),
+        "sourceDigest", DiagnosticSnapshot.sha256(image.toString()));
   }
   private static List<Map<String, Object>> resourceFilters(
       org.eclipse.core.internal.resources.ProjectDescription description, IProject selectedProject, Budget budget) throws Exception {
