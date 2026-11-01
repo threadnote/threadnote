@@ -27,7 +27,7 @@ import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
-import {managerLiveHttpLayer, type ManagerLive} from './live.js';
+import {managerLiveHttpLayer, serveManagerLive, type ManagerLive} from './live.js';
 import {ManagerLiveChangeHints} from './live_sources.js';
 import {ManagerHealthObservationHints} from './live_health_sources.js';
 import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
@@ -345,7 +345,6 @@ interface TargetMemoryInput {
   readonly team?: string;
   readonly topic?: string;
 }
-
 interface BulkItemResult {
   readonly ok: boolean;
   readonly output?: string;
@@ -388,7 +387,8 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             sources,
           } = yield* makeManagerLiveObservationRuntime(config, actualPort, token, automaticCompactionStatus);
           yield* Effect.addFinalizer(() => releaseManagerGraphSnapshotLeases());
-          yield* server.serve(
+          yield* serveManagerLive(
+            server,
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope, live}).pipe(
               Effect.provideService(ManagerLiveChangeHints, sources.hints),
               Effect.provideService(ManagerHealthObservationHints, {
@@ -402,6 +402,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
               Effect.provideService(ManagerConsumerClockHints, projectObservation.clockHints),
               Effect.provideService(ManagerReviewSourceReadiness, {current: projectObservation.reviewReadiness}),
             ),
+            live,
           );
           yield* startManagerContextSchedulers(config, automaticCompactionStatus, graph.compactionChanged).pipe(
             Effect.provideService(ManagerLiveChangeHints, sources.hints),
