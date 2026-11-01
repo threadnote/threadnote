@@ -4,7 +4,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Deferred, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Order, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {unzipSync} from 'fflate';
 import fc from 'fast-check';
@@ -34,6 +34,7 @@ import {
   javaTypeDefinitionCommand,
   javaFileUri,
 } from '../../src/semantic/providers/java_snapshot.js';
+import {preparedSessionFixture} from '../fixtures/semantic/jvm/prepared-session.js';
 
 const model: JavaDiagnosticModel = {
   projectUri: 'file:///private/projection',
@@ -246,6 +247,321 @@ const limitedSession = Effect.fn('test.limitedJavaSession')(function* (limits?: 
 });
 
 describe('Java request diagnostics', () => {
+  describe.skipIf(process.platform === 'win32')('prepared session source admission', () => {
+    effectIt.effect.prop(
+      'preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard',
+      [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
+      ([suffix]) =>
+        Effect.gen(function* () {
+          for (const target of ['source', 'sdk', 'model', 'private', 'library', 'inventory'] as const) {
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                const f = yield* preparedSessionFixture();
+                yield* f.prepared.verifySource;
+                yield* f.prepared.verify;
+                const files = {
+                  source: f.path.join(f.source, 'Main.java'),
+                  sdk: f.path.join(f.javaHome, 'release'),
+                  model: f.metadataFile,
+                  private: f.path.join(f.prepared.project, '.settings/org.eclipse.jdt.core.prefs'),
+                  library: f.library,
+                  inventory: f.path.join(f.path.dirname(f.metadataFile), 'unexpected'),
+                };
+                const original = target === 'inventory' ? '' : yield* f.fs.readFileString(files[target]);
+                yield* f.fs.writeFileString(files[target], original + suffix, {mode: 0o600});
+                const source = yield* Effect.exit(f.prepared.verifySource);
+                const full = yield* Effect.exit(f.prepared.verify);
+                expect(source._tag).toBe(target === 'sdk' ? 'Success' : 'Failure');
+                expect(full._tag).toBe('Failure');
+              }),
+            );
+          }
+        }).pipe(Effect.provide(BunServices.layer)),
+      {arbitrary: {runs: 8}},
+    );
+    effectIt.effect('retains exactly two full guards and retires on SDK drift inside a source-only exchange', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        let fullChecks = 0,
+          sourceChecks = 0,
+          changeSdk = false;
+        const range = {start: {line: 0, character: 6}, end: {line: 0, character: 14}};
+        const made = yield* f.create(
+          [{uri: f.uris['Included.java'], range}],
+          options => {
+            Reflect.set(options, 'prepared', {
+              ...f.prepared,
+              verify: Effect.sync(() => {
+                fullChecks++;
+              }).pipe(Effect.andThen(f.prepared.verify)),
+              verifySource: Effect.sync(() => {
+                sourceChecks++;
+              }).pipe(Effect.andThen(f.prepared.verifySource)),
+            });
+          },
+          method =>
+            changeSdk && method === 'textDocument/definition'
+              ? f.fs.writeFileString(f.path.join(f.javaHome, 'release'), 'changed SDK')
+              : Effect.void,
+        );
+        const session = yield* made.result;
+        const observation = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        fullChecks = 0;
+        sourceChecks = 0;
+        expect((yield* session.query('definition', observation, {line: 0, character: 13}, 1000)).status).toBe('ok');
+        expect(fullChecks).toBe(2);
+        expect(sourceChecks).toBe(2);
+        changeSdk = true;
+        expect(
+          yield* Effect.flip(session.query('definition', observation, {line: 0, character: 13}, 1000)),
+        ).toMatchObject({code: 'prerequisite'});
+        expect(yield* session.available).toBe(false);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+    effectIt.effect('rejects SDK drift before compiler IO, on provider error, and before diagnostic delivery', () =>
+      Effect.gen(function* () {
+        for (const mode of ['before', 'error', 'diagnostics'] as const) {
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* preparedSessionFixture();
+              let armed = false;
+              const changeSdk = f.fs.writeFileString(f.path.join(f.javaHome, 'release'), 'changed SDK');
+              const made = yield* f.create([], undefined, method =>
+                Effect.gen(function* () {
+                  if (!armed || (method !== 'textDocument/definition' && method !== 'workspace/executeCommand')) return;
+                  yield* changeSdk;
+                  if (mode === 'error') return yield* LspFault.make({code: 'protocol'});
+                }),
+              );
+              const session = yield* made.result;
+              const observation = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+              const calls = made.calls.length;
+              if (mode === 'before') yield* changeSdk;
+              else armed = true;
+              const operation =
+                mode === 'diagnostics'
+                  ? session.diagnostics(observation, 1000).pipe(Effect.asVoid)
+                  : session.query('definition', observation, {line: 0, character: 13}, 1000).pipe(Effect.asVoid);
+              expect(yield* Effect.flip(operation)).toMatchObject({code: 'prerequisite'});
+              if (mode === 'before') expect(made.calls).toHaveLength(calls);
+              expect(yield* session.available).toBe(false);
+            }),
+          );
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+    effectIt.effect.prop(
+      'binds compiler values independently of key order and rejects a changed value before initialize',
+      [
+        Schema.Struct({
+          ranks: Schema.Array(Schema.Int.check(Schema.isBetween({minimum: -9, maximum: 9}))).check(
+            Schema.isBetweenLength(5, 5),
+          ),
+          changed: Schema.Boolean,
+          key: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 4})),
+        }),
+      ],
+      ([control]) =>
+        Effect.gen(function* () {
+          const f = yield* preparedSessionFixture();
+          const entries = EffectRecord.toEntries(f.prepared.model.compilerOptions);
+          const ranked = EffectArray.map(entries, (entry, index) => ({entry, index, rank: control.ranks[index]}));
+          const byRank: Order.Order<(typeof ranked)[number]> = (a, b) =>
+            Order.Number(a.rank, b.rank) || Order.Number(a.index, b.index);
+          const ordered = EffectArray.sort(ranked, byRank);
+          const compilerOptions = EffectRecord.fromEntries(EffectArray.map(ordered, item => item.entry));
+          if (control.changed)
+            Reflect.set(compilerOptions, entries[control.key][0], entries[control.key][1] + '-changed');
+          const made = yield* f.create([], options => {
+            Reflect.set(options, 'diagnosticModel', {...options.diagnosticModel, compilerOptions});
+          });
+          if (control.changed) {
+            expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
+            expect(made.calls).toEqual([]);
+          } else expect(yield* (yield* made.result).available).toBe(true);
+        }).pipe(Effect.provide(BunServices.layer)),
+      {arbitrary: {runs: 16}},
+    );
+
+    effectIt.effect('does not activate projected reads when the prepared model is missing', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const withoutModel = {...f.prepared};
+        Reflect.deleteProperty(withoutModel, 'model');
+        const made = yield* f.create([], options => {
+          Reflect.set(options, 'prepared', withoutModel);
+        });
+        expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
+        expect(made.calls).toEqual([]);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('keeps matcher exhaustion a typed capacity refusal without changing the attached view', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture({
+          inclusions: ['Main.java', ...EffectArray.replicate(EffectString.repeat(4000)('*') + 'Z', 32)],
+        });
+        const made = yield* f.create();
+        const session = yield* made.result;
+        const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        const before = made.calls.length;
+        expect(
+          yield* Effect.flip(
+            session.upsert({...current, uri: f.uris['Included.java']}, f.texts['Main.java'], 'java', 1000),
+          ),
+        ).toMatchObject({_tag: 'LspFault', code: 'capacity'});
+        expect(made.calls).toHaveLength(before);
+        expect(yield* session.observation(current.uri)).toEqual(current);
+        expect(yield* session.available).toBe(true);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('uses the verified v2 model, accepts compiler key permutations and preserves unsaved text', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const location = {
+          uri: f.uris['Included.java'],
+          range: {start: {line: 0, character: 6}, end: {line: 0, character: 14}},
+        };
+        const made = yield* f.create([location], options => {
+          Reflect.set(options, 'diagnosticModel', {
+            ...options.diagnosticModel,
+            compilerOptions: EffectRecord.fromEntries(
+              EffectArray.reverse(EffectRecord.toEntries(f.prepared.model.compilerOptions)),
+            ),
+          });
+        });
+        const session = yield* made.result;
+        const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        const result = yield* session.query('definition', current, {line: 0, character: 15}, 1000);
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') expect(result.items).toEqual([location]);
+        const text = 'class Main { Included value; int unsaved; } // élève𐐀\n';
+        const next = yield* session.upsert(
+          {...current, documentVersion: 2, content: sha256HexSync(text)},
+          text,
+          'java',
+          1000,
+        );
+        expect((yield* session.diagnostics(next, 1000)).observation).toEqual(next);
+        expect(yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'))).toBe(f.texts['Main.java']);
+        yield* f.prepared.verify;
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('refuses every mismatched snapshot basis before initializing the provider', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const outside = javaFileUri(yield* f.path.toFileUrl(f.parent));
+        for (const [field, value] of [
+          ['projectUri', outside],
+          ['javaHomeUri', outside],
+          ['projectionDigest', EffectString.repeat(64)('0')],
+          ['sourceRoots', []],
+          ['libraries', [f.uris['Included.java']]],
+          ['compilerOptions', undefined],
+          ['compilerOptions', {...f.prepared.model.compilerOptions, 'org.eclipse.jdt.core.compiler.source': '25'}],
+        ] as const) {
+          const made = yield* f.create([], options => {
+            Reflect.set(options, 'diagnosticModel', {...options.diagnosticModel, [field]: value});
+          });
+          expect(yield* Effect.flip(made.result)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+          expect(made.calls).toEqual([]);
+        }
+        for (const field of ['project', 'worktree'] as const) {
+          const made = yield* f.create([], options => {
+            Reflect.set(options, 'basis', {...options.basis, [field]: outside});
+          });
+          expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
+          expect(made.calls).toEqual([]);
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('refuses excluded, non-Java, absent and outside inputs without changing the view or wire', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const outside = f.path.join(f.parent, 'Outside.java');
+        yield* f.fs.writeFileString(outside, 'class Outside {}\n');
+        const made = yield* f.create();
+        const session = yield* made.result;
+        const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        for (const uri of [
+          f.uris['Excluded.java'],
+          f.uris['Readme.txt'],
+          javaFileUri(yield* f.path.toFileUrl(outside)),
+          javaFileUri(yield* f.path.toFileUrl(f.path.join(f.source, 'Missing.java'))),
+        ]) {
+          const before = made.calls.length;
+          expect(
+            yield* Effect.flip(
+              session.upsert({...current, uri, documentVersion: 2}, f.texts['Main.java'], 'java', 1000),
+            ),
+          ).toMatchObject({_tag: 'SemanticSessionFault', reason: 'invalid'});
+          expect(made.calls).toHaveLength(before);
+          expect(yield* session.observation(current.uri)).toEqual(current);
+          expect(yield* session.observation(uri)).toBeUndefined();
+          expect(yield* session.available).toBe(true);
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('returns the physical canonical observation for an alias without mutating its caller', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const alias = f.path.join(f.parent, 'source-alias');
+        yield* f.fs.symlink(f.source, alias);
+        const uri = javaFileUri(yield* f.path.toFileUrl(f.path.join(alias, 'Main.java')));
+        const requested = {...f.basis, uri};
+        const original = structuredClone(requested);
+        const made = yield* f.create();
+        const session = yield* made.result;
+        const current = yield* session.upsert(requested, f.texts['Main.java'], 'java', 1000);
+        expect(current.uri).toBe(f.uris['Main.java']);
+        expect(requested).toEqual(original);
+        expect(yield* session.observation(uri)).toBeUndefined();
+        expect(yield* session.observation(current.uri)).toEqual(current);
+        const open = EffectArray.findFirst(made.calls, call => call.method === 'textDocument/didOpen');
+        expect(open).toMatchObject({value: {params: {textDocument: {uri: current.uri}}}});
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect('refuses an entire result or edit when one physical target is logically excluded', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const range = {start: {line: 0, character: 6}, end: {line: 0, character: 14}};
+        for (const operation of ['definition', 'rename', 'code-action'] as const) {
+          const edit = {changes: {[f.uris['Excluded.java']]: [{range, newText: 'Next'}]}};
+          const response =
+            operation === 'definition'
+              ? [
+                  {uri: f.uris['Included.java'], range},
+                  {uri: f.uris['Excluded.java'], range},
+                ]
+              : operation === 'rename'
+                ? edit
+                : [{title: 'Fix', kind: 'quickfix', edit}];
+          const made = yield* f.create(response);
+          const session = yield* made.result;
+          const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+          const result =
+            operation === 'definition'
+              ? yield* session.query('definition', current, {line: 0, character: 15}, 1000)
+              : yield* session.prepare(
+                  operation,
+                  current,
+                  {line: 0, character: 15},
+                  operation === 'rename' ? 'Next' : undefined,
+                  1000,
+                );
+          expect(result.status).toBe('unsupported');
+          expect(yield* session.available).toBe(true);
+          expect(yield* f.fs.readFileString(f.path.join(f.source, 'Excluded.java'))).toBe(f.texts['Excluded.java']);
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  });
+
   effectIt.effect.prop(
     'preserves the prospective view model and refuses capacity without changing state or wire history',
     [
