@@ -530,6 +530,254 @@ export function javaPreparedEntryJson(entry: JavaPreparedModel['rawClasspath'][n
   return canonicalJson(entry);
 }
 
+/** Verify host-pinned persisted facts and their private artifact image without importing a build or starting a provider. */
+export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')(
+  function* (options: {
+    readonly metadataFile: string;
+    readonly metadataDigest: string;
+    readonly project: string;
+    readonly worktree: string;
+    readonly javaHome: string;
+  }) {
+    const selected = yield* Schema.decodeEffect(
+      Schema.Struct({
+        metadataFile: text,
+        metadataDigest: Digest,
+        project: text,
+        worktree: text,
+        javaHome: text,
+      }),
+      {onExcessProperty: 'error'},
+    )({...options}).pipe(Effect.mapError(fail));
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const inside = (root: string, file: string) => root === file || EffectString.startsWith(root + path.sep)(file);
+    const artifactRoot = path.dirname(selected.metadataFile);
+    if (
+      selected.metadataFile !== path.join(artifactRoot, 'model.json') ||
+      !inside(selected.worktree, selected.project) ||
+      inside(selected.worktree, artifactRoot) ||
+      inside(artifactRoot, selected.worktree) ||
+      inside(selected.worktree, selected.javaHome) ||
+      inside(selected.javaHome, selected.worktree) ||
+      inside(selected.javaHome, artifactRoot) ||
+      inside(artifactRoot, selected.javaHome)
+    )
+      return yield* fail();
+    const owners = yield* Effect.forEach(
+      [
+        {directory: artifactRoot, privateMode: true},
+        {directory: selected.project, privateMode: false},
+        {directory: selected.worktree, privateMode: false},
+        {directory: selected.javaHome, privateMode: false},
+      ],
+      item => ownDirectory(item.directory, item.privateMode),
+    );
+    const metadataStat = yield* fs.lstat(selected.metadataFile);
+    if (
+      metadataStat.type !== 'File' ||
+      Option.isNone(metadataStat.ino) ||
+      (metadataStat.mode & 0o777) !== 0o600 ||
+      Number(metadataStat.size) > 256 * 1024 ||
+      (yield* fs.realPath(selected.metadataFile)) !== selected.metadataFile
+    )
+      return yield* fail();
+    const bytes = yield* readBounded(selected.metadataFile, 256 * 1024);
+    if (Number(metadataStat.size) !== bytes.length || sha256HexSync(bytes) !== selected.metadataDigest)
+      return yield* fail();
+    const content = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+      catch: fail,
+    });
+    const model = yield* Effect.try({try: () => JSON.parse(content) as unknown, catch: fail}).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(JavaPreparedModel, {onExcessProperty: 'error'})),
+      Effect.mapError(fail),
+    );
+    if (
+      model.project !== selected.project ||
+      model.worktree !== selected.worktree ||
+      model.javaHome !== selected.javaHome ||
+      javaPreparedModelJson(model) !== content
+    )
+      return yield* fail();
+    const freeze = (value: Schema.Json): void => {
+      if (value !== null && typeof value === 'object') {
+        for (const child of EffectArray.isArray<Schema.Json>(value) ? value : EffectRecord.values(value)) freeze(child);
+        Object.freeze(value);
+      }
+    };
+    freeze(model);
+    const expected = new Map<string, {readonly digest: string; readonly bytes: number}>([
+      [selected.metadataFile, {digest: selected.metadataDigest, bytes: bytes.length}],
+    ]);
+    let libraryBytes = 0;
+    for (const library of model.libraries) {
+      if (
+        library.file !== path.join(artifactRoot, library.digest + '.jar') ||
+        expected.has(library.file) ||
+        (libraryBytes += library.bytes) > 512 * 1024 * 1024
+      )
+        return yield* fail();
+      expected.set(library.file, library);
+    }
+    const initialFiles = new Map<string, FileSystem.File.Info>([[selected.metadataFile, metadataStat]]);
+    for (const file of expected.keys()) {
+      if (file === selected.metadataFile) continue;
+      const stat = yield* fs.lstat(file);
+      if (
+        stat.type !== 'File' ||
+        Option.isNone(stat.ino) ||
+        (stat.mode & 0o777) !== 0o600 ||
+        Number(stat.size) !== expected.get(file)!.bytes ||
+        (yield* fs.realPath(file)) !== file
+      )
+        return yield* fail();
+      initialFiles.set(file, stat);
+    }
+    const sourceRoots: string[] = [],
+      absentSourceRoots: string[] = [];
+    const rootOwners: Effect.Success<ReturnType<typeof ownDirectory>>[] = [];
+    const sourceNames = new Set<string>();
+    for (const entry of model.rawClasspath) {
+      if (entry.kind !== 3) continue;
+      if (
+        !entry.path ||
+        sourceNames.has(entry.path) ||
+        /\\/u.test(entry.path) ||
+        EffectArray.some(
+          EffectString.split('/')(entry.path),
+          part => !part || part === '.' || part === '..' || part === '.git',
+        ) ||
+        entry.exists === undefined
+      )
+        return yield* fail();
+      sourceNames.add(entry.path);
+      const root = path.join(selected.project, ...EffectString.split('/')(entry.path));
+      if (!inside(selected.project, root) || root === selected.project) return yield* fail();
+      if (entry.exists) {
+        rootOwners.push(yield* ownDirectory(root));
+        sourceRoots.push(root);
+      } else {
+        if (
+          !EffectArray.some(
+            entry.attributes,
+            attr => attr.name === 'optional' && 'value' in attr && attr.value === 'true',
+          )
+        )
+          return yield* fail();
+        absentSourceRoots.push(root);
+      }
+    }
+    if (!sourceRoots.length || sourceNames.size > 32) return yield* fail();
+    const absent = (file: string) =>
+      Effect.gen(function* () {
+        yield* fs.lstat(file).pipe(
+          Effect.matchEffect({
+            onSuccess: fail,
+            onFailure: error => (error.reason._tag === 'NotFound' ? Effect.void : fail()),
+          }),
+        );
+        let ancestor = path.dirname(file);
+        for (let depth = 0; depth < 128; depth++) {
+          const info = yield* fs
+            .lstat(ancestor)
+            .pipe(Effect.catchTag('PlatformError', error => (error.reason._tag === 'NotFound' ? Effect.void : fail())));
+          if (info) {
+            if (info.type !== 'Directory' || (yield* fs.realPath(ancestor)) !== ancestor) return yield* fail();
+            return;
+          }
+          if (ancestor === selected.project || !inside(selected.project, ancestor)) return yield* fail();
+          ancestor = path.dirname(ancestor);
+        }
+        return yield* fail();
+      });
+    const verifyInventory = Effect.gen(function* () {
+      const names = yield* fs.readDirectory(artifactRoot);
+      if (
+        names.length !== expected.size ||
+        EffectArray.some(names, name => !expected.has(path.join(artifactRoot, name)))
+      )
+        return yield* fail();
+    });
+    const verifyFile = (file: string) =>
+      Effect.gen(function* () {
+        const original = initialFiles.get(file)!;
+        const pinned = expected.get(file)!;
+        const current = yield* fs.lstat(file);
+        if (
+          current.type !== 'File' ||
+          (yield* fs.realPath(file)) !== file ||
+          !sameIdentity(original, current) ||
+          (current.mode & 0o777) !== 0o600 ||
+          Number(current.size) !== pinned.bytes ||
+          Option.getOrUndefined(current.mtime)?.getTime() !== Option.getOrUndefined(original.mtime)?.getTime()
+        )
+          return yield* fail();
+      });
+    const verifyArtifacts = Effect.gen(function* () {
+      yield* verifyInventory;
+      for (const [file, pinned] of expected) {
+        yield* verifyFile(file);
+        if (
+          (yield* boundedFileDigest(file, file === selected.metadataFile ? 256 * 1024 : 64 * 1024 * 1024)) !==
+          pinned.digest
+        )
+          return yield* fail();
+        yield* verifyFile(file);
+      }
+      yield* verifyInventory;
+    });
+    const verifyFingerprints = Effect.gen(function* () {
+      if (
+        (yield* semanticTreeDigest(selected.worktree)) !== model.sourceDigest ||
+        (yield* semanticSdkDigest(selected.javaHome)) !== model.javaSdkDigest
+      )
+        return yield* fail();
+    });
+    const verify = Effect.gen(function* () {
+      for (const owner of owners) yield* owner.verify;
+      yield* verifyArtifacts;
+      yield* verifyFingerprints;
+      for (const owner of rootOwners) yield* owner.verify;
+      for (const root of absentSourceRoots) yield* absent(root);
+      const encoding = yield* verifyJavaSourceEncoding(selected.project, sourceRoots);
+      const image = javaSourceEncodingImage(
+        EffectArray.map(encoding.sources, source => ({
+          name: EffectArray.join(EffectString.split(path.sep)(path.relative(selected.project, source.file)), '/'),
+          digest: source.digest,
+        })),
+      );
+      if (
+        image.sourceCount !== model.sourceEncoding.sourceCount ||
+        image.sourceDigest !== model.sourceEncoding.sourceDigest
+      )
+        return yield* fail();
+      yield* verifyArtifacts;
+      yield* verifyFingerprints;
+      for (const file of expected.keys()) yield* verifyFile(file);
+      for (const owner of owners) yield* owner.verify;
+      for (const owner of rootOwners) yield* owner.verify;
+      for (const root of absentSourceRoots) yield* absent(root);
+      yield* verifyInventory;
+    }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
+    yield* verify;
+    return Object.freeze({
+      model,
+      sourceRoots: Object.freeze(sourceRoots),
+      absentSourceRoots: Object.freeze(absentSourceRoots),
+      verify,
+    });
+  },
+  effect =>
+    effect.pipe(
+      Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())),
+      Effect.timeoutOption(45000),
+      Effect.flatMap(result =>
+        Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+      ),
+    ),
+);
+
 export const javaPreparedModelCommand = 'threadnote.java.preparedProjectModel.v1';
 export const JavaPreparationGradle = Schema.Struct({
   sdkDirectory: text,

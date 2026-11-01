@@ -4,9 +4,24 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Queue, Schema, Scope, Stream} from 'effect';
+import {
+  Arbitrary,
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Option,
+  Path,
+  Queue,
+  Schema,
+  Scope,
+  Stream,
+} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect, vi} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
 import * as fingerprints from '../../src/semantic/fingerprint.js';
 import {LspFault, makeLspClient, type LspWire} from '../../src/semantic/lsp_transport.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
@@ -32,6 +47,7 @@ import {
   sealJavaPreparedModel,
   verifyJavaPreparationInputs,
   verifyJavaSourceEncoding,
+  loadJavaPreparedModel,
 } from '../../src/semantic/providers/java_preparation.js';
 
 const candidate = (): JavaRuntimeCandidate => ({
@@ -53,6 +69,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly hostVerify?: Effect.Effect<void, LspFault>;
     readonly sourceBytes?: Uint8Array;
     readonly resourcePreferences?: string;
+    readonly jarText?: string;
     readonly encodingCount?: number;
     readonly encodingDigest?: string;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
@@ -93,7 +110,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
   yield* fs.writeFileString(jrt, 'synthetic SDK artifact');
   yield* fs.makeDirectory(path.join(runtimeDirectory, 'm2'), {mode: 0o700});
   const jar = path.join(runtimeDirectory, 'm2/library.jar');
-  const jarText = 'synthetic pinned library';
+  const jarText = control.jarText ?? 'synthetic pinned library';
   yield* fs.writeFileString(jar, jarText);
   const common = {
     exported: false,
@@ -138,7 +155,9 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
       name: 'JavaSE-21',
       javaHomeUri: yield* uri(javaHome),
     },
-    libraries: [{uri: yield* uri(jar), bytes: jarText.length, sha256: sha256HexSync(jarText)}],
+    libraries: [
+      {uri: yield* uri(jar), bytes: new TextEncoder().encode(jarText).length, sha256: sha256HexSync(jarText)},
+    ],
     model: {
       projectUri: yield* uri(copiedProject),
       build: 'maven',
@@ -337,6 +356,268 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
 });
 
 describe('Java prepared model sealing', () => {
+  effectIt.effect(
+    'loads persisted facts after setup removal and protects the captured model from caller mutation',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture();
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const content = yield* f.fs.readFileString(sealed.metadataFile);
+        const methods = [...f.methods];
+        yield* f.fs.remove(f.copiedProject, {recursive: true});
+        yield* f.fs.remove(f.runtimeDirectory, {recursive: true});
+        const loaded = yield* loadJavaPreparedModel({
+          metadataFile: sealed.metadataFile,
+          metadataDigest: sealed.metadataDigest,
+          project: f.project,
+          worktree: f.project,
+          javaHome: f.javaHome,
+        });
+        expect(javaPreparedModelJson(loaded.model)).toBe(content);
+        expect(loaded.sourceRoots).toEqual([f.path.join(f.project, 'src/main/java')]);
+        expect(loaded.absentSourceRoots).toEqual([f.path.join(f.project, 'src/test/java')]);
+        expect(Reflect.set(loaded.model, 'project', '/different')).toBe(false);
+        expect(Reflect.set(loaded.model.rawClasspath[0], 'path', 'different')).toBe(false);
+        expect(Reflect.set(loaded.model.rawClasspath[0].attributes[0], 'value', 'false')).toBe(false);
+        expect(Reflect.set(loaded.model.compilerOptions, 'org.eclipse.jdt.core.compiler.source', '17')).toBe(false);
+        expect(Reflect.set(loaded.model.libraries[0], 'digest', EffectString.repeat(64)('0'))).toBe(false);
+        expect(Reflect.set(loaded.sourceRoots, '0', '/different')).toBe(false);
+        yield* loaded.verify;
+        expect(javaPreparedModelJson(loaded.model)).toBe(content);
+        expect(f.methods).toEqual(methods);
+        expect(yield* f.fs.readFileString(sealed.metadataFile)).toBe(content);
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
+  for (const mutation of [
+    'metadata',
+    'library',
+    'extra-file',
+    'mode',
+    'source',
+    'SDK',
+    'library-inode',
+    'source-root-inode',
+  ] as const)
+    effectIt.effect(`invalidates persisted verification after ${mutation} drift`, () =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture();
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const loaded = yield* loadJavaPreparedModel({
+          metadataFile: sealed.metadataFile,
+          metadataDigest: sealed.metadataDigest,
+          project: f.project,
+          worktree: f.project,
+          javaHome: f.javaHome,
+        });
+        const library = sealed.model.libraries[0];
+        if (mutation === 'metadata')
+          yield* f.fs.writeFileString(sealed.metadataFile, javaPreparedModelJson(sealed.model) + '\n');
+        else if (mutation === 'library')
+          yield* f.fs.writeFileString(library.file, EffectString.repeat(library.bytes)('X'));
+        else if (mutation === 'extra-file')
+          yield* f.fs.writeFileString(f.path.join(sealed.directory, 'extra'), 'extra', {mode: 0o600});
+        else if (mutation === 'mode') yield* f.fs.chmod(sealed.metadataFile, 0o644);
+        else if (mutation === 'source')
+          yield* f.fs.writeFileString(f.path.join(f.project, 'src/main/java/Main.java'), 'class Changed {}\n');
+        else if (mutation === 'SDK')
+          yield* f.fs.writeFileString(f.path.join(f.javaHome, 'lib/jrt-fs.jar'), 'changed SDK artifact');
+        else if (mutation === 'library-inode') {
+          yield* f.fs.rename(library.file, f.path.join(f.artifactDirectory, 'held-library.jar'));
+          yield* f.fs.writeFileString(library.file, f.jarText, {mode: 0o600});
+        } else {
+          const root = loaded.sourceRoots[0];
+          yield* f.fs.rename(root, f.path.join(f.artifactDirectory, 'held-source'));
+          yield* f.fs.makeDirectory(root);
+          yield* f.fs.writeFileString(f.path.join(root, 'Main.java'), 'class Main {}\n');
+        }
+        expect((yield* Effect.exit(loaded.verify))._tag).toBe('Failure');
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  effectIt.effect('refuses forged optional absence even with a matching current worktree digest', () =>
+    Effect.gen(function* () {
+      for (const kind of ['File', 'Directory'] as const) {
+        const f = yield* modelFixture();
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const optional = f.path.join(f.project, 'src/test/java');
+        yield* f.fs.makeDirectory(f.path.dirname(optional), {recursive: true});
+        if (kind === 'File') yield* f.fs.writeFileString(optional, 'not a source folder');
+        else yield* f.fs.makeDirectory(optional);
+        const forged = {...sealed.model, sourceDigest: yield* semanticTreeDigest(f.project)};
+        const content = javaPreparedModelJson(forged);
+        yield* f.fs.writeFileString(sealed.metadataFile, content);
+        expect(
+          (yield* Effect.exit(
+            loadJavaPreparedModel({
+              metadataFile: sealed.metadataFile,
+              metadataDigest: sha256HexSync(content),
+              project: f.project,
+              worktree: f.project,
+              javaHome: f.javaHome,
+            }),
+          ))._tag,
+        ).toBe('Failure');
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  for (const changed of ['config', 'SDK', 'artifact-inventory'] as const)
+    effectIt.effect(`refuses late ${changed} drift during persisted verification`, () =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture();
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const loaded = yield* loadJavaPreparedModel({
+          metadataFile: sealed.metadataFile,
+          metadataDigest: sealed.metadataDigest,
+          project: f.project,
+          worktree: f.project,
+          javaHome: f.javaHome,
+        });
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const originalRead = fingerprints.readBounded;
+        const originalDigest = fingerprints.boundedFileDigest;
+        const main = f.path.join(f.project, 'src/main/java/Main.java');
+        let libraryReads = 0;
+        const hold = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)));
+        const spy =
+          changed === 'artifact-inventory'
+            ? vi
+                .spyOn(fingerprints, 'boundedFileDigest')
+                .mockImplementation((file, maximum) =>
+                  file === sealed.model.libraries[0].file && ++libraryReads === 2
+                    ? hold.pipe(Effect.andThen(originalDigest(file, maximum)))
+                    : originalDigest(file, maximum),
+                )
+            : vi
+                .spyOn(fingerprints, 'readBounded')
+                .mockImplementation((file, maximum) =>
+                  file === main && maximum === 4 * 1024 * 1024
+                    ? hold.pipe(Effect.andThen(originalRead(file, maximum)))
+                    : originalRead(file, maximum),
+                );
+        yield* Effect.gen(function* () {
+          const verifying = yield* Effect.forkChild(loaded.verify);
+          yield* Deferred.await(entered);
+          if (changed === 'artifact-inventory')
+            yield* f.fs.writeFileString(f.path.join(sealed.directory, 'extra'), 'late extra artifact', {mode: 0o600});
+          else
+            yield* f.fs.writeFileString(
+              changed === 'config' ? f.path.join(f.project, 'pom.xml') : f.path.join(f.javaHome, 'lib/jrt-fs.jar'),
+              'late changed bytes',
+            );
+          yield* Deferred.succeed(release, undefined);
+          expect((yield* Effect.exit(Fiber.join(verifying)))._tag).toBe('Failure');
+        }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  effectIt.effect('refuses noncanonical JSON and metadata symlinks before using persisted facts', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+      const original = yield* f.fs.readFileString(sealed.metadataFile);
+      const whitespace = original + ' ';
+      yield* f.fs.writeFileString(sealed.metadataFile, whitespace);
+      const options = {
+        metadataFile: sealed.metadataFile,
+        metadataDigest: sha256HexSync(whitespace),
+        project: f.project,
+        worktree: f.project,
+        javaHome: f.javaHome,
+      };
+      expect((yield* Effect.exit(loadJavaPreparedModel(options)))._tag).toBe('Failure');
+      const target = f.path.join(f.artifactDirectory, 'held-model.json');
+      yield* f.fs.rename(sealed.metadataFile, target);
+      yield* f.fs.writeFileString(target, original);
+      yield* f.fs.symlink(target, sealed.metadataFile);
+      expect(
+        (yield* Effect.exit(loadJavaPreparedModel({...options, metadataDigest: sealed.metadataDigest})))._tag,
+      ).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'round trips sealed artifact payloads without changing their pinned bytes or model',
+    {
+      payload: Arbitrary.map(
+        Arbitrary.array(Arbitrary.schema(Schema.Literals(['a', 'b', '0', ' ', '%', '~', '[', ']', 'é', '𐐀'])), {
+          minLength: 1,
+          maxLength: 32,
+        }),
+        parts => EffectArray.join(parts, ''),
+      ),
+    },
+    ({payload}) =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture({jarText: payload});
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const loaded = yield* loadJavaPreparedModel({
+          metadataFile: sealed.metadataFile,
+          metadataDigest: sealed.metadataDigest,
+          project: f.project,
+          worktree: f.project,
+          javaHome: f.javaHome,
+        });
+        expect(loaded.model.libraries).toEqual([
+          {
+            file: sealed.model.libraries[0].file,
+            digest: sha256HexSync(payload),
+            bytes: new TextEncoder().encode(payload).length,
+          },
+        ]);
+        expect(yield* f.fs.readFileString(loaded.model.libraries[0].file)).toBe(payload);
+        yield* loaded.verify;
+        expect(javaPreparedModelJson(loaded.model)).toBe(javaPreparedModelJson(sealed.model));
+        expect(yield* f.fs.readFileString(sealed.metadataFile)).toBe(javaPreparedModelJson(sealed.model));
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
+  it('keeps canonical model bytes stable under compiler key reordering and JSON round trips', () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(fc.stringMatching(/^[a-z]{1,8}$/u), fc.constantFrom('error', 'warning', 'ignore', 'é𐐀'), {
+          minKeys: 1,
+          maxKeys: 8,
+        }),
+        options => {
+          const compiler = EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectRecord.toEntries(options),
+              ([key, value]) => ['org.eclipse.jdt.core.compiler.problem.' + key, value] as const,
+            ),
+          );
+          const model: JavaPreparedModel = {
+            format: 'threadnote-prepared-java-project-v2',
+            provider: 'jdtls-1.63.0-202610191322',
+            build: 'maven',
+            project: '/project',
+            worktree: '/project',
+            javaHome: '/sdk',
+            sourceDigest: sha256HexSync('source'),
+            javaSdkDigest: sha256HexSync('SDK'),
+            projectCharset: 'UTF-8',
+            sourceInputEncoding: 'utf8-original-inputs-v1',
+            sourceEncoding: {policy: 'utf8-no-bom-v1', sourceCount: 0, sourceDigest: sha256HexSync('encoding')},
+            compilerOptions: compiler,
+            resourceFilters: [],
+            output: 'target/classes',
+            rawClasspath: [],
+            resolvedClasspath: [],
+            libraries: [],
+          };
+          const original = JSON.stringify(model);
+          const encoded = javaPreparedModelJson(model);
+          expect(JSON.parse(encoded)).toEqual(model);
+          expect(javaPreparedModelJson(Schema.decodeSync(JavaPreparedModel)(JSON.parse(encoded)))).toBe(encoded);
+          expect(
+            javaPreparedModelJson({
+              ...model,
+              compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(compiler).reverse()),
+            }),
+          ).toBe(encoded);
+          expect(JSON.stringify(model)).toBe(original);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
   effectIt.effect('rejects transient UTF8 reads that do not match the admitted source bytes', () =>
     Effect.gen(function* () {
       const baseline = new Uint8Array([0x2f, 0x2a, 0xe9, 0x2a, 0x2f]);
