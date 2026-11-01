@@ -24,6 +24,7 @@ export type JavaRuntimeCandidate = typeof JavaRuntimeCandidate.Type;
 
 /** These exact materialized SDKs qualify macOS arm64 only; other platform rows remain unqualified. */
 export const javaRuntimeQualification = Object.freeze({
+  platform: 'darwin-arm64',
   serverVersion: '1.63.0-202610191322',
   runtimeVersion: '25.0.5+8',
   projectVersion: '21.0.13+9',
@@ -34,6 +35,7 @@ export const javaRuntimeQualification = Object.freeze({
   projectExecutableDigest: '0f642542ea1f0be6957557c0db96653ec128113bb5a4aaa7c2534d1d72ddb51f',
   configurationDigest: '0d5587fcd30641a4ce5b59e706d3565a8a7b7b40cd75c1d78ece842722c0b3ee',
 } as const);
+export const javaRuntimeSetupAction = `Configure the host-approved JDT LS ${javaRuntimeQualification.serverVersion}, server Java ${javaRuntimeQualification.runtimeVersion} and separate project Java ${javaRuntimeQualification.projectVersion} SDKs with their qualified full-tree digests; only macOS arm64 is currently qualified for this experimental profile`;
 const fail = () => LspFault.make({code: 'prerequisite'});
 const setupFault = (component: 'provider' | 'runtime' | 'project', reason: SemanticSetupFault['reason']) =>
   SemanticSetupFault.make({
@@ -43,7 +45,7 @@ const setupFault = (component: 'provider' | 'runtime' | 'project', reason: Seman
     requiredVersion: javaRuntimeQualification.serverVersion,
     requiredSdkVersion:
       component === 'project' ? javaRuntimeQualification.projectVersion : javaRuntimeQualification.runtimeVersion,
-    nextAction: `Configure the host-approved JDT LS ${javaRuntimeQualification.serverVersion}, server Java ${javaRuntimeQualification.runtimeVersion} and separate project Java ${javaRuntimeQualification.projectVersion} SDKs with their qualified full-tree digests; only macOS arm64 is currently qualified for this experimental profile`,
+    nextAction: javaRuntimeSetupAction,
   });
 const inside = (root: string, file: string, separator: string) =>
   root === file || EffectString.startsWith(root + separator)(file);
@@ -232,7 +234,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
       [selected.projectJavaHome, selected.projectSdkDigest, javaRuntimeQualification.projectSdkDigest, 'project'],
     ] as const;
     const verify = Effect.gen(function* () {
-      if (process.platform !== 'darwin' || process.arch !== 'arm64')
+      if (`${process.platform}-${process.arch}` !== javaRuntimeQualification.platform)
         return yield* setupFault('provider', 'incompatible');
       for (const [root, expected, qualified, component] of sdks)
         if (expected !== qualified || !staticPath(root)) return yield* setupFault(component, 'incompatible');
