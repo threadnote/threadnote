@@ -615,7 +615,8 @@ function App({
     const reconciled = reconcileManagerDraft(draftRef.current, {content: next.content, uri: next.node.uri});
     setContent(reconciled.content);
     setPendingCanonical(reconciled.needsReview ? next : undefined);
-    setMemoryViewMode(isMarkdownNode(next.node) ? 'preview' : 'edit');
+    if (reconciled.needsReview || draftRef.current?.uri !== next.node.uri)
+      setMemoryViewMode(isMarkdownNode(next.node) ? 'preview' : 'edit');
     setTarget({
       kind: next.record?.metadata.kind ?? 'durable',
       project: next.record?.metadata.project ?? '',

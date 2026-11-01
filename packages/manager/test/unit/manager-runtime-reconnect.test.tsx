@@ -337,6 +337,74 @@ it('preserves a dirty draft for explicit comparison after recovery', async () =>
   expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Unsaved local draft');
 });
 
+it('keeps the reconciled dirty draft in the editor after an unchanged canonical reconnect read', async () => {
+  const socket = await mountAndSelect();
+  await act(async () => reads[0].resolve(memory('Original draft base')));
+  await flush();
+  await act(async () => button('Edit').click());
+  await act(async () => button('Synthetic draft').click());
+  await loseAndReconnect(socket);
+  await act(async () => reads[1].resolve(memory('Changed canonical body')));
+  await flush();
+  expect(host.textContent).toContain('The saved record changed. Your unsaved draft is preserved.');
+  await act(async () => button('Keep my draft').click());
+  await act(async () => button('Edit').click());
+  expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Unsaved local draft');
+
+  const recoveredSocket = FakeManagerSocket.instances.at(-1)!;
+  await loseAndReconnect(recoveredSocket);
+  expect(reads).toHaveLength(3);
+  await act(async () => reads[2].resolve(memory('Changed canonical body')));
+  await flush();
+  const editor = host.querySelector<HTMLTextAreaElement>('textarea');
+  expect(editor).not.toBeNull();
+  expect(editor?.disabled).toBe(false);
+  expect(editor?.value).toBe('Unsaved local draft');
+});
+
+it('keeps editor intent and dirty draft idempotent across repeated unchanged canonical reads', async () => {
+  await fc.assert(
+    fc.asyncProperty(fc.string({minLength: 1, maxLength: 32}), fc.integer({min: 1, max: 4}), async (body, repeats) => {
+      reads = [];
+      heldTrees = [];
+      holdTree = false;
+      pathReads = new Map();
+      FakeManagerSocket.instances = [];
+      host.replaceChildren();
+      try {
+        let socket = await mountAndSelect();
+        await act(async () => reads[0].resolve(memory('Original draft base')));
+        await flush();
+        await act(async () => button('Edit').click());
+        await act(async () => button('Synthetic draft').click());
+        socket = await loseAndReconnect(socket);
+        await act(async () => reads[1].resolve(memory(`Changed canonical ${body}`)));
+        await flush();
+        await act(async () => button('Keep my draft').click());
+        await act(async () => button('Edit').click());
+        expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Unsaved local draft');
+
+        for (let repeat = 0; repeat < repeats; repeat++) {
+          socket = await loseAndReconnect(socket);
+          const currentRead = reads.at(-1)!;
+          await act(async () => currentRead.resolve(memory(`Changed canonical ${body}`)));
+          await flush();
+          const editor = host.querySelector<HTMLTextAreaElement>('textarea');
+          expect(editor).not.toBeNull();
+          expect(editor?.disabled).toBe(false);
+          expect(editor?.value).toBe('Unsaved local draft');
+        }
+      } finally {
+        await act(async () => {
+          for (const root of roots.splice(0)) root.unmount();
+        });
+        host.replaceChildren();
+      }
+    }),
+    {numRuns: 8, seed: 974756},
+  );
+});
+
 it.each(['loss', 'selection'] as const)(
   'rejects an action-triggered reload after %s transfers read authority',
   async transfer => {
