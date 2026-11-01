@@ -47,7 +47,7 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
   private static final String JRE = "org.eclipse.jdt.launching.JRE_CONTAINER/"
       + "org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21";
   record Input(String uri, String expectedHash, ICompilationUnit unit, IBuffer buffer,
-      IDocument document, Object lock, long stamp, String text) {}
+      IDocument document, Object lock, long stamp, String text, String charset) {}
   record Model(IJavaProject project, String projectUri, String javaHomeUri,
       List<String> sourceRoots, List<String> libraries, Map<String, String> options,
       List<String> rawClasspath, List<String> resolvedClasspath, Map<String, Object> projection) {
@@ -149,6 +149,7 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
         if (projectionDigest == null) check(JDTUtils.isOnClassPath(unit), "Unqualified source membership");
         check(fileUri(unit.getJavaProject().getProject().getLocationURI().toString()).equals(projectUri),
             "Compilation unit outside selected private project");
+        String charset = projectionDigest == null ? null : sourceCharset(unit);
         IBuffer buffer = unit.getBuffer();
         check(buffer != null && !buffer.isClosed() && !observed.contains(buffer)
             && buffer instanceof DocumentAdapter, "Unqualified buffer");
@@ -170,7 +171,7 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
               && content.length() == length.intValue() && sha256(content).equals(hash), "Diagnostic input differs");
           totalText += content.length();
           check(totalText <= MAX_TOTAL_TEXT, "Diagnostic input capacity");
-          inputs.add(new Input(uri, hash, unit, buffer, document, lock, stamp, content));
+          inputs.add(new Input(uri, hash, unit, buffer, document, lock, stamp, content, charset));
         }
       }
       membership(units);
@@ -216,6 +217,8 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
       if (typeResult != null) typeResult.verify(model);
       List<Object> identities = new ArrayList<>();
       for (Input input : inputs) {
+        if (input.charset() != null)
+          check(input.charset().equals(sourceCharset(input.unit())), "Snapshot source charset changed");
         synchronized (input.lock()) {
           check(input.unit().equals(input.unit().getPrimary()) && input.unit().isWorkingCopy()
               && input.unit().getBuffer() == input.buffer() && !input.buffer().isClosed()
@@ -275,6 +278,15 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
     CompilationUnit ast = (CompilationUnit) parser.createAST(monitor);
     check(ast.getAST().hasResolvedBindings(), "Semantic bindings unavailable");
     return ast;
+  }
+
+  static String sourceCharset(ICompilationUnit unit) throws Exception {
+    var resource = unit.getResource();
+    check(resource instanceof org.eclipse.core.internal.resources.File && resource.isAccessible()
+        && !resource.isVirtual(), "Unqualified source charset resource");
+    String charset = ((IFile) resource).getCharset(true);
+    check("UTF-8".equalsIgnoreCase(charset), "Unsupported source charset");
+    return charset;
   }
 
   static boolean sourceMember(ICompilationUnit unit, String uri, Model model) throws Exception {
