@@ -40,7 +40,7 @@ import org.eclipse.jdt.launching.IVMInstall;
 import org.eclipse.jdt.launching.JavaRuntime;
 import org.eclipse.jdt.ls.core.internal.IDelegateCommandHandler;
 
-/** Setup evidence only. Classpaths come exclusively from the completed pinned JDT cache, never resolving getters. */
+/** Setup-only model command and source-snapshot metadata. Classpaths come only from the pinned cache, never resolving getters. */
 public final class PreparedProjectModel implements IDelegateCommandHandler {
   private static final String COMMAND = "threadnote.java.preparedProjectModel.v1";
   private static final String JRE = "org.eclipse.jdt.launching.JRE_CONTAINER/"
@@ -181,6 +181,121 @@ public final class PreparedProjectModel implements IDelegateCommandHandler {
 
   record CacheImage(List<Map<String, Object>> raw, List<Map<String, Object>> resolved,
       String outputPath, long timestamp, String optionsDigest) {}
+  record PassiveProjection(Map<String, Object> image, List<Map<String, Object>> raw) {}
+
+  /** Membership belongs to the same immutable image attested for the AST, including its physical source links. */
+  static boolean projectionSourceMember(Map<String, Object> image, IPath target, String sourceUri) throws Exception {
+    URI uri = new URI(sourceUri);
+    if (!"file".equals(uri.getScheme()) || uri.getRawAuthority() != null || uri.getRawQuery() != null
+        || uri.getRawFragment() != null) return false;
+    Path file = Path.of(uri);
+    if (!file.isAbsolute() || !file.normalize().equals(file)) return false;
+    for (Object item : (List<?>) image.get("rawClasspath")) {
+      Map<?, ?> entry = (Map<?, ?>) item;
+      if (!Integer.valueOf(IClasspathEntry.CPE_SOURCE).equals(entry.get("kind"))) continue;
+      IPath root = org.eclipse.core.runtime.Path.fromPortableString((String) entry.get("path"));
+      if (!root.isPrefixOf(target) || root.equals(target)) continue;
+      boolean physical = false;
+      for (Object rawLink : (List<?>) image.get("links")) {
+        Map<?, ?> link = (Map<?, ?>) rawLink;
+        if (root.removeFirstSegments(1).toPortableString().equals(link.get("path"))) {
+          Path directory = Path.of(new URI((String) link.get("uri")));
+          Path selected = directory.resolve(target.removeFirstSegments(root.segmentCount()).toOSString()).normalize();
+          physical = !selected.equals(directory) && selected.startsWith(directory) && selected.equals(file);
+        }
+      }
+      if (!physical) continue;
+      for (Object rawFilter : (List<?>) image.get("resourceFilters")) {
+        Map<?, ?> filter = (Map<?, ?>) rawFilter;
+        var matcher = java.util.regex.Pattern.compile((String) filter.get("arguments"));
+        for (String segment : target.removeFirstSegments(1).segments())
+          if (matcher.matcher(segment).matches()) return false;
+      }
+      if (!org.eclipse.jdt.internal.compiler.util.Util.isExcluded(target.toString().toCharArray(),
+          fullPatterns(root, entry.get("inclusions")), fullPatterns(root, entry.get("exclusions")), false)) return true;
+    }
+    return false;
+  }
+  private static char[][] fullPatterns(IPath root, Object rawPatterns) {
+    List<?> patterns = (List<?>) rawPatterns;
+    if (patterns.isEmpty()) return null;
+    char[][] result = new char[patterns.size()][];
+    for (int i = 0; i < patterns.size(); i++)
+      result[i] = root.removeTrailingSeparator().append(org.eclipse.core.runtime.Path.fromPortableString((String) patterns.get(i)))
+          .toString().toCharArray();
+    return result;
+  }
+
+  /** Called only from an already captured source snapshot, never exposed as an analysis model command. */
+  static PassiveProjection passiveProjection(IJavaProject project, IProgressMonitor monitor) throws Exception {
+    Budget budget = new Budget(monitor);
+    var resource = project.getProject();
+    require(resource instanceof org.eclipse.core.internal.resources.Project && resource.isAccessible()
+        && resource.isOpen(), "unmanaged-project");
+    var pinnedProject = (org.eclipse.core.internal.resources.Project) resource;
+    var description = pinnedProject.internalGetDescription();
+    require(description != null && Arrays.equals(description.getNatureIds(), new String[] {JavaCore.NATURE_ID})
+        && description.getBuildSpec().length == 0 && description.getReferencedProjects().length == 0
+        && description.getDynamicReferences().length == 0
+        && (description.getVariables() == null || description.getVariables().isEmpty()), "unsupported-resource-model");
+    var manager = JavaModelManager.getJavaModelManager();
+    var info = manager.getPerProjectInfo(resource, false);
+    require(info != null, "model-not-cached");
+    CacheImage cache = cacheImage(info, budget);
+    privateOutput(cache.outputPath(), project);
+    for (Map<String, Object> entry : cache.raw())
+      if (entry.containsKey("outputPath")) privateOutput((String) entry.get("outputPath"), project);
+    Set<String> sourceLinks = new HashSet<>();
+    int jres = 0;
+    for (Map<String, Object> entry : cache.raw()) {
+      int kind = (Integer) entry.get("kind");
+      String path = (String) entry.get("path");
+      if (kind == IClasspathEntry.CPE_SOURCE) {
+        IPath source = org.eclipse.core.runtime.Path.fromPortableString(path);
+        require(source.isAbsolute() && source.segmentCount() == 2
+            && source.segment(0).equals(project.getElementName())
+            && source.segment(1).matches("source-(?:[0-9]|[12][0-9]|3[01])")
+            && sourceLinks.add(source.segment(1)), "unsupported-linked-resource");
+      } else if (kind == IClasspathEntry.CPE_CONTAINER) {
+        require(isJre(path), "unsupported-container");
+        jres++;
+      } else require(kind == IClasspathEntry.CPE_LIBRARY, "unsupported-entry");
+    }
+    require(jres == 1 && !sourceLinks.isEmpty(), "incomplete-projection");
+    var descriptions = description.getLinks();
+    require(descriptions != null && descriptions.size() == sourceLinks.size(), "unsupported-linked-resource");
+    Map<String, Map<String, Object>> links = new TreeMap<>();
+    for (var entry : descriptions.entrySet()) {
+      var link = entry.getValue();
+      String path = budget.text(entry.getKey().toPortableString(), 8192);
+      require(sourceLinks.contains(path) && link != null && entry.getKey().equals(link.getProjectRelativePath())
+          && link.getType() == IResource.FOLDER && !link.isGroup(), "unsupported-linked-resource");
+      URI uri = link.getLocationURI();
+      require(uri != null && "file".equals(uri.getScheme()) && uri.getRawAuthority() == null
+          && uri.getRawQuery() == null && uri.getRawFragment() == null, "unsupported-linked-resource");
+      // Compare metadata before any filesystem access through these links. The host's expected digest owns the allowset.
+      Path target = Path.of(uri);
+      require(target.isAbsolute() && target.normalize().equals(target), "unsafe-path");
+      links.put(path, Map.of("path", path, "uri", budget.text(uri.toASCIIString(), 8192), "type", link.getType()));
+    }
+    String charset = resource.getDefaultCharset(true);
+    require("UTF-8".equals(charset), "unsupported-charset");
+    Map<String, Object> image = Map.of("format", "threadnote-passive-java-projection-v1",
+        "projectCharset", charset, "outputPath", cache.outputPath(), "rawClasspath", cache.raw(),
+        "resolvedClasspath", cache.resolved(), "links", List.copyOf(links.values()),
+        "resourceFilters", resourceFilters(description, resource, budget));
+    require(manager.getPerProjectInfo(resource, false) == info
+        && cache.equals(cacheImage(info, new Budget(monitor)))
+        && pinnedProject.internalGetDescription() == description, "model-changed");
+    return new PassiveProjection(image, cache.raw());
+  }
+
+  private static void privateOutput(String value, IJavaProject project) throws Unsupported {
+    IPath output = org.eclipse.core.runtime.Path.fromPortableString(value);
+    require(output.isAbsolute() && output.segmentCount() == 2
+        && output.segment(0).equals(project.getElementName())
+        && output.segment(1).matches("output-(?:[0-9]|[12][0-9]|3[0-2])"), "unsupported-output");
+  }
 
   private static CacheImage cacheImage(PerProjectInfo info, Budget budget) throws Exception {
     synchronized (info) {
