@@ -61,6 +61,11 @@ const resourceFilters = Schema.Array(
   }),
 ).check(Schema.isMaxLength(1));
 const compilerOptions = Schema.Record(Schema.String, text);
+const sourceEncoding = Schema.Struct({
+  policy: Schema.Literal('utf8-no-bom-v1'),
+  sourceCount: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 20000})),
+  sourceDigest: Digest,
+});
 const library = Schema.Struct({
   uri: text,
   sha256: Digest,
@@ -79,6 +84,7 @@ export const JavaPreparedObservation = Schema.Struct({
     build: Schema.Literals(['maven', 'gradle']),
     natures: Schema.Array(text).check(Schema.isMaxLength(8)),
     projectCharset: Schema.Literal('UTF-8'),
+    sourceEncoding,
     rawTimestamp: Schema.Int,
     cachedOptionsSha256: Digest,
     compilerOptions,
@@ -101,6 +107,7 @@ export const JavaPreparedModel = Schema.Struct({
   javaSdkDigest: Digest,
   projectCharset: Schema.Literal('UTF-8'),
   sourceInputEncoding: Schema.Literal('utf8-original-inputs-v1'),
+  sourceEncoding,
   compilerOptions,
   resourceFilters,
   output: text,
@@ -115,6 +122,24 @@ export const JavaPreparedModel = Schema.Struct({
   ).check(Schema.isMaxLength(128)),
 });
 export type JavaPreparedModel = typeof JavaPreparedModel.Type;
+
+/** Matches the pinned native UTF-16 path ordering and length framing; caller supplies the complete verified source set. */
+export function javaSourceEncodingImage(sources: readonly {readonly name: string; readonly digest: string}[]) {
+  const ordered = EffectArray.map(sources, source => ({name: source.name, digest: source.digest})).sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
+  return Object.freeze({
+    policy: 'utf8-no-bom-v1' as const,
+    sourceCount: ordered.length,
+    sourceDigest: sha256HexSync(
+      'threadnote-java-source-encoding-v1\n' +
+        EffectArray.join(
+          EffectArray.map(ordered, source => source.name.length + ':' + source.name + source.digest),
+          '',
+        ),
+    ),
+  });
+}
 
 const fail = () => LspFault.make({code: 'prerequisite'});
 const sameIdentity = (a: FileSystem.File.Info, b: FileSystem.File.Info) =>
@@ -219,6 +244,7 @@ export const verifyJavaSourceEncoding = Effect.fn('semantic.verifyJavaSourceEnco
       if (info.type === 'Directory') pending.push(file);
       else if (info.type === 'File' && EffectString.endsWith('.java')(EffectString.toLowerCase(name))) {
         const bytes = yield* readBounded(file, 4 * 1024 * 1024);
+        if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return yield* fail();
         const digest = sha256HexSync(bytes);
         if ((bytesRead += bytes.length) > 256 * 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
         const text = yield* Effect.try({
@@ -1027,6 +1053,20 @@ export function sealJavaPreparedModel(input: unknown, options: JavaPreparedModel
                   )
               )
                 return yield* fail();
+              const sourceImage = javaSourceEncodingImage(
+                EffectArray.map(encoding.sources, source => ({
+                  name: EffectArray.join(
+                    EffectString.split(path.sep)(path.relative(selected.project, source.file)),
+                    '/',
+                  ),
+                  digest: source.digest,
+                })),
+              );
+              if (
+                observation.model.sourceEncoding.sourceCount !== sourceImage.sourceCount ||
+                observation.model.sourceEncoding.sourceDigest !== sourceImage.sourceDigest
+              )
+                return yield* fail();
               const containers = EffectArray.filter(rawClasspath, entry => entry.kind === 5);
               if (
                 containers.length !== 2 ||
@@ -1053,6 +1093,7 @@ export function sealJavaPreparedModel(input: unknown, options: JavaPreparedModel
                 javaSdkDigest: selected.javaSdkDigest,
                 projectCharset: observation.model.projectCharset,
                 sourceInputEncoding: 'utf8-original-inputs-v1',
+                sourceEncoding: observation.model.sourceEncoding,
                 compilerOptions: compiler,
                 resourceFilters: observation.model.resourceFilters,
                 output,

@@ -27,6 +27,7 @@ import {
   consumeJavaPreparationConnection,
   javaPreparedModelCommand,
   javaPreparedModelJson,
+  javaSourceEncodingImage,
   observeJavaPreparedImport,
   sealJavaPreparedModel,
   verifyJavaPreparationInputs,
@@ -52,6 +53,8 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly hostVerify?: Effect.Effect<void, LspFault>;
     readonly sourceBytes?: Uint8Array;
     readonly resourcePreferences?: string;
+    readonly encodingCount?: number;
+    readonly encodingDigest?: string;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
 ) {
@@ -140,6 +143,16 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
       projectUri: yield* uri(copiedProject),
       build: 'maven',
       projectCharset: 'UTF-8',
+      sourceEncoding: {
+        policy: 'utf8-no-bom-v1',
+        sourceCount: control.encodingCount ?? 1,
+        sourceDigest:
+          control.encodingDigest ??
+          sha256HexSync(
+            'threadnote-java-source-encoding-v1\n23:src/main/java/Main.java' +
+              sha256HexSync(control.sourceBytes ?? new TextEncoder().encode('class Main {}\n')),
+          ),
+      },
       rawTimestamp: 1,
       natures: ['org.eclipse.jdt.core.javanature', 'org.eclipse.m2e.core.maven2Nature'],
       cachedOptionsSha256: sha256HexSync('fixture'),
@@ -389,6 +402,7 @@ describe('Java prepared model sealing', () => {
       for (const control of [
         {sourceBytes: new Uint8Array([0xff, 0xfe, 0x63, 0, 0x6c, 0])},
         {sourceBytes: new Uint8Array([0x2f, 0x2a, 0xe9, 0x2a, 0x2f])},
+        {sourceBytes: new TextEncoder().encode('\uFEFFclass Main {}\n')},
         {
           resourcePreferences:
             'eclipse.preferences.version=1\nencoding/<project>=UTF-8\nencoding/src/main/java/Main.java=ISO-8859-1\n',
@@ -413,11 +427,53 @@ describe('Java prepared model sealing', () => {
       const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
       expect(sealed.model.sourceInputEncoding).toBe('utf8-original-inputs-v1');
       expect(sealed.model.projectCharset).toBe('UTF-8');
+      expect(sealed.model.sourceEncoding).toEqual(f.observation.model.sourceEncoding);
       expect(yield* f.fs.readFileString(sealed.metadataFile)).not.toContain(f.runtimeDirectory);
     }).pipe(Effect.provide(BunServices.layer)),
   );
+  effectIt.effect('refuses a native charset witness for a different source set or source bytes', () =>
+    Effect.gen(function* () {
+      for (const control of [{encodingCount: 0}, {encodingDigest: sha256HexSync('different source image')}]) {
+        const f = yield* modelFixture(control);
+        expect(yield* sealJavaPreparedModel(f.observation, f.options).pipe(Effect.flip)).toMatchObject({
+          code: 'prerequisite',
+        });
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
   effectIt.effect.prop(
-    'validates well-formed UTF8 source bytes without changing them',
+    'source charset images ignore enumeration order, preserve inputs and detect renamed or changed sources',
+    [Schema.Array(Schema.Literals(['é', '𐐀', 'Ｚ', '😀', 'a'])).check(Schema.isBetweenLength(1, 8))],
+    ([names]) =>
+      Effect.sync(() => {
+        const sources = Object.freeze(
+          EffectArray.map(names, (name, index) =>
+            Object.freeze({
+              name: 'src/' + index + '-' + name + '.java',
+              digest: sha256HexSync('source ' + name + index),
+            }),
+          ),
+        );
+        const before = JSON.stringify(sources);
+        const image = javaSourceEncodingImage(sources);
+        expect(image).toEqual(javaSourceEncodingImage(EffectArray.reverse(sources)));
+        expect(image.sourceCount).toBe(sources.length);
+        expect(
+          javaSourceEncodingImage([{...sources[0], name: sources[0].name + 'x'}, ...EffectArray.drop(sources, 1)]),
+        ).not.toEqual(image);
+        expect(
+          javaSourceEncodingImage([
+            {...sources[0], digest: sha256HexSync('changed ' + sources[0].digest)},
+            ...EffectArray.drop(sources, 1),
+          ]),
+        ).not.toEqual(image);
+        expect(JSON.stringify(sources)).toBe(before);
+      }),
+    {arbitrary: {runs: 32}},
+  );
+  effectIt.effect.prop(
+    'validates UTF8 sources once across overlapping roots without changing bytes',
     [Schema.Array(Schema.Literals(['a', 'é', '😀', '\r', '\n', '\uFEFF'])).check(Schema.isMaxLength(64))],
     ([characters]) =>
       Effect.gen(function* () {
@@ -429,7 +485,20 @@ describe('Java prepared model sealing', () => {
         const file = path.join(root, 'Main.java');
         const bytes = new TextEncoder().encode('class Main { /*' + EffectArray.join(characters, '') + '*/ }\n');
         yield* fs.writeFile(file, bytes);
-        yield* verifyJavaSourceEncoding(project, [root]);
+        const nested = path.join(root, 'nested');
+        yield* fs.makeDirectory(nested);
+        yield* fs.writeFileString(path.join(nested, '𐐀.java'), 'class 𐐀 {}\n');
+        const first = yield* verifyJavaSourceEncoding(project, [root, nested, root]);
+        const second = yield* verifyJavaSourceEncoding(project, [nested, root]);
+        const image = (sources: typeof first.sources) =>
+          javaSourceEncodingImage(
+            EffectArray.map(sources, source => ({
+              name: path.relative(project, source.file),
+              digest: source.digest,
+            })),
+          );
+        expect(first.sources.length).toBe(2);
+        expect(image(first.sources)).toEqual(image(second.sources));
         expect(sha256HexSync(yield* fs.readFile(file))).toBe(sha256HexSync(bytes));
       }).pipe(Effect.provide(BunServices.layer)),
     {arbitrary: {runs: 16}},
