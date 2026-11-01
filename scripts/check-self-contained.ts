@@ -4,7 +4,7 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
-import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
+import {hasUndeclaredNodeBuiltinImport, hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -117,13 +117,13 @@ const checkSelfContained = Effect.gen(function* () {
     }
     if (hasUndeclaredPythonRuntimeReference(relativePath, content)) {
       failures.push(
-        `Python runtime token outside migration, language or retained workflow ownership metadata: ${relativePath}`,
+        `Python runtime token outside migration, language, semantic or retained workflow ownership metadata: ${relativePath}`,
       );
     }
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {
       failures.push(`legacy identifier or storage path outside compatibility boundary: ${relativePath}`);
     }
-    if (/(?:from\s+['"]node:|import\s*\(\s*['"]node:|require\s*\(\s*['"]node:)/.test(content)) {
+    if (hasUndeclaredNodeBuiltinImport(relativePath, content)) {
       failures.push(`Node built-in import in production source: ${relativePath}`);
     }
     if (/from\s+['"](?:@effect\/platform-node|@effect\/sql-sqlite-node)['"]/.test(content)) {
