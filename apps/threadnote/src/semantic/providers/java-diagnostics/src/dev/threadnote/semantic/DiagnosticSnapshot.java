@@ -50,12 +50,14 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
       IDocument document, Object lock, long stamp, String text) {}
   record Model(IJavaProject project, String projectUri, String javaHomeUri,
       List<String> sourceRoots, List<String> libraries, Map<String, String> options,
-      List<String> rawClasspath, List<String> resolvedClasspath) {
+      List<String> rawClasspath, List<String> resolvedClasspath, Map<String, Object> projection) {
     Map<String, Object> image() {
-      return Map.of("projectUri", projectUri, "javaHomeUri", javaHomeUri,
+      Map<String, Object> result = new TreeMap<>(Map.of("projectUri", projectUri, "javaHomeUri", javaHomeUri,
           "sourceRoots", sourceRoots, "libraries", libraries,
           "compilerOptions", compilerOptions(options),
-          "annotationProcessing", "disabled-for-snapshot");
+          "annotationProcessing", "disabled-for-snapshot"));
+      if (projection != null) result.put("projection", projection);
+      return Map.copyOf(result);
     }
   }
 
@@ -72,6 +74,13 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
         "javaHomeUri", "sourceRoots", "libraries", "inputs"));
     if (typeDefinition) fields.add("position");
     if (request.containsKey("compilerOptions")) fields.add("compilerOptions");
+    String projectionDigest = null;
+    if (request.containsKey("projectionDigest")) {
+      fields.add("projectionDigest");
+      projectionDigest = text(request.get("projectionDigest"), 64);
+      check(projectionDigest.matches("[0-9a-f]{64}") && request.containsKey("compilerOptions"),
+          "Invalid projection identity");
+    }
     check(request.keySet().equals(fields), "Invalid snapshot fields");
     check(request.get("protocolVersion") instanceof Number version && version.doubleValue() == 1,
         "Unsupported diagnostic protocol");
@@ -105,13 +114,39 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
         Number length = (Number) item.get("utf16Length");
         check(length.doubleValue() == length.intValue() && length.intValue() >= 0
             && length.intValue() <= MAX_TEXT, "Invalid input length");
-        IFile managed = JDTUtils.findFile(uri);
-        check(managed != null && managed.isAccessible() && managed.getLocationURI() != null
-            && fileUri(managed.getLocationURI().toString()).equals(uri), "Unmanaged physical source");
-        ICompilationUnit unit = JDTUtils.resolveCompilationUnit(managed);
+        IFile managed = null;
+        ICompilationUnit unit = null;
+        if (projectionDigest == null) {
+          managed = JDTUtils.findFile(uri);
+          check(managed != null && managed.isAccessible() && managed.getLocationURI() != null
+              && fileUri(managed.getLocationURI().toString()).equals(uri), "Unmanaged physical source");
+          unit = JDTUtils.resolveCompilationUnit(managed);
+        }
+        else {
+          ICompilationUnit[] copies = JavaCore.getWorkingCopies(null);
+          check(copies.length <= 128, "Diagnostic input capacity");
+          Path selected = Path.of(new URI(uri));
+          for (ICompilationUnit copy : copies) {
+            check(!monitor.isCanceled(), "Canceled projection capture");
+            if (!(copy.getResource() instanceof IFile resource) || resource.getLocationURI() == null) continue;
+            URI location = resource.getLocationURI();
+            if (!"file".equals(location.getScheme()) || location.getRawAuthority() != null
+                || location.getRawQuery() != null || location.getRawFragment() != null) continue;
+            if (selected.equals(Path.of(location).normalize()) || uri.equals(fileUri(location.toString()))) {
+              check(unit == null, "Ambiguous compilation unit");
+              unit = copy;
+              managed = resource;
+            }
+          }
+          check(unit != null, copies.length == 0 ? "Missing existing working copy inventory"
+              : "Physical source has no existing working copy");
+          check(managed.isAccessible() && managed.getLocationURI() != null, "Physical source mapping inaccessible");
+          check(fileUri(managed.getLocationURI().toString()).equals(uri), "Physical source mapping differs");
+        }
         check(unit != null && unit.equals(unit.getPrimary()) && unit.isWorkingCopy()
-            && JDTUtils.isOnClassPath(unit) && !JDTUtils.isDefaultProject(unit) && units.add(unit),
+            && !JDTUtils.isDefaultProject(unit) && units.add(unit),
             "Unqualified or duplicate compilation unit");
+        if (projectionDigest == null) check(JDTUtils.isOnClassPath(unit), "Unqualified source membership");
         check(fileUri(unit.getJavaProject().getProject().getLocationURI().toString()).equals(projectUri),
             "Compilation unit outside selected private project");
         IBuffer buffer = unit.getBuffer();
@@ -140,11 +175,15 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
       }
       membership(units);
       Input target = inputs.stream().filter(input -> input.uri().equals(targetUri)).findFirst().orElseThrow();
-      Model model = model(target.unit().getJavaProject());
+      Model model = model(target.unit().getJavaProject(), projectionDigest, monitor);
       check(model.projectUri().equals(projectUri) && model.javaHomeUri().equals(javaHomeUri)
           && model.sourceRoots().equals(sourceRoots) && model.libraries().equals(libraries), "Prepared model differs");
       if (request.containsKey("compilerOptions"))
         check(compilerOptions(model.options()).equals(request.get("compilerOptions")), "Prepared compiler options differ");
+      if (model.projection() != null)
+        for (Input input : inputs)
+          check(input.unit().getJavaProject().equals(model.project()) && sourceMember(input.unit(), input.uri(), model),
+              "Source outside captured projection");
       Map<String, String> compilerOptions = new TreeMap<>(target.unit().getOptions(true));
       check(compilerOptions.equals(model.options()) && generation.get() == 0, "Compilation basis changed");
       CompilationUnit ast = parse(target.unit(), target.text(), model, compilerOptions, monitor);
@@ -189,7 +228,7 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
         }
       }
       membership(units);
-      check(!monitor.isCanceled() && model.equals(model(model.project()))
+      check(!monitor.isCanceled() && model.equals(model(model.project(), projectionDigest, monitor))
           && compilerOptions.equals(target.unit().getOptions(true)) && generation.get() == 0,
           "Snapshot basis changed");
       Map<String, Object> report = new TreeMap<>(Map.of("protocolVersion", 1, "requestToken", token, "uri", target.uri(),
@@ -238,9 +277,15 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
     return ast;
   }
 
-  private static Model model(IJavaProject project) throws Exception {
+  static boolean sourceMember(ICompilationUnit unit, String uri, Model model) throws Exception {
+    return model.projection() == null ? JDTUtils.isOnClassPath(unit)
+        : PreparedProjectModel.projectionSourceMember(model.projection(), unit.getPath(), uri);
+  }
+
+  private static Model model(IJavaProject project, String expectedProjectionDigest, IProgressMonitor monitor) throws Exception {
     var resource = project.getProject();
     check(resource.isAccessible() && resource.isOpen(), "Private project unavailable");
+    if (expectedProjectionDigest != null) return projectedModel(project, expectedProjectionDigest, monitor);
     var description = resource.getDescription();
     check(Arrays.equals(description.getNatureIds(), new String[] {JavaCore.NATURE_ID})
         && description.getBuildSpec().length == 0 && project.getRequiredProjectNames().length == 0,
@@ -286,7 +331,108 @@ public final class DiagnosticSnapshot implements IDelegateCommandHandler {
     for (IClasspathEntry entry : resolvedEntries) resolved.add(entry.toString());
     return new Model(project, fileUri(resource.getLocationURI().toString()),
         vm.getInstallLocation().toPath().toRealPath().toUri().toASCIIString(),
-        List.copyOf(roots), List.copyOf(libraries), Map.copyOf(options), List.copyOf(raw), List.copyOf(resolved));
+        List.copyOf(roots), List.copyOf(libraries), Map.copyOf(options), List.copyOf(raw), List.copyOf(resolved), null);
+  }
+
+  private static Model projectedModel(IJavaProject project, String expectedDigest, IProgressMonitor monitor) throws Exception {
+    var observed = PreparedProjectModel.passiveProjection(project, monitor);
+    // Qualify immutable cached metadata before following any additional projected source or binary path.
+    check(projectionDigest(observed.image()).equals(expectedDigest), "Projection differs");
+    List<String> roots = new ArrayList<>();
+    List<String> libraries = new ArrayList<>();
+    String jre = null;
+    for (var entry : observed.raw()) {
+      check(!monitor.isCanceled(), "Canceled projection capture");
+      int kind = (Integer) entry.get("kind");
+      String path = (String) entry.get("path");
+      if (kind == IClasspathEntry.CPE_SOURCE) {
+        var folder = project.getProject().getFolder(org.eclipse.core.runtime.Path.fromPortableString(path).removeFirstSegments(1));
+        String alias = folder.getProjectRelativePath().toPortableString();
+        String expectedUri = null;
+        for (Object item : (List<?>) observed.image().get("links")) {
+          Map<?, ?> link = (Map<?, ?>) item;
+          if (alias.equals(link.get("path"))) expectedUri = (String) link.get("uri");
+        }
+        check(expectedUri != null && folder.getLocationURI() != null
+            && sourceFolderIdentity(new URI(expectedUri), monitor).equals(sourceFolderIdentity(folder.getLocationURI(), monitor)),
+            "Source link changed");
+        if (!folder.exists()) {
+          boolean optional = false;
+          for (Object item : (List<?>) entry.get("attributes")) {
+            Map<?, ?> attribute = (Map<?, ?>) item;
+            if ("optional".equals(attribute.get("name")) && "true".equals(attribute.get("value"))) optional = true;
+          }
+          check(optional && !Files.exists(Path.of(new URI(expectedUri)), java.nio.file.LinkOption.NOFOLLOW_LINKS),
+              "Source root unavailable");
+          continue;
+        }
+        check(folder.isAccessible() && folder.isLinked() && !folder.isVirtual(), "Source root unavailable");
+        roots.add(fileUri(expectedUri));
+      } else if (kind == IClasspathEntry.CPE_LIBRARY) {
+        Path file = Path.of(org.eclipse.core.runtime.Path.fromPortableString(path).toOSString());
+        check(file.isAbsolute() && file.normalize().equals(file) && file.toRealPath().equals(file)
+            && Files.isRegularFile(file), "Classpath artifact unavailable");
+        libraries.add(file.toUri().toASCIIString());
+      } else jre = path; // The cached-image validator already permits exactly one qualified JRE container.
+    }
+    check(jre != null && !roots.isEmpty(), "Missing prepared classpath");
+    // Resolve only the captured fixed JRE path; a project getter could resolve a concurrently replaced foreign container.
+    var vm = JavaRuntime.getVMInstall(org.eclipse.core.runtime.Path.fromPortableString(jre));
+    check(vm != null && vm.getInstallLocation() != null, "Project JDK unavailable");
+    Map<String, String> options = new TreeMap<>(project.getOptions(true));
+    check(options.size() <= 2048 && "21".equals(options.get(JavaCore.COMPILER_COMPLIANCE))
+        && "21".equals(options.get(JavaCore.COMPILER_SOURCE))
+        && "21".equals(options.get(JavaCore.COMPILER_CODEGEN_TARGET_PLATFORM))
+        && JavaCore.ENABLED.equals(options.get(JavaCore.COMPILER_RELEASE))
+        && JavaCore.DISABLED.equals(options.get(PROCESS_ANNOTATIONS)), "Unqualified compiler options");
+    return new Model(project, fileUri(project.getProject().getLocationURI().toString()),
+        vm.getInstallLocation().toPath().toRealPath().toUri().toASCIIString(), List.copyOf(roots), List.copyOf(libraries),
+        Map.copyOf(options), List.of(), List.of(), observed.image());
+  }
+
+  private static Path sourceFolderIdentity(URI uri, IProgressMonitor monitor) throws Exception {
+    check(!monitor.isCanceled(), "Canceled projection capture");
+    check("file".equals(uri.getScheme()) && uri.getRawAuthority() == null && uri.getRawQuery() == null
+        && uri.getRawFragment() == null, "Unqualified source link");
+    Path target = Path.of(uri);
+    check(target.isAbsolute() && target.normalize().equals(target), "Unqualified source link");
+    Path ancestor = target;
+    int depth = 0;
+    while (!Files.exists(ancestor, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+      check(!monitor.isCanceled() && ++depth <= 128, "Source link capacity or cancellation");
+      ancestor = ancestor.getParent();
+      check(ancestor != null, "Unqualified source link");
+    }
+    Path existing = ancestor.toRealPath();
+    check(!monitor.isCanceled() && Files.isDirectory(existing), "Unqualified source link");
+    return existing.resolve(ancestor.relativize(target)).normalize();
+  }
+
+  static String projectionDigest(Map<String, Object> image) throws Exception {
+    StringBuilder framed = new StringBuilder("threadnote-java-passive-projection-v1\n");
+    projectionFrame(image, framed);
+    return sha256(framed.toString());
+  }
+  private static void projectionFrame(Object value, StringBuilder result) {
+    if (value == null) result.append('z');
+    else if (value instanceof String text) result.append('s').append(text.length()).append(':').append(text);
+    else if (value instanceof Boolean flag) result.append(flag ? 't' : 'f');
+    else if (value instanceof Integer integer) result.append('n').append(integer).append(';');
+    else if (value instanceof List<?> list) {
+      result.append('a').append(list.size()).append(":[");
+      for (Object item : list) projectionFrame(item, result);
+      result.append(']');
+    } else if (value instanceof Map<?, ?> map) {
+      Map<String, Object> fields = new TreeMap<>();
+      for (var field : map.entrySet()) {
+        check(field.getKey() instanceof String, "Invalid projection image");
+        fields.put((String) field.getKey(), field.getValue());
+      }
+      result.append('o').append(fields.size()).append(":[");
+      for (var field : fields.entrySet()) { projectionFrame(field.getKey(), result); projectionFrame(field.getValue(), result); }
+      result.append(']');
+    } else throw new IllegalStateException("Invalid projection image");
+    check(result.length() <= 2 * 1024 * 1024, "Projection image capacity");
   }
 
   private static void membership(Set<ICompilationUnit> expected) throws Exception {

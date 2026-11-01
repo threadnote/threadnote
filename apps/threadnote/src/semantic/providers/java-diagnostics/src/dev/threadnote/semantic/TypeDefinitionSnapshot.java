@@ -37,7 +37,7 @@ final class TypeDefinitionSnapshot {
   }
   private record SourceImage(ICompilationUnit unit, String uri, String text, BasicFileAttributes attributes) {
     void verify(Model model) throws Exception {
-      check(unit.getJavaProject().equals(model.project()) && JDTUtils.isOnClassPath(unit)
+      check(unit.getJavaProject().equals(model.project()) && DiagnosticSnapshot.sourceMember(unit, uri, model)
           && unit.getOptions(true).equals(model.options()), "Type source model changed");
       check(unit.getResource() instanceof IFile resource && resource.isAccessible()
           && DiagnosticSnapshot.fileUri(resource.getLocationURI().toString()).equals(uri), "Type source identity changed");
@@ -82,11 +82,14 @@ final class TypeDefinitionSnapshot {
     if (!type.isFromSource()) return unsupported(position, "binary-type");
     if (!(type.getJavaElement() instanceof IType element)) return unsupported(position, "unrepresentable-source");
     ICompilationUnit unit = element.getCompilationUnit();
-    if (unit == null || !unit.getJavaProject().equals(model.project()) || !JDTUtils.isOnClassPath(unit)
+    if (unit == null || !unit.getJavaProject().equals(model.project())
+        || (model.projection() == null && !JDTUtils.isOnClassPath(unit))
         || JDTUtils.isDefaultProject(unit) || !(unit.getResource() instanceof IFile resource)
         || !resource.isAccessible() || resource.getLocationURI() == null)
       return unsupported(position, "unrepresentable-source");
     String uri = DiagnosticSnapshot.fileUri(resource.getLocationURI().toString());
+    if (model.projection() != null && !DiagnosticSnapshot.sourceMember(unit, uri, model))
+      return unsupported(position, "unrepresentable-source");
     Path file = Path.of(URI.create(uri));
     boolean contained = false;
     for (String root : model.sourceRoots()) {

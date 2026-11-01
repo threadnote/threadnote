@@ -30,6 +30,84 @@ const CompilerOptions = Schema.Record(
       options['org.eclipse.jdt.core.compiler.release'] === 'enabled',
   ),
 );
+const ProjectionText = Schema.String.check(
+  Schema.isMaxLength(8192),
+  Schema.makeFilter(wellFormed),
+  Schema.isPattern(/^[^\p{Cc}\uFFFE\uFFFF]*$/u),
+);
+const ProjectionEntry = Schema.Struct({
+  kind: Schema.Literals([1, 3, 5]),
+  contentKind: Schema.Literals([1, 2]),
+  path: ProjectionText,
+  exported: Schema.Boolean,
+  combineAccessRules: Schema.Boolean,
+  inclusions: Schema.Array(ProjectionText).check(Schema.isMaxLength(128)),
+  exclusions: Schema.Array(ProjectionText).check(Schema.isMaxLength(128)),
+  attributes: Schema.Array(
+    Schema.Union([
+      Schema.Struct({name: ProjectionText, value: ProjectionText}),
+      Schema.Struct({
+        name: Schema.Literal('javadoc_location'),
+        valueSha256: Digest,
+        access: Schema.Literal('disabled'),
+      }),
+    ]),
+  ).check(Schema.isMaxLength(32)),
+  accessRules: Schema.Array(
+    Schema.Struct({pattern: ProjectionText, kind: Schema.Literals([0, 1, 2]), ignoreIfBetter: Schema.Boolean}),
+  ).check(Schema.isMaxLength(32)),
+  outputPath: Schema.optional(ProjectionText),
+  sourceAttachmentPath: Schema.optional(ProjectionText),
+  sourceAttachmentRoot: Schema.optional(ProjectionText),
+});
+/** Actual passive Eclipse metadata, observed inside a genuine source snapshot rather than a model-only command. */
+export const JavaProjectionImage = Schema.Struct({
+  format: Schema.Literal('threadnote-passive-java-projection-v1'),
+  projectCharset: Schema.Literal('UTF-8'),
+  outputPath: ProjectionText,
+  rawClasspath: Schema.Array(ProjectionEntry).check(Schema.isBetweenLength(1, 162)),
+  resolvedClasspath: Schema.Array(ProjectionEntry).check(Schema.isBetweenLength(1, 512)),
+  links: Schema.Array(Schema.Struct({path: ProjectionText, uri: ProjectionText, type: Schema.Literal(2)})).check(
+    Schema.isBetweenLength(1, 32),
+  ),
+  resourceFilters: Schema.Array(
+    Schema.Struct({
+      id: ProjectionText,
+      path: Schema.Literal(''),
+      type: Schema.Literal(30),
+      matcherId: Schema.Literal('org.eclipse.core.resources.regexFilterMatcher'),
+      arguments: ProjectionText,
+    }),
+  ).check(Schema.isMaxLength(1)),
+});
+const projectionFrame = (value: unknown): string => {
+  if (value === null) return 'z';
+  if (typeof value === 'string') return 's' + value.length + ':' + value;
+  if (typeof value === 'boolean') return value ? 't' : 'f';
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return 'n' + value + ';';
+  if (EffectArray.isArray(value))
+    return 'a' + value.length + ':[' + EffectArray.join(EffectArray.map(value, projectionFrame), '') + ']';
+  if (Schema.is(Schema.Record(Schema.String, Schema.Unknown))(value)) {
+    const fields = EffectRecord.toEntries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return (
+      'o' +
+      fields.length +
+      ':[' +
+      EffectArray.join(
+        EffectArray.map(fields, ([key, field]) => projectionFrame(key) + projectionFrame(field)),
+        '',
+      ) +
+      ']'
+    );
+  }
+  throw protocol();
+};
+/** UTF-16 length framing agrees with the pinned JVM; object keys sort, semantic arrays retain their order. */
+export const javaProjectionDigest = (image: typeof JavaProjectionImage.Type) => {
+  const framed = 'threadnote-java-passive-projection-v1\n' + projectionFrame(image);
+  if (framed.length > 2 * 1024 * 1024) throw protocol();
+  return sha256HexSync(framed);
+};
 export const JavaSnapshotHeader = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   requestToken: Schema.String.check(Schema.isBetweenLength(1, 128)),
@@ -43,6 +121,7 @@ export const JavaSnapshotHeader = Schema.Struct({
     libraries: Schema.Array(Schema.String).check(Schema.isMaxLength(128)),
     compilerOptions: CompilerOptions,
     annotationProcessing: Schema.Literal('disabled-for-snapshot'),
+    projection: Schema.optional(JavaProjectionImage),
   }),
   inputs: Schema.Array(Input).check(Schema.isBetweenLength(1, 128)),
 });
@@ -52,6 +131,7 @@ export interface JavaSnapshotModel {
   readonly sourceRoots: readonly string[];
   readonly libraries: readonly string[];
   readonly compilerOptions?: Readonly<Record<string, string>>;
+  readonly projectionDigest?: string;
 }
 /** Snapshot mode, paths and options belong to one admitted request, including when its verification suspends. */
 export function captureJavaSnapshotModel(model: JavaSnapshotModel): JavaSnapshotModel {
@@ -62,6 +142,7 @@ export function captureJavaSnapshotModel(model: JavaSnapshotModel): JavaSnapshot
     sourceRoots: Object.freeze([...model.sourceRoots]),
     libraries: Object.freeze([...model.libraries]),
     ...(compilerOptions === undefined ? {} : {compilerOptions: Object.freeze({...compilerOptions})}),
+    ...(model.projectionDigest === undefined ? {} : {projectionDigest: model.projectionDigest}),
   });
 }
 /** Match Java Path.toUri: directory identities end in '/', while classpath artifact identities do not. */
@@ -71,12 +152,16 @@ export const makeJavaSnapshotModel = Effect.fn('semantic.makeJavaSnapshotModel')
   readonly sourceRoots: readonly string[];
   readonly libraries: readonly string[];
   readonly compilerOptions?: Readonly<Record<string, string>>;
+  readonly projectionDigest?: string;
 }) {
   const selected = {...options, sourceRoots: [...options.sourceRoots], libraries: [...options.libraries]};
   const compilerOptions =
     selected.compilerOptions === undefined
       ? undefined
       : Object.freeze(yield* Schema.decodeEffect(CompilerOptions)({...selected.compilerOptions}));
+  const projectionDigest =
+    selected.projectionDigest === undefined ? undefined : yield* Schema.decodeEffect(Digest)(selected.projectionDigest);
+  if (projectionDigest !== undefined && compilerOptions === undefined) return yield* protocol();
   const path = yield* Path.Path;
   const directoryUri = (directory: string) =>
     path
@@ -90,6 +175,7 @@ export const makeJavaSnapshotModel = Effect.fn('semantic.makeJavaSnapshotModel')
       path.toFileUrl(file).pipe(Effect.map(uri => uri.href)),
     ),
     ...(compilerOptions === undefined ? {} : {compilerOptions}),
+    ...(projectionDigest === undefined ? {} : {projectionDigest}),
   });
 });
 const same = (a: readonly string[], b: readonly string[]) =>
@@ -108,8 +194,13 @@ export function assertJavaSnapshotHeader(
     report.utf16Length !== request.target.text.length ||
     report.model.projectUri !== model.projectUri ||
     report.model.javaHomeUri !== model.javaHomeUri ||
+    (model.projectionDigest !== undefined && model.compilerOptions === undefined) ||
     !same(report.model.sourceRoots, model.sourceRoots) ||
     !same(report.model.libraries, model.libraries) ||
+    (model.projectionDigest === undefined
+      ? report.model.projection !== undefined
+      : report.model.projection === undefined ||
+        javaProjectionDigest(report.model.projection) !== model.projectionDigest) ||
     (model.compilerOptions !== undefined &&
       (EffectRecord.keys(report.model.compilerOptions).length !== EffectRecord.keys(model.compilerOptions).length ||
         !EffectRecord.every(model.compilerOptions, (value, key) => report.model.compilerOptions[key] === value))) ||
@@ -140,6 +231,11 @@ export const requestJavaSnapshot = (
     operation: {readonly kind: 'diagnostics'} | {readonly kind: 'type-definition'; readonly position: Position},
   ) =>
     Effect.gen(function* () {
+      if (
+        model.projectionDigest !== undefined &&
+        (!Schema.is(Digest)(model.projectionDigest) || model.compilerOptions === undefined)
+      )
+        return yield* LspFault.make({code: 'prerequisite'});
       if (
         request.inputs.length === 0 ||
         request.inputs.length > 128 ||

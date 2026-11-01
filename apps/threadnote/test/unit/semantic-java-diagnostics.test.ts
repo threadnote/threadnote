@@ -23,7 +23,11 @@ import {
   requestJavaTypeDefinition,
   type JavaDiagnosticModel,
 } from '../../src/semantic/providers/java_diagnostics.js';
-import {javaTypeDefinitionCommand} from '../../src/semantic/providers/java_snapshot.js';
+import {
+  JavaProjectionImage,
+  javaProjectionDigest,
+  javaTypeDefinitionCommand,
+} from '../../src/semantic/providers/java_snapshot.js';
 
 const model: JavaDiagnosticModel = {
   projectUri: 'file:///private/projection',
@@ -69,6 +73,66 @@ const report = () => ({
     utf16Length: input.text.length,
   })),
   diagnostics: [structuredClone(diagnostic)],
+});
+const projectionImage = (): typeof JavaProjectionImage.Type => ({
+  format: 'threadnote-passive-java-projection-v1',
+  projectCharset: 'UTF-8',
+  outputPath: '/threadnote-java/output-0',
+  rawClasspath: [
+    {
+      kind: 3,
+      contentKind: 1,
+      path: '/threadnote-java/source-0',
+      exported: false,
+      combineAccessRules: false,
+      inclusions: ['**/*.java'],
+      exclusions: ['internal/**'],
+      attributes: [
+        {name: 'optional', value: 'true'},
+        {name: 'test', value: 'true'},
+      ],
+      accessRules: [
+        {pattern: 'internal/**', kind: 1, ignoreIfBetter: true},
+        {pattern: 'api/**', kind: 2, ignoreIfBetter: false},
+      ],
+      outputPath: '/threadnote-java/output-1',
+    },
+  ],
+  resolvedClasspath: [
+    {
+      kind: 1,
+      contentKind: 2,
+      path: '/cache/dependency.jar',
+      exported: true,
+      combineAccessRules: false,
+      inclusions: [],
+      exclusions: [],
+      attributes: [{name: 'maven.version', value: '1.0'}],
+      accessRules: [],
+      sourceAttachmentPath: '/sdk/java21/lib/src.zip',
+    },
+    {
+      kind: 1,
+      contentKind: 2,
+      path: '/cache/other-version.jar',
+      exported: false,
+      combineAccessRules: false,
+      inclusions: [],
+      exclusions: [],
+      attributes: [{name: 'maven.version', value: '2.0'}],
+      accessRules: [],
+    },
+  ],
+  links: [{path: 'source-0', uri: 'file:///project/src', type: 2}],
+  resourceFilters: [
+    {
+      id: '1234',
+      path: '',
+      type: 30,
+      matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
+      arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
+    },
+  ],
 });
 const client = (run: LspClient['request']): LspClient => ({
   pid: 1,
@@ -141,6 +205,126 @@ const sharedPolicy = {
 };
 
 describe('Java request diagnostics', () => {
+  it('binds full projection metadata and refuses missing, unsolicited or changed model evidence', () => {
+    const projection = projectionImage();
+    const selected = {
+      ...model,
+      compilerOptions: report().model.compilerOptions,
+      projectionDigest: javaProjectionDigest(projection),
+    };
+    const raw = {...report(), model: {...report().model, projection}};
+    expect(readJavaDiagnosticReport(raw, request, selected)).toEqual(raw.diagnostics);
+    expect(() => readJavaDiagnosticReport(report(), request, selected)).toThrow();
+    expect(() => readJavaDiagnosticReport(raw, request, model)).toThrow();
+    expect(() =>
+      readJavaDiagnosticReport(raw, request, {...model, projectionDigest: selected.projectionDigest}),
+    ).toThrow();
+    const changed = (value: typeof JavaProjectionImage.Type) => ({...raw, model: {...raw.model, projection: value}});
+    const withoutAttachment = structuredClone(projection);
+    Reflect.deleteProperty(withoutAttachment.resolvedClasspath[0], 'sourceAttachmentPath');
+    for (const value of [
+      {...projection, outputPath: projection.outputPath + '-changed'},
+      {...projection, resolvedClasspath: [...projection.resolvedClasspath].reverse()},
+      {
+        ...projection,
+        rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({...entry, exported: !entry.exported})),
+      },
+      {
+        ...projection,
+        rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({
+          ...entry,
+          combineAccessRules: !entry.combineAccessRules,
+        })),
+      },
+      {
+        ...projection,
+        rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({
+          ...entry,
+          accessRules: [...entry.accessRules].reverse(),
+        })),
+      },
+      {
+        ...projection,
+        rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({
+          ...entry,
+          attributes: [...entry.attributes].reverse(),
+        })),
+      },
+      {...projection, rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({...entry, accessRules: []}))},
+      {...projection, rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({...entry, exclusions: []}))},
+      {
+        ...projection,
+        rawClasspath: EffectArray.map(projection.rawClasspath, entry => ({
+          ...entry,
+          outputPath: '/threadnote-java/output-2',
+        })),
+      },
+      withoutAttachment,
+      {...projection, links: [{...projection.links[0], uri: 'file:///different/src'}]},
+      {...projection, resourceFilters: []},
+    ])
+      expect(() => readJavaDiagnosticReport(changed(value), request, selected)).toThrow();
+  });
+  it('frames projection fields deterministically without changing semantic array order or caller objects', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('a', 'é', '𐐀', '😀', ':', '[', ']', ';', '0'), {maxLength: 32}),
+        characters => {
+          const projection = {...projectionImage(), outputPath: '/threadnote-java/' + EffectArray.join(characters, '')};
+          const before = JSON.stringify(projection);
+          const reordered = {
+            resourceFilters: projection.resourceFilters,
+            links: projection.links,
+            resolvedClasspath: projection.resolvedClasspath,
+            rawClasspath: projection.rawClasspath,
+            outputPath: projection.outputPath,
+            projectCharset: projection.projectCharset,
+            format: projection.format,
+          };
+          expect(javaProjectionDigest(reordered)).toBe(javaProjectionDigest(projection));
+          expect(javaProjectionDigest({...projection, outputPath: projection.outputPath + ':'})).not.toBe(
+            javaProjectionDigest(projection),
+          );
+          expect(JSON.stringify(projection)).toBe(before);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+  effectIt.effect('retains the admitted projection identity when caller aliases change during verification', () =>
+    Effect.gen(function* () {
+      for (const kind of ['diagnostics', 'type-definition'] as const) {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const projection = projectionImage();
+        const digest = javaProjectionDigest(projection);
+        const selected: JavaDiagnosticModel = {
+          ...model,
+          compilerOptions: report().model.compilerOptions,
+          projectionDigest: digest,
+        };
+        const raw = kind === 'diagnostics' ? report() : typeReport();
+        const observed = {...raw, model: {...raw.model, projection}};
+        const native = client((method, params) =>
+          Effect.sync(() => {
+            expect(method).toBe('workspace/executeCommand');
+            expect(params).toMatchObject({arguments: [{projectionDigest: digest}]});
+            return observed;
+          }),
+        );
+        const verify = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)));
+        const query =
+          kind === 'diagnostics'
+            ? requestJavaDiagnostics(native, selected, verify)(request, 1000).pipe(Effect.asVoid)
+            : requestJavaTypeDefinition(native, selected, verify)(request, typePosition, 1000).pipe(Effect.asVoid);
+        const querying = yield* Effect.forkChild(query);
+        yield* Deferred.await(entered);
+        Reflect.set(selected, 'projectionDigest', EffectString.repeat(64)('b'));
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(querying);
+      }
+    }),
+  );
   effectIt.effect('retains the admitted compiler basis when caller aliases change during verification', () =>
     Effect.gen(function* () {
       for (const kind of ['diagnostics', 'type-definition'] as const) {
@@ -776,6 +960,7 @@ describe('Java request diagnostics', () => {
           'dev/threadnote/semantic/DiagnosticSnapshot.class',
           'dev/threadnote/semantic/PreparedProjectModel.class',
           'dev/threadnote/semantic/PreparedProjectModel$Host.class',
+          'dev/threadnote/semantic/PreparedProjectModel$PassiveProjection.class',
           'dev/threadnote/semantic/PreparedProjectModel$Budget.class',
           'dev/threadnote/semantic/PreparedProjectModel$CacheImage.class',
           'dev/threadnote/semantic/PreparedProjectModel$Unsupported.class',
