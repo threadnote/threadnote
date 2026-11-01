@@ -116,12 +116,14 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     failAfterPid: boolean;
     rejectSdk: boolean;
     crash: boolean;
+    graceful: boolean;
     available: boolean;
     afterCommit: Effect.Effect<void, unknown>;
   } = {
     failAfterPid: false,
     rejectSdk: false,
     crash: false,
+    graceful: true,
     available: true,
     afterCommit: Effect.void,
   };
@@ -208,7 +210,7 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
           expect(isActive()).toBe(false);
           events.push('invalidate');
         }),
-        close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: true}))),
+        close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: control.graceful}))),
       };
       return {pid: process.pid, api};
     }),
@@ -635,19 +637,68 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
           const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
           f.control.crash = true;
           expect(
-            (yield* Effect.exit(
+            yield* Effect.flip(
               coordinator.use(attached.observation, 1000, api =>
                 api.query('definition', attached.observation, {line: 0, character: 1}, 1000),
               ),
-            ))._tag,
-          ).toBe('Failure');
+            ),
+          ).toMatchObject({_tag: 'LspFault', code: 'exit'});
           yield* coordinator.closeView(attached.observation);
           f.control.crash = false;
+          expect(yield* coordinator.status).toMatchObject({
+            providers: 0,
+            imports: 0,
+            quarantined: 0,
+            failures: [
+              {
+                attempts: attempt + 1,
+                cause: 'exit',
+                nextAction:
+                  attempt === 0
+                    ? 'Reattach an explicit view once prerequisites are ready'
+                    : 'Correct prerequisites and restart the idle coordinator explicitly',
+              },
+            ],
+          });
         }
-        expect((yield* Effect.exit(coordinator.attach(f.basis, f.text, 'java', 'prepared-main')))._tag).toBe('Failure');
+        expect(yield* Effect.flip(coordinator.attach(f.basis, f.text, 'java', 'prepared-main'))).toMatchObject({
+          _tag: 'LspFault',
+          code: 'prerequisite',
+        });
         expect(f.factory).toHaveBeenCalledTimes(2);
         expect(f.finishes()).toBe(2);
         expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('failed graceful Java shutdowns retain their cause and exhaust the same restart budget', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        f.control.graceful = false;
+        const coordinator = yield* f.make();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+          yield* coordinator.closeView(attached.observation);
+          expect(yield* coordinator.status).toMatchObject({
+            providers: 0,
+            imports: 0,
+            quarantined: 0,
+            failures: [
+              {
+                attempts: attempt + 1,
+                cause: 'shutdown',
+                nextAction:
+                  attempt === 0
+                    ? 'Reattach an explicit view once prerequisites are ready'
+                    : 'Correct prerequisites and restart the idle coordinator explicitly',
+              },
+            ],
+          });
+          expect(f.finishes()).toBe(attempt + 1);
+        }
+        expect(yield* Effect.flip(coordinator.attach(f.basis, f.text, 'java', 'prepared-main'))).toMatchObject({
+          code: 'prerequisite',
+        });
+        expect(f.factory).toHaveBeenCalledTimes(2);
       }).pipe(TestClock.withLive),
     );
   });

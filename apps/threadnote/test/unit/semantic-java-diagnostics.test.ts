@@ -651,6 +651,105 @@ describe('Java request diagnostics', () => {
       );
     }
 
+    effectIt.effect('refuses complete Java edit sets with overlaps, duplicate targets or conflicting versions', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const before = yield* semanticTreeDigest(f.project);
+        const edit = {range: {start: {line: 0, character: 6}, end: {line: 0, character: 10}}, newText: 'Next'};
+        const overlap = {...edit, range: {start: {line: 0, character: 8}, end: {line: 0, character: 12}}};
+        const safe = {textDocument: {uri: f.uris['Included.java'], version: null}, edits: [edit]};
+        const target = {textDocument: {uri: f.uris['Main.java'], version: null}, edits: [edit]};
+        const valid = yield* f.create({documentChanges: [safe, target]});
+        const validSession = yield* valid.result;
+        const validView = yield* validSession.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        const complete = yield* validSession.prepare('rename', validView, {line: 0, character: 15}, 'Next', 1000);
+        expect(complete.status).toBe('ok');
+        if (complete.status === 'ok')
+          expect(complete.items).toEqual([
+            expect.objectContaining({
+              files: expect.arrayContaining([
+                expect.objectContaining({uri: f.uris['Included.java']}),
+                expect.objectContaining({uri: f.uris['Main.java']}),
+              ]),
+            }),
+          ]);
+        const cases: readonly Schema.Json[] = [
+          {changes: {[f.uris['Included.java']]: [edit], [f.uris['Main.java']]: [edit, overlap]}},
+          {documentChanges: [safe, {...target, edits: [overlap, edit]}]},
+          {documentChanges: [safe, target, target]},
+          {documentChanges: [safe, {...target, textDocument: {...target.textDocument, version: 42}}]},
+        ];
+        for (const raw of cases)
+          for (const operation of ['rename', 'code-action'] as const) {
+            const response = operation === 'rename' ? raw : [{title: 'Conflicting', edit: raw}];
+            const original = JSON.stringify(response);
+            const made = yield* f.create(response);
+            const session = yield* made.result;
+            const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+            expect(
+              yield* Effect.flip(
+                session.prepare(
+                  operation,
+                  current,
+                  {line: 0, character: 15},
+                  operation === 'rename' ? 'Next' : undefined,
+                  1000,
+                ),
+              ),
+            ).toMatchObject({_tag: 'SemanticSessionFault', reason: 'invalid'});
+            expect(JSON.stringify(response)).toBe(original);
+            expect(yield* session.observation(current.uri)).toEqual(current);
+            expect(yield* session.available).toBe(true);
+          }
+        expect(yield* semanticTreeDigest(f.project)).toBe(before);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+    effectIt.effect.prop(
+      'duplicate Java edits refuse the whole preparation independently of representation and target order',
+      [
+        Schema.Literals(['changes', 'documentChanges']),
+        Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 12})),
+        Schema.Boolean,
+      ],
+      ([representation, start, reverse]) =>
+        Effect.gen(function* () {
+          const f = yield* preparedSessionFixture();
+          const before = yield* semanticTreeDigest(f.project);
+          const edit = {
+            range: {start: {line: 0, character: start}, end: {line: 0, character: start + 1}},
+            newText: 'Next',
+          };
+          const targets = [
+            {textDocument: {uri: f.uris['Included.java'], version: null}, edits: [edit]},
+            {textDocument: {uri: f.uris['Main.java'], version: null}, edits: [edit, structuredClone(edit)]},
+          ];
+          const ordered = reverse ? EffectArray.reverse(targets) : targets;
+          const response: Schema.Json =
+            representation === 'documentChanges'
+              ? {documentChanges: ordered}
+              : {
+                  changes: EffectRecord.fromEntries(
+                    EffectArray.map(ordered, target => [target.textDocument.uri, target.edits]),
+                  ),
+                };
+          const original = JSON.stringify(response);
+          const made = yield* f.create(response);
+          const session = yield* made.result;
+          const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+          expect(
+            yield* Effect.flip(session.prepare('rename', current, {line: 0, character: 15}, 'Next', 1000)),
+          ).toMatchObject({
+            _tag: 'SemanticSessionFault',
+            reason: 'invalid',
+          });
+          expect(JSON.stringify(response)).toBe(original);
+          expect(yield* session.observation(current.uri)).toEqual(current);
+          expect(yield* semanticTreeDigest(f.project)).toBe(before);
+        }).pipe(Effect.provide(BunServices.layer)),
+      {arbitrary: {runs: 16}},
+    );
+
     effectIt.effect('refuses an entire result or edit when one physical target is logically excluded', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
