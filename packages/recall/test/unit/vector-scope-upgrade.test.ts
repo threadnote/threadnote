@@ -5,7 +5,7 @@ import type {RecallCandidate} from '@threadnote/recall/rank';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Effect, FileSystem, Layer, Option, Path, Schedule, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Logger, Option, Path, Schedule, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -16,7 +16,12 @@ import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
-import {currentRecallCorpusGeneration, loadRecallIndexData} from '@threadnote/recall/index';
+import {
+  currentRecallCorpusGeneration,
+  expireRecallIndexValidation,
+  loadRecallIndexData,
+} from '@threadnote/recall/index';
+import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {loadMcpRecallSemanticScoresResult} from '@threadnote/recall/runtime';
 import {
   ensureVectorIndex,
@@ -275,6 +280,113 @@ describe('vector scope mapping upgrades', () => {
           }),
         ).pipe(TestClock.withLive),
       {fastCheck: {numRuns: 12}},
+    );
+  });
+});
+
+describe('MCP recall generation races', () => {
+  effectIt.layer(base)(it => {
+    const generationRace = (updates: readonly string[]) =>
+      withRuntime(() =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-corpus-query-race-'});
+          const manifestPath = path.join(home, 'manifest.json');
+          yield* fs.writeFileString(manifestPath, JSON.stringify({version: 1, projects: []}));
+          const resource = path.join(home, 'data/local/resources/repos/fixture/fact.md');
+          const uri = 'threadnote://resources/repos/fixture/fact.md';
+          const original = '# Controlled fact\n\nOriginal synthetic evidence.\n';
+          let changed = original;
+          yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+          yield* fs.writeFileString(resource, original);
+          const config = {account: 'local', agentContextHome: home, manifestPath, user: 'tester'};
+          yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+          const index = yield* loadRecallIndexData(config, {includeInactive: false});
+          yield* ensureVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
+          const runtime = yield* LocalModelRuntime;
+          const embeddingStarted = yield* Deferred.make<void>();
+          const releaseEmbedding = yield* Deferred.make<void>();
+          let firstQuery = true;
+          const queryRuntime = LocalModelRuntime.of({
+            ...runtime,
+            embedMany: args =>
+              Effect.gen(function* () {
+                if (firstQuery) {
+                  firstQuery = false;
+                  yield* Deferred.succeed(embeddingStarted, undefined);
+                  yield* Deferred.await(releaseEmbedding);
+                }
+                return yield* runtime.embedMany(args);
+              }),
+          });
+          const query = yield* loadMcpRecallSemanticScoresResult(config, 'synthetic evidence', 5).pipe(
+            Effect.provideService(LocalModelRuntime, queryRuntime),
+            Effect.forkChild,
+          );
+          yield* Deferred.await(embeddingStarted);
+          for (const [index, update] of updates.entries()) {
+            changed = `# Controlled fact\n\nChanged synthetic evidence ${index}: ${update}.\n`;
+            yield* fs.writeFileString(resource, changed);
+            yield* expireRecallIndexValidation(home, false, [uri]);
+          }
+          yield* Deferred.succeed(releaseEmbedding, undefined);
+          const result = yield* Fiber.join(query);
+          expect(result.status, Option.getOrUndefined(result.result.warning)).toBe('unavailable');
+          expect(Option.isNone(result.result.scores)).toBe(true);
+          yield* Effect.gen(function* () {
+            const current = yield* currentRecallCorpusGeneration(config);
+            if (
+              Option.isNone(current) ||
+              current.value === index.generation ||
+              (yield* vectorIndexGenerationReadiness(home, manifest, current.value)) !== 'current'
+            )
+              return yield* TestError.make({message: 'Current generation refresh has not completed'});
+          }).pipe(Effect.retry({times: 200, schedule: Schedule.spaced('25 millis')}));
+          expect(Option.getOrUndefined(result.result.warning)).toContain('background refresh');
+          expect((yield* loadMcpRecallSemanticScoresResult(config, 'synthetic evidence', 5)).status).toBe('available');
+          expect(yield* fs.readFileString(resource)).toBe(changed);
+        }),
+      ).pipe(TestClock.withLive);
+    it.effect('schedules current evidence when the corpus advances during query embedding', () =>
+      generationRace(['controlled update']),
+    );
+    fcEffectProp(
+      it,
+      'finite corpus mutations never return stale semantic scores and converge to the latest generation',
+      {updates: fc.array(fc.string({maxLength: 80}), {minLength: 1, maxLength: 4})},
+      ({updates}) => generationRace(updates),
+      {fastCheck: {numRuns: 10}},
+    );
+    fcEffectProp(
+      it,
+      'canonical refresh warnings identify their emitter without exposing arbitrary failure payloads',
+      {payload: fc.string({maxLength: 200})},
+      ({payload}) =>
+        withRuntime(() =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const home = yield* fs.makeTempDirectoryScoped({prefix: 'canonical-refresh-warning-'});
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+            const store = yield* LocalModelStore;
+            const logs: string[] = [];
+            const logger = Logger.make<unknown, void>(options => {
+              logs.push(String(options.message));
+            });
+            const result = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(
+              {account: 'local', agentContextHome: home, user: 'tester'},
+              [],
+            ).pipe(
+              Effect.provideService(LocalModelStore, LocalModelStore.of({...store, status: () => Effect.die(payload)})),
+              Effect.provideService(Logger.CurrentLoggers, new Set([logger])),
+            );
+            expect(result.state).toBe('deferred');
+            expect(logs).toEqual([
+              'Canonical memory was committed, but derived recall indexes could not be refreshed [recall-refresh:deferred]. Run threadnote repair.',
+            ]);
+          }),
+        ).pipe(TestClock.withLive),
+      {fastCheck: {numRuns: 10}},
     );
   });
 });
