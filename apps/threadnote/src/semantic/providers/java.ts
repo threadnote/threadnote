@@ -257,10 +257,13 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       request: (method, params, milliseconds) =>
         Effect.gen(function* () {
           yield* sourceVerify;
-          const result = yield* client.request(method, params, milliseconds);
-          const response = yield* mapJavaSourceResponse(method, result, sourceUri);
+          const response = yield* Effect.exit(
+            client
+              .request(method, params, milliseconds)
+              .pipe(Effect.flatMap(result => mapJavaSourceResponse(method, result, sourceUri))),
+          );
           yield* sourceVerify;
-          return response;
+          return yield* response;
         }).pipe(
           Effect.timeoutOption(milliseconds),
           Effect.flatMap(result =>
@@ -294,7 +297,13 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
           extendedClientCapabilities: {classFileContentsSupport: false, progressReportProvider: true},
         },
         requiredCommands: [javaDiagnosticBundle.command, javaTypeDefinitionCommand],
-        requestDiagnostics: requestJavaDiagnostics(client, diagnosticModel, verify),
+        // Finish the Java fence before the shared session advances its diagnostic sequence/delivery cursor.
+        requestDiagnostics: (request, milliseconds) =>
+          requestJavaDiagnostics(
+            client,
+            diagnosticModel,
+            sourceVerify,
+          )(request, milliseconds).pipe(Effect.tap(() => verify)),
         requestTypeDefinition: (request, position, milliseconds) =>
           Effect.gen(function* () {
             const result = yield* requestJavaTypeDefinition(client, diagnosticModel, sourceVerify)(
@@ -343,7 +352,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       Effect.gen(function* () {
         const fixed = structuredClone(observation);
         yield* verify;
-        const result = yield* operation(fixed).pipe(
+        const completed = yield* operation(fixed).pipe(
           Effect.catchIf(Schema.is(JavaSourceTargetFault), () =>
             Effect.gen(function* () {
               const current = yield* session.observation(fixed.uri);
@@ -369,9 +378,11 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
               } satisfies QueryOutcome;
             }),
           ),
+          Effect.exit,
         );
-        if (result.status === 'stale') return result;
         yield* verify;
+        const result = yield* completed;
+        if (result.status === 'stale') return result;
         const current = yield* session.observation(fixed.uri);
         return current && observationKey(current) === observationKey(fixed)
           ? result
@@ -393,14 +404,29 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         Effect.gen(function* () {
           const fixed = structuredClone(args[0]);
           yield* verify;
-          const result = yield* session.upsert(fixed, args[1], args[2], args[3]);
+          const completed = yield* Effect.exit(session.upsert(fixed, args[1], args[2], args[3]));
           yield* verify;
+          const result = yield* completed;
           const current = yield* session.observation(result.uri);
           if (!current || observationKey(current) !== observationKey(result))
             return yield* SemanticSessionFault.make({reason: 'stale'});
           return result;
         }).pipe(
           Effect.timeoutOption(args[3]),
+          Effect.flatMap(result =>
+            Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+          ),
+        ),
+      diagnostics: (...args: Parameters<typeof session.diagnostics>) =>
+        Effect.gen(function* () {
+          const fixed = structuredClone(args[0]);
+          yield* verify;
+          // Failure has not committed a delivered delta; success must return without another asynchronous fence.
+          return yield* session
+            .diagnostics(fixed, args[1])
+            .pipe(Effect.catchCause(cause => verify.pipe(Effect.andThen(Effect.failCause(cause)))));
+        }).pipe(
+          Effect.timeoutOption(args[1]),
           Effect.flatMap(result =>
             Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
           ),

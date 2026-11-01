@@ -1116,6 +1116,7 @@ const makeSessionFixture = Effect.fn('test.javaSessionFixture')(function* (javaH
       calls: {method: string; params: Schema.Json | undefined}[];
     },
     runtime: JavaSessionOptions['runtime'] = {projectJavaHome: f.javaHome, verify: Effect.void},
+    beforeResponse: (method: string) => Effect.Effect<void, LspFault> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const notifications = makeSemanticNotifications();
@@ -1125,6 +1126,7 @@ const makeSessionFixture = Effect.fn('test.javaSessionFixture')(function* (javaH
         request: (method, params) =>
           Effect.gen(function* (): Effect.fn.Return<Schema.Json, LspFault> {
             calls.push({method, params});
+            yield* beforeResponse(method);
             if (method === 'initialize') {
               if (!timing) notifications.receive('language/status', {type: 'ServiceReady'});
               return {
@@ -1142,12 +1144,14 @@ const makeSessionFixture = Effect.fn('test.javaSessionFixture')(function* (javaH
             if (method === 'workspace/executeCommand') {
               const call = yield* Schema.decodeUnknownEffect(
                 Schema.Struct({
-                  command: Schema.Literal(javaTypeDefinitionCommand),
-                  arguments: Schema.Array(Schema.Struct({requestToken: Schema.String, position: Position})),
+                  command: Schema.Literals([javaTypeDefinitionCommand, javaDiagnosticBundle.command]),
+                  arguments: Schema.Array(
+                    Schema.Struct({requestToken: Schema.String, position: Schema.optional(Position)}),
+                  ),
                 }),
               )(params).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
               expect(call.arguments).toHaveLength(1);
-              return {
+              const header = {
                 protocolVersion: 1,
                 requestToken: call.arguments[0].requestToken,
                 uri,
@@ -1164,6 +1168,17 @@ const makeSessionFixture = Effect.fn('test.javaSessionFixture')(function* (javaH
                   },
                   annotationProcessing: 'disabled-for-snapshot',
                 },
+              };
+              if (call.command === javaDiagnosticBundle.command)
+                return {
+                  ...header,
+                  diagnostics: Schema.is(Schema.Struct({diagnostics: Schema.Array(Schema.Json)}))(response)
+                    ? response.diagnostics
+                    : [],
+                };
+              if (!call.arguments[0].position) return yield* LspFault.make({code: 'protocol'});
+              return {
+                ...header,
                 position: call.arguments[0].position,
                 typeDefinition: Schema.is(Schema.Struct({typeDefinition: Schema.Json}))(response)
                   ? response.typeDefinition
@@ -1215,6 +1230,180 @@ const sessionFixture = makeSessionFixture();
 const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
 
 describe('Java session source targets', () => {
+  for (const operation of ['query', 'rename', 'diagnostics', 'upsert'] as const) {
+    effectIt.effect(`checks SDK integrity after a rejected Java ${operation}`, () =>
+      Effect.gen(function* () {
+        for (const changed of [false, true]) {
+          const f = yield* sessionFixture;
+          const gate = {armed: false, responded: false, postflight: false};
+          const {session, current} = yield* f.create(
+            [],
+            undefined,
+            undefined,
+            {
+              projectJavaHome: f.javaHome,
+              verify: Effect.suspend(() => {
+                if (!gate.responded) return Effect.void;
+                gate.postflight = true;
+                return changed ? LspFault.make({code: 'prerequisite'}) : Effect.void;
+              }),
+            },
+            () =>
+              Effect.suspend(() => {
+                if (!gate.armed) return Effect.void;
+                gate.responded = true;
+                return LspFault.make({code: 'rejected'});
+              }),
+          );
+          gate.armed = true;
+          const changedText = 'class Next {}\n';
+          const work: Effect.Effect<unknown, unknown> =
+            operation === 'query'
+              ? session.query('definition', current, range.start, 1000)
+              : operation === 'rename'
+                ? session.prepare('rename', current, range.start, 'Next', 1000)
+                : operation === 'diagnostics'
+                  ? session.diagnostics(current, 1000)
+                  : session.upsert(
+                      {...current, documentVersion: 2, content: sha256HexSync(changedText)},
+                      changedText,
+                      'java',
+                      1000,
+                    );
+          expect(yield* Effect.flip(work)).toMatchObject({
+            _tag: 'LspFault',
+            code: changed ? 'prerequisite' : 'rejected',
+          });
+          expect(gate.postflight).toBe(true);
+          // A failed attachment already retires shared state; a read error with conserved inputs does not.
+          expect(yield* session.available).toBe(!changed && operation !== 'upsert');
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+  }
+
+  effectIt.effect('keeps a rejected query postflight interruptible and retires a stalled SDK check', () =>
+    Effect.gen(function* () {
+      const f = yield* sessionFixture;
+      const entered = yield* Deferred.make<void>();
+      const gate = {armed: false, responded: false};
+      const {session, current} = yield* f.create(
+        [],
+        undefined,
+        undefined,
+        {
+          projectJavaHome: f.javaHome,
+          verify: Effect.suspend(() =>
+            gate.responded ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)) : Effect.void,
+          ),
+        },
+        () =>
+          Effect.suspend(() => {
+            if (!gate.armed) return Effect.void;
+            gate.responded = true;
+            return LspFault.make({code: 'rejected'});
+          }),
+      );
+      gate.armed = true;
+      const reading = yield* Effect.forkChild(session.query('definition', current, range.start, 1000));
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(1001);
+      expect(yield* Effect.flip(Fiber.join(reading))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
+      expect(yield* session.available).toBe(false);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  for (const changeView of [false, true]) {
+    effectIt.effect(
+      `keeps unreturned diagnostics out of the delivered cursor after ${changeView ? 'a newer view' : 'a newer request'}`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* sessionFixture;
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const gate = {armed: false, checks: 0, total: 0};
+          const response: {diagnostics: Schema.Json[]} = {diagnostics: []};
+          const {session, current} = yield* f.create(response, undefined, undefined, {
+            projectJavaHome: f.javaHome,
+            verify: Effect.suspend(() => {
+              gate.total++;
+              return gate.armed && ++gate.checks === 2
+                ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void;
+            }),
+          });
+          const before = gate.total;
+          expect((yield* session.diagnostics(current, 1000)).items).toEqual([]);
+          expect(gate.total - before).toBe(2);
+          response.diagnostics = [
+            {range, severity: 1, code: '1', source: 'Java', message: 'not yet delivered', data: {arguments: []}},
+          ];
+          gate.armed = true;
+          const reading = yield* Effect.forkChild(session.diagnostics(current, 1000));
+          yield* Deferred.await(entered);
+          const newer = changeView
+            ? yield* session.upsert({...current, documentVersion: 2}, f.text, 'java', 1000)
+            : current;
+          if (changeView) response.diagnostics = [];
+          const next = yield* session.diagnostics(newer, 1000);
+          yield* Deferred.succeed(release, undefined);
+          const obsolete = yield* Effect.exit(Fiber.join(reading));
+          expect(obsolete._tag).toBe('Failure');
+          expect(next.remaining).toEqual([]);
+          expect(next.resolved).toEqual([]);
+          expect(next.added).toHaveLength(changeView ? 0 : 1);
+          expect(yield* session.available).toBe(true);
+          expect(yield* session.observation(current.uri)).toEqual(newer);
+        }).pipe(Effect.provide(BunServices.layer)),
+    );
+  }
+
+  effectIt.effect('captures a diagnostics observation before asynchronous SDK preflight', () =>
+    Effect.gen(function* () {
+      const f = yield* sessionFixture;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const gate = {armed: false};
+      const {session, current} = yield* f.create([], undefined, undefined, {
+        projectJavaHome: f.javaHome,
+        verify: Effect.suspend(() => {
+          if (!gate.armed) return Effect.void;
+          gate.armed = false;
+          return Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)));
+        }),
+      });
+      gate.armed = true;
+      const requested = structuredClone(current);
+      const reading = yield* Effect.forkChild(session.diagnostics(requested, 1000));
+      yield* Deferred.await(entered);
+      Reflect.set(requested, 'documentVersion', 999);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(reading)).observation).toEqual(current);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect('retires a rejected source response after private project metadata drift', () =>
+    Effect.gen(function* () {
+      const f = yield* sessionFixture;
+      const gate = {armed: false};
+      const {session, current} = yield* f.create([], undefined, undefined, undefined, () =>
+        Effect.gen(function* () {
+          if (!gate.armed) return;
+          yield* f.fs
+            .writeFileString(f.prepared.project + '/.classpath', 'changed private metadata')
+            .pipe(Effect.mapError(() => LspFault.make({code: 'write'})));
+          return yield* LspFault.make({code: 'rejected'});
+        }),
+      );
+      gate.armed = true;
+      expect(yield* Effect.flip(session.query('definition', current, range.start, 1000))).toMatchObject({
+        _tag: 'LspFault',
+        code: 'prerequisite',
+      });
+      expect(yield* session.available).toBe(false);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
   effectIt.effect('admits the same prepared SDK with a tilde in its physical home and refuses a different SDK', () =>
     Effect.gen(function* () {
       const f = yield* makeSessionFixture('jdk~');

@@ -12,7 +12,7 @@ import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Observation} from '@threadnote/semantic/contracts';
 import {makeLspSession, makeSemanticNotifications, type LspDiagnosticRequest} from '../../src/semantic/provider.js';
-import type {LspClient} from '../../src/semantic/lsp_transport.js';
+import {LspFault, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {javaDiagnosticBundle} from '../../src/semantic/providers/java_diagnostics_bundle.js';
 import {
   materializeJavaDiagnosticBundle,
@@ -811,6 +811,44 @@ describe('Java request diagnostics', () => {
       );
       expect(result._tag).toBe('Failure');
       expect(checks).toBe(2);
+    }),
+  );
+
+  effectIt.effect('rechecks rejected compiler reads and preserves errors only while the basis remains current', () =>
+    Effect.gen(function* () {
+      for (const operation of ['diagnostics', 'type-definition'] as const) {
+        for (const changed of [false, true]) {
+          let checks = 0;
+          const verify = Effect.suspend(() => (++checks === 2 && changed ? Effect.fail('basis changed') : Effect.void));
+          const api = client(() => LspFault.make({code: 'rejected'}));
+          const read: Effect.Effect<unknown, unknown> =
+            operation === 'diagnostics'
+              ? requestJavaDiagnostics(api, model, verify)(request, 1000)
+              : requestJavaTypeDefinition(api, model, verify)(request, {line: 0, character: 6}, 1000);
+          expect(yield* Effect.flip(read)).toEqual(changed ? 'basis changed' : LspFault.make({code: 'rejected'}));
+          expect(checks).toBe(2);
+        }
+      }
+    }),
+  );
+
+  effectIt.effect('includes rejected compiler read postflight in the same interruptible deadline', () =>
+    Effect.gen(function* () {
+      let checks = 0;
+      const entered = yield* Deferred.make<void>();
+      const verify = Effect.suspend(() =>
+        ++checks === 1 ? Effect.void : Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+      const reading = yield* Effect.forkChild(
+        requestJavaDiagnostics(
+          client(() => LspFault.make({code: 'rejected'})),
+          model,
+          verify,
+        )(request, 1000),
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(1001);
+      expect(yield* Effect.flip(Fiber.join(reading))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
     }),
   );
 
