@@ -190,6 +190,7 @@ function App({
   const [loadedUri, setLoadedUri] = useState<string | undefined>();
   const canonicalizedSelectionRef = useRef<string | undefined>(undefined);
   const selectionReadEpoch = useRef(0);
+  const libraryRefreshEpoch = useRef(0);
   const draftRef = useRef<ManagerDraft | undefined>(undefined);
   const [pendingCanonical, setPendingCanonical] = useState<MemoryResponse | undefined>();
   const [availability, dispatchAvailability] = useReducer(managerAvailabilityTransition, initialManagerAvailability);
@@ -402,12 +403,14 @@ function App({
     () => uniqueSelectorValues(['default', ...EffectArray.map(shares, share => share.name), target.team]),
     [shares, target.team],
   );
-  function markRuntimeLost(): void {
+  function markRuntimeLost(invalidateLibraryRefresh = true): void {
+    if (invalidateLibraryRefresh) libraryRefreshEpoch.current++;
     selectionReadEpoch.current++;
     canonicalizedSelectionRef.current = undefined;
     dispatchAvailability('runtime-lost');
   }
   async function refreshAll(): Promise<void> {
+    const epoch = ++libraryRefreshEpoch.current;
     let nextTree: TreeResponse | undefined;
     const failures = await settleManagerRefreshTasks([
       {
@@ -437,11 +440,12 @@ function App({
         run: async () => {
           try {
             const next = await api<StateResponse>('/api/state', undefined, undefined, isStateResponse);
+            if (epoch !== libraryRefreshEpoch.current) return;
             setState(next);
             onAccount(next.config.account);
             dispatchAvailability('runtime-ready');
           } catch (cause) {
-            markRuntimeLost();
+            if (epoch === libraryRefreshEpoch.current) markRuntimeLost(false);
             throw cause;
           }
         },
@@ -451,9 +455,9 @@ function App({
         run: async () => {
           try {
             nextTree = await api<TreeResponse>('/api/tree', undefined, undefined, isTreeResponse);
-            setLibraryError('');
+            if (epoch === libraryRefreshEpoch.current) setLibraryError('');
           } catch (cause) {
-            setLibraryError(errorMessage(cause));
+            if (epoch === libraryRefreshEpoch.current) setLibraryError(errorMessage(cause));
             throw cause;
           }
         },
@@ -467,6 +471,7 @@ function App({
           ),
       },
     ]);
+    if (epoch !== libraryRefreshEpoch.current) return;
     if (nextTree) {
       setTree(nextTree.tree);
       setResourceTree(nextTree.resourcesTree);
@@ -474,7 +479,6 @@ function App({
     setAttentionRefreshGeneration(generation => generation + 1);
     toastMessage(failures.length === 0 ? 'Refreshed' : `Refresh incomplete · ${EffectArray.join(failures, ' · ')}`);
   }
-
   async function refreshGraphCatalog(notify = true): Promise<void> {
     try {
       const next = await api<GraphCatalog>(
@@ -496,7 +500,6 @@ function App({
       toastMessage(message);
     }
   }
-
   async function refreshGraphDiagnostics(
     options: {readonly analyze: boolean; readonly deep: boolean},
     notify = true,
@@ -532,7 +535,6 @@ function App({
       if (!background) setGraphAdministrationBusy(undefined);
     }
   }
-
   async function runGraphAdministration(action: GraphAdministrationAction): Promise<void> {
     const label = graphAdministrationActionLabel(action);
     setGraphAdministrationBusy(label);
@@ -694,7 +696,6 @@ function App({
     setResourceTree(next.resourcesTree);
     return next;
   }
-
   async function reloadSelected(uri: string): Promise<void> {
     if (isResourceUri(uri)) {
       await loadResource(uri).catch(() => undefined);
@@ -702,7 +703,6 @@ function App({
       await loadMemory(uri).catch(() => undefined);
     }
   }
-
   async function saveCurrent(): Promise<void> {
     if (saveOwned.current || manualEdit.pending) return;
     saveOwned.current = true;
