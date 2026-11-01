@@ -25,6 +25,7 @@ export const SemanticLanguage = Schema.Literals([
   'python',
   'go',
   'rust',
+  'java',
 ]);
 export type SemanticLanguage = typeof SemanticLanguage.Type;
 export interface SdkHostCandidate {
