@@ -158,8 +158,6 @@ export type {
 } from '@threadnote/manager/ui/contracts';
 type NavTreeTab = 'memories' | 'resources';
 
-type MemoryViewMode = 'edit' | 'preview';
-
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
 function App({
   integrations,
@@ -191,11 +189,12 @@ function App({
   const [memory, setMemory] = useState<MemoryResponse | undefined>();
   const [loadedUri, setLoadedUri] = useState<string | undefined>();
   const canonicalizedSelectionRef = useRef<string | undefined>(undefined);
+  const selectionReadEpoch = useRef(0);
   const draftRef = useRef<ManagerDraft | undefined>(undefined);
   const [pendingCanonical, setPendingCanonical] = useState<MemoryResponse | undefined>();
   const [availability, dispatchAvailability] = useReducer(managerAvailabilityTransition, initialManagerAvailability);
   const [content, setContent] = useState('');
-  const [memoryViewMode, setMemoryViewMode] = useState<MemoryViewMode>('edit');
+  const [memoryViewMode, setMemoryViewMode] = useState<'edit' | 'preview'>('edit');
   const [openSelect, setOpenSelect] = useState<SelectId | undefined>();
   const [filter, setFilter] = useState('');
   const [libraryScope, setLibraryScope] = useState<LibraryScope>('local');
@@ -260,7 +259,7 @@ function App({
   }, []);
   useManagerRuntimeConnection({
     runtime: availability.runtime,
-    onLost: () => dispatchAvailability('runtime-lost'),
+    onLost: markRuntimeLost,
     onReady: () => dispatchAvailability('runtime-ready'),
     onRecovery: () => void refreshAll(),
   });
@@ -293,6 +292,7 @@ function App({
     setSelectedUris(current => reconcileMemorySelection(current, scopedTree));
   }, [scopedTree]);
   useEffect(() => {
+    const epoch = ++selectionReadEpoch.current;
     if (!selectedUri) {
       dispatchAvailability('selection-cleared');
       setMemory(undefined);
@@ -321,18 +321,15 @@ function App({
     }
     canonicalizedSelectionRef.current = undefined;
     let cancelled = false;
+    const isCurrent = () => !cancelled && epoch === selectionReadEpoch.current;
     const requestedUri = selectedUri;
     dispatchAvailability('selection-started');
     setMemory(undefined);
     setLoadedUri(undefined);
     if (draftRef.current?.uri !== selectedUri) setContent('');
-    void (
-      isResourceUri(selectedUri)
-        ? loadResource(selectedUri, () => !cancelled)
-        : loadMemory(selectedUri, () => !cancelled)
-    )
+    void (isResourceUri(selectedUri) ? loadResource(selectedUri, isCurrent) : loadMemory(selectedUri, isCurrent))
       .then(resolvedUri => {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         if (resolvedUri && resolvedUri !== requestedUri) {
           setLibraryHistory(current => canonicalizeLibraryHistory(current, requestedUri, resolvedUri));
           canonicalizedSelectionRef.current = resolvedUri;
@@ -341,7 +338,7 @@ function App({
         dispatchAvailability('selection-ready');
       })
       .catch(() => {
-        if (!cancelled) dispatchAvailability('selection-failed');
+        if (isCurrent()) dispatchAvailability('selection-failed');
       });
     return () => {
       cancelled = true;
@@ -405,6 +402,11 @@ function App({
     () => uniqueSelectorValues(['default', ...EffectArray.map(shares, share => share.name), target.team]),
     [shares, target.team],
   );
+  function markRuntimeLost(): void {
+    selectionReadEpoch.current++;
+    canonicalizedSelectionRef.current = undefined;
+    dispatchAvailability('runtime-lost');
+  }
   async function refreshAll(): Promise<void> {
     let nextTree: TreeResponse | undefined;
     const failures = await settleManagerRefreshTasks([
@@ -439,7 +441,7 @@ function App({
             onAccount(next.config.account);
             dispatchAvailability('runtime-ready');
           } catch (cause) {
-            dispatchAvailability('runtime-lost');
+            markRuntimeLost();
             throw cause;
           }
         },
@@ -597,13 +599,10 @@ function App({
     setGraphDiagnostics(current => withoutRemovedGraphDiagnosticsView(current, target));
   }
   async function loadMemory(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
-    const next = await api<MemoryResponse>(
-      `/api/memory?uri=${encodeURIComponent(uri)}`,
-      undefined,
-      undefined,
-      isMemoryResponse,
-    );
-    if (!accept()) return undefined;
+    const epoch = selectionReadEpoch.current;
+    const path = `/api/memory?uri=${encodeURIComponent(uri)}`;
+    const next = await api<MemoryResponse>(path, undefined, undefined, isMemoryResponse);
+    if (epoch !== selectionReadEpoch.current || !accept()) return undefined;
     showMemory(next);
     return next.node.uri;
   }
@@ -626,12 +625,12 @@ function App({
     });
   }
   async function loadResource(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
+    const epoch = selectionReadEpoch.current;
     const result = await api<ReadResponse>('/api/read', {uri}, undefined, isReadResponse);
-    if (!accept()) return undefined;
+    if (epoch !== selectionReadEpoch.current || !accept()) return undefined;
     setMemory(undefined);
     setLoadedUri(uri);
     setContent(result.content || result.output);
-    setOutput(result.output || result.content);
     setMemoryViewMode(isMarkdownUri(uri) ? 'preview' : 'edit');
     setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
     return uri;
@@ -1814,7 +1813,7 @@ function App({
                       onDetails={() => setLibraryDialog('details')}
                       onMove={() => void moveCurrent()}
                     />
-                    {pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
+                    {selectedIsReadable && pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
                       <div className="manager-draft-reconcile" role="alert">
                         <p>The saved record changed. Your unsaved draft is preserved.</p>
                         <details>

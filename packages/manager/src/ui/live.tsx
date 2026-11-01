@@ -26,6 +26,7 @@ export function useManagerRuntimeConnection(options: {
   readonly onRecovery: () => void;
 }): void {
   const connection = useManagerLiveConnection();
+  const recoveryNeeded = useRef(false);
   useEffect(() => {
     if (connection !== 'unsupported' && connection !== 'stopped') return;
     const timer = window.setInterval(() => {
@@ -39,8 +40,16 @@ export function useManagerRuntimeConnection(options: {
     return () => window.clearInterval(timer);
   }, [options.runtime, connection]);
   useEffect(() => {
-    if (connection === 'connected') options.onReady();
-    else if (connection === 'stale') options.onLost();
+    if (connection === 'connected') {
+      options.onReady();
+      if (recoveryNeeded.current) {
+        recoveryNeeded.current = false;
+        options.onRecovery();
+      }
+    } else if (connection === 'stale') {
+      recoveryNeeded.current = true;
+      options.onLost();
+    }
   }, [connection]);
 }
 
