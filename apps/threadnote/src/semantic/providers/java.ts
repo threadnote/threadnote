@@ -1,18 +1,19 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
+import {Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope} from 'effect';
 import {
   canonicalFileUri,
   FileUri,
   observationKey,
-  type Observation,
+  Observation,
   type QueryOutcome,
 } from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {LspFault, type LspClient} from '../lsp_transport.js';
+import {LspFault, makeLspClient, type LspClient} from '../lsp_transport.js';
 import {
   makeLspSession,
+  makeSemanticNotifications,
   SemanticSessionFault,
   validRange,
   wellFormed,
@@ -29,7 +30,98 @@ import {
 } from './java_diagnostics.js';
 import {javaDiagnosticBundle} from './java_diagnostics_bundle.js';
 import {captureJavaSnapshotModel, javaTypeDefinitionCommand, javaFileUri} from './java_snapshot.js';
-import {makeJavaProject, makeJavaPreparedProject, javaPreparedSourceMember} from './java_project.js';
+import {JavaEnvironment, makeJavaProject, makeJavaPreparedProject, javaPreparedSourceMember} from './java_project.js';
+import {JavaRuntimeCandidate, makeJavaRuntime} from './java_runtime.js';
+
+const JavaAnalysisOptions = Schema.Struct({
+  basis: Observation,
+  candidate: Schema.optional(JavaRuntimeCandidate),
+  environment: JavaEnvironment,
+  privateDirectory: Schema.String,
+});
+export type JavaAnalysisOptions = typeof JavaAnalysisOptions.Type;
+
+/** Host-only analysis attachment. Preparation and execution authorization remain separate operations. */
+export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
+  function* (options: JavaAnalysisOptions, onProviderStarted: (pid: number) => Effect.Effect<void, unknown>) {
+    const captured = yield* Effect.try({
+      try: () => structuredClone(options),
+      catch: () => LspFault.make({code: 'prerequisite'}),
+    }).pipe(
+      Effect.flatMap(Schema.decodeEffect(JavaAnalysisOptions, {onExcessProperty: 'error'})),
+      Effect.mapError(() => LspFault.make({code: 'prerequisite'})),
+    );
+    const started = onProviderStarted;
+    if (captured.basis.provider.id !== 'jdtls' || typeof started !== 'function')
+      return yield* LspFault.make({code: 'prerequisite'});
+    const path = yield* Path.Path;
+    const worktree = yield* path.fromFileUrl(new URL(captured.basis.worktree));
+    const project = yield* path.fromFileUrl(new URL(captured.basis.project));
+    const privateDirectory = path.resolve(captured.privateDirectory);
+    const overlaps = (root: string) =>
+      root === privateDirectory ||
+      EffectString.startsWith(root + path.sep)(privateDirectory) ||
+      EffectString.startsWith(privateDirectory + path.sep)(root);
+    if (
+      captured.candidate &&
+      EffectArray.some(
+        [captured.candidate.serverDirectory, captured.candidate.runtimeJavaHome, captured.candidate.projectJavaHome],
+        root => overlaps(path.resolve(root)),
+      )
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+    const owned = yield* Scope.fork(yield* Effect.scope);
+    return yield* Effect.gen(function* () {
+      const runtime = yield* makeJavaRuntime(captured.candidate);
+      const prepared = yield* makeJavaPreparedProject({
+        project,
+        worktree,
+        privateDirectory: captured.privateDirectory,
+        javaHome: runtime.projectJavaHome,
+        environment: captured.environment,
+      });
+      const bundle = yield* materializeJavaDiagnosticBundle(prepared.directory);
+      const diagnosticModel = yield* makeJavaDiagnosticModel({
+        project: prepared.project,
+        javaHome: runtime.projectJavaHome,
+        sourceRoots: prepared.sourceRoots,
+        libraries: EffectArray.map(prepared.model.libraries, library => library.file),
+        compilerOptions: prepared.compilerOptions,
+        projectionDigest: prepared.projectionDigest,
+      });
+      const launched = yield* runtime.analysis({workspace: prepared.workspace, project: prepared.project, worktree});
+      // Bind the actual child to the caller's admission before any initialize or document notification.
+      yield* started(launched.wire.pid);
+      const notifications = makeSemanticNotifications();
+      const client = yield* makeLspClient(launched.wire, notifications.receive, prepared.settings);
+      const api = yield* makeJavaSession(client, {
+        basis: captured.basis,
+        notifications,
+        roots: [],
+        profile: {kind: 'prepared-java', build: prepared.model.build},
+        startupMilliseconds: 45000,
+        prepared,
+        bundle,
+        diagnosticModel,
+        runtime,
+      });
+      return {
+        pid: launched.wire.pid,
+        api: {...api, close: api.close.pipe(Effect.ensuring(Scope.close(owned, Exit.void)))},
+      };
+    }).pipe(
+      Effect.provideService(Scope.Scope, owned),
+      Effect.onExit(exit => (Exit.isFailure(exit) ? Scope.close(owned, exit) : Effect.void)),
+    );
+  },
+  effect =>
+    effect.pipe(
+      Effect.timeoutOption(120000),
+      Effect.flatMap(result =>
+        Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+      ),
+    ),
+);
 
 class JavaSourceTargetFault extends Schema.TaggedError<JavaSourceTargetFault, {readonly brand: unique symbol}>()(
   'JavaSourceTargetFault',

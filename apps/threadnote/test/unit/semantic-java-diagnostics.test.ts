@@ -4,11 +4,16 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Deferred, Effect, Fiber, FileSystem, Order, Path, Schema} from 'effect';
+import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, Order, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {unzipSync} from 'fflate';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
+import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
+import * as lsp from '../../src/semantic/lsp_transport.js';
+import {makeJavaAnalysis, type JavaAnalysisOptions} from '../../src/semantic/providers/java.js';
+import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Observation} from '@threadnote/semantic/contracts';
 import {
@@ -1542,5 +1547,249 @@ describe('Java request diagnostics', () => {
       );
       expect(Array.from(entries['plugin.xml'])).toEqual(Array.from(yield* fs.readFile(path.join(root, resources[2]))));
     }).pipe(Effect.provide(BunServices.layer)),
+  );
+});
+
+const analysisFixture = Effect.fn('test.javaAnalysisFixture')(function* () {
+  const f = yield* preparedSessionFixture();
+  const events: string[] = [];
+  const control = {failInitialization: false};
+  let runtimeVerifications = 0;
+  const verify = Effect.sync((): undefined => {
+    runtimeVerifications++;
+  });
+  const stop = {code: 0, drained: true, forced: false, stdioClosed: true, fault: undefined};
+  let stopped = false;
+  const finish = Effect.sync(() => {
+    if (!stopped) events.push('finish');
+    stopped = true;
+    return stop;
+  });
+  const wire: lsp.LspWire = {
+    pid: 123,
+    messages: Stream.never,
+    failure: () => undefined,
+    beginClosing: Effect.void,
+    send: () => Effect.void,
+    finish,
+  };
+  const runtimeSpy = vi.spyOn(javaRuntime, 'makeJavaRuntime').mockReturnValue(
+    Effect.succeed({
+      verify,
+      identity: sha256HexSync('controlled SDK boundary'),
+      projectJavaHome: f.javaHome,
+      preparation: () => Effect.fail(LspFault.make({code: 'rejected'})),
+      analysis: options =>
+        Effect.gen(function* () {
+          events.push('spawn');
+          yield* options.workspace.hold;
+          yield* Effect.addFinalizer(() => finish.pipe(Effect.flatMap(options.workspace.confirmDrained), Effect.orDie));
+          return {wire, directory: options.workspace.directory, verify};
+        }),
+    }),
+  );
+  yield* Effect.addFinalizer(() => Effect.sync(() => runtimeSpy.mockRestore()));
+  const clientSpy = vi.spyOn(lsp, 'makeLspClient').mockImplementation((_wire, receive) =>
+    Effect.succeed({
+      pid: wire.pid,
+      request: method =>
+        Effect.gen(function* () {
+          events.push(method);
+          if (method === 'initialize') {
+            if (control.failInitialization) return yield* LspFault.make({code: 'protocol'});
+            receive?.('language/status', {type: 'ServiceReady'});
+            return {
+              serverInfo: {name: 'JDT Language Server (Standard)', version: '1.63.0-SNAPSHOT'},
+              capabilities: {
+                definitionProvider: true,
+                referencesProvider: true,
+                documentSymbolProvider: true,
+                renameProvider: true,
+                codeActionProvider: true,
+                typeDefinitionProvider: true,
+                executeCommandProvider: {commands: [javaDiagnosticBundle.command, javaTypeDefinitionCommand]},
+              },
+            };
+          }
+          return [];
+        }),
+      notify: method =>
+        Effect.sync(() => {
+          events.push(method);
+        }),
+      close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: true}))),
+    }),
+  );
+  yield* Effect.addFinalizer(() => Effect.sync(() => clientSpy.mockRestore()));
+  const options: JavaAnalysisOptions = {
+    basis: structuredClone(f.basis),
+    environment: {id: 'controlled-v2', metadataFile: f.metadataFile, metadataDigest: f.basis.configuration},
+    privateDirectory: f.path.join(f.parent, 'analysis'),
+  };
+  const beforeDirectories = yield* f.fs.readDirectory(options.privateDirectory);
+  return {
+    ...f,
+    events,
+    options,
+    runtimeSpy,
+    clientSpy,
+    control,
+    beforeDirectories,
+    runtimeVerifications: () => runtimeVerifications,
+  };
+});
+
+const AnalysisTestLayer = Layer.mergeAll(
+  BunServices.layer,
+  Layer.succeed(ChildEnvironmentPolicy, {
+    sanitizeExternal: () => ({}),
+    preserveIntendedChild: () => ({}),
+  }),
+);
+
+describe('Java analysis attachment composition', () => {
+  effectIt.effect('captures caller state before registration can change it', () =>
+    Effect.gen(function* () {
+      const f = yield* analysisFixture();
+      const options = {...f.options, basis: {...f.options.basis}, environment: {...f.options.environment}};
+      const attached = yield* makeJavaAnalysis(options, () =>
+        Effect.sync(() => {
+          options.basis.project = 'file:///reassigned-project';
+          options.environment.metadataFile = f.path.join(f.parent, 'missing-model.json');
+        }),
+      );
+      const observed = yield* attached.api.upsert(f.basis, f.texts['Main.java'], 'java', 10000);
+      expect(observed.project).toBe(f.basis.project);
+      expect(f.runtimeVerifications()).toBeGreaterThan(0);
+      yield* attached.api.close;
+      expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+    }).pipe(Effect.provide(AnalysisTestLayer)),
+  );
+
+  effectIt.effect.prop(
+    'refuses private output trees overlapping any host SDK before writes or runtime construction',
+    [
+      Schema.Literals(['serverDirectory', 'runtimeJavaHome', 'projectJavaHome']),
+      Schema.Literals(['same', 'child', 'parent']),
+    ],
+    ([key, relation]) =>
+      Effect.gen(function* () {
+        const f = yield* analysisFixture();
+        const q = javaRuntime.javaRuntimeQualification;
+        const candidate = {
+          serverDirectory: f.path.join(f.parent, 'server-sdk'),
+          serverTreeDigest: q.serverTreeDigest,
+          runtimeJavaHome: f.path.join(f.parent, 'runtime-sdk'),
+          runtimeSdkDigest: q.runtimeSdkDigest,
+          projectJavaHome: f.javaHome,
+          projectSdkDigest: q.projectSdkDigest,
+        };
+        const directory = candidate[key];
+        const privateDirectory =
+          relation === 'same'
+            ? directory
+            : relation === 'child'
+              ? f.path.join(directory, 'analysis')
+              : f.path.dirname(directory);
+        const before = yield* f.fs.readDirectory(f.parent);
+        const error = yield* Effect.flip(
+          makeJavaAnalysis({...f.options, candidate, privateDirectory}, () => Effect.void),
+        );
+        expect(error).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+        expect(f.runtimeSpy).not.toHaveBeenCalled();
+        expect(f.events).toEqual([]);
+        expect(yield* f.fs.readDirectory(f.parent)).toEqual(before);
+      }).pipe(Effect.provide(AnalysisTestLayer)),
+    {arbitrary: {runs: 18}},
+  );
+
+  effectIt.effect('registers the actual child before initialization and closes its private workspace explicitly', () =>
+    Effect.gen(function* () {
+      const f = yield* analysisFixture();
+      const before = JSON.stringify(f.options);
+      const original = yield* semanticTreeDigest(f.project);
+      const attached = yield* makeJavaAnalysis(f.options, pid =>
+        Effect.sync(() => {
+          expect(pid).toBe(123);
+          f.events.push('admit');
+        }),
+      );
+      expect(f.events.slice(0, 3)).toEqual(['spawn', 'admit', 'initialize']);
+      expect(attached.pid).toBe(123);
+      expect(yield* attached.api.available).toBe(true);
+      const receipt = yield* attached.api.close;
+      expect(receipt).toMatchObject({drained: true, stdioClosed: true, graceful: true});
+      expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+      expect(EffectArray.filter(f.events, event => event === 'finish')).toHaveLength(1);
+      expect(JSON.stringify(f.options)).toBe(before);
+      expect(yield* semanticTreeDigest(f.project)).toBe(original);
+    }).pipe(Effect.provide(AnalysisTestLayer)),
+  );
+
+  effectIt.effect('drains and removes an admitted private workspace when process registration is refused', () =>
+    Effect.gen(function* () {
+      const f = yield* analysisFixture();
+      const error = yield* Effect.flip(
+        makeJavaAnalysis(f.options, () => Effect.fail(LspFault.make({code: 'rejected'}))),
+      );
+      expect(error).toMatchObject({_tag: 'LspFault', code: 'rejected'});
+      expect(f.events).toEqual(['spawn', 'finish']);
+      expect(f.clientSpy).not.toHaveBeenCalled();
+      expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+    }).pipe(Effect.provide(AnalysisTestLayer)),
+  );
+
+  effectIt.effect('bounds stalled registration and completes cleanup before reporting startup timeout', () =>
+    Effect.gen(function* () {
+      const f = yield* analysisFixture();
+      const entered = yield* Deferred.make<void>();
+      const fiber = yield* Effect.forkChild(
+        makeJavaAnalysis(f.options, () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))),
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(120001);
+      expect(yield* Effect.flip(Fiber.join(fiber))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
+      expect(f.events).toEqual(['spawn', 'finish']);
+      expect(f.clientSpy).not.toHaveBeenCalled();
+      expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+    }).pipe(Effect.provide(AnalysisTestLayer)),
+  );
+
+  effectIt.effect('closes construction resources when initialization fails while the parent scope remains usable', () =>
+    Effect.gen(function* () {
+      const f = yield* analysisFixture();
+      f.control.failInitialization = true;
+      const result = yield* Effect.exit(makeJavaAnalysis(f.options, () => Effect.void));
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(f.events).toEqual(['spawn', 'initialize', 'finish']);
+      expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+      yield* f.fs.writeFileString(f.path.join(f.parent, 'parent-still-usable'), 'ok');
+    }).pipe(Effect.provide(AnalysisTestLayer)),
+  );
+
+  effectIt.effect.prop(
+    'rejects every caller-selected extra analysis option before SDK access, private writes or process registration',
+    [Schema.Literals(['build', 'preparation', 'jvmArguments', 'commands', 'bundle', 'policy', 'configuration'])],
+    ([key]) =>
+      Effect.gen(function* () {
+        const f = yield* analysisFixture();
+        const options = {...f.options, [key]: 'not-authority'};
+        const before = JSON.stringify(options);
+        let called = false;
+        const error = yield* Effect.flip(
+          makeJavaAnalysis(options, () =>
+            Effect.sync(() => {
+              called = true;
+            }),
+          ),
+        );
+        expect(error).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+        expect(f.runtimeSpy).not.toHaveBeenCalled();
+        expect(called).toBe(false);
+        expect(f.events).toEqual([]);
+        expect(JSON.stringify(options)).toBe(before);
+        expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
+      }).pipe(Effect.provide(AnalysisTestLayer)),
+    {arbitrary: {runs: 16}},
   );
 });
