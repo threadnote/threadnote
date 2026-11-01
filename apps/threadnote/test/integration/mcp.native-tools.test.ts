@@ -184,6 +184,7 @@ const CORE_TOOL_NAMES = [
   'recall_context',
   'inspect_code_graph',
   'analyze_code_graph',
+  'semantic_capabilities',
   'context_brief',
   'read_context',
   'list_context',
@@ -583,6 +584,36 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
+  it('returns bounded semantic discovery through the public MCP transport', async () => {
+    await withMcpClient(
+      async (client, fixture) => {
+        const result = await client.callTool({name: 'semantic_capabilities', arguments: {language: 'java'}});
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          version: 1,
+          scope: 'distribution-catalog',
+          status: 'ok',
+          requestedLanguage: 'java',
+          readiness: {installation: 'not-assessed', project: 'not-assessed', queries: 'public-integration-pending'},
+          providers: [
+            {
+              id: 'jdtls',
+              languages: ['java'],
+              productionQualified: false,
+              qualification: 'pending',
+              license: {disposition: 'release-gated'},
+            },
+          ],
+        });
+        expect(JSON.stringify(result.structuredContent)).not.toContain(fixture.home);
+        const deferred = await client.callTool({name: 'semantic_capabilities', arguments: {language: 'kotlin'}});
+        expect(deferred.structuredContent).toMatchObject({status: 'deferred', providers: []});
+        const unsupported = await client.callTool({name: 'semantic_capabilities', arguments: {language: 'ruby'}});
+        expect(unsupported.structuredContent).toMatchObject({status: 'unsupported', providers: []});
+      },
+      {toolset: 'core'},
+    );
+  });
   it('advertises only the core tools by default', async () => {
     await withMcpClient(
       async client => {
@@ -614,6 +645,17 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(37_200);
+        const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
+        const discoveryTool = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_capabilities'),
+        )!;
+        const existingCoreTools = EffectArray.filter(tools.tools, tool => tool.name !== 'semantic_capabilities');
+        // Preserve the existing catalog budget; bound the one new discovery definition separately.
+        expect(Buffer.byteLength(JSON.stringify(existingCoreTools))).toBeLessThanOrEqual(36000);
+        expect(Buffer.byteLength(JSON.stringify(discoveryTool))).toBeLessThanOrEqual(512);
+        expect(serializedToolsBytes).toBeLessThanOrEqual(36513); // Existing array + discovery + one comma.
+        // Keep the earlier complete-list ceiling while the component budgets identify each addition.
+        expect(serializedToolsBytes).toBeLessThanOrEqual(36_000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

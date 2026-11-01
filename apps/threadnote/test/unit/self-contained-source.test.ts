@@ -21,6 +21,7 @@ const workflowSources = EffectArray.map(
 );
 const semanticSources = EffectArray.map(
   [
+    'apps/threadnote/src/effect/semantic_cli.ts',
     'apps/threadnote/src/semantic/coordinator.ts',
     'apps/threadnote/src/semantic/provider.ts',
     'apps/threadnote/src/semantic/providers/python.ts',
@@ -131,6 +132,15 @@ describe('self-contained source Python boundary', () => {
     expect(hasUndeclaredPythonRuntimeReference(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
       false,
     );
+  });
+
+  it('consumes the public catalog language declaration only once and only at its owned path', () => {
+    const catalog = EffectOption.getOrUndefined(
+      EffectArray.findFirst(semanticSources, source => source.path === 'apps/threadnote/src/effect/semantic_cli.ts'),
+    )!;
+    expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/effect/other.ts', catalog.content)).toBe(true);
+    for (const extra of ["const extra = {languages: ['python']};", "const extra = {language: 'python'};"])
+      expect(hasUndeclaredPythonRuntimeReference(catalog.path, `${catalog.content}\n${extra}`)).toBe(true);
   });
 
   it('still rejects added interpreter commands in every semantic metadata source', () => {

@@ -7,7 +7,9 @@ const PYTHON_METADATA_SOURCES = new Set([
   'packages/graph/src/languages/tree_sitter_assets.ts',
   'packages/manager/src/memory_editor_languages.ts',
 ]);
+const SEMANTIC_PYTHON_CATALOG_SOURCE = 'apps/threadnote/src/effect/semantic_cli.ts';
 const SEMANTIC_PYTHON_METADATA_SOURCES = new Set([
+  SEMANTIC_PYTHON_CATALOG_SOURCE,
   'apps/threadnote/src/semantic/coordinator.ts',
   'apps/threadnote/src/semantic/provider.ts',
   'apps/threadnote/src/semantic/providers/python.ts',
@@ -40,14 +42,17 @@ export function hasUndeclaredPythonRuntimeReference(relativePath: string, conten
   if (SEMANTIC_PYTHON_METADATA_SOURCES.has(relativePath)) {
     // These modules describe a language served by pinned Node, not an interpreter dependency.
     // Consume only the existing protocol literals; added interpreter command literals still fail.
-    source = Effect.pipe(
-      source,
-      EffectString.replaceAll(/\b(?:language|l)\s*===\s*'python'/gu, ''),
-      EffectString.replaceAll(/\blanguage:\s*'python'/gu, ''),
-      EffectString.replace("'candidate' | 'python' |", ''),
-      EffectString.replace("  'python',", ''),
-      EffectString.replace("'Experimental Python static-environment profile'", ''),
-    );
+    source =
+      relativePath === SEMANTIC_PYTHON_CATALOG_SOURCE
+        ? EffectString.replace("languages: ['python']", '')(source)
+        : Effect.pipe(
+            source,
+            EffectString.replaceAll(/\b(?:language|l)\s*===\s*'python'/gu, ''),
+            EffectString.replaceAll(/\blanguage:\s*'python'/gu, ''),
+            EffectString.replace("'candidate' | 'python' |", ''),
+            EffectString.replace("  'python',", ''),
+            EffectString.replace("'Experimental Python static-environment profile'", ''),
+          );
     return /['"`][^'"`\r\n]*\bpython(?:\d+(?:\.\d+)*)?(?:\.exe)?(?=\s|['"`;&|<>])/iu.test(source);
   }
   if (relativePath === 'apps/threadnote/src/dev_skills/manifest.ts') {
