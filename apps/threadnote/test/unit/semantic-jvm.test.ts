@@ -41,14 +41,14 @@ const decodeXmlEntities = (text: string) => {
   return text.replace(/&(amp|lt|gt|quot|apos);/gu, (_, entity: string) => entities[entity]);
 };
 
-const fixture = (libraryName = 'dependency') =>
+const fixture = (libraryName = 'dependency', javaHomeName = 'jdk') =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-project-'}));
     const project = path.join(root, 'source');
     const source = path.join(project, 'src/main/java');
-    const javaHome = path.join(root, 'jdk');
+    const javaHome = path.join(root, javaHomeName);
     for (const directory of [source, javaHome, path.join(project, '.git'), path.join(project, '.settings')])
       yield* fs.makeDirectory(directory, {recursive: true});
     yield* fs.writeFileString(path.join(source, 'Main.java'), 'class Main {}\n');
@@ -981,8 +981,8 @@ describe('Java prepared project boundary', () => {
   });
 });
 
-const sessionFixture = Effect.gen(function* () {
-  const f = yield* fixture();
+const makeSessionFixture = Effect.fn('test.javaSessionFixture')(function* (javaHomeName = 'jdk') {
+  const f = yield* fixture('dependency', javaHomeName);
   const prepared = yield* makeJavaProject(f.options);
   const bundle = yield* materializeJavaDiagnosticBundle(prepared.directory);
   const diagnosticModel = yield* makeJavaDiagnosticModel({
@@ -1118,9 +1118,23 @@ const sessionFixture = Effect.gen(function* () {
     });
   return {...f, prepared, basis, uri, text, create};
 });
+const sessionFixture = makeSessionFixture();
 const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
 
 describe('Java session source targets', () => {
+  effectIt.effect('admits the same prepared SDK with a tilde in its physical home and refuses a different SDK', () =>
+    Effect.gen(function* () {
+      const f = yield* makeSessionFixture('jdk~');
+      const {session, current, calls, options} = yield* f.create([]);
+      expect(options.diagnosticModel.javaHomeUri).toContain('/jdk~/');
+      expect(yield* session.available).toBe(true);
+      expect(current.uri).toBe(f.uri);
+      expect(EffectArray.some(calls, call => call.method === 'initialize')).toBe(true);
+      expect(
+        (yield* Effect.exit(f.create([], undefined, undefined, {projectJavaHome: f.root, verify: Effect.void})))._tag,
+      ).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
   effectIt.effect('keeps one admitted diagnostic model after caller-owned model replacement or nested changes', () =>
     Effect.gen(function* () {
       const f = yield* sessionFixture;
@@ -1446,6 +1460,20 @@ describe('Java session source targets', () => {
       const sourceUri = yield* makeJavaSourceUri([f.source]);
       const canonical = (yield* f.path.toFileUrl(f.path.join(f.source, 'Main.java'))).href;
       expect(yield* sourceUri((yield* f.path.toFileUrl(f.path.join(alias, 'Main.java'))).href)).toBe(canonical);
+      expect(yield* sourceUri(canonical)).toBe(canonical);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('maps host escaped tildes to Java spelling through the same physical source identity checks', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const directory = f.path.join(f.source, 'Folder~');
+      yield* f.fs.makeDirectory(directory);
+      const file = f.path.join(directory, 'Main.java');
+      yield* f.fs.writeFileString(file, 'class Main {}\n');
+      const sourceUri = yield* makeJavaSourceUri([directory]);
+      const encoded = (yield* f.path.toFileUrl(file)).href;
+      const canonical = (yield* f.path.toFileUrl(f.source)).href + '/Folder~/Main.java';
+      expect(yield* sourceUri(encoded)).toBe(canonical);
       expect(yield* sourceUri(canonical)).toBe(canonical);
     }).pipe(Effect.provide(BunServices.layer)),
   );

@@ -145,6 +145,11 @@ export function captureJavaSnapshotModel(model: JavaSnapshotModel): JavaSnapshot
     ...(model.projectionDigest === undefined ? {} : {projectionDigest: model.projectionDigest}),
   });
 }
+
+/** Java Path.toUri retains literal tildes; Bun's physical file URL conversion percent-encodes them. */
+export function javaFileUri(url: URL): string {
+  return EffectString.replaceAll('%7E', '~')(url.href);
+}
 /** Match Java Path.toUri: directory identities end in '/', while classpath artifact identities do not. */
 export const makeJavaSnapshotModel = Effect.fn('semantic.makeJavaSnapshotModel')(function* (options: {
   readonly project: string;
@@ -166,14 +171,12 @@ export const makeJavaSnapshotModel = Effect.fn('semantic.makeJavaSnapshotModel')
   const directoryUri = (directory: string) =>
     path
       .toFileUrl(EffectString.endsWith(path.sep)(directory) ? directory : directory + path.sep)
-      .pipe(Effect.map(uri => uri.href));
+      .pipe(Effect.map(javaFileUri));
   return captureJavaSnapshotModel({
     projectUri: yield* directoryUri(selected.project),
     javaHomeUri: yield* directoryUri(selected.javaHome),
     sourceRoots: yield* Effect.forEach(selected.sourceRoots, directoryUri),
-    libraries: yield* Effect.forEach(selected.libraries, file =>
-      path.toFileUrl(file).pipe(Effect.map(uri => uri.href)),
-    ),
+    libraries: yield* Effect.forEach(selected.libraries, file => path.toFileUrl(file).pipe(Effect.map(javaFileUri))),
     ...(compilerOptions === undefined ? {} : {compilerOptions}),
     ...(projectionDigest === undefined ? {} : {projectionDigest}),
   });
