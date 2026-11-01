@@ -150,7 +150,7 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
-  it('does not import or require Node built-ins in production source', async () => {
+  it('confines Node built-in imports to the declared stdio boundary', async () => {
     const importShapes = EffectArray.join(
       [
         "import '../helpers/node-fs.js';",
@@ -177,6 +177,7 @@ describe('Effect architecture boundaries', () => {
 
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
+      const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
       expect(
         EffectArrayPipe(importedModuleSpecifiers(path, source), __effectArrayValues =>
           EffectArray.filter(
@@ -185,8 +186,8 @@ describe('Effect architecture boundaries', () => {
               __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
           ),
         ),
-        relative(repoRoot, path),
-      ).toEqual([]);
+        relativePath,
+      ).toEqual(relativePath === 'apps/threadnote/src/semantic/lsp_transport.ts' ? ['node:child_process'] : []);
     }
   });
 
@@ -253,7 +254,7 @@ describe('Effect architecture boundaries', () => {
     }
   });
 
-  it('keeps runtime globals inside the SystemInfo, process-adapter, and executable boundaries', async () => {
+  it('keeps runtime globals inside declared adapters and exact semantic boundaries', async () => {
     const allowed = new Set([
       'apps/threadnote/src/effect/ai/isolated-local-model-runtime.ts',
       'apps/threadnote/src/effect/mcp_broker_process.ts',
@@ -261,12 +262,32 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/standalone.ts',
       'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
+    const semanticExpressions = new Map([
+      // The POSIX transport/admission adapters own these process-group probes and signals.
+      [
+        'apps/threadnote/src/semantic/lsp_transport.ts',
+        ["process.platform === 'win32'", 'process.kill(-child.pid, 0);', 'process.kill(-child!.pid!, signal);'],
+      ],
+      ['apps/threadnote/src/semantic/coordinator.ts', ['process.kill(-pid, 0);']],
+      // Qualification requires the exact host OS/architecture before inspecting pinned SDKs.
+      ['apps/threadnote/src/semantic/providers/java_runtime.ts', ['`${process.platform}-${process.arch}`']],
+      // These expressions are inside the generated external Node metadata responder.
+      [
+        'apps/threadnote/src/semantic/providers/python_project.ts',
+        [
+          'const a=process.argv.slice(2), m=${JSON.stringify(metadata)};',
+          'process.stdout.write(JSON.stringify(value));',
+        ],
+      ],
+    ]);
     for (const path of await sourceFiles()) {
-      const relativePath = relative(repoRoot, path);
+      const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
       if (allowed.has(relativePath)) {
         continue;
       }
-      const source = await readFile(path, 'utf8');
+      let source = await readFile(path, 'utf8');
+      for (const expression of semanticExpressions.get(relativePath) ?? [])
+        source = Effect.pipe(source, EffectString.replace(expression, ''));
       expect(source, relativePath).not.toMatch(
         /(?<![$\w])process\.(?:argv|cwd|env|execPath|exitCode|getuid|kill|pid|platform|stdin|stdout)/,
       );
