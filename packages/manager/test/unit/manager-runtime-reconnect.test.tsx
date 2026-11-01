@@ -300,12 +300,80 @@ it('ignores a pre-loss runtime failure after the current recovery read succeeds'
   expect(reads).toHaveLength(2);
   await act(async () => reads[1].resolve(memory('Fresh recovered body')));
   await flush();
+  expect(host.querySelector('.toast')?.textContent).toBe('Refreshed');
   await act(async () => oldState.resolve(json({error: 'Old runtime failure'}, 503)));
   await flush();
   expect(reads).toHaveLength(2);
   expect(host.textContent).toContain('Fresh recovered body');
   expect(host.textContent).not.toContain('Manager disconnected');
+  expect(host.querySelector('.toast')?.textContent).toBe('Refreshed');
 });
+
+it.each(['success', 'failure'] as const)(
+  'keeps current runtime failure and independent library %s when an obsolete runtime succeeds',
+  async libraryOutcome => {
+    const socket = await mountAndSelect();
+    await act(async () => reads[0].resolve(memory('Original readable body')));
+    await flush();
+    const originalFetch = globalThis.fetch;
+    const oldState = deferred<Response>();
+    let currentRefresh = false;
+    const currentTree = trees();
+    currentTree.tree.children = [
+      selected,
+      {...other, name: 'Current library entry', metadata: {...other.metadata!, topic: 'Current library entry'}},
+    ];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname;
+      if (pathname === '/api/state')
+        return currentRefresh ? json({error: 'Current runtime failure'}, 503) : oldState.promise;
+      if (pathname === '/api/tree' && currentRefresh)
+        return libraryOutcome === 'success' ? json(currentTree) : json({error: 'Current library failure'}, 503);
+      return originalFetch(input);
+    });
+    await act(async () => button('Refresh manager').click());
+    await flush();
+    currentRefresh = true;
+    await loseAndReconnect(socket);
+    expect(host.textContent).toContain('Manager disconnected');
+    expect(host.textContent).not.toContain('Original readable body');
+    if (libraryOutcome === 'success') {
+      expect(host.querySelector(`button[title="${other.uri}"]`)?.textContent).toContain('Current library entry');
+      expect(host.textContent).not.toContain('Memory library unavailable');
+      expect(reads).toHaveLength(2);
+      await act(async () => reads[1].resolve(memory('Fresh body waits for runtime')));
+      await flush();
+      expect(host.textContent).not.toContain('Fresh body waits for runtime');
+    } else {
+      expect(host.textContent).toContain('Memory library unavailable: Current library failure');
+      expect(reads).toHaveLength(1);
+    }
+    const currentResult = host.querySelector('.toast')?.textContent;
+    expect(currentResult).toContain('Refresh incomplete');
+    expect(currentResult).toContain('Runtime: Current runtime failure');
+    if (libraryOutcome === 'failure') expect(currentResult).toContain('Memory library: Current library failure');
+    const currentSocketCount = FakeManagerSocket.instances.length;
+    expect(host.querySelector('.workspace-footer-meta')?.textContent).toContain('vfixture');
+    await act(async () =>
+      oldState.resolve(
+        json({
+          agents: [],
+          config: {user: 'test', account: 'obsolete-account', agentContextHome: '/tmp/threadnote-reconnect'},
+          autoUpdate: {effectivePolicy: 'notify'},
+          updateAvailable: false,
+          version: 'obsolete-runtime',
+        }),
+      ),
+    );
+    await flush();
+    expect(FakeManagerSocket.instances).toHaveLength(currentSocketCount);
+    expect(host.querySelector('.workspace-footer-meta')?.textContent).toContain('vfixture');
+    expect(host.textContent).not.toContain('obsolete-runtime');
+    expect(host.textContent).toContain('Manager disconnected');
+    expect(host.textContent).not.toContain('Original readable body');
+    expect(host.querySelector('.toast')?.textContent).toBe(currentResult);
+  },
+);
 
 it('rejects a pre-loss library response even before the recovery refresh starts', async () => {
   const socket = await mountAndSelect();
