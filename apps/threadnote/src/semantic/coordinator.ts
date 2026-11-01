@@ -35,6 +35,9 @@ import {
 } from './provider.js';
 import {makePythonSession} from './providers/python.js';
 import {makePythonProject, PythonEnvironment} from './providers/python_project.js';
+import {makeJavaAnalysis, verifyJavaOutputDirectories} from './providers/java.js';
+import {JavaEnvironment} from './providers/java_project.js';
+import {JavaRuntimeCandidate, javaRuntimeQualification, makeJavaRuntime} from './providers/java_runtime.js';
 import {makeGoProject, makeGoSession, goProviderVersion, goExecutableDigest, goToolDigest} from './providers/go.js';
 import {
   makeRustProject,
@@ -85,7 +88,58 @@ export interface PythonHostCandidate {
   readonly serverTreeDigest: string;
   readonly environments: readonly PythonEnvironment[];
 }
-export const semanticCatalogKey = (options: Pick<SemanticCoordinatorOptions, 'candidate' | 'python' | 'go' | 'rust'>) =>
+const JavaHostCandidate = Schema.Struct({
+  runtimeCandidate: JavaRuntimeCandidate,
+  environments: Schema.Array(JavaEnvironment).check(Schema.isBetweenLength(1, 16)),
+});
+export type JavaHostCandidate = typeof JavaHostCandidate.Type;
+export const verifyJavaSemanticCandidate = Effect.fn('semantic.verifyJavaCandidate')(function* (
+  candidate: JavaHostCandidate | undefined,
+) {
+  if (!candidate) return yield* makeJavaRuntime(undefined).pipe(Effect.asVoid);
+  const selected = yield* Schema.decodeEffect(JavaHostCandidate, {onExcessProperty: 'error'})(candidate).pipe(
+    Effect.mapError(() => LspFault.make({code: 'prerequisite'})),
+  );
+  if (
+    new Set(EffectArray.map(selected.environments, environment => environment.id)).size !== selected.environments.length
+  )
+    return yield* LspFault.make({code: 'prerequisite'});
+  yield* makeJavaRuntime(selected.runtimeCandidate);
+});
+const verifyJavaCoordinatorDirectory = Effect.fn('semantic.verifyJavaCoordinatorDirectory')(function* (
+  candidate: JavaHostCandidate,
+  home: string,
+  worktreeUri: string | undefined,
+) {
+  if (!Schema.is(FileUri)(worktreeUri)) return yield* LspFault.make({code: 'prerequisite'});
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const worktree = yield* path.fromFileUrl(new URL(worktreeUri));
+  if ((yield* fs.realPath(worktree)) !== worktree || (yield* fs.stat(worktree)).type !== 'Directory')
+    return yield* LspFault.make({code: 'prerequisite'});
+  const directory = path.join(home, 'semantic');
+  if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+    return yield* LspFault.make({code: 'prerequisite'});
+  if (yield* fs.exists(directory)) {
+    const info = yield* fs.stat(directory);
+    if ((yield* fs.realPath(directory)) !== directory || info.type !== 'Directory' || info.mode & 0o077)
+      return yield* LspFault.make({code: 'prerequisite'});
+  }
+  // Qualify canonical SDK roots before using their spelling to protect any shared write.
+  yield* verifyJavaSemanticCandidate(candidate);
+  yield* verifyJavaOutputDirectories(
+    [directory],
+    [
+      worktree,
+      candidate.runtimeCandidate.serverDirectory,
+      candidate.runtimeCandidate.runtimeJavaHome,
+      candidate.runtimeCandidate.projectJavaHome,
+    ],
+  );
+});
+export const semanticCatalogKey = (
+  options: Pick<SemanticCoordinatorOptions, 'candidate' | 'python' | 'go' | 'rust' | 'java'>,
+) =>
   JSON.stringify([
     options.candidate ? semanticCandidateKey(options.candidate) : null,
     options.python
@@ -106,6 +160,20 @@ export const semanticCatalogKey = (options: Pick<SemanticCoordinatorOptions, 'ca
         ? [candidate.executable, candidate.executableDigest, candidate.sdkDirectory, candidate.sdkTreeDigest]
         : null,
     ),
+    options.java
+      ? [
+          options.java.runtimeCandidate.serverDirectory,
+          options.java.runtimeCandidate.serverTreeDigest,
+          options.java.runtimeCandidate.runtimeJavaHome,
+          options.java.runtimeCandidate.runtimeSdkDigest,
+          options.java.runtimeCandidate.projectJavaHome,
+          options.java.runtimeCandidate.projectSdkDigest,
+          EffectArray.map(
+            [...options.java.environments].sort((a, b) => EffectString.localeCompare(b.id)(a.id)),
+            environment => [environment.id, environment.metadataFile, environment.metadataDigest],
+          ),
+        ]
+      : null,
   ]);
 export interface SemanticCoordinatorOptions {
   readonly enabled: boolean;
@@ -114,6 +182,9 @@ export interface SemanticCoordinatorOptions {
   readonly python?: PythonHostCandidate;
   readonly go?: SdkHostCandidate;
   readonly rust?: SdkHostCandidate;
+  readonly java?: JavaHostCandidate;
+  /** Java must bind its protected worktree before allocating shared coordinator state. */
+  readonly worktree?: string;
 }
 interface AnalysisSession {
   readonly scope: Scope.Closeable;
@@ -217,14 +288,16 @@ export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCan
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
   options: SemanticCoordinatorOptions,
 ) {
-  if (!options.enabled) return yield* LspFault.make({code: 'prerequisite'});
+  const catalog = structuredClone(options);
+  if (!catalog.enabled) return yield* LspFault.make({code: 'prerequisite'});
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   const command = yield* CommandExecutor;
   const crypto = yield* Crypto.Crypto;
-  const home = yield* fs.realPath(options.dataHome);
-  if (home !== path.resolve(options.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
+  const home = yield* fs.realPath(catalog.dataHome);
+  if (home !== path.resolve(catalog.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
+  if (catalog.java) yield* verifyJavaCoordinatorDirectory(catalog.java, home, catalog.worktree);
   const admission = yield* makeSemanticAdmission({directory: path.join(home, 'semantic', 'admission-v1')});
   const startup = yield* Semaphore.make(1);
   const sessions = new Map<string, AnalysisSession>();
@@ -235,7 +308,6 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     if (session) session.faulted = true;
     causes.set(id, reason);
   };
-  const catalog = structuredClone(options);
   const verifyNodeCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate) =>
     Effect.gen(function* () {
       if (
@@ -285,23 +357,31 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
       }
     });
-  // Full SDK hashing has a fixed, larger per-file allocation; serialize it across this worker's sessions.
+  // Serialize coordinator candidate preflights; providers own their per-operation publication guards.
   const sdkVerification = yield* Semaphore.make(1);
-  const verifyCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate, id: string) =>
-    'runtime' in candidate
-      ? verifyNodeCandidate(candidate)
-      : id === 'gopls' || id === 'rust-analyzer'
-        ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
-        : Effect.fail(LspFault.make({code: 'prerequisite'}));
+  const verifyCandidate = (
+    candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate | JavaHostCandidate,
+    id: string,
+  ) =>
+    'runtimeCandidate' in candidate
+      ? id === 'jdtls'
+        ? sdkVerification.withPermit(verifyJavaSemanticCandidate(candidate))
+        : Effect.fail(LspFault.make({code: 'prerequisite'}))
+      : 'runtime' in candidate
+        ? verifyNodeCandidate(candidate)
+        : id === 'gopls' || id === 'rust-analyzer'
+          ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
+          : Effect.fail(LspFault.make({code: 'prerequisite'}));
   const configured = [
     ...(catalog.candidate ? [{candidate: catalog.candidate, id: 'typescript-language-server', version: '6.0.2'}] : []),
     ...(catalog.python ? [{candidate: catalog.python, id: 'basedpyright', version: '1.40.2'}] : []),
     ...(catalog.go ? [{candidate: catalog.go, id: 'gopls', version: goProviderVersion}] : []),
     ...(catalog.rust ? [{candidate: catalog.rust, id: 'rust-analyzer', version: rustProviderVersion}] : []),
+    ...(catalog.java ? [{candidate: catalog.java, id: 'jdtls', version: javaRuntimeQualification.serverVersion}] : []),
   ];
   if (!configured.length) return yield* LspFault.make({code: 'prerequisite'});
   for (const {candidate, id} of configured) {
-    yield* verifyCandidate(candidate, id);
+    if (id !== 'jdtls') yield* verifyCandidate(candidate, id);
     if (!('runtime' in candidate)) continue;
     const version = yield* command.execute(candidate.runtime, ['--version'], {
       env: {},
@@ -337,7 +417,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               ? 'gopls'
               : language === 'rust'
                 ? 'rust-analyzer'
-                : 'typescript-language-server';
+                : language === 'java'
+                  ? 'jdtls'
+                  : 'typescript-language-server';
         const provider = EffectOption.getOrUndefined(
           EffectArray.findFirst(configured, entry => entry.id === providerId),
         );
@@ -345,29 +427,43 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         if (!candidate && (providerId === 'gopls' || providerId === 'rust-analyzer'))
           return yield* nativeSetupFault(providerId, 'missing', 'provider');
         const selected =
-          language === 'python'
+          language === 'python' || language === 'java'
             ? (effectOptionalValue =>
                 effectOptionalValue == null
                   ? undefined
                   : EffectOption.getOrUndefined(EffectArray.findFirst(effectOptionalValue, e => e.id === environment)))(
-                catalog.python?.environments,
+                language === 'python' ? catalog.python?.environments : catalog.java?.environments,
               )
             : undefined;
         if (
           !provider ||
           !candidate ||
           input.provider.id !== providerId ||
-          (language === 'python' ? !selected : environment !== undefined)
+          (language === 'python' || language === 'java' ? !selected : environment !== undefined)
         )
           return yield* LspFault.make({code: 'prerequisite'});
         const toolchain = sha256HexSync(
-          JSON.stringify([
-            'runtime' in candidate ? candidate.runtimeDigest : candidate.executableDigest,
-            'runtime' in candidate ? candidate.serverTreeDigest : candidate.sdkTreeDigest,
-            'sdkTreeDigest' in candidate ? candidate.sdkTreeDigest : selected,
-          ]),
+          JSON.stringify(
+            'runtimeCandidate' in candidate
+              ? [
+                  candidate.runtimeCandidate.serverDirectory,
+                  candidate.runtimeCandidate.serverTreeDigest,
+                  candidate.runtimeCandidate.runtimeJavaHome,
+                  candidate.runtimeCandidate.runtimeSdkDigest,
+                  candidate.runtimeCandidate.projectJavaHome,
+                  candidate.runtimeCandidate.projectSdkDigest,
+                  selected,
+                ]
+              : [
+                  'runtime' in candidate ? candidate.runtimeDigest : candidate.executableDigest,
+                  'runtime' in candidate ? candidate.serverTreeDigest : candidate.sdkTreeDigest,
+                  'sdkTreeDigest' in candidate ? candidate.sdkTreeDigest : selected,
+                ],
+          ),
         );
         let fixed = {...input, toolchain};
+        if (language === 'java' && fixed.worktree !== catalog.worktree)
+          return yield* LspFault.make({code: 'prerequisite'});
         const project = yield* path.fromFileUrl(new URL(fixed.project));
         const worktree = yield* path.fromFileUrl(new URL(fixed.worktree));
         const file = yield* path.fromFileUrl(new URL(fixed.uri));
@@ -421,6 +517,25 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                     }).pipe(Effect.timeout(10000), Effect.provideService(CommandExecutor, command))
                 : undefined;
             const projectOptions = pythonProject ?? nativeProject;
+            const javaDirectory =
+              'runtimeCandidate' in candidate ? path.join(home, 'semantic', 'environments') : undefined;
+            if (javaDirectory && 'runtimeCandidate' in candidate) {
+              yield* verifyJavaOutputDirectories(
+                [javaDirectory],
+                [
+                  worktree,
+                  candidate.runtimeCandidate.serverDirectory,
+                  candidate.runtimeCandidate.runtimeJavaHome,
+                  candidate.runtimeCandidate.projectJavaHome,
+                ],
+              );
+              const parent = path.dirname(javaDirectory);
+              if ((yield* fs.realPath(parent)) !== parent || (yield* fs.stat(parent)).type !== 'Directory')
+                return yield* LspFault.make({code: 'prerequisite'});
+              if (!(yield* fs.exists(javaDirectory))) yield* fs.makeDirectory(javaDirectory, {mode: 0o700});
+              if ((yield* fs.realPath(javaDirectory)) !== javaDirectory || (yield* fs.stat(javaDirectory)).mode & 0o077)
+                return yield* LspFault.make({code: 'prerequisite'});
+            }
             const reservation = yield* admission.acquire(
               sha256HexSync(fixed.repository + '\0' + fixed.worktree),
               10000,
@@ -435,11 +550,11 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               projectEpoch: reservation.generation,
             };
             const wireState: {
-              current?: LspWire;
+              finish?: LspWire['finish'];
             } = {};
             yield* Effect.addFinalizer(() =>
-              wireState.current
-                ? wireState.current.finish.pipe(
+              wireState.finish
+                ? wireState.finish.pipe(
                     Effect.flatMap(receipt => reservation.release(receipt.drained && receipt.stdioClosed)),
                     Effect.ignore,
                   )
@@ -451,77 +566,95 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               Effect.provideService(Path.Path, path),
               Effect.provideService(Crypto.Crypto, crypto),
             );
-            const wire = yield* spawnLspWire({
-              command: 'runtime' in candidate ? candidate.runtime : candidate.executable,
-              args:
-                'runtime' in candidate
-                  ? [
-                      path.join(
-                        candidate.serverDirectory,
-                        language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs',
-                      ),
-                      '--stdio',
-                    ]
-                  : [],
-              cwd: project,
-              // No repository PATH, NODE_OPTIONS, Python startup hooks, plugins or inherited execution settings.
-              environment: nativeProject?.environment ?? {},
-            });
-            wireState.current = wire;
-            yield* reservation.bindProvider(wire.pid);
-            const notifications = makeSemanticNotifications();
-            const client = yield* makeLspClient(wire, notifications.receive, projectOptions?.settings);
             let api: SemanticSession;
-            if (pythonProject && 'runtime' in candidate) {
-              api = yield* makePythonSession(client, {
-                basis: fixed,
-                notifications,
-                roots: [...pythonProject.roots, candidate.serverDirectory],
-                profile: pythonProject.profile,
-                environmentReady: pythonProject.ready,
-                startupMilliseconds: 10000,
-              });
-            } else if (nativeProject) {
-              api = yield* (language === 'go' ? makeGoSession : makeRustSession)(client, {
-                basis: fixed,
-                notifications,
-                roots: nativeProject.roots,
-                profile: nativeProject.profile,
-                ready: nativeProject.ready,
-                initializationOptions: nativeProject.initializationOptions,
-                startupMilliseconds: 20000,
-              }).pipe(
-                Effect.mapError(error =>
-                  Schema.is(SemanticSessionFault)(error) && error.reason === 'provider'
-                    ? nativeSetupFault(language === 'go' ? 'gopls' : 'rust-analyzer', 'incompatible', 'provider')
-                    : error,
-                ),
+            if ('runtimeCandidate' in candidate) {
+              if (!selected || !javaDirectory) return yield* LspFault.make({code: 'prerequisite'});
+              const java = yield* makeJavaAnalysis(
+                {
+                  basis: fixed,
+                  candidate: candidate.runtimeCandidate,
+                  environment: selected,
+                  privateDirectory: javaDirectory,
+                },
+                (pid, finish) => {
+                  wireState.finish = finish;
+                  return reservation.bindProvider(pid);
+                },
+                () => session?.closing !== true,
               );
+              api = java.api;
             } else {
-              if (!('runtime' in candidate) || !('sdkDirectory' in candidate))
-                return yield* LspFault.make({code: 'prerequisite'});
-              const ts = yield* makeTypeScriptSession(client, {
-                basis: fixed,
-                tsserver: path.join(candidate.sdkDirectory, 'lib/tsserver.js'),
-                maxMemoryMb: 512,
-                startupMilliseconds: 10000,
+              const wire = yield* spawnLspWire({
+                command: 'runtime' in candidate ? candidate.runtime : candidate.executable,
+                args:
+                  'runtime' in candidate
+                    ? [
+                        path.join(
+                          candidate.serverDirectory,
+                          language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs',
+                        ),
+                        '--stdio',
+                      ]
+                    : [],
+                cwd: project,
+                // No repository PATH, NODE_OPTIONS, Python startup hooks, plugins or inherited execution settings.
+                environment: nativeProject?.environment ?? {},
               });
-              api = {
-                ...ts,
-                query: (operation, observation, position, milliseconds) =>
-                  isCoreSemanticQuery(operation)
-                    ? ts.query(operation, observation, position, milliseconds)
-                    : Effect.succeed<QueryOutcome>({
-                        version: 1,
-                        status: 'unsupported',
-                        reason: 'Optional operation is not qualified for the TypeScript profile',
-                        evidence: null,
-                      }),
-                upsert: (o, t, l, ms) =>
-                  l === 'python' || l === 'go' || l === 'rust'
-                    ? Effect.fail(LspFault.make({code: 'rejected'}))
-                    : ts.upsert(o, t, l, ms),
-              };
+              wireState.finish = wire.finish;
+              yield* reservation.bindProvider(wire.pid);
+              const notifications = makeSemanticNotifications();
+              const client = yield* makeLspClient(wire, notifications.receive, projectOptions?.settings);
+              if (pythonProject && 'runtime' in candidate) {
+                api = yield* makePythonSession(client, {
+                  basis: fixed,
+                  notifications,
+                  roots: [...pythonProject.roots, candidate.serverDirectory],
+                  profile: pythonProject.profile,
+                  environmentReady: pythonProject.ready,
+                  startupMilliseconds: 10000,
+                });
+              } else if (nativeProject) {
+                api = yield* (language === 'go' ? makeGoSession : makeRustSession)(client, {
+                  basis: fixed,
+                  notifications,
+                  roots: nativeProject.roots,
+                  profile: nativeProject.profile,
+                  ready: nativeProject.ready,
+                  initializationOptions: nativeProject.initializationOptions,
+                  startupMilliseconds: 20000,
+                }).pipe(
+                  Effect.mapError(error =>
+                    Schema.is(SemanticSessionFault)(error) && error.reason === 'provider'
+                      ? nativeSetupFault(language === 'go' ? 'gopls' : 'rust-analyzer', 'incompatible', 'provider')
+                      : error,
+                  ),
+                );
+              } else {
+                if (!('runtime' in candidate) || !('sdkDirectory' in candidate))
+                  return yield* LspFault.make({code: 'prerequisite'});
+                const ts = yield* makeTypeScriptSession(client, {
+                  basis: fixed,
+                  tsserver: path.join(candidate.sdkDirectory, 'lib/tsserver.js'),
+                  maxMemoryMb: 512,
+                  startupMilliseconds: 10000,
+                });
+                api = {
+                  ...ts,
+                  query: (operation, observation, position, milliseconds) =>
+                    isCoreSemanticQuery(operation)
+                      ? ts.query(operation, observation, position, milliseconds)
+                      : Effect.succeed<QueryOutcome>({
+                          version: 1,
+                          status: 'unsupported',
+                          reason: 'Optional operation is not qualified for the TypeScript profile',
+                          evidence: null,
+                        }),
+                  upsert: (o, t, l, ms) =>
+                    l === 'python' || l === 'go' || l === 'rust' || l === 'java'
+                      ? Effect.fail(LspFault.make({code: 'rejected'}))
+                      : ts.upsert(o, t, l, ms),
+                };
+              }
             }
             fixed = yield* api.upsert(fixed, text, language, 10000);
             yield* reservation.finishImport;
@@ -612,6 +745,18 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             if (before !== session.diskBasis) {
               yield* retire(id, session);
               return yield* LspFault.make({code: 'rejected'});
+            }
+            // Java owns complete publication fences, including this host's closing predicate.
+            // Returning its committed diagnostic delta must not add another asynchronous rejection.
+            if (session.basis.provider.id === 'jdtls') {
+              session.lastUsed = yield* Clock.currentTimeMillis;
+              return yield* f(session.api).pipe(
+                Effect.onError(() =>
+                  session.api.available.pipe(
+                    Effect.flatMap(ready => (ready ? Effect.void : retire(id, session).pipe(Effect.ignore))),
+                  ),
+                ),
+              );
             }
             yield* session.verify.pipe(Effect.onError(() => retire(id, session).pipe(Effect.ignore)));
             session.lastUsed = yield* Clock.currentTimeMillis;
@@ -1028,6 +1173,7 @@ const Bootstrap = Schema.Struct({
   candidate: Schema.optional(HostCandidate),
   go: Schema.optional(SdkCandidate),
   rust: Schema.optional(SdkCandidate),
+  java: Schema.optional(JavaHostCandidate),
   python: Schema.optional(
     Schema.Struct({
       runtime: Schema.String,
@@ -1046,15 +1192,17 @@ export interface SemanticEndpointLaunch extends SemanticCoordinatorOptions {
 }
 /** Starts one runtime/worktree coordinator lazily. Capabilities/source text never enter process arguments. */
 export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(function* (options: SemanticEndpointLaunch) {
-  if (!options.enabled || !Schema.is(Digest)(options.runtimeIdentity) || !Schema.is(FileUri)(options.worktree))
+  const launch = structuredClone(options);
+  if (!launch.enabled || !Schema.is(Digest)(launch.runtimeIdentity) || !Schema.is(FileUri)(launch.worktree))
     return yield* LspFault.make({code: 'prerequisite'});
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const crypto = yield* Crypto.Crypto;
-  const home = yield* fs.realPath(options.dataHome);
-  if (home !== path.resolve(options.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
-  const key = sha256HexSync(JSON.stringify([home, options.worktree, options.runtimeIdentity]));
+  const home = yield* fs.realPath(launch.dataHome);
+  if (home !== path.resolve(launch.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
+  if (launch.java) yield* verifyJavaCoordinatorDirectory(launch.java, home, launch.worktree);
+  const key = sha256HexSync(JSON.stringify([home, launch.worktree, launch.runtimeIdentity]));
   const directory = path.join(home, 'semantic', EffectString.slice(0, 20)(key));
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   if ((yield* fs.realPath(directory)) !== directory || (yield* fs.stat(directory)).mode & 0o077)
@@ -1077,25 +1225,28 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
       if (existing) {
         bootstrap = yield* readSemanticBootstrap(bootstrapFile);
         if (
-          bootstrap.worktree !== options.worktree ||
-          bootstrap.runtimeIdentity !== options.runtimeIdentity ||
+          bootstrap.worktree !== launch.worktree ||
+          bootstrap.runtimeIdentity !== launch.runtimeIdentity ||
           bootstrap.dataHome !== home ||
-          semanticCatalogKey(bootstrap) !== semanticCatalogKey(options)
+          semanticCatalogKey(bootstrap) !== semanticCatalogKey(launch)
         )
           return yield* LspFault.make({code: 'prerequisite'});
       } else {
         bootstrap = {
           version: 1,
-          runtimeIdentity: options.runtimeIdentity,
-          worktree: options.worktree,
+          runtimeIdentity: launch.runtimeIdentity,
+          worktree: launch.worktree,
           token: sha256HexSync(yield* crypto.randomBytes(32)),
           dataHome: home,
-          ...(options.candidate ? {candidate: options.candidate} : {}),
-          ...(options.python ? {python: options.python} : {}),
-          ...(options.go ? {go: options.go} : {}),
-          ...(options.rust ? {rust: options.rust} : {}),
+          ...(launch.candidate ? {candidate: launch.candidate} : {}),
+          ...(launch.python ? {python: launch.python} : {}),
+          ...(launch.go ? {go: launch.go} : {}),
+          ...(launch.rust ? {rust: launch.rust} : {}),
+          ...(launch.java ? {java: launch.java} : {}),
         };
       }
+      const serialized = JSON.stringify(bootstrap);
+      if (new TextEncoder().encode(serialized).length > 16 * 1024) return yield* LspFault.make({code: 'capacity'});
       const probe = requestSemanticEndpoint(socket, bootstrap.token, {operation: 'status'}).pipe(
         Effect.timeoutOption(250),
         Effect.map(
@@ -1110,9 +1261,9 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
       );
       if (!(yield* probe)) {
         // Surface native setup causes in the parent before publishing bootstrap or waiting for a worker that cannot start.
-        if (options.go) yield* verifyNativeSemanticCandidate(options.go, 'gopls');
-        if (options.rust) yield* verifyNativeSemanticCandidate(options.rust, 'rust-analyzer');
-        if (!existing) yield* fs.writeFileString(bootstrapFile, JSON.stringify(bootstrap), {flag: 'wx', mode: 0o600});
+        if (launch.go) yield* verifyNativeSemanticCandidate(launch.go, 'gopls');
+        if (launch.rust) yield* verifyNativeSemanticCandidate(launch.rust, 'rust-analyzer');
+        if (!existing) yield* fs.writeFileString(bootstrapFile, serialized, {flag: 'wx', mode: 0o600});
         const name = (effectOptionalValue =>
           effectOptionalValue == null ? undefined : EffectString.toLowerCase(effectOptionalValue))(
           EffectString.split('/')(EffectString.replaceAll('\\', '/')(system.executablePath)).at(-1),
@@ -1182,6 +1333,8 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
           python: bootstrap.python,
           go: bootstrap.go,
           rust: bootstrap.rust,
+          java: bootstrap.java,
+          worktree: bootstrap.worktree,
         });
         const endpoint = yield* serveSemanticEndpoint(coordinator, {
           directory,

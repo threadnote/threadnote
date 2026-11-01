@@ -253,6 +253,63 @@ const limitedSession = Effect.fn('test.limitedJavaSession')(function* (limits?: 
 
 describe('Java request diagnostics', () => {
   describe.skipIf(process.platform === 'win32')('prepared session source admission', () => {
+    effectIt.effect('refuses a closed host before initialization and captures its lifecycle predicate', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const refused = yield* f.create([], options => {
+          Reflect.set(options, 'isActive', () => false);
+        });
+        expect(yield* Effect.flip(refused.result)).toMatchObject({code: 'closing'});
+        expect(refused.calls).toEqual([]);
+
+        let active = true;
+        const made = yield* f.create([], options => {
+          Reflect.set(options, 'isActive', () => active);
+        });
+        const session = yield* made.result;
+        const observation = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        Reflect.set(made.options, 'isActive', () => true);
+        active = false;
+        const calls = made.calls.length;
+        expect(
+          yield* Effect.flip(session.query('definition', observation, {line: 0, character: 13}, 1000)),
+        ).toMatchObject({code: 'closing'});
+        expect(made.calls).toHaveLength(calls);
+        expect(yield* session.available).toBe(false);
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+    effectIt.effect('refuses reads and diagnostic delivery when the host closes during compiler IO', () =>
+      Effect.gen(function* () {
+        for (const operation of ['definition', 'diagnostics'] as const)
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* preparedSessionFixture();
+              let active = true,
+                armed = false;
+              const made = yield* f.create(
+                [],
+                options => {
+                  Reflect.set(options, 'isActive', () => active);
+                },
+                method =>
+                  Effect.sync(() => {
+                    if (armed && (method === 'textDocument/definition' || method === 'workspace/executeCommand'))
+                      active = false;
+                  }),
+              );
+              const session = yield* made.result;
+              const observation = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+              armed = true;
+              const read =
+                operation === 'diagnostics'
+                  ? session.diagnostics(observation, 1000).pipe(Effect.asVoid)
+                  : session.query('definition', observation, {line: 0, character: 13}, 1000).pipe(Effect.asVoid);
+              expect(yield* Effect.flip(read)).toMatchObject({code: 'closing'});
+              expect(yield* session.available).toBe(false);
+            }),
+          );
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
     effectIt.effect.prop(
       'preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard',
       [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
@@ -1759,8 +1816,19 @@ describe('Java analysis attachment composition', () => {
     Effect.gen(function* () {
       const f = yield* analysisFixture();
       f.control.failInitialization = true;
-      const result = yield* Effect.exit(makeJavaAnalysis(f.options, () => Effect.void));
+      let finish: Effect.Effect<lsp.WireStop> | undefined;
+      const result = yield* Effect.exit(
+        makeJavaAnalysis(f.options, (pid, stop) =>
+          Effect.sync(() => {
+            expect(pid).toBe(123);
+            finish = stop;
+          }),
+        ),
+      );
       expect(Exit.isFailure(result)).toBe(true);
+      expect(f.events).toEqual(['spawn', 'initialize', 'finish']);
+      if (!finish) return yield* Effect.die('Missing pre-initialize stop receipt');
+      expect(yield* finish).toMatchObject({drained: true, stdioClosed: true, forced: false});
       expect(f.events).toEqual(['spawn', 'initialize', 'finish']);
       expect(yield* f.fs.readDirectory(f.options.privateDirectory)).toEqual(f.beforeDirectories);
       yield* f.fs.writeFileString(f.path.join(f.parent, 'parent-still-usable'), 'ok');

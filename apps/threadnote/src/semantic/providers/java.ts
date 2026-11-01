@@ -10,7 +10,7 @@ import {
   type QueryOutcome,
 } from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {LspFault, makeLspClient, type LspClient} from '../lsp_transport.js';
+import {LspFault, makeLspClient, type LspClient, type WireStop} from '../lsp_transport.js';
 import {
   makeLspSession,
   makeSemanticNotifications,
@@ -45,7 +45,7 @@ import {
   sealJavaPreparedModel,
 } from './java_preparation.js';
 
-const verifyJavaOutputDirectories = Effect.fn('semantic.verifyJavaOutputDirectories')(function* (
+export const verifyJavaOutputDirectories = Effect.fn('semantic.verifyJavaOutputDirectories')(function* (
   outputs: readonly string[],
   protectedRoots: readonly string[],
 ) {
@@ -210,7 +210,11 @@ export type JavaAnalysisOptions = typeof JavaAnalysisOptions.Type;
 
 /** Host-only analysis attachment. Preparation and execution authorization remain separate operations. */
 export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
-  function* (options: JavaAnalysisOptions, onProviderStarted: (pid: number) => Effect.Effect<void, unknown>) {
+  function* (
+    options: JavaAnalysisOptions,
+    onProviderStarted: (pid: number, finish: Effect.Effect<WireStop>) => Effect.Effect<void, unknown>,
+    isActive: () => boolean = () => true,
+  ) {
     const captured = yield* Effect.try({
       try: () => structuredClone(options),
       catch: () => LspFault.make({code: 'prerequisite'}),
@@ -219,7 +223,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
       Effect.mapError(() => LspFault.make({code: 'prerequisite'})),
     );
     const started = onProviderStarted;
-    if (captured.basis.provider.id !== 'jdtls' || typeof started !== 'function')
+    if (captured.basis.provider.id !== 'jdtls' || typeof started !== 'function' || typeof isActive !== 'function')
       return yield* LspFault.make({code: 'prerequisite'});
     const path = yield* Path.Path;
     const worktree = yield* path.fromFileUrl(new URL(captured.basis.worktree));
@@ -254,7 +258,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
       });
       const launched = yield* runtime.analysis({workspace: prepared.workspace, project: prepared.project, worktree});
       // Bind the actual child to the caller's admission before any initialize or document notification.
-      yield* started(launched.wire.pid);
+      yield* started(launched.wire.pid, launched.wire.finish);
       const notifications = makeSemanticNotifications();
       const client = yield* makeLspClient(launched.wire, notifications.receive, prepared.settings);
       const api = yield* makeJavaSession(client, {
@@ -267,6 +271,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
         bundle,
         diagnosticModel,
         runtime,
+        isActive,
       });
       return {
         pid: launched.wire.pid,
@@ -474,6 +479,8 @@ export const mapJavaSourceResponse = Effect.fn('semantic.mapJavaSourceResponse')
 });
 
 export interface JavaSessionOptions extends Omit<LspSessionOptions, 'policy' | 'ready'> {
+  /** Synchronous host lifecycle predicate; it performs no I/O and cannot authorize setup. */
+  readonly isActive?: () => boolean;
   readonly prepared:
     Effect.Success<ReturnType<typeof makeJavaProject>> | Effect.Success<ReturnType<typeof makeJavaPreparedProject>>;
   readonly bundle: Effect.Success<ReturnType<typeof materializeJavaDiagnosticBundle>>;
@@ -486,6 +493,7 @@ export interface JavaSessionOptions extends Omit<LspSessionOptions, 'policy' | '
 /** The shared session alone owns documents, versions and epochs; Java adds readiness and checked URI translation. */
 export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
   function* (client: LspClient, options: JavaSessionOptions) {
+    const isActive = options.isActive ?? (() => true);
     const prepared = options.prepared;
     const preparedModel = 'model' in prepared ? prepared : undefined;
     const diagnosticModel = captureJavaSnapshotModel(options.diagnosticModel);
@@ -556,6 +564,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
     const sourceVerify = checkSource(preparedModel ? preparedModel.verifySource : prepared.verify);
     const verify = options.runtime.verify.pipe(
       Effect.andThen(preparedModel ? checkSource(prepared.verify) : sourceVerify),
+      Effect.andThen(Effect.suspend(() => (isActive() ? Effect.void : LspFault.make({code: 'closing'})))),
       Effect.onExit(exit => (Exit.isFailure(exit) ? retire : Effect.void)),
     );
     const mapped: LspSessionClient = {

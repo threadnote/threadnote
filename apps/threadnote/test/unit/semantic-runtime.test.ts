@@ -5,13 +5,28 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import * as BunCrypto from '@effect/platform-bun/BunCrypto';
-import {Cause, Effect, Fiber, FileSystem, Layer, Path, Queue, Stream} from 'effect';
+import {Cause, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {SystemInfo} from '@threadnote/platform/system';
-import {makeSemanticAdmission} from '../../src/semantic/coordinator.js';
+import {CommandExecutor} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
+import * as fingerprint from '../../src/semantic/fingerprint.js';
+import {type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
+import {SemanticSetupFault, type SemanticSession, type DiagnosticDelta} from '../../src/semantic/provider.js';
+import {
+  makeSemanticAdmission,
+  makeSemanticCoordinator,
+  ensureSemanticEndpoint,
+  semanticCatalogKey,
+  verifyJavaSemanticCandidate,
+  type JavaHostCandidate,
+} from '../../src/semantic/coordinator.js';
+import * as javaProvider from '../../src/semantic/providers/java.js';
+import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   LspFrameDecoder,
@@ -45,6 +60,606 @@ const fakeWire = Effect.gen(function* () {
   return {wire, sent, incoming, finishes: () => finishes};
 });
 const admissionLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, TestSystemInfoLayer);
+const javaCandidate = (): JavaHostCandidate => ({
+  runtimeCandidate: {
+    serverDirectory: '/qualified/jdtls',
+    serverTreeDigest: javaRuntime.javaRuntimeQualification.serverTreeDigest,
+    runtimeJavaHome: '/qualified/jdk25',
+    runtimeSdkDigest: javaRuntime.javaRuntimeQualification.runtimeSdkDigest,
+    projectJavaHome: '/qualified/jdk21',
+    projectSdkDigest: javaRuntime.javaRuntimeQualification.projectSdkDigest,
+  },
+  environments: [
+    {id: 'prepared-main', metadataFile: '/prepared/model.json', metadataDigest: sha256HexSync('prepared')},
+  ],
+});
+const JavaCoordinatorTestLayer = Layer.effectContext(
+  Layer.build(
+    Layer.mergeAll(
+      admissionLayer,
+      Layer.succeed(ChildEnvironmentPolicy, {sanitizeExternal: () => ({}), preserveIntendedChild: () => ({})}),
+      Layer.succeed(CommandExecutor, {
+        execute: () => Effect.die('Java analysis must not run a host version/build command'),
+        executeStreaming: () => Effect.die('Java analysis must not stream a build'),
+      }),
+    ),
+  ).pipe(TestClock.withLive),
+);
+const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-coordinator-'}));
+  const project = path.join(root, 'source');
+  const home = path.join(root, 'home');
+  for (const directory of [project, home]) yield* fs.makeDirectory(directory, {mode: 0o700});
+  const text = 'class Main {}\n';
+  const file = path.join(project, 'Main.java');
+  yield* fs.writeFileString(file, text);
+  const projectUri = (yield* path.toFileUrl(project)).href;
+  const basis: Observation = {
+    version: 1,
+    repository: 'java-coordinator-test',
+    worktree: projectUri,
+    project: projectUri,
+    configuration: sha256HexSync('initial'),
+    toolchain: sha256HexSync('initial SDK'),
+    provider: {id: 'jdtls', version: javaRuntime.javaRuntimeQualification.serverVersion, generation: 0},
+    view: {kind: 'overlay', id: 'main', owner: 'test-owner', epoch: 0},
+    uri: (yield* path.toFileUrl(file)).href,
+    content: sha256HexSync(text),
+    documentVersion: 1,
+    projectEpoch: 0,
+  };
+  const candidate = javaCandidate();
+  const events: string[] = [];
+  const control: {
+    failAfterPid: boolean;
+    rejectSdk: boolean;
+    crash: boolean;
+    available: boolean;
+    afterCommit: Effect.Effect<void, unknown>;
+  } = {
+    failAfterPid: false,
+    rejectSdk: false,
+    crash: false,
+    available: true,
+    afterCommit: Effect.void,
+  };
+  const constructions: {options: javaProvider.JavaAnalysisOptions; isActive: () => boolean}[] = [];
+  let finishes = 0;
+  // SDK/process construction are mocked; coordinator admission, selection, fingerprints and closure are real.
+  const sdk = vi.spyOn(javaRuntime, 'makeJavaRuntime').mockImplementation(() =>
+    Effect.suspend(() => {
+      events.push('verify-sdk');
+      return control.rejectSdk
+        ? Effect.fail(
+            SemanticSetupFault.make({
+              providerId: 'jdtls',
+              component: 'sdk',
+              reason: 'incompatible',
+              requiredVersion: javaRuntime.javaRuntimeQualification.serverVersion,
+              requiredSdkVersion: javaRuntime.javaRuntimeQualification.runtimeVersion,
+              nextAction: 'Restore the qualified fixture SDK',
+            }),
+          )
+        : Effect.succeed({
+            identity: sha256HexSync('fixture SDK'),
+            projectJavaHome: candidate.runtimeCandidate.projectJavaHome,
+            verify: Effect.sync((): undefined => {}),
+            analysis: () => Effect.die('The coordinator must use the analysis factory'),
+            preparation: () => Effect.die('The coordinator must never import or build'),
+          });
+    }),
+  );
+  const factory = vi.spyOn(javaProvider, 'makeJavaAnalysis').mockImplementation((options, started, active) =>
+    Effect.gen(function* () {
+      const isActive = active ?? (() => true);
+      constructions.push({options: structuredClone(options), isActive});
+      let ended = false;
+      const finish = Effect.sync(() => {
+        if (!ended) finishes++;
+        ended = true;
+        return {code: 0, drained: true, stdioClosed: true, forced: false, fault: undefined};
+      });
+      yield* started(process.pid, finish);
+      events.push('pid-bound');
+      if (control.failAfterPid) return yield* LspFault.make({code: 'protocol'});
+      const documents = new Map<string, Observation>();
+      const outcome = (observation: Observation): QueryOutcome => ({
+        version: 1,
+        status: 'ok',
+        items: [],
+        evidence: {basis: 'semantic', observation, scope: 'project:fixture', completeness: 'partial', limitations: []},
+      });
+      const api = {
+        upsert: (observation: Observation, _text: string, language: string) =>
+          Effect.sync(() => {
+            expect(language).toBe('java');
+            documents.set(observation.uri, structuredClone(observation));
+            return observation;
+          }),
+        query: (_operation: Parameters<SemanticSession['query']>[0], observation: Observation) =>
+          Effect.suspend(() => {
+            if (control.crash) return LspFault.make({code: 'exit'});
+            if (control.rejectSdk) {
+              control.available = false;
+              return LspFault.make({code: 'prerequisite'});
+            }
+            return Effect.succeed(outcome(observation));
+          }),
+        diagnostics: (observation: Observation) =>
+          Effect.gen(function* () {
+            if (!isActive()) return yield* LspFault.make({code: 'closing'});
+            events.push('diagnostic-committed');
+            const delta: DiagnosticDelta = {observation, items: [], added: [], remaining: [], resolved: []};
+            yield* control.afterCommit;
+            return delta;
+          }),
+        prepare: (_operation: Parameters<NonNullable<SemanticSession['prepare']>>[0], observation: Observation) =>
+          Effect.succeed(outcome(observation)),
+        observation: (uri: string) => Effect.succeed(documents.get(uri)),
+        project: () =>
+          Effect.succeed({
+            configuration: options.basis.configuration,
+            profile: {kind: 'prepared-java', build: 'maven'},
+          }),
+        available: Effect.sync(() => !ended && control.available),
+        invalidate: Effect.sync(() => {
+          expect(isActive()).toBe(false);
+          events.push('invalidate');
+        }),
+        close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: true}))),
+      };
+      return {pid: process.pid, api};
+    }),
+  );
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      sdk.mockRestore();
+      factory.mockRestore();
+    }),
+  );
+  return {
+    fs,
+    path,
+    root,
+    project,
+    home,
+    text,
+    file,
+    basis,
+    candidate,
+    events,
+    control,
+    constructions,
+    factory,
+    sdk,
+    finishes: () => finishes,
+    make: () => makeSemanticCoordinator({enabled: true, dataHome: home, java: candidate, worktree: basis.worktree}),
+  };
+});
+
+describe.skipIf(process.platform === 'win32')('Java coordinator registration', () => {
+  effectIt.layer(JavaCoordinatorTestLayer, {buildPerTest: true})(layerIt => {
+    layerIt.effect('refuses existing semantic-parent links before they can redirect writes into source or SDKs', () =>
+      Effect.gen(function* () {
+        for (const role of ['source', 'serverDirectory', 'runtimeJavaHome', 'projectJavaHome', 'missing'] as const)
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* javaCoordinatorFixture();
+              const target = role === 'source' ? f.project : f.path.join(f.root, 'protected');
+              if (role !== 'source' && role !== 'missing') {
+                yield* f.fs.makeDirectory(target, {mode: 0o700});
+                yield* f.fs.writeFileString(f.path.join(target, 'protected.txt'), 'unchanged');
+              }
+              const semantic = f.path.join(f.home, 'semantic');
+              yield* f.fs.symlink(target, semantic);
+              const before = role === 'missing' ? undefined : yield* semanticTreeDigest(target);
+              const entries = role === 'missing' ? undefined : yield* f.fs.readDirectory(target);
+              const options = {
+                enabled: true,
+                dataHome: f.home,
+                worktree: f.basis.worktree,
+                java:
+                  role === 'source' || role === 'missing'
+                    ? f.candidate
+                    : {...f.candidate, runtimeCandidate: {...f.candidate.runtimeCandidate, [role]: target}},
+                runtimeIdentity: sha256HexSync('private fixture runtime'),
+              };
+              for (const endpoint of [false, true]) {
+                expect(
+                  yield* Effect.flip(
+                    endpoint
+                      ? ensureSemanticEndpoint(options).pipe(Effect.asVoid)
+                      : makeSemanticCoordinator(options).pipe(Effect.asVoid),
+                  ),
+                ).toMatchObject({code: 'prerequisite'});
+                expect(yield* f.fs.readLink(semantic)).toBe(target);
+                expect(yield* f.fs.readDirectory(f.home)).toEqual(['semantic']);
+                if (role === 'missing') expect(yield* f.fs.exists(target)).toBe(false);
+                else {
+                  expect(yield* f.fs.readDirectory(target)).toEqual(entries);
+                  expect(yield* semanticTreeDigest(target)).toBe(before);
+                }
+                expect(f.sdk).not.toHaveBeenCalled();
+                expect(f.factory).not.toHaveBeenCalled();
+              }
+            }),
+          );
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect.prop(
+      'refuses shared output overlapping source or any SDK before creating admission, endpoint or lock files',
+      [
+        Schema.Literals(['source', 'serverDirectory', 'runtimeJavaHome', 'projectJavaHome']),
+        Schema.Literals(['same', 'child', 'parent']),
+      ],
+      ([role, relation]) =>
+        Effect.gen(function* () {
+          for (const endpoint of [false, true])
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                const f = yield* javaCoordinatorFixture();
+                const protectedRoot = f.path.join(
+                  f.root,
+                  relation === 'child' ? 'protected' : relation === 'same' ? 'semantic' : 'semantic/protected',
+                );
+                yield* f.fs.makeDirectory(protectedRoot, {recursive: true, mode: 0o700});
+                yield* f.fs.writeFileString(f.path.join(protectedRoot, 'protected.txt'), 'unchanged');
+                const home = relation === 'child' ? protectedRoot : f.root;
+                const semantic = f.path.join(home, 'semantic');
+                const entries = (yield* f.fs.exists(semantic)) ? yield* f.fs.readDirectory(semantic) : undefined;
+                const before = yield* semanticTreeDigest(f.root);
+                const options = {
+                  enabled: true,
+                  dataHome: home,
+                  worktree: role === 'source' ? (yield* f.path.toFileUrl(protectedRoot)).href : f.basis.worktree,
+                  java:
+                    role === 'source'
+                      ? f.candidate
+                      : {
+                          ...f.candidate,
+                          runtimeCandidate: {...f.candidate.runtimeCandidate, [role]: protectedRoot},
+                        },
+                  runtimeIdentity: sha256HexSync('private fixture runtime'),
+                };
+                expect(
+                  yield* Effect.flip(
+                    endpoint
+                      ? ensureSemanticEndpoint(options).pipe(Effect.asVoid)
+                      : makeSemanticCoordinator(options).pipe(Effect.asVoid),
+                  ),
+                ).toMatchObject({code: 'prerequisite'});
+                expect(yield* semanticTreeDigest(f.root)).toBe(before);
+                expect((yield* f.fs.exists(semantic)) ? yield* f.fs.readDirectory(semantic) : undefined).toEqual(
+                  entries,
+                );
+                expect(f.factory).not.toHaveBeenCalled();
+              }),
+            );
+        }).pipe(TestClock.withLive),
+      {arbitrary: {runs: 24}},
+    );
+    layerIt.effect('requires a canonical Java worktree before any shared write and binds later attachments to it', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const options = {enabled: true, dataHome: f.home, java: f.candidate};
+        expect(yield* Effect.flip(makeSemanticCoordinator(options))).toMatchObject({code: 'prerequisite'});
+        expect(yield* f.fs.readDirectory(f.home)).toEqual([]);
+        const alias = f.path.join(f.root, 'source-alias');
+        yield* f.fs.symlink(f.project, alias);
+        const worktree = (yield* f.path.toFileUrl(alias)).href;
+        for (const endpoint of [false, true]) {
+          const launch = {...options, worktree, runtimeIdentity: sha256HexSync('private fixture runtime')};
+          expect(
+            yield* Effect.flip(
+              endpoint
+                ? ensureSemanticEndpoint(launch).pipe(Effect.asVoid)
+                : makeSemanticCoordinator(launch).pipe(Effect.asVoid),
+            ),
+          ).toMatchObject({code: 'prerequisite'});
+          expect(yield* f.fs.readDirectory(f.home)).toEqual([]);
+        }
+        const coordinator = yield* f.make();
+        expect(
+          yield* Effect.flip(coordinator.attach({...f.basis, worktree}, f.text, 'java', 'prepared-main')),
+        ).toMatchObject({code: 'prerequisite'});
+        expect(f.factory).not.toHaveBeenCalled();
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('checks physical SDK spellings before a shared write can bypass a lexical overlap check', () =>
+      Effect.gen(function* () {
+        for (const role of ['serverDirectory', 'runtimeJavaHome', 'projectJavaHome'] as const)
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* javaCoordinatorFixture();
+              f.sdk.mockRestore();
+              const runtimeCandidate = {...f.candidate.runtimeCandidate};
+              const digests = new Map<string, string>();
+              for (const [key, digest] of [
+                ['serverDirectory', javaRuntime.javaRuntimeQualification.serverTreeDigest],
+                ['runtimeJavaHome', javaRuntime.javaRuntimeQualification.runtimeSdkDigest],
+                ['projectJavaHome', javaRuntime.javaRuntimeQualification.projectSdkDigest],
+              ] as const) {
+                const directory = f.path.join(f.root, key);
+                yield* f.fs.makeDirectory(directory, {mode: 0o700});
+                yield* f.fs.writeFileString(f.path.join(directory, 'protected.txt'), 'unchanged');
+                runtimeCandidate[key] = directory;
+                digests.set(directory, digest);
+              }
+              const home = runtimeCandidate[role];
+              const alias = f.path.join(f.root, 'sdk-alias');
+              yield* f.fs.symlink(home, alias);
+              runtimeCandidate[role] = alias;
+              // Only SDK bytes are mocked: production canonical-path validation still runs for every role.
+              const hashing = vi
+                .spyOn(fingerprint, 'semanticSdkDigest')
+                .mockImplementation(root => Effect.succeed(digests.get(root) ?? sha256HexSync('unqualified')));
+              yield* Effect.addFinalizer(() => Effect.sync(() => hashing.mockRestore()));
+              const protectedRoots = [f.project, ...digests.keys()];
+              const before = yield* Effect.forEach(protectedRoots, root => semanticTreeDigest(root));
+              const options = {
+                enabled: true,
+                dataHome: home,
+                worktree: f.basis.worktree,
+                java: {...f.candidate, runtimeCandidate},
+                runtimeIdentity: sha256HexSync('private fixture runtime'),
+              };
+              for (const endpoint of [false, true]) {
+                expect(
+                  yield* Effect.flip(
+                    endpoint
+                      ? ensureSemanticEndpoint(options).pipe(Effect.asVoid)
+                      : makeSemanticCoordinator(options).pipe(Effect.asVoid),
+                  ),
+                ).toMatchObject({_tag: 'SemanticSetupFault', reason: 'incompatible'});
+                expect(yield* f.fs.readDirectory(home)).toEqual(['protected.txt']);
+                expect(yield* Effect.forEach(protectedRoots, root => semanticTreeDigest(root))).toEqual(before);
+                expect(f.factory).not.toHaveBeenCalled();
+              }
+            }),
+          );
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('rejects malformed catalogs before SDK access and preserves typed SDK setup failures', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        for (const candidate of [
+          {...f.candidate, environments: []},
+          {...f.candidate, environments: [f.candidate.environments[0], f.candidate.environments[0]]},
+          {...f.candidate, preparation: {build: 'maven'}},
+          {...f.candidate, runtimeCandidate: {...f.candidate.runtimeCandidate, commands: ['build']}},
+          {...f.candidate, environments: [{...f.candidate.environments[0], policy: 'trusted'}]},
+        ])
+          expect(yield* Effect.flip(verifyJavaSemanticCandidate(candidate))).toMatchObject({code: 'prerequisite'});
+        expect(f.sdk).not.toHaveBeenCalled();
+        f.control.rejectSdk = true;
+        expect(yield* Effect.flip(f.make())).toMatchObject({
+          _tag: 'SemanticSetupFault',
+          component: 'sdk',
+          reason: 'incompatible',
+        });
+        expect(
+          yield* Effect.flip(
+            ensureSemanticEndpoint({
+              enabled: true,
+              dataHome: f.home,
+              java: f.candidate,
+              worktree: f.basis.worktree,
+              runtimeIdentity: sha256HexSync('private fixture runtime'),
+            }),
+          ),
+        ).toMatchObject({_tag: 'SemanticSetupFault', component: 'sdk', reason: 'incompatible'});
+        expect(yield* f.fs.readDirectory(f.home)).toEqual([]);
+        expect(f.factory).not.toHaveBeenCalled();
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('selects an explicit sealed environment and binds PID before exposing the session', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        expect(f.constructions).toHaveLength(1);
+        expect(f.constructions[0].options.candidate).toEqual(f.candidate.runtimeCandidate);
+        expect(f.constructions[0].options.environment).toEqual(f.candidate.environments[0]);
+        expect((yield* coordinator.status).providers).toBe(1);
+        expect((yield* coordinator.status).imports).toBe(0);
+        expect(attached.observation.provider.id).toBe('jdtls');
+        expect(attached.edits).toBe('preparation-only');
+        yield* coordinator.closeView(attached.observation);
+        expect(f.constructions[0].isActive()).toBe(false);
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('unknown or omitted environment selection cannot launch or reserve a provider', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        for (const environment of [undefined, 'unknown']) {
+          expect((yield* Effect.exit(coordinator.attach(f.basis, f.text, 'java', environment)))._tag).toBe('Failure');
+          expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+        }
+        expect(f.factory).not.toHaveBeenCalled();
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('initialization failure uses the captured stop receipt to release shared admission', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        f.control.failAfterPid = true;
+        expect((yield* Effect.exit(coordinator.attach(f.basis, f.text, 'java', 'prepared-main')))._tag).toBe('Failure');
+        expect(f.events).toContain('pid-bound');
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('returns the Java committed diagnostic delta without another asynchronous SDK rejection', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        f.control.afterCommit = Effect.sync(() => {
+          f.control.rejectSdk = true;
+        });
+        const delta = yield* coordinator.use(attached.observation, 1000, api =>
+          api.diagnostics(attached.observation, 1000),
+        );
+        expect(delta.observation).toEqual(attached.observation);
+        expect(f.events.at(-1)).toBe('diagnostic-committed');
+        f.control.rejectSdk = false;
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('source changes retire the old Java view without starting setup', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        yield* f.fs.writeFileString(f.file, 'class Changed {}\n');
+        expect(
+          (yield* Effect.exit(
+            coordinator.use(attached.observation, 1000, api =>
+              api.query('definition', attached.observation, {line: 0, character: 1}, 1000),
+            ),
+          ))._tag,
+        ).toBe('Failure');
+        expect(f.finishes()).toBe(1);
+        expect(f.factory).toHaveBeenCalledOnce();
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('a retired Java API releases the provider before returning its prerequisite failure', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        f.control.rejectSdk = true;
+        expect(
+          yield* Effect.flip(
+            coordinator.use(attached.observation, 1000, api =>
+              api.query('definition', attached.observation, {line: 0, character: 1}, 1000),
+            ),
+          ),
+        ).toMatchObject({code: 'prerequisite'});
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('switching prepared Java environments retires the old session before reattachment', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const second = {...f.candidate.environments[0], id: 'prepared-second', metadataDigest: sha256HexSync('second')};
+        const coordinator = yield* makeSemanticCoordinator({
+          enabled: true,
+          dataHome: f.home,
+          worktree: f.basis.worktree,
+          java: {...f.candidate, environments: [...f.candidate.environments, second]},
+        });
+        const first = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        expect(yield* Effect.flip(coordinator.attach(f.basis, f.text, 'java', 'prepared-second'))).toMatchObject({
+          code: 'rejected',
+        });
+        expect(f.constructions[0].isActive()).toBe(false);
+        expect((yield* coordinator.status).providers).toBe(0);
+        const other = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-second');
+        expect(first.observation.toolchain).not.toBe(other.observation.toolchain);
+        expect(f.constructions[1].options.environment).toEqual(second);
+        expect((yield* coordinator.status).providers).toBe(1);
+        yield* coordinator.closeView(other.observation);
+        expect(f.finishes()).toBe(2);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('Java reads renew the idle lease before the original attachment becomes ten minutes old', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+        yield* TestClock.adjust(590000);
+        yield* coordinator.use(attached.observation, 1000, api =>
+          api.query('definition', attached.observation, {line: 0, character: 1}, 1000),
+        );
+        yield* TestClock.adjust(11000);
+        expect(f.finishes()).toBe(0);
+        expect((yield* coordinator.status.pipe(TestClock.withLive)).providers).toBe(1);
+        yield* coordinator.closeView(attached.observation).pipe(TestClock.withLive);
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status.pipe(TestClock.withLive)).toMatchObject({
+          providers: 0,
+          imports: 0,
+          quarantined: 0,
+        });
+      }),
+    );
+    layerIt.effect('two crashes bound restart attempts and leave no admitted provider', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const coordinator = yield* f.make();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const attached = yield* coordinator.attach(f.basis, f.text, 'java', 'prepared-main');
+          f.control.crash = true;
+          expect(
+            (yield* Effect.exit(
+              coordinator.use(attached.observation, 1000, api =>
+                api.query('definition', attached.observation, {line: 0, character: 1}, 1000),
+              ),
+            ))._tag,
+          ).toBe('Failure');
+          yield* coordinator.closeView(attached.observation);
+          f.control.crash = false;
+        }
+        expect((yield* Effect.exit(coordinator.attach(f.basis, f.text, 'java', 'prepared-main')))._tag).toBe('Failure');
+        expect(f.factory).toHaveBeenCalledTimes(2);
+        expect(f.finishes()).toBe(2);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, imports: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+  });
+});
+describe('Java catalog identity', () => {
+  it('catalog identity is deterministic under environment order and binds each SDK role without mutation', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.integer({min: 0, max: 32}), {minLength: 1, maxLength: 8}), ids => {
+        const candidate = javaCandidate();
+        const environments = EffectArray.map(ids, id => ({
+          id: 'env-' + id,
+          metadataFile: '/models/' + id + '.json',
+          metadataDigest: sha256HexSync(String(id)),
+        }));
+        const java = {...candidate, environments};
+        const before = JSON.stringify(java);
+        const key = semanticCatalogKey({java});
+        expect(semanticCatalogKey({java: {...java, environments: EffectArray.reverse(environments)}})).toBe(key);
+        for (const field of [
+          'serverDirectory',
+          'serverTreeDigest',
+          'runtimeJavaHome',
+          'runtimeSdkDigest',
+          'projectJavaHome',
+          'projectSdkDigest',
+        ] as const)
+          expect(
+            semanticCatalogKey({
+              java: {...java, runtimeCandidate: {...java.runtimeCandidate, [field]: sha256HexSync(field)}},
+            }),
+          ).not.toBe(key);
+        expect(
+          semanticCatalogKey({
+            java: {
+              ...java,
+              environments: [
+                {...environments[0], metadataDigest: sha256HexSync('changed')},
+                ...EffectArray.drop(environments, 1),
+              ],
+            },
+          }),
+        ).not.toBe(key);
+        expect(JSON.stringify(java)).toBe(before);
+      }),
+      {numRuns: 24},
+    );
+  });
+});
 const admissionFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
