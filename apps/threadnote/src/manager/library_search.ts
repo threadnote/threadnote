@@ -80,8 +80,8 @@ export const searchManagerLibrary = Effect.fn('manager.searchLibrary')(function*
   const uris = EffectArray.filter(
     [
       ...new Set([
-        ...EffectArray.map(sections.ranked, hit => Effect2.pipe(hit.uri, EffectString.replace(/#.*$/u, ''))),
         ...literalUris,
+        ...EffectArray.map(sections.ranked, hit => Effect2.pipe(hit.uri, EffectString.replace(/#.*$/u, ''))),
       ]),
     ],
     uri =>
