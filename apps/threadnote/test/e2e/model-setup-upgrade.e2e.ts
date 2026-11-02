@@ -20,6 +20,7 @@ import {
   PREDECESSOR_VERSION,
   recordUpgradeAttempt,
   recordUpgradeCleanupFailure,
+  requestOwnedUpgradeRecallRetirement,
   withUpgradeCleanupObservation,
   requiredUpgradeEnvironment,
   serveUpgradeCandidate,
@@ -202,6 +203,7 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         const firstRequest = server!.requests.length;
         let update;
         let commands: string[];
+        let processObservation: Awaited<ReturnType<typeof stopObserving>>;
         try {
           // Legacy repair requires OS process identity, which sandbox-exec denies on macOS.
           // This explicitly admitted disposable runner allows update-stage network access;
@@ -218,7 +220,8 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
             ...(skip ? ['--no-post-update', '--no-repair'] : []),
           ]);
         } finally {
-          commands = await stopObserving();
+          processObservation = await stopObserving();
+          commands = processObservation.commands;
         }
         const output = `${update.stdout}\n${update.stderr}`;
         expect(output).toContain('Update complete.');
@@ -269,6 +272,7 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
               defaultHome,
               intendedHome: home,
               observedCommands: commands,
+              processObservation: {snapshots: processObservation.snapshots, complete: processObservation.complete},
               stdout: Effect.pipe(update.stdout, EffectString.slice(-16_384)),
               stderr: Effect.pipe(update.stderr, EffectString.slice(-16_384)),
               defaultHomeFiles: await upgradeHomeSnapshot(defaultHome),
@@ -323,7 +327,9 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         let evidence: Record<string, unknown> = {};
         let bodyFailure: unknown;
         let bodyFailed = false;
-        let cleanupStage: 'model-setup-off' | 'manager-close' | 'release-leases-empty' = 'model-setup-off';
+        let cleanupStage: 'model-setup-off' | 'manager-close' | 'release-leases-empty' | 'recall-worker-retirement' =
+          'model-setup-off';
+        let recallRetirement: Awaited<ReturnType<typeof requestOwnedUpgradeRecallRetirement>>;
         const closeManager = async () => {
           manager.kill('SIGTERM');
           await vi.waitFor(() => expect(manager.exitCode !== null || manager.signalCode !== null).toBe(true), {
@@ -341,11 +347,37 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
               throw cause;
             });
           }
+          if (!skip) {
+            cleanupStage = 'recall-worker-retirement';
+            recallRetirement = await requestOwnedUpgradeRecallRetirement({
+              run,
+              installation,
+              home,
+              version,
+              candidate,
+              observedSnapshots: processObservation.snapshots,
+              observationComplete: processObservation.complete,
+              legacyEnvironment: environment,
+            });
+          }
           cleanupStage = 'release-leases-empty';
-          await vi.waitFor(async () => expect(await readdir(join(installation, 'leases', version))).toEqual([]), {
-            timeout: 10_000,
-            interval: 50,
-          });
+          await vi.waitFor(
+            async () => {
+              if (recallRetirement) expect(await recallRetirement.hasReturned()).toBe(true);
+              expect(await readdir(join(installation, 'leases', version))).toEqual([]);
+            },
+            {
+              timeout: 10_000,
+              interval: 50,
+            },
+          );
+          if (recallRetirement)
+            evidence.recallWorkerRetirement = {
+              pid: recallRetirement.pid,
+              canonicalStartIdentity: recallRetirement.canonicalStartIdentity,
+              signalRequested: recallRetirement.signalRequested,
+              instanceReturned: true,
+            };
         };
         try {
           await vi.waitFor(

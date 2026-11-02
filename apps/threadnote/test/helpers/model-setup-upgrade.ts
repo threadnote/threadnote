@@ -1,12 +1,14 @@
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {RECALL_EMBEDDING_WORKER_ARGUMENT, RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION} from '../../src/worker_protocol.js';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {
   runtimeOpenTextDirectoryNameReader,
   runtimeReadBoundedStableRegularFile,
   parseCanonicalProcessStartIdentityOutput,
+  parseProcessStartIdentityOutput,
 } from '@threadnote/platform/system';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
-import {lstat, readFile, readdir, readlink, writeFile} from '@threadnote/testing/node-fs-promises';
+import {lstat, readFile, readdir, readlink, realpath, writeFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {TestError} from '@threadnote/testing/test-error';
@@ -161,14 +163,31 @@ export function serveUpgradeCandidate(archive: string, checksum: string, version
 /** Bounded supplementary observations; the pinned updater's synchronous exit is the completion oracle. */
 export async function observeUpgradeProcesses(releaseRoot: string) {
   const observed = new Set<string>();
+  const snapshots = new Map<string, readonly string[]>();
+  let complete = true;
   let pending = Promise.resolve();
   let sampling = false;
   let failure: unknown;
   const sample = async () => {
-    const {stdout} = await executeUpgradeCommand('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command=']);
-    for (const line of Effect.pipe(stdout, EffectString.split('\n'))) {
-      if (Effect.pipe(line, EffectString.includes(`${releaseRoot}/`)) && observed.size < 256)
-        observed.add(Effect.pipe(line, EffectString.trim, EffectString.slice(0, 2048)));
+    const {stdout} = await executeUpgradeCommand('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+      timeout: 1000,
+      maxBuffer: 1_048_576,
+      env: {...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC'},
+    });
+    const related = EffectArray.map(
+      EffectArray.filter(EffectString.split('\n')(stdout), line => EffectString.includes(`${releaseRoot}/`)(line)),
+      EffectString.trim,
+    );
+    if (related.length >= 256 || EffectArray.some(related, line => line.length >= 2048)) complete = false;
+    for (const line of related) {
+      if (!observed.has(line) && observed.size >= 256) complete = false;
+      if (observed.size < 256) observed.add(EffectString.slice(0, 2048)(line));
+    }
+    const snapshot = EffectArray.map(EffectArray.take(related, 255), EffectString.slice(0, 2047));
+    const key = EffectArray.join(snapshot, '\n');
+    if (!snapshots.has(key)) {
+      if (snapshots.size >= 64) complete = false;
+      else snapshots.set(key, snapshot);
     }
   };
   await sample();
@@ -187,7 +206,7 @@ export async function observeUpgradeProcesses(releaseRoot: string) {
     clearInterval(timer);
     await pending;
     if (failure) throw TestError.make({message: 'Upgrade process observation failed.', cause: failure});
-    return [...observed];
+    return {commands: [...observed], snapshots: [...snapshots.values()], complete};
   };
 }
 
@@ -203,7 +222,7 @@ export async function recordUpgradeCleanupFailure(input: {
   candidateSha256: string;
   manager?: {pid?: number; exitCode: number | null; signalCode: string | null};
   ownedRecallChild?: {pid?: number; exitCode: number | null; signalCode: string | null};
-  stage: 'model-setup-off' | 'manager-close' | 'release-leases-empty';
+  stage: 'model-setup-off' | 'manager-close' | 'release-leases-empty' | 'recall-worker-retirement';
   bodyFailure: unknown;
   bodyFailed: boolean;
   cleanupFailure: unknown;
@@ -259,7 +278,15 @@ export async function recordUpgradeCleanupFailure(input: {
     return {
       present: true,
       kind: choice(item.name, ['AssertionError', 'TypeError', 'SyntaxError', 'Error']) ?? 'other',
-      code: choice(item.code, ['ENOENT', 'EPERM', 'EACCES', 'ESRCH', 'ETIMEDOUT', 'ENOSPC']),
+      code: choice(item.code, [
+        'ENOENT',
+        'EPERM',
+        'EACCES',
+        'ESRCH',
+        'ETIMEDOUT',
+        'ENOSPC',
+        'UPGRADE_WORKER_OWNERSHIP_UNVERIFIED',
+      ]),
       sourceLine: frame ? Number(frame[1]) : null,
       sourceColumn: frame ? Number(frame[2]) : null,
     };
@@ -470,4 +497,255 @@ export async function recordUpgradeCleanupFailure(input: {
       : JSON.stringify({schemaVersion: 1, status: 'output-limit', complete: false}),
     {mode: 0o600},
   );
+}
+
+/** Only the admitted disposable predecessor fixture may retire its original repair child. */
+export async function requestOwnedUpgradeRecallRetirement(input: {
+  run: string;
+  installation: string;
+  home: string;
+  version: string;
+  candidate: string;
+  observedSnapshots: readonly (readonly string[])[];
+  observationComplete: boolean;
+  legacyEnvironment: NodeJS.ProcessEnv;
+}): Promise<
+  | {
+      pid: number;
+      canonicalStartIdentity: string;
+      signalRequested: boolean;
+      hasReturned: () => Promise<boolean>;
+    }
+  | undefined
+> {
+  const fail = () =>
+    Object.assign(new Error('Cannot verify the fixture-owned recall worker.'), {
+      code: 'UPGRADE_WORKER_OWNERSHIP_UNVERIFIED',
+    });
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+  const nonce = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9-]{36}$/u.test(value);
+  const ownerSchema = Schema.Struct({
+    token: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
+    processId: Schema.Int.check(Schema.isGreaterThan(0)),
+    processStartIdentity: Schema.String.check(Schema.isMaxLength(1024), Schema.isMinLength(1)),
+  });
+  // Production stateSchema is private. Decode only the admissible active/idle subset, with identical field constraints.
+  const controlSchema = Schema.Struct({
+    version: Schema.Literals([1]),
+    protocol: Schema.Int.check(Schema.isGreaterThan(0)),
+    runtimeVersion: Schema.String.check(Schema.isMaxLength(256)),
+    wakeSequence: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER})),
+    active: Schema.optionalKey(
+      Schema.Struct({
+        nonce: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
+        owner: ownerSchema,
+      }),
+    ),
+  });
+  const decodeControl = Schema.decodeUnknownSync(controlSchema, {onExcessProperty: 'error'});
+  const parseRow = (line: string) => {
+    const row = /^\s*([1-9]\d*)\s+([1-9]\d*)\s+(.{24})\s+(.+?)\s*$/u.exec(line);
+    if (!row) return undefined;
+    const pid = Number(row[1]);
+    const parent = Number(row[2]);
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parent)) return undefined;
+    const canonical = parseCanonicalProcessStartIdentityOutput('darwin', row[3]);
+    return canonical ? {pid, parent, canonical, command: row[4]} : undefined;
+  };
+  if (
+    !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/u.test(input.version) ||
+    input.version.length > 64 ||
+    !input.observationComplete ||
+    input.observedSnapshots.length > 64 ||
+    EffectArray.some(
+      input.observedSnapshots,
+      rows => rows.length >= 256 || EffectArray.some(rows, line => line.length >= 2048),
+    ) ||
+    (await realpath(input.run)) !== input.run ||
+    input.installation !== join(input.run, 'installation') ||
+    (await realpath(input.installation)) !== input.installation ||
+    input.home !== join(input.run, 'data') ||
+    (await realpath(input.home)) !== input.home ||
+    input.candidate !== join(input.installation, 'versions', input.version, 'threadnote') ||
+    (await realpath(input.candidate)) !== input.candidate
+  )
+    throw fail();
+  const oldExecutable = join(input.installation, 'versions', PREDECESSOR_VERSION, 'threadnote');
+  const updaterPrefix = `${oldExecutable} update --home ${input.home} --source `;
+  const repairCommand = `${input.candidate} repair --no-post-update`;
+  const childPrefix = `${input.candidate} ${RECALL_EMBEDDING_WORKER_ARGUMENT} --home ${input.home} --protocol ${RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION} --version ${input.version} --launch-nonce `;
+  const owners = new Map<string, {pid: number; canonical: string; nonce: string}>();
+  for (const snapshot of input.observedSnapshots) {
+    const rows = EffectArray.filter(EffectArray.map(snapshot, parseRow), row => row !== undefined);
+    if (new Set(EffectArray.map(rows, row => row.pid)).size !== rows.length) throw fail();
+    for (const row of rows) {
+      if (!EffectString.startsWith(childPrefix)(row.command)) continue;
+      const launchNonce = EffectString.slice(childPrefix.length)(row.command);
+      if (!nonce(launchNonce)) throw fail();
+      const repair = EffectArray.findFirst(
+        rows,
+        parent => parent.pid === row.parent && parent.command === repairCommand,
+      );
+      if (EffectOption.isNone(repair)) continue; // Reparented rows alone never grant ownership.
+      const updater = EffectArray.findFirst(
+        rows,
+        parent =>
+          parent.pid === repair.value.parent &&
+          parent.parent === process.pid &&
+          EffectString.startsWith(updaterPrefix)(parent.command),
+      );
+      if (EffectOption.isNone(updater)) throw fail();
+      // All three instances coexist in this original sample; flattened PID joins are never authority.
+      const key = JSON.stringify([
+        row.pid,
+        row.canonical,
+        launchNonce,
+        repair.value.pid,
+        repair.value.canonical,
+        updater.value.pid,
+        updater.value.canonical,
+      ]);
+      owners.set(key, {pid: row.pid, canonical: row.canonical, nonce: launchNonce});
+    }
+  }
+  if (owners.size > 1) throw fail(); // No group retirement or arbitrary latest-PID choice.
+  const proof = EffectOption.getOrUndefined(EffectArray.head(EffectArray.fromIterable(owners.values())));
+  if (!proof) {
+    // A missing original child is normal only when no recall ownership is present.
+    for (const name of [
+      'embedding-worker-v1.json',
+      'embedding-worker.lock',
+      'embedding-worker-v1.json.launch-v2.json',
+    ]) {
+      const filename = join(input.home, 'locks', 'recall', name);
+      try {
+        await lstat(filename);
+      } catch (cause) {
+        if (isRecord(cause) && cause.code === 'ENOENT') continue;
+        throw fail();
+      }
+      if (name !== 'embedding-worker-v1.json.launch-v2.json') throw fail();
+      const state = decodeControl(
+        JSON.parse(
+          new TextDecoder('utf-8', {fatal: true}).decode(await runtimeReadBoundedStableRegularFile(filename, 8192)),
+        ),
+      );
+      if (
+        state.protocol !== RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION ||
+        state.runtimeVersion !== input.version ||
+        state.active !== undefined
+      )
+        throw fail();
+    }
+    return undefined;
+  }
+  if (proof.pid <= 1 || proof.pid === process.pid) throw fail();
+  const probe = async (): Promise<'current' | 'returned' | 'unknown'> => {
+    try {
+      if (!process.kill(proof.pid, 0)) return 'unknown';
+    } catch (cause) {
+      return isRecord(cause) && cause.code === 'ESRCH' ? 'returned' : 'unknown';
+    }
+    try {
+      const {stdout} = await executeUpgradeCommand(
+        '/bin/ps',
+        ['-p', String(proof.pid), '-o', 'pid=,ppid=,lstart=,comm='],
+        {
+          timeout: 1000,
+          maxBuffer: 16_384,
+          env: {...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC'},
+        },
+      );
+      const row = parseRow(stdout);
+      if (!row || row.pid !== proof.pid) return 'unknown';
+      if (row.canonical !== proof.canonical) return 'returned'; // The original instance is gone; never signal its replacement.
+      return row.command === input.candidate ? 'current' : 'unknown';
+    } catch {
+      try {
+        process.kill(proof.pid, 0);
+      } catch (cause) {
+        if (isRecord(cause) && cause.code === 'ESRCH') return 'returned';
+      }
+      return 'unknown';
+    }
+  };
+  const hasReturned = async () => {
+    const state = await probe();
+    if (state === 'unknown') throw fail();
+    return state === 'returned';
+  };
+  const result = (signalRequested: boolean) => ({
+    pid: proof.pid,
+    canonicalStartIdentity: proof.canonical,
+    signalRequested,
+    hasReturned,
+  });
+  const first = await probe();
+  if (first === 'returned') return result(false);
+  if (first !== 'current') throw fail();
+  const leaseDirectory = join(input.installation, 'leases', input.version);
+  const recallDirectory = join(input.home, 'locks', 'recall');
+  if ((await realpath(leaseDirectory)) !== leaseDirectory || (await realpath(recallDirectory)) !== recallDirectory)
+    throw fail();
+  const read = async (filename: string) => {
+    const value: unknown = JSON.parse(
+      new TextDecoder('utf-8', {fatal: true}).decode(await runtimeReadBoundedStableRegularFile(filename, 8192)),
+    );
+    if (!isRecord(value)) throw fail();
+    return value;
+  };
+  try {
+    // Legacy ownership uses the exact child environment; never derive local time from canonical UTC text.
+    const {stdout} = await executeUpgradeCommand('/bin/ps', ['-p', String(proof.pid), '-o', 'lstart='], {
+      timeout: 1000,
+      maxBuffer: 16_384,
+      env: input.legacyEnvironment,
+    });
+    const legacyIdentity = parseProcessStartIdentityOutput('darwin', stdout);
+    if (!legacyIdentity || legacyIdentity.length > 1024) throw fail();
+    const receipt = await read(join(recallDirectory, 'embedding-worker-v1.json'));
+    const control = decodeControl(await read(join(recallDirectory, 'embedding-worker-v1.json.launch-v2.json')));
+    const lock = await read(join(recallDirectory, 'embedding-worker.lock'));
+    const lease = await read(join(leaseDirectory, `${proof.pid}.json`));
+    if (!isRecord(control.active) || !isRecord(control.active.owner)) throw fail();
+    const owner = control.active.owner;
+    if (
+      control.version !== 1 ||
+      control.protocol !== RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION ||
+      control.runtimeVersion !== input.version ||
+      control.active.nonce !== proof.nonce ||
+      owner.processId !== proof.pid ||
+      owner.processStartIdentity !== legacyIdentity ||
+      !nonce(owner.token) ||
+      receipt.processId !== proof.pid ||
+      receipt.processStartIdentity !== legacyIdentity ||
+      receipt.token !== owner.token ||
+      receipt.protocol !== RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION ||
+      receipt.version !== input.version ||
+      lock.processId !== proof.pid ||
+      lock.processStartIdentity !== legacyIdentity ||
+      !nonce(lock.token) ||
+      lease.processId !== proof.pid ||
+      lease.processStartIdentity !== proof.canonical ||
+      !nonce(lease.token) ||
+      lease.version !== input.version ||
+      lease.executable !== input.candidate ||
+      lease.retirementPolicy !== 'terminate'
+    )
+      throw fail();
+  } catch {
+    if ((await probe()) === 'returned') return result(false);
+    throw fail();
+  }
+  const final = await probe();
+  if (final === 'returned') return result(false);
+  if (final !== 'current') throw fail();
+  try {
+    if (!process.kill(proof.pid, 'SIGTERM')) throw fail();
+  } catch (cause) {
+    if (isRecord(cause) && cause.code === 'ESRCH' && (await probe()) === 'returned') return result(false);
+    throw fail();
+  }
+  return result(true);
 }
