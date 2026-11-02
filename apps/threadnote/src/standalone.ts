@@ -11,6 +11,11 @@ import type {ChildEnvironmentPolicy} from '@threadnote/platform/child-environmen
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {telemetryChildEnvironmentPolicyLayer} from './telemetry/session.js';
 import {
+  CONTEXT_MAINTENANCE_WORKER_ARGUMENT,
+  decodeContextMaintenanceWorkerRequest,
+  runContextMaintenanceWorker,
+} from './memory/context/maintenance_worker.js';
+import {
   CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT,
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
   RECALL_EMBEDDING_WORKER_ARGUMENT,
@@ -35,6 +40,7 @@ const executableName = Effect2.pipe(
 );
 const arguments_ = process.argv.slice(2);
 const isModelSetupWorker = arguments_[0] === 'model-setup-worker';
+const isContextMaintenanceWorker = arguments_[0] === CONTEXT_MAINTENANCE_WORKER_ARGUMENT;
 const isModelSetupRequest = arguments_[0] === 'model-setup-request';
 const isHandoffSaveWorker = arguments_[0] === HANDOFF_SAVE_WORKER_ARGUMENT;
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
@@ -138,7 +144,9 @@ if (
                                 ? await codeGraphParserWorkerProgram(arguments_)
                                 : isGitWorktreeRegistrationWorker
                                   ? await gitWorktreeRegistrationWorkerProgram()
-                                  : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
+                                  : isContextMaintenanceWorker
+                                    ? await contextMaintenanceWorkerProgram(arguments_.slice(1))
+                                    : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
     withCliDiagnostics,
@@ -159,6 +167,43 @@ if (
       isOAuthUserRegistryCredentialHelper ||
       (!isMcpServer && !isMcpBroker),
   });
+}
+
+async function contextMaintenanceWorkerProgram(args: readonly string[]) {
+  const runtime = await import('./effect/runtime-bootstrap.js');
+  return Effect.gen(function* () {
+    const {config, owner} = yield* decodeContextMaintenanceWorkerRequest(args);
+    const work = Effect.gen(function* () {
+      // Started imports must settle on interruption before releasing the lease.
+      const maintenance = yield* fromPromiseInterruptibleAwaiting(
+        () => import('./memory/context/maintenance_control.js'),
+        cause => cause,
+      );
+      if ((yield* maintenance.readContextMaintenanceControl(config)).paused) return;
+      const command = yield* fromPromiseInterruptibleAwaiting(
+        () =>
+          applicationProgram(
+            [
+              '--home',
+              config.agentContextHome,
+              '--manifest',
+              config.manifestPath,
+              'context',
+              'maintain',
+              '--max-records',
+              '16',
+              '--json',
+            ],
+            false,
+            false,
+          ),
+        cause => cause,
+      );
+      yield* command;
+    });
+    const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);
+    if (status === 'deadline') process.exitCode = 1;
+  }).pipe(Effect.provide(runtime.StandaloneBrokerLayer));
 }
 
 async function automaticModelSetupProgram(arguments_: readonly string[]) {

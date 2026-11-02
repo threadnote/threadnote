@@ -5,6 +5,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {succeedUndefined} from '@threadnote/platform/optional';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   runContextMaintenanceScheduler,
@@ -14,6 +15,7 @@ import {
 } from '@threadnote/threadnote/memory/context/maintenance';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {CONTEXT_MAINTENANCE_WORKER_ARGUMENT} from '../../src/memory/context/maintenance_worker.js';
 
 function fixture() {
   return Effect.gen(function* () {
@@ -47,7 +49,7 @@ describe('context maintenance scheduler containment', () => {
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
   );
 
-  effectIt.effect('starts a detached tick immediately and repeats after thirty seconds', () =>
+  effectIt.effect('wakes the guarded worker immediately and every thirty seconds with the exact MCP owner', () =>
     Effect.gen(function* () {
       const config = yield* fixture();
       yield* setContextMaintenancePaused(config, false);
@@ -78,9 +80,14 @@ describe('context maintenance scheduler containment', () => {
       yield* Deferred.await(first);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({intendedChild: 'context-maintenance'});
-      expect(calls[0].args.slice(-5)).toEqual(['context', 'maintain', '--max-records', '16', '--json']);
-      expect(calls[0].args).toContain(config.agentContextHome);
-      expect(calls[0].args).toContain(config.manifestPath);
+      expect(calls[0].args.at(-2)).toBe(CONTEXT_MAINTENANCE_WORKER_ARGUMENT);
+      expect(JSON.parse(calls[0].args.at(-1)!)).toEqual({
+        config,
+        owner: {
+          processId: system.processId,
+          startIdentity: yield* system.canonicalProcessStartIdentity!(system.processId),
+        },
+      });
       expect(calls[0].cwd).toBe(system.currentDirectory());
       expect(calls[0].env).toMatchObject({
         THREADNOTE_ACCOUNT: config.account,
@@ -102,7 +109,12 @@ describe('context maintenance scheduler containment', () => {
       const command = CommandExecutor.of({
         execute: unavailableCommand,
         executeStreaming: unavailableCommand,
-        spawnDetached: () => Effect.sync(() => (calls++, true)),
+        spawnDetached: (_executable, args) =>
+          Effect.sync(() => {
+            expect(JSON.parse(args.at(-1)!)).toEqual({config});
+            calls++;
+            return true;
+          }),
       });
       yield* setContextMaintenancePaused(config, true);
       expect(yield* wakeContextMaintenance(config).pipe(Effect.provideService(CommandExecutor, command))).toBe(false);
@@ -113,6 +125,30 @@ describe('context maintenance scheduler containment', () => {
       }).pipe(Effect.provideService(CommandExecutor, command), TestClock.withLive);
       expect(results.sort()).toEqual([false, true]);
       expect(calls).toBe(1);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
+  );
+
+  effectIt.effect('does not launch MCP work with an unknown owner identity', () =>
+    Effect.gen(function* () {
+      const config = yield* fixture();
+      yield* setContextMaintenancePaused(config, false);
+      const system = yield* SystemInfo;
+      expect(
+        yield* wakeContextMaintenance(config, {bindToParent: true}).pipe(
+          Effect.provideService(SystemInfo, {
+            ...system,
+            canonicalProcessStartIdentity: () => succeedUndefined,
+          }),
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              execute: unavailableCommand,
+              executeStreaming: unavailableCommand,
+              spawnDetached: () => Effect.die('Unknown MCP owner must not start a worker.'),
+            }),
+          ),
+        ),
+      ).toBe(false);
     }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
   );
 });
