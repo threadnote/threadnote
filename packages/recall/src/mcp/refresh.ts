@@ -1,3 +1,4 @@
+import {loadRecallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import * as EffectString from 'effect/String';
 import {Cause, Effect, Schema} from 'effect';
 import {
@@ -51,6 +52,7 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
     config: McpRecallRefreshConfig,
     invalidatedUris: readonly string[],
     receipt?: ResourceRecallInvalidationReceipt,
+    onStage?: (stage: 'lexical' | 'recall-demand') => Effect.Effect<void>,
   ) {
     const uris = [...new Set(invalidatedUris)];
     const forceRefresh =
@@ -69,7 +71,9 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
             ),
           );
     // Complete lexical freshness before deciding whether any vector caller needs candidate data.
+    if (onStage) yield* onStage('lexical');
     yield* refreshRecallLexicalIndex(config, forceRefresh, true);
+    if (onStage) yield* onStage('recall-demand');
     return yield* Effect.gen(function* () {
       const selection = yield* readModelSelection(config.agentContextHome);
       const modelId = selection.roles.embedding;
@@ -85,7 +89,12 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
         return {state: 'deferred' as const, repair: 'Lexical generation is unavailable; run `threadnote repair`.'};
       // Mutation hooks inspect metadata only; a full encoded-vector integrity scan
       // belongs to explicit doctor/verify or the worker's first admitted unit.
-      const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, lexical.generation);
+      const readiness = yield* vectorIndexGenerationReadiness(
+        config.agentContextHome,
+        manifest,
+        lexical.generation,
+        yield* loadRecallVectorAuthorizationKey(config),
+      );
       if (readiness === 'current') return {state: 'current' as const};
       if (readiness === 'corrupt')
         return {
@@ -113,8 +122,9 @@ export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
   config: McpRecallRefreshConfig,
   invalidatedUris: readonly string[],
   receipt?: ResourceRecallInvalidationReceipt,
+  onStage?: (stage: 'lexical' | 'recall-demand') => Effect.Effect<void>,
 ) {
-  const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris, receipt).pipe(
+  const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris, receipt, onStage).pipe(
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause),
       () =>

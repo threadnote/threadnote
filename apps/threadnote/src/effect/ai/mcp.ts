@@ -103,6 +103,8 @@ type ToolFields = {
 };
 
 interface ToolDefinition<Fields extends ToolFields> {
+  /** Explicit promise that this handler never invokes local inference. Unmarked handlers block background work. */
+  readonly nativeFree?: true;
   readonly annotations?: ToolAnnotations;
   readonly description?: string;
   readonly inputSchema: Fields;
@@ -143,6 +145,7 @@ export interface McpRequestContext {
   readonly identity?: unknown;
   readonly policy?: unknown;
   readonly transport: 'http' | 'stdio';
+  readonly liveTransport?: true;
 }
 
 export interface McpHttpRequestContext {
@@ -318,8 +321,10 @@ export class EffectMcpServerRegistry {
           omitAnonymousTelemetryRecorder,
         );
         const admission = Context.get(applicationServices, BackgroundInferenceAdmission);
-        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>) =>
-          productionLogHome === undefined ? program : admission.withForeground(productionLogHome, program);
+        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>, nativeFree = false) =>
+          productionLogHome === undefined
+            ? program
+            : admission.withForeground(productionLogHome, program, {nativeFree});
         for (const registration of resourceTemplates) {
           yield* server.addResourceTemplate({
             annotations: Context.empty(),
@@ -387,7 +392,11 @@ export class EffectMcpServerRegistry {
                       const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
                         Effect.flatMap(parsed =>
                           toolHandlerEffect(
-                            () => registration.handle(parsed, {progress, requestContext}),
+                            () =>
+                              registration.handle(parsed, {
+                                progress,
+                                requestContext: {...requestContext, liveTransport: true},
+                              }),
                             applicationServices,
                           ).pipe(
                             Effect.matchCauseEffect({
@@ -420,7 +429,9 @@ export class EffectMcpServerRegistry {
                           reportedFailureType: 'McpToolError',
                           reportedOutcome: readAnonymousTelemetryReportedOutcome,
                         },
-                        foreground(loggedHandling).pipe(Effect.catchCause(mcpToolFailureResult)),
+                        foreground(loggedHandling, registration.definition.nativeFree).pipe(
+                          Effect.catchCause(mcpToolFailureResult),
+                        ),
                       ).pipe(Effect.provideContext(applicationServices));
                     });
                   }),

@@ -43,6 +43,22 @@ import {codeGraphAnonymousTelemetryComponent, CodeGraphObservability} from '../r
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+/** Only typed recovery categories reach logs; raw storage messages may contain private paths. */
+export function deferredCodeGraphMaintenanceFailureMessage(error: CodeGraphStoreFailure): string {
+  const actions = {
+    defer: 'wait for foreground work to finish and retry',
+    diagnose: 'run threadnote doctor and inspect graph storage health',
+    'fix-permissions': 'restore access to the Threadnote home and retry',
+    'free-space': 'free disk space and retry',
+    'manual-migration': 'run threadnote repair for the required migration',
+    'manual-rebuild': 'run threadnote repair to rebuild derived graph data',
+    'migrate-additive': 'run threadnote repair to update graph storage',
+    'reconnect-runtime': 'restart Threadnote with the current runtime',
+    'retry-read-only': 'retry after the current graph writer releases its lease',
+  } as const;
+  return `Deferred code graph maintenance failed: stage=deferred-maintenance; reason=${error.code}; action=${actions[error.recovery]}.`;
+}
+
 export const CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT = 128;
 export const CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_MILLISECONDS = 2_000;
 export const CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_UNITS = 16;
@@ -834,7 +850,7 @@ export const makeCodeGraphMaintenanceCoordinator = Effect.fn('codeGraph.makeMain
         if (next !== undefined) {
           yield* execute(next.input, next.completion, next.budget).pipe(
             Effect.tapError(error =>
-              Effect.logWarning(`Deferred code graph maintenance failed (${error.code}).`).pipe(
+              Effect.logWarning(deferredCodeGraphMaintenanceFailureMessage(error)).pipe(
                 Effect.andThen(
                   onDeferredFailure === undefined
                     ? Effect.void

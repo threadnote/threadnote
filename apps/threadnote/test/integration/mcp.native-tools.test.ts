@@ -212,6 +212,7 @@ const CORE_TOOL_NAMES = [
   'context_brief',
   'read_context',
   'list_context',
+  'memory_write_status',
   'remember_context',
   'finalize_code_refs',
   'inspect_obsidian_note',
@@ -630,9 +631,15 @@ describe('Threadnote MCP toolsets', () => {
         for (const fullOnlyTool of ['archive', 'compact_context', 'forget', 'share_conflicts', 'share_skill']) {
           expect(EffectArray.map(tools.tools, tool => tool.name)).not.toContain(fullOnlyTool);
         }
-        const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        // Includes the five revisioned source-evidence tools; search-capable hosts can defer definitions.
-        expect(serializedToolsBytes).toBeLessThanOrEqual(36_000);
+        const status = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'memory_write_status'),
+        );
+        const priorCore = EffectArray.filter(tools.tools, tool => tool.name !== 'memory_write_status');
+        // Preserve the existing catalog budget; bound the required owned-save status addition separately.
+        expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
+        expect(status).toBeDefined();
+        expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(36_500);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

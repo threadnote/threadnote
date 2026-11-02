@@ -2,6 +2,8 @@ import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_DATABASE_VERSION, CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './vector/generation_schema.js';
 import {
   commitCodeGraphGenerationStep,
+  copyCodeGraphCompatiblePrefix,
+  estimateCodeGraphCompatibleCopyBytes,
   completeCodeGraphGeneration,
   claimCodeGraphGeneration,
   initializeCodeGraphGenerationSchema,
@@ -308,6 +310,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   readonly maximumSteps?: number;
   readonly lockWaitTimeoutMilliseconds?: number;
   readonly maximumInferenceSymbolsPerStep?: number;
+  readonly maximumRawSymbolsPerStep?: number;
   readonly inferenceBatchSize?: number;
   readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
   readonly ownerToken?: string;
@@ -329,7 +332,12 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
 }) {
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
-  for (const limit of [input.maximumSteps, input.maximumInferenceSymbolsPerStep, input.inferenceBatchSize]) {
+  for (const limit of [
+    input.maximumSteps,
+    input.maximumInferenceSymbolsPerStep,
+    input.inferenceBatchSize,
+    input.maximumRawSymbolsPerStep,
+  ]) {
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
       return yield* CodeGraphEmbeddingError.make({
         message: 'Code graph vector generation limits must be positive safe integers.',
@@ -367,6 +375,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   const worktreeId = requiredWorktreeId(input.layout);
   const ownerToken = input.ownerToken ?? (yield* crypto.randomUUIDv4());
   const requestEpoch = input.force ? ownerToken : input.snapshot.id;
+  const atomicReuse = input.maximumSteps !== undefined && !input.force;
   yield* input.fs.makeDirectory(root, {recursive: true, mode: 0o700});
   const capacity = yield* makeCodeGraphVectorRetirementCapacityProtector({
     databasePath,
@@ -452,7 +461,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                 }
                 let reusable: VectorGenerationRow | undefined;
                 if (!generation) {
-                  if (!input.force) {
+                  if (!input.force && !atomicReuse) {
                     const active = yield* selectActiveGeneration(sql, worktreeId);
                     reusable =
                       active?.model_sha256 === selected.manifest.sha256 &&
@@ -480,12 +489,19 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                   return yield* CodeGraphVectorOwnerExpired.make({
                     message: 'Vector generation ownership expired; a fresh validated owner is required.',
                   });
-                const progress = yield* claimCodeGraphGeneration(sql, {
+                let progress = yield* claimCodeGraphGeneration(sql, {
                   generation: generation.generation,
                   ownerToken,
                   requestEpoch,
                   reusableGeneration: reusable?.generation,
                 });
+                if (progress && atomicReuse && progress.reusable_generation !== null) {
+                  yield* sql.unsafe(
+                    'UPDATE vector_generation_progress SET reusable_generation = NULL WHERE generation = ? AND owner_token = ?',
+                    [generation.generation, ownerToken],
+                  );
+                  progress = yield* readCodeGraphGenerationProgress(sql, generation.generation);
+                }
                 return progress ? {generation, progress} : undefined;
               }),
             ),
@@ -518,15 +534,87 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
           1,
           Math.min(EMBED_BATCH_SIZE, Math.floor(input.inferenceBatchSize ?? EMBED_BATCH_SIZE)),
         );
+        const rawPageSize = Math.max(
+          1,
+          Math.min(VECTOR_PAGE_SIZE, Math.floor(input.maximumRawSymbolsPerStep ?? VECTOR_PAGE_SIZE)),
+        );
         if (initialGeneration.state !== 'ready') {
           for (;;) {
             yield* validate;
             progress = yield* lock(requireCodeGraphGenerationClaim(sql, generation, ownerToken));
             const cursor: CodeGraphSymbolCursor | undefined = progress.cursor ? JSON.parse(progress.cursor) : undefined;
             let rawPage = isSymbolPageSource(input.symbols)
-              ? yield* input.symbols.loadPage(cursor, VECTOR_PAGE_SIZE)
-              : input.symbols.slice(progress.array_offset, progress.array_offset + VECTOR_PAGE_SIZE);
+              ? yield* input.symbols.loadPage(cursor, rawPageSize)
+              : input.symbols.slice(progress.array_offset, progress.array_offset + rawPageSize);
             if (rawPage.length === 0) break;
+            let forcedPrefix = false;
+            if (atomicReuse) {
+              const projected = new Map(
+                EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => {
+                  const item = projectSymbol(symbol);
+                  return [item.id, item.fingerprint] as const;
+                }),
+              );
+              const raw = EffectArray.map(rawPage, symbol => ({
+                id: symbol.id,
+                fingerprint: projected.get(symbol.id),
+                cursor: JSON.stringify({id: symbol.id, path: symbol.path, qualifiedName: symbol.qualifiedName}),
+              }));
+              const copied = yield* protect(
+                rawPage.length + 1,
+                estimateCodeGraphCompatibleCopyBytes(raw, selected.manifest.dimensions!),
+                lock(
+                  copyCodeGraphCompatiblePrefix(sql, {
+                    generation,
+                    ownerToken,
+                    worktreeId,
+                    expectedCursor: progress.cursor,
+                    expectedOffset: progress.array_offset,
+                    modelId: selected.manifest.id,
+                    modelSha256: selected.manifest.sha256,
+                    dimensions: selected.manifest.dimensions!,
+                    templateVersion: CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION,
+                    raw,
+                    decode: value => {
+                      try {
+                        const bytes = bytesFromSqlBlob(value);
+                        return isDecodableVector(bytes, selected.manifest.dimensions!) ? bytes : undefined;
+                      } catch {
+                        return undefined;
+                      }
+                    },
+                  }),
+                ),
+              );
+              if (copied.consumed > 0) {
+                progress = copied.progress;
+                yield* input.onProgress?.({
+                  completed: progress.embedded + progress.reused,
+                  embedded: progress.embedded,
+                  reused: progress.reused,
+                  phase: 'embedding',
+                  total,
+                  unit: 'symbols',
+                }) ?? Effect.void;
+                steps++;
+                if (copied.consumed === rawPage.length && rawPage.length < rawPageSize) break;
+                if (steps >= maximumSteps)
+                  return {
+                    embedded: progress.embedded,
+                    reused: progress.reused,
+                    generation,
+                    ownerToken,
+                    modelId: selected.manifest.id,
+                    ready: false,
+                    state: 'checkpointed' as const,
+                    reason: 'Code graph vector generation checkpointed.',
+                  };
+                continue;
+              }
+              // The first missing input is inferred only after the copy transaction has ended.
+              forcedPrefix = rawPage.length > 1;
+              rawPage = rawPage.slice(0, 1);
+            }
             let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
             const existing =
               projectedPage.length === 0
@@ -564,7 +652,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                 seen.add(item.id);
               }
             }
-            const truncated = consumed < rawPage.length;
+            const truncated = forcedPrefix || consumed < rawPage.length;
             rawPage = rawPage.slice(0, consumed);
             if (truncated) {
               projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
@@ -645,7 +733,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               unit: 'symbols',
             }) ?? Effect.void;
             steps += 1;
-            if (!truncated && rawPage.length < VECTOR_PAGE_SIZE) break;
+            if (!truncated && rawPage.length < rawPageSize) break;
             if (steps >= maximumSteps)
               return {
                 embedded: progress.embedded,

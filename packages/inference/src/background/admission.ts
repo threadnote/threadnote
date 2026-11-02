@@ -22,6 +22,8 @@ export const BACKGROUND_INFERENCE_INPUT_LIMIT = 1;
 export const BACKGROUND_INFERENCE_REQUEST_MILLISECONDS = 10_000;
 export const BACKGROUND_INFERENCE_BATCH_MILLISECONDS = 15_000;
 export const BACKGROUND_INFERENCE_QUIET_MILLISECONDS = 1_000;
+export const BACKGROUND_INFERENCE_FOREGROUND_AGE_MILLISECONDS = 30_000;
+const MINIMUM_CAPACITY_YIELD_MILLISECONDS = 100;
 const LEASE_MILLISECONDS = 30_000;
 const HEARTBEAT_MILLISECONDS = 5_000;
 const SAMPLE_MINIMUM_MILLISECONDS = 500;
@@ -43,11 +45,14 @@ const leaseSchema = Schema.Struct({
   expiresAt: timestamp,
   // Older v1 readers strip this optional tag but still conservatively block on the lease.
   purpose: Schema.optionalKey(Schema.Literals(['idle-execution'])),
+  nativeFree: Schema.optionalKey(Schema.Literal(true)),
+  spareCapacityStartedAt: Schema.optionalKey(timestamp),
 });
 export const backgroundBatchAuthoritySchema = Schema.Struct({
   home: Schema.String.check(Schema.isMaxLength(4096)),
   domain: domainSchema,
   owner: ownerSchema,
+  capacityMode: Schema.optionalKey(Schema.Literal('spare-cpu-v2')),
 });
 export type BackgroundBatchAuthority = typeof backgroundBatchAuthoritySchema.Type;
 export const CurrentBackgroundBatchAuthority = Context.Reference<BackgroundBatchAuthority | undefined>(
@@ -69,6 +74,8 @@ export const backgroundInferenceAdmissionStateSchema = Schema.Struct({
   active: Schema.optionalKey(Schema.Struct({...leaseSchema.fields, domain: domainSchema})),
   lastGranted: Schema.optionalKey(domainSchema),
   quietUntil: timestamp,
+  foregroundBusySince: Schema.optionalKey(timestamp),
+  spareCapacityNotBefore: Schema.optionalKey(timestamp),
 });
 export type BackgroundInferenceOwner = typeof ownerSchema.Type;
 export type BackgroundInferenceAdmissionState = typeof backgroundInferenceAdmissionStateSchema.Type;
@@ -129,6 +136,20 @@ export const emptyBackgroundInferenceAdmission = (): BackgroundInferenceAdmissio
   quietUntil: 0,
 });
 
+const capacityCooldown = (
+  state: BackgroundInferenceAdmissionState,
+  removed: readonly {readonly spareCapacityStartedAt?: number}[],
+  now: number,
+) => {
+  let until = state.spareCapacityNotBefore;
+  for (const lease of removed) {
+    if (lease.spareCapacityStartedAt === undefined) continue;
+    const elapsed = Math.max(MINIMUM_CAPACITY_YIELD_MILLISECONDS, now - lease.spareCapacityStartedAt);
+    until = Math.max(until ?? 0, now + Math.min(BACKGROUND_INFERENCE_BATCH_MILLISECONDS, elapsed));
+  }
+  return until;
+};
+
 /** Expiration alone never proves a computing or foreground owner dead. */
 export function pruneBackgroundInferenceOwners(
   state: BackgroundInferenceAdmissionState,
@@ -136,12 +157,18 @@ export function pruneBackgroundInferenceOwners(
   now: number,
 ): BackgroundInferenceAdmissionState {
   const {active, ...rest} = state;
+  const cooldown = capacityCooldown(
+    state,
+    EffectArray.filter([...state.foreground, ...(active ? [active] : [])], lease => deadTokens.has(lease.owner.token)),
+    now,
+  );
   return {
     ...rest,
     foreground: EffectArray.filter(state.foreground, lease => !deadTokens.has(lease.owner.token)),
     // Tickets grant no work authority; dropping an expired ticket cannot lose domain demand.
     pending: EffectArray.filter(state.pending, ticket => ticket.expiresAt > now),
     ...(active && !deadTokens.has(active.owner.token) ? {active} : {}),
+    ...(cooldown === undefined ? {} : {spareCapacityNotBefore: cooldown}),
   };
 }
 
@@ -149,9 +176,16 @@ export function registerBackgroundForegroundLease(
   state: BackgroundInferenceAdmissionState,
   owner: BackgroundInferenceOwner,
   now: number,
+  nativeFree = false,
 ): BackgroundInferenceAdmissionState {
   if (state.foreground.length >= 128) throw new Error('Foreground inference admission capacity unavailable.');
-  return {...state, foreground: [...state.foreground, {owner, expiresAt: now + LEASE_MILLISECONDS}]};
+  return {
+    ...state,
+    foreground: [
+      ...state.foreground,
+      {owner, expiresAt: now + LEASE_MILLISECONDS, ...(nativeFree ? {nativeFree: true as const} : {})},
+    ],
+  };
 }
 
 /** The atomic grant is the start of one bounded batch, before any domain claim. */
@@ -173,13 +207,29 @@ export function planBackgroundInferenceBatch(
       ? [{domain, requestedAt: Option.isSome(old) ? old.value.requestedAt : now, expiresAt: now + LEASE_MILLISECONDS}]
       : []),
   ];
-  const next = {...state, pending};
+  const contended =
+    EffectArray.some(state.foreground, lease => lease.purpose !== 'idle-execution') || state.quietUntil > now;
+  const {foregroundBusySince, ...withoutAge} = state;
+  const since = contended ? (foregroundBusySince ?? now) : undefined;
+  const next = {...withoutAge, pending, ...(since === undefined ? {} : {foregroundBusySince: since})};
   const deny = (reason: BackgroundInferenceDeferral) => ({state: next, admitted: false, reason});
   if (!owner.startIdentity) return deny('identity-unavailable');
-  if (state.foreground.length > 0) return deny('foreground');
-  if (state.quietUntil > now) return deny('foreground-quiet');
+  if (EffectArray.some(state.foreground, lease => lease.purpose === 'idle-execution')) return deny('foreground');
+  // Unknown/inference-bearing owners never opt into overlap, even after aging.
+  if (
+    EffectArray.some(
+      state.foreground,
+      lease => lease.nativeFree !== true || !lease.owner.startIdentity || lease.expiresAt <= now,
+    )
+  )
+    return deny('foreground');
+  const spareCapacity = since !== undefined && now >= since + BACKGROUND_INFERENCE_FOREGROUND_AGE_MILLISECONDS;
+  if (contended && !spareCapacity) return deny(state.foreground.length ? 'foreground' : 'foreground-quiet');
   if (state.active) return deny('inference-active');
   if (capacity.state !== 'idle') return deny(capacity.state === 'busy' ? 'cpu-busy' : 'cpu-unknown');
+  if (spareCapacity && capacity.spareCpus < BACKGROUND_INFERENCE_THREADS + 1) return deny('cpu-busy');
+  if ((state.spareCapacityNotBefore ?? 0) > now) return deny('foreground-quiet');
+  if (state.foreground.length >= 128) return deny('admission-unavailable');
   const ordered = [...pending].sort(
     (left, right) =>
       left.requestedAt - right.requestedAt || (left.domain < right.domain ? -1 : left.domain > right.domain ? 1 : 0),
@@ -191,7 +241,12 @@ export function planBackgroundInferenceBatch(
     state: {
       ...next,
       pending: EffectArray.filter(pending, ticket => ticket.domain !== domain),
-      active: {domain, owner, expiresAt: now + LEASE_MILLISECONDS},
+      active: {
+        domain,
+        owner,
+        expiresAt: now + LEASE_MILLISECONDS,
+        ...(spareCapacity ? {spareCapacityStartedAt: now} : {}),
+      },
       lastGranted: domain,
     },
     admitted: true,
@@ -205,6 +260,11 @@ export function releaseBackgroundInferenceLease(
 ): BackgroundInferenceAdmissionState {
   const foreground = EffectArray.filter(state.foreground, lease => lease.owner.token !== token);
   const {active, ...rest} = state;
+  const cooldown = capacityCooldown(
+    state,
+    EffectArray.filter([...state.foreground, ...(active ? [active] : [])], lease => lease.owner.token === token),
+    now,
+  );
   return {
     ...rest,
     foreground,
@@ -215,6 +275,7 @@ export function releaseBackgroundInferenceLease(
       ? Math.max(state.quietUntil, now + BACKGROUND_INFERENCE_QUIET_MILLISECONDS)
       : state.quietUntil,
     ...(active?.owner.token === token ? {} : active ? {active} : {}),
+    ...(cooldown === undefined ? {} : {spareCapacityNotBefore: cooldown}),
   };
 }
 
@@ -227,6 +288,7 @@ export interface BackgroundInferenceAdmissionShape {
   readonly withForeground: <A, E, R>(
     home: string,
     program: Effect.Effect<A, E, R>,
+    options?: {readonly existingHomeOnly?: boolean; readonly nativeFree?: boolean},
   ) => Effect.Effect<A, E | BackgroundInferenceAdmissionUnavailable, R>;
   readonly withExecution: <A, E, R>(
     authority: BackgroundBatchAuthority,
@@ -448,7 +510,8 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       }
     });
   let previousCpu: CpuCapacitySample | undefined;
-  const sampleCpu = Effect.gen(function* () {
+  let nextCpu: CpuCapacitySample | undefined;
+  const observeCpuSample = Effect.gen(function* () {
     const observation = system.cpuTimes
       ? system.cpuTimes.pipe(Effect.map(Option.fromUndefinedOr))
       : Effect.succeed(Option.none<SystemCpuTimes>());
@@ -459,10 +522,30 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       ),
     );
     const now = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
-    const current = Option.isSome(counters) ? {...counters.value, atMilliseconds: now} : undefined;
+    return Option.isSome(counters) ? {...counters.value, atMilliseconds: now} : undefined;
+  });
+  const sampleCpu = Effect.gen(function* () {
+    const current = yield* observeCpuSample;
+    const now = current?.atMilliseconds ?? Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+    // Keep two staggered anchors. Every decision still uses a fresh OS sample
+    // over >=500ms, without imposing a new500ms pause after each short unit.
+    if (nextCpu && now - nextCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) {
+      previousCpu = nextCpu;
+      nextCpu = undefined;
+    }
     const capacity = classifyBackgroundCpuCapacity(previousCpu, current);
-    if (!previousCpu || !current || now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS)
+    if (
+      !previousCpu ||
+      !current ||
+      (capacity.state === 'unknown' && now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) ||
+      now - previousCpu.atMilliseconds > SAMPLE_MAXIMUM_MILLISECONDS ||
+      previousCpu.logicalCpus !== current.logicalCpus ||
+      current.totalMilliseconds < previousCpu.totalMilliseconds ||
+      current.idleMilliseconds < previousCpu.idleMilliseconds
+    ) {
       previousCpu = current;
+      nextCpu = undefined;
+    } else if (!nextCpu && now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) nextCpu = current;
     return capacity;
   });
   const deadOwners = (home: string) =>
@@ -494,12 +577,21 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
         Effect.gen(function* () {
           if (!path.isAbsolute(authority.home)) return yield* executionDeferred();
           const parent = authority.owner;
+          if (!parent.startIdentity || !system.isProcessRunning(parent.processId)) return yield* executionDeferred();
+          const capacityMode = authority.capacityMode === 'spare-cpu-v2';
+          if (capacityMode) {
+            const before = yield* observeCpuSample;
+            if (!before) return yield* executionDeferred();
+            yield* Effect.sleep(SAMPLE_MINIMUM_MILLISECONDS);
+            const capacity = classifyBackgroundCpuCapacity(before, yield* observeCpuSample);
+            if (capacity.state !== 'idle' || capacity.spareCpus < BACKGROUND_INFERENCE_THREADS + 1)
+              return yield* executionDeferred();
+          }
           const probe =
             parent.identityKind === 'canonical'
               ? system.canonicalProcessStartIdentity?.(parent.processId)
               : system.processStartIdentity(parent.processId);
-          if (!probe || !parent.startIdentity || !system.isProcessRunning(parent.processId))
-            return yield* executionDeferred();
+          if (!probe) return yield* executionDeferred();
           const identity = yield* probe.pipe(Effect.timeoutOption('100 millis'), Effect.map(Option.getOrUndefined));
           if (identity !== parent.startIdentity) return yield* executionDeferred();
           const lease = yield* owner;
@@ -516,14 +608,31 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
               active.owner.identityKind === parent.identityKind &&
               active.owner.startIdentity === parent.startIdentity &&
               system.isProcessRunning(parent.processId) &&
-              state.foreground.length === 0;
+              (active.spareCapacityStartedAt !== undefined) === capacityMode &&
+              state.foreground.length < 128 &&
+              (capacityMode
+                ? active.spareCapacityStartedAt! <= now &&
+                  EffectArray.every(
+                    state.foreground,
+                    lease =>
+                      lease.nativeFree === true &&
+                      !!lease.owner.startIdentity &&
+                      lease.expiresAt > now &&
+                      lease.purpose !== 'idle-execution',
+                  )
+                : state.foreground.length === 0);
             return admitted
               ? {
                   state: {
                     ...state,
                     foreground: [
                       ...state.foreground,
-                      {owner: lease, expiresAt: now + LEASE_MILLISECONDS, purpose: 'idle-execution' as const},
+                      {
+                        owner: lease,
+                        expiresAt: now + LEASE_MILLISECONDS,
+                        purpose: 'idle-execution' as const,
+                        ...(capacityMode ? {spareCapacityStartedAt: now} : {}),
+                      },
                     ],
                   },
                   value: true,
@@ -539,14 +648,18 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
         lease => Effect.scoped(heartbeat(authority.home, lease.token).pipe(Effect.forkScoped, Effect.andThen(program))),
         lease => release(authority.home, lease.token),
       ),
-    withForeground: (home, program) =>
+    withForeground: (home, program, options) =>
       Effect.acquireUseRelease(
         owner.pipe(
           Effect.flatMap(lease =>
             transact(
               home,
-              (state, now) => ({state: registerBackgroundForegroundLease(state, lease, now), value: lease}),
+              (state, now) => ({
+                state: registerBackgroundForegroundLease(state, lease, now, options?.nativeFree),
+                value: lease,
+              }),
               true,
+              options?.existingHomeOnly !== true,
             ).pipe(Effect.onError(() => release(home, lease.token))),
           ),
         ),
@@ -594,6 +707,9 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
                         home,
                         domain,
                         owner: admission.lease,
+                        ...(admission.state.active?.spareCapacityStartedAt === undefined
+                          ? {}
+                          : {capacityMode: 'spare-cpu-v2' as const}),
                       }),
                     ),
                   ),

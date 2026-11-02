@@ -30,6 +30,7 @@ import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_proce
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
 import {
   consumeNativeWatchNotification,
+  matchesTerminalNativeWatchArrival,
   nativeWatchWakeupSchema,
   type NativeWatchWakeup,
 } from './watch_notification_state.js';
@@ -616,6 +617,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
         const at = yield* Clock.currentTimeMillis;
         let envelope = stored.envelope;
         let output: Record<string, unknown> = {};
+        let arrivalOnly = false;
         if (request.command === 'stop') envelope = {...envelope, stopRequested: true};
         else if (request.command === 'consumer') {
           yield* from(() => assertQualifiedBinding(envelope));
@@ -640,24 +642,45 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
         } else {
           const consumerId = required(request.consumerId, 'consumerId');
           if (request.command === 'relay' || request.command === 'wait') {
-            const count = Math.max(1, boundedItems(envelope.state.events).items.length);
-            const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count));
-            envelope = {
-              ...envelope,
-              state: relay.state,
-              metrics: {...envelope.metrics, consumerReads: envelope.metrics.consumerReads + 1},
-            };
-            if (request.eventKey !== undefined && envelope.notification)
+            const route =
+              request.eventKey === undefined
+                ? undefined
+                : {
+                    consumerId,
+                    wakeupId: required(request.wakeupId, 'wakeupId'),
+                    eventKey: request.eventKey,
+                    ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
+                  };
+            arrivalOnly =
+              route !== undefined &&
+              envelope.notification !== undefined &&
+              matchesTerminalNativeWatchArrival(envelope.notification, envelope.state, route) &&
+              (envelope.collector?.status === 'stopped' || envelope.collector?.status === 'terminal') &&
+              !(yield* nativeWatchCollectorAlive(envelope.collector));
+            if (arrivalOnly && route && envelope.notification) {
+              const notification = consumeNativeWatchNotification(envelope.notification, envelope.state, route);
+              if (notification !== envelope.notification) envelope = {...envelope, notification};
+              output = {delivery: null};
+            } else {
+              const count = Math.max(1, boundedItems(envelope.state.events).items.length);
+              const relay = yield* from(() => relayNativeWatch(envelope.state, consumerId, at, count));
               envelope = {
                 ...envelope,
-                notification: consumeNativeWatchNotification(envelope.notification, envelope.state, {
-                  consumerId,
-                  wakeupId: required(request.wakeupId, 'wakeupId'),
-                  eventKey: request.eventKey,
-                  ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
-                }),
+                state: relay.state,
+                metrics: {...envelope.metrics, consumerReads: envelope.metrics.consumerReads + 1},
               };
-            output = {delivery: relay.delivery};
+              if (request.eventKey !== undefined && envelope.notification)
+                envelope = {
+                  ...envelope,
+                  notification: consumeNativeWatchNotification(envelope.notification, envelope.state, {
+                    consumerId,
+                    wakeupId: required(request.wakeupId, 'wakeupId'),
+                    eventKey: request.eventKey,
+                    ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
+                  }),
+                };
+              output = {delivery: relay.delivery};
+            }
           } else if (request.command === 'disposition')
             envelope = {
               ...envelope,
@@ -686,7 +709,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
               ),
             };
         }
-        if (request.command !== 'stop' && envelope.notification && envelope !== stored.envelope)
+        if (!arrivalOnly && request.command !== 'stop' && envelope.notification && envelope !== stored.envelope)
           envelope = {...envelope, notification: {...envelope.notification, lastConsumerAt: at}};
         const saved =
           envelope === stored.envelope ? stored : yield* writeNativeWatch(config, envelope, stored.revision);

@@ -11,7 +11,8 @@ import {normalizeVector} from '@threadnote/inference/vector-search';
 import {openRecallVectorPreparationSource} from '../index/vector-preparation-source.js';
 export {RecallVectorSourceChanged} from '../index/vector-preparation-source.js';
 import type {RecallCandidate} from '../rank.js';
-import {recallVectorStorage, vectorIndexGenerationReadiness} from '../vector-index.js';
+import {recallVectorStorage, VectorIndexCorrupt} from '../vector-index.js';
+import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../vector/preparation-identity.js';
 import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
 import type {RecallEmbeddingScope} from './demand.js';
 import {
@@ -241,19 +242,91 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   } else if (target.phase === 'retire') {
     yield* verify;
     yield* source.fence;
-    const complete = yield* retireRecallVectorPreparation(config, manifest, target);
-    return {state: complete ? ('current' as const) : ('pending' as const), phase: target.phase, inferred: false};
+    const complete = yield* retireRecallVectorPreparation(config, manifest, target, source.generation);
+    return {state: 'pending' as const, phase: complete ? ('ready' as const) : target.phase, inferred: false};
   } else {
     yield* verify;
     yield* source.fence;
-    if ((yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, source.generation)) !== 'current')
-      return yield* preparationChanged();
     for (let offset = 0; ; offset += 100) {
       const page = yield* documents(offset);
       yield* source.authorize(page);
       if (page.length < 100) break;
     }
-    return {state: 'current' as const, phase: target.phase, inferred: false};
+    const pointer = yield* recallVectorStorage.read(
+      filename,
+      Effect.gen(function* () {
+        return yield* (yield* SqlClient.SqlClient)<{
+          readonly generation: string;
+        }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
+      }),
+    );
+    if (pointer[0]?.generation !== target.generation)
+      yield* recallVectorStorage
+        .validateGenerationRows(config.agentContextHome, manifest, target.generation, manifest.dimensions)
+        .pipe(
+          Effect.mapError(() =>
+            VectorIndexCorrupt.make({
+              modelId: manifest.id,
+              message: 'Retained recall vectors require explicit repair.',
+            }),
+          ),
+        );
+    // A different authorization scope may have activated since this target retired.
+    // Reuse its immutable ready vectors only after fresh authorization and exact fences.
+    return yield* Effect.acquireUseRelease(
+      withRecallVectorWrite(
+        config,
+        manifest,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* assertRecallVectorTarget(target);
+          const job = recallVectorPreparationJobId(
+            recallVectorPreparationIdentity(
+              source.generation,
+              source.authorizationKey,
+              manifest.id,
+              recallVectorStorage.recipe(manifest),
+            ),
+          );
+          const ready = yield* sql`SELECT 1 FROM vector_generations g
+          WHERE g.generation = ${target.generation} AND g.state = 'ready'
+          AND g.job_id = ${job} AND g.corpus_generation = ${source.generation}
+          AND g.chunk_count = (SELECT COUNT(*) FROM vector_chunks c WHERE c.generation = g.generation)`;
+          if (ready.length !== 1) return yield* preparationChanged();
+          const previous = yield* sql<{
+            readonly generation: string;
+          }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
+          yield* verify;
+          yield* source.fence;
+          yield* sql`INSERT INTO vector_pointer (singleton,generation) VALUES (1,${target.generation})
+          ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation`;
+          return previous[0]?.generation;
+        }),
+      ),
+      () =>
+        verify.pipe(
+          Effect.andThen(source.fence),
+          Effect.as({state: 'current' as const, phase: target.phase, inferred: false}),
+        ),
+      (previous, exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : withRecallVectorWrite(
+              config,
+              manifest,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                const restored =
+                  previous === undefined
+                    ? []
+                    : yield* sql`UPDATE vector_pointer SET generation = ${previous}
+          WHERE generation = ${target.generation}
+          AND EXISTS (SELECT 1 FROM vector_generations WHERE generation = ${previous} AND state = 'ready') RETURNING generation`;
+                if (!restored.length) yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
+                // Ready targets have already discarded preparation chunks. Never demote them.
+              }),
+            ),
+    );
   }
   return {state: 'pending' as const, phase: target.phase, inferred: false};
 });

@@ -7,6 +7,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -287,7 +288,9 @@ describe('built self-contained distribution', () => {
   it('recalls saved memory immediately and explicitly rebuilds vectors through built launchers', async () => {
     const recall = await runCli(['recall', '--query', 'QZ9 native recall background service']);
     expect(recall).toContain('native-e2e.md');
-    expect(await runCli(['doctor'])).toMatch(/WARN\s+vector recall index:.*queued/);
+    expect(await runCli(['doctor'])).toMatch(
+      /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot)/,
+    );
     expect(await activeVectorRevision()).toBe(initialVectorRevision);
     const rebuilt = await runCli(['index', 'rebuild']);
     expect(rebuilt).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
@@ -1674,6 +1677,51 @@ async function runCliJson<S extends Schema.ConstraintDecoder<unknown>>(
   );
 }
 
+async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<string> {
+  const detail = (key: string) => {
+    const value = childProcessOutput(cause, key);
+    if (typeof value === 'string') return Effect.pipe(value, EffectString.slice(0, 128));
+    return typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) || value === null
+      ? value
+      : undefined;
+  };
+  const exit = {
+    code: detail('code'),
+    signal: detail('signal'),
+    killed: detail('killed'),
+    platform: process.platform,
+    architecture: process.arch,
+  };
+  // Test homes contain synthetic data. Read a bounded tail and expose only diagnostic categories.
+  const phases = await (async () => {
+    const file = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
+    try {
+      const size = (await file.stat()).size;
+      const buffer = Buffer.alloc(Math.min(32_768, size));
+      const {bytesRead} = await file.read(buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+      const lines = Effect.pipe(buffer.subarray(0, bytesRead).toString('utf8'), EffectString.split('\n'));
+      return EffectArray.flatMap(EffectArray.takeRight(lines, 17), line => {
+        try {
+          const record: unknown = JSON.parse(line);
+          if (typeof record !== 'object' || record === null) return [];
+          const selected: Record<string, string | number | boolean> = {};
+          for (const key of ['component', 'operation', 'event', 'outcome', 'errorType', 'phase']) {
+            const value = Reflect.get(record, key);
+            if (typeof value === 'string') selected[key] = Effect.pipe(value, EffectString.slice(0, 128));
+            else if (typeof value === 'number' || typeof value === 'boolean') selected[key] = value;
+          }
+          return [selected];
+        } catch {
+          return [];
+        }
+      });
+    } finally {
+      await file.close();
+    }
+  })().catch(() => []);
+  return `Packaged CLI failure evidence: ${JSON.stringify({exit, phases})}`;
+}
+
 async function runCliOutput(
   args: readonly string[],
   environment: NodeJS.ProcessEnv = {},
@@ -1696,6 +1744,7 @@ async function runCliOutput(
           `${cli} --home ${targetHome} ${EffectArray.join(args, ' ')}`,
           `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
           `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
+          await cliFailureEvidence(targetHome, cause).catch(() => 'Packaged CLI failure evidence unavailable.'),
           ...(args[0] === 'source' && args[1] === 'sync'
             ? [await coordinatorFailureEvidence(targetHome, environment)]
             : []),

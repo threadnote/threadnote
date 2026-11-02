@@ -47,7 +47,7 @@ const events = (home: string) =>
         const value: unknown = JSON.parse(line);
         if (!Predicate.isObject(value) || typeof value.event !== 'string' || typeof value.pid !== 'number')
           throw TestError.make({message: 'Embedding worker emitted a malformed event.'});
-        for (const key of ['childPid', 'inputs', 'pool', 'limit'])
+        for (const key of ['childPid', 'inputs', 'pool', 'limit', 'rows'])
           if (value[key] !== undefined && typeof value[key] !== 'number')
             throw TestError.make({message: 'Embedding worker event contained a malformed numeric field.'});
         for (const key of ['state', 'modelId'])
@@ -60,6 +60,7 @@ const events = (home: string) =>
           ...(typeof value.inputs === 'number' ? {inputs: value.inputs} : {}),
           ...(typeof value.pool === 'number' ? {pool: value.pool} : {}),
           ...(typeof value.limit === 'number' ? {limit: value.limit} : {}),
+          ...(typeof value.rows === 'number' ? {rows: value.rows} : {}),
           ...(typeof value.state === 'string' ? {state: value.state} : {}),
           ...(typeof value.modelId === 'string' ? {modelId: value.modelId} : {}),
         };
@@ -286,8 +287,10 @@ for (const fault of [
             Effect.provideService(FileSystem.FileSystem, faultFs),
             Effect.provideService(LocalModelRuntime, runtime),
           );
+          let firstResult = yield* turn;
+          for (let unit = 0; unit < 4 && firstResult.state === 'checkpointed'; unit++) firstResult = yield* turn;
           expect(
-            yield* turn,
+            firstResult,
             JSON.stringify({observationFailures, publicationFailures, cleanupFailures}),
           ).toMatchObject({state: terminal ? 'blocked' : 'deferred'});
           const pending = (yield* lanes(home))[0];
@@ -297,7 +300,8 @@ for (const fault of [
           expect(completed.progress[0].owner_token).toBe(pending.active?.owner.token);
           expect(completed.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
           expect(pending.attempt).toBe(0);
-          expect(inferenceCalls).toBe(1);
+          expect(inferenceCalls).toBe(2);
+          const completedClaims = [...claims];
           if (capacityFault) expect(observationFailures).toBeGreaterThan(0);
           else {
             expect(publicationFailures).toBeGreaterThan(0);
@@ -344,7 +348,7 @@ for (const fault of [
             );
             expect(yield* boundaryTurn).toMatchObject({state: uncertainOwner ? 'deferred' : 'unavailable'});
             expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
-            expect(claims).toHaveLength(1);
+            expect(claims).toEqual(completedClaims);
             expect(observe()!.progress[0].expires_at).toBeGreaterThan(boundaryTime);
             // The next turn sees the expired demand and must still retain it if vector cleanup is denied.
             expect(yield* boundaryTurn).toMatchObject({state: 'blocked'});
@@ -353,7 +357,7 @@ for (const fault of [
             denyPublication = false;
             expect(yield* boundaryTurn).toMatchObject({state: uncertainOwner ? 'ready' : 'unavailable'});
             expect((yield* lanes(home))[0].active).toBeUndefined();
-            expect(inferenceCalls).toBe(1);
+            expect(inferenceCalls).toBe(2);
             if (uncertainOwner)
               expect(observe()!.pointers).toEqual([{generation: completed.generations[0].generation}]);
             else expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
@@ -372,8 +376,8 @@ for (const fault of [
             expect(yield* turn).toMatchObject({state: 'blocked'});
             expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
             expect(observe()!.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
-            expect(claims).toHaveLength(1);
-            expect(inferenceCalls).toBe(1);
+            expect(claims).toEqual(completedClaims);
+            expect(inferenceCalls).toBe(2);
             denyRecovery = false;
             denyPublication = false;
             if (fault === 'expired-demand-unavailable-model') {
@@ -381,7 +385,7 @@ for (const fault of [
               expect((yield* lanes(home))[0].active).toBeUndefined();
               expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
               expect(observe()!.pointers).toEqual([]);
-              expect(inferenceCalls).toBe(1);
+              expect(inferenceCalls).toBe(2);
               return;
             }
           }
@@ -403,15 +407,17 @@ for (const fault of [
               );
             } else expect(yield* turn).toMatchObject({state: 'blocked'});
             expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
-            expect(inferenceCalls).toBe(1);
+            expect(inferenceCalls).toBe(2);
             denyRecovery = false;
             denyPublication = false;
-            expect(yield* turn).toMatchObject({state: 'ready'});
+            let rebound = yield* turn;
+            for (let unit = 0; unit < 4 && rebound.state === 'checkpointed'; unit++) rebound = yield* turn;
+            expect(rebound).toMatchObject({state: 'ready'});
             expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
             expect(observe()!.pointers).toEqual([]);
             expect((yield* lanes(home))[0]).toMatchObject({state: 'ready', model: {id: alternateManifest.id}});
             expect(claims.at(-1)).not.toBe(claims[0]);
-            expect(inferenceCalls).toBe(2);
+            expect(inferenceCalls).toBe(4);
             return;
           }
           if (fault === 'superseded-cleanup') {
@@ -466,7 +472,7 @@ for (const fault of [
           expect(published.pointers).toEqual([{generation: completed.generations[0].generation}]);
           expect((yield* lanes(home))[0]).toMatchObject({state: 'ready', attempt: 0});
           expect((yield* lanes(home))[0].active).toBeUndefined();
-          expect(inferenceCalls).toBe(1);
+          expect(inferenceCalls).toBe(2);
           if (fault === 'capacity-observation') expect(claims[1]).toBe(claims[0]);
           else expect(claims.at(-1)).not.toBe(claims[0]);
         }),
@@ -488,9 +494,15 @@ effectIt.effect(
         for (const result of results) {
           expect(result.error).toBe('');
           expect(result.code).toBe(0);
-          expect(JSON.parse(result.output).ready).toBe(true);
+          expect(JSON.parse(result.output).accepted).toBe(true);
         }
-        yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')));
+        // The one-input contract requires130 durable checkpoint/IPC turns. This case
+        // has scheduling headroom for loaded CI; native and batch deadlines are unchanged.
+        yield* until(
+          lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')),
+          '130-symbol completion',
+          Number.POSITIVE_INFINITY,
+        );
         yield* Effect.sync(() => {
           const db = new Database(layout.databasePath);
           try {
@@ -502,7 +514,15 @@ effectIt.effect(
         const records = yield* events(home);
         expect(EffectArray.filter(records, record => record.event === 'worker-ready')).toHaveLength(1);
         const calls = EffectArray.filter(records, record => record.event === 'inference');
-        expect(calls).toHaveLength(5);
+        expect(calls).toHaveLength(130);
+        expect(EffectArray.filter(records, row => row.event === 'symbol-count')).toHaveLength(1);
+        expect(
+          EffectArray.reduce(
+            EffectArray.filter(records, row => row.event === 'symbol-page'),
+            0,
+            (sum, row) => sum + (row.rows ?? 0),
+          ),
+        ).toBe(130);
         let activeBatches = 0;
         let maximumBatches = 0;
         for (const event of records) {
@@ -512,7 +532,7 @@ effectIt.effect(
         expect(maximumBatches).toBe(1);
         expect(activeBatches).toBe(0);
 
-        expect(EffectArray.every(calls, call => call.inputs! <= 32 && call.pool === 1)).toBe(true);
+        expect(EffectArray.every(calls, call => call.inputs === 1 && call.pool === 1)).toBe(true);
         expect(
           EffectArray.every(
             EffectArray.filter(records, record => record.event === 'symbol-page'),
@@ -532,7 +552,7 @@ effectIt.effect(
         });
       }),
     ),
-  30_000,
+  60_000,
 );
 
 effectIt.effect(
@@ -609,7 +629,11 @@ for (const barrier of ['ready', 'claim', 'checkpoint'] as const) {
           );
           yield* fs.remove(`${home}/crash-after-${barrier}`);
           expect((yield* host(home)).code).toBe(0);
-          yield* until(lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')));
+          yield* until(
+            lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')),
+            '65-symbol recovery within the existing30s test budget',
+            Number.POSITIVE_INFINITY,
+          );
           const inputs = EffectArray.reduce(
             EffectArray.filter(yield* events(home), record => record.event === 'inference'),
             0,
@@ -658,7 +682,13 @@ effectIt.effect(
         );
         const secondWake = yield* host(home);
         expect(secondWake.code).toBe(0);
-        expect(JSON.parse(secondWake.output).ready).toBe(true);
+        expect(JSON.parse(secondWake.output).accepted).toBe(true);
+        yield* until(
+          events(home).pipe(
+            Effect.map(rows => EffectArray.filter(rows, row => row.event === 'worker-ready').length === 2),
+          ),
+          'second actual worker readiness',
+        );
         const workers = EffectArray.filter(yield* events(home), record => record.event === 'worker-ready');
         expect(workers).toHaveLength(2);
         const secondWorker = workers[1];
@@ -784,7 +814,7 @@ effectIt.effect(
             EffectArray.filter(yield* events(home), row => row.event === 'inference'),
             row => row.modelId,
           ),
-        ).toEqual([manifest.id, alternateManifest.id]);
+        ).toEqual([manifest.id, alternateManifest.id, alternateManifest.id]);
       }),
     ),
   30_000,
@@ -856,6 +886,14 @@ effectIt.effect(
         );
         yield* fs.writeFileString(`${home}/disk-denied`, '');
         expect((yield* host(home)).code).toBe(0);
+        yield* until(
+          events(home).pipe(
+            Effect.map(records =>
+              EffectArray.some(records, record => record.event === 'worker-ready' && record.pid !== readyWorker.pid),
+            ),
+          ),
+          'capacity-denied replacement worker ready',
+        );
         const deniedWorker = EffectArray.filter(yield* events(home), record => record.event === 'worker-ready').at(-1)!;
         yield* until(
           Effect.sync(() => !system.isProcessRunning(deniedWorker.pid)),
@@ -869,7 +907,7 @@ effectIt.effect(
           yield* events(home),
           record => record.event === 'inference',
         ).length;
-        expect(callsBeforeRecovery).toBe(1);
+        expect(callsBeforeRecovery).toBe(2);
         expect(yield* Effect.sync(payload)).toEqual(before);
         expect((yield* store.readySnapshot(layout.databasePath, worktreeId))?.id).toBe(snapshotId);
         yield* fs.remove(`${home}/disk-denied`);
@@ -943,7 +981,9 @@ effectIt.effect(
           'all66 finite lanes ready',
           1200,
         );
-        expect(EffectArray.filter(yield* events(home), record => record.event === 'inference')).toHaveLength(1);
+        const calls = EffectArray.filter(yield* events(home), record => record.event === 'inference');
+        expect(calls).toHaveLength(2);
+        expect(EffectArray.every(calls, call => call.inputs === 1 && call.pool === 1)).toBe(true);
         yield* Effect.sync(() => {
           const root = codeGraphLayout(path, home, checkoutId, worktreeId).vectorRoot;
           const db = new Database(`${root}/${manifest.id}/vectors-v2.sqlite`);

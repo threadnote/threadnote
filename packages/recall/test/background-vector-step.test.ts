@@ -1,6 +1,16 @@
+import * as ExternalResources from '@threadnote/store/external-resource';
+import {loadRecallVectorAuthorizationKey} from '../src/vector/preparation-identity.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
-import {releasePreparedRecallDocument, releaseResolvedRecallMetadata} from '../src/background/vector-preparation.js';
+import {
+  releasePreparedRecallDocument,
+  releaseResolvedRecallMetadata,
+  recallVectorTarget,
+  prepareRecallVectorMetadata,
+} from '../src/background/vector-preparation.js';
+import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
+import {recallEmbeddingDemandKey} from '../src/background/demand.js';
+import {RECALL_CHUNKER_VERSION} from '../src/chunker.js';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -19,9 +29,11 @@ import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtim
 import {loadRecallIndexData, expireRecallIndexValidation} from '../src/index.js';
 import {
   vectorIndexGenerationReadiness,
+  vectorIndexStatus,
   ensureVectorIndex,
   vectorIndexDatabaseFilename,
   selectedSemanticScores,
+  recallVectorStorage,
 } from '../src/vector-index.js';
 import {stepRecallVectorPreparation} from '../src/background/vector-step.js';
 
@@ -134,6 +146,274 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('resumable recall vector preparation', () => {
+  effectIt.effect('upgrades an exact legacy target identity without resetting its durable cursor', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const source = yield* openRecallVectorPreparationSource(f.config);
+      const first = yield* recallVectorTarget(f.config, manifest, source);
+      yield* prepareRecallVectorMetadata(f.config, manifest, source, first);
+      const checkpoint = yield* recallVectorTarget(f.config, manifest, source);
+      const legacyJob = sha256HexSync(
+        JSON.stringify([
+          'idle-recall-v1',
+          recallEmbeddingDemandKey(f.config),
+          source.generation,
+          source.authorizationKey,
+          manifest.id,
+          recallVectorStorage.recipe(manifest),
+          RECALL_CHUNKER_VERSION,
+        ]),
+      );
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() => new Database(f.filename)),
+        db =>
+          Effect.sync(() =>
+            db.query('UPDATE vector_generations SET job_id=? WHERE generation=?').run(legacyJob, checkpoint.generation),
+          ),
+        db => Effect.sync(() => db.close()),
+      );
+      expect(yield* recallVectorTarget(f.config, manifest, source)).toEqual(checkpoint);
+      expect(yield* recallVectorTarget({...f.config, user: 'another-user'}, manifest, source)).toEqual(checkpoint);
+      expect(f.inputs()).toBe(0);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+  effectIt.effect(
+    'shares computation across equivalent scopes while retaining authorization separation and cursor',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const source = yield* openRecallVectorPreparationSource(f.config);
+        const otherScope = {...f.config, user: 'another-user'};
+        const otherSource = yield* openRecallVectorPreparationSource(otherScope);
+        expect(otherSource.generation).toBe(source.generation);
+        expect(otherSource.authorizationKey).toBe(source.authorizationKey);
+        const first = yield* recallVectorTarget(f.config, manifest, source);
+        yield* prepareRecallVectorMetadata(f.config, manifest, source, first);
+        const checkpoint = yield* recallVectorTarget(f.config, manifest, source);
+        expect(checkpoint.phase).toBe('resolve');
+        expect(yield* recallVectorTarget(otherScope, manifest, otherSource)).toEqual(checkpoint);
+        const distinct = yield* recallVectorTarget(otherScope, manifest, {
+          ...otherSource,
+          authorizationKey: 'distinct-authority',
+        });
+        expect(distinct.generation).not.toBe(checkpoint.generation);
+        expect(yield* recallVectorTarget(f.config, manifest, source)).toEqual(checkpoint);
+        expect(f.inputs()).toBe(0);
+      }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect(
+    'distinct live authorization scopes both finish and query fallback requeues the displaced scope',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const other = {...f.config, user: 'second'};
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() =>
+            vi
+              .spyOn(ExternalResources, 'loadExternalResourceAccess')
+              .mockImplementation(location =>
+                Effect.succeed<Record<string, string>>(
+                  location.user === 'second' ? {'resources/external/github/source/docs/doc/chunk.md': 'hash'} : {},
+                ),
+              ),
+          ),
+          () =>
+            Effect.gen(function* () {
+              const stepOther = stepRecallVectorPreparation(other, manifest, Effect.succeed(true)).pipe(
+                Effect.provideService(LocalModelStore, f.store),
+                Effect.provideService(LocalModelRuntime, f.runtime),
+              );
+              let firstDone = false;
+              let secondDone = false;
+              for (let turn = 0; turn < 500 && !(firstDone && secondDone); turn++) {
+                if (!firstDone) firstDone = (yield* f.step()).state === 'current';
+                if (!secondDone) secondDone = (yield* stepOther).state === 'current';
+              }
+              expect(firstDone && secondDone).toBe(true);
+              expect((yield* stepOther).state).toBe('current');
+              const firstKey = yield* loadRecallVectorAuthorizationKey(f.config);
+              const secondKey = yield* loadRecallVectorAuthorizationKey(other);
+              expect(firstKey).not.toBe(secondKey);
+              expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation, firstKey)).toBe(
+                'stale',
+              );
+              expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation, secondKey)).toBe(
+                'current',
+              );
+              const before = f.inputs();
+              expect(
+                yield* selectedSemanticScores(f.config, 'example', {corpusGeneration: f.index.generation}).pipe(
+                  Effect.provideService(LocalModelStore, f.store),
+                  Effect.provideService(LocalModelRuntime, f.runtime),
+                ),
+              ).toBeUndefined();
+              expect(f.inputs()).toBe(before);
+              yield* f.finish;
+              expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation, firstKey)).toBe(
+                'current',
+              );
+            }),
+          mock => Effect.sync(() => mock.mockRestore()),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('rejects a live authorization-map change during query inference or ready reactivation', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.finish;
+      let changed = false;
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(ExternalResources, 'loadExternalResourceAccess')
+            .mockImplementation(() =>
+              Effect.succeed<Record<string, string>>(changed ? {'new-external-uri': 'hash'} : {}),
+            ),
+        ),
+        () =>
+          Effect.gen(function* () {
+            f.before(
+              Effect.sync(() => {
+                changed = true;
+              }),
+            );
+            expect(
+              yield* selectedSemanticScores(f.config, 'query', {corpusGeneration: f.index.generation}).pipe(
+                Effect.provideService(LocalModelStore, f.store),
+                Effect.provideService(LocalModelRuntime, f.runtime),
+              ),
+            ).toBeUndefined();
+            changed = false;
+            let checks = 0;
+            const step = stepRecallVectorPreparation(
+              f.config,
+              manifest,
+              Effect.sync(() => {
+                if (++checks === 2) changed = true;
+                return true;
+              }),
+            ).pipe(
+              Effect.provideService(LocalModelStore, f.store),
+              Effect.provideService(LocalModelRuntime, f.runtime),
+            );
+            expect((yield* step.pipe(Effect.result))._tag).toBe('Failure');
+            changed = false;
+            const before = f.inputs();
+            expect((yield* f.step()).state).toBe('current');
+            expect(f.inputs()).toBe(before);
+          }),
+        mock => Effect.sync(() => mock.mockRestore()),
+      );
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  for (const corruption of ['malformed', 'missing'] as const)
+    effectIt.effect(`refuses ${corruption} inactive ready vectors without replacing a healthy active pointer`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.finish;
+        const original = yield* recallVectorTarget(
+          f.config,
+          manifest,
+          yield* openRecallVectorPreparationSource(f.config),
+        );
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() =>
+            vi
+              .spyOn(ExternalResources, 'loadExternalResourceAccess')
+              .mockImplementation(location =>
+                Effect.succeed<Record<string, string>>(location.user === 'second' ? {'other-authority': 'hash'} : {}),
+              ),
+          ),
+          () =>
+            Effect.gen(function* () {
+              const other = {...f.config, user: 'second'};
+              for (let turn = 0; turn < 500; turn++) {
+                const result = yield* stepRecallVectorPreparation(other, manifest, Effect.succeed(true)).pipe(
+                  Effect.provideService(LocalModelStore, f.store),
+                  Effect.provideService(LocalModelRuntime, f.runtime),
+                );
+                if (result.state === 'current') break;
+              }
+              expect((yield* vectorIndexStatus(f.home, manifest)).ready).toBe(true);
+              yield* Effect.sync(() => {
+                const db = new Database(f.filename);
+                try {
+                  db.exec('PRAGMA foreign_keys=OFF');
+                  let id = 999999;
+                  if (corruption === 'malformed') {
+                    db.query('INSERT INTO vector_values (vector_key,vector) VALUES (?,?)').run(
+                      'corrupt-inactive',
+                      new Uint8Array([0]),
+                    );
+                    id = db
+                      .query<{id: number}, [string]>('SELECT id FROM vector_values WHERE vector_key=?')
+                      .get('corrupt-inactive')!.id;
+                  }
+                  db.query(
+                    'UPDATE vector_chunks SET vector_id=? WHERE generation=? AND chunk_id=(SELECT MIN(chunk_id) FROM vector_chunks WHERE generation=?)',
+                  ).run(id, original.generation, original.generation);
+                } finally {
+                  db.close();
+                }
+              });
+              const before = f.inputs();
+              expect(yield* f.step().pipe(Effect.result)).toMatchObject({
+                _tag: 'Failure',
+                failure: {_tag: 'VectorIndexCorrupt'},
+              });
+              expect(f.inputs()).toBe(before);
+              expect((yield* vectorIndexStatus(f.home, manifest)).ready).toBe(true);
+              expect(
+                yield* vectorIndexGenerationReadiness(
+                  f.home,
+                  manifest,
+                  f.index.generation,
+                  yield* loadRecallVectorAuthorizationKey(other),
+                ),
+              ).toBe('current');
+              expect(
+                (yield* recallVectorTarget(f.config, manifest, yield* openRecallVectorPreparationSource(f.config)))
+                  .phase,
+              ).toBe('ready');
+            }),
+          mock => Effect.sync(() => mock.mockRestore()),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  effectIt.effect('retiring one target preserves another current-corpus unfinished checkpoint and prepared rows', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const source = yield* openRecallVectorPreparationSource(f.config);
+      const otherSource = {...source, authorizationKey: 'other-live-authority'};
+      const other = yield* recallVectorTarget(f.config, manifest, otherSource);
+      yield* prepareRecallVectorMetadata(f.config, manifest, otherSource, other);
+      const checkpoint = yield* recallVectorTarget(f.config, manifest, otherSource);
+      const observe = Effect.acquireUseRelease(
+        Effect.sync(() => new Database(f.filename, {readonly: true})),
+        db =>
+          Effect.sync(() => ({
+            metadata: db
+              .query<{count: number}, [string]>('SELECT COUNT(*) AS count FROM idle_recall_metadata WHERE generation=?')
+              .get(other.generation)!.count,
+            state: db
+              .query<{state: string}, [string]>('SELECT state FROM vector_generations WHERE generation=?')
+              .get(other.generation)!.state,
+          })),
+        db => Effect.sync(() => db.close()),
+      );
+      const before = yield* observe;
+      expect(before.metadata).toBeGreaterThan(0);
+      expect(before.state).toBe('building');
+      yield* f.finish;
+      expect(yield* recallVectorTarget(f.config, manifest, otherSource)).toEqual(checkpoint);
+      expect(yield* observe).toEqual(before);
+      expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).toBe('current');
+    }).pipe(provideFixtureLayer(platform)),
+  );
   effectIt.effect('checkpoints one input at a time, resumes without re-embedding, and reuses content values', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -144,7 +424,7 @@ describe('resumable recall vector preparation', () => {
         expect(f.inputs() - before).toBeLessThanOrEqual(1);
         if (f.inputs() > before) inferenceTurns++;
         if (result.state === 'current') break;
-        if (result.phase !== 'retire')
+        if (result.phase !== 'retire' && result.phase !== 'ready')
           expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).not.toBe('current');
       }
       expect(inferenceTurns).toBeGreaterThan(1);
@@ -419,7 +699,7 @@ describe('resumable recall vector preparation', () => {
       }
     }).pipe(provideFixtureLayer(platform)),
   );
-  effectIt.effect('never clears demand from a retained ready target whose active pointer was removed', () =>
+  effectIt.effect('reactivates an authorized immutable ready target without repeating inference', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
       yield* f.finish;
@@ -431,8 +711,10 @@ describe('resumable recall vector preparation', () => {
           db.close();
         }
       });
-      expect((yield* f.step().pipe(Effect.result))._tag).toBe('Failure');
-      expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).not.toBe('current');
+      const before = f.inputs();
+      expect((yield* f.step()).state).toBe('current');
+      expect(f.inputs()).toBe(before);
+      expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).toBe('current');
     }).pipe(provideFixtureLayer(platform)),
   );
   effectIt.effect('keeps unknown existing schema untouched for manual repair', () =>

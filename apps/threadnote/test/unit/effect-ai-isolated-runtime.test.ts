@@ -17,6 +17,7 @@ import {EmbeddingFailed} from '@threadnote/inference/engine/errors';
 import {
   BACKGROUND_INFERENCE_ENV,
   BackgroundInferenceDeferred,
+  BackgroundInferenceAdmission,
   CurrentBackgroundBatchAuthority,
 } from '@threadnote/inference/background/admission';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -209,26 +210,95 @@ describe('isolated local model runtime', () => {
       expect(starts).toBe(0);
     }).pipe(provideTestLayer(layer));
   });
-  effectIt.effect('uses only the distinct idle opcode and never downgrades after an old worker rejects it', () => {
-    const worker = new FakeWorkerProcess(request => {
-      // The retained v1 worker decodes an unsupported operation as invalid before dispatch.
-      worker.stdoutFeed.push(
-        JSON.stringify({protocol: 1, id: 'invalid', ok: false, error: {tag: 'WorkerProtocolInvalid'}}) + '\n',
-      );
-      expect(request.operation).toBe('embedManyIdleV1');
-    });
-    const layer = isolatedLocalModelRuntimeLayer({background: true, idleTimeoutMs: 0, spawnWorker: () => worker}).pipe(
-      Layer.provide(TestSystemInfoLayer),
+  for (const capacityMode of [undefined, 'spare-cpu-v2'] as const)
+    effectIt.effect(
+      `uses a distinct ${capacityMode ?? 'idle'} opcode and never downgrades after old-worker rejection`,
+      () => {
+        const operation = capacityMode ? 'embedManyCapacityV2' : 'embedManyIdleV1';
+        const worker = new FakeWorkerProcess(request => {
+          worker.stdoutFeed.push(
+            JSON.stringify({protocol: 1, id: 'invalid', ok: false, error: {tag: 'WorkerProtocolInvalid'}}) + '\n',
+          );
+          expect(request.operation).toBe(operation);
+          expect(request.payload).toMatchObject({
+            authority: {...backgroundAuthority, ...(capacityMode ? {capacityMode} : {})},
+          });
+        });
+        const layer = isolatedLocalModelRuntimeLayer({
+          background: true,
+          idleTimeoutMs: 0,
+          spawnWorker: () => worker,
+        }).pipe(Layer.provide(TestSystemInfoLayer));
+        return Effect.gen(function* () {
+          const result = yield* (yield* LocalModelRuntime)
+            .embedMany({inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'})
+            .pipe(Effect.result);
+          expect(result._tag).toBe('Failure');
+          expect(worker.writes).toHaveLength(1);
+          expect(worker.writes[0]?.operation).toBe(operation);
+        }).pipe(
+          provideTestLayer(layer),
+          Effect.provideService(CurrentBackgroundBatchAuthority, {
+            ...backgroundAuthority,
+            ...(capacityMode ? {capacityMode} : {}),
+          }),
+        );
+      },
     );
-    return Effect.gen(function* () {
-      const result = yield* (yield* LocalModelRuntime)
-        .embedMany({inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'})
-        .pipe(Effect.result);
-      expect(result._tag).toBe('Failure');
-      expect(worker.writes).toHaveLength(1);
-      expect(worker.writes[0]?.operation).toBe('embedManyIdleV1');
-    }).pipe(provideTestLayer(layer), Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority));
-  });
+
+  effectIt.effect('rejects both opcode/authority mode mismatches before entering admission or inference', () =>
+    Effect.gen(function* () {
+      const input = new AsyncFeed<string | Uint8Array>();
+      const output: string[] = [];
+      let admissions = 0;
+      for (const operation of ['embedManyIdleV1', 'embedManyCapacityV2'])
+        input.push(
+          JSON.stringify({
+            protocol: 1,
+            id: operation,
+            operation,
+            payload: {
+              authority: {
+                ...backgroundAuthority,
+                ...(operation === 'embedManyIdleV1' ? {capacityMode: 'spare-cpu-v2'} : {}),
+              },
+              request: {inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'},
+            },
+          }) + '\n',
+        );
+      input.end();
+      const system = yield* SystemInfo;
+      yield* serveWorker(
+        LocalModelRuntime.of({
+          diagnostics: Effect.die('must not execute'),
+          embedMany: () => Effect.die('must not execute'),
+          generate: () => Effect.die('must not execute'),
+          rerank: () => Effect.die('must not execute'),
+        }),
+        {
+          input,
+          writeLine: line => {
+            output.push(line);
+            return Promise.resolve();
+          },
+        },
+      ).pipe(
+        Effect.provideService(SystemInfo, {...system, environment: () => ({[BACKGROUND_INFERENCE_ENV]: '1'})}),
+        Effect.provideService(BackgroundInferenceAdmission, {
+          withForeground: (_home, program) => program,
+          runBatch: () => Effect.die('must not select a batch'),
+          withExecution: (_authority, program) =>
+            Effect.sync(() => {
+              admissions++;
+            }).pipe(Effect.andThen(program)),
+        }),
+      );
+      expect(admissions).toBe(0);
+      expect(output).toHaveLength(2);
+      for (const line of output)
+        expect(JSON.parse(line)).toMatchObject({ok: false, error: {tag: 'WorkerProtocolInvalid'}});
+    }).pipe(provideTestLayer(TestSystemInfoLayer)),
+  );
   effectIt.effect('maps child execution deferral without exposing authority or treating it as a model failure', () => {
     const worker = new FakeWorkerProcess(request =>
       worker.stdoutFeed.push(
