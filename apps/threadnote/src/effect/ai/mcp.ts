@@ -103,6 +103,8 @@ type ToolFields = {
 };
 
 interface ToolDefinition<Fields extends ToolFields> {
+  /** Explicit promise that this handler never invokes local inference. Unmarked handlers block background work. */
+  readonly nativeFree?: true;
   readonly annotations?: ToolAnnotations;
   readonly description?: string;
   readonly inputSchema: Fields;
@@ -319,8 +321,10 @@ export class EffectMcpServerRegistry {
           omitAnonymousTelemetryRecorder,
         );
         const admission = Context.get(applicationServices, BackgroundInferenceAdmission);
-        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>) =>
-          productionLogHome === undefined ? program : admission.withForeground(productionLogHome, program);
+        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>, nativeFree = false) =>
+          productionLogHome === undefined
+            ? program
+            : admission.withForeground(productionLogHome, program, {nativeFree});
         for (const registration of resourceTemplates) {
           yield* server.addResourceTemplate({
             annotations: Context.empty(),
@@ -425,7 +429,9 @@ export class EffectMcpServerRegistry {
                           reportedFailureType: 'McpToolError',
                           reportedOutcome: readAnonymousTelemetryReportedOutcome,
                         },
-                        foreground(loggedHandling).pipe(Effect.catchCause(mcpToolFailureResult)),
+                        foreground(loggedHandling, registration.definition.nativeFree).pipe(
+                          Effect.catchCause(mcpToolFailureResult),
+                        ),
                       ).pipe(Effect.provideContext(applicationServices));
                     });
                   }),

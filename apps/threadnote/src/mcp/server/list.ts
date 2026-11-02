@@ -26,6 +26,7 @@ export function registerListTool(
   server.registerTool(
     name,
     {
+      nativeFree: true,
       annotations: {readOnlyHint: true, destructiveHint: false},
       description,
       inputSchema: {

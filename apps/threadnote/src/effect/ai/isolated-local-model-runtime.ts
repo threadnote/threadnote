@@ -55,7 +55,7 @@ const PROTOCOL_VERSION = 1;
 const WORKER_CRASH_PATTERN =
   /(?:bun has crashed|panic(?:\([^)]*\))?:|segmentation fault|fatal error:|reached heap limit|allocation failed)/i;
 
-type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'generate' | 'rerank';
+type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'embedManyCapacityV2' | 'generate' | 'rerank';
 type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
 
 interface WorkerRequest {
@@ -214,7 +214,11 @@ export function isolatedLocalModelRuntimeLayer(
                         message: 'Background embedding requires current idle admission.',
                       });
                     const response = yield* request(
-                      options.background ? 'embedManyIdleV1' : 'embedMany',
+                      options.background
+                        ? authority?.capacityMode === 'spare-cpu-v2'
+                          ? 'embedManyCapacityV2'
+                          : 'embedManyIdleV1'
+                        : 'embedMany',
                       options.background ? {authority, request: {...input, inputs: batch}} : {...input, inputs: batch},
                       result => decodeVectors(result, batch.length, input.manifest.dimensions),
                     ).pipe(
@@ -790,6 +794,7 @@ function handleWorkerLine(runtime: LocalModelRuntimeShape, line: string): Effect
         Option.isSome(system) &&
         system.value.environment()[BACKGROUND_INFERENCE_ENV] === '1' &&
         request.value.operation !== 'embedManyIdleV1' &&
+        request.value.operation !== 'embedManyCapacityV2' &&
         request.value.operation !== 'diagnostics'
       )
         return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
@@ -828,7 +833,7 @@ function dispatchWorkerRequest(
   runtime: LocalModelRuntimeShape,
   request: WorkerRequest,
 ): Effect.Effect<unknown, unknown> {
-  if (request.operation === 'embedManyIdleV1') {
+  if (request.operation === 'embedManyIdleV1' || request.operation === 'embedManyCapacityV2') {
     return Effect.gen(function* () {
       const system = yield* Effect.serviceOption(SystemInfo);
       const admission = yield* Effect.serviceOption(BackgroundInferenceAdmission);
@@ -842,6 +847,8 @@ function dispatchWorkerRequest(
       const authority = Schema.decodeUnknownOption(backgroundBatchAuthoritySchema)(request.payload.authority);
       const decoded = decodeEmbeddingRequest(request.payload.request);
       if (Option.isNone(authority) || Option.isNone(decoded) || decoded.value.inputs.length !== 1)
+        return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
+      if ((request.operation === 'embedManyCapacityV2') !== (authority.value.capacityMode === 'spare-cpu-v2'))
         return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
       // A stale queued frame cannot execute after its parent releases admission.
       // The child's own busy lease survives parent death; model residency does not hold it.
@@ -1390,6 +1397,7 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
     value === 'diagnostics' ||
     value === 'embedMany' ||
     value === 'embedManyIdleV1' ||
+    value === 'embedManyCapacityV2' ||
     value === 'generate' ||
     value === 'rerank'
   );

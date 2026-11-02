@@ -20,7 +20,7 @@ import {
   SystemInfo,
 } from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {fromPromise} from '@threadnote/platform/errors';
+import {fromPromise, fromPromiseInterruptible} from '@threadnote/platform/errors';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {observeCanonicalProcessInstanceIdentity} from '../process/process_identity.js';
 import {
@@ -692,7 +692,10 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
   const gate = (prepared: import('../mcp/server/memory.js').PreparedPersonalMemoryWrite) =>
     Effect.gen(function* () {
       if (value.goPossible) return yield* Effect.die(new Error('Repeated handoff mutation gate.'));
-      const {canonicalMemoryDocumentContent} = yield* Effect.promise(() => import('@threadnote/memory/document'));
+      const {canonicalMemoryDocumentContent} = yield* fromPromiseInterruptible(
+        () => import('@threadnote/memory/document'),
+        cause => cause,
+      ).pipe(Effect.orDie);
       yield* persist({
         stage: 'prepared',
         goPossible: true,
@@ -733,9 +736,10 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
     stage: (stage: HandoffSaveStage) =>
       Effect.gen(function* () {
         if (stage === 'canonical-observed' && value.prepared) {
-          const [{readMemoryRecordsByUri}, {canonicalMemoryDocumentContent}] = yield* Effect.promise(() =>
-            Promise.all([import('../mcp/server/memory.js'), import('@threadnote/memory/document')]),
-          );
+          const [{readMemoryRecordsByUri}, {canonicalMemoryDocumentContent}] = yield* fromPromiseInterruptible(
+            () => Promise.all([import('../mcp/server/memory.js'), import('@threadnote/memory/document')]),
+            cause => cause,
+          ).pipe(Effect.orDie);
           const [record] = yield* readMemoryRecordsByUri(config, [value.prepared.uri]);
           const observed =
             record?.metadata.memoryId === value.prepared.memoryId &&
@@ -745,9 +749,10 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
       }).pipe(Effect.provideContext(observerContext), Effect.orDie),
   };
   const outcome = yield* Effect.gen(function* () {
-    const [{EffectMcpServerRegistry}, {registerStoreTool}] = yield* Effect.promise(() =>
-      Promise.all([import('../effect/ai/mcp.js'), import('../mcp/server/store.js')]),
-    );
+    const [{EffectMcpServerRegistry}, {registerStoreTool}] = yield* fromPromiseInterruptible(
+      () => Promise.all([import('../effect/ai/mcp.js'), import('../mcp/server/store.js')]),
+      cause => cause,
+    ).pipe(Effect.orDie);
     const registry = new EffectMcpServerRegistry();
     registerStoreTool(registry, config, 'remember_context', 'Store memory.');
     const result = yield* registry
@@ -755,14 +760,16 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
       .pipe(Effect.provideService(CurrentHandoffSaveObserver, observer));
     if (!value.authorized || !value.prepared)
       return yield* Effect.die(new Error('Handoff completed without its required gate.'));
-    const [{readMemoryRecordsByUri}, {canonicalMemoryDocumentContent}, {recallIndexStatus}] = yield* Effect.promise(
-      () =>
-        Promise.all([
-          import('../mcp/server/memory.js'),
-          import('@threadnote/memory/document'),
-          import('@threadnote/recall/index'),
-        ]),
-    );
+    const [{readMemoryRecordsByUri}, {canonicalMemoryDocumentContent}, {recallIndexStatus}] =
+      yield* fromPromiseInterruptible(
+        () =>
+          Promise.all([
+            import('../mcp/server/memory.js'),
+            import('@threadnote/memory/document'),
+            import('@threadnote/recall/index'),
+          ]),
+        cause => cause,
+      ).pipe(Effect.orDie);
     const [record] = yield* readMemoryRecordsByUri(config, [value.prepared.uri]);
     const canonicalObserved =
       record?.metadata.memoryId === value.prepared.memoryId &&

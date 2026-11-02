@@ -66,11 +66,12 @@ export function registerStoreTool(
     server.registerTool(
       'memory_write_status',
       {
+        nativeFree: true,
         annotations: {readOnlyHint: false},
-        description: 'Inspect an owned handoff save. Pending is admission only; never resubmit an uncertain save.',
+        description: 'Owned handoff status. Never resubmit pending/unknown saves.',
         inputSchema: {
           operationId: Schema.String,
-          cancel: McpInput.boolean('Request cancellation before canonical authorization'),
+          cancel: McpInput.boolean('Cancel before authorization'),
         },
       },
       ({operationId, cancel}) => inspectHandoffSaveOperation(config, operationId, cancel),

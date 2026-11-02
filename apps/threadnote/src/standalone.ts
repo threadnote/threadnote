@@ -779,6 +779,7 @@ async function handoffSaveWorkerProgram() {
     yield* lease.withStandaloneProcessLease(
       (yield* admission.BackgroundInferenceAdmission).withForeground(home, worker.runHandoffSaveWorker(), {
         existingHomeOnly: true,
+        nativeFree: true,
       }),
     );
   }).pipe(Effect.provide(runtime.HandoffSaveWorkerLayer));

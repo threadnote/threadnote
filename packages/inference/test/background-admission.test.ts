@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
+import {Cause, Clock, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
@@ -11,6 +11,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {nativeEmbeddingContextPlan} from '../src/engine/node-llama-cpp.js';
 import {
   BACKGROUND_INFERENCE_BATCH_MILLISECONDS,
+  BACKGROUND_INFERENCE_FOREGROUND_AGE_MILLISECONDS,
   CurrentBackgroundBatchAuthority,
   type BackgroundBatchAuthority,
   backgroundInferenceAdmissionStateSchema,
@@ -80,6 +81,7 @@ const fixture = Effect.gen(function* () {
     system,
     read,
     write,
+    samples: () => total,
     busy: (value: boolean) => {
       busy = value;
     },
@@ -776,3 +778,282 @@ function provideFixtureLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>)
   return <A, E2, R2>(program: Effect.Effect<A, E2, R2>) =>
     Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context)))));
 }
+
+describe('spare capacity during sustained foreground work', () => {
+  const sustained = () => ({
+    ...registerBackgroundForegroundLease(emptyBackgroundInferenceAdmission(), owner(90), 0, true),
+    foreground: [{owner: owner(90), expiresAt: 1_000_000, nativeFree: true as const}],
+  });
+  const tick = (
+    state: BackgroundInferenceAdmissionState,
+    domain: 'recall' | 'graph',
+    now: number,
+    capacity: CpuCapacity = idle,
+  ) =>
+    planBackgroundInferenceBatch(
+      pruneBackgroundInferenceOwners(state, new Set(), now),
+      domain,
+      owner(domain === 'recall' ? 1 : 2),
+      now,
+      capacity,
+    );
+
+  it('ages across short-call quiet gaps, resets after real quiet, and retains legacy/native blockers', () => {
+    let state = tick(sustained(), 'recall', 0).state;
+    expect(tick(state, 'recall', 29_999).admitted).toBe(false);
+    const ended = releaseBackgroundInferenceLease(state, owner(90).token, 29_900);
+    const granted = tick(ended, 'recall', 30_000);
+    expect(granted.admitted).toBe(true);
+    expect(granted.state.active?.spareCapacityStartedAt).toBe(30_000);
+    state = releaseBackgroundInferenceLease(granted.state, owner(1).token, 30_010);
+    const quiet = tick(state, 'graph', 31_000);
+    expect(quiet.admitted).toBe(true);
+    expect(quiet.state.foregroundBusySince).toBeUndefined();
+    expect(quiet.state.active?.spareCapacityStartedAt).toBeUndefined();
+    state = registerBackgroundForegroundLease(
+      releaseBackgroundInferenceLease(quiet.state, owner(2).token, 31_001),
+      owner(90),
+      31_002,
+      true,
+    );
+    expect(tick(state, 'recall', 31_003).admitted).toBe(false);
+    for (const foreground of [
+      [{owner: owner(90), expiresAt: 0}],
+      [{owner: owner(90), expiresAt: 0, nativeFree: true as const}],
+      [{owner: {...owner(90), startIdentity: undefined}, expiresAt: 0, nativeFree: true as const}],
+      [{owner: owner(90), expiresAt: 0, nativeFree: true as const, purpose: 'idle-execution' as const}],
+    ]) {
+      const blocked = {...sustained(), foreground, foregroundBusySince: 0};
+      expect(tick(blocked, 'recall', 100_000).admitted).toBe(false);
+    }
+    for (const capacity of [
+      {state: 'unknown'} as const,
+      {state: 'busy', utilization: 1, spareCpus: 0} as const,
+      {state: 'idle', utilization: 0, spareCpus: 0.75} as const,
+    ])
+      expect(tick({...sustained(), foregroundBusySince: 0}, 'recall', 30_000, capacity).admitted).toBe(false);
+  });
+
+  it('charges proportional bounded cooldown on release and crash pruning without mutating or extending retired evidence', () => {
+    for (const elapsed of [1, 500, 40_000]) {
+      const state: BackgroundInferenceAdmissionState = {
+        ...sustained(),
+        foregroundBusySince: 0,
+        active: {domain: 'recall', owner: owner(1), expiresAt: 0, spareCapacityStartedAt: 30_000},
+        foreground: [
+          ...sustained().foreground,
+          {owner: owner(3), expiresAt: 0, purpose: 'idle-execution', spareCapacityStartedAt: 30_010},
+        ],
+      };
+      const before = JSON.stringify(state),
+        now = 30_000 + elapsed;
+      const expected = now + Math.max(100, Math.min(15_000, elapsed));
+      const pruned = pruneBackgroundInferenceOwners(state, new Set([owner(1).token, owner(3).token]), now);
+      expect(pruned.spareCapacityNotBefore).toBe(expected);
+      expect(
+        pruneBackgroundInferenceOwners(pruned, new Set([owner(1).token, owner(3).token]), now + 1)
+          .spareCapacityNotBefore,
+      ).toBe(expected);
+      expect(releaseBackgroundInferenceLease(state, owner(1).token, now).spareCapacityNotBefore).toBe(expected);
+      expect(pruneBackgroundInferenceOwners(state, new Set(), now).active).toEqual(state.active);
+      expect(JSON.stringify(state)).toBe(before);
+      expect(tick(pruned, 'graph', expected - 1).admitted).toBe(false);
+      expect(tick({...pruned, foreground: [], quietUntil: 0}, 'graph', expected - 1).admitted).toBe(false);
+      expect(tick(pruned, 'graph', expected).admitted).toBe(true);
+    }
+  });
+
+  it('both domains make fair progress through one shared yielded budget under continuous compatible foreground work', () => {
+    for (const orderMode of ['graph', 'recall', 'random'] as const)
+      fc.assert(
+        fc.property(
+          fc.array(
+            fc.record({
+              graphFirst: fc.boolean(),
+              duration: fc.integer({min: 1, max: 500}),
+              advance: fc.integer({min: 100, max: 500}),
+            }),
+            {minLength: 40, maxLength: 60},
+          ),
+          trace => {
+            let state = tick(sustained(), 'recall', 0).state;
+            let now = BACKGROUND_INFERENCE_FOREGROUND_AGE_MILLISECONDS,
+              nextSlot = 0;
+            const counts = {recall: 0, graph: 0};
+            for (const step of trace) {
+              for (const domain of (orderMode === 'random' ? step.graphFirst : orderMode === 'graph')
+                ? (['graph', 'recall'] as const)
+                : (['recall', 'graph'] as const)) {
+                const before = JSON.stringify(state),
+                  result = tick(state, domain, now);
+                expect(JSON.stringify(state)).toBe(before);
+                state = result.state;
+                if (!result.admitted) continue;
+                expect(now).toBeGreaterThanOrEqual(nextSlot);
+                expect(state.active?.domain).toBe(domain);
+                expect(state.active?.spareCapacityStartedAt).toBe(now);
+                expect(state.foreground).toEqual(sustained().foreground);
+                counts[domain]++;
+                now += step.duration;
+                nextSlot = now + Math.max(100, step.duration);
+                state = releaseBackgroundInferenceLease(state, owner(domain === 'recall' ? 1 : 2).token, now);
+                expect(state.spareCapacityNotBefore).toBe(nextSlot);
+              }
+              now += step.advance;
+            }
+            expect(counts.recall).toBeGreaterThan(0);
+            expect(counts.graph).toBeGreaterThan(0);
+            expect(Math.abs(counts.recall - counts.graph)).toBeLessThanOrEqual(1);
+          },
+        ),
+        {numRuns: 40},
+      );
+  });
+
+  effectIt.effect(
+    'selects and executes a capacity batch while compatible foreground remains live, then yields to the other domain',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        // Age selection is covered above; controlled age avoids advancing heartbeat time during filesystem I/O.
+        yield* TestClock.adjust(BACKGROUND_INFERENCE_FOREGROUND_AGE_MILLISECONDS);
+        yield* f.admission.withForeground(
+          f.home,
+          Effect.gen(function* () {
+            expect((yield* f.admission.runBatch(f.home, 'recall', Effect.die('too early'))).state).toBe('deferred');
+            yield* f.write({...(yield* f.read()), foregroundBusySince: 0});
+            yield* TestClock.adjust(500);
+            const nativeStarting = yield* Deferred.make<void>();
+            const executing = yield* f.admission
+              .runBatch(
+                f.home,
+                'recall',
+                Effect.gen(function* () {
+                  const authority = yield* CurrentBackgroundBatchAuthority;
+                  expect(authority?.capacityMode).toBe('spare-cpu-v2');
+                  if (!authority) return yield* Effect.die('missing authority');
+                  yield* Deferred.succeed(nativeStarting, undefined);
+                  return yield* f.admission.withExecution(
+                    authority,
+                    Effect.gen(function* () {
+                      const state = yield* f.read();
+                      expect(state.foreground.length).toBe(2);
+                      expect(state.foreground[0].nativeFree).toBe(true);
+                      expect(state.foreground[1].purpose).toBe('idle-execution');
+                      return 'native complete';
+                    }),
+                  );
+                }),
+              )
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(nativeStarting);
+            yield* TestClock.adjust(500);
+            expect(yield* Fiber.join(executing)).toEqual({state: 'completed', value: 'native complete'});
+            expect((yield* f.read()).foreground.length).toBe(1);
+            expect((yield* f.admission.runBatch(f.home, 'graph', Effect.die('must yield'))).state).toBe('deferred');
+            yield* TestClock.adjust(1_000);
+            expect(yield* f.admission.runBatch(f.home, 'graph', Effect.succeed('graph complete'))).toEqual({
+              state: 'completed',
+              value: 'graph complete',
+            });
+          }),
+          {nativeFree: true},
+        );
+        expect((yield* f.read()).foreground).toEqual([]);
+      }).pipe(provideFixtureLayer(platform)),
+  );
+
+  for (const fault of [
+    'none',
+    'cpu-busy',
+    'unclassified',
+    'missing-identity',
+    'expired',
+    'full',
+    'wrong-mode',
+    'parent-reused',
+  ] as const)
+    effectIt.effect(`capacity native boundary ${fault} preserves CPU and child ledger authority`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.admission.withForeground(
+          f.home,
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            const authority: BackgroundBatchAuthority = {
+              home: f.home,
+              domain: 'recall',
+              capacityMode: 'spare-cpu-v2',
+              owner: {...owner(900), processId: f.system.processId, startIdentity: 'fixture-self'},
+            };
+            const original = yield* f.read();
+            // These foreign owners are live; dead-owner pruning is tested separately.
+            if (fault === 'unclassified' || fault === 'missing-identity' || fault === 'expired')
+              f.identities.set(999, 'fixture-999');
+            if (fault === 'full') for (let n = 0; n < 128; n++) f.identities.set(n + 10_000, 'fixture-' + (n + 10_000));
+            // Controlled service fixture; the pure state-machine property above exercises real grant selection.
+            yield* f.write({
+              ...original,
+              foregroundBusySince: 0,
+              active: {domain: 'recall', owner: authority.owner, expiresAt: now + 30_000, spareCapacityStartedAt: now},
+              ...(fault === 'unclassified'
+                ? {foreground: [...original.foreground, {owner: owner(999), expiresAt: 999_999}]}
+                : {}),
+              ...(fault === 'missing-identity'
+                ? {
+                    foreground: [
+                      ...original.foreground,
+                      {owner: {...owner(999), startIdentity: undefined}, expiresAt: 999_999, nativeFree: true as const},
+                    ],
+                  }
+                : {}),
+              ...(fault === 'expired'
+                ? {foreground: [...original.foreground, {owner: owner(999), expiresAt: 0, nativeFree: true as const}]}
+                : {}),
+              ...(fault === 'full'
+                ? {
+                    foreground: Array.from({length: 128}, (_, n) => ({
+                      owner: owner(n + 10_000),
+                      expiresAt: 999_999,
+                      nativeFree: true as const,
+                    })),
+                  }
+                : {}),
+            });
+            if (fault === 'cpu-busy') f.busy(true);
+            let entered = false;
+            const samples = f.samples();
+            const executing = yield* f.admission
+              .withExecution(
+                fault === 'wrong-mode' ? {...authority, capacityMode: undefined} : authority,
+                Effect.sync(() => {
+                  entered = true;
+                }),
+              )
+              .pipe(Effect.result, Effect.forkChild);
+            if (fault !== 'wrong-mode') {
+              while (f.samples() === samples) yield* Effect.yieldNow;
+              if (fault === 'parent-reused') f.identities.set(f.system.processId, 'reused-parent');
+              yield* TestClock.adjust(500);
+            }
+            expect((yield* Fiber.join(executing))._tag).toBe(fault === 'none' ? 'Success' : 'Failure');
+            expect(entered).toBe(fault === 'none');
+            expect((yield* f.read()).foreground.length).toBe(
+              fault === 'full'
+                ? 128
+                : fault === 'unclassified' || fault === 'missing-identity' || fault === 'expired'
+                  ? 2
+                  : 1,
+            );
+            f.identities.set(f.system.processId, 'fixture-self');
+            yield* f.write(original);
+          }),
+          {nativeFree: true},
+        );
+        expect((yield* f.read()).foreground).toEqual([]);
+        expect(yield* f.admission.withForeground(f.home, Effect.succeed('owner reservation returned'))).toBe(
+          'owner reservation returned',
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    );
+});

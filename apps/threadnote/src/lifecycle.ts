@@ -1014,10 +1014,10 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
             : observed.state === 'deferred-cpu'
               ? 'deferred until spare CPU capacity'
               : observed.state === 'deferred-foreground'
-                ? 'deferred until foreground Threadnote work is quiet'
+                ? 'deferred until a safe background capacity slot'
                 : observed.state === 'blocked' || observed.state === 'corrupt'
                   ? `${observed.state}: ${observed.reason ?? 'inspect embedding demand'}; run \`threadnote repair\``
-                  : 'queued for spare CPU capacity and no foreground Threadnote work';
+                  : 'queued for a safe background capacity slot';
       return {
         detail: `${manifest.id}; ${detail}; lexical recall available`,
         name: 'vector recall index',

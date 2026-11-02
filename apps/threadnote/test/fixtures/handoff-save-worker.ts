@@ -58,7 +58,7 @@ const program = Effect.gen(function* () {
           pid === unknownPid ? succeedUndefined : system.canonicalProcessStartIdentity!(pid),
       }),
     ),
-    {existingHomeOnly: true},
+    {existingHomeOnly: true, nativeFree: true},
   );
 });
 // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This private test executable is the application entry point.

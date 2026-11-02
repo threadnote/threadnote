@@ -138,21 +138,28 @@ const fixture = Effect.gen(function* () {
     publication: CodeGraphVectorPublication,
     retainPublicationClaimOnFailure?: (cause: unknown) => boolean,
   ) =>
-    executeCodeGraphVectorGeneration({
-      catalog,
-      force: false,
-      fs,
-      layout,
-      modelStore,
-      path,
-      runtime,
-      snapshot: target,
-      symbols,
-      threadnoteHome: home,
-      ownerToken,
-      maximumSteps: 1,
-      publication,
-      ...(retainPublicationClaimOnFailure === undefined ? {} : {retainPublicationClaimOnFailure}),
+    Effect.gen(function* () {
+      // Exercise publication after the production one-step preparation boundaries.
+      for (let step = 0; step < symbols.length + 2; step++) {
+        const result = yield* executeCodeGraphVectorGeneration({
+          catalog,
+          force: false,
+          fs,
+          layout,
+          modelStore,
+          path,
+          runtime,
+          snapshot: target,
+          symbols,
+          threadnoteHome: home,
+          ownerToken,
+          maximumSteps: 1,
+          publication,
+          ...(retainPublicationClaimOnFailure === undefined ? {} : {retainPublicationClaimOnFailure}),
+        });
+        if (result.ready || !('state' in result) || result.state !== 'checkpointed') return result;
+      }
+      return yield* Effect.die(TestError.make({message: 'Fixture did not reach publication within its bounded steps'}));
     });
   return {run, batches, layout, filename: path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite')};
 });
@@ -200,7 +207,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
           expect(state.progress).toMatchObject([{owner_token: 'same-owner'}]);
           expect(state.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
           expect(state.pointers).toEqual([]);
-          expect(f.batches).toEqual([2]);
+          expect(f.batches).toEqual([1, 1]);
         }
         const before = yield* inspect(f.filename);
         expect(yield* f.run('same-owner', attach)).toMatchObject({ready: true, embedded: 0, reused: 2});
@@ -211,7 +218,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
         expect(after.pointers).toEqual([
           {worktree_id: f.layout.worktreeId, generation: before.generations[0].generation},
         ]);
-        expect(f.batches).toEqual([2]);
+        expect(f.batches).toEqual([1, 1]);
         expect(
           isCodeGraphEmbeddingWorkerContention(
             CodeGraphDiskCapacityPressureError.make({message: 'No space', operation: 'publish'}),
@@ -247,7 +254,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
         expect(before.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
         expect(yield* f.run('validation-owner', attach)).toMatchObject({ready: true});
         expect((yield* inspect(f.filename)).progress).toEqual([]);
-        expect(f.batches).toEqual([2]);
+        expect(f.batches).toEqual([1, 1]);
       }).pipe(TestClock.withLive),
     );
   }
@@ -282,7 +289,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
         const before = yield* inspect(f.filename);
         expect(before.progress).toMatchObject([{owner_token: 'first-owner', expires_at: 0}]);
         expect(before.pointers).toEqual([]);
-        expect(f.batches).toEqual([2]);
+        expect(f.batches).toEqual([1, 1]);
         expect(yield* Clock.currentTimeMillis).toBeLessThan(originalExpiry);
         expect(yield* f.run('fresh-owner', attach)).toMatchObject({ready: true, embedded: 0, reused: 2});
         const after = yield* inspect(f.filename);
@@ -292,7 +299,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
         expect(after.pointers).toEqual([
           {worktree_id: f.layout.worktreeId, generation: before.generations[0].generation},
         ]);
-        expect(f.batches).toEqual([2]);
+        expect(f.batches).toEqual([1, 1]);
       }).pipe(TestClock.withLive),
     );
   }
@@ -329,7 +336,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
       expect(attached.pointers).toEqual([
         {worktree_id: f.layout.worktreeId, generation: pinned.generations[0].generation},
       ]);
-      expect(f.batches).toEqual([2]);
+      expect(f.batches).toEqual([1, 1]);
     }).pipe(TestClock.withLive),
   );
 });
