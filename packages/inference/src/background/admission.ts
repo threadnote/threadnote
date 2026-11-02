@@ -503,7 +503,10 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
           const identity = yield* probe.pipe(Effect.timeoutOption('100 millis'), Effect.map(Option.getOrUndefined));
           if (identity !== parent.startIdentity) return yield* executionDeferred();
           const lease = yield* owner;
-          if (!lease.startIdentity) return yield* executionDeferred();
+          if (!lease.startIdentity) {
+            ownerReservations--;
+            return yield* executionDeferred();
+          }
           const granted = yield* transact(authority.home, (state, now) => {
             const active = state.active;
             const admitted =
@@ -527,7 +530,10 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
                 }
               : {state, value: false};
           }).pipe(Effect.onError(() => release(authority.home, lease.token)));
-          if (!granted) return yield* executionDeferred();
+          if (!granted) {
+            ownerReservations--;
+            return yield* executionDeferred();
+          }
           return lease;
         }),
         lease => Effect.scoped(heartbeat(authority.home, lease.token).pipe(Effect.forkScoped, Effect.andThen(program))),

@@ -683,6 +683,38 @@ describe('native child execution admission', () => {
       expect((yield* f.read()).foreground).toEqual([]);
     }).pipe(provideFixtureLayer(platform)),
   );
+  effectIt.effect('repeated rejected native execution returns unpublished owner reservations', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const parentPid = f.system.processId + 200_000;
+      f.identities.set(parentPid, 'fixture-parent');
+      const authority: BackgroundBatchAuthority = {
+        home: f.home,
+        domain: 'recall',
+        owner: {...owner(1), processId: parentPid, startIdentity: 'fixture-parent'},
+      };
+      for (const unknownChild of [false, true]) {
+        const system = unknownChild
+          ? {
+              ...f.system,
+              canonicalProcessStartIdentity: (pid: number) =>
+                Effect.succeed(pid === parentPid ? 'fixture-parent' : undefined),
+              processStartIdentity: (pid: number) => Effect.succeed(pid === parentPid ? 'fixture-parent' : undefined),
+            }
+          : f.system;
+        const admission = yield* makeBackgroundInferenceAdmission.pipe(Effect.provideService(SystemInfo, system));
+        for (let index = 0; index < 132; index++)
+          expect(
+            yield* admission.withExecution(authority, Effect.die('must not execute')).pipe(Effect.result),
+          ).toMatchObject({
+            _tag: 'Failure',
+            failure: {_tag: 'BackgroundInferenceDeferred'},
+          });
+        expect(yield* admission.withForeground(f.home, Effect.succeed('ready'))).toBe('ready');
+        expect((yield* f.read()).foreground).toEqual([]);
+      }
+    }).pipe(provideFixtureLayer(platform)),
+  );
   effectIt.effect('a foreground request that arrives before native execution revokes eligibility', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
