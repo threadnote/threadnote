@@ -1,3 +1,4 @@
+import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
 import {resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
 import {codeGraphEmbeddingWorkerProcessLayer} from '../code_graph/embedding_worker.js';
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
@@ -110,6 +111,7 @@ const codeGraphQueryLayer = CodeGraphQueryService.layer.pipe(Layer.provideMerge(
 const codeGraphWatcherLayer = CodeGraphWatcher.layer.pipe(Layer.provideMerge(codeGraphIndexerLayer));
 
 const ApplicationServicesLayer = Layer.mergeAll(
+  BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
   cliOutputLayer,
   graphEmbeddingWorkerProcessLayer,
   threadnoteCliFormatterLayer,

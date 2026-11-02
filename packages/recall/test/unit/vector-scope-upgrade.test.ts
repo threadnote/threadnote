@@ -1,3 +1,5 @@
+import {stepRecallVectorPreparation} from '../../src/background/vector-step.js';
+import {readRecallEmbeddingDemand} from '../../src/background/demand.js';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
@@ -148,11 +150,11 @@ describe('vector scope mapping upgrades', () => {
           const first = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
           expect(first.status).toBe('unavailable');
           expect(Option.getOrUndefined(first.result.warning)).toContain('refresh');
-          yield* Effect.gen(function* () {
-            if ((yield* vectorIndexGenerationReadiness(home, manifest, index.generation)) !== 'current') {
-              return yield* TestError.make({message: 'Upgrade refresh has not completed'});
-            }
-          }).pipe(Effect.retry({times: 200, schedule: Schedule.spaced('25 millis')}));
+          expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+          for (let unit = 0; unit < 50; unit++) {
+            if ((yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true))).state === 'current') break;
+          }
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('current');
           expect(embedded).toHaveLength(beforeRefresh);
           const next = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
           expect(next.status).toBe('available');

@@ -623,7 +623,22 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
         (uri): uri is string => uri !== undefined,
       );
       if (invalidatedUris.length > 0) {
-        yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, invalidatedUris);
+        const refresh = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, invalidatedUris);
+        if (refresh.state === 'blocked')
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: `Canonical memory committed at ${memoryUri}; lexical recall is pending. Run threadnote repair. Read the existing record instead of creating it again.`,
+              },
+            ],
+            structuredContent: {
+              ...result.structuredContent,
+              mutationOutcome: 'canonical-committed',
+              recallReadiness: 'lexical-pending',
+            },
+          };
       }
     }
     return result;

@@ -38,7 +38,28 @@ const ownerSchema = Schema.Struct({
   startIdentity: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1024))),
   token: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
 });
-const leaseSchema = Schema.Struct({owner: ownerSchema, expiresAt: timestamp});
+const leaseSchema = Schema.Struct({
+  owner: ownerSchema,
+  expiresAt: timestamp,
+  // Older v1 readers strip this optional tag but still conservatively block on the lease.
+  purpose: Schema.optionalKey(Schema.Literals(['idle-execution'])),
+});
+export const backgroundBatchAuthoritySchema = Schema.Struct({
+  home: Schema.String.check(Schema.isMaxLength(4096)),
+  domain: domainSchema,
+  owner: ownerSchema,
+});
+export type BackgroundBatchAuthority = typeof backgroundBatchAuthoritySchema.Type;
+export const CurrentBackgroundBatchAuthority = Context.Reference<BackgroundBatchAuthority | undefined>(
+  '@threadnote/inference/background/CurrentBatchAuthority',
+  {defaultValue: () => undefined},
+);
+export class BackgroundInferenceDeferred extends Schema.TaggedError<
+  BackgroundInferenceDeferred,
+  {readonly brand: unique symbol}
+>()('BackgroundInferenceDeferred', {message: Schema.String}) {}
+const executionDeferred = () =>
+  BackgroundInferenceDeferred.make({message: 'Background execution authority is no longer eligible.'});
 export const backgroundInferenceAdmissionStateSchema = Schema.Struct({
   version: Schema.Literals([1]),
   foreground: Schema.Array(leaseSchema).check(Schema.isMaxLength(128)),
@@ -187,10 +208,12 @@ export function releaseBackgroundInferenceLease(
   return {
     ...rest,
     foreground,
-    quietUntil:
-      foreground.length !== state.foreground.length
-        ? Math.max(state.quietUntil, now + BACKGROUND_INFERENCE_QUIET_MILLISECONDS)
-        : state.quietUntil,
+    quietUntil: EffectArray.some(
+      state.foreground,
+      lease => lease.owner.token === token && lease.purpose !== 'idle-execution',
+    )
+      ? Math.max(state.quietUntil, now + BACKGROUND_INFERENCE_QUIET_MILLISECONDS)
+      : state.quietUntil,
     ...(active?.owner.token === token ? {} : active ? {active} : {}),
   };
 }
@@ -205,6 +228,10 @@ export interface BackgroundInferenceAdmissionShape {
     home: string,
     program: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | BackgroundInferenceAdmissionUnavailable, R>;
+  readonly withExecution: <A, E, R>(
+    authority: BackgroundBatchAuthority,
+    program: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | BackgroundInferenceDeferred | BackgroundInferenceAdmissionUnavailable, R>;
   readonly runBatch: <A, E, R>(
     home: string,
     domain: BackgroundInferenceDomain,
@@ -462,6 +489,50 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       return new Set(EffectArray.filter(observed, (token): token is string => token !== undefined));
     });
   const service: BackgroundInferenceAdmissionShape = {
+    withExecution: (authority, program) =>
+      Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          if (!path.isAbsolute(authority.home)) return yield* executionDeferred();
+          const parent = authority.owner;
+          const probe =
+            parent.identityKind === 'canonical'
+              ? system.canonicalProcessStartIdentity?.(parent.processId)
+              : system.processStartIdentity(parent.processId);
+          if (!probe || !parent.startIdentity || !system.isProcessRunning(parent.processId))
+            return yield* executionDeferred();
+          const identity = yield* probe.pipe(Effect.timeoutOption('100 millis'), Effect.map(Option.getOrUndefined));
+          if (identity !== parent.startIdentity) return yield* executionDeferred();
+          const lease = yield* owner;
+          if (!lease.startIdentity) return yield* executionDeferred();
+          const granted = yield* transact(authority.home, (state, now) => {
+            const active = state.active;
+            const admitted =
+              active?.domain === authority.domain &&
+              active.owner.token === parent.token &&
+              active.owner.processId === parent.processId &&
+              active.owner.identityKind === parent.identityKind &&
+              active.owner.startIdentity === parent.startIdentity &&
+              system.isProcessRunning(parent.processId) &&
+              state.foreground.length === 0;
+            return admitted
+              ? {
+                  state: {
+                    ...state,
+                    foreground: [
+                      ...state.foreground,
+                      {owner: lease, expiresAt: now + LEASE_MILLISECONDS, purpose: 'idle-execution' as const},
+                    ],
+                  },
+                  value: true,
+                }
+              : {state, value: false};
+          }).pipe(Effect.onError(() => release(authority.home, lease.token)));
+          if (!granted) return yield* executionDeferred();
+          return lease;
+        }),
+        lease => Effect.scoped(heartbeat(authority.home, lease.token).pipe(Effect.forkScoped, Effect.andThen(program))),
+        lease => release(authority.home, lease.token),
+      ),
     withForeground: (home, program) =>
       Effect.acquireUseRelease(
         owner.pipe(
@@ -511,7 +582,15 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
             ? Effect.scoped(
                 heartbeat(home, admission.lease.token).pipe(
                   Effect.forkScoped,
-                  Effect.andThen(program),
+                  Effect.andThen(
+                    program.pipe(
+                      Effect.provideService(CurrentBackgroundBatchAuthority, {
+                        home,
+                        domain,
+                        owner: admission.lease,
+                      }),
+                    ),
+                  ),
                   Effect.timeoutOption(BACKGROUND_INFERENCE_BATCH_MILLISECONDS),
                   Effect.map(result =>
                     Option.isSome(result)

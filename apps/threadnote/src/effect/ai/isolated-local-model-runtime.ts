@@ -2,6 +2,10 @@ import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Exit, Layer, Option, Predicate, Schema, Semaphore, Stream} from 'effect';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {
+  BackgroundInferenceAdmission,
+  BackgroundInferenceDeferred,
+  backgroundBatchAuthoritySchema,
+  CurrentBackgroundBatchAuthority,
   BACKGROUND_INFERENCE_ENV,
   BACKGROUND_INFERENCE_INPUT_LIMIT,
   BACKGROUND_INFERENCE_REQUEST_MILLISECONDS,
@@ -51,7 +55,7 @@ const PROTOCOL_VERSION = 1;
 const WORKER_CRASH_PATTERN =
   /(?:bun has crashed|panic(?:\([^)]*\))?:|segmentation fault|fatal error:|reached heap limit|allocation failed)/i;
 
-type WorkerOperation = 'diagnostics' | 'embedMany' | 'generate' | 'rerank';
+type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'generate' | 'rerank';
 type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
 
 interface WorkerRequest {
@@ -204,8 +208,15 @@ export function isolatedLocalModelRuntimeLayer(
                   const vectors: (readonly number[])[] = [];
                   for (let start = 0; start < input.inputs.length; start += EMBEDDING_BATCH_SIZE) {
                     const batch = input.inputs.slice(start, start + EMBEDDING_BATCH_SIZE);
-                    const response = yield* request('embedMany', {...input, inputs: batch}, result =>
-                      decodeVectors(result, batch.length, input.manifest.dimensions),
+                    const authority = yield* CurrentBackgroundBatchAuthority;
+                    if (options.background && !authority)
+                      return yield* BackgroundInferenceDeferred.make({
+                        message: 'Background embedding requires current idle admission.',
+                      });
+                    const response = yield* request(
+                      options.background ? 'embedManyIdleV1' : 'embedMany',
+                      options.background ? {authority, request: {...input, inputs: batch}} : {...input, inputs: batch},
+                      result => decodeVectors(result, batch.length, input.manifest.dimensions),
                     ).pipe(
                       Effect.mapError(error =>
                         Schema.is(LocalModelWorkerTransportError)(error)
@@ -773,7 +784,17 @@ function handleWorkerLine(runtime: LocalModelRuntimeShape, line: string): Effect
   const effect = withThreadnoteProcessActivity(
     'local-model-worker',
     workerOperationLabel(request.value.operation),
-    dispatchWorkerRequest(runtime, request.value),
+    Effect.gen(function* () {
+      const system = yield* Effect.serviceOption(SystemInfo);
+      if (
+        Option.isSome(system) &&
+        system.value.environment()[BACKGROUND_INFERENCE_ENV] === '1' &&
+        request.value.operation !== 'embedManyIdleV1' &&
+        request.value.operation !== 'diagnostics'
+      )
+        return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
+      return yield* dispatchWorkerRequest(runtime, request.value);
+    }),
     {idleTransitionDelayMilliseconds: LOCAL_MODEL_PROCESS_ACTIVITY_IDLE_DELAY_MS},
   );
   return Effect.exit(effect).pipe(
@@ -807,6 +828,40 @@ function dispatchWorkerRequest(
   runtime: LocalModelRuntimeShape,
   request: WorkerRequest,
 ): Effect.Effect<unknown, unknown> {
+  if (request.operation === 'embedManyIdleV1') {
+    return Effect.gen(function* () {
+      const system = yield* Effect.serviceOption(SystemInfo);
+      const admission = yield* Effect.serviceOption(BackgroundInferenceAdmission);
+      if (
+        Option.isNone(system) ||
+        Option.isNone(admission) ||
+        system.value.environment()[BACKGROUND_INFERENCE_ENV] !== '1' ||
+        !Predicate.isObject(request.payload)
+      )
+        return yield* BackgroundInferenceDeferred.make({message: 'Background execution is unavailable.'});
+      const authority = Schema.decodeUnknownOption(backgroundBatchAuthoritySchema)(request.payload.authority);
+      const decoded = decodeEmbeddingRequest(request.payload.request);
+      if (Option.isNone(authority) || Option.isNone(decoded) || decoded.value.inputs.length !== 1)
+        return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
+      // A stale queued frame cannot execute after its parent releases admission.
+      // The child's own busy lease survives parent death; model residency does not hold it.
+      const ownSystem = system.value;
+      return yield* admission.value.withExecution(
+        authority.value,
+        Effect.acquireUseRelease(
+          Effect.sync(() =>
+            // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Native child wall-clock watchdog must use host time even when an Effect clock is suspended.
+            setTimeout(
+              () => ownSystem.signalProcess(ownSystem.processId, 'SIGKILL'),
+              BACKGROUND_INFERENCE_REQUEST_MILLISECONDS,
+            ),
+          ),
+          () => runtime.embedMany({...decoded.value, embeddingContextPoolSize: 1}),
+          timer => Effect.sync(() => clearTimeout(timer)),
+        ),
+      );
+    });
+  }
   if (request.operation === 'diagnostics') {
     const diagnostics = (runtime as Partial<LocalModelRuntimeWithDiagnostics>).diagnostics;
     return diagnostics ?? Effect.fail({_tag: 'NativeRuntimeUnavailable'});
@@ -1051,6 +1106,7 @@ function remoteEmbeddingFailure(
   request: LocalEmbeddingRequest,
   error: DecodedOperationError,
 ):
+  | BackgroundInferenceDeferred
   | EmbeddingFailed
   | InferenceInterrupted
   | InsufficientMemory
@@ -1058,6 +1114,8 @@ function remoteEmbeddingFailure(
   | ModelNotInstalled
   | NativeRuntimeUnavailable
   | UnsupportedNativeRuntime {
+  if (error.tag === 'BackgroundInferenceDeferred' || error.tag === 'BackgroundInferenceAdmissionUnavailable')
+    return BackgroundInferenceDeferred.make({message: 'Background execution was deferred.'});
   const common = remoteModelError(request.manifest.id, request.modelPath, 'embedding', error);
   return Option.isSome(common)
     ? common.value
@@ -1328,11 +1386,19 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isWorkerOperation(value: unknown): value is WorkerOperation {
-  return value === 'diagnostics' || value === 'embedMany' || value === 'generate' || value === 'rerank';
+  return (
+    value === 'diagnostics' ||
+    value === 'embedMany' ||
+    value === 'embedManyIdleV1' ||
+    value === 'generate' ||
+    value === 'rerank'
+  );
 }
 
 function isKnownOperationErrorTag(value: unknown): value is string {
   return (
+    value === 'BackgroundInferenceDeferred' ||
+    value === 'BackgroundInferenceAdmissionUnavailable' ||
     value === 'AiError' ||
     value === 'EmbeddingFailed' ||
     value === 'GenerationFailed' ||
