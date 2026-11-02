@@ -1,3 +1,4 @@
+import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
 import {Array as EffectArray} from 'effect';
 import * as BunStdio from '@effect/platform-bun/BunStdio';
 import {Cause, Context, Effect, Layer, Logger, Option, Schema, Sink, Stdio} from 'effect';
@@ -316,6 +317,9 @@ export class EffectMcpServerRegistry {
           omitProductionLogPhaseRecorder,
           omitAnonymousTelemetryRecorder,
         );
+        const admission = Context.get(applicationServices, BackgroundInferenceAdmission);
+        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+          productionLogHome === undefined ? program : admission.withForeground(productionLogHome, program);
         for (const registration of resourceTemplates) {
           yield* server.addResourceTemplate({
             annotations: Context.empty(),
@@ -324,7 +328,7 @@ export class EffectMcpServerRegistry {
               Effect.flatMap(CurrentMcpRequestContext, requestContext =>
                 withAnonymousTelemetry(
                   {component: 'mcp', operation: 'resource-read'},
-                  registration.handle(uri, requestContext),
+                  foreground(registration.handle(uri, requestContext)),
                 ).pipe(Effect.provideContext(applicationServices)),
               ).pipe(Effect.catchCause(mcpResourceFailureResult)),
             routerPath: registration.definition.routerPath,
@@ -416,7 +420,7 @@ export class EffectMcpServerRegistry {
                           reportedFailureType: 'McpToolError',
                           reportedOutcome: readAnonymousTelemetryReportedOutcome,
                         },
-                        loggedHandling,
+                        foreground(loggedHandling).pipe(Effect.catchCause(mcpToolFailureResult)),
                       ).pipe(Effect.provideContext(applicationServices));
                     });
                   }),

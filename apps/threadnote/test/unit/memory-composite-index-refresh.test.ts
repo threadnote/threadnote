@@ -16,6 +16,7 @@ import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {ensureVectorIndex, vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
+import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
@@ -24,13 +25,17 @@ const manifest = EffectOption.getOrUndefined(
 )!;
 
 describe('composite memory mutation recall refresh', () => {
-  it.effect('restores lexical and already-built selected vector readiness after CLI and MCP compact mutations', () =>
+  it.effect('refreshes lexical recall and queues selected vectors after CLI and MCP compact mutations', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
+        let embeddingCalls = 0;
         const runtime = fakeRuntime((inputs, dimensions) =>
-          Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+          Effect.sync(() => {
+            embeddingCalls += 1;
+            return EffectArray.map(inputs, () => unitVector(dimensions));
+          }),
         );
 
         yield* Effect.forEach(['cli', 'mcp'] as const, surface =>
@@ -50,6 +55,7 @@ describe('composite memory mutation recall refresh', () => {
             yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
             const initial = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
             yield* ensureVectorIndex(config, manifest, initial.candidates, {corpusGeneration: initial.generation});
+            const beforeMutation = embeddingCalls;
 
             if (surface === 'cli') {
               yield* runCompact(config, {apply: true, project: 'threadnote'});
@@ -61,10 +67,16 @@ describe('composite memory mutation recall refresh', () => {
             const refreshed = yield* recallIndexStatus(config);
             expect(refreshed.ready).toBe(true);
             expect(refreshed.generation).not.toBe(initial.generation);
-            expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('current');
+            expect(embeddingCalls).toBe(beforeMutation);
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('stale');
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
             const candidates = yield* loadRecallIndexData(config, {includeInactive: false});
             expect(candidates.candidates).toHaveLength(1);
             expect(candidates.candidates[0]?.uri).toContain('/durable/projects/threadnote/');
+            yield* ensureVectorIndex(config, manifest, candidates.candidates, {
+              corpusGeneration: candidates.generation,
+            });
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, candidates.generation)).toBe('current');
           }).pipe(
             Effect.provideService(LocalModelRuntime, runtime),
             Effect.provideService(LocalModelStore, installedModelStore()),

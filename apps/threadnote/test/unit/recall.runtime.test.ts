@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
+import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdir, mkdtemp, rm, utimes, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -527,7 +528,7 @@ describe('recall runtime orchestration', () => {
       expect(Option.isNone(prepared.semanticResult.scores)).toBe(true);
     }),
   );
-  effectIt.effect('keeps top-level lexical recall available when semantic inference dies', () =>
+  effectIt.effect('keeps top-level lexical recall available without starting inference for missing vectors', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-runtime-')));
       homes.push(home);
@@ -568,6 +569,7 @@ describe('recall runtime orchestration', () => {
           verify: () => Effect.succeed(installation),
         } satisfies LocalModelStoreShape),
       );
+      let embeddingCalls = 0;
       const failingRuntimeLayer = Layer.succeed(
         LocalModelRuntime,
         LocalModelRuntime.of({
@@ -576,7 +578,10 @@ describe('recall runtime orchestration', () => {
             buildType: 'prebuilt',
             cpuMathCores: 4,
           }),
-          embedMany: () => Effect.die(TestError.make({message: 'synthetic semantic runtime failure'})),
+          embedMany: () =>
+            Effect.sync(() => {
+              embeddingCalls += 1;
+            }).pipe(Effect.andThen(Effect.die(TestError.make({message: 'synthetic semantic runtime failure'})))),
           generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
           rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
         }),
@@ -594,9 +599,11 @@ describe('recall runtime orchestration', () => {
       }).pipe(provideTestLayer(failingRuntimeLayer), provideTestLayer(storeLayer), provideTestLayer(ApplicationLayer));
       expect(recalled.output).toContain('fallback.md');
       expect(recalled.output).toContain('lexical-fallback-anchor');
-      expect(recalled.output).toContain(
-        'Local AI recall warning: semantic retrieval failed (SemanticRecallUnavailable)',
-      );
+      expect(recalled.output).not.toContain('semantic retrieval failed');
+      expect(
+        (yield* readRecallEmbeddingDemand(config).pipe(provideTestLayer(ApplicationLayer)))?.desired,
+      ).toBeDefined();
+      expect(embeddingCalls).toBe(0);
     }),
   );
   effectIt.effect('preserves fallback hits and reports a real persistent lexical recovery failure', () =>

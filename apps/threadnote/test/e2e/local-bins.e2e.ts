@@ -186,6 +186,10 @@ beforeAll(async () => {
   const installedModel = await stat(installedModelPath);
   expect(installedModel.size).toBe(receipt.size);
   installedModelModifiedAt = installedModel.mtimeMs;
+  // Installation queues optional embeddings. Exercise the explicit foreground boundary
+  // before taking a baseline pointer; later saves must not silently rebuild it.
+  expect(installedFiles).not.toContain(join('indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()));
+  await runCli(['index', 'rebuild']);
   initialVectorRevision = await activeVectorRevision();
   await runCli([
     'remember',
@@ -234,7 +238,7 @@ function isProcessRunning(pid: number): boolean {
 }
 
 describe('built self-contained distribution', () => {
-  it('initializes core lexical and vector recall without server or interpreter artifacts', async () => {
+  it('initializes lexical recall and queues core vectors without server or interpreter artifacts', async () => {
     expect(installOutput).toContain('Install complete');
     expect(installOutput).not.toContain('SQLite is an experimental feature');
     expect(installOutput).toContain(`${coreEmbeddingModelId}: core embedding model verified`);
@@ -246,16 +250,14 @@ describe('built self-contained distribution', () => {
       'Writing lexical recall postings: 0/0 changed document(s) (100%), 0 stale document(s) removed.',
     );
     expect(installOutput).toContain('Activating lexical recall index with 0 document(s).');
-    expect(installOutput).toContain(
-      `Preparing vector recall index for 0 lexical document(s) with ${coreEmbeddingModelId}.`,
-    );
-    expect(installOutput).toContain(
-      'Building vector recall index: 0/0 new chunk(s) embedded (100%), 0 unchanged chunk(s) reused.',
-    );
-    expect(installOutput).toContain('Activating vector recall index with 0 chunk(s).');
+    expect(installOutput).toContain('Document embeddings queued for idle background work.');
+    expect(installOutput).not.toContain('Preparing vector recall index');
+    expect(installOutput).not.toContain('Activating vector recall index');
     expect(installedFiles).toContain('layout.json');
     expect(installedFiles).toContain(join('indexes', 'lexical', recallIndexDatabaseFilename(false)));
-    expect(installedFiles).toContain(join('indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()));
+    expect(installedFiles).not.toContain(
+      join('indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()),
+    );
     expect(installedFiles).not.toContain(join('cache', 'recall-index-v6.json'));
     expect(EffectArray.some(installedFiles, file => /\.py$|server\.pid|server\.lock|ov\.conf/i.test(file))).toBe(false);
     const commandShim = installedLauncher();
@@ -282,9 +284,14 @@ describe('built self-contained distribution', () => {
     expect(script).not.toMatch(/(?:^|[;}\n])export\s*\{/);
   });
 
-  it('stores memory, refreshes the vector generation, and recalls through built launchers', async () => {
+  it('recalls saved memory immediately and explicitly rebuilds vectors through built launchers', async () => {
     const recall = await runCli(['recall', '--query', 'QZ9 native recall background service']);
     expect(recall).toContain('native-e2e.md');
+    expect(await runCli(['doctor'])).toMatch(/WARN\s+vector recall index:.*queued/);
+    expect(await activeVectorRevision()).toBe(initialVectorRevision);
+    const rebuilt = await runCli(['index', 'rebuild']);
+    expect(rebuilt).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
+    expect(await runCli(['index', 'verify'])).toContain('Verified vector generation');
     const shimArgs = ['--home', home, 'recall', '--query', 'QZ9 native recall background service'];
     const shimInvocation =
       process.platform === 'win32'
@@ -1072,7 +1079,18 @@ describe('built self-contained distribution', () => {
     expect(output).not.toContain('Recover canonical data into the final Threadnote 4 layout');
   });
 
-  it('streams index rebuild progress from the repair command used by update', async () => {
+  it('streams lexical repair progress and leaves document inference to an explicit rebuild', async () => {
+    await runCli([
+      'remember',
+      '--kind',
+      'durable',
+      '--project',
+      'threadnote',
+      '--topic',
+      'repair-e2e',
+      '--text',
+      'QZ9 canonical change before lexical repair and explicit vector rebuild.',
+    ]);
     const output = await runCli(['repair', '--mcp', 'none', '--no-post-update']);
 
     expect(
@@ -1089,12 +1107,13 @@ describe('built self-contained distribution', () => {
       /Writing lexical recall postings: \d+\/\d+ changed document\(s\) \(\d+%\), \d+ stale document\(s\) removed\./,
     );
     expect(output).toMatch(/Activating lexical recall index with \d+ document\(s\)\./);
-    expect(output).toMatch(/Preparing vector recall index for \d+ lexical document\(s\)/);
-    expect(output).toMatch(
-      /Building vector recall index: \d+\/\d+ new chunk\(s\) embedded \(\d+%\), \d+ unchanged chunk\(s\) reused\./,
-    );
-    expect(output).toMatch(/Activating vector recall index with \d+ chunk\(s\)\./);
-    expect(output).toContain('Rebuilt recall indexes');
+    expect(output).toContain('Rebuilt lexical recall');
+    expect(output).toContain('Document embeddings queued for idle background work.');
+    expect(output).not.toContain('Preparing vector recall index');
+    const rebuilt = await runCli(['index', 'rebuild']);
+    expect(rebuilt).toMatch(/Embedding \d+ canonical document\(s\) with/);
+    expect(rebuilt).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
+    expect(await runCli(['index', 'verify'])).toContain('Verified vector generation');
   });
 
   it('reports core health without warning about unregistered agent hosts', async () => {
