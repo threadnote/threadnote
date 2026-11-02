@@ -2158,6 +2158,7 @@ async function waitForContenderBarrier(barrier: string, count: number, timeoutMi
 
 const LIVE_RECONCILIATION_CONTENDER_SOURCE = String.raw`
 import * as BunServices from '@effect/platform-bun/BunServices';
+import {cryptoLayer} from './packages/platform/src/crypto.ts';
 import {Effect, Layer, Path} from 'effect';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from './apps/threadnote/test/helpers/system-layer.ts';
 
@@ -2168,7 +2169,7 @@ import {makeLiveCodeGraphWorktreeReconciler} from './packages/graph/src/worktree
 
 const layer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)),
 );
 const result = await Effect.runPromise(
   Effect.gen(function* () {
