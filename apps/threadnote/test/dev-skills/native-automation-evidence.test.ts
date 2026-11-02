@@ -106,7 +106,7 @@ describe('native workflow graph evidence contention', () => {
             graph.acquireSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => acquired++))),
           releaseSnapshotLease: (...args: Parameters<typeof graph.releaseSnapshotLease>) =>
             graph.releaseSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => released++))),
-          effectiveSnapshotCitationEvidence: () => {
+          readReadySnapshotCitationEvidence: () => {
             reads++;
             return Effect.fail(evidenceFailure);
           },
@@ -123,7 +123,7 @@ describe('native workflow graph evidence contention', () => {
               'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
           },
         });
-        expect({acquired, released, reads}).toEqual({acquired: 2, released: 2, reads: 2});
+        expect({acquired, released, reads}).toEqual({acquired: 0, released: 0, reads: 2});
         expect(yield* f.f.fs.readFileString(statePath)).toBe(beforeState);
         expect(yield* f.f.fs.readFileString(journalPath)).toBe(beforeJournal);
         expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
@@ -151,9 +151,9 @@ describe('native workflow graph evidence contention', () => {
       let attempts = 0;
       const busyGraph = CodeGraphStore.of({
         ...graph,
-        acquireSnapshotLease: () => {
+        readReadySnapshotCitationEvidence: () => {
           attempts++;
-          return Effect.fail(CodeGraphStoreBusyError.of('synthetic snapshot lease contention'));
+          return Effect.fail(CodeGraphStoreBusyError.of('synthetic ready evidence reader contention'));
         },
       });
       const denied = yield* failure(
@@ -163,7 +163,7 @@ describe('native workflow graph evidence contention', () => {
       expect(denied).toMatchObject({
         failure: {
           message:
-            'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.',
+            'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
         },
       });
       expect(attempts).toBe(2);
@@ -187,11 +187,13 @@ describe('native workflow graph evidence contention', () => {
         let attempts = 0;
         const busyAfterInitialPreflight = CodeGraphStore.of({
           ...graph,
-          acquireSnapshotLease: (...args: Parameters<typeof graph.acquireSnapshotLease>) => {
+          readReadySnapshotCitationEvidence: (
+            ...args: Parameters<NonNullable<typeof graph.readReadySnapshotCitationEvidence>>
+          ) => {
             attempts++;
             return attempts === 1
-              ? graph.acquireSnapshotLease(...args)
-              : Effect.fail(CodeGraphStoreBusyError.of('synthetic preparation contention'));
+              ? graph.readReadySnapshotCitationEvidence!(...args)
+              : Effect.fail(CodeGraphStoreBusyError.of('synthetic preparation reader contention'));
           },
         });
         const request = citationWrite(f, 'resume-citations');

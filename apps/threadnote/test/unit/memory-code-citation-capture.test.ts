@@ -658,6 +658,10 @@ function citationFixture(
     } satisfies CodeGraphEffectiveSnapshotCitationEvidence;
   };
   const store = {
+    // This adapter intentionally exercises the supported legacy lease contract.
+    // Layer.mock synthesizes unimplemented methods unless optional capability
+    // absence is explicit.
+    readReadySnapshotCitationEvidence: undefined,
     acquireSnapshotLease: statusOptions.acquireLease ?? (() => Effect.sync(() => `lease-${++acquired}`)),
     effectiveSnapshotCitationEvidence: (
       _databasePath: string,
