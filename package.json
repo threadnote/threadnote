@@ -47,6 +47,9 @@
     "test": "bun --bun vitest run",
     "test:e2e:local-bins": "bun run build && bun --bun vitest run --config vitest.e2e.config.ts",
     "test:e2e:windows": "bun run build && bun --bun vitest run --config vitest.windows-e2e.config.ts",
+    "test:e2e:manager": "bun run build && node node_modules/@playwright/test/cli.js test --config playwright.manager.config.ts",
+    "test:e2e:manager:ui": "bun run build && node node_modules/@playwright/test/cli.js test --config playwright.manager.config.ts --ui",
+    "test:e2e:manager:report": "node node_modules/@playwright/test/cli.js show-report .context/manager-e2e/report",
     "test:smoke:release": "bun --bun vitest run apps/threadnote/test/unit/bun-package-contract.test.ts apps/threadnote/test/unit/publish-workflow.test.ts",
     "test:smoke:self-contained": "bun run build && bun scripts/smoke-self-contained.ts",
     "test:watch": "bun --bun vitest",
@@ -133,8 +136,11 @@
     "@expo-google-fonts/spline-sans": "0.4.2",
     "@fontsource-variable/jetbrains-mono": "5.3.0",
     "@fontsource-variable/spline-sans": "5.3.0",
+    "@playwright/test": "1.64.1",
     "@repomix/tree-sitter-wasms": "0.1.17",
     "@resvg/resvg-js": "2.6.2",
+    "@threadnote/testing": "workspace:*",
+    "@threadnote/website": "workspace:*",
     "@tree-sitter-grammars/tree-sitter-hcl": "1.2.0",
     "@tree-sitter-grammars/tree-sitter-lua": "0.4.1",
     "@tree-sitter-grammars/tree-sitter-svelte": "1.0.2",
@@ -162,9 +168,7 @@
     "tree-sitter-systemverilog": "0.4.1",
     "typescript": "7.0.2",
     "vite": "8.3.5",
-    "vitest": "5.0.5",
-    "@threadnote/website": "workspace:*",
-    "@threadnote/testing": "workspace:*"
+    "vitest": "5.0.5"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.7",
