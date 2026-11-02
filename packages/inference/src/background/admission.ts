@@ -27,6 +27,7 @@ const HEARTBEAT_MILLISECONDS = 5_000;
 const SAMPLE_MINIMUM_MILLISECONDS = 500;
 const SAMPLE_MAXIMUM_MILLISECONDS = 10_000;
 const MAXIMUM_STATE_BYTES = 65_536;
+const MAXIMUM_PROCESS_OWNERS = 128;
 
 const domainSchema = Schema.Literals(['recall', 'graph']);
 export type BackgroundInferenceDomain = typeof domainSchema.Type;
@@ -232,17 +233,25 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       .processStartIdentity(system.processId)
       .pipe(Effect.timeoutOption('1 second'), Effect.map(Option.getOrUndefined)));
   const identityKind = canonical === undefined ? ('runtime' as const) : ('canonical' as const);
-  const owner = crypto.randomUUIDv4().pipe(
-    Effect.mapBoth({
-      onSuccess: token => ({
-        processId: system.processId,
-        identityKind,
-        ...(startIdentity === undefined ? {} : {startIdentity}),
-        token,
+  let ownerReservations = 0;
+  const owner = Effect.suspend(() => {
+    // Reserve before the first asynchronous boundary, including while acquiring
+    // or retaining an uncertain lease. Concurrent failures cannot exceed this bound.
+    if (ownerReservations >= MAXIMUM_PROCESS_OWNERS) return unavailable();
+    ownerReservations++;
+    return crypto.randomUUIDv4().pipe(
+      Effect.mapBoth({
+        onSuccess: token => ({
+          processId: system.processId,
+          identityKind,
+          ...(startIdentity === undefined ? {} : {startIdentity}),
+          token,
+        }),
+        onFailure: unavailable,
       }),
-      onFailure: unavailable,
-    }),
-  );
+      Effect.onError(() => Effect.sync(() => ownerReservations--)),
+    );
+  }).pipe(Effect.uninterruptible);
   const locations = (home: string) => {
     const directory = path.join(home, 'locks', 'inference-idle-v1');
     return {
@@ -339,8 +348,12 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
         Effect.gen(function* () {
           let state = yield* readState(location, initialize);
           const now = yield* Clock.currentTimeMillis;
+          const retiring: string[] = [];
           for (const [token, retiredHome] of retired) {
-            if (retiredHome === home) state = releaseBackgroundInferenceLease(state, token, now);
+            if (retiredHome === home) {
+              state = releaseBackgroundInferenceLease(state, token, now);
+              retiring.push(token);
+            }
           }
           const dead = new Set(
             EffectArray.map(
@@ -355,6 +368,9 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
             catch: unavailable,
           });
           yield* writeState(location, result.state);
+          // Only tokens in this committed snapshot are proven released. Later
+          // releases retain their reservations for the next transaction.
+          for (const token of retiring) if (retired.delete(token)) ownerReservations--;
           return result.value;
         }),
       ).pipe(
@@ -368,7 +384,6 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       Effect.andThen(
         transact(home, (state, now) => ({state: releaseBackgroundInferenceLease(state, token, now), value: undefined})),
       ),
-      Effect.tap(() => Effect.sync(() => retired.delete(token))),
       Effect.onError(() => Queue.offer(cleanup, undefined)),
       Effect.ignore,
     );
@@ -380,14 +395,8 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       let delay = 250;
       while (retired.size > 0) {
         yield* Effect.sleep(delay);
-        for (const [token, home] of [...retired]) {
-          yield* transact(home, (state, now) => ({
-            state: releaseBackgroundInferenceLease(state, token, now),
-            value: undefined,
-          })).pipe(
-            Effect.tap(() => Effect.sync(() => retired.delete(token))),
-            Effect.ignore,
-          );
+        for (const home of new Set(retired.values())) {
+          yield* transact(home, state => ({state, value: undefined})).pipe(Effect.ignore);
         }
         delay = Math.min(delay * 2, 30_000);
       }
@@ -512,7 +521,12 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
                 ),
               )
             : Effect.succeed({state: 'deferred' as const, reason: admission.reason ?? 'admission-unavailable'}),
-        admission => (admission.admitted ? release(home, admission.lease.token) : Effect.void),
+        admission =>
+          admission.lease === undefined
+            ? Effect.void
+            : admission.admitted
+              ? release(home, admission.lease.token)
+              : Effect.sync(() => ownerReservations--),
       ),
   };
   return service;
