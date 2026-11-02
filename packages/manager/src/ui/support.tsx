@@ -39,6 +39,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 const token = typeof window === 'undefined' ? '' : (new URLSearchParams(window.location.search).get('token') ?? '');
+export const CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS = 60_000;
 export const GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
 export const isAgentClient = Schema.is(
   Schema.Literals(['claude', 'codex', 'copilot', 'cursor', 'effect-ai', 'local-ai']),
