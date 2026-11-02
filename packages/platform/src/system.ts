@@ -99,6 +99,7 @@ export interface FileSystemPathAuthority extends FileSystemIdentity {
 }
 
 interface RuntimeDirectoryEntry {
+  readonly isFile: () => boolean;
   readonly isDirectory: () => boolean;
   readonly name: string | Uint8Array;
 }
@@ -516,7 +517,10 @@ export async function runtimeDirectoryNamePage(path: string, entryLimit: number)
 }
 
 /** Scoped callers retain this native iterator; every read advances at most 64 directory entries. */
-export async function runtimeOpenTextDirectoryNameReader(root: string) {
+export async function runtimeOpenTextDirectoryNameReader(
+  root: string,
+  options: {readonly entryKind?: 'directory' | 'file'} = {},
+) {
   const directory = await openRuntimeDirectory(root, {bufferSize: 32, encoding: 'utf8'});
   let closed = false;
   const close = async () => {
@@ -537,7 +541,7 @@ export async function runtimeOpenTextDirectoryNameReader(root: string) {
           await close();
           return {names, done: true};
         }
-        if (entry.isDirectory())
+        if (options.entryKind === 'file' ? entry.isFile() : entry.isDirectory())
           names.push(
             typeof entry.name === 'string' ? entry.name : new TextDecoder('utf-8', {fatal: true}).decode(entry.name),
           );

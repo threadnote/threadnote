@@ -143,6 +143,7 @@ export interface McpRequestContext {
   readonly identity?: unknown;
   readonly policy?: unknown;
   readonly transport: 'http' | 'stdio';
+  readonly liveTransport?: true;
 }
 
 export interface McpHttpRequestContext {
@@ -387,7 +388,11 @@ export class EffectMcpServerRegistry {
                       const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
                         Effect.flatMap(parsed =>
                           toolHandlerEffect(
-                            () => registration.handle(parsed, {progress, requestContext}),
+                            () =>
+                              registration.handle(parsed, {
+                                progress,
+                                requestContext: {...requestContext, liveTransport: true},
+                              }),
                             applicationServices,
                           ).pipe(
                             Effect.matchCauseEffect({

@@ -2,7 +2,9 @@ import {
   readRecallEmbeddingDemand,
   requestRecallEmbeddings,
   repairRecallEmbeddingDemand,
+  recallEmbeddingObservedState,
 } from '@threadnote/recall/background/demand';
+import {recallEmbeddingWorkerControlState} from './recall/embedding_worker_process.js';
 import {Array as EffectArray} from 'effect';
 import {queueAutomaticModelSetup} from './models/setup_lifecycle.js';
 import {stopModelSetup} from './models/setup.js';
@@ -72,6 +74,7 @@ import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
+  loadRecallVectorAuthorizationKey,
   VectorCorpusGenerationChanged,
   type VectorIndexGenerationReadiness,
   vectorIndexGenerationReadiness,
@@ -671,7 +674,12 @@ const maintainRecallIndexes = Effect.fn('lifecycle.maintainRecallIndexes')(funct
           onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
         });
         const current =
-          (yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation)) === 'current';
+          (yield* vectorIndexGenerationReadiness(
+            config.agentContextHome,
+            manifest,
+            index.generation,
+            yield* loadRecallVectorAuthorizationKey(config),
+          )) === 'current';
         if (!current) yield* forceRefresh ? repairRecallEmbeddingDemand(config) : requestRecallEmbeddings(config);
         return {documentCount: index.corpusStatistics.documentCount, vectors: {queued: !current}};
       }),
@@ -972,20 +980,50 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
     const status = yield* vectorIndexStatus(config.agentContextHome, manifest);
     const currentGeneration =
       status.ready &&
-      (yield* vectorIndexMatchesGeneration(config.agentContextHome, manifest, lexicalStatus.generation));
+      (yield* vectorIndexMatchesGeneration(
+        config.agentContextHome,
+        manifest,
+        lexicalStatus.generation,
+        yield* loadRecallVectorAuthorizationKey(config),
+      ));
     const demand = yield* readRecallEmbeddingDemand(config).pipe(Effect.option);
     const queued = Option.isSome(demand) && demand.value?.desired !== undefined;
     const readiness = yield* vectorIndexGenerationReadiness(
       config.agentContextHome,
       manifest,
       lexicalStatus.generation,
+      yield* loadRecallVectorAuthorizationKey(config),
     );
-    if (!currentGeneration && queued && (status.ready || status.reason === 'not built') && readiness !== 'corrupt')
+    if (!currentGeneration && queued && (status.ready || status.reason === 'not built') && readiness !== 'corrupt') {
+      const observed = yield* recallEmbeddingObservedState(
+        config,
+        manifest.id + ':' + manifest.sha256 + ':' + String(manifest.dimensions),
+      );
+      const control = yield* recallEmbeddingWorkerControlState(config.agentContextHome);
+      if (control.state === 'legacy-owner' || control.state === 'unavailable')
+        return {
+          detail: `${manifest.id}; ${control.state === 'legacy-owner' ? 'blocked by a legacy or unverified worker; wait for its owner to release it and restart the compatible runtime' : 'worker control unavailable; run `threadnote repair`'}; lexical recall available`,
+          name: 'vector recall index',
+          status: 'fail' as const,
+        };
+      const detail =
+        observed.state === 'running'
+          ? 'background embeddings running'
+          : observed.state === 'preparing'
+            ? 'background embeddings preparing'
+            : observed.state === 'deferred-cpu'
+              ? 'deferred until spare CPU capacity'
+              : observed.state === 'deferred-foreground'
+                ? 'deferred until foreground Threadnote work is quiet'
+                : observed.state === 'blocked' || observed.state === 'corrupt'
+                  ? `${observed.state}: ${observed.reason ?? 'inspect embedding demand'}; run \`threadnote repair\``
+                  : 'queued for spare CPU capacity and no foreground Threadnote work';
       return {
-        detail: `${manifest.id}; queued for spare CPU capacity and no foreground Threadnote work; lexical recall available`,
+        detail: `${manifest.id}; ${detail}; lexical recall available`,
         name: 'vector recall index',
-        status: 'warn' as const,
+        status: observed.state === 'blocked' || observed.state === 'corrupt' ? ('fail' as const) : ('warn' as const),
       };
+    }
     return status.ready
       ? currentGeneration
         ? {

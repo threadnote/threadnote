@@ -1,6 +1,7 @@
 import {
   Array as EffectArray,
   Clock,
+  Cause,
   Context,
   Crypto,
   Effect,
@@ -177,6 +178,38 @@ export const CurrentNativeJobBeforeDispatch = Context.Reference<Effect.Effect<vo
 export const CurrentNativeJobAutoLaunch = Context.Reference<boolean>('threadnote/NativeJobAutoLaunch', {
   defaultValue: () => true,
 });
+/** Only verified canonical calls in this worker's dispatch context report progress. */
+export const CurrentNativeJobProgress = Context.Reference<
+  | ((proof: {
+      readonly runId: string;
+      readonly generation: string;
+      readonly bindingId: string;
+      readonly operationId: string;
+      readonly rootVerified: boolean;
+    }) => Effect.Effect<void>)
+  | undefined
+>('threadnote/NativeJobProgress', {defaultValue: () => undefined});
+const progressSchema = Schema.Struct({
+  verifiedOperations: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 4096})),
+  rootVerified: Schema.Boolean,
+  stage: Schema.Literals(['canonical-work', 'finalizing']),
+  lastProgressAt: Schema.Finite,
+});
+export type NativeJobProgress = typeof progressSchema.Type;
+export function advanceNativeJobProgress(
+  previous: NativeJobProgress | undefined,
+  count: number,
+  rootVerified: boolean,
+  at: number,
+): NativeJobProgress {
+  const root = rootVerified || previous?.rootVerified === true;
+  return {
+    verifiedOperations: Math.max(count, previous?.verifiedOperations ?? 0),
+    rootVerified: root,
+    stage: root ? 'finalizing' : 'canonical-work',
+    lastProgressAt: Math.max(at, previous?.lastProgressAt ?? 0),
+  };
+}
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-job'),
   version: Schema.Literal(1),
@@ -200,6 +233,7 @@ const envelopeSchema = Schema.Struct({
   code: Schema.optionalKey(Schema.String),
   action: Schema.optionalKey(Schema.String),
   updatedAt: Schema.Finite,
+  progress: Schema.optionalKey(progressSchema),
 });
 type Envelope = typeof envelopeSchema.Type;
 const inputSchema = Schema.Struct({
@@ -226,7 +260,7 @@ export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: s
 export function nativeJobStatus(
   envelope: Pick<
     Envelope,
-    'jobId' | 'runId' | 'generation' | 'status' | 'stopRequested' | 'updatedAt' | 'code' | 'action'
+    'jobId' | 'runId' | 'generation' | 'status' | 'stopRequested' | 'updatedAt' | 'code' | 'action' | 'progress'
   >,
 ) {
   return {
@@ -239,6 +273,7 @@ export function nativeJobStatus(
     status: envelope.status,
     stopRequested: envelope.stopRequested,
     updatedAt: envelope.updatedAt,
+    ...(envelope.progress ? {progress: envelope.progress} : {}),
     ...(envelope.code ? {code: envelope.code} : {}),
     ...(envelope.action ? {nextAction: envelope.action} : {}),
   };
@@ -774,6 +809,7 @@ const transition = Effect.fn('nativeJobs.transition')(function* (
       const current = yield* read(config, runId, jobId);
       if (!current) return yield* fail('job-not-found', 'No accepted job has this identity.');
       const next = change(current.state);
+      if (next === current.state) return current;
       return yield* write(config, next, current.revision);
     }),
   );
@@ -825,6 +861,42 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           return yield* fail('job-stopped', 'Cancellation was requested at a canonical child boundary.');
       });
       const generation = current.state.generation;
+      const verifiedThisAttempt = new Set<string>();
+      const progressContext = yield* Effect.context<Effect.Services<ReturnType<typeof transition>>>();
+      let reported = current.state.progress;
+      const reportProgress = (proof: {
+        readonly runId: string;
+        readonly generation: string;
+        readonly bindingId: string;
+        readonly operationId: string;
+        readonly rootVerified: boolean;
+      }) =>
+        Effect.gen(function* () {
+          if (
+            proof.runId !== runId ||
+            proof.generation !== generation ||
+            proof.bindingId !== view.bindingId ||
+            verifiedThisAttempt.has(proof.operationId)
+          )
+            return;
+          verifiedThisAttempt.add(proof.operationId);
+          const count = Math.max(reported?.verifiedOperations ?? 0, verifiedThisAttempt.size);
+          const root = proof.rootVerified || reported?.rootVerified === true;
+          if (count === reported?.verifiedOperations && root === reported.rootVerified) return;
+          const now = yield* Clock.currentTimeMillis;
+          const updated = yield* transition(config, runId, jobId, state => ({
+            ...state,
+            progress: advanceNativeJobProgress(state.progress, count, root, now),
+          }));
+          reported = updated.state.progress;
+        }).pipe(
+          Effect.provideContext(progressContext),
+          Effect.catchCauseIf(
+            cause => !Cause.hasInterrupts(cause),
+            () => Effect.void,
+          ),
+        );
+
       let workAction: Work['action'] | undefined;
       const execute = Effect.gen(function* () {
         const work = yield* Effect.try({
@@ -883,6 +955,7 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
       }).pipe(
         Effect.provideService(CurrentNativeJobSourceView, view),
         Effect.provideService(CurrentNativeJobBoundary, boundary),
+        Effect.provideService(CurrentNativeJobProgress, reportProgress),
       );
       const result = yield* Effect.result(execute);
       if (result._tag === 'Success') {

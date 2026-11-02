@@ -286,7 +286,9 @@ describe('lexical vector preparation source', () => {
           );
           yield* fs.writeFileString(filename, content + 'changed');
         }
-        expect(yield* source.hydrate(logical)).toEqual([]);
+        const hydrated = yield* source.hydrate(logical).pipe(Effect.result);
+        if (change === 'bytes') expect(hydrated).toMatchObject({_tag: 'Success', success: []});
+        else expect(hydrated).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallVectorSourceChanged'}});
         expect((yield* source.authorize(logical).pipe(Effect.result))._tag).toBe('Failure');
         expect(
           (yield* (yield* openRecallVectorPreparationSource(config)).readMetadataPage(undefined)).candidates,

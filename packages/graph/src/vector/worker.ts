@@ -1,4 +1,9 @@
-import {Clock, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Clock, Crypto, Effect, Exit, FileSystem, Path, Schema} from 'effect';
+import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
+import {
+  BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
+  type BackgroundWorkerLifecycle,
+} from '@threadnote/inference/background/worker-control';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -55,6 +60,7 @@ export interface CodeGraphEmbeddingWorkerOutcome {
 }
 export interface CodeGraphEmbeddingWorkerOptions {
   readonly version: string;
+  readonly lifecycle?: BackgroundWorkerLifecycle;
   /** Enumerates existing graph catalogs only. It must never create demand or index. */
   readonly catalogPage: (after?: string) => Effect.Effect<CodeGraphEmbeddingWorkerCatalogPage, unknown>;
   readonly idleGraceMilliseconds?: number;
@@ -80,8 +86,17 @@ export function isCodeGraphEmbeddingWorkerContention(error: unknown): boolean {
       error.retryable === true) ||
     isFileLockTimeout(error) ||
     tag === 'CodeGraphStoreBusyError' ||
-    tag === 'CodeGraphMaintenanceActiveError'
+    tag === 'CodeGraphMaintenanceActiveError' ||
+    Schema.is(BackgroundInferenceDeferred)(error)
   );
+}
+
+interface WorkerMemo {
+  count?: number;
+  pageLimit: 1 | 400;
+  embedded: number;
+  reused: number;
+  generation?: string;
 }
 
 /** A single bounded lane turn; inference is outside every structural publication gate. */
@@ -90,6 +105,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
   readonly layout: CodeGraphLayout;
   readonly lane: CodeGraphEmbeddingDemandLane;
   readonly owner: CodeGraphEmbeddingDemandOwner;
+  readonly memo?: WorkerMemo;
   readonly afterAttachment?: Effect.Effect<void, unknown>;
   readonly onClaim?: Effect.Effect<void, unknown>;
   readonly afterCheckpoint?: Effect.Effect<void, unknown>;
@@ -290,18 +306,35 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
           ownerToken: pinned.owner.token,
           retainPublicationClaimOnFailure: isCodeGraphEmbeddingWorkerContention,
           maximumSteps: 1,
-          maximumInferenceSymbolsPerStep: 32,
-          inferenceBatchSize: 32,
+          maximumInferenceSymbolsPerStep: 1,
+          maximumRawSymbolsPerStep: input.memo?.pageLimit ?? 1,
+          inferenceBatchSize: 1,
           embeddingContextPoolSize: 1,
           lockWaitTimeoutMilliseconds: 0,
           symbols: {
-            count: read(store.countEmbeddingSymbols(layout.databasePath, snapshot.id)),
+            count:
+              input.memo?.count === undefined
+                ? read(store.countEmbeddingSymbols(layout.databasePath, snapshot.id)).pipe(
+                    Effect.tap(count =>
+                      Effect.sync(() => {
+                        if (input.memo) input.memo.count = count;
+                      }),
+                    ),
+                  )
+                : Effect.succeed(input.memo.count),
             loadPage: (cursor, limit) =>
               read(store.loadEmbeddingSymbolPage(layout.databasePath, snapshot.id, cursor, Math.min(400, limit))),
           },
         }),
       token => store.releaseSnapshotLease(layout.databasePath, token, {waitTimeoutMilliseconds: 0}).pipe(Effect.ignore),
     );
+    if (input.memo) {
+      const priorEmbedded = input.memo.generation === result.generation ? input.memo.embedded : 0;
+      input.memo.pageLimit = result.embedded > priorEmbedded ? 1 : 400;
+      input.memo.embedded = result.embedded;
+      input.memo.reused = result.reused;
+      input.memo.generation = result.generation;
+    }
     if (result.ready) {
       yield* input.afterAttachment ?? Effect.void;
       yield* acknowledge({kind: 'finish'});
@@ -323,6 +356,10 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
   });
   return yield* execute.pipe(
     Effect.catch(error => {
+      // Foreground arrived after admission: keep finite passive checkpoints,
+      // without renewing a claim or spending the preparation failure budget.
+      if (Schema.is(BackgroundInferenceDeferred)(error))
+        return Effect.succeed({state: 'deferred' as const, reason: 'native-authority-deferred'});
       const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
       const superseded = tag === 'CodeGraphEmbeddingWorkerSuperseded' || tag === 'CodeGraphVectorPublicationSuperseded';
       const modelInvalidated = tag === 'CodeGraphEmbeddingWorkerModelInvalidated';
@@ -378,7 +415,11 @@ function expectedWorkerFailure(error: unknown) {
 
 /** Admission can deny even the status write; preserve recorded demand and report a read-only outcome. */
 export const runCodeGraphEmbeddingWorkerUnit = (input: Parameters<typeof processCodeGraphEmbeddingWorkerUnit>[0]) =>
-  processCodeGraphEmbeddingWorkerUnit(input).pipe(
+  Effect.gen(function* () {
+    const admission = yield* BackgroundInferenceAdmission;
+    const outcome = yield* admission.runBatch(input.home, 'graph', processCodeGraphEmbeddingWorkerUnit(input));
+    return outcome.state === 'completed' ? outcome.value : {state: 'deferred' as const, reason: outcome.reason};
+  }).pipe(
     Effect.catchIf(expectedWorkerFailure, error => {
       const contention = isCodeGraphEmbeddingWorkerContention(error);
       return Effect.succeed({
@@ -409,15 +450,19 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
   if (!owner.processStartIdentity)
     return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Cannot identify embedding worker process.'});
   const receiptPath = codeGraphEmbeddingWorkerReceiptPath(path, canonicalHome);
+  // Immutable snapshot counts and page-size hints only; no symbol/vector payloads.
+  const memo = new Map<string, WorkerMemo>();
   return yield* withExclusiveFileLock(
     fs,
     codeGraphEmbeddingWorkerLockPath(path, canonicalHome),
     {
+      createParentDirectory: options.lifecycle === undefined,
       retryIntervalMilliseconds: 1,
-      staleAfterMilliseconds: 120_000,
+      staleAfterMilliseconds: BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
       waitTimeoutMilliseconds: 0,
     },
     Effect.gen(function* () {
+      if (options.lifecycle && !(yield* options.lifecycle.activate(owner))) return;
       const receipt = JSON.stringify({
         ...owner,
         protocol: CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
@@ -428,6 +473,7 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
       yield* options.onReady ?? Effect.void;
       let idleSince = yield* Clock.currentTimeMillis;
       do {
+        yield* options.lifecycle?.beforeScan ?? Effect.void;
         let catalogAfter: string | undefined;
         let runnable = false;
         do {
@@ -460,11 +506,19 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
                   if (lane.state !== 'blocked') runnable = true;
                   continue;
                 }
+                const key = checkoutId + ':' + lane.snapshotId;
+                let state = memo.get(key);
+                if (!state) {
+                  if (memo.size >= 64) memo.delete(memo.keys().next().value!);
+                  state = {pageLimit: 1, embedded: 0, reused: 0};
+                  memo.set(key, state);
+                }
                 const result = yield* runCodeGraphEmbeddingWorkerUnit({
                   home: canonicalHome,
                   layout: codeGraphLayout(path, canonicalHome, checkoutId, lane.worktreeId, lane.scopeId),
                   lane,
                   owner,
+                  memo: state,
                   afterAttachment: options.afterAttachment,
                   onClaim: options.onClaim,
                   afterCheckpoint: options.afterCheckpoint,
@@ -482,17 +536,20 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
         if (now - idleSince >= (options.idleGraceMilliseconds ?? 2000)) break;
         yield* Effect.sleep(options.pollMilliseconds ?? 1000);
       } while (true);
-    }).pipe(
-      Effect.ensuring(
-        fs.readFileString(receiptPath).pipe(
-          Effect.flatMap(content =>
-            Effect2.pipe(content, EffectString.includes(owner.token))
-              ? fs.remove(receiptPath, {force: true})
-              : Effect.void,
+    }),
+  ).pipe(
+    Effect.onExit(exit =>
+      options.lifecycle
+        ? options.lifecycle.afterRelease(Exit.isSuccess(exit))
+        : fs.readFileString(receiptPath).pipe(
+            Effect.flatMap(content =>
+              Effect2.pipe(content, EffectString.includes(owner.token))
+                ? fs.remove(receiptPath, {force: true})
+                : Effect.void,
+            ),
+            Effect.ignore,
           ),
-          Effect.ignore,
-        ),
-      ),
     ),
-  ).pipe(Effect.catchIf(isFileLockTimeout, () => Effect.void));
+    Effect.catchIf(isFileLockTimeout, () => Effect.void),
+  );
 });

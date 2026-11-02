@@ -87,6 +87,29 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('background CPU admission policy', () => {
+  effectIt.effect('existing-home foreground workers never recreate a removed home or its ancestors', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.fs.remove(f.home, {recursive: true});
+      for (const suffix of ['', '/nested/new']) {
+        let entered = false;
+        expect(
+          (yield* f.admission
+            .withForeground(
+              f.home + suffix,
+              Effect.sync(() => {
+                entered = true;
+              }),
+              {existingHomeOnly: true},
+            )
+            .pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(entered).toBe(false);
+        expect(yield* f.fs.exists(f.home)).toBe(false);
+      }
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
   it("does not let repeatedly ineligible demand reserve another domain's fair turn", () => {
     fc.assert(
       fc.property(fc.boolean(), fc.integer({min: 1, max: 30}), (missingIdentity, rounds) => {

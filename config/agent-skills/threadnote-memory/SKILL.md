@@ -19,6 +19,10 @@ Close out in order:
    Only add `observed`, `anchors`, `attempted`, `unresolved`, and `avoid_repeat` fields from direct evidence.
    Use stable project/topic + `replaceUri`. Handoffs accept explicit `keywords` and preserve them on replacement;
    `clearKeywords` removes them. Omit `regenerateKeywords`: handoffs never generate keywords.
+   A qualified compiled MCP handoff save may return `state: pending` with an `operationId`. This is admission, not a
+   saved memory. Follow that same ID with `memory_write_status`; require `state: complete` and verified canonical/lexical
+   outcomes before recording success. Do not resubmit a pending or unknown save. An unavailable receipt or dead worker
+   does not prove that no canonical write occurred. Source/direct invocation keeps its synchronous compatibility path.
 2. Only when the session produced reusable durable knowledge, preview a five-field Knowledge Delta (`decisions` +
    `rationale`, `constraints`, `verificationPerformed`, `knowledgeInvalidated`, `unresolvedRisks`) with a complete
    `review_session_context` call containing task, outcome, project, `callerCwd`, `sourceCommit`, and those fields. Candidates

@@ -11,6 +11,7 @@ import {recallEmbeddingDemandKey} from './demand.js';
 import {openRecallVectorPreparationSource} from '../index/vector-preparation-source.js';
 import {recallVectorStorage} from '../vector-index.js';
 import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
+import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../vector/preparation-identity.js';
 
 export interface RecallPreparedChunk {
   readonly chunk_id: string;
@@ -66,16 +67,16 @@ export const recallVectorTarget = Effect.fn('recall.vectorTarget')(function* (
   manifest: LocalModelManifest,
   source: RecallVectorSource,
 ) {
-  const job = sha256HexSync(
-    JSON.stringify([
-      'idle-recall-v1',
-      recallEmbeddingDemandKey(config),
-      source.generation,
-      source.authorizationKey,
-      manifest.id,
-      recallVectorStorage.recipe(manifest),
-      RECALL_CHUNKER_VERSION,
-    ]),
+  const inputIdentity = recallVectorPreparationIdentity(
+    source.generation,
+    source.authorizationKey,
+    manifest.id,
+    recallVectorStorage.recipe(manifest),
+  );
+  const job = recallVectorPreparationJobId(inputIdentity);
+  const previousSharedJob = sha256HexSync(JSON.stringify(['idle-recall-v2', ...inputIdentity]));
+  const legacyJob = sha256HexSync(
+    JSON.stringify(['idle-recall-v1', recallEmbeddingDemandKey(config), ...inputIdentity]),
   );
   return yield* withRecallVectorWrite(
     config,
@@ -85,6 +86,12 @@ export const recallVectorTarget = Effect.fn('recall.vectorTarget')(function* (
       const existing =
         yield* sql<RecallVectorTarget>`SELECT t.* FROM idle_recall_targets t JOIN vector_generations g USING(generation) WHERE g.job_id = ${job}`;
       if (existing[0]) return existing[0];
+      const legacy =
+        yield* sql<RecallVectorTarget>`SELECT t.* FROM idle_recall_targets t JOIN vector_generations g USING(generation) WHERE g.job_id IN (${legacyJob},${previousSharedJob}) ORDER BY g.created_at,g.generation LIMIT 1`;
+      if (legacy[0]) {
+        yield* sql`UPDATE vector_generations SET job_id = ${job} WHERE generation = ${legacy[0].generation} AND job_id IN (${legacyJob},${previousSharedJob})`;
+        return legacy[0];
+      }
       const generation = `${yield* Clock.currentTimeMillis}-${EffectString.slice(0, 8)(yield* (yield* Crypto.Crypto).randomUUIDv4())}`;
       yield* sql`INSERT INTO vector_generations (generation,job_id,corpus_generation,model_id,model_sha256,dimensions,embedding_recipe,chunker_version,normalized,chunk_count,state,created_at,scope_mapping_version)
       VALUES (${generation},${job},${source.generation},${manifest.id},${manifest.sha256},${manifest.dimensions},${recallVectorStorage.recipe(manifest)},${RECALL_CHUNKER_VERSION},'l2',0,'building',${DateTime.formatIso(yield* DateTime.now)},1)`;
@@ -229,6 +236,7 @@ export const retireRecallVectorPreparation = Effect.fn('recall.retireVectorPrepa
   config: RecallEmbeddingScope,
   manifest: LocalModelManifest,
   target: RecallVectorTarget,
+  currentCorpusGeneration: string,
 ) {
   return yield* withRecallVectorWrite(
     config,
@@ -236,12 +244,17 @@ export const retireRecallVectorPreparation = Effect.fn('recall.retireVectorPrepa
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* assertRecallVectorTarget(target);
-      const pointer = yield* sql<{
-        readonly generation: string;
-      }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
-      if (pointer[0]?.generation !== target.generation) return yield* preparationChanged();
+      const own = yield* sql`SELECT 1 FROM vector_generations WHERE generation = ${target.generation}
+        AND state = 'ready' AND corpus_generation = ${currentCorpusGeneration}`;
+      if (own.length !== 1) return yield* preparationChanged();
       const obsolete = yield* sql<{readonly generation: string}>`SELECT g.generation FROM vector_generations g
-      WHERE g.generation <> ${target.generation} AND (g.state = 'ready' OR EXISTS (SELECT 1 FROM idle_recall_targets t WHERE t.generation = g.generation))
+      WHERE g.generation <> ${target.generation}
+      AND NOT EXISTS (SELECT 1 FROM vector_pointer p WHERE p.generation = g.generation) AND (
+        g.corpus_generation <> ${currentCorpusGeneration}
+        OR (g.state = 'ready' AND NOT EXISTS (
+          SELECT 1 FROM idle_recall_targets t WHERE t.generation = g.generation
+        ))
+      )
       ORDER BY g.created_at, g.generation LIMIT 1`;
       const old = obsolete[0]?.generation;
       if (old) {

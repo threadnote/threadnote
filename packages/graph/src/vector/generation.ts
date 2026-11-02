@@ -244,6 +244,169 @@ export const commitCodeGraphGenerationStep = Effect.fn('codeGraph.commitGenerati
   );
 });
 
+export const CODE_GRAPH_REUSE_POINTER_WINDOW = 16;
+export const CODE_GRAPH_REUSE_GENERATION_WINDOW = 32;
+export const CODE_GRAPH_REUSE_CANDIDATES = 8;
+export const CODE_GRAPH_REUSE_BYTE_LIMIT = 4 * 1024 * 1024;
+export const CODE_GRAPH_REUSE_PAYLOAD_ROWS = 400;
+
+export function estimateCodeGraphCompatibleCopyBytes(
+  raw: readonly {id: string; fingerprint?: string; cursor: string}[],
+  dimensions: number,
+): number {
+  const utf8 = new TextEncoder();
+  return (
+    EffectArray.reduce(
+      raw,
+      4096,
+      (sum, row) => sum + utf8.encode(row.id).byteLength + utf8.encode(row.fingerprint ?? '').byteLength + 256,
+    ) +
+    utf8.encode(raw.at(-1)?.cursor ?? '').byteLength +
+    Math.min(CODE_GRAPH_REUSE_BYTE_LIMIT, raw.length * dimensions * 4)
+  );
+}
+
+/** Source selection, payload validation and destination ownership share one writer transaction. */
+export const copyCodeGraphCompatiblePrefix = Effect.fn('codeGraph.copyCompatiblePrefix')(function* (
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly generation: string;
+    readonly ownerToken: string;
+    readonly worktreeId: string;
+    readonly expectedCursor: string | null;
+    readonly expectedOffset: number;
+    readonly modelId: string;
+    readonly modelSha256: string;
+    readonly dimensions: number;
+    readonly templateVersion: number;
+    readonly raw: readonly {readonly id: string; readonly fingerprint?: string; readonly cursor: string}[];
+    readonly decode: (value: unknown) => Uint8Array | undefined;
+  },
+) {
+  if (input.raw.length > 400 || !Number.isSafeInteger(input.dimensions) || input.dimensions < 1)
+    return yield* CodeGraphGenerationClaimError.make({message: 'Compatible vector copy exceeds its bounds.'});
+  return yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const progress = yield* requireCodeGraphGenerationClaim(sql, input.generation, input.ownerToken);
+      if (progress.cursor !== input.expectedCursor || progress.array_offset !== input.expectedOffset)
+        return yield* CodeGraphGenerationClaimError.make({message: 'Compatible vector copy cursor changed.'});
+      const own = yield* sql.unsafe<{readonly generation: string}>(
+        'SELECT generation FROM vector_pointers WHERE worktree_id = ?',
+        [input.worktreeId],
+      );
+      // Bounds apply to raw indexed metadata BEFORE compatibility filtering.
+      const pointers = yield* sql.unsafe<{readonly generation: string}>(
+        'SELECT generation FROM vector_pointers ORDER BY worktree_id LIMIT ?',
+        [CODE_GRAPH_REUSE_POINTER_WINDOW],
+      );
+      const generations = yield* sql.unsafe<{readonly generation: string}>(
+        'SELECT generation FROM vector_generations ORDER BY generation LIMIT ?',
+        [CODE_GRAPH_REUSE_GENERATION_WINDOW],
+      );
+      const candidates: string[] = [];
+      const inspected = new Set<string>();
+      for (const reference of [...own, ...pointers, ...generations]) {
+        if (inspected.has(reference.generation)) continue;
+        inspected.add(reference.generation);
+        const compatible = yield* sql.unsafe(
+          `SELECT 1 FROM vector_generations WHERE generation = ? AND state = 'ready'
+          AND model_id = ? AND model_sha256 = ? AND dimensions = ? AND template_version = ?
+          AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = ?)`,
+          [
+            reference.generation,
+            input.modelId,
+            input.modelSha256,
+            input.dimensions,
+            input.templateVersion,
+            reference.generation,
+          ],
+        );
+        if (compatible.length === 1) candidates.push(reference.generation);
+        if (candidates.length === CODE_GRAPH_REUSE_CANDIDATES) break;
+      }
+      const rows: Array<readonly [string, string, string, Uint8Array]> = [];
+      const seen = new Set<string>();
+      let consumed = 0;
+      let copiedBytes = 0;
+      let transportedBytes = 0;
+      let transportedRows = 0;
+      let probes = 0;
+      for (const item of input.raw) {
+        if (item.fingerprint === undefined || seen.has(item.id)) {
+          consumed++;
+          continue;
+        }
+        const existing = yield* sql.unsafe<{readonly fingerprint: string}>(
+          'SELECT fingerprint FROM vectors WHERE generation = ? AND symbol_id = ?',
+          [input.generation, item.id],
+        );
+        if (existing.length) {
+          if (existing[0]?.fingerprint !== item.fingerprint)
+            return yield* CodeGraphGenerationClaimError.make({message: 'Destination vector identity changed.'});
+          seen.add(item.id);
+          consumed++;
+          continue;
+        }
+        if (copiedBytes + input.dimensions * 4 > CODE_GRAPH_REUSE_BYTE_LIMIT) break;
+        let bytes: Uint8Array | undefined;
+        for (const source of candidates) {
+          if (
+            transportedRows === CODE_GRAPH_REUSE_PAYLOAD_ROWS ||
+            transportedBytes + input.dimensions * 4 > CODE_GRAPH_REUSE_BYTE_LIMIT
+          )
+            break;
+          probes++;
+          // The existing generation/symbol/fingerprint index gives one bounded point probe.
+          // length() rejects oversized blobs before SQLite transports their payload.
+          const matching = yield* sql.unsafe<{readonly vector: unknown}>(
+            `SELECT vector FROM vectors WHERE generation = ? AND symbol_id = ? AND fingerprint = ?
+            AND typeof(vector) = 'blob' AND length(vector) = ? LIMIT 1`,
+            [source, item.id, item.fingerprint, input.dimensions * 4],
+          );
+          if (matching[0]) {
+            transportedRows++;
+            transportedBytes += input.dimensions * 4;
+            bytes = input.decode(matching[0].vector);
+          }
+          if (bytes?.byteLength === input.dimensions * 4) break;
+          bytes = undefined;
+        }
+        if (!bytes) break;
+        rows.push([input.generation, item.id, item.fingerprint, bytes]);
+        seen.add(item.id);
+        copiedBytes += bytes.byteLength;
+        consumed++;
+      }
+      const next =
+        consumed === 0
+          ? progress
+          : yield* commitCodeGraphGenerationStep(sql, {
+              generation: input.generation,
+              ownerToken: input.ownerToken,
+              expectedCursor: input.expectedCursor,
+              expectedOffset: input.expectedOffset,
+              nextCursor: input.raw[consumed - 1].cursor,
+              nextOffset: input.expectedOffset + consumed,
+              embedded: 0,
+              reused: rows.length,
+              rows,
+            });
+      // No source vector payload escapes this transaction; only the destination checkpoint does.
+      return {
+        progress: next,
+        consumed,
+        copiedBytes,
+        transportedBytes,
+        transportedRows,
+        probes,
+        candidates: candidates.length,
+        rawPointerReferences: pointers.length,
+        rawGenerationReferences: generations.length,
+      };
+    }),
+  );
+});
+
 /** Ready is an immutable, all-or-nothing visibility boundary. Ownership is retained for attachment. */
 export const completeCodeGraphGeneration = Effect.fn('codeGraph.completeGeneration')(function* (
   sql: SqlClient.SqlClient,

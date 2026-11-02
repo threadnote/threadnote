@@ -227,6 +227,7 @@ export interface BackgroundInferenceAdmissionShape {
   readonly withForeground: <A, E, R>(
     home: string,
     program: Effect.Effect<A, E, R>,
+    options?: {readonly existingHomeOnly?: boolean},
   ) => Effect.Effect<A, E | BackgroundInferenceAdmissionUnavailable, R>;
   readonly withExecution: <A, E, R>(
     authority: BackgroundBatchAuthority,
@@ -448,6 +449,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
       }
     });
   let previousCpu: CpuCapacitySample | undefined;
+  let nextCpu: CpuCapacitySample | undefined;
   const sampleCpu = Effect.gen(function* () {
     const observation = system.cpuTimes
       ? system.cpuTimes.pipe(Effect.map(Option.fromUndefinedOr))
@@ -460,9 +462,25 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
     );
     const now = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
     const current = Option.isSome(counters) ? {...counters.value, atMilliseconds: now} : undefined;
+    // Keep two staggered anchors. Every decision still uses a fresh OS sample
+    // over >=500ms, without imposing a new500ms pause after each short unit.
+    if (nextCpu && now - nextCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) {
+      previousCpu = nextCpu;
+      nextCpu = undefined;
+    }
     const capacity = classifyBackgroundCpuCapacity(previousCpu, current);
-    if (!previousCpu || !current || now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS)
+    if (
+      !previousCpu ||
+      !current ||
+      (capacity.state === 'unknown' && now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) ||
+      now - previousCpu.atMilliseconds > SAMPLE_MAXIMUM_MILLISECONDS ||
+      previousCpu.logicalCpus !== current.logicalCpus ||
+      current.totalMilliseconds < previousCpu.totalMilliseconds ||
+      current.idleMilliseconds < previousCpu.idleMilliseconds
+    ) {
       previousCpu = current;
+      nextCpu = undefined;
+    } else if (!nextCpu && now - previousCpu.atMilliseconds >= SAMPLE_MINIMUM_MILLISECONDS) nextCpu = current;
     return capacity;
   });
   const deadOwners = (home: string) =>
@@ -539,7 +557,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
         lease => Effect.scoped(heartbeat(authority.home, lease.token).pipe(Effect.forkScoped, Effect.andThen(program))),
         lease => release(authority.home, lease.token),
       ),
-    withForeground: (home, program) =>
+    withForeground: (home, program, options) =>
       Effect.acquireUseRelease(
         owner.pipe(
           Effect.flatMap(lease =>
@@ -547,6 +565,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
               home,
               (state, now) => ({state: registerBackgroundForegroundLease(state, lease, now), value: lease}),
               true,
+              options?.existingHomeOnly !== true,
             ).pipe(Effect.onError(() => release(home, lease.token))),
           ),
         ),

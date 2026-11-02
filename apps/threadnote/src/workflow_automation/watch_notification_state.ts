@@ -78,6 +78,34 @@ export const nativeWatchNotificationSchema = Schema.Struct({
 });
 export type NativeWatchNotification = typeof nativeWatchNotificationSchema.Type;
 
+/** Terminal arrival has no lease, delivery, disposition or collector authority. */
+export function matchesTerminalNativeWatchArrival(
+  value: NativeWatchNotification,
+  state: NativeWatchState,
+  route: {consumerId: string; wakeupId: string; eventKey: string; attemptId?: string},
+): boolean {
+  const pending = value.outbox;
+  return (
+    value.target.host === 'codex' &&
+    state.prState !== 'open' &&
+    state.events.length === 0 &&
+    state.delivery === null &&
+    state.acknowledged === state.nextSequence - 1 &&
+    !Array.some(state.work, item => item.status === 'open' || item.status === 'blocked') &&
+    value.consumerId === route.consumerId &&
+    value.wakeupId === route.wakeupId &&
+    state.consumer?.id === route.consumerId &&
+    state.consumer.wakeupId === route.wakeupId &&
+    pending?.status === 'queued' &&
+    pending.receipt !== undefined &&
+    pending.attempts > 0 &&
+    route.attemptId !== undefined &&
+    pending.attemptId === route.attemptId &&
+    pending.key === route.eventKey &&
+    (pending.consumedThrough === 0 || pending.consumedThrough === state.nextSequence - 1)
+  );
+}
+
 export function validateNativeWatchNotification(value: NativeWatchNotification, state: NativeWatchState): void {
   const consumer = state.consumer;
   if (

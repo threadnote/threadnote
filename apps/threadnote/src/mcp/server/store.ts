@@ -1,3 +1,6 @@
+import {compiledHandoffSaveIdentity, eligibleOwnedHandoff} from '../../memory/handoff_save_contract.js';
+import {launchOwnedHandoffSave, inspectHandoffSaveOperation} from '../../memory/handoff_save_operation.js';
+import type {McpToolCallContext} from '../../effect/ai/mcp.js';
 import {Array as EffectArray} from 'effect';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Console, DateTime, Effect, Schema} from 'effect';
@@ -59,6 +62,19 @@ export function registerStoreTool(
   description: string,
   scopeSource?: MemoryScopeSource,
 ): void {
+  if (name === 'remember_context' && scopeSource === undefined)
+    server.registerTool(
+      'memory_write_status',
+      {
+        annotations: {readOnlyHint: false},
+        description: 'Inspect an owned handoff save. Pending is admission only; never resubmit an uncertain save.',
+        inputSchema: {
+          operationId: Schema.String,
+          cancel: McpInput.boolean('Request cancellation before canonical authorization'),
+        },
+      },
+      ({operationId, cancel}) => inspectHandoffSaveOperation(config, operationId, cancel),
+    );
   const profileLabel = scopeSource?.label ?? 'Personal Cursor Cloud';
   const handoffDescription =
     name === 'remember_context'
@@ -107,24 +123,52 @@ export function registerStoreTool(
         topic: McpInput.string(),
       },
     },
-    Effect.fn('mcp_server.store')(function* ({
-      callerCwd,
-      citationPolicy,
-      clearKeywords,
-      codeRefs,
-      keywords,
-      kind,
-      project,
-      references,
-      regenerateKeywords,
-      relations,
-      replaceUri,
-      sourceAgentClient,
-      status,
-      team,
-      text,
-      topic,
-    }) {
+    Effect.fn('mcp_server.store')(function* (
+      {
+        callerCwd,
+        citationPolicy,
+        clearKeywords,
+        codeRefs,
+        keywords,
+        kind,
+        project,
+        references,
+        regenerateKeywords,
+        relations,
+        replaceUri,
+        sourceAgentClient,
+        status,
+        team,
+        text,
+        topic,
+      },
+      context: McpToolCallContext,
+    ) {
+      const ownedArgs = {
+        callerCwd,
+        citationPolicy,
+        clearKeywords,
+        codeRefs,
+        keywords,
+        kind,
+        project,
+        references,
+        regenerateKeywords,
+        relations,
+        replaceUri,
+        sourceAgentClient,
+        status,
+        team,
+        text,
+        topic,
+      };
+      if (
+        scopeSource === undefined &&
+        context.requestContext.liveTransport &&
+        compiledHandoffSaveIdentity() &&
+        eligibleOwnedHandoff(ownedArgs, config.user)
+      )
+        return yield* launchOwnedHandoffSave(config, ownedArgs);
       const memoryScope = yield* resolveMemoryScope(scopeSource, kind === 'handoff');
       const checkedText = requiredText(text, name, 'text', {text: 'Durable engineering note...'});
       if (!checkedText.ok) {
