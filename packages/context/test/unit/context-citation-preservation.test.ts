@@ -28,9 +28,10 @@ import {
 } from '@threadnote/graph/local_provenance';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
+import type {CodeGraphStatusOptions} from '@threadnote/graph/query/contract';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {CodeGraphStatus, CodeGraphSymbol} from '@threadnote/graph/types';
+import type {CodeGraphStatus, CodeGraphSymbol, RepositoryIdentityExpectation} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -47,7 +48,7 @@ const platform = Layer.merge(
 );
 const source = 'export const supported = true;\n';
 const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
-const fixture = (dirty = false, capturedSource?: string) =>
+const fixture = (dirty = false, capturedSource?: string, legacyQuery = false) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -117,15 +118,31 @@ const fixture = (dirty = false, capturedSource?: string) =>
         return new Tracer.NativeSpan(options);
       },
     });
+    const statusObservations: {
+      method: 'discovery' | 'published';
+      home: string;
+      cwd: string;
+      expected?: RepositoryIdentityExpectation;
+      options?: CodeGraphStatusOptions;
+    }[] = [];
     const queryMock = Layer.mock(CodeGraphQueryService, {
-      status: readStatus,
-      statusForPublishedIdentity: readStatus,
+      status: (selectedHome, selectedCwd, options) =>
+        Effect.suspend(() => {
+          statusObservations.push({method: 'discovery', home: selectedHome, cwd: selectedCwd, options});
+          return readStatus();
+        }),
+      statusForPublishedIdentity: (selectedHome, selectedCwd, expected, options) =>
+        Effect.suspend(() => {
+          statusObservations.push({method: 'published', home: selectedHome, cwd: selectedCwd, expected, options});
+          return readStatus();
+        }),
     });
     const queryLayer = Layer.effect(
       CodeGraphQueryService,
       Effect.gen(function* () {
         const mockService = yield* CodeGraphQueryService;
         const {withStatusSession: _unusedSessionHook, ...fallbackService} = mockService;
+        if (legacyQuery) expect(Reflect.deleteProperty(fallbackService, 'statusForPublishedIdentity')).toBe(true);
         return fallbackService;
       }),
     ).pipe(Layer.provide(queryMock));
@@ -233,6 +250,7 @@ const fixture = (dirty = false, capturedSource?: string) =>
       },
       leaseCounts: () => ({leases, releases}),
       readCounts: () => ({...reads}),
+      statusObservations: () => [...statusObservations],
       resetReadCounts: () => {
         for (const key of EffectRecord.keys(reads)) reads[key] = 0;
       },
@@ -251,10 +269,11 @@ describe('citation proof before source retirement', () => {
         maximumLines: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3})),
         startLine: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 2})),
         dirty: Schema.Boolean,
+        legacyQuery: Schema.Boolean,
       },
-      ({dirty, ...options}) =>
+      ({dirty, legacyQuery, ...options}) =>
         Effect.gen(function* () {
-          const data = yield* fixture(dirty, source + '// supporting detail 🌱\n');
+          const data = yield* fixture(dirty, source + '// supporting detail 🌱\n', legacyQuery);
           yield* data.provide(captureMemoryCodeCitations(data.config, {callerCwd: data.cwd, refs: ['source.ts']}));
           const scope = {callerCwd: data.cwd, kind: 'repository' as const};
           const read = (purpose?: 'both' | 'historical' | 'current') =>
@@ -285,6 +304,60 @@ describe('citation proof before source retirement', () => {
         }).pipe(TestClock.withLive),
       {arbitrary: {runs: 8, seed: 756013}},
     );
+
+    for (const legacyQuery of [false, true]) {
+      for (const changed of [false, true]) {
+        it.effect(
+          `keeps both current-read fences through ${legacyQuery ? 'legacy discovery' : 'published identity'} with closing snapshot ${changed ? 'changed' : 'unchanged'}`,
+          () =>
+            Effect.gen(function* () {
+              const data = yield* fixture(false, undefined, legacyQuery);
+              if (changed) data.changeSnapshotOnRead(2);
+              const result = yield* data.provide(
+                readContextHealthCitationEvidence(
+                  data.config,
+                  {callerCwd: data.cwd, kind: 'repository', project: 'fixture'},
+                  data.citation,
+                  {purpose: 'current'},
+                ),
+              );
+              expect(result.excerpts).toHaveLength(changed ? 0 : 1);
+              if (!changed)
+                expect(result.excerpts[0]).toMatchObject({
+                  provenance: 'current-verified',
+                  content: source,
+                  supportsCitation: true,
+                });
+              const observations = data.statusObservations();
+              expect(observations).toHaveLength(2);
+              expect(EffectArray.map(observations, item => item.method)).toEqual(
+                legacyQuery ? ['discovery', 'discovery'] : ['published', 'published'],
+              );
+              for (const observation of observations) {
+                expect(observation).toMatchObject({
+                  home: data.home,
+                  cwd: data.cwd,
+                  options: {
+                    manifestPath: data.config.manifestPath,
+                    project: 'fixture',
+                    observeWorktree: true,
+                    observeSemantic: false,
+                    requestMaintenance: false,
+                  },
+                });
+                if (!legacyQuery)
+                  expect(observation.expected).toMatchObject({
+                    repositoryId: data.identity.repositoryId,
+                    checkoutId: data.identity.checkoutId,
+                    worktreeId: data.identity.worktreeId,
+                  });
+              }
+              expect(data.leaseCounts().leases).toBeGreaterThan(0);
+              expect(data.leaseCounts().leases).toBe(data.leaseCounts().releases);
+            }).pipe(TestClock.withLive),
+        );
+      }
+    }
 
     it.effect('keeps requested-provenance failures separate and closes the current snapshot fence', () =>
       Effect.gen(function* () {

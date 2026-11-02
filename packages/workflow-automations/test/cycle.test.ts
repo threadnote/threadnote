@@ -131,6 +131,94 @@ const prDelivery = (state: 'open' | 'merged' = 'open') => ({
 });
 
 describe('native cycle pure domain', () => {
+  it('requires consistent receipt-only base binding and keeps merged replay immutable', () => {
+    const plan = makePlan();
+    plan.phases[0].baseBranch = 'origin/main';
+    const state = validateNativeCyclePhase(
+      initializeNativeCycle(decodeNativeCyclePlan(plan)),
+      'one',
+      snapshot(),
+      validation,
+    );
+    const receipt = {
+      ...prDelivery('merged'),
+      pr: {
+        ...prDelivery('merged').pr,
+        url: 'https://github.com/example/repo/pull/1',
+        baseRefBinding: {
+          ref: 'refs/remotes/origin/main',
+          remote: 'origin',
+          repository: 'https://github.com/example/repo',
+        },
+      },
+    };
+    expect(() =>
+      recordNativeCycleDelivery(state, 'one', {...receipt, pr: {...receipt.pr, baseRefBinding: undefined}}),
+    ).toThrow();
+    const delivered = recordNativeCycleDelivery(state, 'one', receipt);
+    expect(delivered.plan).toEqual(state.plan);
+    expect(delivered.phases.one.phaseHash).toBe(state.phases.one.phaseHash);
+    expect(decodeNativeCycleState(JSON.parse(JSON.stringify(delivered)))).toEqual(delivered);
+    expect(recordNativeCycleDelivery(delivered, 'one', receipt)).toEqual(delivered);
+    expect(() => recordNativeCycleDelivery(delivered, 'one', {...receipt, commitEvidence: 'different'})).toThrow();
+    for (const proof of [
+      {...receipt.pr.baseRefBinding, remote: 'fork'},
+      {...receipt.pr.baseRefBinding, ref: 'refs/remotes/origin/other'},
+      {...receipt.pr.baseRefBinding, repository: 'https://github.com/other/repo'},
+      {...receipt.pr.baseRefBinding, ref: 'refs/remotes/origin/../main'},
+    ]) {
+      const bad = {...receipt, pr: {...receipt.pr, baseRefBinding: proof}};
+      expect(() => recordNativeCycleDelivery(state, 'one', bad)).toThrow();
+      expect(() =>
+        decodeNativeCycleState({
+          ...delivered,
+          phases: {...delivered.phases, one: {...delivered.phases.one, delivery: bad}},
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('preserves all non-delivery state through generated base mappings and serialization', () => {
+    const word = fc
+      .array(fc.constantFrom('a', 'b', 'c', 'x', '1'), {minLength: 1, maxLength: 10})
+      .map(x => EffectArray.join(x, ''));
+    fc.assert(
+      fc.property(word, word, fc.boolean(), (remote, branch, full) => {
+        const plan = makePlan();
+        const ref = `refs/remotes/${remote}/${branch}`;
+        plan.phases[0].baseBranch = full ? ref : `${remote}/${branch}`;
+        const state = validateNativeCyclePhase(
+          initializeNativeCycle(decodeNativeCyclePlan(plan)),
+          'one',
+          snapshot(),
+          validation,
+        );
+        const before = JSON.stringify(state);
+        const receipt = {
+          ...prDelivery('merged'),
+          pr: {
+            ...prDelivery('merged').pr,
+            url: 'https://github.com/example/repo/pull/1',
+            baseBranch: branch,
+            baseRefBinding: {ref, remote, repository: 'https://github.com/example/repo'},
+          },
+        };
+        const delivered = recordNativeCycleDelivery(state, 'one', receipt);
+        expect(delivered).toEqual({
+          ...state,
+          phases: {...state.phases, one: {...state.phases.one, status: 'merged', delivery: receipt}},
+        });
+        expect(decodeNativeCycleState(JSON.parse(JSON.stringify(delivered)))).toEqual(delivered);
+        expect(JSON.stringify(state)).toBe(before);
+        expect(() =>
+          recordNativeCycleDelivery(state, 'one', {...receipt, pr: {...receipt.pr, baseBranch: branch + 'different'}}),
+        ).toThrow();
+        expect(JSON.stringify(state)).toBe(before);
+      }),
+      {numRuns: 30},
+    );
+  });
+
   it('admits zero-write phases while retaining the path cardinality and text bounds', () => {
     const input = makePlan();
     const withPaths = (allowedPaths: string[]) => decodeNativeCyclePlan(makePlan([{...input.phases[0], allowedPaths}]));

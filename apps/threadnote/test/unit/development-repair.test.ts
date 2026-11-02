@@ -24,9 +24,16 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
   currentRecallCorpusGeneration,
   expireRecallIndexValidation,
+  loadRecallIndexData,
+  recallIndexStatus,
   type RecallIndexStatus,
 } from '@threadnote/recall/index';
-import {VectorCorpusGenerationChanged, vectorIndexMatchesGeneration} from '@threadnote/recall/vector-index';
+import {
+  rebuildVectorIndex,
+  VectorCorpusGenerationChanged,
+  vectorIndexMatchesGeneration,
+} from '@threadnote/recall/vector-index';
+import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -270,7 +277,7 @@ describe('development installer repair isolation', () => {
     {fastCheck: {numRuns: 100}},
   );
 
-  effectIt.effect('retries an exact-current recall repair when a concurrent canonical write changes the corpus', () =>
+  effectIt.effect('completes lexical repair and queues vectors without invoking inference side effects', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const f = yield* fixture;
@@ -295,17 +302,22 @@ describe('development installer repair isolation', () => {
         );
         const corpusGeneration = yield* currentRecallCorpusGeneration(f.config);
 
-        expect(result.output).toContain('Rebuilt recall indexes for 1 document(s)');
-        expect(embeddingAttempts).toBe(2);
+        expect(result.output).toContain(
+          'Rebuilt lexical recall for 1 document(s). Document embeddings queued for idle background work.',
+        );
+        expect(embeddingAttempts).toBe(0);
+        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeDefined();
+        expect(yield* recallIndexStatus(f.config)).toMatchObject({ready: true, documentCount: 1});
+        expect(yield* f.fs.readFileString(memoryPath)).toContain('Initial handoff body.');
         expect(corpusGeneration._tag).toBe('Some');
         if (corpusGeneration._tag === 'Some') {
-          expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, corpusGeneration.value)).toBe(true);
+          expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, corpusGeneration.value)).toBe(false);
         }
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('fails after a bounded number of recall repair attempts under persistent canonical writes', () =>
+  effectIt.effect('rejects an explicit vector rebuild superseded by a canonical write during inference', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const f = yield* fixture;
@@ -333,14 +345,20 @@ describe('development installer repair isolation', () => {
           }),
         );
 
+        const initial = yield* loadRecallIndexData(f.config, {includeInactive: false});
         const error = yield* f
-          .provideWithRuntime(runDevelopmentInstallRepair(f.config, version), runtime)
+          .provideWithRuntime(
+            rebuildVectorIndex(f.config, embeddingManifest, initial.candidates, {
+              corpusGeneration: initial.generation,
+              currentCorpusGeneration: () => currentRecallCorpusGeneration(f.config),
+            }),
+            runtime,
+          )
           .pipe(Effect.flip);
 
-        expect(error).toMatchObject({
-          message: expect.stringContaining('lexical recall corpus changed while vector work was in progress'),
-        });
-        expect(embeddingAttempts).toBe(3);
+        expect(error).toMatchObject({_tag: 'VectorCorpusGenerationChanged'});
+        expect(embeddingAttempts).toBe(1);
+        expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, initial.generation)).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -351,7 +369,7 @@ describe('development installer repair isolation', () => {
         const f = yield* fixture;
         const instruction = yield* f.fs.readFileString(f.instruction);
         const result = yield* f.provide(captureConsole(runDevelopmentInstallRepair(f.config, version)));
-        expect(result.output).toContain('Rebuilt recall indexes for 0 document(s)');
+        expect(result.output).toContain('Rebuilt lexical recall for 0 document(s).');
         expect(yield* f.fs.readFileString(f.instruction)).toBe(instruction);
         expect(yield* f.fs.readFileString(f.registry)).toBe(f.registryContent);
         expect(yield* f.fs.readFileString(f.path.join(f.installRoot, 'active-release.json'))).toBe(f.pointer);
@@ -365,7 +383,7 @@ describe('development installer repair isolation', () => {
             }),
           ),
         );
-        expect(coreRepair.output).toContain('Rebuilt recall indexes for 0 document(s)');
+        expect(coreRepair.output).toContain('Rebuilt lexical recall for 0 document(s).');
         expect(coreRepair.output).toContain('Skipping host instructions, hooks, and MCP client repair');
         expect(yield* f.fs.readFileString(f.instruction)).toBe(instruction);
         expect(yield* f.fs.readFileString(f.registry)).toBe(f.registryContent);

@@ -16,6 +16,8 @@ import {
 import type {InferenceInterrupted, ModelSessionError, NativeRuntimeError, RerankingFailed} from './errors.js';
 import type {SystemInfo} from '@threadnote/platform/system';
 
+import type {BackgroundInferenceDeferred} from '../background/admission.js';
+
 const EMBEDDING_BATCH_SIZE = 32;
 const GENERATION_CONTEXT_MINIMUM = 2_048;
 const GENERATION_CONTEXT_RESERVE = 512;
@@ -28,7 +30,7 @@ export interface LocalEmbeddingRequest {
   readonly modelPath: string;
 }
 
-export type LocalEmbeddingError = AiError.AiError | ModelSessionError;
+export type LocalEmbeddingError = AiError.AiError | ModelSessionError | BackgroundInferenceDeferred;
 
 export interface LocalRerankingRequest {
   readonly documents: readonly string[];

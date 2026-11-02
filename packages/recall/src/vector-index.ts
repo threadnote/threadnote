@@ -1585,7 +1585,7 @@ function embeddingRecipe(manifest: LocalModelManifest): string {
   );
 }
 
-function vectorKeyForChunk(recipe: string, chunk: RecallChunk): string {
+function vectorKeyForChunk(recipe: string, chunk: Pick<RecallChunk, 'fingerprint'>): string {
   return sha256HexSync(`${recipe}\0${chunk.fingerprint}`);
 }
 
@@ -1699,3 +1699,18 @@ function withVectorIndexLock<A, E, R>(
 export function chunksForRecallCandidates(candidates: readonly RecallCandidate[]): readonly RecallChunk[] {
   return EffectArray.flatMap(candidates, candidate => chunkRecallDocument(candidate.uri, candidate.text));
 }
+
+/** Private resumable-builder primitives. Automatic callers validate existing storage before additive writes. */
+export const recallVectorStorage = {
+  initialize: initializeVectorDatabase,
+  validate: validateVectorDatabase,
+  use: useVectorDatabase,
+  read: useVectorDatabaseReadOnly,
+  validateVector: validateEncodedVector,
+  databasePath: vectorDatabasePath,
+  recipe: embeddingRecipe,
+  chunkMappings: vectorChunkMappings,
+  aliasMappings: vectorAliasMappings,
+  key: vectorKeyForChunk,
+  encode: encodeVector,
+};
