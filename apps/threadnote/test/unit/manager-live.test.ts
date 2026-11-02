@@ -34,7 +34,12 @@ import {
 import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource/settled_revision';
 import {makeCanonicalRevisionObservation, makeManagerLiveSources} from '../../src/manager/live_sources.js';
 import {makeManagerHealthLiveRegistry} from '../../src/manager/live_health_sources.js';
-import {makeManagerLive, makeManagerLiveMailbox, type ManagerLiveOptions} from '../../src/manager/live.js';
+import {
+  makeManagerLive,
+  makeManagerLiveMailbox,
+  readManagerLiveProjects,
+  type ManagerLiveOptions,
+} from '../../src/manager/live.js';
 import {
   MANAGER_LIVE_LIMITS,
   ManagerLiveServerFrame,
@@ -636,7 +641,7 @@ describe('Manager health live registry', () => {
 });
 
 const serveLive = Effect.fn('test.managerLive.serve')(function* (
-  projects: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set(['one', 'two'])),
+  projects: Effect.Effect<ReadonlySet<string>, unknown> = Effect.succeed(new Set(['one', 'two'])),
   health?: ManagerLiveOptions['health'],
   observations?: ManagerLiveOptions['observations'],
   snapshots?: ManagerLiveOptions['snapshots'],
@@ -727,6 +732,37 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
 });
 
 describe('Manager live protocol', () => {
+  effectIt.effect('keeps account subscriptions live with an empty fresh-home manifest', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-live-empty-manifest-'});
+      const manifest = path.join(home, 'seed-manifest.yaml');
+      yield* fs.writeFileString(manifest, 'version: 1\nprojects: []\n');
+      const server = yield* serveLive(readManagerLiveProjects(fs, manifest), undefined, {
+        topics: ['home', 'share-conflicts'],
+        subscribe: () => Effect.succeed([]),
+        release: () => Effect.void,
+      });
+      const response = yield* server.ticketWithBody({topics: ['home', 'share-conflicts']});
+      const client = yield* server.connect(decodeTicketResponse(yield* response.json).ticket);
+      expect(yield* client.next).toMatchObject({type: 'welcome'});
+      const shares = {topic: 'share-conflicts', scope: 'account'} as const;
+      const accountHome = {topic: 'home', scope: 'account'} as const;
+      for (const [index, resources] of [[shares], [shares, accountHome], [shares]].entries()) {
+        yield* client.send({type: 'subscribe', version: 1, generation: index + 1, resources});
+        expect(yield* client.next).toMatchObject({type: 'subscribed', generation: index + 1});
+      }
+      yield* client.send({
+        type: 'subscribe',
+        version: 1,
+        generation: 4,
+        resources: [{topic: 'home', project: 'not-enrolled'}],
+      });
+      expect((yield* Effect.result(client.next))._tag).toBe('Failure');
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
   effectIt.effect('pushes negotiated snapshots after ACK and retains legacy invalidation delivery', () =>
     Effect.gen(function* () {
       let value = 1;

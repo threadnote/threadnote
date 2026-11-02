@@ -14,6 +14,15 @@ import {useManagerLiveConnection, useManagerLiveQuery} from '../live/provider.js
 import {GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS, api, errorMessage} from './support.js';
 import {Array as EffectArray} from 'effect';
 
+export function readManagerGraphCatalog(): Promise<GraphCatalog> {
+  return api<GraphCatalog>(
+    '/api/graphs',
+    undefined,
+    {timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS},
+    isGraphCatalog,
+  );
+}
+
 type Status = Pick<
   GraphCatalog,
   'automaticCompaction' | 'builds' | 'catalogRevision' | 'lifecyclePending' | 'maintenance' | 'waiterCount' | 'waiters'
