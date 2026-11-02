@@ -1,7 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import * as Array from 'effect/Array';
 import * as Clock from 'effect/Clock';
-import * as Crypto from 'effect/Crypto';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
 import * as FileSystem from 'effect/FileSystem';
@@ -347,7 +347,7 @@ effectIt.effect('refuses a skipped-probe binding that changed concurrently befor
   Effect.gen(function* () {
     const f = yield* fixture();
     const fs = yield* FileSystem.FileSystem;
-    const context = yield* Effect.context<Crypto.Crypto | Path.Path>();
+    const context = yield* Effect.context<SecureRandom.SecureRandom | Path.Path>();
     const stored = yield* f.read();
     const changed = {
       ...stored.envelope,

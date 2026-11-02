@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import type {CodeGraphVectorPolicy} from '../indexer/types.js';
 import {
   CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV,
@@ -7,7 +8,7 @@ import {
   CODE_GRAPH_EXPECTED_SCOPE_ID_ENV,
   CodeGraphScopeRoutingError,
 } from '../scope/routing.js';
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Ref, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path, Ref, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -367,7 +368,7 @@ export const runIsolatedCodeGraphIndex: (
 ) => Effect.Effect<
   CodeGraphIsolatedBuilderResult,
   unknown,
-  CommandExecutor | Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo
+  CommandExecutor | SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
 > = Effect.fn('codeGraph.isolatedBuilder.run')(function* (options: CodeGraphIsolatedBuilderOptions) {
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;

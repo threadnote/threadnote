@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
@@ -5,7 +6,7 @@ import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Cause, Console, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {Cause, Console, DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
 import {
   commandLauncherPath,
   installCommandShim,
@@ -500,12 +501,12 @@ const writeDevelopmentRuntimeOwner = Effect.fn('developmentInstall.writeRuntimeO
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const file = path.join(installRoot, DEVELOPMENT_RUNTIME_OWNER_FILE);
-  const temporary = path.join(installRoot, `.${DEVELOPMENT_RUNTIME_OWNER_FILE}.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(installRoot, `.${DEVELOPMENT_RUNTIME_OWNER_FILE}.${yield* crypto.uuidV4()}.tmp`);
   const nextOwner: DevelopmentRuntimeOwnerV2 = {
     ...owner,
-    ownershipRevision: yield* crypto.randomUUIDv4(),
+    ownershipRevision: yield* crypto.uuidV4(),
     schemaVersion: DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION,
   };
   yield* Effect.gen(function* () {
@@ -1023,11 +1024,8 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     input.releaseRoot,
     Option.none(),
   );
-  const crypto = yield* Crypto.Crypto;
-  const stagedRoot = path.join(
-    input.canonicalVersionsRoot,
-    `.${input.version}.${yield* crypto.randomUUIDv4()}.staging`,
-  );
+  const crypto = yield* SecureRandom.SecureRandom;
+  const stagedRoot = path.join(input.canonicalVersionsRoot, `.${input.version}.${yield* crypto.uuidV4()}.staging`);
   return yield* stageAndValidateDevelopmentRelease({
     distributionRoot,
     executableName: input.executableName,

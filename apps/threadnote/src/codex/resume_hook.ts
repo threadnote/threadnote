@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
+import {Clock, Console, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {compileContextBriefRuntimeProjection} from '../context_brief/index.js';
 import {CODEX_RESUME_ADDITIONAL_CONTEXT_LIMIT} from './hooks.js';
 import {THREADNOTE_CODEX_RESUME_PRELOAD_ENV} from '../constants.js';
@@ -617,9 +618,9 @@ function writeCodexResumeReceipt(
   receipt: CodexResumeReceiptV1,
 ) {
   return Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     yield* fs.makeDirectory(pathService.dirname(receiptPath), {recursive: true, mode: 0o700});
-    const temporary = `${receiptPath}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const temporary = `${receiptPath}.${yield* crypto.uuidV4()}.tmp`;
     yield* fs.writeFileString(temporary, `${JSON.stringify(receipt)}\n`, {flag: 'wx', mode: 0o600});
     yield* fs
       .rename(temporary, receiptPath)

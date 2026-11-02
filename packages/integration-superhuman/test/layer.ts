@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, Layer} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -12,7 +13,7 @@ const runtimeDependencies = Layer.mergeAll(
   }),
 );
 export const superhumanTestLayer = Layer.merge(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(Layer.provide(runtimeDependencies)),
 );
 

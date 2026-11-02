@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Schema} from 'effect';
@@ -14,6 +15,8 @@ import {
 } from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {Array as EffectArray} from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 function provideLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>) {
   return <A, E2, R2>(effect: Effect.Effect<A, E2, R2>) =>
@@ -116,7 +119,7 @@ const systemLayer = SystemInfo.layer.pipe(
     ),
   ),
 );
-const dependencies = Layer.mergeAll(BunServices.layer, systemLayer);
+const dependencies = Layer.mergeAll(platformServicesLayer, systemLayer);
 
 it.effect('a prebuilt real store observes request-local retries and exhausted failure in either scope', () =>
   Effect.gen(function* () {

@@ -1,17 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {
-  Context,
-  Crypto,
-  Effect,
-  FileSystem,
-  Layer,
-  Option,
-  Path,
-  PlatformError,
-  Result,
-  Schedule,
-  Schema,
-} from 'effect';
+import {Context, Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schedule, Schema} from 'effect';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -252,12 +241,12 @@ export class ResourceStore extends Context.Service<ResourceStore, ResourceStoreS
         const path = yield* Path.Path;
         const recallInvalidation = yield* ResourceRecallInvalidation;
         const externalPolicy = yield* Effect.serviceOption(ExternalSourcePolicy);
-        const lockServices = (yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>()).pipe(
-          Context.pick(Crypto.Crypto, Path.Path, SystemInfo),
+        const lockServices = (yield* Effect.context<SecureRandom.SecureRandom | Path.Path | SystemInfo>()).pipe(
+          Context.pick(SecureRandom.SecureRandom, Path.Path, SystemInfo),
         );
         const provideLockServices = <A, E, R>(
           effect: Effect.Effect<A, E, R>,
-        ): Effect.Effect<A, E, Exclude<R, Crypto.Crypto | Path.Path | SystemInfo>> =>
+        ): Effect.Effect<A, E, Exclude<R, SecureRandom.SecureRandom | Path.Path | SystemInfo>> =>
           effect.pipe(Effect.provide(lockServices));
         const operation = createResourceStoreOperations(
           fs,
@@ -280,7 +269,7 @@ function createResourceStoreOperations(
   path: Path.Path,
   provideLockServices: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, Exclude<R, Crypto.Crypto | Path.Path | SystemInfo>>,
+  ) => Effect.Effect<A, E, Exclude<R, SecureRandom.SecureRandom | Path.Path | SystemInfo>>,
   recallInvalidation: ResourceRecallInvalidationShape,
   layerOptions: ResourceStoreLayerOptions,
   externalPolicy: Option.Option<Context.Service.Shape<typeof ExternalSourcePolicy>>,
@@ -1069,9 +1058,9 @@ function writeAtomically(
   createOnly: boolean,
 ) {
   return Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const parent = path.dirname(resolved.path);
-    const temporary = path.join(parent, `.${path.basename(resolved.path)}.${yield* crypto.randomUUIDv4()}.tmp`);
+    const temporary = path.join(parent, `.${path.basename(resolved.path)}.${yield* crypto.uuidV4()}.tmp`);
     yield* Effect.scoped(
       Effect.gen(function* () {
         const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

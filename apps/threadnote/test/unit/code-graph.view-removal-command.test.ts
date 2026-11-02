@@ -1,3 +1,5 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -5,7 +7,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
+import {Clock, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphVectorWriteLockPath} from '@threadnote/graph/layout';
@@ -35,6 +37,8 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
 const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}-direct`;
@@ -42,7 +46,7 @@ const SCOPED_SNAPSHOT_ID = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-d
 const SCOPE_ID = `code-graph-scope:${Effect2.pipe('e', EffectString.repeat(64))}`;
 const ViewRemovalCommandTestLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 describe('code graph remove-view command core', () => {
@@ -131,7 +135,7 @@ describe('code graph remove-view command core', () => {
         Effect.scoped(
           Effect.gen(function* () {
             const fixture = yield* viewActionFixture;
-            const crypto = yield* Crypto.Crypto;
+            const crypto = yield* SecureRandom.SecureRandom;
             const fs = yield* FileSystem.FileSystem;
             const path = yield* Path.Path;
             const system = yield* SystemInfo;
@@ -161,7 +165,7 @@ describe('code graph remove-view command core', () => {
                   WORKTREE_ID,
                   Effect.sync(() => void (kickedAfterTargetUnlock = true)),
                 ).pipe(
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fs),
                   Effect.provideService(Path.Path, path),
                   Effect.provideService(SystemInfo, system),
@@ -197,7 +201,7 @@ describe('code graph remove-view command core', () => {
         Effect.gen(function* () {
           const fixture = yield* viewActionFixture;
           const provenance = yield* seedLocalProvenance(fixture.home, DateTime.formatIso(DateTime.makeUnsafe(0)));
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const path = yield* Path.Path;
           const system = yield* SystemInfo;
           const lockReacquired = yield* Deferred.make<void>();
@@ -214,7 +218,7 @@ describe('code graph remove-view command core', () => {
                 0,
                 Deferred.succeed(lockReacquired, undefined).pipe(Effect.asVoid),
               ).pipe(
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, provenance.fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, system),

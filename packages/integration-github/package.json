@@ -24,13 +24,13 @@
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.7",
+    "effect": "4.1.2",
     "lucide-react": "^1.63.0",
     "react": "^19.3.1"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.7",
-    "@effect/vitest": "4.0.7",
+    "@effect/platform-bun": "4.1.2",
+    "@effect/vitest": "4.1.2",
     "@threadnote/integration-runtime": "workspace:*",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",

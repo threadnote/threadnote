@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 interface DocumentCursor {
@@ -71,10 +72,10 @@ export const writeDocumentCursor = Effect.fn('superhuman.writeDocumentCursor')(f
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const path = yield* cursorPath(config, sourceId);
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporary = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporary = `${path}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporary, JSON.stringify({version: 1, fingerprint, requestId, offset}), {mode: 0o600});
   yield* fs.rename(temporary, path).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });

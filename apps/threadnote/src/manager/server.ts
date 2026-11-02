@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {shareSummaries} from './share_summaries.js';
 import {parseDoctorChecksFromOutput} from './doctor_output.js';
 export {parseDoctorChecksFromOutput} from './doctor_output.js';
@@ -8,7 +9,6 @@ import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
 import {
   Cause,
   Console,
-  Crypto,
   DateTime,
   Effect,
   Exit,
@@ -361,7 +361,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
           if (yield* codeGraphMaintenanceIntentActive(config.agentContextHome)) {
             return yield* ManagerOperationError.make({message: GRAPH_MAINTENANCE_BUSY_MESSAGE});
           }
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const lifecycleMaintenance = yield* CodeGraphMaintenanceCoordinator;
           const lifecycleTargets = yield* observeCodeGraphLifecycleOpportunityTargets(config.agentContextHome);
           yield* runCodeGraphLifecycleOpportunity({
@@ -1448,7 +1448,7 @@ const runBulk = Effect.fn('manager.runBulk')(function* (
 
 function createConsolidation(context: ApiContext, body: Record<string, unknown>) {
   return Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const input = yield* Effect.try({
       try: () => ({
         agent: consolidationAgent(requireString(body.agent, 'agent')),
@@ -1487,7 +1487,7 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       agent: input.agent,
       ...(selectedModel ? {model: selectedModel.id} : {}),
       createdAt: DateTime.formatIso(yield* DateTime.now),
-      id: yield* crypto.randomUUIDv4(),
+      id: yield* crypto.uuidV4(),
       sourceUris: input.sourceUris,
       status: 'running',
       target: input.target,

@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -16,8 +17,10 @@ import type {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 describe('code graph lifecycle opportunities', () => {
-  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(layerIt => {
+  effectIt.layer(Layer.merge(platformServicesLayer, TestSystemInfoLayer))(layerIt => {
     layerIt.effect('services a pending reconciliation directly on a cold one-shot opportunity', () =>
       Effect.scoped(
         Effect.gen(function* () {

@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {dlopen} from 'bun:ffi';
-import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {createRemoteAccessTokenVerifier, type AccessTokenClaims} from '@threadnote/protocol/access-token';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -196,8 +197,8 @@ export const configureRegistryAuth0User = Effect.fn('codeGraph.sharing.configure
   const destination = path.join(graphSharingLayout(path, config.agentContextHome).root, 'auth0-user-registry.json');
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option)))
     return yield* graphSharingFailure('Registry Auth0 binding must not be a symbolic link.');
-  const crypto = yield* Crypto.Crypto;
-  const staged = `${destination}.${yield* crypto.randomUUIDv4()}.pending`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const staged = `${destination}.${yield* crypto.uuidV4()}.pending`;
   yield* writePrivateJsonFile(staged, {bindings: [...next, validated], schemaVersion: 1});
   // Stage the binding first; Docker conflicts leave it unpublished, and a retry can reuse an installed helper.
   yield* Effect.gen(function* () {

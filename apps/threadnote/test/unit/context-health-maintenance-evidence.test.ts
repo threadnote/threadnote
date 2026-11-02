@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -51,6 +52,8 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const citationEnvironmentPolicy = Layer.mergeAll(
   Layer.succeed(ChildEnvironmentPolicy, {
     preserveIntendedChild: environment => environment,
@@ -62,7 +65,7 @@ const citationSystemLayer = SystemInfo.layer.pipe(Layer.provide(citationEnvironm
 const citationPlatformLayer = Layer.mergeAll(
   citationSystemLayer,
   CommandExecutor.layer.pipe(Layer.provideMerge(citationSystemLayer), Layer.provide(citationEnvironmentPolicy)),
-).pipe(Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(platformServicesLayer));
 
 const repository = '/synthetic/repository';
 const status: CodeGraphStatus = {
@@ -165,7 +168,7 @@ function receipt(now: string): ContextBriefCitationValidationReceiptV2 {
   };
 }
 const narrow = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   Layer.succeed(
     CommandExecutor,
     CommandExecutor.of({

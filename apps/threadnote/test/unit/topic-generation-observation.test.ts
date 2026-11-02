@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
@@ -26,6 +27,8 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const identity = {
   caseId: 'health-case-' + Effect2.pipe('a', EffectString.repeat(40)),
   reviewId: 'review-' + Effect2.pipe('b', EffectString.repeat(24)),
@@ -37,7 +40,7 @@ const identity = {
   promptVersion: 'v5',
 };
 const result = (text: string) => ({text, usage: {status: 'unavailable' as const}});
-const layer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
+const layer = Layer.merge(platformServicesLayer, TestSystemInfoLayer);
 
 describe('private topic generation lifecycle', () => {
   effectIt.layer(layer)(it => {

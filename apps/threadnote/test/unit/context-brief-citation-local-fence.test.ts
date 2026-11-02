@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import * as EffectStruct from 'effect/Struct';
 import * as EffectString from 'effect/String';
 import {
@@ -12,7 +13,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {symlinkSync} from 'node:fs';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Crypto, Deferred, Effect, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -72,7 +73,9 @@ const scenario = (
     const path = yield* Path.Path;
     const store = yield* CodeGraphStore;
     const packs = yield* CodeGraphLanguagePackRegistry;
-    const fixtureContext = yield* Effect.context<FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo>();
+    const fixtureContext = yield* Effect.context<
+      FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo
+    >();
     const command = yield* CommandExecutor;
     const admissionStarted = yield* Deferred.make<void>();
     const overlayStarted = yield* Deferred.make<void>();

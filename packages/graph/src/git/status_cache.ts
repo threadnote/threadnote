@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   runBinaryCommandEffect,
@@ -122,7 +123,7 @@ export const worktreeUntrackedStatusWithPrivateCache = Effect.fn('codeGraph.work
         });
     }
     if (!cacheExists) yield* ensurePrivateCacheDirectory(fs, path, privateHome, cacheRoot);
-    const crypto = yield* Effect.serviceOption(Crypto.Crypto);
+    const crypto = yield* Effect.serviceOption(SecureRandom.SecureRandom);
     if (Option.isNone(crypto))
       return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Private cache lock entropy is unavailable.'});
     return yield* withExclusiveFileLock(
@@ -186,7 +187,7 @@ export const worktreeUntrackedStatusWithPrivateCache = Effect.fn('codeGraph.work
           });
         return {tracked, untracked};
       }),
-    ).pipe(Effect.provideService(Crypto.Crypto, crypto.value));
+    ).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto.value));
   },
 );
 

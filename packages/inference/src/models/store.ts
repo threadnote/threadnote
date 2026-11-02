@@ -1,4 +1,5 @@
-import {Context, Crypto, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Context, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import {
   InsufficientDiskSpace,
   ModelChecksumMismatch,
@@ -94,11 +95,16 @@ export class LocalModelStore extends Context.Service<LocalModelStore, LocalModel
         const http = yield* HttpService;
         const path = yield* Path.Path;
         const system = yield* SystemInfo;
-        const platform = yield* Effect.context<Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo>();
+        const platform = yield* Effect.context<
+          SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
+        >();
         const providePlatform = <A, E, R>(
           effect: Effect.Effect<A, E, R>,
-        ): Effect.Effect<A, E, Exclude<R, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo>> =>
-          effect.pipe(Effect.provide(platform));
+        ): Effect.Effect<
+          A,
+          E,
+          Exclude<R, SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo>
+        > => effect.pipe(Effect.provide(platform));
         return LocalModelStore.of(makeLocalModelStore(fs, http, path, system, providePlatform, options));
       }),
     );
@@ -119,7 +125,7 @@ function makeLocalModelStore(
   system: SystemInfoShape,
   providePlatform: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, Exclude<R, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo>>,
+  ) => Effect.Effect<A, E, Exclude<R, SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo>>,
   layerOptions: LocalModelStoreLayerOptions,
 ): LocalModelStoreShape {
   const verifiedModels = new Map<string, LocalModelInstallation>();

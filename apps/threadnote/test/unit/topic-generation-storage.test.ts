@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Path} from 'effect';
@@ -13,6 +14,8 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {Array as EffectArray} from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const receipt = (ordinal: number): TopicGenerationReceiptV1 => ({
   version: 1,
@@ -34,7 +37,7 @@ const receipt = (ordinal: number): TopicGenerationReceiptV1 => ({
 });
 
 describe('private generation receipt storage', () => {
-  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+  effectIt.layer(Layer.merge(platformServicesLayer, TestSystemInfoLayer))(it => {
     it.effect('enforces capacity, expiry and orphan temporary cleanup without touching candidate reviews', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;

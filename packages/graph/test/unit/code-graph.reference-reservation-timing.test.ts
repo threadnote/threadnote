@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -13,13 +14,17 @@ import {withCodeGraphIndexTiming, type CodeGraphIndexTimingObserver} from '../..
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const stages = EffectArray.map(
   ['owner-identity', 'claim', 'use', 'release'],
   stage => `reference-reservation-${stage}`,
 );
 const completeEvents = ['owner', 'owner', 'claim', 'use', 'release', 'owner'];
 const provideFixtureLayer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.scoped(Layer.build(BunServices.layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
+  Effect.scoped(
+    Layer.build(platformServicesLayer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+  );
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;

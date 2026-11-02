@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Clock, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
@@ -41,7 +42,10 @@ const policy = Layer.mergeAll(
     sanitizeExternal: environment => environment,
   }),
 );
-const platform = Layer.mergeAll(BunServices.layer, SystemInfo.layer.pipe(Layer.provide(policy)));
+const platform = Layer.mergeAll(
+  Layer.merge(BunServices.layer, cryptoLayer),
+  SystemInfo.layer.pipe(Layer.provide(policy)),
+);
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -585,6 +589,7 @@ function spawnAdmission(options: {
       process.execPath,
       '--eval',
       `
+    import {cryptoLayer} from '@threadnote/platform/crypto';
     import * as BunServices from '@effect/platform-bun/BunServices';
     import * as BunRuntime from '@effect/platform-bun/BunRuntime';
     import {Clock, Effect, FileSystem, Layer} from 'effect';
@@ -597,7 +602,7 @@ function spawnAdmission(options: {
       Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: 'admission-fixture'}),
       Layer.succeed(ChildEnvironmentPolicy, {preserveIntendedChild: value => value, sanitizeExternal: value => value}),
     );
-    const platform = Layer.mergeAll(BunServices.layer, SystemInfo.layer.pipe(Layer.provide(policy)));
+    const platform = Layer.mergeAll(Layer.merge(BunServices.layer, cryptoLayer), SystemInfo.layer.pipe(Layer.provide(policy)));
     BunRuntime.runMain(Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const system = yield* SystemInfo;

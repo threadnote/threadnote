@@ -1,4 +1,4 @@
-import * as Crypto from 'effect/Crypto';
+import {SecureRandom} from 'effect/crypto';
 import * as Effect from 'effect/Effect';
 import * as FileSystem from 'effect/FileSystem';
 import * as Option from 'effect/Option';
@@ -101,7 +101,7 @@ export const claimNativeWatchHostSession = Effect.fn('nativeWatch.claimHostSessi
       const bytes = stableJson(claim) + '\n';
       if (new TextEncoder().encode(bytes).byteLength > 16_384)
         return yield* failure('invalid-host-session', 'Host session claim exceeds its byte bound.');
-      const temporary = file + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+      const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(temporary, bytes, {flag: 'wx', mode: 0o600});
         const prepared = yield* readClaim(temporary);

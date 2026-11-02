@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Result} from 'effect';
@@ -12,6 +13,8 @@ import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutati
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -24,7 +27,7 @@ const systemLayer = SystemInfo.layer.pipe(
   ),
 );
 const dependencies = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   systemLayer,
   Layer.succeed(ResourceRecallInvalidation, {expire: () => Effect.void}),
 );

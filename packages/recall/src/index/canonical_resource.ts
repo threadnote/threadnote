@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {expandPath} from '@threadnote/platform/paths';
@@ -22,7 +23,11 @@ interface SeedStateEntry {
 export function loadCanonicalResourcePolicy<E>(
   config: {readonly agentContextHome: string; readonly manifestPath?: string},
   makeError: (input: {readonly cause: unknown; readonly message: string}) => E,
-): Effect.Effect<CanonicalResourcePolicy, never, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
+): Effect.Effect<
+  CanonicalResourcePolicy,
+  never,
+  SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
+> {
   const manifestPath = config.manifestPath;
   if (!manifestPath) {
     return Effect.succeed({entryKeyByUri: new Map(), sourcePathByUri: new Map()});

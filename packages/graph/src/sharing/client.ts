@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {importCodeGraphCheckpointSnapshot} from '@threadnote/graph/checkpoint/operations';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
 import {encodeCodeGraphCheckpointPackV1} from '../checkpoint/pack.js';
@@ -716,7 +717,7 @@ const importVerifiedSharedCheckpoint = Effect.fn('codeGraph.sharing.importVerifi
     );
   }
   yield* sharingProgress(input.request.onProgress, 'applying-deltas');
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const checkpoint = decodeGraphShareCheckpointBytes(yield* fs.readFile(checkpointPath));
   const deltas = [];
   let previousLogical = checkpoint.header.logical.digest;
@@ -757,7 +758,7 @@ const importVerifiedSharedCheckpoint = Effect.fn('codeGraph.sharing.importVerifi
   }
   const composedPath = yield* writeTemporaryCheckpointPack(
     path.join(layout.root, 'downloads'),
-    `${yield* crypto.randomUUIDv4()}.cgcp`,
+    `${yield* crypto.uuidV4()}.cgcp`,
     composed,
   );
   const imported = yield* importCodeGraphCheckpointSnapshot(runtimeConfigForHome(input.request.threadnoteHome), {

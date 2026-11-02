@@ -1,9 +1,10 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Predicate} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
+import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -379,7 +380,7 @@ describe('bounded code graph maintenance', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-repair-database-appeared-'});
       const identity = legacyRepositoryIdentity(home, 'a');
@@ -428,7 +429,7 @@ describe('bounded code graph maintenance', () => {
                   yield* fs.writeFile(spoolPath, new Uint8Array([1]));
                 }),
               ).pipe(
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, system),
               );

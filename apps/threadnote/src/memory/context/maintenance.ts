@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   withMaintenanceControlPauseFence,
@@ -62,7 +63,7 @@ export {
   maintenanceAnchorChunksComplete,
   duplicateArchiveSafe,
 } from './maintenance_policy.js';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -1821,7 +1822,7 @@ export const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   if (encoded.length > MAX_STATE_BYTES) return yield* fail('Maintenance state exceeds its write boundary.');
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

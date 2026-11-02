@@ -1,7 +1,7 @@
+import {Digest} from 'effect/crypto';
 import {
   Array as EffectArray,
   Context,
-  Crypto,
   Effect,
   FileSystem,
   Option,
@@ -126,7 +126,7 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const canonicalPath = resourceAccountMutationGenerationPath(path, options.home, options.account);
   const canonical = yield* makeCanonicalRevisionObservation(
     readCanonicalMutationGeneration(fs, path, options.home, options.account),
@@ -170,7 +170,7 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
     );
     const identity = EffectArray.join(identities, '|');
     const revision = EffectArray.join(
-      Array.from(yield* crypto.digest('SHA-256', new TextEncoder().encode(identity)), byte =>
+      Array.from(yield* crypto.digest(Digest.sha256, new TextEncoder().encode(identity)), byte =>
         Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0')),
       ),
       '',

@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Path} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {runCodeGraphCheckpointExport} from '../checkpoint/commands.js';
 import type {CliOutput} from '../../effect/cli/output.js';
@@ -234,7 +235,7 @@ const bootstrapGraphPublisherCandidate = Effect.fn('codeGraph.sharing.bootstrapP
   config: RuntimeConfig,
   options: GraphPublisherBootstrapOptions,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const cwd = yield* commandCwd(options.cwd);
@@ -277,7 +278,7 @@ const bootstrapGraphPublisherCandidate = Effect.fn('codeGraph.sharing.bootstrapP
     };
   });
   if (yield* fs.exists(pointerPath)) return yield* existing;
-  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
+  const spool = path.join(casRoot, 'spool', `${yield* crypto.uuidV4()}.cgcp`);
   const exported = yield* runCodeGraphCheckpointExport(config, {cwd, output: spool, quiet: true});
   const checkpointDigest = yield* putCasFile(casRoot, spool);
   yield* fs.remove(spool, {force: true});

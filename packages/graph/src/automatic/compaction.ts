@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
 import {CommandExecutor, type CommandExecutionError} from '@threadnote/platform/command';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -540,7 +541,7 @@ export const runCodeGraphAutomaticCompactionScheduler = Effect.fn('codeGraph.aut
 function productionAutomaticCompactionDependencies(
   onCandidate?: (candidate: CodeGraphAutomaticCompactionCandidate) => Effect.Effect<void>,
 ): CodeGraphAutomaticCompactionDependencies<
-  CommandExecutor | Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo
+  CommandExecutor | SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
 > {
   return {
     candidateAllowed: codeGraphAutomaticCompactionCandidateAllowed,

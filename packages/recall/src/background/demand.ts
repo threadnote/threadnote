@@ -1,4 +1,5 @@
-import {Cause, Context, Crypto, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Cause, Context, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
 import {runtimeReadBoundedStableRegularFile, SystemInfo} from '@threadnote/platform/system';
 import {fromPromise} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -171,7 +172,7 @@ const updateDemand = <A>(
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     // A worker must not resurrect an uninstalled home. No recursive mkdir crosses this boundary.
     const home = yield* fs.stat(scope.agentContextHome);
     if (home.type !== 'Directory') return yield* unavailable();
@@ -208,7 +209,7 @@ const updateDemand = <A>(
               )
                 return yield* error;
               yield* fs.readFileString(location.state);
-              yield* fs.rename(location.state, location.state + '.invalid-' + (yield* crypto.randomUUIDv4()));
+              yield* fs.rename(location.state, location.state + '.invalid-' + (yield* crypto.uuidV4()));
               yield* syncDirectoryBestEffort(fs, location.directory);
               return undefined;
             });
@@ -219,7 +220,7 @@ const updateDemand = <A>(
         const encoded = JSON.stringify(result.state) + '\n';
         // Validate before any replacement, including caller supplied account/path sizes.
         yield* Schema.decodeEffect(Schema.fromJsonString(demandSchema))(encoded);
-        const temporary = path.join(location.directory, (yield* crypto.randomUUIDv4()) + '.tmp');
+        const temporary = path.join(location.directory, (yield* crypto.uuidV4()) + '.tmp');
         yield* Effect.acquireUseRelease(
           fs.writeFileString(temporary, encoded, {mode: 0o600, flag: 'wx'}).pipe(Effect.as(temporary)),
           temporary => syncWritableFile(fs, temporary).pipe(Effect.andThen(fs.rename(temporary, location.state))),
@@ -237,8 +238,8 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
   coalesce: boolean,
   resetInvalid: boolean,
 ) {
-  const crypto = yield* Crypto.Crypto;
-  const revision = yield* crypto.randomUUIDv4();
+  const crypto = yield* SecureRandom.SecureRandom;
+  const revision = yield* crypto.uuidV4();
   const selected = yield* updateDemand(
     scope,
     state => {

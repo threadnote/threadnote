@@ -2,7 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Console, Effect, Terminal} from 'effect';
+import {Console, Effect, Queue, Terminal} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {clipInteractiveProgressText, promptForSelection, startProgress} from '@threadnote/threadnote/cli_ui';
@@ -191,6 +191,7 @@ describe('CLI progress indicator', () => {
         stdoutIsTTY: true,
       });
       const terminal = Terminal.make({
+        size: Queue.make<Terminal.Size>().pipe(Effect.tap(queue => Queue.offer(queue, {columns: 120, rows: 40}))),
         columns: Effect.succeed(120),
         display: text =>
           Effect.sync(() => {
@@ -234,6 +235,7 @@ describe('CLI progress indicator', () => {
         stdoutIsTTY: true,
       });
       const terminal = Terminal.make({
+        size: Queue.make<Terminal.Size>().pipe(Effect.tap(queue => Queue.offer(queue, {columns: 24, rows: 40}))),
         columns: Effect.succeed(24),
         display: text =>
           Effect.sync(() => {
@@ -300,6 +302,7 @@ describe('CLI progress indicator', () => {
       const interactiveSystem = SystemInfo.of({...system, environment: () => ({}), stdoutIsTTY: true});
       const output = orderedCliOutput(events);
       const terminal = Terminal.make({
+        size: Queue.make<Terminal.Size>().pipe(Effect.tap(queue => Queue.offer(queue, {columns: 120, rows: 40}))),
         columns: Effect.succeed(120),
         display: text =>
           Effect.sync(() => {

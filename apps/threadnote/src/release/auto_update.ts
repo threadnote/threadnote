@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Console, Crypto, DateTime, Effect, Exit, FileSystem, Path, Result, Schema} from 'effect';
+import {Cause, Clock, Console, DateTime, Effect, Exit, FileSystem, Path, Result, Schema} from 'effect';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {applicationError, fromPromise} from '@threadnote/platform/errors';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
@@ -556,10 +557,10 @@ const readAutoUpdateState = Effect.fn('autoUpdate.readState')(function* () {
 const writeAutoUpdateState = Effect.fn('autoUpdate.writeState')(function* (state: AutoUpdateState) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const target = yield* autoUpdateStatePath();
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.uuidV4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(state, null, 2)}\n`, {flag: 'wx', mode: 0o600});

@@ -1,4 +1,5 @@
 import {compiledHandoffSaveIdentity, HANDOFF_SAVE_WORKER_ARGUMENT} from './memory/handoff_save_contract.js';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import type {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
@@ -279,7 +280,7 @@ async function graphOAuthHelperProgram(arguments_: readonly string[]) {
       Layer.merge(
         system.SystemInfo.layer,
         command.CommandExecutor.layer.pipe(Layer.provide(system.SystemInfo.layer)),
-      ).pipe(Layer.provideMerge(BunServices.layer)),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer))),
     ),
   );
 }
@@ -300,7 +301,7 @@ async function oauthUserRegistryCredentialHelperProgram(arguments_: readonly str
       Layer.merge(
         system.SystemInfo.layer,
         command.CommandExecutor.layer.pipe(Layer.provide(system.SystemInfo.layer)),
-      ).pipe(Layer.provideMerge(BunServices.layer)),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer))),
     ),
   );
 }
@@ -335,7 +336,7 @@ async function remoteMemoryOperatorProgram(arguments_: readonly string[]) {
           process.exitCode = code;
         }),
       ),
-      Effect.provide(BunServices.layer),
+      Effect.provide(Layer.merge(BunServices.layer, cryptoLayer)),
     );
 }
 
@@ -373,7 +374,7 @@ async function remoteMemoryServiceProgram() {
         ),
       );
     }),
-  ).pipe(Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)));
+  ).pipe(Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))));
 }
 
 function remoteMemoryServiceHelpProgram(): Effect.Effect<void, never, never> {
@@ -434,7 +435,7 @@ async function codeGraphDeepDiagnosticsWorkerProgram() {
         ),
       ),
     ),
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -457,7 +458,7 @@ async function codeGraphAutomaticCompactionWorkerProgram() {
         ),
       ),
     ),
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -513,7 +514,7 @@ async function gitWorktreeRegistrationWorkerProgram() {
     import('@threadnote/platform/system'),
   ]);
   return worker.gitWorktreeRegistrationWorkerProgram.pipe(
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -542,7 +543,7 @@ async function localModelWorkerProgram(arguments_: readonly string[]) {
         ),
       ),
     ),
-    Effect.provide(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(systemModule.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -568,7 +569,7 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
     ),
     Effect.provide(
       treeSitter.TreeSitterRuntime.layer.pipe(
-        Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
+        Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
       ),
     ),
   );

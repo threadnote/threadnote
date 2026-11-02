@@ -1,5 +1,6 @@
 import * as ExternalResources from '@threadnote/store/external-resource';
 import {loadRecallVectorAuthorizationKey} from '../src/vector/preparation-identity.js';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {
@@ -43,7 +44,7 @@ const manifest = {
   promptPrefixes: {document: 'document: ', query: 'query: '},
 };
 const platform = Layer.mergeAll(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

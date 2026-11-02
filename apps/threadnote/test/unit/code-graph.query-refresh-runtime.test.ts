@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -31,7 +32,9 @@ import {TestError} from '@threadnote/testing/test-error';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const platform = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, CodeGraphLanguagePackRegistry.layer);
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
+const platform = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer, CodeGraphLanguagePackRegistry.layer);
 const dependencies = Layer.merge(platform, TestCommandExecutorLayer.pipe(Layer.provide(platform)));
 const node: CodeGraphQueryNode = {
   contentHash: 'fixture',

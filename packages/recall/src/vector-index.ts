@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -354,7 +355,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   const dimensions = manifest.dimensions;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const runtime = yield* LocalModelRuntime;
   const store = yield* LocalModelStore;
   const installed = yield* store.verify(config.agentContextHome, manifest);
@@ -395,7 +396,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         building = undefined;
       }
       if (!building) {
-        const generation = `${yield* Clock.currentTimeMillis}-${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.slice(0, 8))}`;
+        const generation = `${yield* Clock.currentTimeMillis}-${Effect2.pipe(yield* crypto.uuidV4(), EffectString.slice(0, 8))}`;
         yield* sql`
           INSERT INTO vector_generations (
             generation,
