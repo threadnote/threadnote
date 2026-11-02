@@ -983,46 +983,56 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
           });
         const finalDocuments = new Map(EffectArray.map(journal.documents, document => [document.key, document]));
         const seen = new Set<string>();
-        for (const document of journal.documents) {
-          const boundary = yield* CurrentNativeJobBoundary;
-          if (boundary) yield* boundary;
-          if (!seen.has(document.key)) {
-            const final = finalDocuments.get(document.key);
-            if (final && final !== document) {
-              const operationId =
-                'closeout-' +
-                Effect2.pipe(journal.transactionId, EffectString.slice(0, 24)) +
-                '-' +
-                document.key +
-                '-final';
-              const knownOperations = (yield* readNativeWorkflowState(config, request.runId))?.state.operations ?? [];
-              const existing = EffectOption.getOrUndefined(
-                EffectArray.findFirst(knownOperations, item => item.intent.operationId === operationId),
-              );
-              if (existing) {
-                if (
-                  existing.intent.body !== final.body ||
-                  existing.intent.uri !== final.uri ||
-                  existing.intent.bindingId !== journal.bindingId ||
-                  existing.intent.role !== 'closeout-' + document.key ||
-                  stableJson(existing.intent.relations ?? []) !== stableJson(final.relations)
-                )
-                  return yield* fail('closeout-intent-conflict', 'The final output differs from admitted knowledge.');
-                // The final native write may have committed before its parent receipt.
-                // Recover that original operation below instead of requiring the superseded revision.
-                seen.add(document.key);
-                continue;
+        // Read back each canonical output now; refresh lexical state once before retirement.
+        yield* withWorkflowRecallRefreshBatch(
+          config,
+          Effect.gen(function* () {
+            for (const document of journal.documents) {
+              const boundary = yield* CurrentNativeJobBoundary;
+              if (boundary) yield* boundary;
+              if (!seen.has(document.key)) {
+                const final = finalDocuments.get(document.key);
+                if (final && final !== document) {
+                  const operationId =
+                    'closeout-' +
+                    Effect2.pipe(journal.transactionId, EffectString.slice(0, 24)) +
+                    '-' +
+                    document.key +
+                    '-final';
+                  const knownOperations =
+                    (yield* readNativeWorkflowState(config, request.runId))?.state.operations ?? [];
+                  const existing = EffectOption.getOrUndefined(
+                    EffectArray.findFirst(knownOperations, item => item.intent.operationId === operationId),
+                  );
+                  if (existing) {
+                    if (
+                      existing.intent.body !== final.body ||
+                      existing.intent.uri !== final.uri ||
+                      existing.intent.bindingId !== journal.bindingId ||
+                      existing.intent.role !== 'closeout-' + document.key ||
+                      stableJson(existing.intent.relations ?? []) !== stableJson(final.relations)
+                    )
+                      return yield* fail(
+                        'closeout-intent-conflict',
+                        'The final output differs from admitted knowledge.',
+                      );
+                    // The final native write may have committed before its parent receipt.
+                    // Recover that original operation below instead of requiring the superseded revision.
+                    seen.add(document.key);
+                    continue;
+                  }
+                }
               }
+              const observed = yield* write(document.key, document.body, document.relations, seen.has(document.key));
+              if (observed.uri !== document.uri)
+                return yield* fail(
+                  'closeout-destination-drift',
+                  'A knowledge destination changed after final-size admission; keep remaining drafts.',
+                );
+              seen.add(document.key);
             }
-          }
-          const observed = yield* write(document.key, document.body, document.relations, seen.has(document.key));
-          if (observed.uri !== document.uri)
-            return yield* fail(
-              'closeout-destination-drift',
-              'A knowledge destination changed after final-size admission; keep remaining drafts.',
-            );
-          seen.add(document.key);
-        }
+          }),
+        );
         // Recover an archive whose response or parent receipt was lost, using its original native intent.
         for (const item of journal.owned) {
           const boundary = yield* CurrentNativeJobBoundary;

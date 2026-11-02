@@ -19,6 +19,8 @@ import {
   PREDECESSOR_EXECUTABLE_SHA256,
   PREDECESSOR_VERSION,
   recordUpgradeAttempt,
+  recordUpgradeCleanupFailure,
+  withUpgradeCleanupObservation,
   requiredUpgradeEnvironment,
   serveUpgradeCandidate,
   UPGRADE_ACKNOWLEDGEMENT,
@@ -319,6 +321,32 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         });
         const closed = new Promise(resolve => manager.once('close', resolve));
         let evidence: Record<string, unknown> = {};
+        let bodyFailure: unknown;
+        let bodyFailed = false;
+        let cleanupStage: 'model-setup-off' | 'manager-close' | 'release-leases-empty' = 'model-setup-off';
+        const closeManager = async () => {
+          manager.kill('SIGTERM');
+          await vi.waitFor(() => expect(manager.exitCode !== null || manager.signalCode !== null).toBe(true), {
+            timeout: 10_000,
+            interval: 50,
+          });
+          await closed;
+        };
+        const cleanup = async () => {
+          try {
+            await sandbox(candidate, ['models', 'setup', '--home', home, '--auto', 'off']);
+          } finally {
+            await closeManager().catch(cause => {
+              cleanupStage = 'manager-close';
+              throw cause;
+            });
+          }
+          cleanupStage = 'release-leases-empty';
+          await vi.waitFor(async () => expect(await readdir(join(installation, 'leases', version))).toEqual([]), {
+            timeout: 10_000,
+            interval: 50,
+          });
+        };
         try {
           await vi.waitFor(
             async () => {
@@ -396,21 +424,28 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
             physicalMemoryBytes: totalmem(),
             nativeGenerationInvokedByTest: false,
           };
+        } catch (cause) {
+          bodyFailed = true;
+          bodyFailure = cause;
+          throw cause;
         } finally {
-          try {
-            await sandbox(candidate, ['models', 'setup', '--home', home, '--auto', 'off']);
-          } finally {
-            manager.kill('SIGTERM');
-            await vi.waitFor(() => expect(manager.exitCode !== null || manager.signalCode !== null).toBe(true), {
-              timeout: 10_000,
-              interval: 50,
-            });
-            await closed;
-          }
-          await vi.waitFor(async () => expect(await readdir(join(installation, 'leases', version))).toEqual([]), {
-            timeout: 10_000,
-            interval: 50,
-          });
+          await withUpgradeCleanupObservation(cleanup, cleanupFailure =>
+            recordUpgradeCleanupFailure({
+              file: join(receipts, `${skip ? 'both-skip' : 'legacy-children'}-cleanup-observation.json`),
+              scenario: 'hosted-predecessor',
+              installation,
+              home,
+              version,
+              sourceCommit,
+              sourceTree,
+              candidateSha256,
+              manager: {pid: manager.pid, exitCode: manager.exitCode, signalCode: manager.signalCode},
+              stage: cleanupStage,
+              bodyFailure,
+              bodyFailed,
+              cleanupFailure,
+            }),
+          );
         }
         expect(await upgradeHomeSnapshot(defaultHome)).toEqual(defaultAfterUpdate);
         return evidence;
