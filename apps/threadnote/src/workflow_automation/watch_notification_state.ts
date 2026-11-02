@@ -191,5 +191,5 @@ export function nativeWatchNotice(
   const locator = JSON.stringify({...route, eventKey: value.key, attemptId: value.attemptId});
   if (new TextEncoder().encode(locator).byteLength > 6144)
     throw new Error('Host notification route exceeds its byte budget.');
-  return `Threadnote watch event. Route=${locator}. Relay this home/watch with consumerId, wakeupId, eventKey and attemptId to claim arrival. Inspect durable delivery/work; preserve disposition and ACK semantics. Scope this home to this watch; preserve caller workspace and default home.`;
+  return `Threadnote watch event. Route=${locator}. Inspect first. If terminal/stopped, pending=0, deliveryId=null, work.open=work.blocked=0: no renewal, relay or ACK. Queued/consumedThrough=0 can survive ACK; interrupted monitoring alone is not failure. Otherwise relay exact route to claim arrival; persist disposition before ACK; retain unresolved work. Use routed home only here; keep caller cwd/default home.`;
 }

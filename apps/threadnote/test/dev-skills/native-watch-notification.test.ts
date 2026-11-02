@@ -419,6 +419,16 @@ describe('native watch notification transport', () => {
         pending,
       ).length,
     ).toBeLessThan(512);
+    const notice = nativeWatchNotice(
+      {home: '/private/home', watchId: 'watch-1', consumerId: 'consumer', wakeupId: 'wakeup'},
+      pending,
+    );
+    expect(notice).toContain('Inspect first.');
+    expect(notice).toContain(
+      'If terminal/stopped, pending=0, deliveryId=null, work.open=work.blocked=0: no renewal, relay or ACK.',
+    );
+    expect(notice).toContain('Queued/consumedThrough=0 can survive ACK; interrupted monitoring alone is not failure.');
+    expect(notice).toContain('persist disposition before ACK; retain unresolved work.');
   });
   it('stages each durable range deterministically without mutating state', () => {
     fc.assert(
@@ -845,6 +855,86 @@ effectIt.effect.prop(
       }
     }).pipe(provide),
   {arbitrary: {runs: 20}},
+);
+
+effectIt.effect('late arrival after ordinary terminal ACK and stop refuses expired ownership without mutation', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    const system = yield* SystemInfo;
+    yield* Effect.gen(function* () {
+      let queueCalls = 0;
+      yield* f.dispatch().pipe(
+        commandLayer((executable, args) => {
+          expect(executable).toBe(target.executable);
+          expect(args.slice(0, 4)).toEqual(['queue', '--thread', target.threadId, '--message']);
+          queueCalls++;
+          return Effect.succeed(success);
+        }),
+      );
+      const queued = yield* f.read();
+      const head = EffectString.repeat(40)('a');
+      const state = reconcileNativeWatch(queued.envelope.state, {
+        head,
+        startedHead: head,
+        state: 'merged',
+        at: 0,
+        sources: [],
+        ci: {head, complete: false, count: 0, pending: 0, failed: 0, version: EffectString.repeat(64)('a')},
+      });
+      yield* writeNativeWatch(
+        f.config,
+        {...queued.envelope, state, collector: {...queued.envelope.collector!, status: 'terminal', reason: 'merged'}},
+        queued.revision,
+      );
+      const control = (command: string, fields: Record<string, unknown> = {}) =>
+        runNativeWatch(f.config, {
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'watch',
+          command,
+          watchId: 'watch-1',
+          consumerId: 'consumer',
+          wakeupId: 'wakeup',
+          ...fields,
+        });
+      // Ordinary work delivery deliberately omits the queued notice's key and attempt.
+      yield* control('relay');
+      const delivered = (yield* f.read()).envelope.state;
+      const deliveryId = delivered.delivery!.id;
+      yield* control('disposition', {
+        deliveryId,
+        dispositions: Array.map(delivered.events, event => ({
+          eventId: event.id,
+          status: 'resolved',
+          reason: 'terminal work verified',
+          evidence: 'private mocked fixture',
+        })),
+      });
+      expect(Array.every((yield* f.read()).envelope.state.work, item => item.status === 'resolved')).toBe(true);
+      yield* control('ack', {deliveryId});
+      yield* control('stop');
+      yield* TestClock.adjust(state.consumer!.leaseUntil + 1);
+      expect(yield* control('inspect')).toMatchObject({
+        prState: 'merged',
+        stopRequested: true,
+        consumer: {live: false},
+        collector: {alive: false, status: 'terminal'},
+        monitoring: 'interrupted',
+        pending: 0,
+        deliveryId: null,
+        work: {open: 0, blocked: 0, terminal: delivered.events.length},
+        notification: {status: 'queued', receipt, consumedThrough: 0},
+      });
+      const before = yield* f.read();
+      const fs = yield* FileSystem.FileSystem;
+      const statePath = f.config.agentContextHome + '/workflow-automations/native-watch-v1/watch-1.json';
+      const bytes = yield* fs.readFileString(statePath);
+      expect(yield* arrive(f).pipe(Effect.result)).toMatchObject({failure: {code: 'invalid-watch'}});
+      expect(yield* f.read()).toEqual(before);
+      expect(yield* fs.readFileString(statePath)).toBe(bytes);
+      expect(queueCalls).toBe(1);
+    }).pipe(Effect.provideService(SystemInfo, {...system, homeDirectory: f.userHome, isProcessRunning: () => false}));
+  }).pipe(provide),
 );
 
 effectIt.effect('terminal notice survives lease expiry and explicit same-owner renewal before arrival', () =>
