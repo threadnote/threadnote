@@ -168,7 +168,7 @@ describe('MCP toolsets', () => {
         Effect.provideService(SystemInfo, testSystem),
       );
       expect(preview.output).toContain('codex mcp remove team-memory\n');
-      expect(preview.output).toContain("'/opt/threadnote'\"'\"'s bin/threadnote-mcp-server'");
+      expect(preview.output).toContain(`'${join("/opt/threadnote'\"'\"'s bin", 'threadnote-mcp-server')}'`);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
