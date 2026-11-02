@@ -349,6 +349,87 @@ describe('owned handoff parent protocol', () => {
       }),
     {fastCheck: {numRuns: 20}},
   );
+  fcEffectProp(
+    effectIt,
+    'generated protocol histories preserve authorization and exact child-exit ownership',
+    {
+      history: fc.array(
+        fc.constantFrom(
+          'old-source',
+          'pid-reuse',
+          'duplicate',
+          'early-result',
+          'cancel-before',
+          'cancel-after',
+          'crash',
+          'uncertain-go',
+          'complete',
+        ),
+        {minLength: 1, maxLength: 3},
+      ),
+      lateFrames: fc.integer({min: 0, max: 3}),
+    },
+    ({history, lateFrames}) =>
+      withSource(
+        Effect.gen(function* () {
+          for (const event of history) {
+            const f = yield* fixture;
+            const barrier = Promise.withResolvers<void>();
+            // Independent model: only a valid ready grants a single mutation attempt.
+            const authorized = ['cancel-after', 'crash', 'uncertain-go', 'complete'].includes(event);
+            const interrupted = event === 'cancel-before' || event === 'cancel-after';
+            f.onRequest(() => {
+              if (event === 'cancel-before') barrier.resolve();
+              else if (event === 'old-source')
+                f.emit({
+                  type: 'ready',
+                  processId: process.pid,
+                  processStartIdentity: 'fixture-start',
+                  source: {...source, commit: 'old'},
+                });
+              else if (event === 'pid-reuse')
+                f.emit({type: 'ready', processId: process.pid, processStartIdentity: 'another-instance'});
+              else if (event === 'early-result') f.emit({type: 'result', receipt: f.receipt()});
+              else {
+                f.ready();
+                if (event === 'duplicate') f.ready();
+              }
+            });
+            f.onGo(() => {
+              if (event === 'cancel-after') barrier.resolve();
+              else if (event === 'uncertain-go') throw new Error('Observed go write became uncertain.');
+              else {
+                if (event === 'complete') f.emit({type: 'result', receipt: f.receipt()});
+                f.close();
+              }
+            });
+            if (interrupted) {
+              const parent = yield* f.launch.pipe(Effect.forkChild);
+              yield* Effect.promise(() => barrier.promise);
+              yield* Fiber.interrupt(parent);
+            } else {
+              const result = yield* f.launch;
+              expect(result.structuredContent).toMatchObject({
+                state: event === 'complete' ? 'complete' : authorized ? 'pending' : 'not-started',
+              });
+              if (event !== 'complete') expect(JSON.stringify(result.content)).not.toContain('Stored memory:');
+            }
+            expect(f.go()).toBe(authorized ? 1 : 0);
+            expect(f.kills()).toBe(authorized ? 0 : 1);
+            // Terminal/refused parent state cannot be revived by duplicate or late frames.
+            for (let index = 0; index < lateFrames; index++) {
+              f.ready();
+              f.emit({type: 'result', receipt: f.receipt()});
+            }
+            f.close();
+            yield* Effect.yieldNow;
+            expect(f.go()).toBe(authorized ? 1 : 0);
+            expect(f.kills()).toBe(authorized ? 0 : 1);
+          }
+        }),
+      ),
+    {fastCheck: {numRuns: 16}},
+  );
 });
 
 // These examples exercise the actual isolated child and original MCP save handler.
@@ -889,6 +970,202 @@ for (const beforeGo of [true, false])
                 }
               }),
           );
+        }),
+      ),
+  );
+
+const actualHandoff = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const system = yield* SystemInfo;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'handoff-protocol-history-'});
+  const config = {
+    agentContextHome: home,
+    account: 'local',
+    user: 'tester',
+    agentId: 'test',
+    manifestPath: home + '/manifest.json',
+  };
+  yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+  const children: Bun.Subprocess<'pipe', 'pipe', 'ignore'>[] = [];
+  yield* Effect.addFinalizer(() =>
+    Effect.promise(async () => {
+      for (const child of children) {
+        if (child.exitCode === null) child.kill('SIGKILL');
+        await child.exited;
+      }
+    }),
+  );
+  const start = (environment: NodeJS.ProcessEnv = {}) =>
+    launchOwnedHandoffSave(config, {
+      kind: 'handoff',
+      project: 'threadnote',
+      topic: 'protocol-history',
+      text: 'Exact protocol-history canonical body.',
+    }).pipe(
+      Effect.provideService(CurrentHandoffSaveSpawn, options => {
+        const child = Bun.spawn({
+          cmd: [
+            system.executablePath,
+            Bun.fileURLToPath(new URL('../fixtures/handoff-save-worker.ts', import.meta.url)),
+          ],
+          env: {...options.environment, ...environment},
+          stdin: 'pipe',
+          stdout: 'pipe',
+          stderr: 'ignore',
+        });
+        children.push(child);
+        return child;
+      }),
+    );
+  return {fs, system, home, config, children, start};
+});
+
+for (const stage of ['prepared', 'canonical-observed'] as const)
+  effectIt.effect(`real child crash at ${stage} retains truthful outcome without replay`, () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const result = yield* f.start({THREADNOTE_TEST_HANDOFF_CRASH_STAGE: stage});
+        const {operationId} = yield* Schema.decodeUnknownEffect(Schema.Struct({operationId: Schema.String}))(
+          result.structuredContent,
+        );
+        expect(yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'))).toBe(77);
+        const directory = receiptDirectory(f.config);
+        const before = yield* f.fs.readFileString(directory + '/' + operationId + '.json');
+        const applied = stage === 'canonical-observed';
+        for (let repeat = 0; repeat < 3; repeat++) {
+          expect((yield* inspectHandoffSaveOperation(f.config, operationId)).structuredContent).toMatchObject({
+            state: 'unknown',
+            authorized: applied,
+            possiblyApplied: applied,
+            canonicalObserved: false,
+            alive: false,
+          });
+          expect(yield* f.fs.readFileString(directory + '/' + operationId + '.json')).toBe(before);
+        }
+        const canonical = f.home + '/data/local/user/tester/memories/handoffs/active/threadnote/protocol-history.md';
+        expect(yield* f.fs.exists(canonical)).toBe(applied);
+        if (applied) expect(yield* f.fs.readFileString(canonical)).toContain('Exact protocol-history canonical body.');
+        expect(f.children).toHaveLength(1);
+      }),
+    ),
+  );
+
+effectIt.effect('simultaneous separate homes progress independently and cannot inspect each other operations', () =>
+  withSource(
+    Effect.gen(function* () {
+      const first = yield* actualHandoff,
+        second = yield* actualHandoff;
+      const results = yield* Effect.all(
+        [
+          first.start({THREADNOTE_TEST_HANDOFF_HOLD_STAGE: 'uri-lock'}),
+          second.start({THREADNOTE_TEST_HANDOFF_HOLD_STAGE: 'uri-lock'}),
+        ],
+        {concurrency: 2},
+      );
+      const ids = yield* Effect.forEach(results, result =>
+        Schema.decodeUnknownEffect(
+          Schema.Struct({
+            state: Schema.Literal('pending'),
+            authorized: Schema.Literal(true),
+            operationId: Schema.String,
+          }),
+        )(result.structuredContent),
+      );
+      expect(ids[0].operationId).not.toBe(ids[1].operationId);
+      for (const [home, index] of [
+        [first, 0],
+        [second, 1],
+      ] as const) {
+        expect(home.children[0].exitCode).toBeNull();
+        expect(
+          (yield* inspectHandoffSaveOperation(home.config, ids[index].operationId)).structuredContent,
+        ).toMatchObject({state: 'pending', authorized: true, alive: true});
+        expect(
+          (yield* inspectHandoffSaveOperation(home.config, ids[1 - index].operationId)).structuredContent,
+        ).toMatchObject({state: 'unknown'});
+      }
+    }),
+  ),
+);
+
+for (const observation of ['different-instance', 'unknown'] as const)
+  effectIt.effect(`pre-go status cancellation never signals a ${observation} process`, () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* actualHandoff;
+        const parent = yield* f.start({THREADNOTE_TEST_HANDOFF_HOLD_STAGE: 'metadata'}).pipe(Effect.forkChild);
+        for (let turn = 0; turn < 200 && !(yield* f.fs.exists(f.home + '/fixture-held-stage')); turn++)
+          yield* Effect.sleep(10);
+        expect(yield* f.fs.readFileString(f.home + '/fixture-held-stage')).toBe('metadata');
+        const directory = receiptDirectory(f.config);
+        const files = EffectArray.filter(yield* f.fs.readDirectory(directory), file =>
+          /^[a-f0-9-]{36}\.json$/u.test(file),
+        );
+        expect(files).toHaveLength(1);
+        const operationId = EffectString.slice(0, -5)(files[0]);
+        const before = yield* f.fs.readFileString(directory + '/' + files[0]);
+        let signals = 0;
+        const status = yield* inspectHandoffSaveOperation(f.config, operationId, true).pipe(
+          Effect.provideService(SystemInfo, {
+            ...f.system,
+            canonicalProcessStartIdentity: pid =>
+              pid === f.children[0].pid
+                ? Effect.succeed(observation === 'unknown' ? undefined : 'another-instance')
+                : f.system.canonicalProcessStartIdentity!(pid),
+            signalProcess: () => {
+              signals++;
+            },
+          }),
+        );
+        expect(status.structuredContent).toMatchObject({
+          state: observation === 'unknown' ? 'pending' : 'unknown',
+          authorized: false,
+          cancellationRequested: true,
+        });
+        expect(signals).toBe(0);
+        expect(f.children[0].exitCode).toBeNull();
+        expect(yield* f.fs.readFileString(directory + '/' + files[0])).toBe(before);
+        yield* Fiber.interrupt(parent);
+      }),
+    ),
+  );
+
+for (const observation of ['different-instance', 'unknown'] as const)
+  effectIt.effect(
+    `account intake ${observation === 'unknown' ? 'retains unknown ownership' : 'recovers positively reused PID ownership'}`,
+    () =>
+      withSource(
+        Effect.gen(function* () {
+          const f = yield* actualHandoff;
+          const path = yield* Path.Path;
+          const directory = receiptDirectory(f.config);
+          yield* f.fs.makeDirectory(directory, {recursive: true});
+          const owner = path.join(path.dirname(directory), 'owner.json');
+          const original = JSON.stringify({
+            operationId: '00000000-0000-4000-8000-000000000001',
+            user: 'tester',
+            processId: f.system.processId,
+            processStartIdentity: 'positively-old-instance',
+          });
+          yield* f.fs.writeFileString(owner, original);
+          const result = yield* f.start(
+            observation === 'unknown' ? {THREADNOTE_TEST_HANDOFF_UNKNOWN_PID: String(f.system.processId)} : {},
+          );
+          const allowed = observation !== 'unknown';
+          expect(result.structuredContent).toMatchObject({
+            state: allowed ? expect.stringMatching(/complete|pending/u) : 'not-started',
+          });
+          const exit = yield* Effect.promise(() => f.children[0].exited).pipe(Effect.timeout('5 seconds'));
+          // A refused pre-go child may exit itself or be terminated by its exact parent handle.
+          expect(allowed ? [0] : [0, 143]).toContain(exit);
+          expect(
+            yield* f.fs.exists(
+              f.home + '/data/local/user/tester/memories/handoffs/active/threadnote/protocol-history.md',
+            ),
+          ).toBe(allowed);
+          if (!allowed) expect(yield* f.fs.readFileString(owner)).toBe(original);
+          else expect(yield* f.fs.readFileString(owner)).not.toBe(original);
         }),
       ),
   );

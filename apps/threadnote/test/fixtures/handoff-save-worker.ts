@@ -3,6 +3,7 @@ import {Effect, FileSystem, String as EffectString} from 'effect';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
 import {SystemInfo} from '@threadnote/platform/system';
+import {succeedUndefined} from '@threadnote/platform/optional';
 import {runHandoffSaveWorker} from '../../src/memory/handoff_save_operation.js';
 
 Object.assign(globalThis, {
@@ -18,6 +19,8 @@ const program = Effect.gen(function* () {
   const system = yield* SystemInfo;
   const home = system.environment().THREADNOTE_HANDOFF_SAVE_HOME;
   const hold = system.environment().THREADNOTE_TEST_HANDOFF_HOLD_STAGE;
+  const crash = system.environment().THREADNOTE_TEST_HANDOFF_CRASH_STAGE;
+  const unknownPid = Number(system.environment().THREADNOTE_TEST_HANDOFF_UNKNOWN_PID);
   if (!home) return;
   const fs = yield* FileSystem.FileSystem;
   const held = (stage: string) =>
@@ -33,6 +36,7 @@ const program = Effect.gen(function* () {
         const receipt: unknown = JSON.parse(content);
         if (typeof receipt === 'object' && receipt !== null && 'stage' in receipt && 'sequence' in receipt) {
           const stage = receipt.stage;
+          if (stage === crash) return Effect.sync(() => process.exit(77));
           if (
             (hold === 'journal' && stage === 'preparing' && receipt.sequence === 0) ||
             (hold === 'metadata' && stage === 'preparing' && receipt.sequence !== 0) ||
@@ -46,7 +50,14 @@ const program = Effect.gen(function* () {
   });
   yield* (yield* BackgroundInferenceAdmission).withForeground(
     home,
-    runHandoffSaveWorker().pipe(Effect.provideService(FileSystem.FileSystem, controlled)),
+    runHandoffSaveWorker().pipe(
+      Effect.provideService(FileSystem.FileSystem, controlled),
+      Effect.provideService(SystemInfo, {
+        ...system,
+        canonicalProcessStartIdentity: pid =>
+          pid === unknownPid ? succeedUndefined : system.canonicalProcessStartIdentity!(pid),
+      }),
+    ),
     {existingHomeOnly: true},
   );
 });
