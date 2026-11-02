@@ -1,8 +1,8 @@
 import {LibraryReaderHeader, LibraryScopeControls, LibraryContentTabs} from './library_controls.js';
+import {ManagerLiveProjectScope} from './live/provider.js';
 import {
   isCheckssharesResponse,
   isCodeGraphLocalDiagnosticsReport,
-  isGraphCatalog,
   isGraphIndexActionResponse,
   isJobResponse2,
   isManagerGraphViewRemovalResponse,
@@ -43,7 +43,7 @@ import {DevSkillsPanel} from './dev_skills/view.js';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 
-import {useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
+import {readManagerGraphCatalog, useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
@@ -93,7 +93,6 @@ import {
   type GraphCatalog,
 } from '@threadnote/manager/graph';
 import {
-  GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
   actionProgressLabel,
   api,
   clampSidebarWidth,
@@ -170,6 +169,7 @@ function App({
   const [panel, setPanel] = useState<PanelName>('home');
   const [state, setState] = useState<StateResponse | undefined>();
   const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | undefined>();
+  const [liveProjects, setLiveProjects] = useState<readonly string[]>();
   const [graphCatalogError, setGraphCatalogError] = useState('');
   const graphCatalogRef = useRef<GraphCatalog | undefined>(undefined);
   const graphCatalogAuthoritativeRef = useRef(false);
@@ -404,6 +404,7 @@ function App({
     [shares, target.team],
   );
   function markRuntimeLost(invalidateLibraryRefresh = true): void {
+    setLiveProjects(undefined);
     if (invalidateLibraryRefresh) libraryRefreshEpoch.current++;
     selectionReadEpoch.current++;
     canonicalizedSelectionRef.current = undefined;
@@ -411,23 +412,19 @@ function App({
   }
   async function refreshAll(): Promise<void> {
     const epoch = ++libraryRefreshEpoch.current;
+    setLiveProjects(undefined);
     let nextTree: TreeResponse | undefined;
     const failures = await settleManagerRefreshTasks([
       {
         label: 'Graph indexes',
         run: async () => {
           try {
-            const catalog = await api<GraphCatalog>(
-              '/api/graphs',
-              undefined,
-              {
-                timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-              },
-              isGraphCatalog,
-            );
+            const catalog = await readManagerGraphCatalog();
             graphCatalogAuthoritativeRef.current = true;
             graphCatalogRef.current = catalog;
             setGraphCatalog(catalog);
+            if (epoch === libraryRefreshEpoch.current)
+              setLiveProjects(EffectArray.map(catalog.configuredProjects ?? [], project => project.name));
             setGraphCatalogError('');
           } catch (cause) {
             setGraphCatalogError(errorMessage(cause));
@@ -481,14 +478,7 @@ function App({
   }
   async function refreshGraphCatalog(notify = true): Promise<void> {
     try {
-      const next = await api<GraphCatalog>(
-        '/api/graphs',
-        undefined,
-        {
-          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-        },
-        isGraphCatalog,
-      );
+      const next = await readManagerGraphCatalog();
       graphCatalogAuthoritativeRef.current = true;
       graphCatalogRef.current = next;
       setGraphCatalog(next);
@@ -1992,7 +1982,7 @@ function App({
       {manualEdit.dialog}
     </div>
   );
-  return app;
+  return <ManagerLiveProjectScope projects={liveProjects}>{app}</ManagerLiveProjectScope>;
 }
 
 export function mountManager(options: {readonly integrations: readonly IntegrationRegistration[]}): void {

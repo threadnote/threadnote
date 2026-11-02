@@ -4,6 +4,7 @@ import type {Root} from 'react-dom/client';
 import * as EffectString from 'effect/String';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import type {TreeNode} from '../../src/ui/contracts.js';
+import type {GraphConfiguredProject} from '../../src/graph/model.js';
 import {FakeManagerSocket, liveFrame} from './live-consumer-fixture.js';
 import {
   MANAGER_LIVE_SUPPORTED_TOPICS,
@@ -11,6 +12,13 @@ import {
   type ManagerLiveResource,
 } from '../../src/live/contracts.js';
 import {Array as EffectArray, Schema} from 'effect';
+
+let enrolledProjects: ReadonlySet<string> | undefined;
+let rejectedProjectSubscriptions: readonly (readonly ManagerLiveResource[])[];
+let configuredProjects: readonly GraphConfiguredProject[] | undefined;
+let graphUnavailable: boolean;
+let deferredGraphs: boolean;
+let graphReads: ReturnType<typeof deferred<Response>>[];
 
 class AutomaticManagerSocket extends FakeManagerSocket {
   sequence = 0;
@@ -31,6 +39,16 @@ class AutomaticManagerSocket extends FakeManagerSocket {
     this.generation = frame.generation;
     queueMicrotask(() => {
       if (this.readyState !== 1 || !this.onmessage) return;
+      const allowed = enrolledProjects;
+      if (
+        allowed !== undefined &&
+        EffectArray.some(frame.resources, resource => 'project' in resource && !allowed.has(resource.project))
+      ) {
+        rejectedProjectSubscriptions = [...rejectedProjectSubscriptions, frame.resources];
+        this.readyState = 3;
+        this.onclose?.(new CloseEvent('close', {code: 1008}));
+        return;
+      }
       this.emit(
         liveFrame('subscribed', {epoch: 'epoch-one', generation: frame.generation, startingSequence: this.sequence}),
       );
@@ -141,6 +159,12 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
+  enrolledProjects = new Set(['demo']);
+  rejectedProjectSubscriptions = [];
+  configuredProjects = [configuredDemo];
+  graphUnavailable = false;
+  deferredGraphs = false;
+  graphReads = [];
   vi.stubGlobal('WebSocket', AutomaticManagerSocket);
   vi.spyOn(Math, 'random').mockReturnValue(0);
   reads = [];
@@ -166,11 +190,19 @@ beforeEach(() => {
       return pending.promise;
     }
     if (url.pathname === '/api/memory/save') return json({output: 'Synthetic save complete'});
-    if (url.pathname === '/api/graphs')
-      return json({repositories: [], builds: [], diagnostics: [], views: [], waiterCount: 0, waiters: []});
+    if (url.pathname === '/api/graphs') {
+      if (deferredGraphs) {
+        const pending = deferred<Response>();
+        graphReads.push(pending);
+        return pending.promise;
+      }
+      return graphResponse(configuredProjects, graphUnavailable ? 503 : 200);
+    }
     if (url.pathname === '/api/shares') return json({shares: []});
     if (url.pathname === '/api/shares/conflicts') return json({conflicts: []});
     if (url.pathname === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
+    if (url.pathname === '/api/attention/automatic-memory')
+      return json({version: 1, project: url.searchParams.get('project'), items: [], omitted: 0, incomplete: false});
     if (url.pathname === '/api/home')
       return json({
         version: 1,
@@ -198,6 +230,131 @@ beforeEach(() => {
   host = document.createElement('div');
   host.id = 'root';
   document.body.append(host);
+});
+
+function graphResponse(projects?: readonly GraphConfiguredProject[], status = 200): Response {
+  return json(
+    {
+      repositories: [],
+      builds: [],
+      diagnostics: [],
+      views: [],
+      waiterCount: 0,
+      waiters: [],
+      configuredProjects: projects,
+    },
+    status,
+  );
+}
+const configuredDemo: GraphConfiguredProject = {
+  name: 'demo',
+  folder: 'demo',
+  path: '/synthetic/demo',
+  graphState: 'not-indexed',
+};
+
+it.each(['unenrolled', 'unscoped', 'unknown', 'unreadable'] as const)(
+  'keeps a %s memory editable without sending its ancillary project on the shared socket',
+  async mode => {
+    enrolledProjects = new Set();
+    configuredProjects = mode === 'unenrolled' || mode === 'unscoped' ? [] : undefined;
+    graphUnavailable = mode === 'unreadable';
+    await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
+    await flush();
+    await flush();
+    await act(async () => button('Library').click());
+    const selection = host.querySelector<HTMLButtonElement>(`button[title="${selected.uri}"]`);
+    expect(selection).not.toBeNull();
+    await act(async () => selection!.click());
+    await flush();
+    expect(reads.length).toBeGreaterThan(0);
+    await act(async () => {
+      const node =
+        mode === 'unscoped' ? {...selected, metadata: {...selected.metadata!, project: undefined}} : selected;
+      for (const read of reads) read.resolve(memory('Unenrolled memory remains readable', node));
+    });
+    await flush();
+    expect(rejectedProjectSubscriptions).toEqual([]);
+    expect(button('Edit').disabled).toBe(false);
+    await act(async () => button('Edit').click());
+    await flush();
+    expect(host.querySelector('[contenteditable="true"]')).not.toBeNull();
+    expect(host.textContent).toContain('Unenrolled memory remains readable');
+    expect(FakeManagerSocket.instances).toHaveLength(1);
+    expect(pathReads.get('/api/live-session')).toBe(1);
+  },
+);
+
+it('retains live updates for an enrolled project without requiring a prepared graph', async () => {
+  enrolledProjects = new Set(['demo']);
+  configuredProjects = [configuredDemo];
+  await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
+  await flush();
+  await flush();
+  await act(async () => button('Library').click());
+  await act(async () => host.querySelector<HTMLButtonElement>(`button[title="${selected.uri}"]`)!.click());
+  await flush();
+  await act(async () => {
+    for (const read of reads) read.resolve(memory('Enrolled project memory'));
+  });
+  await flush();
+  const socket = FakeManagerSocket.instances[0];
+  const subscriptions = EffectArray.filter(
+    EffectArray.map(socket.sent, frame => Schema.decodeUnknownSync(ManagerLiveClientFrame)(frame)),
+    frame => frame.type === 'subscribe',
+  );
+  const resources = EffectArray.flatMap(subscriptions, frame => frame.resources);
+  expect(resources).toContainEqual({topic: 'automatic-memory', project: 'demo'});
+  if (!(socket instanceof AutomaticManagerSocket)) throw new Error('Expected automatic synthetic socket');
+  const before = pathReads.get('/api/attention/automatic-memory') ?? 0;
+  await act(async () => socket.invalidate(++socket.sequence, {topic: 'automatic-memory', project: 'demo'}));
+  await flush();
+  expect(pathReads.get('/api/attention/automatic-memory')).toBeGreaterThan(before);
+  expect(rejectedProjectSubscriptions).toEqual([]);
+  expect(button('Edit').disabled).toBe(false);
+  expect(FakeManagerSocket.instances).toHaveLength(1);
+});
+
+it('does not restore removed project access from a late older catalog response', async () => {
+  enrolledProjects = new Set(['demo']);
+  configuredProjects = [configuredDemo];
+  await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
+  await flush();
+  await flush();
+  await act(async () => button('Library').click());
+  await act(async () => host.querySelector<HTMLButtonElement>(`button[title="${selected.uri}"]`)!.click());
+  await flush();
+  await act(async () => {
+    for (const read of reads) read.resolve(memory('Retained selected memory'));
+  });
+  await flush();
+  const socket = FakeManagerSocket.instances[0];
+  enrolledProjects = new Set();
+  deferredGraphs = true;
+  await act(async () => button('Refresh manager').click());
+  await flush();
+  await act(async () => button('Refresh manager').click());
+  await flush();
+  expect(graphReads).toHaveLength(2);
+  await act(async () => graphReads[1].resolve(graphResponse([])));
+  await flush();
+  await act(async () => graphReads[0].resolve(graphResponse([configuredDemo])));
+  await flush();
+  await act(async () => {
+    for (const read of reads) read.resolve(memory('Retained selected memory'));
+  });
+  await flush();
+  const subscriptions = EffectArray.filter(
+    EffectArray.map(socket.sent, frame => Schema.decodeUnknownSync(ManagerLiveClientFrame)(frame)),
+    frame => frame.type === 'subscribe',
+  );
+  expect(subscriptions.at(-1)?.resources).not.toContainEqual({topic: 'automatic-memory', project: 'demo'});
+  expect(rejectedProjectSubscriptions).toEqual([]);
+  expect(button('Edit').disabled).toBe(false);
+  await act(async () => button('Edit').click());
+  await flush();
+  expect(host.querySelector('[contenteditable="true"]')).not.toBeNull();
+  expect(FakeManagerSocket.instances).toHaveLength(1);
 });
 afterEach(async () => {
   await act(async () => {

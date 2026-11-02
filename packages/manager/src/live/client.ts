@@ -1,4 +1,3 @@
-import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {
@@ -49,6 +48,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
   let epoch: string | undefined;
   let sequence = 0;
   let topics = new Set<string>();
+  let projectScope: ReadonlySet<string> | undefined;
   let snapshotTopics = new Set<string>();
   const streams = (entry: ManagerLiveEntry) => snapshotTopics.has(entry.resource.topic);
   let heartbeatMilliseconds: number = MANAGER_LIVE_LIMITS.heartbeatMilliseconds;
@@ -183,17 +183,19 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     update(entry, 'data' in entry.snapshot ? 'stale' : 'loading');
     read(entry, fallback);
   };
+  const subscriptionResources = () =>
+    EffectArray.filter(
+      store.resources(),
+      resource =>
+        topics.has(resource.topic) &&
+        (!('project' in resource) || projectScope === undefined || projectScope.has(resource.project)),
+    );
   const subscribeFrame = () => {
     if (!socket || socket.readyState !== 1 || !epoch) return;
     acknowledged = false;
     staleAll();
     armHandshake();
-    const resources = EffectArrayPipe(store.resources(), __effectArrayValues =>
-      EffectArray.filter(
-        __effectArrayValues,
-        (resource, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && topics.has(resource.topic),
-      ),
-    );
+    const resources = subscriptionResources();
     pendingGeneration = ++generation;
     send({type: 'subscribe', version: MANAGER_LIVE_VERSION, generation: pendingGeneration, resources});
   };
@@ -363,6 +365,13 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
         }
         void connect();
       }
+    },
+    setProjectScope(projects: ReadonlySet<string>) {
+      const before = subscriptionResources();
+      projectScope = projects;
+      const after = subscriptionResources();
+      if (before.length !== after.length || EffectArray.some(before, (resource, index) => resource !== after[index]))
+        subscribeFrame();
     },
     subscribe<T>(resource: ManagerLiveResource, reader: (signal: AbortSignal) => Promise<T>, listener: () => void) {
       return this.subscribeQuery(resource, '', reader, listener);
