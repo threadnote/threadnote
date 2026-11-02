@@ -7,7 +7,7 @@ import type {RecallCandidate} from '@threadnote/recall/rank';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Logger, Option, Path, Schedule, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Logger, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -289,7 +289,7 @@ describe('vector scope mapping upgrades', () => {
 describe('MCP recall generation races', () => {
   effectIt.layer(base)(it => {
     const generationRace = (updates: readonly string[]) =>
-      withRuntime(() =>
+      withRuntime(embedded =>
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
@@ -306,6 +306,7 @@ describe('MCP recall generation races', () => {
           yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
           const index = yield* loadRecallIndexData(config, {includeInactive: false});
           yield* ensureVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
+          const initialInputs = embedded.length;
           const runtime = yield* LocalModelRuntime;
           const embeddingStarted = yield* Deferred.make<void>();
           const releaseEmbedding = yield* Deferred.make<void>();
@@ -336,15 +337,18 @@ describe('MCP recall generation races', () => {
           const result = yield* Fiber.join(query);
           expect(result.status, Option.getOrUndefined(result.result.warning)).toBe('unavailable');
           expect(Option.isNone(result.result.scores)).toBe(true);
-          yield* Effect.gen(function* () {
-            const current = yield* currentRecallCorpusGeneration(config);
-            if (
-              Option.isNone(current) ||
-              current.value === index.generation ||
-              (yield* vectorIndexGenerationReadiness(home, manifest, current.value)) !== 'current'
-            )
-              return yield* TestError.make({message: 'Current generation refresh has not completed'});
-          }).pipe(Effect.retry({times: 200, schedule: Schedule.spaced('25 millis')}));
+          // Query embedding may finish, but changed document vectors must stay queued.
+          expect(embedded).toHaveLength(initialInputs + 1);
+          expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+          // The isolated package fixture has no automatic worker. Drive its lexical
+          // preparation and bounded vector units explicitly after the queued result.
+          const current = yield* loadRecallIndexData(config, {includeInactive: false});
+          expect(current.generation).not.toBe(index.generation);
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, current.generation)).toBe('stale');
+          for (let unit = 0; unit < 50; unit++) {
+            if ((yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true))).state === 'current') break;
+          }
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, current.generation)).toBe('current');
           expect(Option.getOrUndefined(result.result.warning)).toContain('background refresh');
           expect((yield* loadMcpRecallSemanticScoresResult(config, 'synthetic evidence', 5)).status).toBe('available');
           expect(yield* fs.readFileString(resource)).toBe(changed);
