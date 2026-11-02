@@ -124,13 +124,9 @@ describe('agent instruction lifecycle', () => {
             'Writing lexical recall postings: 0/0 changed document(s) (100%), 0 stale document(s) removed.',
           );
           expect(installed.output).toContain('Activating lexical recall index with 0 document(s).');
-          expect(installed.output).toContain(
-            `Preparing vector recall index for 0 lexical document(s) with ${embeddingManifest.id}.`,
-          );
-          expect(installed.output).toContain(
-            'Building vector recall index: 0/0 new chunk(s) embedded (100%), 0 unchanged chunk(s) reused.',
-          );
-          expect(installed.output).toContain('Activating vector recall index with 0 chunk(s).');
+          expect(installed.output).toContain('Document embeddings queued for idle background work.');
+          expect(installed.output).not.toContain('Preparing vector recall index');
+          expect(installed.output).not.toContain('Activating vector recall index');
           if (system.platform !== 'win32') {
             expect(installed.output).toContain(`Wrote command launcher: ${commandShim}`);
             const commandShimContent = yield* fs.readFileString(commandShim);

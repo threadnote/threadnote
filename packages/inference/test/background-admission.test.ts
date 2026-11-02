@@ -11,6 +11,8 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {nativeEmbeddingContextPlan} from '../src/engine/node-llama-cpp.js';
 import {
   BACKGROUND_INFERENCE_BATCH_MILLISECONDS,
+  CurrentBackgroundBatchAuthority,
+  type BackgroundBatchAuthority,
   backgroundInferenceAdmissionStateSchema,
   classifyBackgroundCpuCapacity,
   emptyBackgroundInferenceAdmission,
@@ -604,4 +606,150 @@ function spawnAdmission(options: {
     stdout: 'pipe',
     stderr: 'pipe',
   });
+}
+
+describe('native child execution admission', () => {
+  effectIt.effect('rejects a queued frame after its exact parent batch was released', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.admission.runBatch(f.home, 'recall', Effect.void);
+      yield* TestClock.adjust(500);
+      const granted = yield* f.admission.runBatch(f.home, 'recall', CurrentBackgroundBatchAuthority);
+      expect(granted.state).toBe('completed');
+      if (granted.state !== 'completed' || !granted.value) return yield* Effect.die('expected authority');
+      let executed = false;
+      const result = yield* f.admission
+        .withExecution(
+          granted.value,
+          Effect.sync(() => {
+            executed = true;
+          }),
+        )
+        .pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      expect(executed).toBe(false);
+      expect((yield* f.read()).foreground).toEqual([]);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+  effectIt.effect('a live computing child blocks a new batch after its parent dies', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const childPid = f.system.processId + 100_000;
+      f.identities.set(childPid, 'fixture-child');
+      const child = yield* makeBackgroundInferenceAdmission.pipe(
+        Effect.provideService(SystemInfo, {...f.system, processId: childPid}),
+      );
+      const authority = yield* Deferred.make<BackgroundBatchAuthority>();
+      const releaseParent = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      const releaseChild = yield* Deferred.make<void>();
+      yield* f.admission.runBatch(f.home, 'recall', Effect.void);
+      yield* TestClock.adjust(500);
+      const parent = yield* f.admission
+        .runBatch(
+          f.home,
+          'recall',
+          Effect.gen(function* () {
+            const current = yield* CurrentBackgroundBatchAuthority;
+            if (!current) return yield* Effect.die('missing authority');
+            yield* Deferred.succeed(authority, current);
+            yield* Deferred.await(releaseParent);
+          }),
+        )
+        .pipe(Effect.forkScoped);
+      const witness = yield* Deferred.await(authority);
+      const executing = yield* child
+        .withExecution(witness, Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(releaseChild))))
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      f.identities.delete(f.system.processId);
+      yield* Deferred.succeed(releaseParent, undefined);
+      yield* Fiber.join(parent);
+      const state = yield* f.read();
+      expect(state.active).toBeUndefined();
+      expect(state.foreground).toHaveLength(1);
+      expect(state.foreground[0]?.owner.processId).toBe(childPid);
+      expect(state.foreground[0]?.purpose).toBe('idle-execution');
+      expect(yield* f.admission.runBatch(f.home, 'graph', Effect.die('overlapping native work'))).toEqual({
+        state: 'deferred',
+        reason: 'foreground',
+      });
+      const second = yield* child
+        .withExecution(witness, Effect.die('stale queued child execution'))
+        .pipe(Effect.result);
+      expect(second._tag).toBe('Failure');
+      yield* Deferred.succeed(releaseChild, undefined);
+      yield* Fiber.join(executing);
+      expect((yield* f.read()).foreground).toEqual([]);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+  effectIt.effect('repeated rejected native execution returns unpublished owner reservations', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const parentPid = f.system.processId + 200_000;
+      f.identities.set(parentPid, 'fixture-parent');
+      const authority: BackgroundBatchAuthority = {
+        home: f.home,
+        domain: 'recall',
+        owner: {...owner(1), processId: parentPid, startIdentity: 'fixture-parent'},
+      };
+      for (const unknownChild of [false, true]) {
+        const system = unknownChild
+          ? {
+              ...f.system,
+              canonicalProcessStartIdentity: (pid: number) =>
+                Effect.succeed(pid === parentPid ? 'fixture-parent' : undefined),
+              processStartIdentity: (pid: number) => Effect.succeed(pid === parentPid ? 'fixture-parent' : undefined),
+            }
+          : f.system;
+        const admission = yield* makeBackgroundInferenceAdmission.pipe(Effect.provideService(SystemInfo, system));
+        for (let index = 0; index < 132; index++)
+          expect(
+            yield* admission.withExecution(authority, Effect.die('must not execute')).pipe(Effect.result),
+          ).toMatchObject({
+            _tag: 'Failure',
+            failure: {_tag: 'BackgroundInferenceDeferred'},
+          });
+        expect(yield* admission.withForeground(f.home, Effect.succeed('ready'))).toBe('ready');
+        expect((yield* f.read()).foreground).toEqual([]);
+      }
+    }).pipe(provideFixtureLayer(platform)),
+  );
+  effectIt.effect('a foreground request that arrives before native execution revokes eligibility', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const authority = yield* Deferred.make<BackgroundBatchAuthority>();
+      const releaseParent = yield* Deferred.make<void>();
+      yield* f.admission.runBatch(f.home, 'recall', Effect.void);
+      yield* TestClock.adjust(500);
+      const parent = yield* f.admission
+        .runBatch(
+          f.home,
+          'recall',
+          Effect.gen(function* () {
+            const current = yield* CurrentBackgroundBatchAuthority;
+            if (!current) return yield* Effect.die('missing authority');
+            yield* Deferred.succeed(authority, current);
+            yield* Deferred.await(releaseParent);
+          }),
+        )
+        .pipe(Effect.forkScoped);
+      const witness = yield* Deferred.await(authority);
+      yield* f.admission.withForeground(
+        f.home,
+        Effect.gen(function* () {
+          expect(
+            (yield* f.admission.withExecution(witness, Effect.die('must not start')).pipe(Effect.result))._tag,
+          ).toBe('Failure');
+        }),
+      );
+      yield* Deferred.succeed(releaseParent, undefined);
+      yield* Fiber.join(parent);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+});
+
+function provideFixtureLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>) {
+  return <A, E2, R2>(program: Effect.Effect<A, E2, R2>) =>
+    Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context)))));
 }

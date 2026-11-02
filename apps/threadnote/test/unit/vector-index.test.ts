@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
@@ -7,6 +8,7 @@ import {Effect, Layer, Option, Result} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
@@ -344,52 +346,66 @@ describe('vector index generations', () => {
     }
   });
 
-  it('repairs a corrupt active vector once during semantic recall and returns semantic scores', async () => {
-    const home = await mkdtemp('threadnote-vector-semantic-repair-');
-    const config = {account: 'local', agentContextHome: home, user: 'me'};
-    const uri = 'threadnote://resources/repos/threadnote/alpha.md';
-    const resourcePath = join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'alpha.md');
-    const embeddedBatches: number[] = [];
-    const runtimeLayer = fakeRuntimeLayer(
-      () => 0,
-      inputs => embeddedBatches.push(inputs.length),
-    );
-    try {
-      await mkdir(join(resourcePath, '..'), {recursive: true});
-      await writeFile(resourcePath, '# Alpha\n\nSemantic repair content.', 'utf8');
-      await runEffect(
-        Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-          const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-          yield* rebuildVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
-        }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer)),
-      );
-      const corrupted = new Database(vectorDatabasePath(home));
-      corrupted.exec('UPDATE vector_values SET vector = zeroblob(4)');
-      corrupted.close();
-
-      const scores = await runEffect(
-        loadRecallSemanticScores(config, 'alpha semantic repair', 5).pipe(
-          provideTestLayer(runtimeLayer),
-          provideTestLayer(modelStoreLayer),
-        ),
-      );
-
-      expect(scores?.get(uri)).toBeCloseTo(1);
-      expect(embeddedBatches).toEqual([1, 1, 1, 1]);
-      const repaired = new Database(vectorDatabasePath(home), {readonly: true});
-      try {
-        expect(repaired.query('SELECT length(vector) AS bytes FROM vector_values').get()).toEqual({
-          bytes: manifest.dimensions * 4,
-        });
-      } finally {
-        repaired.close();
-      }
-    } finally {
-      await rm(home, {force: true, recursive: true});
-    }
-  });
+  effectIt.effect(
+    'keeps corrupt vectors unchanged during recall and permits explicit rebuild before semantic scoring',
+    () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => mkdtemp('threadnote-vector-semantic-repair-')),
+        home =>
+          Effect.gen(function* () {
+            const config = {account: 'local', agentContextHome: home, user: 'me'};
+            const uri = 'threadnote://resources/repos/threadnote/alpha.md';
+            const resourcePath = join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'alpha.md');
+            const embeddedBatches: number[] = [];
+            const runtimeLayer = fakeRuntimeLayer(
+              () => 0,
+              inputs => embeddedBatches.push(inputs.length),
+            );
+            yield* Effect.gen(function* () {
+              yield* Effect.promise(() => mkdir(join(resourcePath, '..'), {recursive: true}));
+              yield* Effect.promise(() => writeFile(resourcePath, '# Alpha\n\nSemantic repair content.', 'utf8'));
+              const catalog = yield* LocalModelCatalog;
+              yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+              const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+              yield* rebuildVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
+              yield* Effect.acquireUseRelease(
+                Effect.sync(() => new Database(vectorDatabasePath(home))),
+                database => Effect.sync(() => database.exec('UPDATE vector_values SET vector = zeroblob(4)')),
+                database => Effect.sync(() => database.close()),
+              );
+              const scores = yield* loadRecallSemanticScores(config, 'alpha semantic repair', 5);
+              expect(scores).toBeUndefined();
+              // Only the foreground query was embedded; recall did not repair document vectors.
+              expect(embeddedBatches).toEqual([1, 1]);
+              yield* Effect.acquireUseRelease(
+                Effect.sync(() => new Database(vectorDatabasePath(home), {readonly: true})),
+                database =>
+                  Effect.sync(() => {
+                    expect(database.query('SELECT length(vector) AS bytes FROM vector_values').get()).toEqual({
+                      bytes: 4,
+                    });
+                  }),
+                database => Effect.sync(() => database.close()),
+              );
+              yield* rebuildVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
+              const repairedScores = yield* loadRecallSemanticScores(config, 'alpha semantic repair', 5);
+              expect(repairedScores?.get(uri)).toBeCloseTo(1);
+              expect(embeddedBatches).toEqual([1, 1, 1, 1]);
+              yield* Effect.acquireUseRelease(
+                Effect.sync(() => new Database(vectorDatabasePath(home), {readonly: true})),
+                database =>
+                  Effect.sync(() => {
+                    expect(database.query('SELECT length(vector) AS bytes FROM vector_values').get()).toEqual({
+                      bytes: manifest.dimensions * 4,
+                    });
+                  }),
+                database => Effect.sync(() => database.close()),
+              );
+            }).pipe(provideTestLayer(runtimeLayer), provideTestLayer(modelStoreLayer));
+          }),
+        home => Effect.promise(() => rm(home, {force: true, recursive: true})),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('keeps MCP semantic retrieval read-only when the active vector is corrupt', async () => {
     const home = await mkdtemp('threadnote-vector-mcp-read-only-');
