@@ -12,6 +12,7 @@ import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
   Clock,
+  Deferred,
   Effect,
   Fiber,
   FileSystem,
@@ -37,6 +38,8 @@ import {
   type HandoffSaveReceipt,
 } from '../../src/memory/handoff_save_contract.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- Drain the child stream's OS callback turn without advancing the Effect test clock.
+import {setImmediate} from 'node:timers';
 import fc from 'fast-check';
 
 const receiptDirectory = (config: {agentContextHome: string; account: string; user: string}) =>
@@ -132,6 +135,8 @@ const fixture = Effect.gen(function* () {
   let onRequest = () => {};
   let onGo = () => {};
   let closed = false;
+  let closeOnKill = true;
+  let observeIdentity = () => Effect.succeed('fixture-start');
   const emit = (frame: object) => {
     if (!closed) controller.enqueue(new TextEncoder().encode(JSON.stringify({operationId, source, ...frame}) + '\n'));
   };
@@ -172,7 +177,7 @@ const fixture = Effect.gen(function* () {
     exited,
     kill: () => {
       kills++;
-      close();
+      if (closeOnKill) close();
     },
     stdin: {
       write: (line: string) => {
@@ -195,7 +200,7 @@ const fixture = Effect.gen(function* () {
     Effect.provideService(CurrentHandoffSaveSpawn, spawn),
     Effect.provideService(SystemInfo, {
       ...system,
-      canonicalProcessStartIdentity: () => Effect.succeed('fixture-start'),
+      canonicalProcessStartIdentity: () => observeIdentity(),
     }),
   );
   return {
@@ -206,6 +211,12 @@ const fixture = Effect.gen(function* () {
     close,
     go: () => go,
     kills: () => kills,
+    holdUnapprovedExit: () => {
+      closeOnKill = false;
+    },
+    onIdentity: (fn: () => Effect.Effect<string>) => {
+      observeIdentity = fn;
+    },
     onRequest: (fn: () => void) => {
       onRequest = fn;
     },
@@ -214,13 +225,17 @@ const fixture = Effect.gen(function* () {
     },
   };
 });
-const withSource = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+const withSource = <A, E, R>(program: Effect.Effect<A, E, R>, live = true) =>
   Effect.acquireUseRelease(
     Effect.sync(() => vi.stubGlobal('THREADNOTE_RUNTIME_SOURCE_IDENTITY', source)),
     () => program,
     () => Effect.sync(() => vi.unstubAllGlobals()),
-  ).pipe(TestClock.withLive, program =>
-    Effect.scoped(Layer.build(platform).pipe(Effect.flatMap(context => program.pipe(Effect.provideContext(context))))),
+  ).pipe(
+    program => (live ? TestClock.withLive(program) : program),
+    program =>
+      Effect.scoped(
+        Layer.build(platform).pipe(Effect.flatMap(context => program.pipe(Effect.provideContext(context)))),
+      ),
   );
 
 describe('owned handoff parent protocol', () => {
@@ -268,6 +283,44 @@ describe('owned handoff parent protocol', () => {
         expect((yield* f.launch).structuredContent).toMatchObject({state: 'complete', memoryUri: expect.any(String)});
         expect(f.go()).toBe(1);
         expect(f.kills()).toBe(0);
+      }),
+    ),
+  );
+  effectIt.effect('a verified result held before actual child exit cannot complete the first response', () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const resultSent = Promise.withResolvers<void>();
+        f.onRequest(f.ready);
+        f.onGo(() => {
+          f.emit({type: 'result', receipt: f.receipt()});
+          resultSent.resolve();
+        });
+        const parent = yield* f.launch.pipe(Effect.forkChild);
+        yield* Effect.promise(() => resultSent.promise);
+        yield* Effect.promise(() => new Promise<void>(resolve => setImmediate(resolve)));
+        expect(yield* Effect.sync(() => parent.pollUnsafe())).toBeUndefined();
+        yield* TestClock.adjust(1000);
+        expect((yield* Fiber.join(parent)).structuredContent).toMatchObject({state: 'pending', authorized: true});
+        expect(f.kills()).toBe(0);
+        f.close();
+        expect((yield* Fiber.join(parent)).structuredContent).toMatchObject({state: 'pending', authorized: true});
+      }),
+      false,
+    ),
+  );
+  effectIt.effect('uncertain go write keeps the child authorized and never claims not-started', () =>
+    withSource(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.onRequest(f.ready);
+        f.onGo(() => {
+          throw new Error('Go transport failed after observing its write.');
+        });
+        expect((yield* f.launch).structuredContent).toMatchObject({state: 'pending', authorized: true});
+        expect(f.go()).toBe(1);
+        expect(f.kills()).toBe(0);
+        f.close();
       }),
     ),
   );
@@ -351,84 +404,162 @@ describe('owned handoff parent protocol', () => {
   );
   fcEffectProp(
     effectIt,
-    'generated protocol histories preserve authorization and exact child-exit ownership',
+    'one-owner generated state-machine histories preserve refusal, authorization and actual exit',
     {
-      history: fc.array(
-        fc.constantFrom(
-          'old-source',
-          'pid-reuse',
-          'duplicate',
-          'early-result',
-          'cancel-before',
-          'cancel-after',
-          'crash',
-          'uncertain-go',
-          'complete',
-        ),
-        {minLength: 1, maxLength: 3},
+      initial: fc.constantFrom('ready', 'old-source', 'pid-reuse', 'early-result', 'expiry', 'cancel'),
+      beforeGo: fc.array(fc.constantFrom('duplicate-ready', 'old-source', 'early-result'), {maxLength: 2}),
+      afterGo: fc.constantFrom(
+        ['result', 'check', 'exit'],
+        ['result', 'deadline', 'late-ready', 'exit'],
+        ['duplicate-ready', 'result', 'exit'],
+        ['old-result', 'deadline', 'exit'],
+        ['cancel', 'result', 'exit'],
+        ['exit'],
+        ['deadline', 'late-ready', 'result', 'exit'],
       ),
-      lateFrames: fc.integer({min: 0, max: 3}),
+      lateFrames: fc.integer({min: 1, max: 3}),
     },
-    ({history, lateFrames}) =>
+    ({initial, beforeGo, afterGo, lateFrames}) =>
       withSource(
         Effect.gen(function* () {
-          for (const event of history) {
-            const f = yield* fixture;
-            const barrier = Promise.withResolvers<void>();
-            // Independent model: only a valid ready grants a single mutation attempt.
-            const authorized = ['cancel-after', 'crash', 'uncertain-go', 'complete'].includes(event);
-            const interrupted = event === 'cancel-before' || event === 'cancel-after';
-            f.onRequest(() => {
-              if (event === 'cancel-before') barrier.resolve();
-              else if (event === 'old-source')
-                f.emit({
-                  type: 'ready',
-                  processId: process.pid,
-                  processStartIdentity: 'fixture-start',
-                  source: {...source, commit: 'old'},
-                });
-              else if (event === 'pid-reuse')
-                f.emit({type: 'ready', processId: process.pid, processStartIdentity: 'another-instance'});
-              else if (event === 'early-result') f.emit({type: 'result', receipt: f.receipt()});
-              else {
-                f.ready();
-                if (event === 'duplicate') f.ready();
-              }
-            });
-            f.onGo(() => {
-              if (event === 'cancel-after') barrier.resolve();
-              else if (event === 'uncertain-go') throw new Error('Observed go write became uncertain.');
-              else {
-                if (event === 'complete') f.emit({type: 'result', receipt: f.receipt()});
-                f.close();
-              }
-            });
-            if (interrupted) {
-              const parent = yield* f.launch.pipe(Effect.forkChild);
-              yield* Effect.promise(() => barrier.promise);
-              yield* Fiber.interrupt(parent);
-            } else {
-              const result = yield* f.launch;
-              expect(result.structuredContent).toMatchObject({
-                state: event === 'complete' ? 'complete' : authorized ? 'pending' : 'not-started',
+          const f = yield* fixture;
+          f.holdUnapprovedExit();
+          const identityObserved = yield* Deferred.make<void>();
+          const identityGate = yield* Deferred.make<string>();
+          f.onIdentity(() =>
+            Deferred.succeed(identityObserved, undefined).pipe(Effect.andThen(Deferred.await(identityGate))),
+          );
+          const requested = Promise.withResolvers<void>(),
+            granted = Promise.withResolvers<void>();
+          f.onRequest(() => requested.resolve());
+          f.onGo(() => granted.resolve());
+          const parent = yield* f.launch.pipe(Effect.forkChild);
+          yield* Effect.promise(() => requested.promise);
+          // One independent model persists across commands for this exact owner.
+          const model = {
+            authorized: false,
+            refused: false,
+            interrupted: false,
+            result: false,
+            exited: false,
+            broken: false,
+          };
+          let firstResponse: string | undefined;
+          const flush = Effect.promise(() => new Promise<void>(resolve => setImmediate(resolve)));
+          const observe = Effect.gen(function* () {
+            yield* flush;
+            const outcome = yield* Effect.sync(() => parent.pollUnsafe());
+            if (outcome === undefined) return;
+            if (outcome._tag === 'Failure') {
+              expect(model.interrupted).toBe(true);
+              return;
+            }
+            const actual = outcome.value;
+            const encoded = JSON.stringify(actual);
+            if (firstResponse !== undefined) expect(encoded).toBe(firstResponse);
+            else {
+              firstResponse = encoded;
+              expect(actual.structuredContent).toMatchObject({
+                state: model.refused
+                  ? 'not-started'
+                  : model.result && model.exited && !model.broken
+                    ? 'complete'
+                    : 'pending',
               });
-              if (event !== 'complete') expect(JSON.stringify(result.content)).not.toContain('Stored memory:');
             }
-            expect(f.go()).toBe(authorized ? 1 : 0);
-            expect(f.kills()).toBe(authorized ? 0 : 1);
-            // Terminal/refused parent state cannot be revived by duplicate or late frames.
-            for (let index = 0; index < lateFrames; index++) {
-              f.ready();
-              f.emit({type: 'result', receipt: f.receipt()});
+            expect(f.go()).toBe(model.authorized ? 1 : 0);
+          });
+          if (initial === 'cancel') {
+            model.refused = true;
+            model.interrupted = true;
+            yield* Fiber.interrupt(parent);
+          } else if (initial === 'expiry') {
+            model.refused = true;
+            yield* TestClock.adjust(3000);
+            yield* Fiber.join(parent);
+          } else {
+            if (initial === 'early-result') f.emit({type: 'result', receipt: f.receipt()});
+            else if (initial === 'old-source')
+              f.emit({
+                type: 'ready',
+                processId: process.pid,
+                processStartIdentity: 'fixture-start',
+                source: {...source, commit: 'old'},
+              });
+            else if (initial === 'pid-reuse')
+              f.emit({type: 'ready', processId: process.pid, processStartIdentity: 'different-instance'});
+            else f.ready();
+            if (initial === 'ready' || initial === 'pid-reuse') {
+              yield* Deferred.await(identityObserved);
+              for (const command of beforeGo) {
+                if (command === 'duplicate-ready') f.ready();
+                else if (command === 'old-source')
+                  f.emit({
+                    type: 'ready',
+                    processId: process.pid,
+                    processStartIdentity: 'fixture-start',
+                    source: {...source, commit: 'old'},
+                  });
+                else f.emit({type: 'result', receipt: f.receipt()});
+                model.refused = true;
+                yield* flush;
+              }
+              if (initial === 'pid-reuse') model.refused = true;
+              yield* Deferred.succeed(identityGate, 'fixture-start');
+              if (!model.refused) {
+                yield* Effect.promise(() => granted.promise);
+                model.authorized = true;
+              } else yield* Fiber.join(parent);
+            } else {
+              model.refused = true;
+              yield* Fiber.join(parent);
             }
-            f.close();
-            yield* Effect.yieldNow;
-            expect(f.go()).toBe(authorized ? 1 : 0);
-            expect(f.kills()).toBe(authorized ? 0 : 1);
           }
+          if (model.authorized)
+            for (const command of afterGo) {
+              if (command === 'result') {
+                f.emit({type: 'result', receipt: f.receipt()});
+                if (!model.broken) model.result = true;
+              } else if (command === 'exit') {
+                f.close();
+                model.exited = true;
+                if (!model.result) model.broken = true;
+              } else if (command === 'cancel') {
+                model.interrupted = true;
+                yield* Fiber.interrupt(parent);
+              } else if (command === 'deadline') yield* TestClock.adjust(1000);
+              else if (command === 'check') {
+                yield* flush;
+                expect(yield* Effect.sync(() => parent.pollUnsafe())).toBeUndefined();
+                expect(model.exited).toBe(false);
+              } else {
+                if (command === 'old-result')
+                  f.emit({type: 'result', receipt: f.receipt(), source: {...source, commit: 'old'}});
+                else f.ready();
+                // Once a valid result is latched the reader waits only for actual exit.
+                if (!model.result) model.broken = true;
+              }
+              yield* observe;
+            }
+          if (!model.interrupted) {
+            yield* TestClock.adjust(1000);
+            yield* Fiber.join(parent);
+          }
+          yield* observe;
+          // A refused process is deliberately still alive here, so these frames reach its reader.
+          for (let index = 0; index < lateFrames; index++) {
+            f.ready();
+            f.emit({type: 'result', receipt: f.receipt()});
+            yield* flush;
+          }
+          expect(f.go()).toBe(model.authorized ? 1 : 0);
+          expect(f.kills()).toBe(model.authorized ? 0 : 1);
+          yield* observe;
+          f.close();
         }),
+        false,
       ),
-    {fastCheck: {numRuns: 16}},
+    {fastCheck: {numRuns: 32}},
   );
 });
 
