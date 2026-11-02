@@ -91,6 +91,17 @@ export function withRecallVectorWrite<A, E, R>(
                 yield* sql.unsafe(
                   "CREATE UNIQUE INDEX IF NOT EXISTS idle_recall_documents_uri ON idle_recall_documents (generation,json_extract(candidate_json, '$.uri'))",
                 );
+                yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS idle_recall_document_preparations (
+            generation TEXT NOT NULL REFERENCES idle_recall_targets(generation) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, reuse_key TEXT NOT NULL, chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),
+            reused INTEGER NOT NULL CHECK(reused IN (0,1)), PRIMARY KEY(generation, ordinal)
+          ) WITHOUT ROWID`);
+                yield* sql.unsafe(
+                  'CREATE INDEX IF NOT EXISTS idle_recall_preparation_reuse ON idle_recall_document_preparations (reuse_key)',
+                );
+                yield* sql.unsafe(
+                  'CREATE INDEX IF NOT EXISTS idle_recall_chunks_uri ON idle_recall_chunks (generation,uri)',
+                );
                 return yield* program;
               }),
             );

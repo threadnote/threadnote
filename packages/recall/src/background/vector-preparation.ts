@@ -166,11 +166,88 @@ let preparedDocument:
       readonly ordinal: number;
       readonly chunks: readonly RecallPreparedChunk[];
       readonly aliases: ReturnType<typeof recallVectorStorage.aliasMappings>;
+      readonly reuseKey: string | undefined;
     }
   | undefined;
 export function releasePreparedRecallDocument(generation: string): void {
   if (preparedDocument?.generation === generation) preparedDocument = undefined;
 }
+
+function documentPreparationKey(
+  candidate: RecallCandidate,
+  text: string,
+  manifest: LocalModelManifest,
+  authorization: string,
+) {
+  // Bind exact hydrated text too: logical memory hashes intentionally omit hygiene trailers.
+  return sha256HexSync(
+    JSON.stringify([
+      'recall-document-v1',
+      authorization,
+      recallVectorStorage.recipe(manifest),
+      RECALL_CHUNKER_VERSION,
+      candidate,
+      sha256HexSync(text),
+    ]),
+  );
+}
+
+const reusePreparedDocument = Effect.fn('recall.reusePreparedDocument')(function* (
+  config: RecallEmbeddingScope,
+  manifest: LocalModelManifest,
+  source: RecallVectorSource,
+  target: RecallVectorTarget,
+  candidate: RecallCandidate,
+  reuseKey: string,
+) {
+  const aliases = recallVectorStorage.aliasMappings([candidate]);
+  if (target.chunk_cursor !== 0 || target.alias_cursor !== 0 || aliases.length > 100) return false;
+  return yield* withRecallVectorWrite(
+    config,
+    manifest,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* assertRecallVectorTarget(target);
+      yield* source.fence;
+      const cached = yield* sql<{readonly generation: string; readonly chunk_count: number}>`
+      SELECT generation,chunk_count FROM idle_recall_document_preparations
+      WHERE reuse_key = ${reuseKey} AND generation <> ${target.generation}
+        AND chunk_count <= ${100 - aliases.length} ORDER BY generation DESC LIMIT 1`;
+      const previous = cached[0];
+      if (!previous) return false;
+      const chunks = yield* sql<RecallPreparedChunk>`SELECT * FROM idle_recall_chunks
+      WHERE generation = ${previous.generation} AND uri = ${candidate.uri} ORDER BY chunk_id LIMIT 101`;
+      if (chunks.length !== previous.chunk_count) return false;
+      const valid = yield* Effect.try({
+        try: () =>
+          EffectArray.every(chunks, chunk => {
+            const content: unknown = JSON.parse(chunk.content);
+            return (
+              typeof content === 'string' &&
+              sha256HexSync(content) === chunk.fingerprint &&
+              recallVectorStorage.key(recallVectorStorage.recipe(manifest), chunk) === chunk.vector_key &&
+              recallPreparedChunkDigest({...chunk, content}) === chunk.payload_hash
+            );
+          }),
+        catch: () => false,
+      }).pipe(Effect.orElseSucceed(() => false));
+      if (!valid) return false;
+      for (const chunk of chunks)
+        yield* sql`INSERT INTO idle_recall_chunks
+      (generation,chunk_id,uri,fingerprint,project,approved_authoritative,vector_key,content,payload_hash)
+      VALUES (${target.generation},${chunk.chunk_id},${chunk.uri},${chunk.fingerprint},${chunk.project},
+        ${chunk.approved_authoritative},${chunk.vector_key},${chunk.content},${chunk.payload_hash})`;
+      for (const alias of aliases)
+        yield* sql`INSERT INTO vector_aliases (generation,uri,representative_uri)
+      VALUES (${target.generation},${alias.uri},${alias.representativeUri})`;
+      yield* sql`INSERT INTO idle_recall_document_preparations (generation,ordinal,reuse_key,chunk_count,reused)
+      VALUES (${target.generation},${target.cursor},${reuseKey},${chunks.length},1)`;
+      yield* sql`UPDATE idle_recall_targets SET cursor = ${target.cursor + 1} WHERE generation = ${target.generation}`;
+      return true;
+    }),
+  );
+});
+
 export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocuments')(function* (
   config: RecallEmbeddingScope,
   manifest: LocalModelManifest,
@@ -180,6 +257,7 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
 ) {
   const selected = metadata.slice(0, 1);
   yield* source.authorize(selected);
+  let reuseKey: string | undefined;
   if (preparedDocument?.generation !== target.generation || preparedDocument.ordinal !== target.cursor) {
     const documents = yield* source.hydrate(selected, {requireAll: true});
     if (
@@ -187,6 +265,10 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
       !EffectArray.every(documents, (document, index) => document.uri === selected[index]?.uri)
     )
       return yield* preparationChanged();
+    if (selected[0]) {
+      reuseKey = documentPreparationKey(selected[0], documents[0].text, manifest, source.authorizationKey);
+      if (yield* reusePreparedDocument(config, manifest, source, target, selected[0], reuseKey)) return;
+    }
     const recipe = recallVectorStorage.recipe(manifest);
     preparedDocument = {
       generation: target.generation,
@@ -204,6 +286,7 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
         return {...row, payload_hash: recallPreparedChunkDigest(row)};
       }),
       aliases: recallVectorStorage.aliasMappings(documents),
+      reuseKey,
     };
   }
   const chunks = preparedDocument.chunks.slice(target.chunk_cursor, target.chunk_cursor + 100);
@@ -211,6 +294,8 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
   const done =
     target.chunk_cursor + chunks.length === preparedDocument.chunks.length &&
     target.alias_cursor + aliases.length === preparedDocument.aliases.length;
+  const preparedChunkCount = preparedDocument.chunks.length;
+  const preparedReuseKey = preparedDocument.reuseKey;
   yield* withRecallVectorWrite(
     config,
     manifest,
@@ -223,6 +308,9 @@ export const hydrateRecallVectorDocuments = Effect.fn('recall.hydrateVectorDocum
       VALUES (${target.generation},${chunk.chunk_id},${chunk.uri},${chunk.fingerprint},${chunk.project},${chunk.approved_authoritative},${chunk.vector_key},${JSON.stringify(chunk.content)},${chunk.payload_hash})`;
       for (const alias of aliases)
         yield* sql`INSERT INTO vector_aliases (generation,uri,representative_uri) VALUES (${target.generation},${alias.uri},${alias.representativeUri})`;
+      if (done && selected.length && preparedReuseKey)
+        yield* sql`INSERT INTO idle_recall_document_preparations (generation,ordinal,reuse_key,chunk_count,reused)
+          VALUES (${target.generation},${target.cursor},${preparedReuseKey},${preparedChunkCount},0)`;
       yield* sql`UPDATE idle_recall_targets SET cursor = ${target.cursor + (done ? selected.length : 0)},
       chunk_cursor = ${done ? 0 : target.chunk_cursor + chunks.length}, alias_cursor = ${done ? 0 : target.alias_cursor + aliases.length},
       phase = ${selected.length === 0 ? 'embed' : 'hydrate'}, source_after = NULL WHERE generation = ${target.generation}`;
@@ -259,6 +347,7 @@ export const retireRecallVectorPreparation = Effect.fn('recall.retireVectorPrepa
       const old = obsolete[0]?.generation;
       if (old) {
         for (const [table, key] of [
+          ['idle_recall_document_preparations', 'ordinal'],
           ['idle_recall_metadata', 'ordinal'],
           ['idle_recall_documents', 'ordinal'],
           ['idle_recall_chunks', 'chunk_id'],
@@ -274,11 +363,8 @@ export const retireRecallVectorPreparation = Effect.fn('recall.retireVectorPrepa
         yield* sql`DELETE FROM vector_generations WHERE generation = ${old}`;
         return false;
       }
-      // Current read contracts need vector_chunks/aliases; preparation bodies do not.
-      for (const [table, key] of [
-        ['idle_recall_metadata', 'ordinal'],
-        ['idle_recall_chunks', 'chunk_id'],
-      ] as const) {
+      // Keep this generation's validated document preparation for the next corpus revision.
+      for (const [table, key] of [['idle_recall_metadata', 'ordinal']] as const) {
         const removed = yield* sql.unsafe(
           `DELETE FROM ${table} WHERE generation = ? AND ${key} IN (SELECT ${key} FROM ${table} WHERE generation = ? LIMIT 100) RETURNING ${key}`,
           [target.generation, target.generation],

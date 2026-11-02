@@ -15,7 +15,7 @@ import {
   type RecallEmbeddingObservation,
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
-import {RecallVectorSourceChanged, stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
+import {RecallVectorSourceChanged, runRecallVectorPreparationBatch} from '@threadnote/recall/background/vector-step';
 
 export interface RecallEmbeddingWorkerUnitResult {
   readonly state: 'complete' | 'checkpointed' | 'deferred' | 'blocked';
@@ -64,6 +64,7 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
         ? demand.observation
         : undefined;
     const failures = previous?.failures ?? 0;
+    let progress = previous?.progress;
     const persistObservation = (
       state: RecallEmbeddingObservation['state'],
       reason?: string,
@@ -77,6 +78,7 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
         ...(owner === undefined ? {} : {owner}),
         ...(reason === undefined ? {} : {reason}),
         ...(notBefore === undefined ? {} : {notBefore}),
+        ...(progress === undefined ? {} : {progress}),
       }).pipe(Effect.provide(platform), Effect.mapError(controlUnavailable));
     const observe = (...args: Parameters<typeof persistObservation>) =>
       persistObservation(...args).pipe(Effect.orElseSucceed(() => false));
@@ -130,11 +132,13 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
               message: 'Lexical storage requires explicit repair before background embeddings.',
             });
           if (!lexical.ready) yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
-          return yield* stepRecallVectorPreparation(config, selected, current).pipe(
+          const result = yield* runRecallVectorPreparationBatch(config, selected, current).pipe(
             Effect.provideService(LocalModelRuntime, observedRuntime),
             Effect.provideService(LocalModelCatalog, catalog),
             Effect.provideService(LocalModelStore, store),
           );
+          progress = result.progress;
+          return result;
         }),
       )
       .pipe(Effect.result);
