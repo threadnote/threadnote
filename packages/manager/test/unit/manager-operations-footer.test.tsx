@@ -72,6 +72,26 @@ it('polls operations across page changes, shares the inventory, handles failures
     processes = [process('graph', 4)];
     await tick();
     expect(container.querySelector('.footer-operations [role="status"]')?.textContent).toBe('1 active operation');
+    processes = [
+      {
+        ...process('recall-embedding', 5),
+        role: 'cli',
+        embeddingProgress: {
+          state: 'queued',
+          reason: 'fair-turn',
+          phase: 'hydrate',
+          completed: 12,
+          total: 30,
+          reusedDocuments: 8,
+        },
+      },
+    ];
+    await act(async () => root.render(render(true)));
+    await tick();
+    expect(container.querySelector('.process-workspace')?.textContent).toContain(
+      'Sharing capacity with graph indexing · Preparing documents · 12 / 30',
+    );
+    expect(container.querySelector('.process-workspace')?.textContent).toContain('Started');
     await act(async () => root.unmount());
     const requests = fetch.mock.calls.length;
     await tick();

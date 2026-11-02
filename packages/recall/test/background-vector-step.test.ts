@@ -15,7 +15,7 @@ import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Array as EffectArray, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {describe, expect, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -35,7 +35,7 @@ import {
   selectedSemanticScores,
   recallVectorStorage,
 } from '../src/vector-index.js';
-import {stepRecallVectorPreparation} from '../src/background/vector-step.js';
+import {runRecallVectorPreparationBatch, stepRecallVectorPreparation} from '../src/background/vector-step.js';
 
 const manifest = {
   ...Option.getOrThrow(EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding')),
@@ -146,6 +146,182 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('resumable recall vector preparation', () => {
+  effectIt.effect('stops preparation at the time budget and omits an unfinished resolution denominator', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      for (let index = 0; index < 101; index++)
+        yield* f.fs.writeFileString(path.join(path.dirname(f.resource), `${index}.md`), `Document ${index}`);
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* f.step();
+      yield* f.step();
+      const clock = yield* Clock.Clock;
+      let samples = 0;
+      const result = yield* runRecallVectorPreparationBatch(f.config, manifest, Effect.succeed(true)).pipe(
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, f.runtime),
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          monotonicTimeNanos: Effect.sync(() => BigInt(samples++) * 251_000_000n),
+        }),
+      );
+      expect(result.progress).toMatchObject({phase: 'resolve', completed: 100, total: 0});
+      expect(f.inputs()).toBe(0);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+  effectIt.effect('keeps completed document preparation when an unfinished corpus is superseded', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const changing = path.join(path.dirname(f.resource), 'zz-changing.md');
+      yield* f.fs.writeFileString(changing, 'Before source change');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* f.step();
+      yield* f.step();
+      yield* f.step();
+      expect((yield* preparationSnapshot(f.filename)).target).toMatchObject({phase: 'hydrate', cursor: 1});
+      expect(f.inputs()).toBe(0);
+      yield* f.fs.writeFileString(changing, 'After source change');
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      yield* f.finish;
+      yield* Effect.sync(() => {
+        const db = new Database(f.filename, {readonly: true});
+        try {
+          expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
+            reused: 1,
+          });
+          expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
+        } finally {
+          db.close();
+        }
+      });
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  for (const damage of ['missing', 'content', 'count'] as const)
+    effectIt.effect(`rebuilds a ${damage} cached preparation instead of copying it`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.finish;
+        yield* Effect.sync(() => {
+          const db = new Database(f.filename);
+          try {
+            if (damage === 'missing')
+              db.exec('DELETE FROM idle_recall_chunks WHERE chunk_id = (SELECT MIN(chunk_id) FROM idle_recall_chunks)');
+            if (damage === 'content')
+              db.exec(
+                "UPDATE idle_recall_chunks SET content='invalid-json' WHERE chunk_id = (SELECT MIN(chunk_id) FROM idle_recall_chunks)",
+              );
+            if (damage === 'count') db.exec('UPDATE idle_recall_document_preparations SET chunk_count=0');
+          } finally {
+            db.close();
+          }
+        });
+        const path = yield* Path.Path;
+        yield* f.fs.writeFileString(path.join(path.dirname(f.resource), 'new.md'), 'New corpus member');
+        yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+        yield* f.finish;
+        yield* Effect.sync(() => {
+          const db = new Database(f.filename, {readonly: true});
+          try {
+            expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
+              reused: 0,
+            });
+          } finally {
+            db.close();
+          }
+        });
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  effectIt.effect('batches lightweight checkpoints while making at most one native request', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      for (let index = 0; index < 40; index++)
+        yield* f.fs.writeFileString(path.join(path.dirname(f.resource), `${index}.md`), `Document ${index}`);
+      yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+      let before = 0;
+      let largestPreparationAdvance = 0;
+      for (let turn = 0; turn < 100; turn++) {
+        const inferred = f.inputs();
+        const result = yield* runRecallVectorPreparationBatch(f.config, manifest, Effect.succeed(true)).pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, f.runtime),
+        );
+        expect(f.inputs() - inferred).toBeLessThanOrEqual(1);
+        if (result.progress?.phase === 'hydrate') {
+          largestPreparationAdvance = Math.max(largestPreparationAdvance, result.progress.completed - before);
+          before = result.progress.completed;
+          expect(result.progress.total).toBe(41);
+        }
+        if (result.state === 'current') break;
+      }
+      expect(largestPreparationAdvance).toBeGreaterThan(1);
+      expect(
+        yield* vectorIndexGenerationReadiness(
+          f.home,
+          manifest,
+          (yield* loadRecallIndexData(f.config, {includeInactive: false})).generation,
+        ),
+      ).toBe('current');
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'preparation reused across corpus churn equals a clean build',
+    {
+      words: fc.array(fc.constantFrom('alpha', 'βeta', '😀', 'delta'), {minLength: 1, maxLength: 8}),
+      repeats: fc.integer({min: 2, max: 40}),
+    },
+    ({words, repeats}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const path = yield* Path.Path;
+        const changed = path.join(path.dirname(f.resource), 'changing.md');
+        yield* f.fs.writeFileString(changed, 'Initial independent document');
+        yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+        yield* f.finish;
+        const mapping = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(recallVectorStorage, 'chunkMappings')),
+          value => Effect.sync(() => value.mockRestore()),
+        );
+        yield* f.fs.writeFileString(
+          changed,
+          '# Changed\n\n' + EffectString.repeat(repeats)(EffectArray.join(words, ' ') + '\n'),
+        );
+        const current = yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
+        yield* f.finish;
+        expect(EffectArray.filter(mapping.mock.calls, ([candidates]) => candidates.length > 0)).toHaveLength(1);
+        yield* Effect.sync(() => {
+          const db = new Database(f.filename, {readonly: true});
+          try {
+            expect(db.query('SELECT SUM(reused) AS reused FROM idle_recall_document_preparations').get()).toEqual({
+              reused: 1,
+            });
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
+          } finally {
+            db.close();
+          }
+        });
+        const cleanHome = yield* f.fs.makeTempDirectoryScoped({prefix: 'recall-churn-clean-'});
+        yield* ensureVectorIndex({agentContextHome: cleanHome}, manifest, current.candidates, {
+          corpusGeneration: current.generation,
+        }).pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, {
+            ...f.runtime,
+            embedMany: ({inputs}) => Effect.succeed(EffectArray.map(inputs, embeddingForInput)),
+          }),
+        );
+        expect(yield* vectorSnapshot(f.filename)).toEqual(
+          yield* vectorSnapshot(path.join(cleanHome, 'indexes/vectors', manifest.id, vectorIndexDatabaseFilename())),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    {fastCheck: {numRuns: 8}},
+  );
+
   effectIt.effect('upgrades an exact legacy target identity without resetting its durable cursor', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -673,31 +849,35 @@ describe('resumable recall vector preparation', () => {
       expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation)).not.toBe('current');
     }).pipe(provideFixtureLayer(platform)),
   );
-  effectIt.effect('bounds retained generations and removes prepared document bodies across canonical churn', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      for (let generation = 0; generation < 4; generation++) {
-        if (generation) {
-          yield* f.fs.writeFileString(f.resource, 'New canonical generation ' + String(generation));
-          yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-        }
-        yield* f.finish;
-        yield* Effect.sync(() => {
-          const db = new Database(f.filename, {readonly: true});
-          try {
-            expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
-            expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_chunks').get()).toEqual({count: 0});
-            expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_metadata').get()).toEqual({count: 0});
-            expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_documents').get()).toEqual({count: 1});
-            expect(db.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({
-              count: generation ? 1 : f.inputs(),
-            });
-          } finally {
-            db.close();
+  effectIt.effect(
+    'bounds retained generations and retains only current document preparation across canonical churn',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        for (let generation = 0; generation < 4; generation++) {
+          if (generation) {
+            yield* f.fs.writeFileString(f.resource, 'New canonical generation ' + String(generation));
+            yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
           }
-        });
-      }
-    }).pipe(provideFixtureLayer(platform)),
+          yield* f.finish;
+          yield* Effect.sync(() => {
+            const db = new Database(f.filename, {readonly: true});
+            try {
+              expect(db.query('SELECT COUNT(*) AS count FROM vector_generations').get()).toEqual({count: 1});
+              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_chunks').get()).toEqual(
+                db.query('SELECT COUNT(*) AS count FROM vector_chunks').get(),
+              );
+              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_metadata').get()).toEqual({count: 0});
+              expect(db.query('SELECT COUNT(*) AS count FROM idle_recall_documents').get()).toEqual({count: 1});
+              expect(db.query('SELECT COUNT(*) AS count FROM vector_values').get()).toEqual({
+                count: generation ? 1 : f.inputs(),
+              });
+            } finally {
+              db.close();
+            }
+          });
+        }
+      }).pipe(provideFixtureLayer(platform)),
   );
   effectIt.effect('reactivates an authorized immutable ready target without repeating inference', () =>
     Effect.gen(function* () {

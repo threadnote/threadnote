@@ -33,6 +33,14 @@ const observationSchema = Schema.Struct({
   failures: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8})),
   notBefore: Schema.optionalKey(Schema.Finite.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}))),
   owner: Schema.optionalKey(Schema.Struct({processId: Schema.Int, processStartIdentity: Schema.String})),
+  progress: Schema.optionalKey(
+    Schema.Struct({
+      phase: Schema.Literals(['metadata', 'resolve', 'hydrate', 'embed', 'retire', 'ready']),
+      completed: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      total: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      reusedDocuments: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    }),
+  ),
 });
 export type RecallEmbeddingObservation = typeof observationSchema.Type;
 
