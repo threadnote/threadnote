@@ -38,7 +38,9 @@
     "./threshold": "./src/threshold.ts",
     "./tokenize": "./src/tokenize.ts",
     "./vector-index": "./src/vector-index.ts",
-    "./warning": "./src/warning.ts"
+    "./warning": "./src/warning.ts",
+    "./background/demand": "./src/background/demand.ts",
+    "./background/vector-step": "./src/background/vector-step.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

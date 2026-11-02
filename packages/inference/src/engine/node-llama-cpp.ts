@@ -2,6 +2,7 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Exit, Layer, Path, Scope} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {SystemInfo} from '@threadnote/platform/system';
+import {BACKGROUND_INFERENCE_ENV, BACKGROUND_INFERENCE_THREADS} from '../background/admission.js';
 import {
   EmbeddingFailed,
   GenerationFailed,
@@ -134,12 +135,14 @@ export type EmbeddingContextPoolSize = (typeof EMBEDDING_CONTEXT_POOL_SIZES)[num
 export const THREADNOTE_EMBEDDING_CONTEXTS_ENV = 'THREADNOTE_EMBEDDING_CONTEXTS';
 
 export interface NodeLlamaCppLayerOptions {
+  readonly background?: boolean;
   readonly embeddingContextPoolSize?: EmbeddingContextPoolSize;
   readonly embeddingGpuLayers?: number;
   readonly loadModule?: () => Promise<NodeLlamaCppModule>;
 }
 
 interface NativeEmbeddingPolicy {
+  readonly background?: boolean;
   readonly architecture?: string;
   readonly contextPoolSize?: EmbeddingContextPoolSize;
   readonly contextPoolSizeEnvironment?: string;
@@ -164,6 +167,7 @@ export function nodeLlamaCppEngineLayer(options: NodeLlamaCppLayerOptions = {}) 
     Effect.gen(function* () {
       let loadModule = options.loadModule;
       let embeddingPolicy: NativeEmbeddingPolicy = {
+        background: options.background,
         contextPoolSize: options.embeddingContextPoolSize,
         gpuLayers: options.embeddingGpuLayers,
       };
@@ -171,6 +175,7 @@ export function nodeLlamaCppEngineLayer(options: NodeLlamaCppLayerOptions = {}) 
         const path = yield* Path.Path;
         const system = yield* SystemInfo;
         embeddingPolicy = {
+          background: options.background === true || system.environment()[BACKGROUND_INFERENCE_ENV] === '1',
           architecture: system.architecture,
           contextPoolSize: options.embeddingContextPoolSize,
           contextPoolSizeEnvironment: system.environment()[THREADNOTE_EMBEDDING_CONTEXTS_ENV],
@@ -283,6 +288,7 @@ function makeEngine(
           );
           const modelGpuLayers = model.gpuLayers ?? gpuLayers ?? (llama.gpu === false ? 0 : undefined);
           const contextPlan = nativeEmbeddingContextPlan({
+            background: embeddingPolicy.background,
             cpuMathCores: llama.cpuMathCores,
             modelGpuLayers,
             requestedContexts: contextPoolSize,
@@ -389,6 +395,7 @@ function isEmbeddingContextPoolSize(value: number): value is EmbeddingContextPoo
 }
 
 export function nativeEmbeddingContextPlan(options: {
+  readonly background?: boolean;
   readonly cpuMathCores: number;
   readonly modelGpuLayers: number | undefined;
   readonly requestedContexts: EmbeddingContextPoolSize;
@@ -396,6 +403,7 @@ export function nativeEmbeddingContextPlan(options: {
   readonly contexts: number;
   readonly threadCounts: readonly (number | undefined)[];
 } {
+  if (options.background) return {contexts: 1, threadCounts: [BACKGROUND_INFERENCE_THREADS]};
   if (options.modelGpuLayers !== 0 || options.requestedContexts === 1) {
     return {contexts: 1, threadCounts: [undefined]};
   }

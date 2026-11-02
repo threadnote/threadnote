@@ -45,11 +45,8 @@ import {
   type RecallOperationalWarning,
 } from './warning.js';
 import {
-  ensureVectorIndex,
-  rebuildVectorIndex,
   selectedSemanticScores,
   VectorCorpusGenerationChanged,
-  VectorIndexCorrupt,
   vectorIndexGenerationReadiness,
   vectorIndexMatchesGeneration,
 } from './vector-index.js';
@@ -880,14 +877,10 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     limit: 0,
     query: '',
   });
-  let corpusGeneration = snapshot.generation;
+  const corpusGeneration = snapshot.generation;
   if (!(yield* vectorIndexMatchesGeneration(config.agentContextHome, manifest, corpusGeneration))) {
-    const index = yield* loadRecallIndexData(config, {includeInactive: false});
-    corpusGeneration = index.generation;
-    yield* ensureVectorIndex(config, manifest, index.candidates, {
-      corpusGeneration,
-      currentCorpusGeneration: fence,
-    });
+    yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
+    return {corpusGeneration, scores: undefined};
   }
   return yield* selectedSemanticScores(config, query, {
     allowedUriScopes,
@@ -895,28 +888,7 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     currentCorpusGeneration: fence,
     eligibility,
     limit,
-  }).pipe(
-    Effect.map(scores => ({corpusGeneration, scores})),
-    Effect.catchIf(
-      (error): error is VectorIndexCorrupt => Schema.is(VectorIndexCorrupt)(error),
-      () =>
-        Effect.gen(function* () {
-          const index = yield* loadRecallIndexData(config, {includeInactive: false});
-          yield* rebuildVectorIndex(config, manifest, index.candidates, {
-            corpusGeneration: index.generation,
-            currentCorpusGeneration: fence,
-          });
-          const scores = yield* selectedSemanticScores(config, query, {
-            allowedUriScopes,
-            corpusGeneration: index.generation,
-            currentCorpusGeneration: fence,
-            eligibility,
-            limit,
-          });
-          return {corpusGeneration: index.generation, scores};
-        }),
-    ),
-  );
+  }).pipe(Effect.map(scores => ({corpusGeneration, scores})));
 });
 
 export const loadRecallSemanticScores = Effect.fn('recall.loadSemanticScores')(function* (
@@ -964,15 +936,8 @@ function semanticRecallCooldownWarning(): string {
   );
 }
 
-function semanticRecallRefreshingWarning(schedule: McpRecallBackgroundRefreshSchedule): string {
-  const activity =
-    schedule === 'scheduled'
-      ? 'A single background refresh was scheduled'
-      : 'A single background refresh is already running';
-  return (
-    `Local AI recall warning: semantic indexes are stale or missing. ${activity}; ` +
-    'lexical recall continued without waiting.'
-  );
+function semanticRecallRefreshingWarning(_schedule: McpRecallBackgroundRefreshSchedule): string {
+  return 'Local AI recall warning: semantic indexes are stale or missing; background refresh is queued for idle. Lexical recall continued without waiting.';
 }
 
 function semanticRecallStructuralWarning(): string {
