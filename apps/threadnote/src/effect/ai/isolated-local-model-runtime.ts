@@ -1,6 +1,15 @@
 import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Exit, Layer, Option, Predicate, Schema, Semaphore, Stream} from 'effect';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
+import {
+  BackgroundInferenceAdmission,
+  BackgroundInferenceDeferred,
+  backgroundBatchAuthoritySchema,
+  CurrentBackgroundBatchAuthority,
+  BACKGROUND_INFERENCE_ENV,
+  BACKGROUND_INFERENCE_INPUT_LIMIT,
+  BACKGROUND_INFERENCE_REQUEST_MILLISECONDS,
+} from '@threadnote/inference/background/admission';
 import {parseLocalModelManifest} from '@threadnote/inference/models/catalog';
 import {
   EmbeddingFailed,
@@ -23,6 +32,7 @@ import {
 } from '@threadnote/inference/engine/local-model-runtime';
 import type {LlamaCppDiagnostics} from '@threadnote/inference/engine/llama-cpp-engine';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {withThreadnoteProcessActivity} from '../../process/diagnostics.js';
 import {LOCAL_MODEL_WORKER_ARGUMENT} from '../../worker_protocol.js';
 import {withAnonymousTelemetryPhase} from '../telemetry.js';
@@ -45,7 +55,7 @@ const PROTOCOL_VERSION = 1;
 const WORKER_CRASH_PATTERN =
   /(?:bun has crashed|panic(?:\([^)]*\))?:|segmentation fault|fatal error:|reached heap limit|allocation failed)/i;
 
-type WorkerOperation = 'diagnostics' | 'embedMany' | 'generate' | 'rerank';
+type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'generate' | 'rerank';
 type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
 
 interface WorkerRequest {
@@ -102,6 +112,8 @@ export type LocalModelWorkerSpawner = (
 ) => LocalModelWorkerProcess | Promise<LocalModelWorkerProcess>;
 
 export interface IsolatedLocalModelRuntimeOptions {
+  /** Private idle-worker profile: bounded input, one transport attempt, explicit native thread cap. */
+  readonly background?: boolean;
   /** Milliseconds to keep an unused native worker resident. Set to 0 to disable idle eviction. */
   readonly idleTimeoutMs?: number;
   readonly maxStderrBytes?: number;
@@ -148,11 +160,12 @@ export function isolatedLocalModelRuntimeLayer(
           payload: unknown,
           decode: (result: unknown) => Option.Option<A>,
         ): Effect.Effect<A, DecodedOperationError | LocalModelWorkerTransportError> => {
-          const transmitted: Effect.Effect<WorkerResponse, LocalModelWorkerTransportError> = Effect.tryPromise({
-            try: signal => pool.request(operation, payload, signal),
-            catch: (cause): LocalModelWorkerTransportError =>
-              Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol'),
-          });
+          const send = (signal: AbortSignal) => pool.request(operation, payload, signal);
+          const decodeError = (cause: unknown): LocalModelWorkerTransportError =>
+            Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol');
+          const transmitted = options.background
+            ? fromPromiseInterruptibleAwaiting(send, decodeError)
+            : Effect.tryPromise({try: send, catch: decodeError});
           return Effect.gen(function* () {
             const response = yield* transmitted;
             if (!response.ok) return yield* Effect.fail<DecodedOperationError>(response.error);
@@ -185,11 +198,25 @@ export function isolatedLocalModelRuntimeLayer(
               'model.embedding',
               permits.withPermit(
                 Effect.gen(function* () {
+                  if (options.background && input.inputs.length > BACKGROUND_INFERENCE_INPUT_LIMIT) {
+                    return yield* EmbeddingFailed.make({
+                      cause: new Error('Background embedding input budget exceeded.'),
+                      modelId: input.manifest.id,
+                      message: 'Background embedding requires one bounded input per admitted batch.',
+                    });
+                  }
                   const vectors: (readonly number[])[] = [];
                   for (let start = 0; start < input.inputs.length; start += EMBEDDING_BATCH_SIZE) {
                     const batch = input.inputs.slice(start, start + EMBEDDING_BATCH_SIZE);
-                    const response = yield* request('embedMany', {...input, inputs: batch}, result =>
-                      decodeVectors(result, batch.length, input.manifest.dimensions),
+                    const authority = yield* CurrentBackgroundBatchAuthority;
+                    if (options.background && !authority)
+                      return yield* BackgroundInferenceDeferred.make({
+                        message: 'Background embedding requires current idle admission.',
+                      });
+                    const response = yield* request(
+                      options.background ? 'embedManyIdleV1' : 'embedMany',
+                      options.background ? {authority, request: {...input, inputs: batch}} : {...input, inputs: batch},
+                      result => decodeVectors(result, batch.length, input.manifest.dimensions),
                     ).pipe(
                       Effect.mapError(error =>
                         Schema.is(LocalModelWorkerTransportError)(error)
@@ -344,10 +371,15 @@ class LocalModelWorkerPool {
 
   constructor(
     private readonly system: SystemInfoShape,
-    options: IsolatedLocalModelRuntimeOptions,
+    private readonly options: IsolatedLocalModelRuntimeOptions,
   ) {
-    this.maximumRequestAttempts = options.maximumRequestAttempts ?? 2;
-    this.deadlineMs = positiveInteger(options.requestDeadlineMs, DEFAULT_REQUEST_DEADLINE_MS);
+    this.maximumRequestAttempts = options.background ? 1 : (options.maximumRequestAttempts ?? 2);
+    this.deadlineMs = options.background
+      ? Math.min(
+          positiveInteger(options.requestDeadlineMs, BACKGROUND_INFERENCE_REQUEST_MILLISECONDS),
+          BACKGROUND_INFERENCE_REQUEST_MILLISECONDS,
+        )
+      : positiveInteger(options.requestDeadlineMs, DEFAULT_REQUEST_DEADLINE_MS);
     this.idleTimeoutMs = nonNegativeInteger(
       options.idleTimeoutMs ?? parseInteger(system.environment()[LOCAL_MODEL_WORKER_IDLE_TIMEOUT_ENV]),
       DEFAULT_LOCAL_MODEL_WORKER_IDLE_TIMEOUT_MS,
@@ -431,8 +463,13 @@ class LocalModelWorkerPool {
 
   private async spawnConnection(operation: WorkerOperation): Promise<LocalModelWorkerConnection> {
     try {
-      const process = await this.spawnWorker(localModelWorkerSpawnOptions(this.system));
-      const connection = new LocalModelWorkerConnection(process, this.maxStderrBytes, this.responseLimitBytes);
+      const process = await this.spawnWorker(localModelWorkerSpawnOptions(this.system, this.options));
+      const connection = new LocalModelWorkerConnection(
+        process,
+        this.maxStderrBytes,
+        this.responseLimitBytes,
+        this.options.background === true,
+      );
       if (this.closed) {
         await connection.close();
         throw transportError(operation, 'exit');
@@ -498,6 +535,7 @@ class LocalModelWorkerConnection {
     private readonly process: LocalModelWorkerProcess,
     private readonly maxStderrBytes: number,
     private readonly responseLimitBytes: number,
+    private readonly awaitExit = false,
   ) {
     void this.consumeStdout();
     void this.consumeStderr();
@@ -517,6 +555,7 @@ class LocalModelWorkerConnection {
       void Promise.resolve()
         .then(() => this.process.closeInput())
         .catch(() => undefined);
+      if (this.awaitExit) await this.process.exited.catch(() => undefined);
       return;
     }
     this.closed = true;
@@ -528,6 +567,9 @@ class LocalModelWorkerConnection {
       WORKER_SHUTDOWN_DEADLINE_MS,
     );
     if (!closedGracefully) this.kill();
+    // A background admission claim remains owned until the computing process
+    // has exited, including when a native call outlives its transport deadline.
+    if (this.awaitExit) await this.process.exited.catch(() => undefined);
   }
 
   async request(request: WorkerRequest, deadlineMs: number, signal: AbortSignal): Promise<WorkerResponse> {
@@ -696,14 +738,20 @@ function spawnBunWorker(options: LocalModelWorkerSpawnOptions): LocalModelWorker
   };
 }
 
-export function localModelWorkerSpawnOptions(system: SystemInfoShape): LocalModelWorkerSpawnOptions {
+export function localModelWorkerSpawnOptions(
+  system: SystemInfoShape,
+  options: Pick<IsolatedLocalModelRuntimeOptions, 'background'> = {},
+): LocalModelWorkerSpawnOptions {
   const script = developmentStandaloneScript(system);
+  const environment: Record<string, string | undefined> = {
+    ...withCurrentAgentSessionEnvironment(system.environment(), 'local-model-worker'),
+    THREADNOTE_LOCAL_MODEL_WORKER: '1',
+  };
+  if (options.background) environment[BACKGROUND_INFERENCE_ENV] = '1';
+  else delete environment[BACKGROUND_INFERENCE_ENV];
   return {
     arguments: [...Option.toArray(script), LOCAL_MODEL_WORKER_ARGUMENT],
-    environment: {
-      ...withCurrentAgentSessionEnvironment(system.environment(), 'local-model-worker'),
-      THREADNOTE_LOCAL_MODEL_WORKER: '1',
-    },
+    environment,
     executable: system.executablePath,
   };
 }
@@ -736,7 +784,17 @@ function handleWorkerLine(runtime: LocalModelRuntimeShape, line: string): Effect
   const effect = withThreadnoteProcessActivity(
     'local-model-worker',
     workerOperationLabel(request.value.operation),
-    dispatchWorkerRequest(runtime, request.value),
+    Effect.gen(function* () {
+      const system = yield* Effect.serviceOption(SystemInfo);
+      if (
+        Option.isSome(system) &&
+        system.value.environment()[BACKGROUND_INFERENCE_ENV] === '1' &&
+        request.value.operation !== 'embedManyIdleV1' &&
+        request.value.operation !== 'diagnostics'
+      )
+        return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
+      return yield* dispatchWorkerRequest(runtime, request.value);
+    }),
     {idleTransitionDelayMilliseconds: LOCAL_MODEL_PROCESS_ACTIVITY_IDLE_DELAY_MS},
   );
   return Effect.exit(effect).pipe(
@@ -770,6 +828,40 @@ function dispatchWorkerRequest(
   runtime: LocalModelRuntimeShape,
   request: WorkerRequest,
 ): Effect.Effect<unknown, unknown> {
+  if (request.operation === 'embedManyIdleV1') {
+    return Effect.gen(function* () {
+      const system = yield* Effect.serviceOption(SystemInfo);
+      const admission = yield* Effect.serviceOption(BackgroundInferenceAdmission);
+      if (
+        Option.isNone(system) ||
+        Option.isNone(admission) ||
+        system.value.environment()[BACKGROUND_INFERENCE_ENV] !== '1' ||
+        !Predicate.isObject(request.payload)
+      )
+        return yield* BackgroundInferenceDeferred.make({message: 'Background execution is unavailable.'});
+      const authority = Schema.decodeUnknownOption(backgroundBatchAuthoritySchema)(request.payload.authority);
+      const decoded = decodeEmbeddingRequest(request.payload.request);
+      if (Option.isNone(authority) || Option.isNone(decoded) || decoded.value.inputs.length !== 1)
+        return yield* Effect.fail({_tag: 'WorkerProtocolInvalid'});
+      // A stale queued frame cannot execute after its parent releases admission.
+      // The child's own busy lease survives parent death; model residency does not hold it.
+      const ownSystem = system.value;
+      return yield* admission.value.withExecution(
+        authority.value,
+        Effect.acquireUseRelease(
+          Effect.sync(() =>
+            // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Native child wall-clock watchdog must use host time even when an Effect clock is suspended.
+            setTimeout(
+              () => ownSystem.signalProcess(ownSystem.processId, 'SIGKILL'),
+              BACKGROUND_INFERENCE_REQUEST_MILLISECONDS,
+            ),
+          ),
+          () => runtime.embedMany({...decoded.value, embeddingContextPoolSize: 1}),
+          timer => Effect.sync(() => clearTimeout(timer)),
+        ),
+      );
+    });
+  }
   if (request.operation === 'diagnostics') {
     const diagnostics = (runtime as Partial<LocalModelRuntimeWithDiagnostics>).diagnostics;
     return diagnostics ?? Effect.fail({_tag: 'NativeRuntimeUnavailable'});
@@ -1014,6 +1106,7 @@ function remoteEmbeddingFailure(
   request: LocalEmbeddingRequest,
   error: DecodedOperationError,
 ):
+  | BackgroundInferenceDeferred
   | EmbeddingFailed
   | InferenceInterrupted
   | InsufficientMemory
@@ -1021,6 +1114,8 @@ function remoteEmbeddingFailure(
   | ModelNotInstalled
   | NativeRuntimeUnavailable
   | UnsupportedNativeRuntime {
+  if (error.tag === 'BackgroundInferenceDeferred' || error.tag === 'BackgroundInferenceAdmissionUnavailable')
+    return BackgroundInferenceDeferred.make({message: 'Background execution was deferred.'});
   const common = remoteModelError(request.manifest.id, request.modelPath, 'embedding', error);
   return Option.isSome(common)
     ? common.value
@@ -1291,11 +1386,19 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isWorkerOperation(value: unknown): value is WorkerOperation {
-  return value === 'diagnostics' || value === 'embedMany' || value === 'generate' || value === 'rerank';
+  return (
+    value === 'diagnostics' ||
+    value === 'embedMany' ||
+    value === 'embedManyIdleV1' ||
+    value === 'generate' ||
+    value === 'rerank'
+  );
 }
 
 function isKnownOperationErrorTag(value: unknown): value is string {
   return (
+    value === 'BackgroundInferenceDeferred' ||
+    value === 'BackgroundInferenceAdmissionUnavailable' ||
     value === 'AiError' ||
     value === 'EmbeddingFailed' ||
     value === 'GenerationFailed' ||

@@ -1,3 +1,7 @@
+import {
+  BackgroundInferenceAdmission,
+  type BackgroundInferenceAdmissionUnavailable,
+} from '@threadnote/inference/background/admission';
 import {Array as EffectArray} from 'effect';
 import {Clock, Console, Crypto, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
@@ -212,7 +216,11 @@ export function withThreadnoteProcessRegistration<A, E, R>(
   baseRole: RegisteredThreadnoteProcessRole,
   effect: Effect.Effect<A, E, R>,
   baseOperation?: string,
-): Effect.Effect<A, E, R | SystemInfo | FileSystem.FileSystem | Path.Path | Crypto.Crypto> {
+): Effect.Effect<
+  A,
+  E | BackgroundInferenceAdmissionUnavailable,
+  R | SystemInfo | FileSystem.FileSystem | Path.Path | Crypto.Crypto
+> {
   return Effect.acquireUseRelease(
     registerThreadnoteProcess(home, baseRole, baseOperation),
     active =>
@@ -226,7 +234,13 @@ export function withThreadnoteProcessRegistration<A, E, R>(
               }
             }).pipe(Effect.forkScoped({startImmediately: true}));
           }
-          return yield* effect;
+          const admission = yield* Effect.serviceOption(BackgroundInferenceAdmission);
+          return yield* baseRole === 'cli' &&
+          baseOperation !== 'workflow-watch-collector' &&
+          baseOperation !== 'recall-embedding' &&
+          Option.isSome(admission)
+            ? admission.value.withForeground(home, effect)
+            : effect;
         }),
       ),
     active => unregisterThreadnoteProcess(active),

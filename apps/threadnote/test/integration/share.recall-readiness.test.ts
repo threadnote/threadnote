@@ -23,6 +23,8 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import * as relocation from '@threadnote/memory/relocation';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {ensureVectorIndex, vectorIndexGenerationReadiness, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import * as recallRefresh from '@threadnote/recall/mcp/refresh';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runShareSync, syncSharedReposBeforeAgentRead} from '@threadnote/threadnote/effect/share';
@@ -42,7 +44,7 @@ function withEmbedding<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   options: {
     readonly fail?: Ref.Ref<boolean>;
-    readonly pause?: {readonly started: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
+    readonly calls?: Ref.Ref<number>;
   } = {},
 ) {
   const installation = {
@@ -73,13 +75,7 @@ function withEmbedding<A, E, R>(
                 ),
               ),
         ),
-        Effect.tap(() =>
-          options.pause
-            ? Deferred.succeed(options.pause.started, undefined).pipe(
-                Effect.andThen(Deferred.await(options.pause.release)),
-              )
-            : Effect.void,
-        ),
+        Effect.tap(() => (options.calls ? Ref.update(options.calls, value => value + 1) : Effect.void)),
       ),
     generate: unexpected,
     rerank: unexpected,
@@ -209,9 +205,10 @@ describe('shared sync recall readiness', () => {
     );
   }
 
-  effectIt.effect('refreshes an existing selected vector index and leaves an unchanged sync alone', () =>
+  effectIt.effect('queues selected vectors, leaves an unchanged sync alone and supports explicit rebuild', () =>
     Effect.gen(function* () {
       const {config, home, seed} = yield* makeFixture();
+      const calls = yield* Ref.make(0);
       yield* withEmbedding(
         home,
         Effect.gen(function* () {
@@ -223,12 +220,19 @@ describe('shared sync recall readiness', () => {
 
           const lexical = yield* recallIndexStatus(config);
           expect(lexical).toMatchObject({ready: true, documentCount: 1});
-          expect(yield* vectorIndexGenerationReadiness(home, embedding, lexical.generation!)).toBe('current');
+          expect(yield* Ref.get(calls)).toBe(0);
+          expect(yield* vectorIndexGenerationReadiness(home, embedding, lexical.generation!)).toBe('stale');
+          expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
           const vector = yield* vectorIndexStatus(home, embedding);
           yield* runShareSync(config, {push: false});
           expect(yield* recallIndexStatus(config)).toEqual(lexical);
           expect(yield* vectorIndexStatus(home, embedding)).toEqual(vector);
+          const current = yield* loadRecallIndexData(config, {includeInactive: false});
+          expect(current.candidates[0]?.text).toContain('Selected vector refresh anchor.');
+          yield* ensureVectorIndex(config, embedding, current.candidates, {corpusGeneration: current.generation});
+          expect(yield* vectorIndexGenerationReadiness(home, embedding, current.generation)).toBe('current');
         }),
+        {calls},
       );
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -248,7 +252,9 @@ describe('shared sync recall readiness', () => {
           const result = yield* syncSharedReposBeforeAgentRead(config);
           expect(result.syncedTeams).toEqual(['default']);
           expect(EffectArray.join(result.warnings, '\n')).toContain('recall refresh is deferred');
-          expect(EffectArray.join(result.warnings, '\n')).toContain('threadnote repair');
+          expect(EffectArray.join(result.warnings, '\n')).toContain(
+            'queued until spare CPU capacity and no foreground Threadnote work',
+          );
           const lexical = yield* recallIndexStatus(config);
           expect(lexical).toMatchObject({ready: true, documentCount: 1});
           expect(yield* vectorIndexGenerationReadiness(home, embedding, lexical.generation!)).toBe('stale');
@@ -260,19 +266,32 @@ describe('shared sync recall readiness', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('releases the shared lock when a caller cancels a stalled post-commit vector refresh', () =>
+  effectIt.effect('releases the shared lock when a caller cancels after required post-commit recall refresh', () =>
     Effect.gen(function* () {
       const {config, home, seed} = yield* makeFixture();
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const returned = yield* Deferred.make<void>();
+      const originalRefresh = recallRefresh.refreshRecallDerivedIndexesAfterCanonicalMutation;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(recallRefresh, 'refreshRecallDerivedIndexesAfterCanonicalMutation')
+            .mockImplementation((...args) =>
+              originalRefresh(...args).pipe(
+                Effect.tap(() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)))),
+              ),
+            ),
+        ),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
       yield* withEmbedding(
         home,
         Effect.gen(function* () {
           yield* writeModelSelection(home, {version: 1, roles: {embedding: embedding.id}});
           const initial = yield* loadRecallIndexData(config, {includeInactive: false});
           yield* ensureVectorIndex(config, embedding, initial.candidates, {corpusGeneration: initial.generation});
-          yield* publishIncoming(seed, 'Durable before vector-refresh cancellation.');
+          yield* publishIncoming(seed, 'Durable before post-commit refresh cancellation.');
           const sync = yield* syncSharedReposBeforeAgentRead(config).pipe(
             Effect.ensuring(Deferred.succeed(returned, undefined)),
             Effect.forkScoped,
@@ -285,8 +304,11 @@ describe('shared sync recall readiness', () => {
           const lexical = yield* recallIndexStatus(config);
           expect(lexical).toMatchObject({ready: true, documentCount: 1});
           expect(yield* vectorIndexGenerationReadiness(home, embedding, lexical.generation!)).toBe('stale');
+          expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+          expect((yield* loadRecallIndexData(config, {includeInactive: false})).candidates[0]?.text).toContain(
+            'Durable before post-commit refresh cancellation.',
+          );
         }),
-        {pause: {started, release}},
       ).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );

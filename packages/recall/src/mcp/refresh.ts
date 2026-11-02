@@ -1,4 +1,5 @@
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import {Cause, Effect, Schema} from 'effect';
 import {
   consumeResourceRecallInvalidationReceipt,
   type ResourceRecallInvalidationReceipt,
@@ -6,15 +7,8 @@ import {
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {ensureVectorIndex, vectorIndexGenerationReadiness, vectorIndexStatus} from '../vector-index.js';
-import {
-  currentRecallCorpusGeneration,
-  expireRecallIndexValidation,
-  loadRecallIndexData,
-  recallIndexStatus,
-  type RecallIndexData,
-  type RecallIndexStatus,
-} from '../index.js';
+import {vectorIndexGenerationReadiness} from '../vector-index.js';
+import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus, type RecallIndexStatus} from '../index.js';
 
 interface McpRecallRefreshConfig {
   readonly account: string;
@@ -26,15 +20,12 @@ interface McpRecallRefreshConfig {
 export type McpRecallBackgroundRefreshSchedule = 'coalesced' | 'scheduled';
 
 export type DerivedIndexRefreshOutcome =
-  {readonly state: 'current'} | {readonly repair: string; readonly state: 'deferred'} | {readonly state: 'unavailable'};
+  | {readonly state: 'current'}
+  | {readonly repair: string; readonly state: 'deferred'}
+  | {readonly state: 'unavailable'}
+  | {readonly state: 'blocked'; readonly repair: string};
 
-interface ActiveMcpRecallRefresh {
-  config: McpRecallRefreshConfig;
-  manifest: LocalModelManifest;
-  pending: boolean;
-}
-
-const activeRefreshes = new Map<string, ActiveMcpRecallRefresh>();
+import {deferRecallEmbeddings, readRecallEmbeddingDemand, requestRecallEmbeddings} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -44,86 +35,17 @@ class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
-/**
- * Start one process-local derived-index refresh without joining it to the MCP
- * request. Concurrent calls retain the latest inputs for one trailing rerun so
- * a newer generation is not lost behind an obsolete generation fence. The
- * filesystem locks remain the cross-process authority; this map only prevents
- * redundant work from concurrent requests in this process.
- */
+/** Persist demand before returning; an ephemeral caller cannot discard it on exit. */
 export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpBackgroundRefresh')(function* (
   config: McpRecallRefreshConfig,
-  manifest: LocalModelManifest,
+  _manifest: LocalModelManifest,
 ) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const canonicalHome = yield* fs
-    .realPath(config.agentContextHome)
-    .pipe(Effect.orElseSucceed(() => path.resolve(config.agentContextHome)));
-  return yield* Effect.uninterruptible(
-    Effect.gen(function* () {
-      const candidate: ActiveMcpRecallRefresh = {config, manifest, pending: false};
-      const active = yield* Effect.sync(() => {
-        const existing = activeRefreshes.get(canonicalHome);
-        if (existing !== undefined) {
-          existing.config = config;
-          existing.manifest = manifest;
-          existing.pending = true;
-          return existing;
-        }
-        activeRefreshes.set(canonicalHome, candidate);
-        return candidate;
-      });
-      if (active !== candidate) return 'coalesced' as const;
-
-      const clear = Effect.sync(() => {
-        if (activeRefreshes.get(canonicalHome) === active) activeRefreshes.delete(canonicalHome);
-      });
-      const refresh = Effect.gen(function* () {
-        for (;;) {
-          const latest = yield* Effect.sync(() => {
-            active.pending = false;
-            return {config: active.config, manifest: active.manifest};
-          });
-          yield* refreshMcpRecallDerivedIndexes(latest.config, latest.manifest).pipe(
-            Effect.catchCause(() =>
-              Effect.logWarning(
-                'Threadnote background recall-index refresh failed; deterministic lexical recall remains available. Run threadnote doctor --dry-run.',
-              ),
-            ),
-          );
-          const rerun = yield* Effect.sync(() => {
-            if (activeRefreshes.get(canonicalHome) !== active) return false;
-            if (active.pending) return true;
-            activeRefreshes.delete(canonicalHome);
-            return false;
-          });
-          if (!rerun) return;
-        }
-      }).pipe(Effect.ensuring(clear));
-      yield* Effect.forkDetach(refresh);
-      return 'scheduled' as const;
-    }),
-  );
+  const previous = yield* readRecallEmbeddingDemand(config);
+  yield* requestRecallEmbeddings(config, true);
+  return previous?.desired ? ('coalesced' as const) : ('scheduled' as const);
 });
 
-const refreshMcpRecallDerivedIndexes = Effect.fn('recall.refreshMcpDerivedIndexes')(function* (
-  config: McpRecallRefreshConfig,
-  manifest: LocalModelManifest,
-) {
-  const index = yield* refreshRecallLexicalIndex(config);
-  yield* refreshRecallVectorIndex(config, manifest, index);
-});
-
-/**
- * Restore derived-index readiness after a trusted product mutation. Lexical
- * readiness is synchronous and independently invalidated. An already-built
- * selected vector index finishes before this hook returns because graph and
- * Workset preparation can run in an ephemeral child process; process-local
- * detached work would be lost when that child exits. Incremental vector reuse
- * avoids re-embedding unchanged memory chunks. This hook never constructs a
- * previously absent vector index.
- */
+/** Canonical and lexical readiness complete now; document inference is durable idle demand. */
 export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refreshDerivedIndexesFromSelection')(
   function* (
     config: McpRecallRefreshConfig,
@@ -141,7 +63,10 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
         ? false
         : yield* expireRecallIndexValidation(config.agentContextHome, false, uris).pipe(
             Effect.as(false),
-            Effect.catchCause(() => Effect.succeed(true)),
+            Effect.catchCauseIf(
+              cause => !Cause.hasInterrupts(cause),
+              () => Effect.succeed(true),
+            ),
           );
     // Complete lexical freshness before deciding whether any vector caller needs candidate data.
     yield* refreshRecallLexicalIndex(config, forceRefresh, true);
@@ -155,21 +80,27 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
       const store = yield* LocalModelStore;
       const installed = yield* store.status(config.agentContextHome, manifest);
       if (!installed.installed) return {state: 'unavailable' as const};
-      const vectorStatus = yield* vectorIndexStatus(config.agentContextHome, manifest);
-      if (!vectorStatus.ready && vectorStatus.reason === 'not built') return {state: 'unavailable' as const};
-      const index = yield* loadRecallIndexData(config, {includeInactive: false});
-      yield* refreshRecallVectorIndex(config, manifest, index);
-      const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation);
-      if (readiness !== 'current') {
+      const lexical = yield* recallIndexStatus(config, false);
+      if (!lexical.generation)
+        return {state: 'deferred' as const, repair: 'Lexical generation is unavailable; run `threadnote repair`.'};
+      // Mutation hooks inspect metadata only; a full encoded-vector integrity scan
+      // belongs to explicit doctor/verify or the worker's first admitted unit.
+      const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, lexical.generation);
+      if (readiness === 'current') return {state: 'current' as const};
+      if (readiness === 'corrupt')
         return {
-          repair: 'Run `threadnote repair` to retry derived-index refresh.',
           state: 'deferred' as const,
+          repair: 'Vector storage validation failed; run `threadnote index rebuild`.',
         };
-      }
-      return {state: 'current' as const};
+      return yield* deferRecallEmbeddings(config);
     }).pipe(
-      Effect.catchCause(() =>
-        Effect.succeed({repair: 'Run `threadnote repair` to retry derived-index refresh.', state: 'deferred' as const}),
+      Effect.catchCauseIf(
+        cause => !Cause.hasInterrupts(cause),
+        () =>
+          Effect.succeed({
+            repair: 'Run `threadnote repair` to retry derived-index refresh.',
+            state: 'deferred' as const,
+          }),
       ),
     );
   },
@@ -184,17 +115,25 @@ export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
   receipt?: ResourceRecallInvalidationReceipt,
 ) {
   const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris, receipt).pipe(
-    Effect.catchCause(() =>
-      Effect.succeed({repair: 'Run `threadnote repair` to retry derived-index refresh.', state: 'deferred' as const}),
+    Effect.catchCauseIf(
+      cause => !Cause.hasInterrupts(cause),
+      () =>
+        Effect.succeed({
+          repair: 'Canonical memory was committed, but lexical recall refresh failed; run `threadnote repair`.',
+          state: 'blocked' as const,
+        }),
     ),
   );
-  if (outcome.state === 'deferred') {
+  if (
+    outcome.state === 'blocked' ||
+    (outcome.state === 'deferred' && EffectString.includes('repair')(outcome.repair))
+  ) {
     yield* Effect.logWarning(
       'Canonical memory was committed, but derived recall indexes could not be refreshed [recall-refresh:deferred]. Run threadnote repair.',
     );
   }
   return outcome;
-});
+}, Effect.orDie);
 
 const refreshRecallLexicalIndex = Effect.fn('recall.refreshDerivedLexicalIndex')(function* (
   config: McpRecallRefreshConfig,
@@ -203,30 +142,14 @@ const refreshRecallLexicalIndex = Effect.fn('recall.refreshDerivedLexicalIndex')
 ) {
   const lexicalStatus = yield* recallIndexStatus(config, false);
   if (lexicalRefreshDisposition(lexicalStatus) === 'unsafe') {
-    return yield* McpRecallBackgroundRefreshBlocked.make({message: ''});
+    return yield* McpRecallBackgroundRefreshBlocked.make({
+      message: `Lexical recall is unavailable: ${lexicalStatus.reason ?? 'unknown storage state'}; run threadnote repair.`,
+    });
   }
   return yield* loadRecallIndexData(config, {
     forceRefresh,
     includeInactive: false,
     ...(metadataOnly ? {memoryIds: []} : {}),
-  });
-});
-
-const refreshRecallVectorIndex = Effect.fn('recall.refreshDerivedVectorIndex')(function* (
-  config: McpRecallRefreshConfig,
-  manifest: LocalModelManifest,
-  index: RecallIndexData,
-) {
-  const vectorStatus = yield* vectorIndexStatus(config.agentContextHome, manifest);
-  if (!vectorStatus.ready && vectorStatus.reason !== 'not built') {
-    return yield* McpRecallBackgroundRefreshBlocked.make({message: ''});
-  }
-  const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation);
-  if (readiness === 'corrupt') return yield* McpRecallBackgroundRefreshBlocked.make({message: ''});
-  if (readiness === 'current') return;
-  yield* ensureVectorIndex(config, manifest, index.candidates, {
-    corpusGeneration: index.generation,
-    currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
   });
 });
 

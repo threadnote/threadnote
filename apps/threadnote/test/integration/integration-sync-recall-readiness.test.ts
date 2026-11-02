@@ -186,27 +186,39 @@ describe('integration source recall completion', () => {
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('refreshes an existing selected vector generation after a source quantum', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      yield* withEmbedding(
-        f.home,
-        Effect.gen(function* () {
-          yield* writeModelSelection(f.home, {version: 1, roles: {embedding: embedding.id}});
-          const initial = yield* loadRecallIndexData(f.config, {includeInactive: false});
-          yield* ensureVectorIndex(f.config, embedding, initial.candidates, {corpusGeneration: initial.generation});
-          yield* quantum(
-            f.config,
-            f.store
-              .write(f.location, uri, memory('New selected-vector anchor.'), {mode: 'replace'})
-              .pipe(Effect.as(result())),
-          );
-          const current = yield* recallIndexStatus(f.config, false);
-          expect(current.ready).toBe(true);
-          expect(yield* vectorIndexGenerationReadiness(f.home, embedding, current.generation!)).toBe('current');
-        }),
-      );
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  effectIt.effect(
+    'queues an existing selected vector generation after a source quantum and permits explicit rebuild',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* withEmbedding(
+          f.home,
+          Effect.gen(function* () {
+            yield* writeModelSelection(f.home, {version: 1, roles: {embedding: embedding.id}});
+            const initial = yield* loadRecallIndexData(f.config, {includeInactive: false});
+            yield* ensureVectorIndex(f.config, embedding, initial.candidates, {corpusGeneration: initial.generation});
+            yield* quantum(
+              f.config,
+              f.store
+                .write(f.location, uri, memory('New selected-vector anchor.'), {mode: 'replace'})
+                .pipe(Effect.as(result())),
+            );
+            const current = yield* recallIndexStatus(f.config, false);
+            expect(current.ready).toBe(true);
+            expect(yield* vectorIndexGenerationReadiness(f.home, embedding, current.generation!)).toBe('stale');
+            const refreshed = yield* loadRecallIndexData(f.config, {includeInactive: false});
+            expect(
+              EffectArray.some(refreshed.candidates, candidate =>
+                EffectString.includes('New selected-vector anchor.')(candidate.text),
+              ),
+            ).toBe(true);
+            yield* ensureVectorIndex(f.config, embedding, refreshed.candidates, {
+              corpusGeneration: refreshed.generation,
+            });
+            expect(yield* vectorIndexGenerationReadiness(f.home, embedding, refreshed.generation)).toBe('current');
+          }),
+        );
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('delivers the fixed deferred warning without changing the explicit provider value', () =>
