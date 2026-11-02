@@ -287,7 +287,9 @@ describe('built self-contained distribution', () => {
   it('recalls saved memory immediately and explicitly rebuilds vectors through built launchers', async () => {
     const recall = await runCli(['recall', '--query', 'QZ9 native recall background service']);
     expect(recall).toContain('native-e2e.md');
-    expect(await runCli(['doctor'])).toMatch(/WARN\s+vector recall index:.*queued/);
+    expect(await runCli(['doctor'])).toMatch(
+      /WARN\s+vector recall index:.*(?:queued|deferred until foreground Threadnote work is quiet)/,
+    );
     expect(await activeVectorRevision()).toBe(initialVectorRevision);
     const rebuilt = await runCli(['index', 'rebuild']);
     expect(rebuilt).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
