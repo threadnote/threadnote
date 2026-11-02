@@ -462,12 +462,13 @@ async function gitWorktreeRegistrationWorkerProgram() {
 }
 
 async function localModelWorkerProgram(arguments_: readonly string[]) {
-  const [isolatedModel, model, systemModule, processDiagnostics, processLease] = await Promise.all([
+  const [isolatedModel, model, systemModule, processDiagnostics, processLease, admission] = await Promise.all([
     import('./effect/ai/isolated-local-model-runtime.js'),
     import('@threadnote/inference/engine/local-model-runtime'),
     import('@threadnote/platform/system'),
     import('./process/diagnostics.js'),
     import('./process/standalone_lease.js'),
+    import('@threadnote/inference/background/admission'),
   ]);
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(
@@ -476,7 +477,11 @@ async function localModelWorkerProgram(arguments_: readonly string[]) {
         processDiagnostics.withThreadnoteProcessRegistration(
           home,
           'local-model-worker',
-          Effect.scoped(isolatedModel.localModelWorkerServer.pipe(Effect.provide(model.localModelRuntimeLayer()))),
+          Effect.scoped(
+            isolatedModel.localModelWorkerServer.pipe(
+              Effect.provide(Layer.merge(model.localModelRuntimeLayer(), admission.BackgroundInferenceAdmission.layer)),
+            ),
+          ),
           'model-stdio',
         ),
       ),
@@ -628,8 +633,13 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       .pipe(Effect.provide(runtime.ApplicationLayer));
   }
   const cliOperation = invocation.operation;
+  const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';
-  const processOperation = cliOperation === 'manage' ? 'manager-ui' : cliOperation;
+  const processOperation = isWatchCollector
+    ? 'workflow-watch-collector'
+    : cliOperation === 'manage'
+      ? 'manager-ui'
+      : cliOperation;
   const isStaticVersionRequest = arguments_.length === 1 && (arguments_[0] === '--version' || arguments_[0] === '-v');
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(

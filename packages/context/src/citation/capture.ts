@@ -371,6 +371,8 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   const query = yield* CodeGraphQueryService;
   const store = yield* CodeGraphStore;
   const fs = yield* FileSystem.FileSystem;
+  // A copied ready snapshot needs a fresh closing observation, even inside a caller read transaction.
+  const readReadyEvidence = query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
   const before = yield* query
     .status(config.agentContextHome, cwd, {
       project,
@@ -391,23 +393,24 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
       // internal maintenance retains its existing writer-wait contract. A
       // denied release leaves only the existing bounded, expiring lease.
       const leaseWriterOptions = {waitTimeoutMilliseconds: writerWaitTimeoutMilliseconds};
-      yield* Effect.acquireRelease(
-        store
-          .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
-          .pipe(
-            Effect.mapError(error =>
-              Schema.is(CodeGraphStoreBusyError)(error)
-                ? MemoryCodeCitationCaptureError.of(
-                    'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
-                    writerBusyRecovery(before),
-                    undefined,
-                    true,
-                  )
-                : captureError(cwd, error),
+      if (!readReadyEvidence)
+        yield* Effect.acquireRelease(
+          store
+            .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
+            .pipe(
+              Effect.mapError(error =>
+                Schema.is(CodeGraphStoreBusyError)(error)
+                  ? MemoryCodeCitationCaptureError.of(
+                      'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
+                      writerBusyRecovery(before),
+                      undefined,
+                      true,
+                    )
+                  : captureError(cwd, error),
+              ),
             ),
-          ),
-        token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
-      );
+          token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
+        );
       const repositoryRoot = yield* fs
         .realPath(before.identity.repoRoot)
         .pipe(Effect.mapError(error => captureError(before.identity.repoRoot, error)));
@@ -422,12 +425,20 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         (target): target is CaptureTarget & {readonly target: {readonly kind: 'symbol'; readonly nodeId: string}} =>
           target.target.kind === 'symbol',
       );
-      const evidence = yield* store
-        .effectiveSnapshotCitationEvidence(before.databasePath, snapshot.id, {
-          paths: EffectArray.map(fileTargets, target => target.target.path),
-          symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
-        })
-        .pipe(Effect.mapError(error => captureError(cwd, error)));
+      const request = {
+        paths: EffectArray.map(fileTargets, target => target.target.path),
+        symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
+      };
+      const evidence = yield* (
+        readReadyEvidence
+          ? readReadyEvidence(before.databasePath, snapshot, request)
+          : store.effectiveSnapshotCitationEvidence(before.databasePath, snapshot.id, request)
+      ).pipe(Effect.mapError(error => captureError(cwd, error)));
+      if (evidence === undefined)
+        return yield* MemoryCodeCitationCaptureError.of(
+          'The ready graph changed before citation evidence could be copied. Retry with exact current evidence.',
+          captureRecovery(before, 'exact-current-evidence-unavailable', captureGroupPreparation(targets)),
+        );
       const files = evidence.filesByPaths;
       const symbols = evidence.symbolsByIds;
       const fileByPath = new Map(
@@ -558,8 +569,8 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         (result): result is NonNullable<(typeof results)[number]> => result !== undefined,
       );
 
-      // Complete preservation before releasing the snapshot lease or returning
-      // anchors: dirty source has no clean-Git recovery after worktree removal.
+      // The atomic copy has closed before retention. Dirty source still requires
+      // preservation before returning anchors because Git cannot recover it.
       const retainedTargets: typeof capturedTargets = [];
       for (const captured of capturedTargets) {
         const {citation} = captured;
@@ -598,14 +609,17 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         });
       }
 
-      const after = yield* query
-        .status(config.agentContextHome, cwd, {
-          project,
-          manifestPath: config.manifestPath,
-          observeWorktree: true,
-          requestMaintenance: false,
-        })
-        .pipe(Effect.mapError(error => captureError(cwd, error)));
+      const closingOptions = {
+        project,
+        manifestPath: config.manifestPath,
+        observeWorktree: true,
+        requestMaintenance: false,
+      };
+      const after = yield* (
+        readReadyEvidence && query.withStatusSession
+          ? query.withStatusSession(config.agentContextHome, cwd, undefined, closingOptions, Effect.succeed)
+          : query.status(config.agentContextHome, cwd, closingOptions)
+      ).pipe(Effect.mapError(error => captureError(cwd, error)));
       if (!sameExactSnapshot(before, after)) {
         return yield* MemoryCodeCitationCaptureError.of(
           'Repository graph or worktree changed while code citations were captured.',

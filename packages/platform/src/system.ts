@@ -56,7 +56,16 @@ interface NativePathModuleShape {
 }
 
 interface NativeOperatingSystemModuleShape {
-  readonly cpus: () => readonly {readonly model: string}[];
+  readonly cpus: () => readonly {
+    readonly model: string;
+    readonly times: {
+      readonly user: number;
+      readonly nice: number;
+      readonly sys: number;
+      readonly idle: number;
+      readonly irq: number;
+    };
+  }[];
   readonly release: () => string;
   readonly totalmem: () => number;
 }
@@ -564,6 +573,8 @@ export interface SystemInfoShape {
   readonly availableDiskBytes: (path: string) => Effect.Effect<number | undefined, unknown>;
   /** Versioned cross-observer identity; optional for legacy injected SystemInfo adapters. */
   readonly canonicalProcessStartIdentity?: (processId: number) => Effect.Effect<string | undefined>;
+  /** Cumulative host CPU counters; absence is unknown capacity, never an idle observation. */
+  readonly cpuTimes?: Effect.Effect<SystemCpuTimes | undefined>;
   readonly currentDirectory: () => string;
   readonly environment: () => NodeJS.ProcessEnv;
   readonly developmentEntrypoint: string;
@@ -595,6 +606,12 @@ export interface SystemInfoShape {
   readonly tempDirectory: string;
   readonly userId?: number;
   readonly userName: string;
+}
+
+export interface SystemCpuTimes {
+  readonly logicalCpus: number;
+  readonly idleMilliseconds: number;
+  readonly totalMilliseconds: number;
 }
 
 export interface SystemHardwareInfo {
@@ -716,6 +733,17 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
         architecture: runtimeArchitecture,
         availableDiskBytes: path => availableDiskBytes(path, runtimePlatform, process.env, diskCapacityProbeAdapters),
         canonicalProcessStartIdentity,
+        cpuTimes: Effect.try(() => {
+          const processors = nativeOperatingSystemModule.cpus();
+          if (processors.length === 0) return undefined;
+          let idleMilliseconds = 0;
+          let totalMilliseconds = 0;
+          for (const {times} of processors) {
+            idleMilliseconds += times.idle;
+            totalMilliseconds += times.user + times.nice + times.sys + times.idle + times.irq;
+          }
+          return {logicalCpus: processors.length, idleMilliseconds, totalMilliseconds};
+        }).pipe(Effect.orElseSucceed(() => undefined)),
         currentDirectory: () => process.cwd(),
         environment: () => process.env,
         developmentEntrypoint: entrypoint.developmentEntrypoint,

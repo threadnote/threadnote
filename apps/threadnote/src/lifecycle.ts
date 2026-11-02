@@ -1,8 +1,13 @@
+import {
+  readRecallEmbeddingDemand,
+  requestRecallEmbeddings,
+  repairRecallEmbeddingDemand,
+} from '@threadnote/recall/background/demand';
 import {Array as EffectArray} from 'effect';
 import {queueAutomaticModelSetup} from './models/setup_lifecycle.js';
 import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
-import {Console, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Console, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   repairRegisteredAgentAdapters,
   removeRegisteredAgentAdaptersInTransaction,
@@ -51,7 +56,6 @@ import {
   telemetryEnvironmentOptOut,
 } from './telemetry/config.js';
 import {
-  currentRecallCorpusGeneration,
   loadRecallIndexData,
   recallIndexStatus,
   type RecallIndexProgress,
@@ -68,8 +72,6 @@ import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
-  ensureVectorIndex,
-  type VectorIndexProgress,
   VectorCorpusGenerationChanged,
   type VectorIndexGenerationReadiness,
   vectorIndexGenerationReadiness,
@@ -429,12 +431,12 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
   const embedding = yield* provisionCoreEmbedding(config, {dryRun});
   if (dryRun && options.skipRecallIndexes !== true) {
     yield* Console.log(
-      `Would build the lexical SQLite index and ${embedding.manifest.id} vector index from canonical documents.`,
+      `Would build the lexical SQLite index and queue ${embedding.manifest.id} document embeddings for idle background work.`,
     );
   } else if (!dryRun && options.skipRecallIndexes !== true) {
     const {documentCount, vectors} = yield* maintainRecallIndexes(config, embedding.manifest, false);
     yield* Console.log(
-      `Recall indexes ready: ${documentCount} lexical document(s), ${vectors.chunkCount} vector chunk(s).`,
+      `Recall lexical index ready: ${documentCount} document(s). ${vectors.queued ? 'Document embeddings queued for idle background work.' : 'Vector index current.'}`,
     );
   }
   if (options.start !== false) {
@@ -446,7 +448,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
     yield* Console.log(
       dryRun
         ? 'Dry run complete. Run without --dry-run to initialize the Threadnote home.'
-        : 'Install complete. Semantic recall is ready. Next: `threadnote seed` to add repository resources.',
+        : 'Install complete. Document embeddings run when idle. Next: `threadnote seed` to add repository resources.',
     );
   }
   if (releaseRoot !== undefined) {
@@ -471,7 +473,7 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     yield* maintainRecallIndexes(config, embedding.manifest, true).pipe(
       Effect.tap(({documentCount, vectors}) =>
         Console.log(
-          `Rebuilt recall indexes for ${documentCount} document(s) and ${vectors.chunkCount} vector chunk(s).`,
+          `Rebuilt lexical recall for ${documentCount} document(s). ${vectors.queued ? 'Document embeddings queued for idle background work.' : 'Vector index current.'}`,
         ),
       ),
       Effect.mapError(cause =>
@@ -479,7 +481,9 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
       ),
     );
   } else {
-    yield* Console.log('Would validate and rebuild the derived lexical and vector recall indexes.');
+    yield* Console.log(
+      'Would validate and rebuild lexical recall, then queue document embeddings for idle background work.',
+    );
   }
   if (options.coreOnly === true) {
     yield* Console.log('Skipping host instructions, hooks, and MCP client repair (--core-only).');
@@ -660,54 +664,20 @@ const maintainRecallIndexes = Effect.fn('lifecycle.maintainRecallIndexes')(funct
     startProgress(`${forceRefresh ? 'Rebuilding' : 'Building'} lexical recall index from canonical documents.`),
     progress =>
       Effect.gen(function* () {
-        const updateProgress = (message: string) => progress.update(message).pipe(Effect.ignore);
-        for (
-          let completedRetries = 0;
-          completedRetries <= RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT;
-          completedRetries += 1
-        ) {
-          const attempt = yield* Effect.gen(function* () {
-            const index = yield* loadRecallIndexData(config, {
-              forceRefresh,
-              includeInactive: false,
-              onProgress: state => updateProgress(recallProgressMessage(state)),
-            });
-            yield* updateProgress(
-              `Preparing vector recall index for ${index.candidates.length} lexical document(s) with ${manifest.id}.`,
-            );
-            const vectors = yield* ensureVectorIndex(config, manifest, index.candidates, {
-              corpusGeneration: index.generation,
-              currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
-              onProgress: state => updateProgress(vectorProgressMessage(state)),
-            });
-            yield* verifyRecallIndexMaintenanceReadiness({
-              manifestId: manifest.id,
-              readLexicalStatus: () => recallIndexStatus(config, false),
-              readVectorReadiness: () =>
-                vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation),
-              requestedGeneration: index.generation,
-            });
-            return {documentCount: index.candidates.length, vectors};
-          }).pipe(Effect.result);
-          if (Result.isSuccess(attempt)) return attempt.success;
-          if (!recallIndexMaintenanceShouldRetry(attempt.failure, completedRetries)) {
-            return yield* Effect.fail(attempt.failure);
-          }
-          yield* updateProgress('Canonical documents changed during vector work; rebuilding current recall indexes.');
-        }
-        return yield* Effect.die(new Error('Recall index maintenance retry loop exhausted without a result.'));
+        const index = yield* loadRecallIndexData(config, {
+          forceRefresh,
+          includeInactive: false,
+          memoryIds: [],
+          onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
+        });
+        const current =
+          (yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation)) === 'current';
+        if (!current) yield* forceRefresh ? repairRecallEmbeddingDemand(config) : requestRecallEmbeddings(config);
+        return {documentCount: index.corpusStatistics.documentCount, vectors: {queued: !current}};
       }),
     progress => progress.stop,
   );
 });
-
-function vectorProgressMessage(progress: VectorIndexProgress): string {
-  if (progress.phase === 'activating') {
-    return `Activating vector recall index with ${progress.chunkCount} chunk(s).`;
-  }
-  const percentage = progress.total === 0 ? 100 : Math.floor((progress.completed / progress.total) * 100);
-  return `Building vector recall index: ${progress.completed}/${progress.total} new chunk(s) embedded (${percentage}%), ${progress.reused} unchanged chunk(s) reused.`;
-}
 
 function recallProgressMessage(progress: RecallIndexProgress): string {
   if (progress.phase === 'activating') {
@@ -1003,6 +973,19 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
     const currentGeneration =
       status.ready &&
       (yield* vectorIndexMatchesGeneration(config.agentContextHome, manifest, lexicalStatus.generation));
+    const demand = yield* readRecallEmbeddingDemand(config).pipe(Effect.option);
+    const queued = Option.isSome(demand) && demand.value?.desired !== undefined;
+    const readiness = yield* vectorIndexGenerationReadiness(
+      config.agentContextHome,
+      manifest,
+      lexicalStatus.generation,
+    );
+    if (!currentGeneration && queued && (status.ready || status.reason === 'not built') && readiness !== 'corrupt')
+      return {
+        detail: `${manifest.id}; queued for spare CPU capacity and no foreground Threadnote work; lexical recall available`,
+        name: 'vector recall index',
+        status: 'warn' as const,
+      };
     return status.ready
       ? currentGeneration
         ? {
@@ -1016,7 +999,7 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
             status: 'fail' as const,
           }
       : {
-          detail: `${manifest.id}; ${status.reason ?? 'not built'}; run \`threadnote repair\``,
+          detail: `${manifest.id}; ${status.reason ?? 'not built'}; run \`threadnote index rebuild\``,
           name: 'vector recall index',
           status: 'fail' as const,
         };

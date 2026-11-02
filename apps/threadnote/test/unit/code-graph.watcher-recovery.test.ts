@@ -248,8 +248,9 @@ describe('watcher admitted-attempt recovery', () => {
         const observability = yield* CodeGraphObservability;
         const store = yield* CodeGraphStore;
         const failed = yield* Deferred.make<void>();
-        const ready = yield* Deferred.make<void>();
+        const ready = yield* Deferred.make<void, string>();
         let attempts = 0;
+        let repairRequested = false;
         const context = yield* Layer.build(
           Layer.fresh(CodeGraphWatcher.layer).pipe(
             Layer.provide(
@@ -269,7 +270,12 @@ describe('watcher admitted-attempt recovery', () => {
                   CodeGraphObservability,
                   CodeGraphObservability.of({
                     ...observability,
-                    backgroundFailure: () => Deferred.succeed(failed, undefined).pipe(Effect.asVoid),
+                    backgroundFailure: (_component, failure) =>
+                      !repairRequested
+                        ? Deferred.succeed(failed, undefined).pipe(Effect.asVoid)
+                        : Deferred.fail(ready, `Repaired refresh failed: ${JSON.stringify(failure)}`).pipe(
+                            Effect.asVoid,
+                          ),
                   }),
                 ),
               ),
@@ -290,11 +296,6 @@ describe('watcher admitted-attempt recovery', () => {
           onRefreshed: () => Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
         };
         const key = 'recovery';
-        const awaitSignal = (signal: Deferred.Deferred<void>, label: string) =>
-          Deferred.await(signal).pipe(
-            Effect.timeout('5 seconds'),
-            Effect.catchCause(() => Effect.die(label)),
-          );
         yield* watcher.ensure({...target, key});
         const read = Effect.gen(function* () {
           const refreshStatus = Option.getOrUndefined(yield* watcher.cachedStatus(key, target));
@@ -308,17 +309,18 @@ describe('watcher admitted-attempt recovery', () => {
           });
         });
         yield* read;
-        yield* awaitSignal(requests[0], 'request 1 did not complete');
-        yield* awaitSignal(failed, 'initial child failure was not reported');
+        yield* Deferred.await(requests[0]);
+        yield* Deferred.await(failed);
         const cached = Option.getOrUndefined(yield* watcher.cachedStatus(key, target));
         expect(cached).toMatchObject({state: 'deferred', failure: {retryable: false, reobserveTarget: true}});
         yield* read;
-        yield* awaitSignal(requests[1], 'unchanged request 2 did not complete');
+        yield* Deferred.await(requests[1]);
         expect(attempts).toBe(1);
         yield* fs.writeFileString(manifestPath, `${manifest}\n`);
+        repairRequested = true;
         yield* read;
-        yield* awaitSignal(requests[2], 'repaired request 3 did not complete');
-        yield* awaitSignal(ready, 'repaired child did not refresh');
+        yield* Deferred.await(requests[2]);
+        yield* Deferred.await(ready);
         expect(attempts).toBe(2);
         expect(Option.getOrUndefined(yield* watcher.cachedStatus(key, target))).toMatchObject({state: 'ready'});
         expect((yield* watcher.metrics).activeWatches).toBe(1);
