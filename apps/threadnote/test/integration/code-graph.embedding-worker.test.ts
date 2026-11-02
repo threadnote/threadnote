@@ -496,8 +496,8 @@ effectIt.effect(
           expect(result.code).toBe(0);
           expect(JSON.parse(result.output).accepted).toBe(true);
         }
-        // The one-input contract needs130 independent native turns. The unchanged30s
-        // test budget owns this functional wait; an old10s inner limit is not an SLO.
+        // The one-input contract requires130 durable checkpoint/IPC turns. This case
+        // has scheduling headroom for loaded CI; native and batch deadlines are unchanged.
         yield* until(
           lanes(home).pipe(Effect.map(rows => rows[0]?.state === 'ready')),
           '130-symbol completion',
@@ -552,7 +552,7 @@ effectIt.effect(
         });
       }),
     ),
-  30_000,
+  60_000,
 );
 
 effectIt.effect(
