@@ -794,7 +794,7 @@ function recallIndexRoots(config: RecallRefreshConfig, path: Path.Path) {
 }
 
 function excludedDirectory(path: string, includeInactive: boolean): boolean {
-  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/'));
+  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/')) + '/';
   if (Effect2.pipe(normalized, EffectString.includes('/agent-artifacts/packs/'))) return true;
   return (
     !includeInactive &&

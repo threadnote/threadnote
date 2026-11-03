@@ -132,6 +132,39 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
 
 describe('Recall source staging', () => {
   effectIt.layer(BunServices.layer)(it => {
+    for (const includeInactive of [false, true])
+      it.effect(`keeps direct inactive-folder files ${includeInactive ? 'in' : 'out of'} the selected variant`, () =>
+        Effect.gen(function* () {
+          const {fs, path, config, policy, expected} = yield* fixture(sources(1));
+          const inactiveUris: string[] = [];
+          for (const status of ['archived', 'expired', 'superseded']) {
+            const directory = path.join(
+              config.agentContextHome,
+              'data',
+              config.account,
+              'user',
+              config.user,
+              'memories',
+              status,
+            );
+            yield* fs.makeDirectory(directory, {recursive: true});
+            yield* fs.writeFileString(path.join(directory, 'direct.md'), 'inactive source');
+            inactiveUris.push(`threadnote://user/${config.user}/memories/${status}/direct.md`);
+          }
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const result = yield* scanRecallSources(sql, fs, path, config, includeInactive, policy, new Set());
+            const uris = EffectArray.map(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`),
+              row => row.uri,
+            ).sort();
+            expect(uris).toEqual(
+              [...EffectArray.map(expected, row => row.uri), ...(includeInactive ? inactiveUris : [])].sort(),
+            );
+            expect(result.scannedSourceCount).toBe(includeInactive ? 4 : 1);
+          }).pipe(withDatabase);
+        }),
+      );
     it.effect('permits an independent SQLite writer while touched source checks are paused', () =>
       Effect.gen(function* () {
         const {expected, scan, fs, path, config, policy} = yield* fixture(sources(1));
