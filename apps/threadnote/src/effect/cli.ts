@@ -614,7 +614,7 @@ const indexRebuild = Command.make(
   'rebuild',
   {model: optionalString('model', 'Embedding model ID; defaults to the selected embedding model')},
   options => withRuntimeEffect(config => runIndexRebuild(config, options)),
-).pipe(Command.withDescription('Build and atomically activate a complete vector-index generation'));
+).pipe(Command.withDescription('Prepare lexical and vector recall indexes now; wait until both are ready'));
 
 const indexStatus = Command.make('status', {}, () => withRuntimeEffect(config => runIndexStatus(config))).pipe(
   Command.withDescription('Show vector-index generation and compatibility state'),
