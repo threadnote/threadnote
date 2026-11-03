@@ -210,9 +210,9 @@ export const stageRecallSources = Effect.fn('recall.stageSources')(function* (
 ) {
   if (options.mode.kind === 'touched') {
     yield* prepareRecallSourceScan(sql);
-    const touched = yield* sql.withTransaction(
-      stageTouchedRecallSources(sql, fs, path, config, options, options.mode.contentGeneration),
-    );
+    const touched = yield* sql
+      .withTransaction(stageTouchedRecallSources(sql, fs, path, config, options, options.mode.contentGeneration))
+      .pipe(Effect.provideService(SqlClient.BeginTransaction, 'BEGIN DEFERRED'));
     if (touched) return {...touched, mode: 'touched' as const, forceAllSources: false};
   }
   return {

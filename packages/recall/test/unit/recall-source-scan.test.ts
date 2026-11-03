@@ -2,7 +2,8 @@ import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path} from 'effect';
+import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -30,8 +31,9 @@ interface SourceRow {
   readonly authority_policy_key: string | null;
   readonly invalidated: number;
 }
-function withDatabase<A, E, R>(effect: Effect.Effect<A, E, R>) {
-  return Effect.scoped(Layer.build(database).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
+function withDatabase<A, E, R>(effect: Effect.Effect<A, E, R>, filename?: string) {
+  const selected = filename === undefined ? database : SqliteClient.layer({filename});
+  return Effect.scoped(Layer.build(selected).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }
 function sources(count: number): Source[] {
   return Array.from({length: count}, (_, id) => ({
@@ -130,6 +132,73 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
 
 describe('Recall source staging', () => {
   effectIt.layer(BunServices.layer)(it => {
+    it.effect('permits an independent SQLite writer while touched source checks are paused', () =>
+      Effect.gen(function* () {
+        const {expected, scan, fs, path, config, policy} = yield* fixture(sources(1));
+        const filename = path.join(config.agentContextHome, 'staging.sqlite');
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const paused = {
+          ...fs,
+          realPath: (target: string) =>
+            target === config.agentContextHome
+              ? Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(fs.realPath(target)),
+                )
+              : fs.realPath(target),
+        };
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          yield* sql.unsafe('CREATE TABLE writer_probe (value TEXT NOT NULL)');
+          const staging = yield* stageRecallSources(sql, paused, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([expected[0].uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered).pipe(Effect.timeout('2 seconds'));
+          const script = `import {Database} from 'bun:sqlite';
+            const db = new Database(process.argv.at(-1), {create: false});
+            db.exec('PRAGMA busy_timeout = 50');
+            db.exec('BEGIN IMMEDIATE');
+            db.exec("INSERT INTO writer_probe VALUES ('independent')");
+            db.exec('COMMIT');
+            db.close();`;
+          const writer = yield* Effect.acquireUseRelease(
+            Effect.sync(() =>
+              Bun.spawn([process.execPath, '--eval', script, filename], {
+                stdin: 'ignore',
+                stdout: 'ignore',
+                stderr: 'pipe',
+              }),
+            ),
+            child =>
+              Effect.gen(function* () {
+                const code = yield* Effect.promise(() => child.exited);
+                const stderr = yield* Effect.promise(() => new Response(child.stderr).text());
+                return {code, stderr};
+              }).pipe(Effect.timeout('2 seconds')),
+            child =>
+              Effect.promise(async () => {
+                if (child.exitCode === null) child.kill();
+                await child.exited;
+              }),
+          ).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+          expect(writer.code, writer.stderr).toBe(0);
+          expect((yield* Fiber.join(staging)).mode).toBe('touched');
+          expect(yield* sql.unsafe('SELECT value FROM writer_probe')).toEqual([{value: 'independent'}]);
+          expect(yield* sql.unsafe('SELECT value FROM metadata WHERE key = ?', ['content_generation'])).toEqual([
+            {value: 'baseline'},
+          ]);
+          expect(yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`)).toEqual([
+            {...expected[0], invalidated: 1},
+          ]);
+        }).pipe(effect => withDatabase(effect, filename));
+      }).pipe(TestClock.withLive),
+    );
     it.effect('forces hydration of an invalidated file with unchanged size and modification time', () =>
       Effect.gen(function* () {
         const {expected, scan, fs, path, config, policy} = yield* fixture(sources(1));
