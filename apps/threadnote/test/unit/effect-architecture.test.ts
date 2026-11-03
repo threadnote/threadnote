@@ -250,6 +250,11 @@ describe('Effect architecture boundaries', () => {
           'process.stdout.write(JSON.stringify(value));',
         ],
       ],
+      // This expression is inside the generated external Node launcher attestation.
+      [
+        'apps/threadnote/src/semantic/providers/typescript_runtime.ts',
+        ['pid: process.pid, instance, challenge: args.challenge, locked});'],
+      ],
     ]);
     for (const path of await sourceFiles()) {
       const relativePath = Effect.pipe(relative(repoRoot, path), EffectString.replaceAll('\\', '/'));
