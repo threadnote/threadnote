@@ -165,6 +165,37 @@ effectIt.effect('retains ordinary per-lock waiting beyond the native allowance',
   }).pipe(provide),
 );
 
+effectIt.effect('caps an unbounded local policy only within native attempts', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* Effect.gen(function* () {
+      for (const retryIntervalMilliseconds of [250, Number.POSITIVE_INFINITY]) {
+        const error = yield* withNativeFileLockWaitBudget(
+          withExclusiveFileLock(
+            f.unavailable('native-infinite'),
+            f.file('native-infinite'),
+            {...policy, retryIntervalMilliseconds, waitTimeoutMilliseconds: Number.POSITIVE_INFINITY},
+            Effect.void,
+          ),
+        ).pipe(Effect.flip);
+        expect(error).toMatchObject({
+          _tag: 'FileLockTimeout',
+          waitedMilliseconds: 2000,
+          cumulativeWaitMilliseconds: 2000,
+        });
+      }
+      const started = yield* Clock.currentTimeMillis;
+      yield* withExclusiveFileLock(
+        f.unavailable('ordinary-infinite', 12),
+        f.file('ordinary-infinite'),
+        {...policy, waitTimeoutMilliseconds: Number.POSITIVE_INFINITY},
+        Effect.void,
+      );
+      expect((yield* Clock.currentTimeMillis) - started).toBe(3000);
+    }).pipe(f.model);
+  }).pipe(provide),
+);
+
 effectIt.effect.prop(
   'charges generated wait histories once while excluding preparation and protected work',
   {

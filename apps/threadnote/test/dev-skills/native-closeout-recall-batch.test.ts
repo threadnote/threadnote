@@ -142,17 +142,22 @@ for (const outcome of ['success', 'lost-response', 'interrupted'] as const) {
       const store = f.store;
       const intercepted = {
         ...store,
-        remove: (...args: Parameters<typeof store.remove>) =>
-          store.remove(...args).pipe(
+        mutateChecked: <E, R>(
+          location: Parameters<typeof store.mutateChecked>[0],
+          mutations: Parameters<typeof store.mutateChecked>[1],
+          check: Effect.Effect<void, E, R>,
+        ) =>
+          store.mutateChecked(location, mutations, check).pipe(
             Effect.andThen(() => {
-              removed.push(args[1]);
-              if (outcome === 'success' || injected || args[1] !== target.uri) return Effect.void;
+              const retired = EffectArray.filter(mutations, mutation => mutation.type === 'remove');
+              removed.push(...EffectArray.map(retired, mutation => mutation.uri));
+              if (outcome === 'success' || injected || !EffectArray.some(retired, mutation => mutation.uri === target.uri)) return Effect.void;
               injected = true;
               return outcome === 'interrupted'
                 ? Effect.interrupt
                 : Effect.fail(
                     ResourceIoFailed.make({
-                      uri: args[1],
+                      uri: target.uri,
                       operation: 'write',
                       message: 'Lost batch archive response.',
                       cause: new Error('Lost batch archive response.'),

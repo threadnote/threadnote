@@ -199,10 +199,15 @@ export function withExclusiveFileLock<A, E, R>(
           })
         : Effect.acquireUseRelease(
             Effect.sync(() => {
-              const localRemaining =
-                BigInt(Math.max(0, Math.floor(options.waitTimeoutMilliseconds * 1_000_000))) - waitedNanos;
-              const requested = BigInt(Math.max(0, Math.floor(options.retryIntervalMilliseconds * 1_000_000)));
               const available = budget.active ? budget.remainingNanos : 0n;
+              const localRemaining =
+                options.waitTimeoutMilliseconds === Number.POSITIVE_INFINITY
+                  ? available
+                  : BigInt(Math.max(0, Math.floor(options.waitTimeoutMilliseconds * 1_000_000))) - waitedNanos;
+              const requested =
+                options.retryIntervalMilliseconds === Number.POSITIVE_INFINITY
+                  ? available
+                  : BigInt(Math.max(0, Math.floor(options.retryIntervalMilliseconds * 1_000_000)));
               const granted = requested < available ? requested : available;
               const nanos = granted < localRemaining ? granted : localRemaining;
               if (nanos <= 0n) return undefined;
