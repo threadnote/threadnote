@@ -187,6 +187,17 @@ const provide = <A, E, R>(body: Effect.Effect<A, E, R>) =>
     }),
     provideTestLayer(Layer.mergeAll(BunServices.layer, SystemInfo.layer)),
   );
+const withStoppedFixtureCollector = <A, E, R>(body: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    return yield* body.pipe(
+      Effect.provideService(SystemInfo, {
+        ...system,
+        // The fixture's synthetic collector PID must not depend on the host process table.
+        isProcessRunning: pid => (pid === 123 ? false : system.isProcessRunning(pid)),
+      }),
+    );
+  });
 
 effectIt.effect('rejects unsupported Codex start and changed consumer bindings before any durable mutation', () =>
   Effect.gen(function* () {
@@ -1072,7 +1083,7 @@ effectIt.effect('settled terminal notice claims late arrival without renewing ex
     expect(after.envelope.notification!.outbox!.consumedThrough).toBe(state.nextSequence - 1);
     yield* arrive(f);
     expect((yield* f.read()).revision).toBe(after.revision);
-  }).pipe(provide),
+  }).pipe(withStoppedFixtureCollector, provide),
 );
 
 effectIt.effect('terminal notice survives lease expiry and explicit same-owner renewal before arrival', () =>
@@ -1118,7 +1129,7 @@ effectIt.effect('terminal notice survives lease expiry and explicit same-owner r
     expect(finished.envelope.notification).toMatchObject({outbox: null, lastReceipt: {receipt}});
     expect(finished.envelope.state.events).toHaveLength(0);
     expect(finished.envelope.state.work.length).toBeGreaterThan(0);
-  }).pipe(provide),
+  }).pipe(withStoppedFixtureCollector, provide),
 );
 
 effectIt.effect('Codex crash ambiguity and lost receipts never automatically repeat an unchanged event', () =>

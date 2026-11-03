@@ -91,7 +91,7 @@ it('polls operations across page changes, shares the inventory, handles failures
     expect(container.querySelector('.process-workspace')?.textContent).toContain(
       'Sharing capacity with graph indexing · Preparing documents · 12 / 30',
     );
-    expect(container.querySelector('.process-workspace')?.textContent).toContain('Started');
+    expect(container.querySelector('.process-lane-metadata')?.textContent).toContain('Age 1s');
     processes = [
       {...process('recall-embedding', 5), role: 'cli', embeddingProgress: {state: 'deferred-cpu', reason: 'cpu-busy'}},
     ];

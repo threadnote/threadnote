@@ -23,13 +23,13 @@ import {
   invalidateManagerReviewReadiness,
 } from '../../src/manager/review_actionability.js';
 import {requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance_control.js';
+import {runContextMaintenance} from '../../src/memory/context/maintenance.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
-  outcome: 'propose-update' | 'propose-revalidation' | 'insufficient-evidence' | 'policy-conflict' = 'propose-update',
-) {
+const evidenceFixture = Effect.fn('managerAutomaticReviewLoading.evidenceFixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'review-loading-'});
@@ -78,6 +78,13 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
   const packet = yield* requestAutomaticMemoryReview(config, input);
   if ('reviewId' in packet) throw new Error('Expected a synthetic evidence packet.');
   expect(packet.reviewEvidence).toHaveLength(4);
+  return {fs, path, home, root, target, uri, content, config, input, packet};
+});
+
+const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
+  outcome: 'propose-update' | 'propose-revalidation' | 'insufficient-evidence' | 'policy-conflict' = 'propose-update',
+) {
+  const {fs, path, home, root, target, uri, content, config, input, packet} = yield* evidenceFixture();
   const handle = packet.reviewEvidence[0];
   const proposed = yield* requestAutomaticMemoryReview(config, {
     ...input,
@@ -136,6 +143,30 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
     review: yield* candidates.loadCandidateReview(home, proposed.reviewId),
   };
 });
+
+effectIt.effect('offers a bounded first foreground draft without treating provisional roles as approval', () =>
+  Effect.gen(function* () {
+    const f = yield* evidenceFixture();
+    expect(f.packet.capabilities.draft).toBe(false);
+    expect(f.packet.draftRequest.available).toBe(true);
+    const status = () =>
+      handleManagerAutomaticMemory({
+        config: f.config,
+        method: 'GET',
+        url: new URL(
+          `http://manager.test/api/attention/automatic-memory?project=fixture&uri=${encodeURIComponent(f.uri)}`,
+        ),
+        body: Effect.succeed({}),
+      });
+    yield* setContextMaintenancePaused(f.config, false);
+    yield* runContextMaintenance(f.config, {cwd: f.root, project: 'fixture', maxRecords: 16});
+    expect(yield* status()).toMatchObject({status: 200, body: {items: [{canGenerate: true}]}});
+    yield* setContextMaintenancePaused(f.config, true);
+    expect(yield* status()).toMatchObject({status: 200, body: {items: [{canGenerate: false}]}});
+    expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
+    expect(yield* candidates.listCandidateReviews(f.home)).toEqual([]);
+  }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+);
 
 effectIt.effect(
   'groups unavailable code readiness and restores the exact generated proposal without waiving its whole source vector',

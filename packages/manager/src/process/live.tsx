@@ -34,7 +34,7 @@ function useProcessInventory(enabled: boolean): ProcessInventory {
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
     if (!enabled) return;
-    const timer = window.setInterval(() => setDisplayNow(Date.now()), 10_000);
+    const timer = window.setInterval(() => setDisplayNow(Date.now()), 3_000);
     return () => window.clearInterval(timer);
   }, [enabled]);
   const load = async (signal?: AbortSignal): Promise<void> => {
@@ -80,6 +80,12 @@ function useProcessInventory(enabled: boolean): ProcessInventory {
             processes: EffectArray.map(current.processes, process => ({
               ...process,
               ageMilliseconds: process.ageMilliseconds + Math.max(0, displayNow - sample.current.at),
+              cpu:
+                process.cpu?.state === 'sampled' &&
+                (!Number.isFinite(Date.parse(process.cpu.sampledAt)) ||
+                  Date.now() - Date.parse(process.cpu.sampledAt) > 10_000)
+                  ? {state: 'unavailable' as const, sampledAt: process.cpu.sampledAt}
+                  : process.cpu,
             })),
           }
         : current,

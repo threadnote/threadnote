@@ -1,8 +1,9 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
@@ -118,6 +119,194 @@ const fixture = Effect.fn('test.workflowMemory.fixture')(function* (profile: Wor
 });
 
 describe('private workflow artifact protocol', () => {
+  effectIt.effect('lets an unrelated binding commit while deferred preparation is paused', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', f.repo, ...args]);
+      yield* git(['config', 'user.email', 'test@example.invalid']);
+      yield* git(['config', 'user.name', 'Workflow Test']);
+      yield* f.fs.makeDirectory(f.path.join(f.repo, 'src'));
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'src/value.ts'), 'export const value = 1;\n');
+      yield* git(['add', '.']);
+      yield* git(['commit', '-m', 'fixture']);
+      const second = yield* f.call({
+        protocolVersion: 1,
+        action: 'bind',
+        workflowRunId: 'another-run',
+        project: 'fixture',
+        featureId: 'feature',
+        generation: 'bundle-v1',
+      });
+      if (!('binding' in second)) throw new Error('Expected second binding');
+      const query = yield* CodeGraphQueryService;
+      const paused = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let observations = 0;
+      const events: string[] = [];
+      const guarded = CodeGraphQueryService.of({
+        ...query,
+        status: (...args) =>
+          Effect.gen(function* () {
+            const names = yield* f.fs
+              .readDirectory(f.path.join(f.home, 'threadnote', 'memory-locks'))
+              .pipe(Effect.orElseSucceed(() => []));
+            events.push(`graph:${names.length}`);
+            if (++observations === 2) {
+              yield* Deferred.succeed(paused, undefined);
+              yield* Deferred.await(release);
+            }
+            return yield* query.status(...args);
+          }),
+      });
+      const first = yield* f
+        .call({...f.write, codeRefs: ['src/value.ts'], citationPolicy: 'defer'})
+        .pipe(Effect.provideService(CodeGraphQueryService, guarded), Effect.forkChild);
+      yield* Deferred.await(paused);
+      yield* Effect.gen(function* () {
+        const other = yield* f
+          .call({...f.write, bindingId: second.binding.bindingId})
+          .pipe(Effect.timeoutOption('3 seconds'));
+        expect(other).toMatchObject({_tag: 'Some', value: {status: 'ok'}});
+        expect(events).toEqual(['graph:0', 'graph:0']);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+      expect(yield* Fiber.join(first)).toMatchObject({status: 'ok'});
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('recovers a child interrupted after canonical write without writing its postimage twice', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const preview = yield* f.call({...f.write, action: 'preflight', mutation: 'create'});
+      if (!('canonicalUri' in preview) || typeof preview.canonicalUri !== 'string') throw new Error('Expected preview');
+      const committed = yield* Deferred.make<void>();
+      const store = yield* ResourceStore;
+      let canonicalWrites = 0;
+      let pause = true;
+      const observed = ResourceStore.of({
+        ...store,
+        writeChecked: (location, uri, content, options, check) =>
+          store.writeChecked(location, uri, content, options, check).pipe(
+            Effect.tap(() => {
+              if (uri !== preview.canonicalUri) return Effect.void;
+              canonicalWrites++;
+              return pause ? Deferred.succeed(committed, undefined).pipe(Effect.andThen(Effect.never)) : Effect.void;
+            }),
+          ),
+      });
+      const writer = yield* f.call(f.write).pipe(Effect.provideService(ResourceStore, observed), Effect.forkChild);
+      yield* Deferred.await(committed);
+      yield* Fiber.interrupt(writer);
+      pause = false;
+      const before = yield* store.read(
+        {account: f.config.account, home: f.home, user: f.config.user},
+        preview.canonicalUri,
+      );
+      const stateFile = f.path.join(f.home, 'workflow-memory', `${f.binding.bindingId}.json`);
+      expect(JSON.parse(yield* f.fs.readFileString(stateFile)).operations[f.write.operationId!].status).toBe(
+        'prepared',
+      );
+      const recovered = yield* f
+        .call({
+          protocolVersion: 1,
+          action: 'recover',
+          bindingId: f.binding.bindingId,
+          operationId: f.write.operationId,
+        })
+        .pipe(Effect.provideService(ResourceStore, observed));
+      expect(recovered).toMatchObject({
+        status: 'ok',
+        canonicalUri: preview.canonicalUri,
+        revision: sha256HexSync(before),
+      });
+      expect(canonicalWrites).toBe(1);
+      expect(
+        yield* store.read({account: f.config.account, home: f.home, user: f.config.user}, preview.canonicalUri),
+      ).toBe(before);
+      expect(JSON.parse(yield* f.fs.readFileString(stateFile)).operations[f.write.operationId!].status).toBe(
+        'verified',
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('admits an archive write and source removal through one checked batch', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const created = readResult(yield* f.call(f.write));
+      const store = yield* ResourceStore;
+      const batches: string[][] = [];
+      let checks = 0;
+      const result = yield* f
+        .call({
+          protocolVersion: 1,
+          action: 'archive',
+          bindingId: f.binding.bindingId,
+          operationId: 'archive-batch',
+          artifactKey: f.write.artifactKey,
+          sourceRunId: f.write.sourceRunId,
+          role: f.write.role,
+          uri: created.canonicalUri,
+          expectedRevision: created.revision,
+        })
+        .pipe(
+          Effect.provideService(
+            ResourceStore,
+            ResourceStore.of({
+              ...store,
+              mutateChecked: (location, mutations, check) => {
+                batches.push(EffectArray.map(mutations, mutation => mutation.type));
+                return store.mutateChecked(
+                  location,
+                  mutations,
+                  check.pipe(
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        checks++;
+                      }),
+                    ),
+                  ),
+                );
+              },
+            }),
+          ),
+        );
+      expect(result).toMatchObject({status: 'ok', state: 'archived'});
+      expect(batches).toEqual([['write', 'remove']]);
+      expect(checks).toBe(1);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('prepares deferred graph evidence before acquiring shared memory locks', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', f.repo, ...args]);
+      yield* git(['config', 'user.email', 'test@example.invalid']);
+      yield* git(['config', 'user.name', 'Workflow Test']);
+      yield* f.fs.makeDirectory(f.path.join(f.repo, 'src'));
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'src/value.ts'), 'export const value = 1;\n');
+      yield* git(['add', '.']);
+      yield* git(['commit', '-m', 'fixture']);
+      const query = yield* CodeGraphQueryService;
+      let observed = 0;
+      const guarded = CodeGraphQueryService.of({
+        ...query,
+        status: (...args) =>
+          Effect.gen(function* () {
+            observed++;
+            const locks = yield* f.fs
+              .readDirectory(f.path.join(f.home, 'threadnote', 'memory-locks'))
+              .pipe(Effect.orElseSucceed(() => []));
+            expect(locks).toEqual([]);
+            return yield* query.status(...args);
+          }),
+      });
+      const result = yield* f
+        .call({...f.write, codeRefs: ['src/value.ts'], citationPolicy: 'defer'})
+        .pipe(Effect.provideService(CodeGraphQueryService, guarded));
+      expect(result).toMatchObject({status: 'ok'});
+      expect(observed).toBeGreaterThan(0);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const) {
     effectIt.effect(`keeps ${profile} planning private and rejects profile drift`, () =>
       Effect.gen(function* () {

@@ -50,18 +50,18 @@ describe('native closeout lifecycle', () => {
       let lost = false;
       const interruptedStore = {
         ...store,
-        remove: (
-          location: Parameters<typeof store.remove>[0],
-          uri: string,
-          options?: Parameters<typeof store.remove>[2],
+        mutateChecked: <E, R>(
+          location: Parameters<typeof store.mutateChecked>[0],
+          mutations: Parameters<typeof store.mutateChecked>[1],
+          check: Effect.Effect<void, E, R>,
         ) =>
-          store.remove(location, uri, options).pipe(
+          store.mutateChecked(location, mutations, check).pipe(
             Effect.andThen(() => {
-              if (!lost && uri === target.uri) {
+              if (!lost && EffectArray.some(mutations, mutation => mutation.type === 'remove' && mutation.uri === target.uri)) {
                 lost = true;
                 return Effect.fail(
                   ResourceIoFailed.make({
-                    uri,
+                    uri: target.uri,
                     operation: 'write',
                     message: 'Synthetic lost archive response after commit.',
                     cause: new Error('Synthetic lost archive response after commit.'),
@@ -112,20 +112,20 @@ describe('native closeout lifecycle', () => {
       let lost = false;
       const interruptedStore = {
         ...store,
-        remove: (
-          location: Parameters<typeof store.remove>[0],
-          uri: string,
-          options?: Parameters<typeof store.remove>[2],
+        mutateChecked: <E, R>(
+          location: Parameters<typeof store.mutateChecked>[0],
+          mutations: Parameters<typeof store.mutateChecked>[1],
+          check: Effect.Effect<void, E, R>,
         ) =>
-          store.remove(location, uri, options).pipe(
+          store.mutateChecked(location, mutations, check).pipe(
             Effect.andThen(() => {
-              if (!lost && uri === target.uri) {
+              if (!lost && EffectArray.some(mutations, mutation => mutation.type === 'remove' && mutation.uri === target.uri)) {
                 lost = true;
                 outputRefreshesBeforeArchive =
                   refreshes.snapshot().totals['recall.refreshDerivedLexicalIndex']?.started ?? 0;
                 return Effect.fail(
                   ResourceIoFailed.make({
-                    uri,
+                    uri: target.uri,
                     operation: 'write',
                     message: 'Synthetic lost archive response after commit.',
                     cause: new Error('Synthetic lost archive response after commit.'),

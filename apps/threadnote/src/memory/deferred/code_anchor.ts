@@ -224,12 +224,8 @@ interface InvalidDeferredCodeAnchorIntent {
 
 type DeferredCodeAnchorIntentEntry = InvalidDeferredCodeAnchorIntent | StoredDeferredCodeAnchorIntent;
 
-/**
- * Stage the private intent before the canonical memory write. A crash can leave
- * an orphaned intent, but cannot leave a successfully stored deferred memory
- * without its recovery intent. Finalization reconciles orphans fail-closed.
- */
-export const stageDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.stage')(function* (
+/** Resolve graph identity and encode the outbox image before mutation coordination. */
+export const prepareDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.prepareIntent')(function* (
   config: RuntimeConfig,
   input: {
     readonly memoryContent: string;
@@ -321,10 +317,42 @@ export const stageDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.stage')
     visibility: 'private-local',
     worktreeId: status.identity.worktreeId,
   };
-  yield* writeDeferredCodeAnchorIntent(config, intent);
+  return {
+    intent,
+    content: `${JSON.stringify(intent, undefined, 2)}\n`,
+    uriDigest: yield* deferredCodeAnchorUriDigest(intent.memoryUri),
+    name: yield* deferredCodeAnchorShardedIntentName(intent),
+    routeKeys: yield* deferredCodeAnchorRouteQueueKeysForIntent(config, intent),
+  };
+});
+
+export const persistPreparedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persistPreparedIntent')(function* (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
+  prepared: Effect.Success<ReturnType<typeof prepareDeferredCodeAnchorIntent>>,
+) {
+  yield* persistShardedDeferredCodeAnchorIntent(config, prepared.intent, prepared.content, prepared);
+  return prepared.intent;
+});
+
+export const schedulePreparedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.schedulePreparedIntent')(function* (
+  config: RuntimeConfig,
+  intent: DeferredCodeAnchorIntentV1,
+) {
   if (intent.recovery.recovery === 'prepare-current-graph' && intent.recovery.preparation.target !== 'workset') {
     yield* scheduleDeferredCodeAnchorIntentRefresh(config, intent).pipe(Effect.ignoreCause);
   }
+});
+
+/** Persist before canonical write; finalization reconciles crash-orphaned intents fail-closed. */
+export const stageDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.stage')(function* (
+  config: RuntimeConfig,
+  input: Parameters<typeof prepareDeferredCodeAnchorIntent>[1],
+) {
+  const intent = yield* persistPreparedDeferredCodeAnchorIntent(
+    config,
+    yield* prepareDeferredCodeAnchorIntent(config, input),
+  );
+  yield* schedulePreparedDeferredCodeAnchorIntent(config, intent);
   return intent;
 });
 
@@ -863,13 +891,6 @@ const finalizeDeferredCodeAnchor = Effect.fn('memoryCodeAnchor.finalizeOne')(fun
   );
 });
 
-const writeDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.writeIntent')(function* (
-  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
-  intent: DeferredCodeAnchorIntentV1,
-) {
-  yield* persistShardedDeferredCodeAnchorIntent(config, intent, `${JSON.stringify(intent, undefined, 2)}\n`);
-});
-
 export const listDeferredCodeAnchorIntents = Effect.fn('memoryCodeAnchor.listIntents')(function* (
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
 ) {
@@ -1177,12 +1198,16 @@ const persistShardedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persi
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
   intent: DeferredCodeAnchorIntentV1,
   content: string,
+  prepared?: Pick<
+    Effect.Success<ReturnType<typeof prepareDeferredCodeAnchorIntent>>,
+    'uriDigest' | 'name' | 'routeKeys'
+  >,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* ensurePrivateDeferredCodeAnchorRoot(config);
-  const uriDigest = yield* deferredCodeAnchorUriDigest(intent.memoryUri);
-  const name = yield* deferredCodeAnchorShardedIntentName(intent);
+  const uriDigest = prepared?.uriDigest ?? (yield* deferredCodeAnchorUriDigest(intent.memoryUri));
+  const name = prepared?.name ?? (yield* deferredCodeAnchorShardedIntentName(intent));
   const itemRoot = yield* ensurePrivateDeferredCodeAnchorDirectory(
     fs,
     path.join(root, DEFERRED_CODE_ANCHOR_ITEM_ROOT_NAME),
@@ -1204,7 +1229,7 @@ const persistShardedDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.persi
     path.join(root, DEFERRED_CODE_ANCHOR_ROUTE_ROOT_NAME),
     [root],
   );
-  for (const key of yield* deferredCodeAnchorRouteQueueKeysForIntent(config, intent)) {
+  for (const key of prepared?.routeKeys ?? (yield* deferredCodeAnchorRouteQueueKeysForIntent(config, intent))) {
     const queueRoot = yield* ensurePrivateDeferredCodeAnchorDirectory(fs, path.join(routeRoot, key), [root, routeRoot]);
     const laneRoot = yield* ensurePrivateDeferredCodeAnchorDirectory(fs, path.join(queueRoot, '0'), [
       root,

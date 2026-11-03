@@ -128,6 +128,31 @@ const selectedIntegrationPackageTests = (changedFile: string) => {
 };
 
 describe('generated Bazel test contracts', () => {
+  it.each([
+    'packages/manager/src/ui.tsx',
+    'apps/threadnote/src/manager/live.ts',
+    'packages/integration-core/src/source-coordinator.ts',
+    'apps/threadnote/test/e2e/manager/fixtures/runtime.ts',
+    'playwright.manager.config.ts',
+    'packages/manager/static/app.css',
+    'scripts/build.ts',
+    'bun.lock',
+  ])('selects Manager browser E2E for runtime, fixture and build input %s', file => {
+    expect(target('//:manager_e2e_inputs').inputs).toContain(file);
+    const selection = selectForChangedInput(file);
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:manager_e2e');
+  });
+
+  it('does not select Manager browser E2E for website-only content and retains unknown-input fallback', () => {
+    const website = selectForChangedInput('apps/website/src/content/docsAgentIntegrations.ts');
+    expect(website.mode).toBe('selective');
+    expect(website.targets).not.toContain('//:manager_e2e');
+    const unknown = selectForChangedInput('unmodeled/manager-fixture-input.ts');
+    expect(unknown.mode).toBe('fallback');
+    expect(unknown.targets).toContain('//:manager_e2e');
+  });
+
   it('selects Windows smoke when its workflow changes', () => {
     expect(selectForChangedInput('.github/workflows/ci.yml').targets).toContain('//:windows_smoke');
   });

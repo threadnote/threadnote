@@ -123,7 +123,7 @@ describe('native workflow graph evidence contention', () => {
               'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
           },
         });
-        expect({acquired, released, reads}).toEqual({acquired: 0, released: 0, reads: 2});
+        expect({acquired, released, reads}).toEqual({acquired: 0, released: 0, reads: 1});
         expect(yield* f.f.fs.readFileString(statePath)).toBe(beforeState);
         expect(yield* f.f.fs.readFileString(journalPath)).toBe(beforeJournal);
         expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
@@ -166,7 +166,7 @@ describe('native workflow graph evidence contention', () => {
             'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
         },
       });
-      expect(attempts).toBe(2);
+      expect(attempts).toBe(1);
       expect(yield* f.f.fs.readFileString(statePath)).toBe(beforeState);
       expect(yield* f.f.fs.readFileString(journalPath)).toBe(beforeJournal);
       expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(beforeRoot);
@@ -201,7 +201,7 @@ describe('native workflow graph evidence contention', () => {
           f.f.call(request, f.config).pipe(Effect.provideService(CodeGraphStore, busyAfterInitialPreflight)),
         );
         expect(denied).toMatchObject(errorShape);
-        expect(attempts).toBe(3);
+        expect(attempts).toBe(2);
         const stateBeforeRecovery = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath()));
         const prepared = stateBeforeRecovery.operations.filter(
           (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'resume-citations',
@@ -267,7 +267,7 @@ describe('native workflow graph evidence contention', () => {
       );
       expect(denied).toMatchObject(errorShape);
       expect(wrote).toBe(true);
-      expect(busyReads).toBe(2);
+      expect(busyReads).toBe(1);
       const pending = JSON.parse(yield* f.f.fs.readFileString(f.f.statePath())).operations.filter(
         (operation: {intent: {operationId: string}}) => operation.intent.operationId === 'readback-citations',
       );

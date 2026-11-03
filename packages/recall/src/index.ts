@@ -1,6 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
+import {Cause, Clock, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {
   recallCodeLinkMatchesResult,
   recallExactMatchesResult,
@@ -8,7 +8,6 @@ import {
   recallIndexDataResult,
   recallMemoryLinkMatchesResult,
 } from './index/result.js';
-import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
   readyRecallSelectionPolicy,
@@ -24,8 +23,6 @@ import {
   numericMetadata,
   chunkRecallValues,
 } from './index/read_policy.js';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
   isExternalResourceUri,
   loadExternalResourceAccess,
@@ -72,6 +69,14 @@ import {
   type RecallMemoryLinkQueryOptions,
 } from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
+import {useRecallDatabase, withCanonicalResourceMutationLock, withRecallIndexLock} from './index/locks.js';
+import {
+  failFastIdentityPreparation,
+  normalizeRecallIdentityPreparation,
+  readRecallIdentityAdmissionCut,
+  RecallIdentityAdmissionBusy,
+  withPreparedRecallIdentityAdmission,
+} from './index/admission.js';
 import {
   RECALL_LOGICAL_SCOPE_CHANGED_REASON,
   recallLogicalScope,
@@ -531,53 +536,60 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
   options: RecallIndexReadQuery,
   firstCause: Cause.Cause<unknown>,
 ) {
-  return yield* withRecallIndexLock(fs, path, config.agentContextHome, options.includeInactive, () =>
-    Effect.gen(function* () {
-      const activePath = yield* resolveActiveRecallDatabasePath(
-        fs,
-        path,
-        config.agentContextHome,
-        options.includeInactive,
-      );
-      if (activePath !== failedDatabasePath) {
-        return yield* executeRecallIndexQuery(activePath, staleMarkerBasePath, config, options);
-      }
-      const system = yield* SystemInfo;
-      const generation = `${yield* Clock.currentTimeMillis}-${system.processId}-${nextRecallGenerationCounter()}`;
-      const root = recallIndexRoot(path, config.agentContextHome);
-      const relativeDatabasePath = path.join(
-        'generations',
-        `${options.includeInactive ? 'with-inactive' : 'active'}-${generation}.sqlite`,
-      );
-      const replacementPath = path.join(root, relativeDatabasePath);
-      yield* fs.makeDirectory(path.dirname(replacementPath), {recursive: true, mode: 0o700});
-      const replacementOptions = {...options, forceRefresh: true};
-      const rebuilt = yield* executeRecallIndexQuery(
-        replacementPath,
-        staleMarkerBasePath,
-        config,
-        replacementOptions,
-        true,
-        true,
-      ).pipe(
-        Effect.catchCause(secondCause =>
-          Effect.fail(
-            RecallIndexOperationError.make({
-              message: `Lexical recall index recovery failed: ${Cause.pretty(firstCause)}; replacement failed: ${Cause.pretty(secondCause)}`,
-            }),
+  return yield* withRecallIndexLock(
+    fs,
+    recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+    () =>
+      Effect.gen(function* () {
+        const activePath = yield* resolveActiveRecallDatabasePath(
+          fs,
+          path,
+          config.agentContextHome,
+          options.includeInactive,
+        );
+        if (activePath !== failedDatabasePath) {
+          return yield* executeRecallIndexQuery(activePath, staleMarkerBasePath, config, options);
+        }
+        const system = yield* SystemInfo;
+        const generation = `${yield* Clock.currentTimeMillis}-${system.processId}-${nextRecallGenerationCounter()}`;
+        const root = recallIndexRoot(path, config.agentContextHome);
+        const relativeDatabasePath = path.join(
+          'generations',
+          `${options.includeInactive ? 'with-inactive' : 'active'}-${generation}.sqlite`,
+        );
+        const replacementPath = path.join(root, relativeDatabasePath);
+        yield* fs.makeDirectory(path.dirname(replacementPath), {recursive: true, mode: 0o700});
+        const replacementOptions = {...options, forceRefresh: true};
+        const rebuilt = yield* executeRecallIndexQuery(
+          replacementPath,
+          staleMarkerBasePath,
+          config,
+          replacementOptions,
+          true,
+          true,
+        ).pipe(
+          normalizeRecallIdentityPreparation,
+          Effect.catchCauseIf(
+            secondCause =>
+              !Cause.hasInterrupts(secondCause) && !Schema.is(RecallIdentityAdmissionBusy)(Cause.squash(secondCause)),
+            secondCause =>
+              Effect.fail(
+                RecallIndexOperationError.make({
+                  message: `Lexical recall index recovery failed: ${Cause.pretty(firstCause)}; replacement failed: ${Cause.pretty(secondCause)}`,
+                }),
+              ),
           ),
-        ),
-        Effect.ensuring(removeRecallDatabaseAuxiliaryFiles(fs, replacementPath).pipe(Effect.ignore)),
-      );
-      yield* writeActiveRecallDatabasePointer(
-        fs,
-        path,
-        config.agentContextHome,
-        options.includeInactive,
-        relativeDatabasePath,
-      );
-      return rebuilt;
-    }),
+          Effect.ensuring(removeRecallDatabaseAuxiliaryFiles(fs, replacementPath).pipe(Effect.ignore)),
+        );
+        yield* writeActiveRecallDatabasePointer(
+          fs,
+          path,
+          config.agentContextHome,
+          options.includeInactive,
+          relativeDatabasePath,
+        );
+        return rebuilt;
+      }),
   );
 });
 
@@ -615,9 +627,43 @@ export const loadRecallMemoryIdentities = Effect.fn('recall.loadMemoryIdentities
     includeInactive: false,
     memoryIds: options.memoryIds,
     validateNow: options.validateNow,
-  });
+  }).pipe(normalizeRecallIdentityPreparation);
   return data.candidates;
 });
+
+export {RecallIdentityAdmissionBusy, withRecallIdentityPreparation} from './index/admission.js';
+
+/** Prepare outside memory locks; consume the check once under the canonical account mutation fence. */
+export function withRecallIdentityAdmission<A, E, R, E2, R2>(
+  config: RecallIndexConfig,
+  prepare: Effect.Effect<void, E, R>,
+  use: (check: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>) => Effect.Effect<A, E2, R2>,
+) {
+  const location = {...config};
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* withPreparedRecallIdentityAdmission(
+      loadRecallMemoryIdentities(location, {allowedUriScopes: [], memoryIds: []}).pipe(Effect.asVoid),
+      readRecallIdentityAdmissionCut({
+        account: location.account,
+        home: location.agentContextHome,
+        databasePath: resolveActiveRecallDatabasePath(fs, path, location.agentContextHome, false),
+        pointerPath: recallIndexPointerPath(path, location.agentContextHome, false),
+        fixedDatabasePath: recallIndexDatabasePath(path, location.agentContextHome, false),
+        schemaVersion: RECALL_INDEX_DATABASE_VERSION,
+      }),
+      prepare,
+      check =>
+        withRecallIndexLock(
+          fs,
+          recallIndexLockPath(path, location.agentContextHome, false),
+          () => use(check),
+          location.account,
+        ),
+    );
+  });
+}
 
 export const loadRecallExactMatches = Effect.fn('recall.loadExactMatches')(function* (
   config: RecallIndexConfig,
@@ -1256,21 +1302,9 @@ const writeActiveRecallDatabasePointer = Effect.fn('recall.writeActiveDatabasePo
     .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
 });
 
-function useRecallDatabase<A, E, R>(
-  databasePath: string,
-  effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-): Effect.Effect<A, E, R> {
-  return Effect.scoped(
-    Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
-      Effect.withSpan('recall.acquireDatabase'),
-      Effect.flatMap(context => effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'))),
-    ),
-  );
-}
-
 const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function* (sql: SqlClient.SqlClient) {
   yield* sql.unsafe('PRAGMA foreign_keys = ON');
-  yield* sql.unsafe('PRAGMA busy_timeout = 5000');
+  yield* sql.unsafe((yield* failFastIdentityPreparation) ? 'PRAGMA busy_timeout = 0' : 'PRAGMA busy_timeout = 5000');
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS metadata (
       key TEXT PRIMARY KEY NOT NULL,
@@ -1489,7 +1523,11 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
   );
   yield* indexLockHeld
     ? refresh
-    : withRecallIndexLock(fs, path, config.agentContextHome, options.includeInactive, () => refresh);
+    : withRecallIndexLock(
+        fs,
+        recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+        () => refresh,
+      );
 });
 
 function recallIndexForegroundFreshness(
@@ -1900,44 +1938,8 @@ function decodeCandidateRow(row: RecallDocumentRow): RecallCandidate {
   return value;
 }
 
-function withRecallIndexLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  path: Path.Path,
-  home: string,
-  includeInactive: boolean,
-  effect: () => Effect.Effect<A, E, R>,
-) {
-  return withExclusiveFileLock(
-    fs,
-    path.join(home, 'locks', 'indexes', 'lexical', `${recallIndexDatabaseFilename(includeInactive)}.lock`),
-    {
-      heartbeatIntervalMilliseconds: 10_000,
-      retryIntervalMilliseconds: 100,
-      staleAfterMilliseconds: 60_000,
-      waitTimeoutMilliseconds: 120_000,
-    },
-    Effect.suspend(effect),
-  );
-}
-
-function withCanonicalResourceMutationLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  path: Path.Path,
-  home: string,
-  account: string,
-  effect: Effect.Effect<A, E, R>,
-) {
-  return withExclusiveFileLock(
-    fs,
-    resourceAccountMutationLockPath(path, home, account),
-    {
-      heartbeatIntervalMilliseconds: 10_000,
-      retryIntervalMilliseconds: 25,
-      staleAfterMilliseconds: 30_000,
-      waitTimeoutMilliseconds: 30_000,
-    },
-    effect,
-  );
+function recallIndexLockPath(path: Path.Path, home: string, includeInactive: boolean) {
+  return path.join(home, 'locks', 'indexes', 'lexical', `${recallIndexDatabaseFilename(includeInactive)}.lock`);
 }
 
 function removeRecallDatabaseAuxiliaryFiles(fs: FileSystem.FileSystem, databasePath: string) {

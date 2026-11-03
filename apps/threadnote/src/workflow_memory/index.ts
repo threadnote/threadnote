@@ -1,5 +1,6 @@
 import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {
   WorkflowRequestSchema,
   WorkflowOperationInspectionRequestSchema,
@@ -170,4 +171,4 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
         });
       });
     return use(session.admission, call);
-  });
+  }).pipe(withRecallIdentityPreparation);
