@@ -10,6 +10,7 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
+import type {NativeCycleBaseRequalificationInput} from '@threadnote/workflow-automations/cycle-review';
 import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -273,6 +274,101 @@ export const pinNativeCycleTree = Effect.fn('workflowAutomation.cycle.pinTree')(
   yield* git(repo, ['update-ref', reference, tree, '0'.repeat(tree.length)]);
   return reference;
 });
+
+export const pinNativeCycleCommit = Effect.fn('workflowAutomation.cycle.pinCommit')(function* (
+  repo: string,
+  bindingId: string,
+  snapshotId: string,
+  commit: string,
+  purpose: 'requalification-before' | 'requalification-after' | 'requalification-base',
+) {
+  if (
+    !/^[a-f0-9]{64}$/u.test(bindingId) ||
+    !objectId.test(commit) ||
+    (yield* resolveObject(repo, commit, 'commit')) !== commit
+  )
+    return yield* fail('invalid-base-requalification', 'Retention requires exact commit identities.');
+  const reference = `refs/threadnote/cycles/${purpose}/${sha256HexSync(JSON.stringify([bindingId, purpose, snapshotId]))}`;
+  const existing = yield* runCommandEffect(
+    'git',
+    ['--no-optional-locks', '-C', repo, 'show-ref', '--verify', '--hash', reference],
+    {
+      allowFailure: true,
+      timeoutMs: 10_000,
+      maxOutputBytes: 4096,
+    },
+  );
+  if (existing.exitCode === 0) {
+    if (EffectString.trim(existing.stdout) !== commit)
+      return yield* fail('snapshot-conflict', 'This immutable reference already pins another commit.');
+    return reference;
+  }
+  if (existing.exitCode !== 1 && existing.exitCode !== 128)
+    return yield* fail('invalid-base-requalification', 'The commit reference could not be inspected.');
+  yield* git(repo, ['update-ref', reference, commit, EffectString.repeat(commit.length)('0')]);
+  return reference;
+});
+
+export const nativeCycleIsAncestor = Effect.fn('workflowAutomation.cycle.isAncestor')(function* (
+  repo: string,
+  before: string,
+  after: string,
+) {
+  const result = yield* runCommandEffect(
+    'git',
+    ['--no-optional-locks', '-C', repo, 'merge-base', '--is-ancestor', before, after],
+    {
+      allowFailure: true,
+      timeoutMs: 30_000,
+      maxOutputBytes: 4096,
+    },
+  );
+  if (result.exitCode === 0) return true;
+  if (result.exitCode === 1) return false;
+  return yield* fail('invalid-base-requalification', 'Git could not verify source ancestry.');
+});
+
+export const verifyNativeCycleBaseRequalification = Effect.fn('workflowAutomation.cycle.verifyBaseRequalification')(
+  function* (
+    repo: string,
+    priorHead: string,
+    currentHead: string,
+    declaredBaseHead: string,
+    witness: NativeCycleBaseRequalificationInput,
+  ) {
+    if (
+      witness.preRebaseHead !== priorHead ||
+      witness.rebasedHead !== currentHead ||
+      witness.ontoHead !== declaredBaseHead
+    )
+      return yield* fail(
+        'invalid-base-requalification',
+        'Use the exact reviewed predecessor, current HEAD and declared new base.',
+      );
+    for (const commit of new Set([priorHead, currentHead, declaredBaseHead]))
+      if (
+        (yield* resolveObject(repo, commit, 'commit').pipe(
+          Effect.mapError(() => fail('invalid-base-requalification', 'A witnessed commit is unavailable.')),
+        )) !== commit
+      )
+        return yield* fail('invalid-base-requalification', 'Every witnessed commit must resolve exactly.');
+    if (
+      (yield* nativeCycleIsAncestor(repo, priorHead, currentHead)) ||
+      !(yield* nativeCycleIsAncestor(repo, declaredBaseHead, currentHead))
+    )
+      return yield* fail(
+        'invalid-base-requalification',
+        'Requalification requires rewritten source descended from its declared new base.',
+      );
+    const common = EffectString.trim(
+      yield* git(repo, ['merge-base', priorHead, declaredBaseHead]).pipe(
+        Effect.mapError(() => fail('invalid-base-requalification', 'Keep a common repository history.')),
+      ),
+    );
+    if (!objectId.test(common))
+      return yield* fail('invalid-base-requalification', 'Git did not return a common repository history.');
+  },
+);
 
 export const makeWorkflowGitAdapter = Effect.fn('workflowAutomation.cycle.gitAdapter')(function* () {
   const fs = yield* FileSystem.FileSystem;
