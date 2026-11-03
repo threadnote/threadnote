@@ -326,6 +326,8 @@ describe('foreground index rebuild', () => {
           const f = yield* fixture;
           if (change === 'authorization') yield* f.addExternal;
           let fired = false;
+          const path = yield* Path.Path;
+          const latePath = path.join(f.home, 'indexes', 'vectors', manifest.id, 'active.json');
           const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom>();
           const lateChange =
             change === 'selection'
@@ -337,7 +339,7 @@ describe('foreground index rebuild', () => {
               f.fs.remove(filename, options).pipe(
                 Effect.andThen(
                   Effect.gen(function* () {
-                    if (!fired && filename === `${f.home}/indexes/vectors/${manifest.id}/active.json`) {
+                    if (!fired && filename === latePath) {
                       fired = true;
                       yield* lateChange.pipe(Effect.provide(context));
                     }
