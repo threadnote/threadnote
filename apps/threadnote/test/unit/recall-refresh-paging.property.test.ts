@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {TestError} from '@threadnote/testing/test-error';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -13,12 +14,14 @@ import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 function requiredRow<Row extends object>(row: Row | null): Row {
   if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
   return row;
 }
 
-const RecallIndexTestLayer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
+const RecallIndexTestLayer = Layer.merge(platformServicesLayer, TestSystemInfoLayer);
 const UNICODE_NAMES = ['alpha', 'omega', 'ßeta', 'λambda', '中間', '\uE000-private', '😀-face', '𐀀-linear-b'] as const;
 
 interface CorpusEntry {

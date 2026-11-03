@@ -1,10 +1,10 @@
+import {SecureRandom} from 'effect/crypto';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {
   Array as EffectArray,
   Cause,
   Clock,
   Context,
-  Crypto,
   Effect,
   FileSystem,
   Option,
@@ -156,7 +156,7 @@ const writeReceipt = Effect.fn('handoffSave.writeReceipt')(function* (
     yield* scope.assert;
   });
   yield* checkPrevious;
-  const temporary = location.receipt + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = location.receipt + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   yield* scope.assert;
   yield* fs.writeFileString(temporary, encoded, {flag: 'wx', mode: 0o600});
   yield* syncWritableFile(fs, temporary);
@@ -421,7 +421,7 @@ export const launchOwnedHandoffSave = Effect.fn('handoffSave.launch')(function* 
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;
   const spawn = yield* CurrentHandoffSaveSpawn;
-  const operationId = yield* (yield* Crypto.Crypto).randomUUIDv4();
+  const operationId = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   let owned: {child: HandoffSaveChild; authorized: boolean} | undefined;
   const stopUnapproved = Effect.sync(() => {
     if (owned && !owned.authorized) {
@@ -669,7 +669,7 @@ export const runHandoffSaveWorker = Effect.fn('handoffSave.worker')(function* ()
       if (count >= HANDOFF_SAVE_HISTORY_LIMIT) return false;
       yield* writeReceipt(config, value, scope);
       const temporary =
-        location.owner + '.' + operationId + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+        location.owner + '.' + operationId + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
       yield* scope.assert;
       yield* fs.writeFileString(
         temporary,

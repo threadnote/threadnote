@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {startProgress, withProgressLine} from '../cli_ui.js';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import {readExclusiveFileLockOwner} from '@threadnote/platform/file/lock';
@@ -1716,7 +1717,7 @@ export const runCodeGraphExport = Effect.fn('codeGraph.command.export')(function
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const identity = yield* resolveRepositoryIdentity(yield* commandCwd(options.cwd));
   const layout = codeGraphLayout(path, config.agentContextHome, identity.checkoutId, identity.worktreeId);
   const store = yield* CodeGraphStore;
@@ -1734,7 +1735,7 @@ export const runCodeGraphExport = Effect.fn('codeGraph.command.export')(function
   const nodeLimit = yield* parseCodeGraphExportLimit(options.nodeLimit, '--node-limit');
   const parent = path.dirname(output);
   yield* fs.makeDirectory(parent, {recursive: true});
-  const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.uuidV4()}.tmp`);
   const summary = yield* Effect.scoped(
     Effect.gen(function* () {
       const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

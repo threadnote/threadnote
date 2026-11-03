@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -202,7 +203,7 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
     Option.isSome(yield* fs.readLink(file).pipe(Effect.option))
   )
     return yield* workflowError('unsafe-journal', 'Workflow journals cannot be symbolic links.');
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* fs.writeFileString(temporary, serialized, {mode: 0o600});
   yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
   if (compact) markPackedWorkflowScopes(state.binding);

@@ -1,9 +1,10 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   isSafeInteger as checkedIsSafeInteger,
   isFiniteNumber as checkedIsFiniteNumber,
 } from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {CandidateReview} from '@threadnote/memory/candidate';
 import type {ValueReportCountsInputV1} from './index.js';
@@ -430,12 +431,12 @@ function writeValueEvents(
   fs: FileSystem.FileSystem,
   path: string,
   events: readonly LocalValueEventV1[],
-): Effect.Effect<void, unknown, Crypto.Crypto | Path.Path> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom | Path.Path> {
   return Effect.gen(function* () {
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-    const crypto = yield* Crypto.Crypto;
-    const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const crypto = yield* SecureRandom.SecureRandom;
+    const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
     const content =
       events.length === 0
         ? ''

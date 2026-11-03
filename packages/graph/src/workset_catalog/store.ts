@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Path} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -248,7 +249,7 @@ export const beginCodeGraphWorksetCatalogProjection = Effect.fn('codeGraphWorkse
     }
     return validated;
   });
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const stagingToken = sha256HexSync(yield* crypto.randomBytes(32));
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -1192,7 +1193,7 @@ export const registerCodeGraphWorksetResultSet = Effect.fn('codeGraphWorksetCata
   const persistedDigest = codeGraphWorksetPersistedResultDigest(envelope.digest, sequence.digest);
   const ttlMilliseconds = yield* validateInput(() => resultSetTtlMilliseconds(input.ttlMilliseconds));
   yield* validateInput(() => validateResultSetIdentityInput(result, input.projectorVersion));
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const resultSetToken = sha256HexSync(yield* crypto.randomBytes(32));
   const resultSetId = codeGraphWorksetResultSetId(resultSetToken);
   const cursors = Array.from({length: sequence.cards.length + 1}, (_, offset) =>

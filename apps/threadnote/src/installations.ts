@@ -1,4 +1,5 @@
-import {Console, Crypto, Effect, FileSystem, Path, Predicate, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Console, Effect, FileSystem, Path, Predicate, Schema} from 'effect';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -86,8 +87,8 @@ export const activateStandaloneRelease = Effect.fn('installations.activateReleas
     return;
   }
   yield* recoverActiveReleasePromotion(fs, path, root);
-  const crypto = yield* Crypto.Crypto;
-  const operationId = `${system.processId}-${yield* crypto.randomUUIDv4()}`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const operationId = `${system.processId}-${yield* crypto.uuidV4()}`;
   yield* fs.makeDirectory(root, {recursive: true, mode: 0o700});
   const activePath = path.join(root, ACTIVE_RELEASE_FILE);
   const backupPath = path.join(root, ACTIVE_RELEASE_BACKUP_FILE);
@@ -570,9 +571,9 @@ const writePrivateJsonAtomically = Effect.fn('installations.writePrivateJsonAtom
   target: string,
   value: unknown,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.uuidV4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(value, undefined, 2)}\n`, {flag: 'wx', mode: 0o600});

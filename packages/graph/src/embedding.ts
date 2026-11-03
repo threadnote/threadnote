@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_DATABASE_VERSION, CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './vector/generation_schema.js';
 import {
@@ -16,7 +17,7 @@ import {
 } from './vector/generation.js';
 import {inspectVectorPageStorageSql} from './vector/retirement/inspection.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Cause, Clock, Context, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
+import {Cause, Clock, Context, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -182,7 +183,7 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
       const catalog = yield* LocalModelCatalog;
       const modelStore = yield* LocalModelStore;
       const runtime = yield* LocalModelRuntime;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       return CodeGraphEmbeddingIndex.of({
         check: (threadnoteHome, layout, snapshotId, options) =>
@@ -211,7 +212,7 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
             symbols,
             threadnoteHome,
           }).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
@@ -330,7 +331,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   readonly symbols: CodeGraphEmbeddingSymbolSource;
   readonly threadnoteHome: string;
 }) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   for (const limit of [
     input.maximumSteps,
@@ -368,12 +369,12 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   };
   const lock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     withExclusiveFileLock(input.fs, writeLockPath, lockOptions, effect).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(Path.Path, input.path),
       Effect.provideService(SystemInfo, system),
     );
   const worktreeId = requiredWorktreeId(input.layout);
-  const ownerToken = input.ownerToken ?? (yield* crypto.randomUUIDv4());
+  const ownerToken = input.ownerToken ?? (yield* crypto.uuidV4());
   const requestEpoch = input.force ? ownerToken : input.snapshot.id;
   const atomicReuse = input.maximumSteps !== undefined && !input.force;
   yield* input.fs.makeDirectory(root, {recursive: true, mode: 0o700});
@@ -470,7 +471,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                         ? active
                         : undefined;
                   }
-                  const id = `${yield* Clock.currentTimeMillis}-${yield* crypto.randomUUIDv4()}`;
+                  const id = `${yield* Clock.currentTimeMillis}-${yield* crypto.uuidV4()}`;
                   yield* sql`INSERT INTO vector_generations (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
             VALUES (${id}, ${input.snapshot.id}, ${selected.manifest.id}, ${selected.manifest.sha256}, ${selected.manifest.dimensions!},
               ${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}, 0, 'building', ${DateTime.formatIso(yield* DateTime.now)})`;

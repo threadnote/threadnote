@@ -1,7 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {appendFileSync, existsSync, readFileSync} from '@threadnote/testing/node-fs';
-import {Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -107,7 +109,7 @@ export const fixtureLayer = Layer.mergeAll(
     runBatch: (_home, _domain, program) => program.pipe(Effect.map(value => ({state: 'completed' as const, value}))),
   }),
   TestCommandExecutorLayer,
-).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
 export const seed = (home: string, count = 65, catalogId = checkoutId, viewId = worktreeId) =>
   Effect.gen(function* () {
     const checkoutId = catalogId;
@@ -229,7 +231,7 @@ const fixtureMain = Effect.gen(function* () {
   const home = argument('--home');
   const system = yield* SystemInfo;
   if (process.argv.includes('--model')) {
-    const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>();
+    const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>();
     const runtime = LocalModelRuntime.of({
       diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 2}),
       embedMany: ({inputs, embeddingContextPoolSize, manifest: requestedManifest}) =>

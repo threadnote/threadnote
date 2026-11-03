@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Crypto, Deferred, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Context, Deferred, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {codeGraphLayout, codeGraphRefreshDemandPath} from '@threadnote/graph/layout';
@@ -65,7 +66,7 @@ describe('watcher admitted-attempt recovery', () => {
   effectIt.effect('consumes one prepared claim across two persisted retry deadlines without replay or spin', () =>
     Effect.gen(function* () {
       const {target, home, readState} = yield* persistedDriverFixture;
-      type DemandServices = Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo;
+      type DemandServices = SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo;
       const services = yield* Effect.context<DemandServices>();
       const bind = <A, E>(effect: Effect.Effect<A, E, DemandServices>) => effect.pipe(Effect.provide(services));
       const registration = yield* registerCodeGraphBackgroundDemand(target.demandIdentity, target.requestKey);
@@ -139,7 +140,7 @@ describe('watcher admitted-attempt recovery', () => {
   effectIt.effect('consumes a genuinely new queued prepared claim before the older retry deadline', () =>
     Effect.gen(function* () {
       const {target, home, readState} = yield* persistedDriverFixture;
-      type DemandServices = Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo;
+      type DemandServices = SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo;
       const services = yield* Effect.context<DemandServices>();
       const bind = <A, E>(effect: Effect.Effect<A, E, DemandServices>) => effect.pipe(Effect.provide(services));
       const first = yield* registerCodeGraphBackgroundDemand(target.demandIdentity, target.requestKey);

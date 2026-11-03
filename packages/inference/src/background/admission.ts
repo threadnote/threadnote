@@ -1,9 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   Array as EffectArray,
   Cause,
   Clock,
   Context,
-  Crypto,
   Effect,
   FileSystem,
   Layer,
@@ -311,7 +311,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const canonical = yield* (system.canonicalProcessStartIdentity?.(system.processId) ?? Effect.void).pipe(
     Effect.timeoutOption('1 second'),
     Effect.map(Option.getOrUndefined),
@@ -328,7 +328,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
     // or retaining an uncertain lease. Concurrent failures cannot exceed this bound.
     if (ownerReservations >= MAXIMUM_PROCESS_OWNERS) return unavailable();
     ownerReservations++;
-    return crypto.randomUUIDv4().pipe(
+    return crypto.uuidV4().pipe(
       Effect.mapBoth({
         onSuccess: token => ({
           processId: system.processId,
@@ -387,7 +387,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
     Effect.gen(function* () {
       const text = JSON.stringify(state) + '\n';
       if (new TextEncoder().encode(text).byteLength > MAXIMUM_STATE_BYTES) return yield* unavailable();
-      const temporary = path.join(location.directory, (yield* crypto.randomUUIDv4()) + '.tmp');
+      const temporary = path.join(location.directory, (yield* crypto.uuidV4()) + '.tmp');
       yield* Effect.acquireUseRelease(
         fs.writeFileString(temporary, text, {mode: 0o600, flag: 'wx'}).pipe(Effect.as(temporary)),
         temporary => syncWritableFile(fs, temporary).pipe(Effect.andThen(fs.rename(temporary, location.state))),
@@ -463,7 +463,7 @@ export const makeBackgroundInferenceAdmission = Effect.gen(function* () {
           return result.value;
         }),
       ).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),
       );

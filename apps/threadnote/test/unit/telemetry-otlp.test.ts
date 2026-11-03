@@ -74,7 +74,7 @@ describe('anonymous telemetry OTLP transport', () => {
             contentType: 'application/x-protobuf',
             path: '/v1/traces',
             traceparent: null,
-            userAgent: 'OTel-OTLP-Exporter-JavaScript-Effect-OtlpTracer/4.0.7',
+            userAgent: 'OTel-OTLP-Exporter-JavaScript-Effect-OtlpTracer/4.1.2',
           });
           const envelope = decodeTelemetryEnvelope(requests[0].body);
           expect(envelope.resourceAttributes).toEqual({

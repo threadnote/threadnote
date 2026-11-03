@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -94,7 +95,7 @@ export const writeNativeCloseoutJournal = Effect.fn('workflowAutomation.writeClo
   const {validated, serialized} = yield* encodedJournal(state, decode);
   const file = yield* nativeCloseoutJournalPath(config, runId);
   const fs = yield* FileSystem.FileSystem;
-  const uuid = yield* (yield* Crypto.Crypto).randomUUIDv4();
+  const uuid = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   const temporary = file + '.' + uuid + '.tmp';
   return yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});

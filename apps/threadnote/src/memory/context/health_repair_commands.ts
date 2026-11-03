@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {shellQuote} from '@threadnote/platform/command';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
@@ -1051,13 +1052,13 @@ const writeRepairJournal = Effect.fn('memory.contextHealthRepair.writeJournal')(
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const content = `${JSON.stringify(journal, undefined, 2)}\n`;
   if (new TextEncoder().encode(content).byteLength > MAXIMUM_REPAIR_JOURNAL_BYTES) {
     return yield* repairError('Context-health repair journal exceeds its size limit.');
   }
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
   yield* fs
     .rename(temporaryPath, path)

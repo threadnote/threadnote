@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Context, Crypto, Deferred, Effect, Exit, FileSystem, Layer, Path, SynchronizedRef, Schema} from 'effect';
+import {Clock, Context, Deferred, Effect, Exit, FileSystem, Layer, Path, SynchronizedRef, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {maintainCodeGraphBuildHistoryUnit} from '../build_status.js';
@@ -202,7 +203,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
       const observability = yield* CodeGraphObservability;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       const reconciler = yield* makeLiveCodeGraphWorktreeReconciler();
       const orphanProvenanceCleaner = yield* makeLiveCodeGraphOrphanProvenanceCleaner();
@@ -299,7 +300,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
             },
           ).pipe(
             Effect.map(codeGraphRemovedViewProvenancePageResult),
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(CommandExecutor, command),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
@@ -321,7 +322,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
                 preparation,
                 use,
               ).pipe(
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, system),
@@ -335,7 +336,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
               ),
         withTargetLock: (input, worktreeId, effect, scopeId) =>
           withCodeGraphTargetWorktreeLock(input.threadnoteHome, input.checkoutId, worktreeId, effect, scopeId).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
@@ -475,7 +476,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
               },
             ),
           ),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),

@@ -1,10 +1,11 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {inspectObsidianFile, scanObsidianDirectoryPage} from './scan.js';
 import {SourceCoordinator, type SourceWorkOptions} from '@threadnote/integration-core/source-coordinator';
 import {Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Clock, Console, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 const MAX_SECRET_MATCHES_TO_PRINT = 5;
 import {sha256Hex} from '@threadnote/platform/digest';
 import {fromPromise} from '@threadnote/platform/errors';
@@ -509,13 +510,13 @@ const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvi
             message: 'Evidence fragment is absent from the exact sanitized imported revision.',
           });
         }
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         const now = yield* Clock.currentTimeMillis;
         if (reservation && (Date.parse(reservation.capturedAt) > now || Date.parse(reservation.expiresAt) <= now))
           return yield* ObsidianSourceError.make({
             message: 'Obsidian capture reservation is future-dated or expired; obtain fresh explicit approval.',
           });
-        const pinId = reservation?.pinId ?? (yield* crypto.randomUUIDv4());
+        const pinId = reservation?.pinId ?? (yield* crypto.uuidV4());
         const citation: MemoryObsidianEvidenceV1 = {
           version: 1,
           sourceId: source.id,
@@ -1137,7 +1138,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           } satisfies ObsidianInventory;
         }
         const currentTimeMillis = yield* Clock.currentTimeMillis;
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         const identities = new Map<string, ObsidianSourceFileState[]>();
         for (const previous of EffectRecord.values(plan.state.files)) {
           if (!previous.fileIdentity) continue;
@@ -1165,7 +1166,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
             noteId:
               previousNoteId && EffectArray.every(matching, previous => previous.noteId === previousNoteId)
                 ? previousNoteId
-                : yield* crypto.randomUUIDv4(),
+                : yield* crypto.uuidV4(),
             sanitizedHash: note.sanitizedHash,
             sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
             size: note.size,
@@ -1176,7 +1177,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           files: nextFiles,
           ...(plan.scan === undefined ? {} : {scan: plan.scan}),
           sourceId: source.id,
-          sourceInstanceId: plan.state.sourceInstanceId ?? (yield* crypto.randomUUIDv4()),
+          sourceInstanceId: plan.state.sourceInstanceId ?? (yield* crypto.uuidV4()),
           syncedAt:
             plan.scan === undefined ? DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)) : plan.state.syncedAt,
           version: SOURCE_STATE_VERSION,
@@ -1441,9 +1442,9 @@ const readSourceState = Effect.fn('obsidian.readSourceState')(function* (path: s
 const writeSourceState = Effect.fn('obsidian.writeSourceState')(function* (path: string, state: ObsidianSourceState) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {mode: PRIVATE_FILE_MODE});
   yield* fs
     .rename(temporaryPath, path)

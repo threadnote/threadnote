@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -27,7 +28,7 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
 
   const path = yield* Path.Path;
 
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
 
   const system = yield* SystemInfo;
 
@@ -83,7 +84,7 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
           },
           guarded,
         ).pipe(
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
         );
@@ -181,7 +182,7 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
       ).pipe(
         Effect.asSome,
         Effect.catchIf(isFileLockTimeout, () => Effect.succeedNone),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),
       );
@@ -245,7 +246,7 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
       ).pipe(
         Effect.asSome,
         Effect.catchIf(isFileLockTimeout, () => Effect.succeedNone),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),
       );

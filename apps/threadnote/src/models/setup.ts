@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Console, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {Cause, Clock, Console, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
@@ -479,8 +480,8 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
     yield* updateModelSetup(canonicalHome, manifest, {type: 'blocked', intentEpoch: state.intentEpoch, reason});
     return yield* readModelSetupStatus(canonicalHome);
   }
-  const crypto = yield* Crypto.Crypto;
-  const nonce = yield* crypto.randomUUIDv4();
+  const crypto = yield* SecureRandom.SecureRandom;
+  const nonce = yield* crypto.uuidV4();
   const reservationNow = yield* Clock.currentTimeMillis;
   const reservation = yield* updateModelSetup(
     canonicalHome,
@@ -623,7 +624,7 @@ export const runModelSetupWorker = Effect.fn('models.setup.worker')(function* (
   const fence = {intentEpoch, job, owner};
   if (claimed.status !== 'valid' || !owns(claimed.state, fence)) return;
   const store = yield* LocalModelStore;
-  const services = yield* Effect.context<FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo>();
+  const services = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo>();
   const stage = (phase: 'downloading' | 'verifying' | 'publishing', bytes: number) =>
     Effect.gen(function* () {
       yield* requireOwner(canonicalHome, fence);
@@ -678,7 +679,7 @@ export const runModelSetupWorker = Effect.fn('models.setup.worker')(function* (
         if (currentOwner.status !== 'valid' || !owns(currentOwner.state, fence)) return;
         const failure = failureReason(error);
         const timestamp = yield* Clock.currentTimeMillis;
-        const random = yield* Crypto.Crypto;
+        const random = yield* SecureRandom.SecureRandom;
         const entropy = yield* random.randomBytes(1);
         yield* updateModelSetup(
           canonicalHome,

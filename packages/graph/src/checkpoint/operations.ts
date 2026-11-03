@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {checkpointTerminalText} from './terminal_text.js';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
@@ -151,7 +152,7 @@ export const runCodeGraphCheckpointExport = Effect.fn('codeGraph.checkpoint.expo
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const cwd = yield* checkpointCommandCwd(options.cwd);
   const identity = yield* resolveRepositoryIdentity(cwd);
   const layout = codeGraphLayout(path, config.agentContextHome, identity.checkoutId, identity.worktreeId);
@@ -178,7 +179,7 @@ export const runCodeGraphCheckpointExport = Effect.fn('codeGraph.checkpoint.expo
   if (yield* fs.exists(output)) return yield* checkpointFailure(`Checkpoint output already exists: ${output}`);
   const parent = path.dirname(output);
   yield* fs.makeDirectory(parent, {recursive: true});
-  const spoolPath = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.spool`);
+  const spoolPath = path.join(parent, `.${path.basename(output)}.${yield* crypto.uuidV4()}.spool`);
   const artifact = yield* withPrivateSpool(spoolPath, spool =>
     Effect.gen(function* () {
       let encoder: CodeGraphCheckpointStreamEncoderV1 | undefined;
@@ -244,7 +245,7 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const store = yield* CodeGraphStore;
   const registry = yield* CodeGraphLanguagePackRegistry;
@@ -326,7 +327,7 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
       if (reusable !== undefined) return {mode: 'reused' as const, snapshot: reusable};
       const ownerToken = yield* store.claimPersistentBuild(layout.databasePath, identity, building, {
         logicalSnapshotId: snapshotId,
-        owner: {buildId: yield* crypto.randomUUIDv4(), processId: system.processId},
+        owner: {buildId: yield* crypto.uuidV4(), processId: system.processId},
       });
       const imported = Effect.gen(function* () {
         yield* store.bindCheckpointImportBuild(layout.databasePath, snapshotId, {
@@ -839,9 +840,9 @@ function publishPreparedCheckpoint(
   spool: {readonly file: FileSystem.File},
 ) {
   return Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const parent = path.dirname(output);
-    const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.tmp`);
+    const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.uuidV4()}.tmp`);
     let publicationIdentity: OwnedFileIdentity | undefined;
     return yield* Effect.scoped(
       Effect.gen(function* () {

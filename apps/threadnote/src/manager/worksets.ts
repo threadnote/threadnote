@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   MANAGER_WORKSET_NAME_BYTES_MAXIMUM,
   MANAGER_WORKSET_DESCRIPTION_BYTES_MAXIMUM,
@@ -7,7 +8,7 @@ import {
   safeLocalPath,
 } from './workset_text.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Cause, Clock, Crypto, Effect, Fiber, FileSystem, Path, Predicate, Scope, Schema} from 'effect';
+import {Cause, Clock, Effect, Fiber, FileSystem, Path, Predicate, Scope, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {isMap, isScalar, isSeq, parseDocument, type YAMLMap, type YAMLSeq} from 'yaml';
 import * as ContextBrief from '../context_brief/index.js';
@@ -518,10 +519,10 @@ function mutateManagerManifest<Operation extends string>(
               ),
             {concurrency: 1},
           );
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const temporary = path.join(
             path.dirname(config.manifestPath),
-            `.${path.basename(config.manifestPath)}.manager-${yield* crypto.randomUUIDv4()}.tmp`,
+            `.${path.basename(config.manifestPath)}.manager-${yield* crypto.uuidV4()}.tmp`,
           );
           yield* Effect.gen(function* () {
             yield* fs.writeFileString(temporary, candidate, {flag: 'wx', mode: 0o600});
@@ -824,9 +825,9 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
         EffectOption.getOrUndefined(
           EffectArray.findFirst(catalog.definitions, definition => definition.name === workset),
         )?.memberCount ?? 0;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const createdAt = isoTimestamp(yield* Clock.currentTimeMillis);
-      const id = `cgwj_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+      const id = `cgwj_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
       const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerWorksetPrepareJob = {
         onChange: hints.publish({topic: 'worksets', scope: 'account'}),

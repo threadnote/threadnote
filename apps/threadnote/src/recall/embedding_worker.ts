@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {vectorIndexStatus, VectorIndexCorrupt} from '@threadnote/recall/vector-index';
 import {lexicalRefreshDisposition} from '@threadnote/recall/mcp/refresh';
 import {loadRecallIndexData, recallIndexStatus, RecallIndexCorrupt} from '@threadnote/recall/index';
-import {Array as EffectArray, Clock, Context, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Context, Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -39,16 +40,16 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
   const system = yield* SystemInfo;
   const identity = yield* system.processStartIdentity(system.processId);
   const owner = identity ? {processId: system.processId, processStartIdentity: identity} : undefined;
-  const platform = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>().pipe(
-    Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, Crypto.Crypto)),
-  );
+  const platform = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+  >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
   const verifiedModels = new Set<string>();
   return Effect.fn('recall.embeddingWorkerUnit')(function* (
     scope: RecallEmbeddingScope,
   ): Effect.fn.Return<
     RecallEmbeddingWorkerUnitResult,
     unknown,
-    FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto
+    FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
   > {
     const demand = yield* readRecallEmbeddingDemand(scope);
     if (!demand?.desired) return {state: 'complete', delay: 0};

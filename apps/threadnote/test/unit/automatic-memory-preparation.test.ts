@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
@@ -63,6 +64,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const system = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -72,7 +75,7 @@ const system = SystemInfo.layer.pipe(
   ),
 );
 const dependencies = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   system,
   Layer.succeed(ResourceRecallInvalidation, {expire: () => Effect.void}),
 );

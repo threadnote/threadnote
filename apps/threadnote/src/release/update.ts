@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Clock, Console, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {
   heading,
   info as infoText,
@@ -1403,9 +1404,9 @@ const writePostUpdateState = Effect.fn('update.writePostUpdateState')(function* 
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const target = yield* postUpdateStatePath(config);
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${yield* crypto.uuidV4()}.tmp`);
   yield* ensureDirectory(config.agentContextHome, false);
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(state, null, 2)}\n`, {flag: 'wx', mode: 0o600});

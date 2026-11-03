@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
@@ -401,7 +402,7 @@ const recordResolvedCodeGraphLocalAssociationUnlocked = Effect.fn('codeGraph.rec
   ) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
 
     const directory = yield* ensureLocalWorktreeDirectory(fs, path, threadnoteHome, identity.checkoutId).pipe(
       Effect.option,
@@ -449,7 +450,7 @@ const recordResolvedCodeGraphLocalAssociationUnlocked = Effect.fn('codeGraph.rec
 
     const temporary = path.join(
       directory.value,
-      `.${identity.worktreeId}.${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}.tmp`,
+      `.${identity.worktreeId}.${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}.tmp`,
     );
     const written = yield* Effect.gen(function* () {
       yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

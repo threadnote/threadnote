@@ -1,4 +1,5 @@
-import {Cause, Clock, Crypto, Effect, Exit, FileSystem, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Cause, Clock, Effect, Exit, FileSystem, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -33,7 +34,7 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const {layout, store, snapshot, threadnoteHome} = input;
   const fence = yield* withCodeGraphReadTransaction(
@@ -65,12 +66,12 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
     }
   });
   const provide = <A, E, R>(
-    effect: Effect.Effect<A, E, R | FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo>,
+    effect: Effect.Effect<A, E, R | FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo>,
   ) =>
     effect.pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(SystemInfo, system),
     );
   return {

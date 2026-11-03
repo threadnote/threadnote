@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
@@ -26,21 +27,7 @@ import {execFileSync, spawn} from '@threadnote/testing/node-child-process';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {
-  Clock,
-  Context,
-  Crypto,
-  DateTime,
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  FileSystem,
-  Layer,
-  Path,
-  Ref,
-  Schema,
-} from 'effect';
+import {Clock, Context, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Ref, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -269,7 +256,7 @@ describe('native code graph lifecycle', () => {
           staleAfterMilliseconds: 5_000,
           waitTimeoutMilliseconds: 5_000,
         };
-        const writerGateContext = yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>();
+        const writerGateContext = yield* Effect.context<SecureRandom.SecureRandom | Path.Path | SystemInfo>();
         const fs = yield* FileSystem.FileSystem;
         const queryBehindWriterGate = yield* withExclusiveFileLock(
           fs,

@@ -82,7 +82,7 @@
     "@threadnote/recall": "workspace:*",
     "@threadnote/workspace": "workspace:*",
     "dompurify": "3.4.17",
-    "effect": "4.0.7",
+    "effect": "4.1.2",
     "lucide-react": "^1.63.0",
     "mermaid": "12.2.0",
     "react": "^19.3.1",
@@ -92,7 +92,7 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.7",
+    "@effect/vitest": "4.1.2",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
     "vitest": "5.0.5",

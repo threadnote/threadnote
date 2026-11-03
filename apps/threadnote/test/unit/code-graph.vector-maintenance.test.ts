@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -14,11 +15,13 @@ import {codeGraphVectorViewId} from '@threadnote/graph/vector/identity';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
 const SHARED_WORKTREE_ID = Effect2.pipe('2', EffectString.repeat(64));
 const EXPECTED_SNAPSHOT_ID = 'snapshot-expected';
-const VectorMaintenanceTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const VectorMaintenanceTestLayer = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer);
 
 describe('code graph vector pointer maintenance', () => {
   effectIt.layer(VectorMaintenanceTestLayer)(layerIt => {

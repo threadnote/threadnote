@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {
@@ -163,7 +164,7 @@ export function makeSourceConfigurationStore<
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-    const temporaryPath = `${path}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+    const temporaryPath = `${path}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
     yield* fs.writeFileString(temporaryPath, serialized, {mode: 0o600});
     yield* fs
       .rename(temporaryPath, path)

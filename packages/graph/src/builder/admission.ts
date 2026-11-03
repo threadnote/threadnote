@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -67,7 +68,7 @@ export function withCodeGraphBuilderAdmission<A, E, R>(
     readonly threadnoteHome: string;
   },
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | unknown, R | Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
+): Effect.Effect<A, E | unknown, R | SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo> {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -135,11 +136,11 @@ const createTicket = Effect.fn('codeGraph.builderAdmission.createTicket')(functi
   admissionClass: CodeGraphBuilderAdmissionClass,
   identity?: CodeGraphBuilderAdmissionIdentity,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const root = codeGraphBuilderAdmissionRoot(path, threadnoteHome);
   yield* fs.makeDirectory(root, {recursive: true, mode: 0o700});
   if (system.platform !== 'win32') yield* fs.chmod(root, 0o700);
-  const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4()}`);
+  const token = sha256HexSync(`${system.processId}\0${yield* crypto.uuidV4()}`);
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   const ticket: OwnedTicket = {

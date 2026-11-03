@@ -1,3 +1,5 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -6,7 +8,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphVectorWriteLockPath} from '@threadnote/graph/layout';
@@ -25,6 +27,8 @@ import {SystemInfo} from '@threadnote/platform/system';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
 const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
@@ -33,7 +37,7 @@ const OTHER_SNAPSHOT_ID = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-di
 
 const SnapshotPurgeTestLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 describe('code graph selected snapshot purge', () => {
@@ -229,7 +233,7 @@ describe('code graph selected snapshot purge', () => {
           });
           if (preview.approvalDigest === undefined) throw TestError.make({message: 'expected approval digest'});
 
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const system = yield* SystemInfo;
@@ -246,7 +250,7 @@ describe('code graph selected snapshot purge', () => {
             },
             Deferred.await(release),
           ).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),

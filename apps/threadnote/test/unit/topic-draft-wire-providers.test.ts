@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -46,6 +47,8 @@ import {
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 vi.mock('@effect/ai-openai-compat', async importOriginal => {
   const actual = await importOriginal<typeof import('@effect/ai-openai-compat')>();
@@ -127,7 +130,7 @@ function observationIdentity(basis: TopicMaintenanceDraftBasisV1) {
 
 describe('compact topic provider boundary', () => {
   beforeEach(() => vi.mocked(OpenAiLanguageModel.layer).mockReset());
-  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+  effectIt.layer(Layer.merge(platformServicesLayer, TestSystemInfoLayer))(it => {
     for (const responseText of ['{"private":"invalid-é🙂"', '{"private":"wrong-schema-é🙂"}']) {
       it.effect('retains failed Effect structured output privately: ' + responseText, () =>
         Effect.gen(function* () {

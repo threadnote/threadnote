@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromise} from '@threadnote/platform/errors';
@@ -466,7 +467,7 @@ const mutateIntent = Effect.fn('codeGraph.mutateScopeRetirementIntent')(function
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const root = yield* intentRoot(home, true);
   if (root === undefined) return;
   const file = path.join(root, `${sha256HexSync(scopeId)}.json`);
@@ -513,7 +514,7 @@ const mutateIntent = Effect.fn('codeGraph.mutateScopeRetirementIntent')(function
             message: 'Scoped retirement intent capacity is unavailable.',
           });
       }
-      const temporary = path.join(root, `${sha256HexSync(scopeId)}-${yield* crypto.randomUUIDv4()}.tmp`);
+      const temporary = path.join(root, `${sha256HexSync(scopeId)}-${yield* crypto.uuidV4()}.tmp`);
       const before = yield* fs.stat(root);
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

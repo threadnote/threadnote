@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
 import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
@@ -6,7 +7,7 @@ import {
   CODE_GRAPH_ISOLATED_BUILDER_ENV,
   CodeGraphScopeRoutingError,
 } from '../scope/routing.js';
-import {Cause, Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Cause, Clock, Context, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as HttpClient from 'effect/http/HttpClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -150,7 +151,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       const treeSitter = yield* TreeSitterRuntime;
       const parserPool = yield* CodeGraphParserPool;
       const command = yield* CommandExecutor;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       const http = yield* HttpClient.HttpClient;
       const releaseIdentity = yield* getThreadnoteVersion();
@@ -194,7 +195,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
         } as const;
         const admit: CodeGraphIndexResourceGate = effect =>
           withCodeGraphBuilderAdmission(admissionOptions, effect).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
@@ -235,7 +236,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               () => resources.releasePreparedSpool(bytes),
             ),
           ).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
@@ -270,7 +271,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           producer,
           threadnoteHome,
         }).pipe(
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
@@ -366,7 +367,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               initialIdentity,
               request.threadnoteHome,
               scope,
-            ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+            ).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto));
             const requestedOverlay = requestedBuildRequest.state;
             if (
               request.sourceVerification &&
@@ -665,7 +666,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           identity,
                           options.threadnoteHome,
                           scope,
-                        ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+                        ).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto));
                         const currentOverlay = currentBuildRequest.state;
                         if (!sameOverlayState(currentOverlay, requestedOverlay)) {
                           return yield* WorktreeChangedDuringIndex.make({});
@@ -784,7 +785,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                                 observation: inventoryOverlayObservation,
                                 scopeObservation: scopedObservation,
                                 beforePublication: beginDemandPublication().pipe(
-                                  Effect.provideService(Crypto.Crypto, crypto),
+                                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                                   Effect.provideService(FileSystem.FileSystem, fs),
                                   Effect.provideService(Path.Path, path),
                                   Effect.provideService(SystemInfo, system),
@@ -884,7 +885,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                           identity,
                           options.threadnoteHome,
                           scope,
-                        ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+                        ).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto));
                         if (
                           !sameOverlayState(currentRequest.state, requestedOverlay) ||
                           EffectArray.some(
@@ -937,7 +938,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       );
                       const forceGeneration = options.force
                         ? Effect2.pipe(
-                            yield* crypto.randomUUIDv4(),
+                            yield* crypto.uuidV4(),
                             EffectString.replaceAll('-', ''),
                             EffectString.slice(0, 16),
                           )
@@ -1578,7 +1579,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           ),
           effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope', effect),
           Effect.provideService(CommandExecutor, command),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
@@ -1890,7 +1891,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           }),
         ).pipe(
           Effect.provideService(CommandExecutor, command),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),

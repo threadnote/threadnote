@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {
@@ -79,7 +80,7 @@ const mutate = Effect.fn('codeGraph.refreshDemand.mutate')(function* <A, E, R>(
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const dataPath = codeGraphRefreshDemandPath(
     path,
     identity.threadnoteHome,
@@ -146,10 +147,10 @@ export const registerCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDem
   identity: CodeGraphRefreshDemandIdentity,
   targetKey: string,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -172,10 +173,10 @@ export const resumeCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDeman
   targetKey: string,
   observed?: CodeGraphRefreshDemandLivenessObservation,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -198,9 +199,9 @@ export const enqueueCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDema
   identity: CodeGraphRefreshDemandIdentity,
   targetKey: string,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+  const token = `cgdq_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
   return yield* mutate(identity, state =>
     Effect.sync(() => {
       const registration = enqueueCodeGraphRefreshDemand(state, {
@@ -405,7 +406,7 @@ function parseDemand(content: string): unknown {
 
 function writeState(
   fs: FileSystem.FileSystem,
-  crypto: Crypto.Crypto,
+  crypto: SecureRandom.SecureRandom['Service'],
   dataPath: string,
   ancestors: readonly string[],
   state: CodeGraphRefreshDemandState,
@@ -425,7 +426,7 @@ function writeState(
       return yield* CodeGraphRefreshDemandSuperseded.make({
         message: 'Code graph refresh demand exceeds its bounded sidecar size.',
       });
-    const temporary = `${dataPath}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const temporary = `${dataPath}.${yield* crypto.uuidV4()}.tmp`;
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
     const temporaryInfo = yield* fs.stat(temporary);
     if (temporaryInfo.type !== 'File' || !fileSystemModeIsPrivate(runtimePlatform, temporaryInfo.mode)) {

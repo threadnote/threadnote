@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -9,6 +10,8 @@ import * as FC from 'fast-check';
 import {CodeGraphStore, type CodeGraphViewObservationResult} from '@threadnote/graph/store';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
 const EXPECTED = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
@@ -23,7 +26,7 @@ const observationCase = FC.record({
 
 const ObservationTestLayer = CodeGraphStore.layer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 describe('code graph view-removal observation properties', () => {

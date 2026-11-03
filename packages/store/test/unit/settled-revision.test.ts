@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Result} from 'effect';
@@ -15,6 +16,8 @@ import {
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource/settled_revision';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -26,7 +29,7 @@ const systemLayer = SystemInfo.layer.pipe(
     ),
   ),
 );
-const testLayer = Layer.merge(BunServices.layer, systemLayer);
+const testLayer = Layer.merge(platformServicesLayer, systemLayer);
 function provideLayer<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.scoped(Layer.build(testLayer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }

@@ -1,9 +1,10 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Crypto, Deferred, Effect, Fiber, FileSystem, Logger, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Logger, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
@@ -60,7 +61,7 @@ describe('code graph cache capacity load calibration', () => {
       TestClock.withLive(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const path = yield* Path.Path;
           const system = yield* SystemInfo;
           const startedAtMilliseconds = performance.now();
@@ -192,7 +193,7 @@ describe('code graph cache capacity load calibration', () => {
                     ? cause
                     : CodeGraphStoreError.of('Cache load reservation fixture failed.'),
                 ),
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, system),
@@ -293,7 +294,7 @@ describe('code graph cache capacity load calibration', () => {
     () =>
       TestClock.withLive(
         Effect.gen(function* () {
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const system = yield* SystemInfo;
@@ -345,7 +346,7 @@ describe('code graph cache capacity load calibration', () => {
                         ? cause
                         : CodeGraphStoreError.of('Cache retry reservation fixture failed.'),
                     ),
-                    Effect.provideService(Crypto.Crypto, crypto),
+                    Effect.provideService(SecureRandom.SecureRandom, crypto),
                     Effect.provideService(FileSystem.FileSystem, fs),
                     Effect.provideService(Path.Path, path),
                     Effect.provideService(SystemInfo, system),
@@ -425,7 +426,7 @@ describe('code graph cache capacity load calibration', () => {
                       ? cause
                       : CodeGraphStoreError.of('Cache cancellation reservation fixture failed.'),
                   ),
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fs),
                   Effect.provideService(Path.Path, path),
                   Effect.provideService(SystemInfo, system),
@@ -479,7 +480,7 @@ describe('code graph cache capacity load calibration', () => {
                       ? cause
                       : CodeGraphStoreError.of('Cache prefix reservation fixture failed.'),
                   ),
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fs),
                   Effect.provideService(Path.Path, path),
                   Effect.provideService(SystemInfo, system),

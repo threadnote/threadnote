@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Record as EffectRecord} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
-import {Cause, Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema, Stream} from 'effect';
+import {Cause, Clock, Context, Effect, FileSystem, Layer, Option, Path, Schema, Stream} from 'effect';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientRequest from 'effect/http/HttpClientRequest';
@@ -308,7 +309,7 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
   return Layer.effectContext(
     Effect.gen(function* () {
       const initialContext = yield* Effect.context<
-        R | LaunchR | FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto
+        R | LaunchR | FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
       >();
       const httpContext = yield* Layer.build(FetchHttpClient.layer);
       const context = Context.merge(initialContext, httpContext);
@@ -491,7 +492,7 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
 }) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const paths = yield* coordinatorPaths(options.config).pipe(atWorkerStage('configuration'));
   const config = yield* Effect.try({
     try: () => decodeCoordinatorConfig({...options.config, agentContextHome: paths.home}, paths.home),

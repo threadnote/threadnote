@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Crypto, Deferred, Effect, FileSystem, Fiber, Layer, Path, Ref} from 'effect';
+import {Context, Deferred, Effect, FileSystem, Fiber, Layer, Path, Ref} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -213,7 +214,7 @@ describe('indexer build coordination wiring', () => {
           buildOwner: {buildId: 'fixture-build', processId: process.pid},
           capacityProtection: {
             availableDiskBytes: () => Effect.succeed(1_000_000),
-            crypto: yield* Crypto.Crypto,
+            crypto: yield* SecureRandom.SecureRandom,
             maintenance: yield* CodeGraphMaintenanceCoordinator,
             path,
             system: yield* SystemInfo,

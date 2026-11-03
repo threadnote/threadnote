@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -22,7 +23,10 @@ const policy = Layer.mergeAll(
     sanitizeExternal: environment => environment,
   }),
 );
-const platform = Layer.mergeAll(BunServices.layer, SystemInfo.layer.pipe(Layer.provide(policy)));
+const platform = Layer.mergeAll(
+  Layer.merge(BunServices.layer, cryptoLayer),
+  SystemInfo.layer.pipe(Layer.provide(policy)),
+);
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-demand-'});

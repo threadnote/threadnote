@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Effect, FileSystem, Layer, Path, Result} from 'effect';
@@ -30,6 +31,8 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const config = Effect2.pipe('a', EffectString.repeat(64));
 const credential = Effect2.pipe('b', EffectString.repeat(64));
 const epoch = Effect2.pipe('c', EffectString.repeat(64));
@@ -41,7 +44,7 @@ const policyState: {
   onCurrent?: (call: number) => Effect.Effect<void>;
 } = {enabled: true, currentCalls: 0};
 const services = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

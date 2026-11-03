@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {runtimeEntrypointLayer} from '@threadnote/threadnote/effect/runtime-entrypoint';
 import {codeGraphRuntimeAdapters} from '@threadnote/threadnote/code_graph/runtime_adapters';
 import {Effect, Layer} from 'effect';
@@ -18,7 +19,9 @@ export function provideTestLayer<Services, LayerError, LayerRequirements>(
     runtimeEntrypointLayer,
     codeGraphRuntimeAdapters,
   );
-  const completeLayer = Layer.merge(layer.pipe(Layer.provide(runtimePorts)), runtimePorts);
+  const completeLayer = Layer.merge(layer.pipe(Layer.provide(runtimePorts)), runtimePorts).pipe(
+    Layer.provideMerge(cryptoLayer),
+  );
   const sourceSyncLayer = Layer.effect(
     SourceSync,
     Effect.serviceOption(SourceSync).pipe(

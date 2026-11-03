@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -14,6 +15,8 @@ import type {PocketSourceConfig} from '../src/config.js';
 import {pocketSourceWork, runPocketSourceSync} from '../src/source.js';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const source: PocketSourceConfig = {
   type: 'pocket',
   id: 'source-one',
@@ -24,7 +27,7 @@ const source: PocketSourceConfig = {
   maxStaleHours: 24,
 };
 const base = Layer.merge(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

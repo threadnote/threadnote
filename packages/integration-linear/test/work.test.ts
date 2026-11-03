@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -14,6 +15,8 @@ import type {LinearSourceConfig} from '../src/config.js';
 import {linearSourceWork, runLinearSourceSync} from '../src/source.js';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const source: LinearSourceConfig = {
   type: 'linear',
   id: 'source-one',
@@ -29,7 +32,7 @@ const source: LinearSourceConfig = {
   issueIds: ['00000000-0000-0000-0000-000000000004'],
 };
 const base = Layer.merge(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
