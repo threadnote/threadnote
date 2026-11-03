@@ -93,6 +93,10 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  RESOLUTION_CANDIDATE_SNAPSHOT_TRIGGER,
+  resolutionCandidateSnapshotTriggerCompatible,
+} from './resolution/candidate_index.js';
 
 const WORKTREE_RECONCILIATION_CURSOR_KEY = 'worktree_reconciliation_cursor';
 const WORKTREE_RECONCILIATION_CURSOR_PATTERN = CODE_GRAPH_SCOPE_CURSOR_PATTERN;
@@ -726,12 +730,14 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
                length(CAST(sql AS BLOB)) AS sql_bytes
         FROM sqlite_master
         WHERE type = 'trigger'
+          AND name <> '${RESOLUTION_CANDIDATE_SNAPSHOT_TRIGGER.name}'
           AND tbl_name IN (${EffectArray.join(
             EffectArray.map(triggerTables, table => `'${table}' COLLATE NOCASE`),
             ', ',
           )})
         ORDER BY name
         LIMIT 5`);
+    if (!(yield* resolutionCandidateSnapshotTriggerCompatible(sql))) return false;
     const verifiedTriggers: ReconciliationTrigger[] = [];
     for (const trigger of triggers) {
       if (!isReconciliationTrigger(trigger)) return false;

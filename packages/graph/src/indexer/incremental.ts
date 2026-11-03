@@ -95,6 +95,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
     suppliedPreassessment ??
     (yield* assessIncrementalOverlayCompatibility(
       {
+        baseSnapshotId: input.committedBase?.foldForward?.logicalSnapshotId ?? input.committedBase?.snapshot.id,
         extractorSet: input.building.extractorSet,
         inventory: input.inventory,
         languagePacks: input.languagePacks,
@@ -215,6 +216,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
     }
   }
   return {
+    candidateFacts: preassessment.candidateFacts ?? preassessment.facts,
     closureProjects: preassessment.closureProjects,
     deletedPaths: preassessment.deletedPaths,
     facts,
@@ -230,6 +232,7 @@ export const assessIncrementalOverlay = Effect.fn('codeGraph.assessIncrementalOv
 export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assessIncrementalOverlayCompatibility')(
   function* (
     input: {
+      readonly baseSnapshotId?: string;
       readonly extractorSet: string;
       readonly inventory: CodeGraphInventory;
       readonly languagePacks: CodeGraphLanguagePackRegistryShape;
@@ -352,6 +355,7 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
       } satisfies IncrementalOverlayPreassessment;
     }
     const closure = yield* assessProjectIncrementalClosureCompatibility({
+      baseSnapshotId: input.baseSnapshotId,
       baseFiles: input.inventory.committedFiles,
       baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.committedFiles),
       baseWorkspace: committedWorkspace,
@@ -557,6 +561,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     );
     if (reexportResolutionSurfaceChanged || resolutionSurfaceChanged || workspaceSeedProjectIds.length > 0) {
       const closure = yield* assessProjectIncrementalClosureCompatibility({
+        baseSnapshotId: extractorTransition ? undefined : input.candidate.snapshot.id,
         baseFiles: input.candidate.files,
         baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.candidate.files),
         baseWorkspace: committedWorkspace,
@@ -597,6 +602,7 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
 const assessProjectIncrementalClosureCompatibility = Effect.fn(
   'codeGraph.assessProjectIncrementalClosureCompatibility',
 )(function* (input: {
+  readonly baseSnapshotId?: string;
   readonly baseFiles: readonly CodeGraphInventoryFile[];
   readonly baseFileSetFingerprint: string;
   readonly baseWorkspace: CodeGraphWorkspace;
@@ -623,6 +629,7 @@ const assessProjectIncrementalClosureCompatibility = Effect.fn(
       return {mode: 'fallback', reason: 'resolution-surface-changed'} satisfies IncrementalOverlayPreassessment;
     }
     return yield* assessResolutionCandidateIncrementalClosure({
+      baseSnapshotId: input.baseSnapshotId,
       baseFileSetFingerprint: input.baseFileSetFingerprint,
       baseFiles: input.baseFiles,
       candidateReexports: seeds.candidateReexports ?? [],
@@ -660,6 +667,7 @@ const assessProjectIncrementalClosureCompatibility = Effect.fn(
     return planned;
   }
   return yield* assessResolutionCandidateIncrementalClosure({
+    baseSnapshotId: input.baseSnapshotId,
     baseFileSetFingerprint: input.baseFileSetFingerprint,
     baseFiles: input.baseFiles,
     committedWorkspace: input.baseWorkspace,

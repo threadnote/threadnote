@@ -1,4 +1,10 @@
 import type {Effect, Option} from 'effect';
+import type {
+  ResolutionCandidateIndexStage,
+  ResolutionCandidateIndexFinish,
+  ResolutionCandidateIndexQuery,
+} from './resolution/candidate_index.js';
+import type {ProjectResolutionCandidateClosure} from './resolution/candidate_closure.js';
 import type {ResolvedCodeGraphIndexScope} from '../index_scope.js';
 import type {CodeGraphTraversalEdge} from './internal_models.js';
 import type {CodeGraphScopeApplicabilityEvidence} from '../scope/applicability.js';
@@ -303,6 +309,20 @@ export interface CodeGraphStoreShape {
     update: CodeGraphRemovedViewCleanupUpdate,
     options?: CodeGraphRemovedViewCleanupStoreOptions,
   ) => Effect.Effect<CodeGraphRemovedViewCleanupUpdateResult, CodeGraphStoreFailure>;
+  readonly stageResolutionCandidateIndex?: (
+    databasePath: string,
+    input: ResolutionCandidateIndexStage,
+    protector?: CodeGraphDirectPersistentCapacityProtector,
+  ) => Effect.Effect<void, CodeGraphStoreFailure>;
+  readonly finishResolutionCandidateIndex?: (
+    databasePath: string,
+    input: ResolutionCandidateIndexFinish,
+    protector?: CodeGraphDirectPersistentCapacityProtector,
+  ) => Effect.Effect<boolean, CodeGraphStoreFailure>;
+  readonly resolutionCandidateIndexClosure?: (
+    databasePath: string,
+    input: ResolutionCandidateIndexQuery,
+  ) => Effect.Effect<ProjectResolutionCandidateClosure | undefined, CodeGraphStoreFailure>;
   readonly initialize: (
     databasePath: string,
     options?: {readonly waitTimeoutMilliseconds?: number},

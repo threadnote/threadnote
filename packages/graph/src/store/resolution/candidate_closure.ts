@@ -85,6 +85,7 @@ export type ProjectResolutionCandidateClosure =
   | {
       readonly affectedAliasLookupIdentities: ReadonlySet<string>;
       readonly directAliasSymbolConflictIdentities: ReadonlySet<string>;
+      readonly candidateIndex?: import('./candidate_index.js').ResolutionCandidateIndexWork;
       readonly factBytes: number;
       readonly lookupKeys: number;
       readonly mode: 'eligible';

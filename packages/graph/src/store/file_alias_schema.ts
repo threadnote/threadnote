@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {normalizeSchemaDefinition} from './schema/normalization.js';
+import {resolutionCandidateSnapshotFileTriggersCompatible} from './resolution/candidate_index.js';
 import {inspectBoundedSchemaMetadataValue} from './schema/metadata.js';
 import {
   CODE_GRAPH_SCHEMA_INITIALIZATION_RECEIPT_TABLE,
@@ -395,13 +396,7 @@ const snapshotFileSchemaObjectsExact = Effect.fn('codeGraph.snapshotFileSchemaOb
   ) {
     return false;
   }
-  const triggers = yield* sql.unsafe(
-    `SELECT 1
-     FROM sqlite_master
-     WHERE type = 'trigger' AND tbl_name = 'snapshot_files' COLLATE NOCASE
-     LIMIT 1`,
-  );
-  return triggers.length === 0;
+  return yield* resolutionCandidateSnapshotFileTriggersCompatible(sql);
 });
 
 export const inspectCodeGraphSnapshotFileCitationSchema = Effect.fn('codeGraph.inspectSnapshotFileCitationSchema')(

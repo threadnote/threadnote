@@ -129,6 +129,8 @@ export interface CodeGraphMembershipCandidateWork {
 }
 
 export interface CodeGraphIncrementalWork {
+  /** Indexed metadata decoded in JavaScript, separate from full parser facts. */
+  readonly candidateIndex?: import('../store/resolution/candidate_index.js').ResolutionCandidateIndexWork;
   readonly membershipCandidate?: CodeGraphMembershipCandidateWork;
   /** Persisted attribution context decoded for this delta. */
   readonly attributionContextFiles: number;
@@ -155,6 +157,7 @@ export type CodeGraphIncrementalWorkObservation = Pick<
   | 'inventoryFilesInspected'
   | 'probedDependencyPaths'
   | 'membershipCandidate'
+  | 'candidateIndex'
 >;
 
 export function measureCodeGraphIncrementalWork(input: {
@@ -187,6 +190,7 @@ export function measureCodeGraphIncrementalWork(input: {
   }
   return {
     ...(input.observation?.membershipCandidate ? {membershipCandidate: input.observation.membershipCandidate} : {}),
+    ...(input.observation?.candidateIndex ? {candidateIndex: input.observation.candidateIndex} : {}),
     attributionContextFiles: input.observation?.attributionContextFiles ?? 0,
     baseFactsLoaded: input.observation?.baseFactsLoaded ?? input.files.length,
     changedFiles: input.files.length,

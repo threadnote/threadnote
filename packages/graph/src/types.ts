@@ -254,6 +254,18 @@ export interface CodeGraphMaterializationMetrics {
   /** Files whose parser facts were postprocessed and attributed during this materialization. */
   readonly attributedFilesCompleted?: number;
   readonly attributionMilliseconds?: number;
+  /** Original graph-row assembly only; total counters above/below also include optional candidate evidence work. */
+  readonly graphMaterialization?: import('./indexer/materialization.js').CodeGraphMaterializationReplayMetrics & {
+    readonly loadingMilliseconds: number;
+    readonly attributionMilliseconds: number;
+  };
+  readonly candidateIndex?: {
+    readonly rawFactReplayBytesCompleted: number;
+    readonly attributedFilesCompleted: number;
+    readonly loadingMilliseconds: number;
+    readonly attributionMilliseconds: number;
+    readonly stagingMilliseconds: number;
+  };
   readonly batchesCompleted: number;
   readonly batchesTotal: number;
   readonly cachedFactBytesCompleted?: number;
@@ -549,6 +561,12 @@ export interface CodeGraphIndexSummary {
     readonly resolutionPublicationGate?: import('./resolution/surface.js').CodeGraphResolutionPublicationGate;
     readonly stagedFiles: number;
     readonly totalFiles: number;
+  };
+  readonly candidateIndexBuild?: {
+    /** Additional original-fact replay required only when final materialized shards supplied this build. */
+    readonly rawFilesLoaded: number;
+    readonly rawFactBytesLoaded: number;
+    readonly unsupportedFiles: number;
   };
   readonly reusedFiles: number;
   readonly skippedFiles: number;

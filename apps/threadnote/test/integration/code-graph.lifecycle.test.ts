@@ -2140,7 +2140,7 @@ describe('native code graph lifecycle', () => {
         threadnoteHome: home,
       });
 
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
       expect(metrics.cachedFactReplayBytesCompleted).toBe(metrics.cachedFactBytesTotal);
       expect(metrics.cachedFactReplayBytesCompleted).toBeGreaterThan(0);
       expect(metrics.rawFactReplayBytesCompleted).toBe(metrics.cachedFactBytesTotal);
@@ -2188,19 +2188,32 @@ describe('native code graph lifecycle', () => {
                WHERE snapshot_id = ?`,
             )
             .get(rebuilt.snapshot.id);
-          return {bytes: shards?.bytes ?? 0, references: references?.count ?? 0, shards: shards?.count ?? 0};
+          const rawBytes =
+            database
+              .query<{readonly bytes: number}, []>(
+                `SELECT COALESCE(SUM(${storedCodeGraphFactRawBytesSql('facts_json')}), 0) AS bytes FROM file_blobs`,
+              )
+              .get()?.bytes ?? 0;
+          return {rawBytes, bytes: shards?.bytes ?? 0, references: references?.count ?? 0, shards: shards?.count ?? 0};
         } finally {
           database.close();
         }
       });
 
       expect(rebuilt.materialization).toEqual({mode: 'full', stagedFiles: 12, totalFiles: 12});
+      expect(rebuilt.candidateIndexBuild).toEqual({
+        rawFilesLoaded: 12,
+        rawFactBytesLoaded: shardState.rawBytes,
+        unsupportedFiles: 0,
+      });
       expect(rebuilt.diagnostics).toContain('Reused content-addressed materialized shards for 12 file(s).');
       expect(shardState.shards).toBe(12);
       expect(shardState.references).toBe(12);
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
       expect(metrics.cachedFactReplayBytesCompleted).toBe(shardState.bytes);
       expect(metrics.rawFactReplayBytesCompleted).toBe(0);
+      expect(metrics.candidateIndex?.rawFactReplayBytesCompleted).toBe(shardState.rawBytes);
+      expect(metrics.candidateIndex?.attributedFilesCompleted).toBe(12);
       expect(metrics.materializedShardReplayBytesCompleted).toBe(shardState.bytes);
       expect(metrics.materializedShardCacheDeferredFilesCompleted).toBe(0);
       expect(metrics.materializedShardCacheDeferredRawFactBytesCompleted).toBe(0);
@@ -2266,7 +2279,13 @@ describe('native code graph lifecycle', () => {
                  FROM materialized_file_shards WHERE path_hint NOT IN (?, ?)`,
               )
               .get('src/file-128.ts', 'src/file-129.ts')?.bytes ?? 0;
-          return {completeShardBytes, missingPath: missing.path, rawFactBytes};
+          const completeRawBytes =
+            database
+              .query<{readonly bytes: number}, [string, string]>(
+                `SELECT COALESCE(SUM(${storedCodeGraphFactRawBytesSql('facts_json')}), 0) AS bytes FROM file_blobs WHERE path_hint NOT IN (?, ?)`,
+              )
+              .get('src/file-128.ts', 'src/file-129.ts')?.bytes ?? 0;
+          return {completeRawBytes, completeShardBytes, missingPath: missing.path, rawFactBytes};
         } finally {
           database.close();
         }
@@ -2279,7 +2298,7 @@ describe('native code graph lifecycle', () => {
         threadnoteHome: home,
       });
       const rebuiltGraph = yield* store.loadGraph(databasePath, rebuilt.snapshot.id);
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
       const persistedReuse = yield* Effect.sync(() => {
         const database = new Database(databasePath, {readonly: true});
         try {
@@ -2308,6 +2327,13 @@ describe('native code graph lifecycle', () => {
         partialShardState.rawFactBytes + partialShardState.completeShardBytes,
       );
       expect(metrics.rawFactReplayBytesCompleted).toBe(partialShardState.rawFactBytes);
+      expect(metrics.candidateIndex?.rawFactReplayBytesCompleted).toBe(partialShardState.completeRawBytes);
+      expect(metrics.candidateIndex?.attributedFilesCompleted).toBe(128);
+      expect(rebuilt.candidateIndexBuild).toEqual({
+        rawFilesLoaded: 128,
+        rawFactBytesLoaded: partialShardState.completeRawBytes,
+        unsupportedFiles: 0,
+      });
       expect(metrics.materializedShardReplayBytesCompleted).toBe(partialShardState.completeShardBytes);
       expect(metrics.materializedShardCacheDeferredFilesCompleted).toBe(0);
       expect(metrics.materializedShardCacheDeferredRawFactBytesCompleted).toBe(0);
@@ -2387,7 +2413,7 @@ describe('native code graph lifecycle', () => {
         onProgress: current => Effect.sync(() => progress.push(current)),
         threadnoteHome: home,
       });
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
 
       expect(replayState.changedRaw).toBeGreaterThan(0);
       expect(replayState.retainedShard).toBeGreaterThan(0);
@@ -2488,7 +2514,7 @@ describe('native code graph lifecycle', () => {
       const freshDatabasePath = codeGraphDatabasePath(freshHome, fresh);
       const rebuiltGraph = yield* store.loadGraph(reusedDatabasePath, rebuilt.snapshot.id);
       const freshGraph = yield* store.loadGraph(freshDatabasePath, fresh.snapshot.id);
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
       const freshTarget = EffectOption.getOrUndefined(
         EffectArray.findFirst(
           freshGraph.symbols,
@@ -2581,7 +2607,7 @@ describe('native code graph lifecycle', () => {
             onProgress: current => Effect.sync(() => progress.push(current)),
             threadnoteHome: home,
           });
-          const metrics = finalFullMaterializationMetrics(progress);
+          const metrics = finalGraphMaterializationMetrics(progress);
 
           expect(metrics.exactGenerationShardFilesCompleted, label).toBe(0);
           expect(metrics.crossGenerationShardFilesCompleted, label).toBe(0);
@@ -2645,7 +2671,7 @@ describe('native code graph lifecycle', () => {
             threadnoteHome: home,
           });
           const rebuiltGraph = yield* store.loadGraph(databasePath, rebuilt.snapshot.id);
-          const metrics = finalFullMaterializationMetrics(progress);
+          const metrics = finalGraphMaterializationMetrics(progress);
 
           expect(metrics.exactGenerationShardFilesCompleted, label).toBe(0);
           expect(metrics.crossGenerationShardFilesCompleted, label).toBe(0);
@@ -2804,7 +2830,7 @@ describe('native code graph lifecycle', () => {
         onProgress: current => Effect.sync(() => progress.push(current)),
         threadnoteHome: home,
       });
-      const metrics = finalFullMaterializationMetrics(progress);
+      const metrics = finalGraphMaterializationMetrics(progress);
       const selectedDerivations = yield* Effect.sync(() => {
         const database = new Database(databasePath, {readonly: true});
         try {
@@ -7589,7 +7615,7 @@ function invalidateCachedFactFallback(databasePath: string, snapshotId: string, 
   }
 }
 
-function finalFullMaterializationMetrics(progress: readonly CodeGraphProgress[]): CodeGraphMaterializationMetrics {
+function finalGraphMaterializationMetrics(progress: readonly CodeGraphProgress[]): CodeGraphMaterializationMetrics {
   const metrics = EffectArray.flatMap(
     EffectArray.filter(
       progress,
@@ -7603,7 +7629,31 @@ function finalFullMaterializationMetrics(progress: readonly CodeGraphProgress[])
       current.metrics?.mode === 'full' ? [current.metrics] : [],
   ).at(-1);
   if (metrics === undefined) throw TestError.make({message: 'Expected terminal full-materialization metrics.'});
-  return metrics;
+  const graph = metrics.graphMaterialization;
+  const candidate = metrics.candidateIndex;
+  if (!graph || !candidate)
+    throw TestError.make({message: 'Expected explicit graph/candidate materialization work split.'});
+  expect(metrics.rawFactReplayBytesCompleted).toBe(
+    graph.rawFactReplayBytesCompleted + candidate.rawFactReplayBytesCompleted,
+  );
+  expect(metrics.materializedShardReplayBytesCompleted).toBe(graph.materializedShardReplayBytesCompleted);
+  expect(metrics.cachedFactReplayBytesCompleted).toBe(
+    graph.cachedFactReplayBytesCompleted + candidate.rawFactReplayBytesCompleted,
+  );
+  expect(metrics.cachedFactReplayBytesCompleted).toBe(
+    metrics.rawFactReplayBytesCompleted! + metrics.materializedShardReplayBytesCompleted!,
+  );
+  expect(metrics.attributedFilesCompleted).toBe(graph.attributedFilesCompleted + candidate.attributedFilesCompleted);
+  expect(metrics.loadingMilliseconds).toBe(graph.loadingMilliseconds + candidate.loadingMilliseconds);
+  expect(metrics.attributionMilliseconds).toBe(graph.attributionMilliseconds + candidate.attributionMilliseconds);
+  expect(metrics.stageMilliseconds?.['loading-cache']).toBe(metrics.loadingMilliseconds);
+  expect(metrics.stageMilliseconds?.attributing).toBe(metrics.attributionMilliseconds);
+  expect(metrics.stageMilliseconds?.['writing-candidates']).toBeGreaterThanOrEqual(candidate.stagingMilliseconds);
+  expect(candidate.loadingMilliseconds).toBeGreaterThanOrEqual(0);
+  expect(candidate.attributionMilliseconds).toBeGreaterThanOrEqual(0);
+  expect(candidate.stagingMilliseconds).toBeGreaterThanOrEqual(0);
+  // Preserve every original exact graph-row replay/attribution guarantee; totals above include the extra index work.
+  return {...metrics, ...graph};
 }
 
 function createLargeInventoryRepository(count: number, bytes = 1_048_576): string {

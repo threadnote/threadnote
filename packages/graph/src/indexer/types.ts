@@ -257,6 +257,7 @@ export type IncrementalOverlayAssessment =
       readonly resolutionPublicationAssessment?: CodeGraphResolutionPublicationAssessment;
       readonly extractorTransition?: true;
       readonly reuse: 'persisted-base' | 'staged-base';
+      readonly candidateFacts?: readonly CodeGraphFileFacts[];
       readonly work: CodeGraphIncrementalWork;
     }
   | {
@@ -275,6 +276,7 @@ export type IncrementalOverlayPreassessment =
       readonly files: readonly CodeGraphInventoryFile[];
       readonly closureProjects?: number;
       readonly mode: 'compatible';
+      readonly candidateFacts?: readonly CodeGraphFileFacts[];
       readonly proportionalWork?: CodeGraphIncrementalWorkObservation;
       readonly deletedPaths?: readonly string[];
       readonly resolutionClosure?: 'changed' | 'full' | 'project';
