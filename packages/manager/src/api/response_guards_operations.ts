@@ -92,6 +92,17 @@ const ApiSchema7649 = Schema.Union([
   Schema.Literal('legacy-process'),
 ]);
 const ApiSchema6061 = Schema.Struct({
+  cpu: Schema.optionalKey(
+    Schema.Union([
+      Schema.Struct({
+        state: Schema.Literal('sampled'),
+        percent: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+        sampledAt: Schema.String,
+        windowMilliseconds: Schema.Finite.check(Schema.isGreaterThan(0)),
+      }),
+      Schema.Struct({state: Schema.Literals(['sampling', 'unavailable']), sampledAt: Schema.String}),
+    ]),
+  ),
   activityRole: Schema.optionalKey(ApiSchema7640),
   ageMilliseconds: Schema.Finite,
   currentOperation: Schema.optionalKey(ApiSchema320),

@@ -7,12 +7,18 @@ import {Array as EffectArray} from 'effect';
 import {Clock, Console, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
+import {
+  runtimeTextDirectoryNamePage,
+  SystemInfo,
+  processCpuObservation,
+  type ProcessCpuObservation,
+  type TimedProcessResourceCounters,
+  type ProcessResourceCounters,
+} from '@threadnote/platform/system';
 import {readLiveStandaloneProcessLeases} from './standalone_lease.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {orderThreadnoteProcessesByAttention} from './attention.js';
 import {observeProcessInstanceIdentity, processInstanceIdentityMatches} from './process_identity.js';
-import {withoutTelemetrySessionEnvironment} from '../telemetry/session.js';
 import {createMissingProcessFile, linkMissingProcessFile} from './owned_file.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -21,7 +27,6 @@ const PROCESS_DIAGNOSTICS_SCHEMA_VERSION = 1;
 const PROCESS_DIAGNOSTICS_LIMIT = 100;
 const PROCESS_DIAGNOSTICS_SCAN_LIMIT = 256;
 const PROCESS_REGISTRATION_LIMIT_BYTES = 16 * 1024;
-const PROCESS_MEMORY_QUERY_TIMEOUT_MS = 5_000;
 const PROCESS_REGISTRATION_RECONCILE_MILLISECONDS = 30_000;
 const PROCESS_REGISTRATION_REPAIR_WARNING_LIMIT = 3;
 const SAFE_OPERATION = /^[a-z][a-z0-9-]{0,47}$/;
@@ -77,6 +82,7 @@ export interface ThreadnoteProcessDiagnostic {
   readonly activityRole?: RegisteredThreadnoteProcessRole;
   readonly ageMilliseconds: number;
   readonly currentOperation?: string;
+  readonly cpu?: ProcessCpuObservation;
   readonly parentProcessId: number;
   readonly parentRole?: ThreadnoteProcessRole;
   readonly processId: number;
@@ -296,6 +302,7 @@ export function withThreadnoteProcessActivity<A, E, R>(
 const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   selection: 'attention' | 'chronological' = 'chronological',
+  resources = true,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -409,23 +416,22 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     0,
     PROCESS_DIAGNOSTICS_LIMIT,
   );
-  const memoryByProcess = new Map(
-    processMemoryBytes(
-      EffectArray.map(selected, value => value.processId),
-      system.platform,
-      system.environment(),
-    ),
-  );
+  const identities = new Map(EffectArray.map(live, value => [value.processId, value.processStartIdentity] as const));
+  const resourceByProcess = resources
+    ? yield* sampleProcessResources(system, config.agentContextHome, selected, identities)
+    : new Map<number, {readonly rssBytes?: number; readonly cpu?: ProcessCpuObservation}>();
   if (
     EffectArray.some(selected, value => value.processId === system.processId) &&
-    !memoryByProcess.has(system.processId)
+    resources &&
+    resourceByProcess.get(system.processId)?.rssBytes === undefined
   ) {
     const rssBytes = system.memoryUsage().rss;
-    if (Number.isSafeInteger(rssBytes) && rssBytes >= 0) memoryByProcess.set(system.processId, rssBytes);
+    if (Number.isSafeInteger(rssBytes) && rssBytes >= 0)
+      resourceByProcess.set(system.processId, {...resourceByProcess.get(system.processId), rssBytes});
   }
   const sorted = EffectArray.map(selected, value => ({
     ...value,
-    ...(memoryByProcess.get(value.processId) === undefined ? {} : {rssBytes: memoryByProcess.get(value.processId)}),
+    ...resourceByProcess.get(value.processId),
   }));
   const diagnostics = {
     processes: sorted,
@@ -449,9 +455,10 @@ export const readThreadnoteProcessDiagnostics = Effect.fn('processDiagnostics.re
  */
 export const readManageableThreadnoteProcessDiagnostics = Effect.fn('processDiagnostics.readManageable')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
+  options: {readonly resources?: boolean} = {},
 ) {
   const system = yield* SystemInfo;
-  const snapshot = yield* readThreadnoteProcessSnapshot(config, 'attention');
+  const snapshot = yield* readThreadnoteProcessSnapshot(config, 'attention', options.resources ?? true);
   const diagnostics = snapshot.diagnostics;
   const processes: ManageableThreadnoteProcessDiagnostic[] = yield* Effect.forEach(
     diagnostics.processes,
@@ -532,7 +539,17 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
   options: {readonly json?: boolean},
 ) {
   const system = yield* SystemInfo;
-  const observed = yield* readThreadnoteProcessDiagnostics(config);
+  let observed = yield* readThreadnoteProcessDiagnostics(config);
+  if (
+    system.processResourceCounters &&
+    EffectArray.some(
+      observed.processes,
+      value => value.processId !== system.processId && value.cpu?.state === 'sampling',
+    )
+  ) {
+    yield* Effect.sleep(500);
+    observed = yield* readThreadnoteProcessDiagnostics(config);
+  }
   const diagnostics: ThreadnoteProcessDiagnostics = {
     ...observed,
     processes: EffectArray.filter(observed.processes, process => process.processId !== system.processId),
@@ -556,13 +573,18 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
 
 export function renderProcessDiagnosticsTable(processes: readonly ThreadnoteProcessDiagnostic[]): string {
   const rows = [
-    ['PID', 'PPID', 'ROLE', 'VERSION', 'AGE', 'RSS', 'OPERATION'],
+    ['PID', 'PPID', 'ROLE', 'VERSION', 'AGE', 'CPU', 'RSS', 'OPERATION'],
     ...EffectArray.map(processes, process => [
       String(process.processId),
       process.parentProcessId === 0 ? '-' : String(process.parentProcessId),
       process.activityRole === undefined ? process.role : `${process.role} (${process.activityRole})`,
       process.releaseVersion ?? '-',
       formatDuration(process.ageMilliseconds),
+      process.cpu?.state === 'sampled'
+        ? `${process.cpu.percent.toFixed(1)}%`
+        : process.cpu?.state === 'sampling'
+          ? 'sampling'
+          : 'unavailable',
       process.rssBytes === undefined ? 'unknown' : formatBytes(process.rssBytes),
       process.currentOperation ?? '-',
     ]),
@@ -1041,84 +1063,87 @@ function removeRegistrationFile(fs: FileSystem.FileSystem, file: string) {
   return fs.remove(file, {force: true}).pipe(Effect.ignore);
 }
 
-function processMemoryBytes(
-  processIds: readonly number[],
-  platform: NodeJS.Platform,
-  environment: NodeJS.ProcessEnv,
-): ReadonlyMap<number, number> {
-  if (processIds.length === 0) return new Map();
-  try {
-    if (platform === 'win32') return windowsProcessMemoryBytes(processIds, environment);
-    const result = Bun.spawnSync({
-      cmd: [
-        'ps',
-        '-o',
-        'pid=,rss=',
-        '-p',
-        EffectArray.join(
-          EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
-          ',',
-        ),
-      ],
-      env: withoutTelemetrySessionEnvironment(environment),
-      stderr: 'pipe',
-      stdout: 'pipe',
-      timeout: PROCESS_MEMORY_QUERY_TIMEOUT_MS,
-    });
-    if (result.exitCode !== 0) return new Map();
-    const memory = new Map<number, number>();
-    for (const line of Effect2.pipe(result.stdout.toString(), EffectString.split(/\r?\n/))) {
-      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-      if (!match) continue;
-      memory.set(Number(match[1]), Number(match[2]) * 1024);
-    }
-    return memory;
-  } catch {
-    return new Map();
-  }
-}
+type ResourceDisplay = {readonly cpu?: ProcessCpuObservation; readonly rssBytes?: number};
+type ResourceSampleCache = {
+  readonly gate: Semaphore.Semaphore;
+  previous: ReadonlyMap<number, TimedProcessResourceCounters>;
+  result: Map<number, ResourceDisplay>;
+  signature: string;
+  observedAt: number;
+};
+const resourceSampleCaches = new WeakMap<SystemInfo['Service'], Map<string, ResourceSampleCache>>();
 
-function windowsProcessMemoryBytes(
-  processIds: readonly number[],
-  environment: NodeJS.ProcessEnv,
-): ReadonlyMap<number, number> {
-  const result = Bun.spawnSync({
-    cmd: [
-      'powershell.exe',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '$ids=$env:THREADNOTE_PROCESS_IDS -split ","; ' +
-        'Get-Process -Id $ids -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress',
-    ],
-    env: {
-      ...withoutTelemetrySessionEnvironment(environment),
-      THREADNOTE_PROCESS_IDS: EffectArray.join(
-        EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
-        ',',
-      ),
-    },
-    stderr: 'pipe',
-    stdout: 'pipe',
-    timeout: PROCESS_MEMORY_QUERY_TIMEOUT_MS,
-  });
-  if (result.exitCode !== 0 || !result.stdout.length) return new Map();
-  const parsed = JSON.parse(result.stdout.toString()) as unknown;
-  const rows = EffectArray.isArray(parsed) ? parsed : [parsed];
-  const memory = new Map<number, number>();
-  for (const row of rows) {
-    if (
-      typeof row === 'object' &&
-      row !== null &&
-      'Id' in row &&
-      'WorkingSet64' in row &&
-      Number.isSafeInteger(Number(row.Id)) &&
-      Number.isSafeInteger(Number(row.WorkingSet64))
-    ) {
-      memory.set(Number(row.Id), Number(row.WorkingSet64));
+function sampleProcessResources(
+  system: SystemInfo['Service'],
+  home: string,
+  processes: readonly {readonly processId: number}[],
+  identities: ReadonlyMap<number, string | undefined>,
+) {
+  return Effect.suspend(() => {
+    let homes = resourceSampleCaches.get(system);
+    if (!homes) {
+      homes = new Map();
+      resourceSampleCaches.set(system, homes);
     }
-  }
-  return memory;
+    let cache = homes.get(home);
+    if (!cache) {
+      cache = {
+        gate: Semaphore.makeUnsafe(1),
+        previous: new Map(),
+        result: new Map(),
+        signature: '',
+        observedAt: -Infinity,
+      };
+      if (homes.size >= 4) {
+        const oldest = homes.keys().next().value;
+        if (oldest !== undefined) homes.delete(oldest);
+      }
+      homes.set(home, cache);
+    }
+    const currentCache = cache;
+    return currentCache.gate.withPermit(
+      Effect.gen(function* () {
+        const monotonicMilliseconds = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+        const signature = EffectArray.join(
+          EffectArray.map(processes, value => `${value.processId}:${identities.get(value.processId) ?? ''}`),
+          ',',
+        );
+        if (
+          signature === currentCache.signature &&
+          monotonicMilliseconds - currentCache.observedAt >= 0 &&
+          monotonicMilliseconds - currentCache.observedAt < 250
+        )
+          return new Map(currentCache.result);
+        const sampledAt = DateTime.formatIso(yield* DateTime.now);
+        const ids = EffectArray.map(processes, value => value.processId);
+        const probe: Effect.Effect<ReadonlyMap<number, ProcessResourceCounters>> =
+          system.processResourceCounters?.(ids) ?? Effect.succeed(new Map());
+        const counters = yield* probe.pipe(
+          Effect.timeoutOrElse({duration: 1_500, orElse: () => Effect.succeed(new Map())}),
+          Effect.orElseSucceed(() => new Map()),
+        );
+        const observedAt = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+        const previous = new Map<number, TimedProcessResourceCounters>();
+        const result = new Map<number, ResourceDisplay>();
+        for (const {processId} of processes) {
+          const value = counters.get(processId);
+          // Counter identity is collected with the counters, closing the PID-reuse gap between OS probes.
+          const verified =
+            value !== undefined && identities.get(processId) === value.processStartIdentity
+              ? {...value, monotonicMilliseconds: observedAt}
+              : undefined;
+          const cpu = processCpuObservation(currentCache.previous.get(processId), verified, sampledAt);
+          result.set(processId, {cpu, ...(value?.rssBytes === undefined ? {} : {rssBytes: value.rssBytes})});
+          if (verified) previous.set(processId, verified);
+        }
+        currentCache.previous = previous;
+        currentCache.result = result;
+        currentCache.signature = signature;
+        currentCache.observedAt = observedAt;
+        return new Map(result);
+      }),
+    );
+  });
 }
 
 function setBestEffortProcessTitle(role: ThreadnoteProcessRole): void {

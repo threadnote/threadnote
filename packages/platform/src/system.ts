@@ -1,4 +1,11 @@
 import {Array as EffectArray} from 'effect';
+import {readProcessResourceCounters, type ProcessResourceCounters} from './process-resources.js';
+export {
+  processCpuObservation,
+  type ProcessCpuObservation,
+  type TimedProcessResourceCounters,
+  type ProcessResourceCounters,
+} from './process-resources.js';
 import {RuntimeEntrypoint} from './runtime-entrypoint.js';
 import {
   Config,
@@ -595,6 +602,9 @@ export interface SystemInfoShape {
     readonly rss: number;
   };
   readonly processStartIdentity: (processId: number) => Effect.Effect<string | undefined>;
+  readonly processResourceCounters?: (
+    processIds: readonly number[],
+  ) => Effect.Effect<ReadonlyMap<number, ProcessResourceCounters>>;
   readonly runtimeVersion: string;
   readonly pathDelimiter: string;
   readonly platform: NodeJS.Platform;
@@ -775,6 +785,13 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
           };
         },
         processStartIdentity,
+        processResourceCounters: processIds =>
+          readProcessResourceCounters(
+            processIds,
+            runtimePlatform,
+            process.env,
+            childEnvironmentPolicy.sanitizeExternal,
+          ),
         runtimeVersion: Bun.version,
         pathDelimiter: runtimePlatform === 'win32' ? ';' : ':',
         platform: runtimePlatform,
