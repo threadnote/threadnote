@@ -18,7 +18,7 @@ import {
   SynchronizedRef,
   Schema,
 } from 'effect';
-import {CodeGraphIndexer, type CodeGraphIndexerShape} from './indexer.js';
+import {CodeGraphIndexer, type CodeGraphIndexerShape, type CodeGraphIndexOptions} from './indexer.js';
 import {codeGraphSnapshotAdmissionCurrent, observeCodeGraphAdmissionEnvironment} from './admission_freshness.js';
 import {inventoryRepository, worktreeBuildRequestState} from './inventory.js';
 import {codeGraphInventoryScopeEvidence} from './inventory/scope.js';
@@ -113,6 +113,8 @@ export {makeCodeGraphWatchReconciliation};
 
 export interface CodeGraphWatchOptions {
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
+  /** Structural consumers do not create semantic demand or prewarm historical snapshots. */
+  readonly vectorPolicy?: 'background' | 'off';
   readonly cwd: string;
   readonly key: string;
   readonly manifestPath?: string;
@@ -558,7 +560,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               overlay,
               languagePacks,
               undefined,
-              'background',
+              options.vectorPolicy ?? 'background',
               admission,
               scope,
             ),
@@ -574,7 +576,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
           Effect.provideService(SystemInfo, systemInfo),
         );
       const prepareRefresh: CodeGraphPrepareRefreshRun = options =>
-        options.admissionClass !== 'background'
+        options.vectorPolicy === 'off' || options.admissionClass !== 'background'
           ? Effect.succeed(options)
           : options.refreshDemandPrepared !== undefined
             ? Effect.succeed(options)
@@ -589,7 +591,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                 ),
                 Effect.as(options),
               );
-      const runBackgroundBuild = (input: CodeGraphWatchOptions, target: CodeGraphBackgroundTarget, token: string) => {
+      const runBackgroundBuild = (input: CodeGraphWatchOptions, target: CodeGraphBackgroundTarget, token?: string) => {
         const options =
           target.refreshRoute === undefined
             ? input
@@ -607,7 +609,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               : isolateBuilder
                 ? runIsolatedCodeGraphIndex({
                     admissionClass: 'background',
-                    vectorPolicy: 'background',
+                    vectorPolicy: options.vectorPolicy ?? 'background',
                     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
                     cwd: options.cwd,
                     ...(target.refreshRoute === undefined
@@ -696,39 +698,47 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
           run: (target, token) => runBackgroundBuild(options, target, token),
         });
       const refresh: CodeGraphRefreshRun = (options: CodeGraphWatchOptions) =>
-        options.admissionClass === 'background'
-          ? driveBackgroundDemand(options).pipe(Effect.andThen(isolateBuilder ? Effect.void : schedulePrewarm(options)))
-          : isolateBuilder
-            ? observeTarget(options).pipe(
-                Effect.flatMap(target =>
-                  runIsolatedCodeGraphIndex({
-                    admissionClass: options.admissionClass,
-                    vectorPolicy: 'background',
-                    assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
-                    cwd: options.cwd,
-                    ...(target.refreshRoute === undefined
-                      ? {}
-                      : {
-                          manifestPath: target.refreshRoute.manifestPath,
-                          manifestRevision: target.refreshRoute.manifestRevision,
-                          scopeRoute: target.refreshRoute.route.state,
-                        }),
-                    onProgress: options.onProgress,
-                    ...(options.project === undefined ? {} : {project: options.project}),
-                    requestKey: target.requestKey,
-                    ...(target.scopeId === undefined ? {} : {scopeId: target.scopeId}),
-                    threadnoteHome: options.threadnoteHome,
-                  }),
-                ),
-                Effect.provideService(CommandExecutor, commandExecutor),
-                Effect.provideService(SecureRandom.SecureRandom, crypto),
-                Effect.provideService(FileSystem.FileSystem, fs),
-                Effect.provideService(Path.Path, path),
-                Effect.provideService(SystemInfo, systemInfo),
-                Effect.tap(summary => options.onRefreshed?.(summary.symbols, summary.edges) ?? Effect.void),
-                Effect.asVoid,
+        options.vectorPolicy === 'off'
+          ? observeTarget(options).pipe(
+              Effect.flatMap(target => runBackgroundBuild(options, target)),
+              Effect.tap(summary => options.onRefreshed?.(summary.symbols, summary.edges) ?? Effect.void),
+              Effect.asVoid,
+            )
+          : options.admissionClass === 'background'
+            ? driveBackgroundDemand(options).pipe(
+                Effect.andThen(isolateBuilder ? Effect.void : schedulePrewarm(options)),
               )
-            : indexRepository(indexer, options).pipe(Effect.andThen(schedulePrewarm(options)));
+            : isolateBuilder
+              ? observeTarget(options).pipe(
+                  Effect.flatMap(target =>
+                    runIsolatedCodeGraphIndex({
+                      admissionClass: options.admissionClass,
+                      vectorPolicy: 'background',
+                      assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
+                      cwd: options.cwd,
+                      ...(target.refreshRoute === undefined
+                        ? {}
+                        : {
+                            manifestPath: target.refreshRoute.manifestPath,
+                            manifestRevision: target.refreshRoute.manifestRevision,
+                            scopeRoute: target.refreshRoute.route.state,
+                          }),
+                      onProgress: options.onProgress,
+                      ...(options.project === undefined ? {} : {project: options.project}),
+                      requestKey: target.requestKey,
+                      ...(target.scopeId === undefined ? {} : {scopeId: target.scopeId}),
+                      threadnoteHome: options.threadnoteHome,
+                    }),
+                  ),
+                  Effect.provideService(CommandExecutor, commandExecutor),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
+                  Effect.provideService(FileSystem.FileSystem, fs),
+                  Effect.provideService(Path.Path, path),
+                  Effect.provideService(SystemInfo, systemInfo),
+                  Effect.tap(summary => options.onRefreshed?.(summary.symbols, summary.edges) ?? Effect.void),
+                  Effect.asVoid,
+                )
+              : indexRepository(indexer, options).pipe(Effect.andThen(schedulePrewarm(options)));
       const resolveRecoveryIdentity = (cwd: string) =>
         resolveRepositoryIdentity(cwd).pipe(
           Effect.provideService(CommandExecutor, commandExecutor),
@@ -845,8 +855,9 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
         recover,
         prepareRefresh,
       );
-      const requestBackgroundDemand = (input: CodeGraphWatchOptions) =>
-        Effect.gen(function* () {
+      const requestBackgroundDemand = (input: CodeGraphWatchOptions) => {
+        if (input.vectorPolicy === 'off') return resolveRefreshOptions(input).pipe(Effect.flatMap(watcher.request));
+        return Effect.gen(function* () {
           const options = yield* resolveRefreshOptions(input);
           const target = yield* observeTarget({...options, admissionClass: 'background'});
           // Reconcile only the durable scheduling hint against the existing
@@ -907,8 +918,10 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
             }),
           );
         });
-      const resumeBackgroundDemand = (input: CodeGraphWatchOptions) =>
-        Effect.gen(function* () {
+      };
+      const resumeBackgroundDemand = (input: CodeGraphWatchOptions) => {
+        if (input.vectorPolicy === 'off') return Effect.void.pipe(Effect.as(undefined));
+        return Effect.gen(function* () {
           const options = yield* resolveRefreshOptions(input);
           const target = yield* observeTarget({...options, admissionClass: 'background'});
           const build = yield* currentCodeGraphBuildStatus(target.layout, target.identity.worktreeId).pipe(
@@ -961,6 +974,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
             }),
           );
         });
+      };
       const reportBackgroundFailure = (failure: CodeGraphRefreshFailure) =>
         observability.backgroundFailure(anonymousTelemetryComponent, {operation: 'graph-refresh', failure});
       const scheduleResume = yield* makeCodeGraphResumeScheduler(resumeBackgroundDemand, reportBackgroundFailure);
@@ -1488,7 +1502,9 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
 
 /** Preserve historical keys for full graphs while preventing sibling scoped views from coalescing. */
 function withCodeGraphWatcherScopeKey(options: CodeGraphWatchOptions): CodeGraphWatchOptions {
-  return options.project?.graph === undefined ? options : {...options, key: `${options.key}\0${options.project.uri}`};
+  const scoped =
+    options.project?.graph === undefined ? options : {...options, key: `${options.key}\0${options.project.uri}`};
+  return options.vectorPolicy === 'off' ? {...scoped, key: `${scoped.key}\0vectors-off`} : scoped;
 }
 
 /** @internal Keep identity resolution inside the already-detached failure hook. */
@@ -1765,20 +1781,12 @@ const indexRepository = (indexer: CodeGraphIndexerShape, options: CodeGraphWatch
       ),
     );
 
-/** Automatic indexing publishes structure first and records bounded background vector demand. */
-export function codeGraphWatcherRefreshIndexRequest(options: CodeGraphWatchOptions): {
-  readonly admissionClass?: CodeGraphBuilderAdmissionClass;
-  readonly cwd: string;
-  readonly vectorPolicy: 'background';
-  readonly onProgress: CodeGraphWatchOptions['onProgress'];
-  readonly project?: CodeGraphWatchOptions['project'];
-  readonly refreshDemandToken?: string;
-  readonly threadnoteHome: string;
-} {
+/** Automatic indexing defaults to background vectors; structural consumers explicitly opt out. */
+export function codeGraphWatcherRefreshIndexRequest(options: CodeGraphWatchOptions): CodeGraphIndexOptions {
   return {
     ...(options.admissionClass === undefined ? {} : {admissionClass: options.admissionClass}),
     cwd: options.cwd,
-    vectorPolicy: 'background',
+    vectorPolicy: options.vectorPolicy ?? 'background',
     onProgress: options.onProgress,
     ...(options.project === undefined ? {} : {project: options.project}),
     ...(options.refreshDemandToken === undefined ? {} : {refreshDemandToken: options.refreshDemandToken}),
