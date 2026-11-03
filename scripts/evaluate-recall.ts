@@ -7,7 +7,8 @@ import {evaluateRecallFixture, parseRecallEvaluationFixture} from '@threadnote/r
 import {
   clearRecallIndexMemoryCache,
   expireRecallIndexValidation,
-  loadRecallExactMatches,
+  readRecallExactMatches,
+  loadRecallIndexData,
   loadRecallIndex,
 } from '@threadnote/recall/index';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
@@ -168,6 +169,8 @@ const runProductionBenchmark = Effect.scoped(
         readRecords: () => Effect.succeed([]),
       });
     const prepare = prepareForQuery(`common retrieval ${PRODUCTION_BENCHMARK_QUERY}`);
+    const maintainAndPrepare = (query: string) =>
+      loadRecallIndexData(config, {includeInactive: false, memoryIds: []}).pipe(Effect.andThen(prepareForQuery(query)));
     for (let index = 0; index < PRODUCTION_BENCHMARK_WARMUP_COUNT; index += 1) {
       const warmup = yield* prepare;
       if (!EffectArray.some(warmup.ranked, hit => hit.uri === 'threadnote://resources/repos/threadnote/09999.md')) {
@@ -203,7 +206,7 @@ const runProductionBenchmark = Effect.scoped(
         const observations: RecallEvaluationSample[] = [];
         for (let sample = 0; sample < EXACT_SEARCH_SAMPLE_COUNT; sample += 1) {
           const measured = yield* measureRecallEvaluationSample(() =>
-            loadRecallExactMatches(config, {
+            readRecallExactMatches(config, {
               includeInactive: false,
               terms: [term],
               uriScopes: ['threadnote://resources/repos/threadnote'],
@@ -228,8 +231,11 @@ const runProductionBenchmark = Effect.scoped(
     const coldDecode = yield* measure(COLD_DECODE_SAMPLE_COUNT, COLD_DECODE_P95_LIMIT_MILLISECONDS, () =>
       clearRecallIndexMemoryCache(),
     );
-    const sourceValidation = yield* measure(VALIDATION_SAMPLE_COUNT, VALIDATION_P95_LIMIT_MILLISECONDS, () =>
-      expireRecallIndexValidation(agentContextHome, false, []),
+    const sourceValidation = yield* measure(
+      VALIDATION_SAMPLE_COUNT,
+      VALIDATION_P95_LIMIT_MILLISECONDS,
+      () => expireRecallIndexValidation(agentContextHome, false, []),
+      () => maintainAndPrepare(`common retrieval ${PRODUCTION_BENCHMARK_QUERY}`),
     );
     const incrementalUpdate = yield* measure(
       INCREMENTAL_UPDATE_SAMPLE_COUNT,
@@ -251,7 +257,7 @@ const runProductionBenchmark = Effect.scoped(
           yield* writeSeedState;
           yield* expireRecallIndexValidation(agentContextHome, false, [targetUri]);
         }),
-      sample => prepareForQuery(`benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`),
+      sample => maintainAndPrepare(`benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`),
     );
     const finalUnchangedQuery = yield* prepare;
     if (!EffectArray.some(finalUnchangedQuery.ranked, hit => hit.uri === targetUri)) {

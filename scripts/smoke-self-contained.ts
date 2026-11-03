@@ -135,6 +135,9 @@ const smokeSelfContained = Effect.scoped(
       });
     }
 
+    // The large-output fixture bypasses canonical writes and changes the indexed
+    // body. Prepare its derived state explicitly before later indexed retrieval.
+    yield* run(['repair', '--core-only', '--no-post-update']);
     const lexicalDatabase = path.join(threadnoteHome, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
     const lexicalInfo = yield* fs.stat(lexicalDatabase);
     if (lexicalInfo.type !== 'File' || lexicalInfo.size <= 0) {
