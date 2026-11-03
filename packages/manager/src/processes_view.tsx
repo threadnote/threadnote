@@ -211,6 +211,13 @@ function ProcessMetadata({process}: {readonly process: ManageableManagerProcess}
   const branch = context?.branch;
   const client = context?.client;
   const cpu = process.cpu;
+  const displayedCpu = cpu?.state === 'sampled' ? Number(cpu.percent.toFixed(1)) : undefined;
+  const cpuTone =
+    displayedCpu !== undefined && displayedCpu >= 100
+      ? 'critical'
+      : displayedCpu !== undefined && displayedCpu >= 50
+        ? 'warn'
+        : 'normal';
   const path =
     workspace?.state === 'multiple'
       ? undefined
@@ -252,7 +259,7 @@ function ProcessMetadata({process}: {readonly process: ManageableManagerProcess}
           cpu
             ? `Recent CPU · 100% = one logical core · ${cpu.state === 'sampled' ? `${(cpu.windowMilliseconds / 1000).toFixed(1)}s window · ` : ''}Sample ${cpu.sampledAt}`
             : 'Recent CPU unavailable',
-          'process-fact-metric',
+          `process-fact-metric process-cpu-${cpuTone}`,
         )}
         {detail(
           'Memory',

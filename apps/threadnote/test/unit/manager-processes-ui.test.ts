@@ -15,6 +15,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 let reactRoot: Root | undefined;
+let cpuPercent: number;
 let fetchOriginal: typeof fetch;
 let requests: Array<{readonly body?: Record<string, unknown>; readonly path: string}>;
 
@@ -22,6 +23,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   fetchOriginal = globalThis.fetch;
   requests = [];
+  cpuPercent = 250;
   vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
     const path =
       typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
@@ -66,7 +68,7 @@ beforeEach(() => {
             processId: 80300,
             processRef: `tnp_${Effect.pipe('b', EffectString.repeat(64))}`,
             role: 'mcp',
-            cpu: {state: 'sampled', percent: 250, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
+            cpu: {state: 'sampled', percent: cpuPercent, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
             displayContext: {
               client: {name: 'Codex', version: '1.2'},
               workspace: {
@@ -173,6 +175,30 @@ describe('Manager Processes panel', () => {
     const compaction = document.querySelector('.process-row');
     expect(compaction?.querySelector('.process-lane-metadata')?.textContent).not.toContain('Compact graph storage');
     expect(compaction?.querySelectorAll('.process-missing')).toHaveLength(1);
+  });
+
+  it.each([
+    [0, 'normal'],
+    [49.9, 'normal'],
+    [50, 'warn'],
+    [99, 'warn'],
+    [99.9, 'warn'],
+    [100, 'critical'],
+    [250, 'critical'],
+    [49.96, 'warn'],
+    [99.96, 'critical'],
+  ])('colors the displayed CPU value %s as %s', async (percent, tone) => {
+    cpuPercent = Number(percent);
+    await renderProcesses();
+    const row = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...document.querySelectorAll('.process-row')], element =>
+        Effect.pipe(element.textContent ?? '', EffectString.includes('PID 80300')),
+      ),
+    );
+    const badge = row?.querySelector('.process-fact-metric');
+    expect(badge?.classList.contains(`process-cpu-${tone}`)).toBe(true);
+    expect(badge?.textContent).toContain(`${Number(percent).toFixed(1)}%`);
+    expect(document.querySelector('.process-status-running')?.textContent).toContain('Running');
   });
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {

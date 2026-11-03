@@ -8139,6 +8139,20 @@ h4 {
 .process-fact-metric dd {
   font-weight: 500;
 }
+.process-cpu-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn);
+}
+.process-cpu-critical {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.process-cpu-warn :is(dt, svg),
+.process-cpu-critical :is(dt, svg) {
+  color: inherit;
+}
 .process-fact-path {
   flex: 1 1 340px;
   border-color: transparent;

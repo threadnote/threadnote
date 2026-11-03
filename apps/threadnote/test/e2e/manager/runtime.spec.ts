@@ -49,6 +49,20 @@ test('S17 process inspection and guarded termination affect only a benign owned 
   for (const theme of ['Light', 'Dark']) {
     await page.setViewportSize({width: 1280, height: 900});
     await page.getByRole('button', {name: theme, exact: true}).click();
+    const cpuColors = await page.locator('html').evaluate(element => {
+      const style = getComputedStyle(element);
+      const colors: string[][] = [];
+      for (const [foreground, background] of [
+        ['--warn', '--warn-soft'],
+        ['--danger', '--danger-soft'],
+      ]) {
+        colors.push([style.getPropertyValue(foreground), style.getPropertyValue(background)]);
+      }
+      return colors;
+    });
+    for (const [foreground, background] of cpuColors)
+      expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
+
     for (const width of [1280, 360]) {
       await page.setViewportSize({width, height: 900});
       await row.scrollIntoViewIfNeeded();
@@ -250,3 +264,18 @@ test('S17 operations footer opens the real process inventory for a fixture-owned
   const contents = await Promise.all(EffectArray.map(files, file => readFile(join(directory, file), 'utf8')));
   expect(EffectArray.join(contents, '\n')).toContain('github-e2e-needle');
 });
+
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (color: string) => {
+    const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(EffectString.trim(color));
+    if (!match) throw Error(`Expected an RGB hex color, received ${color}`);
+    const channels = EffectArray.map([match[1], match[2], match[3]], value => {
+      const channel = Number.parseInt(value, 16) / 255;
+      return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const first = luminance(foreground);
+  const second = luminance(background);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
