@@ -27,7 +27,10 @@ export function normalizeRecallExactTerms(terms: readonly string[]): readonly st
 export class RecallReadyReadIncomplete extends Schema.TaggedError<
   RecallReadyReadIncomplete,
   {readonly brand: unique symbol}
->()('RecallReadyReadIncomplete', {message: Schema.String}) {}
+>()('RecallReadyReadIncomplete', {
+  message: Schema.String,
+  maintenance: Schema.optionalKey(Schema.Literals(['refresh', 'reconcile'])),
+}) {}
 
 export function readyRecallSelectionPolicy(policy: RecallEligibilityPolicy | undefined) {
   const base = policy ?? ({kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}} as const);
@@ -79,4 +82,12 @@ export function loadRecallMetadata(sql: SqlClient.SqlClient) {
 export function numericMetadata(metadata: ReadonlyMap<string, string>, key: string): number {
   const value = Number(metadata.get(key) ?? '0');
   return Number.isFinite(value) ? value : 0;
+}
+
+export function chunkRecallValues<Value>(values: readonly Value[], size: number): readonly (readonly Value[])[] {
+  const chunks: Value[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }

@@ -33,10 +33,12 @@ export interface RecallLexicalScope {
   readonly work?: RecallReadMaintenanceWork;
 }
 const demandSchema = Schema.Struct({
-  version: Schema.Literals([1]),
+  // Older workers must reject new reconciliation intent rather than drop it.
+  version: Schema.Literals([1, 2]),
   account: Schema.String.check(Schema.isMaxLength(256)),
   user: Schema.String.check(Schema.isMaxLength(256)),
   includeInactive: Schema.Boolean,
+  reconcile: Schema.optionalKey(Schema.Boolean),
   work: Schema.optionalKey(maintenanceWorkSchema),
   manifestPath: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(4096))),
   revision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u))),
@@ -151,7 +153,7 @@ const update = <A>(
         const previous = yield* readRecallLexicalDemand(scope);
         const result = f(
           previous ?? {
-            version: 1,
+            version: 2,
             account: scope.account,
             user: scope.user,
             includeInactive: scope.includeInactive,
@@ -161,7 +163,7 @@ const update = <A>(
           },
         );
         if (result.state === previous) return result.value;
-        const encoded = JSON.stringify(result.state) + '\n';
+        const encoded = JSON.stringify({...result.state, version: 2}) + '\n';
         yield* Schema.decodeEffect(Schema.fromJsonString(demandSchema))(encoded);
         if (new TextEncoder().encode(encoded).byteLength > 8192) return yield* unavailable();
         const temporary = path.join(files.directory, (yield* crypto.uuidV4()) + '.tmp');
@@ -179,6 +181,7 @@ const update = <A>(
 /** Coalesce configuration, but fence completion against every later enqueue event. */
 export const requestRecallLexicalRefresh = Effect.fn('recall.requestLexicalRefresh')(function* (
   scope: RecallLexicalScope,
+  options: {readonly reconcile?: boolean} = {},
 ) {
   const revision = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   const sourceGeneration = yield* readCanonicalMutationGeneration(
@@ -188,31 +191,38 @@ export const requestRecallLexicalRefresh = Effect.fn('recall.requestLexicalRefre
     scope.account,
   );
   const now = yield* Clock.currentTimeMillis;
-  const selected = yield* update(scope, state =>
-    scope.work?.kind === 'synchronize' &&
-    !state.revision &&
-    state.completedAt !== undefined &&
-    state.completedAt <= now &&
-    now - state.completedAt < 60_000
+  const selected = yield* update(scope, state => {
+    const reconcile = (state.revision !== undefined && state.reconcile === true) || options.reconcile === true;
+    const escalated = reconcile && state.reconcile !== true;
+    return scope.work?.kind === 'synchronize' &&
+      !reconcile &&
+      !state.revision &&
+      state.completedAt !== undefined &&
+      state.completedAt <= now &&
+      now - state.completedAt < 60_000
       ? {state, value: 'current'}
       : state.failures >= 8 &&
           state.sourceGeneration === sourceGeneration &&
           state.notBefore !== undefined &&
           state.notBefore > now
-        ? {state, value: undefined}
+        ? {
+            state: escalated ? {...state, revision, reconcile: true} : state,
+            value: undefined,
+          }
         : {
             state: {
               ...state,
               ...(scope.work ? {work: scope.work} : {}),
               revision,
+              reconcile,
               sourceGeneration,
               failures: state.sourceGeneration === sourceGeneration && state.failures < 8 ? state.failures : 0,
               notBefore:
                 state.sourceGeneration === sourceGeneration && state.failures < 8 ? state.notBefore : undefined,
             },
             value: revision,
-          },
-  );
+          };
+  });
   if (selected === undefined) return yield* unavailable();
   if (selected === 'current') return selected;
   const wake = yield* RecallEmbeddingWakePort;
@@ -226,7 +236,7 @@ export const completeRecallLexicalRefresh = Effect.fn('recall.completeLexicalRef
   const completedAt = yield* Clock.currentTimeMillis;
   return yield* update(scope, state => {
     if (state.revision !== revision) return {state, value: false};
-    const {revision: _revision, notBefore: _notBefore, ...rest} = state;
+    const {revision: _revision, notBefore: _notBefore, reconcile: _reconcile, ...rest} = state;
     return {
       state: {...rest, failures: 0, completedAt},
       value: true,

@@ -20,6 +20,7 @@ import {
 } from '@threadnote/store/external-resource';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
+import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
 import {
   loadRecallExactMatches,
   loadRecallIndexData,
@@ -345,6 +346,10 @@ describe('external source recall', () => {
         });
         expect(approved.candidates).toEqual([]);
         enabled = false;
+        const revoked = yield* readRecallIndexData(config, {includeInactive: false, query: 'needle'});
+        expect(revoked.candidates).toEqual([]);
+        expect(revoked.readState).toEqual({freshness: 'stale', maintenance: 'unavailable'});
+        expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
         expect(
           (yield* readRecallIndexData(config, {
             includeInactive: false,
@@ -411,6 +416,18 @@ describe('external source recall', () => {
         expect(EffectArray.map(changedExact, match => match.uri).sort()).toEqual(uris.slice(1).sort());
         expect((yield* recallIndexStatus(config)).generation).toBe(restored.generation);
         expect(readyEnumerations).toBe(0);
+        const pending = yield* readRecallLexicalDemand({...config, includeInactive: false});
+        expect(pending?.revision).toBeDefined();
+        expect(pending?.reconcile).toBe(false);
+        // Reindexing cannot repair bytes that no longer match their manifest.
+        // A subsequent proof failure must not repeatedly force a corpus rebuild.
+        yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true, memoryIds: []});
+        const afterRebuild = yield* readRecallIndexData(config, {includeInactive: false, query: 'needle'});
+        expect(EffectArray.map(afterRebuild.candidates, candidate => candidate.uri).sort()).toEqual(
+          uris.slice(1).sort(),
+        );
+        expect(afterRebuild.readState).toEqual({freshness: 'stale', maintenance: 'unavailable'});
+        expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.revision).toBe(pending?.revision);
       }).pipe(
         TestClock.withLive,
         provideLayer(Layer.merge(dependencies, ResourceStore.layer.pipe(Layer.provide(dependencies)))),

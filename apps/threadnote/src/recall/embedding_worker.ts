@@ -48,8 +48,8 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
       yield* deferRecallLexicalRefresh(scope, revision, 5000);
       return {state: 'deferred' as const, reason: 'read-maintenance-pending', delay: 5000};
     }
-    if (!(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
-      yield* requestRecallLexicalRefresh({...scope, work: undefined});
+    if (demand.reconcile || !(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
+      yield* requestRecallLexicalRefresh({...scope, work: undefined}, {reconcile: demand.reconcile});
     return (yield* completeRecallLexicalRefresh(scope, revision))
       ? {state: 'complete' as const, delay: 0}
       : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
@@ -59,9 +59,11 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
     yield* failRecallLexicalRefresh(scope, revision, true);
     return {state: 'blocked' as const, reason: 'lexical-storage-requires-repair', delay: 0};
   }
-  const result = yield* loadRecallIndexData(scope, {includeInactive: scope.includeInactive, memoryIds: []}).pipe(
-    Effect.result,
-  );
+  const result = yield* loadRecallIndexData(scope, {
+    includeInactive: scope.includeInactive,
+    memoryIds: [],
+    forceRefresh: demand.reconcile === true,
+  }).pipe(Effect.result);
   if (result._tag === 'Failure') {
     yield* failRecallLexicalRefresh(scope, revision);
     return {state: 'deferred' as const, reason: 'lexical-maintenance-failed', delay: 1000};

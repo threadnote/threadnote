@@ -26,6 +26,7 @@ import {
   readRecallCodeLinks,
   readRecallMemoryLinks,
   recallIndexDatabaseFilename,
+  recallIndexStatus,
   expireRecallIndexValidation,
 } from '@threadnote/recall/index';
 import {requestRecallLexicalRefresh, readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
@@ -61,6 +62,28 @@ const fixture = Effect.gen(function* () {
   return {fs, path, config, directory};
 });
 describe('foreground reads and lexical maintenance', () => {
+  effectIt.effect('reconciles raw canonical drift once even when freshness epochs were not changed', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, directory} = yield* fixture;
+      const scope = {...config, includeInactive: false};
+      const filename = path.join(directory, 'alpha.md');
+      const before = yield* recallIndexStatus(config, false);
+      yield* fs.writeFileString(filename, '# Alpha\nreplacement sentinel');
+      expect((yield* recallIndexStatus(config, false)).ready).toBe(true);
+      expect((yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'})).candidates).toEqual([]);
+      expect((yield* readRecallLexicalDemand(scope))?.reconcile).toBe(true);
+      expect((yield* runRecallLexicalWorkerUnit(scope)).state).toBe('complete');
+      const ready = yield* readRecallIndexData(config, {includeInactive: false, query: 'replacement'});
+      expect(EffectArray.map(ready.candidates, candidate => candidate.uri)).toEqual([
+        'threadnote://resources/alpha.md',
+      ]);
+      expect(ready.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBeUndefined();
+      expect((yield* recallIndexStatus(config, false)).generation).not.toBe(before.generation);
+      expect((yield* runRecallLexicalWorkerUnit(scope)).state).toBe('complete');
+      expect(yield* fs.exists(path.join(config.agentContextHome, 'models'))).toBe(false);
+    }).pipe(provide),
+  );
   effectIt.effect(
     'reads one complete last-ready WAL snapshot while an independent SQLite writer is held',
     () =>

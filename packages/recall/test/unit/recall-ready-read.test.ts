@@ -54,7 +54,11 @@ const system = SystemInfo.layer.pipe(
 const platform = Layer.mergeAll(BunServices.layer, cryptoLayer, system);
 // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This is the scoped test entry point with one focused platform layer.
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(platform), TestClock.withLive);
-const body = (project = 'allowed', status: 'active' | 'archived' = 'active') =>
+const body = (
+  project = 'allowed',
+  status: 'active' | 'archived' = 'active',
+  validity: {memoryId?: string; validFrom?: string; validTo?: string} = {},
+) =>
   formatMemoryDocument(
     'MEMORY',
     {
@@ -64,6 +68,7 @@ const body = (project = 'allowed', status: 'active' | 'archived' = 'active') =>
       sourceAgentClient: 'codex',
       timestamp: '2026-11-01T00:00:00.000Z',
       topic: 'ready-reader',
+      ...validity,
     },
     '# Reader alpha\nUseful alpha sentinel evidence.',
   );
@@ -86,6 +91,283 @@ const eligibility = {
 } as const;
 
 describe('ready lexical readers', () => {
+  effectIt.effect('fills the eligible ranked quota after date exclusion without counting pinned results', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename, uri} = yield* fixture;
+      yield* fs.writeFileString(filename, body('allowed', 'active', {validTo: '2020-01-01T00:00:00.000Z'}));
+      yield* fs.writeFileString(path.join(path.dirname(filename), 'z-next.md'), body());
+      const record = parseMemoryDocument(uri, body())!;
+      yield* fs.writeFileString(
+        path.join(path.dirname(filename), 'pinned.md'),
+        formatMemoryDocument('MEMORY', record.metadata, '# Pinned\nUnrelated beta evidence.'),
+      );
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+      const pinned = 'threadnote://user/me/memories/durable/pinned.md';
+      const result = yield* readRecallIndexData(config, {
+        includeInactive: false,
+        query: 'alpha',
+        limit: 1,
+        requiredUris: [pinned],
+      });
+      expect(EffectArray.map(result.candidates, candidate => candidate.uri)).toEqual([
+        pinned,
+        'threadnote://user/me/memories/durable/z-next.md',
+      ]);
+      expect(result.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+      expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+    }).pipe(provide),
+  );
+  effectIt.effect('reports an exhausted nonexhaustive date-filtered window as incomplete without repair', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename} = yield* fixture;
+      yield* fs.remove(filename);
+      for (let i = 0; i < 256; i++)
+        yield* fs.writeFileString(
+          path.join(path.dirname(filename), `a-expired-${i}.md`),
+          body('allowed', 'active', {
+            memoryId: `tn_expired_${i}`,
+            validTo: '2020-01-01T00:00:00.000Z',
+          }),
+        );
+      yield* fs.writeFileString(path.join(path.dirname(filename), 'z-next.md'), body());
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+      const result = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha', limit: 1}).pipe(
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+    }).pipe(provide),
+  );
+  effectIt.effect('retains each batch selection identity-conflict scope in either order', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename, uri} = yield* fixture;
+      const record = parseMemoryDocument(uri, body())!;
+      const metadata = {...record.metadata, memoryId: 'tn_conflicted'};
+      yield* fs.writeFileString(filename, formatMemoryDocument('MEMORY', metadata, record.body));
+      yield* fs.writeFileString(
+        path.join(path.dirname(filename), 'different.md'),
+        formatMemoryDocument('MEMORY', metadata, '# Beta\nOnly beta evidence.'),
+      );
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+      const broad = {query: 'alpha', allowedUriScopes: ['threadnote://user/me/memories']};
+      const narrow = {query: 'alpha', allowedUriScopes: [uri]};
+      for (const selections of [
+        [broad, narrow],
+        [narrow, broad],
+      ]) {
+        const result = yield* readRecallIndexDataBatch(config, {includeInactive: false, selections});
+        for (let i = 0; i < selections.length; i++) {
+          expect(result[i].candidates).toHaveLength(1);
+          expect(result[i].candidates[0].identityConflict === true).toBe(selections[i] === broad);
+        }
+      }
+    }).pipe(provide),
+  );
+  effectIt.effect('validates physical alias projections before merging their distinct relation metadata', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename, uri} = yield* fixture;
+      const record = parseMemoryDocument(uri, body())!;
+      const firstRelation = {type: 'references' as const, uri: 'threadnote://resources/first.md'};
+      const secondRelation = {type: 'references' as const, uri: 'threadnote://resources/second.md'};
+      const first = formatMemoryDocument(
+        'MEMORY',
+        {...record.metadata, memoryId: 'tn_alias', relations: [firstRelation]},
+        record.body,
+      );
+      const second = formatMemoryDocument(
+        'MEMORY',
+        {...record.metadata, memoryId: 'tn_alias', relations: [secondRelation]},
+        record.body,
+      );
+      yield* fs.writeFileString(filename, first);
+      const alias = path.join(path.dirname(filename), 'z-alias.md');
+      yield* fs.writeFileString(alias, second);
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+      const options = {allowedUriScopes: ['threadnote://user/me/memories'], memoryIds: ['tn_alias']};
+      const identities = yield* readRecallMemoryIdentities(config, options);
+      expect(identities).toHaveLength(1);
+      expect(identities[0].relations).toEqual([firstRelation, secondRelation]);
+      expect(identities[0].equivalentUris).toHaveLength(1);
+      expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+      yield* fs.writeFileString(alias, body('forbidden'));
+      const changed = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha', eligibility});
+      expect(EffectArray.map(changed.candidates, candidate => candidate.uri)).toEqual([uri]);
+      expect(changed.candidates[0].relations).toEqual([firstRelation]);
+      expect(changed.candidates[0].equivalentUris).toBeUndefined();
+    }).pipe(provide),
+  );
+  fcEffectProp(
+    effectIt,
+    'time alone changes query eligibility without invalidating identity or scheduling maintenance',
+    {offset: fc.integer({min: 1, max: 60_000})},
+    ({offset}) =>
+      Effect.gen(function* () {
+        const {fs, config, filename, uri} = yield* fixture;
+        const boundary = Date.parse('2026-11-03T12:00:00.000Z');
+        yield* TestClock.setTime(boundary - offset);
+        yield* fs.writeFileString(
+          filename,
+          body('allowed', 'active', {memoryId: 'tn_history', validTo: '2026-11-03T12:00:00.000Z'}),
+        );
+        yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+        const query = {includeInactive: false, query: 'alpha'};
+        expect((yield* readRecallIndexData(config, query)).candidates).toHaveLength(1);
+        yield* TestClock.setTime(boundary + offset);
+        const expired = yield* readRecallIndexData(config, query);
+        expect(expired.candidates).toEqual([]);
+        expect(expired.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+        expect(
+          yield* readRecallExactMatches(config, {
+            includeInactive: false,
+            terms: ['alpha'],
+            uriScopes: ['threadnote://user/me/memories'],
+          }),
+        ).toEqual([]);
+        const identities = yield* readRecallMemoryIdentities(config, {
+          allowedUriScopes: ['threadnote://user/me/memories'],
+          memoryIds: ['tn_history'],
+        });
+        expect(EffectArray.map(identities, candidate => candidate.uri)).toEqual([uri]);
+        expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Deterministic clock boundary test with the focused platform layer.
+      }).pipe(Effect.provide(platform)),
+    {fastCheck: {numRuns: 4}},
+  );
+  effectIt.effect('does not request maintenance for unchanged future validity or caller policy exclusions', () =>
+    Effect.gen(function* () {
+      const {fs, config, filename} = yield* fixture;
+      yield* fs.writeFileString(filename, body('allowed', 'active', {validFrom: '2999-01-01T00:00:00.000Z'}));
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+      const result = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'});
+      expect(result.candidates).toEqual([]);
+      expect(result.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+      expect(
+        (yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha', project: 'other'})).candidates,
+      ).toEqual([]);
+      expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+    }).pipe(provide),
+  );
+  for (const [name, metadata] of [
+    ['kind', {kind: 'handoff'}],
+    ['timestamp', {timestamp: '2026-10-01T00:00:00.000Z'}],
+    ['relations', {relations: [{type: 'references', uri: 'threadnote://resources/other.md'}]}],
+    ['validTo', {validTo: '2020-01-01T00:00:00.000Z'}],
+  ] as const)
+    effectIt.effect(`queues reconciliation before eligibility for changed ${name}`, () =>
+      Effect.gen(function* () {
+        const {fs, config, filename, uri} = yield* fixture;
+        const current = parseMemoryDocument(uri, body())!;
+        yield* fs.writeFileString(
+          filename,
+          formatMemoryDocument('MEMORY', {...current.metadata, ...metadata}, current.body),
+        );
+        const result = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'});
+        expect(result.candidates).toEqual([]);
+        expect(result.readState).toEqual({freshness: 'stale', maintenance: 'queued'});
+        expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.reconcile).toBe(true);
+      }).pipe(provide),
+    );
+  effectIt.effect('enqueues once with the strongest reason when a stale marker and source drift coexist', () =>
+    Effect.gen(function* () {
+      const {fs, config, filename, uri} = yield* fixture;
+      yield* expireRecallIndexValidation(config.agentContextHome, false, [uri]);
+      yield* fs.writeFileString(filename, body('changed'));
+      let wakes = 0;
+      yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'}).pipe(
+        Effect.provideService(RecallEmbeddingWakePort, () =>
+          Effect.sync(() => {
+            wakes++;
+          }),
+        ),
+      );
+      expect(wakes).toBe(1);
+      expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.reconcile).toBe(true);
+    }).pipe(provide),
+  );
+  effectIt.effect('does not schedule maintenance when selected hydration is interrupted', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename} = yield* fixture;
+      const entered = yield* Deferred.make<void>();
+      const blocked = {
+        ...fs,
+        realPath: (target: string) =>
+          path.basename(target) === path.basename(filename)
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+            : fs.realPath(target),
+      };
+      const reader = yield* readRecallIndexData(config, {includeInactive: false, query: 'alpha'}).pipe(
+        Effect.provideService(FileSystem.FileSystem, blocked),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(reader);
+      expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+    }).pipe(provide),
+  );
+  effectIt.effect('does not retry maintenance after a later read-state callback failure', () =>
+    Effect.gen(function* () {
+      const {config, uri} = yield* fixture;
+      yield* expireRecallIndexValidation(config.agentContextHome, false, [uri]);
+      let wakes = 0;
+      const result = yield* readRecallIndexData(config, {
+        includeInactive: false,
+        query: 'alpha',
+        onReadState: () => {
+          throw new Error('callback failure');
+        },
+      }).pipe(
+        Effect.provideService(RecallEmbeddingWakePort, () =>
+          Effect.sync(() => {
+            wakes++;
+          }),
+        ),
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      expect(wakes).toBe(1);
+    }).pipe(provide),
+  );
+  for (const stale of [false, true])
+    effectIt.effect(
+      `attempts ${stale ? 'one ordinary refresh' : 'no maintenance'} on exact work-window exhaustion`,
+      () =>
+        Effect.gen(function* () {
+          const {fs, path, config, uri} = yield* fixture;
+          if (stale) yield* expireRecallIndexValidation(config.agentContextHome, false, [uri]);
+          const entered = yield* Deferred.make<string>();
+          let attempts = 0;
+          const delayed = {
+            ...fs,
+            rename: (source: string, destination: string) =>
+              path.basename(path.dirname(source)) === 'lexical-demand-v1' && EffectString.endsWith('.tmp')(source)
+                ? Effect.gen(function* () {
+                    attempts++;
+                    yield* Deferred.succeed(entered, yield* fs.readFileString(source));
+                    return yield* Effect.never;
+                  })
+                : fs.rename(source, destination),
+          };
+          const terms = Array.from({length: 4_097}, (_, i) => `absent${i}`);
+          const reader = yield* readRecallExactMatches(config, {
+            includeInactive: false,
+            terms,
+            uriScopes: ['threadnote://user/me/memories'],
+          }).pipe(Effect.provideService(FileSystem.FileSystem, delayed), Effect.result, Effect.forkScoped);
+          if (stale) {
+            expect(JSON.parse(yield* Deferred.await(entered))).toMatchObject({version: 2, reconcile: false});
+            yield* TestClock.adjust('101 millis');
+          }
+          const result = yield* Fiber.join(reader);
+          expect(result._tag).toBe('Failure');
+          expect(attempts).toBe(stale ? 1 : 0);
+          expect(yield* readRecallLexicalDemand({...config, includeInactive: false})).toBeUndefined();
+          if (stale)
+            expect(yield* fs.readDirectory(path.join(config.agentContextHome, 'recall', 'lexical-demand-v1'))).toEqual(
+              [],
+            );
+          // oxlint-disable-next-line effecttsgo/strict-effect-provide -- The controlled admission timeout uses the test clock with a focused platform layer.
+        }).pipe(Effect.provide(platform)),
+    );
   effectIt.effect('retains binary SQL order for an exact limit before sorting the returned union', () =>
     Effect.gen(function* () {
       const {fs, path, config, filename} = yield* fixture;
@@ -503,6 +785,61 @@ describe('ready lexical readers', () => {
         expect(result.ranked[0]?.equivalentUris).toBeUndefined();
       } else expect(result.ranked).toEqual([]);
     });
+  fcEffectProp(
+    effectIt,
+    'preserves reconciliation intent through ordinary coalescing and stale completion',
+    {requests: fc.array(fc.boolean(), {minLength: 1, maxLength: 6})},
+    ({requests}) =>
+      Effect.gen(function* () {
+        const {config} = yield* fixture;
+        const scope = {...config, includeInactive: false};
+        const revisions: string[] = [];
+        let required = false;
+        for (const reconcile of [true, ...requests]) {
+          revisions.push(yield* requestRecallLexicalRefresh(scope, {reconcile}));
+          required ||= reconcile;
+          const state = yield* readRecallLexicalDemand(scope);
+          expect(state?.version).toBe(2);
+          expect(state?.reconcile).toBe(required);
+        }
+        for (const revision of revisions.slice(0, -1))
+          expect(yield* completeRecallLexicalRefresh(scope, revision)).toBe(false);
+        expect((yield* readRecallLexicalDemand(scope))?.reconcile).toBe(true);
+        expect(yield* completeRecallLexicalRefresh(scope, revisions.at(-1)!)).toBe(true);
+        expect((yield* readRecallLexicalDemand(scope))?.reconcile).toBeUndefined();
+        yield* requestRecallLexicalRefresh(scope);
+        expect((yield* readRecallLexicalDemand(scope))?.reconcile).toBe(false);
+      }).pipe(provide),
+    {fastCheck: {numRuns: 8}},
+  );
+  effectIt.effect('upgrades legacy demand and retains force escalation across exhausted backoff', () =>
+    Effect.gen(function* () {
+      const {fs, path, config} = yield* fixture;
+      const scope = {...config, includeInactive: false};
+      const revision = yield* requestRecallLexicalRefresh(scope);
+      const filename = path.join(
+        config.agentContextHome,
+        'recall',
+        'lexical-demand-v1',
+        recallLexicalDemandKey(scope) + '.json',
+      );
+      const previous = JSON.parse(yield* fs.readFileString(filename));
+      delete previous.reconcile;
+      previous.version = 1;
+      yield* fs.writeFileString(filename, JSON.stringify(previous));
+      expect((yield* readRecallLexicalDemand(scope))?.version).toBe(1);
+      yield* failRecallLexicalRefresh(scope, revision, true);
+      expect((yield* readRecallLexicalDemand(scope))?.version).toBe(2);
+      expect((yield* requestRecallLexicalRefresh(scope, {reconcile: true}).pipe(Effect.result))._tag).toBe('Failure');
+      const retained = yield* readRecallLexicalDemand(scope);
+      expect(retained?.reconcile).toBe(true);
+      expect(retained?.failures).toBe(8);
+      expect(retained?.revision).not.toBe(revision);
+      expect(yield* completeRecallLexicalRefresh(scope, revision)).toBe(false);
+      expect((yield* requestRecallLexicalRefresh(scope).pipe(Effect.result))._tag).toBe('Failure');
+      expect((yield* readRecallLexicalDemand(scope))?.reconcile).toBe(true);
+    }).pipe(provide),
+  );
   fcEffectProp(
     effectIt,
     'cannot clear any newer queued maintenance event with an earlier completion',

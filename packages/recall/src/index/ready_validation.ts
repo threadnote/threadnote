@@ -11,6 +11,23 @@ import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_
 import type {RecallCandidate} from '../rank.js';
 import type {RecallEligibilityPolicy} from '../eligibility.js';
 
+export type RecallReadyEligibility = 'eligible' | 'ineligible' | 'stale' | 'unverified';
+const projectionKeys = [
+  'authority',
+  'contentHash',
+  'fields',
+  'kind',
+  'memoryId',
+  'relations',
+  'status',
+  'text',
+  'timestamp',
+  'trust',
+  'uri',
+  'validFrom',
+  'validTo',
+] as const satisfies readonly (keyof RecallCandidate)[];
+
 /** Read only selected canonical sources. A stale index can lose hits, never widen live eligibility. */
 export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(function* (
   config: {account: string; agentContextHome: string; user: string; manifestPath?: string},
@@ -27,7 +44,6 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
   }
   const policy =
     canonicalUris.size > 0 ? yield* loadCanonicalResourcePolicy(config, cause => cause, canonicalUris) : undefined;
-  const now = yield* Clock.currentTimeMillis;
   const readLive = (uri: string) =>
     Effect.gen(function* () {
       const id = yield* Effect.try(() => parseResourceId(uri));
@@ -85,59 +101,64 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
       project?: string;
       workspaceScope?: string;
       workspaceScopeMode?: 'hierarchy' | 'sibling';
+      query?: string;
+      memoryIds?: readonly string[];
     },
   ) =>
     Effect.gen(function* () {
       if (isExternalResourceUri(candidate.uri)) {
         const indexed = indexedByUri.get(candidate.uri);
         if (indexed?.authority !== 'external' || indexed.trust !== 'untrusted' || indexed.contentHash === undefined)
-          return false;
+          return 'unverified' as const;
         const check = externalChecks.get(JSON.stringify([indexed.uri, indexed.contentHash]));
-        return (
-          check !== undefined &&
-          (yield* check) &&
-          recallIndexCandidateIsEligible(
-            {
-              ...(options.eligibility ?? {
-                kind: 'candidate-policy',
-                authority: 'any',
-                projects: {mode: 'unrestricted'},
-              }),
-              externalResources: {[indexed.uri]: indexed.contentHash},
-            },
-            indexed,
-          ) &&
+        // This proof conflates revocation and changed/unverified content. Fail closed;
+        // do not infer a repairable index drift from its boolean failure.
+        if (check === undefined || !(yield* check)) return 'unverified' as const;
+        return recallIndexCandidateIsEligible(
+          {
+            ...(options.eligibility ?? {
+              kind: 'candidate-policy',
+              authority: 'any',
+              projects: {mode: 'unrestricted'},
+            }),
+            externalResources: {[indexed.uri]: indexed.contentHash},
+          },
+          indexed,
+        ) &&
           recallProjectMatches(options.project, indexed.fields?.project) &&
           recallWorkspaceScopeMatches(
             options.workspaceScope,
             indexed.fields?.workspaceScope,
             options.workspaceScopeMode,
           )
-        );
+          ? ('eligible' as const)
+          : ('ineligible' as const);
       }
       const read = cache.get(candidate.uri);
-      if (!read) return false;
+      if (!read) return 'stale' as const;
       const live = yield* read;
-      if (!live || live.text !== candidate.text || live.memoryId !== candidate.memoryId) return false;
-      if (!options.includeInactive && live.status !== undefined && live.status !== 'active') return false;
+      // Check the complete indexed projection before caller/clock eligibility.
+      if (
+        !live ||
+        !EffectArray.every(projectionKeys, key => JSON.stringify(live[key]) === JSON.stringify(candidate[key]))
+      )
+        return 'stale' as const;
+      if (!options.includeInactive && live.status !== undefined && live.status !== 'active')
+        return 'ineligible' as const;
+      const now = yield* Clock.currentTimeMillis;
       if (
         !options.includeInactive &&
+        !(options.query === undefined && options.memoryIds !== undefined) &&
         ((live.validFrom !== undefined && Date.parse(live.validFrom) > now) ||
           (live.validTo !== undefined && Date.parse(live.validTo) < now))
       )
-        return false;
-      if (!options.includeInactive && /\/(archived|expired|superseded)\//u.test(candidate.uri)) return false;
-      return (
-        recallIndexCandidateIsEligible(options.eligibility, live) &&
+        return 'ineligible' as const;
+      if (!options.includeInactive && /\/(archived|expired|superseded)\//u.test(candidate.uri))
+        return 'ineligible' as const;
+      return recallIndexCandidateIsEligible(options.eligibility, live) &&
         recallProjectMatches(options.project, live.fields?.project) &&
-        recallWorkspaceScopeMatches(options.workspaceScope, live.fields?.workspaceScope, options.workspaceScopeMode) &&
-        // Serve only the still-current projection; metadata changes wait for maintenance too.
-        JSON.stringify(live.fields) === JSON.stringify(candidate.fields) &&
-        live.authority === candidate.authority &&
-        live.trust === candidate.trust &&
-        live.status === candidate.status &&
-        live.validFrom === candidate.validFrom &&
-        live.validTo === candidate.validTo
-      );
+        recallWorkspaceScopeMatches(options.workspaceScope, live.fields?.workspaceScope, options.workspaceScopeMode)
+        ? ('eligible' as const)
+        : ('ineligible' as const);
     });
 });

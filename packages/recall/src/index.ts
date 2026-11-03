@@ -22,6 +22,7 @@ import {
   type RecallMetadataRow,
   loadRecallMetadata,
   numericMetadata,
+  chunkRecallValues,
 } from './index/read_policy.js';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
@@ -120,9 +121,7 @@ import {
   type IndexedRecallSource,
 } from './index/refresh.js';
 import {validateRecallReadyResult} from './index/ready_result.js';
-import {requestRecallLexicalRefresh} from './background/lexical-demand.js';
-const requestReadyRecallMaintenance = (scope: Parameters<typeof requestRecallLexicalRefresh>[0]) =>
-  requestRecallLexicalRefresh(scope).pipe(Effect.timeout('100 millis'));
+import {makeReadyRecallMaintenance, retainReadyRecallMaintenance} from './index/maintenance.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -322,17 +321,24 @@ const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(fu
     options.includeInactive,
   );
   if (options.readyOnly) {
-    return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options).pipe(
-      Effect.onError(() =>
-        requestReadyRecallMaintenance({...config, includeInactive: options.includeInactive}).pipe(Effect.ignore),
-      ),
+    const maintenance = makeReadyRecallMaintenance({...config, includeInactive: options.includeInactive});
+    return yield* executeRecallIndexQuery(
+      databasePath,
+      fixedDatabasePath,
+      config,
+      options,
+      false,
+      false,
+      maintenance,
+    ).pipe(
+      Effect.onError(maintenance.onError),
       Effect.catchCauseIf(
         cause => !Cause.hasInterrupts(cause),
         cause =>
           Effect.fail(
             RecallIndexOperationError.make({
               cause,
-              message: 'No readable ready lexical snapshot is available; maintenance was requested.',
+              message: 'No readable ready lexical snapshot is available.',
             }),
           ),
       ),
@@ -352,7 +358,12 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
   options: RecallIndexReadQuery,
   prepareForActivation = false,
   indexLockHeld = false,
+  readyMaintenance: ReturnType<typeof makeReadyRecallMaintenance> = makeReadyRecallMaintenance({
+    ...config,
+    includeInactive: options.includeInactive,
+  }),
 ) {
+  let metadataStale = false;
   return yield* (options.readyOnly ? useRecallDatabaseReadOnly : useRecallDatabase)(
     databasePath,
     Effect.gen(function* () {
@@ -383,13 +394,8 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
         const stale = recallIndexForegroundRefreshRequired(
           recallIndexForegroundFreshness(metadata, marker, canonical, {}),
         );
-        const maintenance = stale
-          ? yield* requestReadyRecallMaintenance({...config, includeInactive: options.includeInactive}).pipe(
-              Effect.as('queued' as const),
-              Effect.orElseSucceed(() => 'unavailable' as const),
-            )
-          : 'unneeded';
-        readState = {freshness: stale ? 'stale' : 'current', maintenance};
+        metadataStale = stale;
+        readState = {freshness: stale ? 'stale' : 'current', maintenance: 'unneeded'};
       } else {
         yield* fs.chmod(databasePath, 0o600);
         yield* ensureRecallDatabaseFresh(
@@ -490,16 +496,10 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
           exactWindows,
         );
         result = validated.result;
-        if (validated.removed && readState?.freshness !== 'stale') {
-          const maintenance = yield* requestReadyRecallMaintenance({
-            ...config,
-            includeInactive: options.includeInactive,
-          }).pipe(
-            Effect.as('queued' as const),
-            Effect.orElseSucceed(() => 'unavailable' as const),
-          );
+        if (validated.reconcileNeeded || metadataStale) {
+          const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded);
           readState = {freshness: 'stale', maintenance};
-        }
+        } else if (validated.unverified) readState = {freshness: 'stale', maintenance: 'unavailable'};
         if (readState) options.onReadState?.(readState);
       }
       const withState = (data: RecallIndexData) => (readState ? {...data, readState} : data);
@@ -515,6 +515,10 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
       }
       return finalResult;
     }),
+  ).pipe(
+    Effect.mapError(error =>
+      Schema.is(RecallReadyReadIncomplete)(error) ? retainReadyRecallMaintenance(error, metadataStale) : error,
+    ),
   );
 });
 
@@ -916,7 +920,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
             )
           : yield* sql<RecallDocumentRow>`SELECT id, uri, candidate_json FROM documents ORDER BY uri`;
     if (readySelection && rows.length > MAX_READY_RECALL_SOURCE_CHECKS)
-      return yield* RecallIndexOperationError.make({message: 'Ready identity selection exceeds its bounded window.'});
+      return yield* RecallReadyReadIncomplete.make({message: 'Ready identity selection exceeds its bounded window.'});
     const selected = EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
       recallIndexCandidateIsEligible(options.eligibility, candidate),
     );
@@ -1859,7 +1863,7 @@ const loadRecallCorpusStatistics = Effect.fn('recall.loadCorpusStatistics')(func
         ? Effect.succeed<readonly RecallTermStatisticRow[]>([])
         : Effect.gen(function* () {
             const selected: RecallTermStatisticRow[] = [];
-            for (const batch of chunkValues(terms, 400)) {
+            for (const batch of chunkRecallValues(terms, 400)) {
               selected.push(
                 ...(yield* sql<RecallTermStatisticRow>`
                   SELECT term, document_frequency FROM term_statistics WHERE ${sql.in('term', batch)}
@@ -1956,14 +1960,6 @@ function isRecoverableRecallIndexCause(cause: Cause.Cause<unknown>): boolean {
 function nextRecallGenerationCounter(): number {
   staleGenerationCounter += 1;
   return staleGenerationCounter;
-}
-
-function chunkValues<Value>(values: readonly Value[], size: number): readonly (readonly Value[])[] {
-  const chunks: Value[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
 }
 
 function filterExternalUriMatches<A>(
