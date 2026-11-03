@@ -403,6 +403,11 @@ function App({
     () => uniqueSelectorValues(['default', ...EffectArray.map(shares, share => share.name), target.team]),
     [shares, target.team],
   );
+  const publicationTeam = EffectArray.some(shares, share => share.name === target.team)
+    ? target.team
+    : (EffectOption.getOrUndefined(EffectArray.findFirst(shares, share => share.default))?.name ??
+      shares[0]?.name ??
+      'default');
   function markRuntimeLost(invalidateLibraryRefresh = true): void {
     setLiveProjects(undefined);
     if (invalidateLibraryRefresh) libraryRefreshEpoch.current++;
@@ -894,7 +899,7 @@ function App({
       fields: [
         {
           id: 'team',
-          initialValue: target.team || 'default',
+          initialValue: publicationTeam,
           label: 'Team',
           options: teamOptions,
           required: true,
@@ -979,7 +984,7 @@ function App({
       confirmLabel: bulkActionLabel(action),
       fields:
         action === 'publish'
-          ? [{id: 'team', initialValue: 'default', label: 'Team', options: teamOptions, required: true}]
+          ? [{id: 'team', initialValue: publicationTeam, label: 'Team', options: teamOptions, required: true}]
           : undefined,
       message:
         action === 'forget'
