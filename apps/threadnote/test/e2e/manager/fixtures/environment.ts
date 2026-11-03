@@ -28,7 +28,10 @@ export function fixtureEnvironment(root: string): NodeJS.ProcessEnv {
   const home = join(root, 'home');
   const preload = pathToFileURL(join(repositoryRoot, '.context/manager-e2e/runtime/network-preload.mjs')).href;
   return {
-    PATH: EffectArray.join([join(root, 'bin'), dirname(findExecutable('git')), '/usr/bin', '/bin'], delimiter),
+    PATH: EffectArray.join(
+      [join(root, 'bin'), dirname(findExecutable('git')), '/usr/bin', '/bin', '/usr/sbin', '/sbin'],
+      delimiter,
+    ),
     ...(process.env.SystemRoot ? {SystemRoot: process.env.SystemRoot} : {}),
     HOME: home,
     USERPROFILE: home,

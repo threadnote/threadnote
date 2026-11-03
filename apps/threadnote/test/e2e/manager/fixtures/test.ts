@@ -1,5 +1,6 @@
 import {expect, test as base} from '@playwright/test';
 import {ManagerRuntime} from './runtime.js';
+import {configureSetup} from './setup.js';
 import {configureModel} from './model.js';
 import {configureProviders} from './providers.js';
 import {Array as EffectArray, pipe} from 'effect';
@@ -12,7 +13,7 @@ import {spawnSync} from '@threadnote/testing/node-child-process';
 interface ManagerFixtures {
   readonly manager: ManagerRuntime;
   readonly managerMode: 'compiled' | 'source';
-  readonly managerScenario: 'empty' | 'populated' | 'providers' | 'remote-model';
+  readonly managerScenario: 'empty' | 'populated' | 'providers' | 'remote-model' | 'model-setup';
 }
 
 export const test = base.extend<ManagerFixtures>({
@@ -57,6 +58,7 @@ export const test = base.extend<ManagerFixtures>({
     const manager = await ManagerRuntime.create();
     try {
       if (managerScenario === 'remote-model') await configureModel(manager);
+      if (managerScenario === 'model-setup') await configureSetup(manager);
       await manager.start(managerMode);
       if (managerScenario === 'populated')
         await manager.remember(

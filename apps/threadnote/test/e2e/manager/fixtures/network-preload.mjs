@@ -109,7 +109,14 @@ Bun.spawn = (...args) => {
   );
   if (environment.HOME !== join(root, 'home') || environment.THREADNOTE_HOME !== join(root, 'home'))
     throw new Error('Manager E2E subprocess escaped its fixture home.');
-  const child = nativeSpawn(...args);
+  // Product workers strip preload variables. Reattach the guard only to this same isolated executable.
+  const guardedEnvironment =
+    command[0] === process.execPath
+      ? {...environment, BUN_OPTIONS: process.env.BUN_OPTIONS, THREADNOTE_E2E_ROOT: root}
+      : environment;
+  const child = EffectArray.isArray(args[0])
+    ? nativeSpawn(args[0], {...options, env: guardedEnvironment})
+    : nativeSpawn({...args[0], env: guardedEnvironment});
   appendFileSync(
     join(root, 'spawn.jsonl'),
     JSON.stringify({
