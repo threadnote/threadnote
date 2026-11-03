@@ -267,6 +267,23 @@ export const ensureResolutionCandidateIndexSchema = Effect.fn('codeGraph.ensureC
   return yield* sql.withTransaction(
     Effect.gen(function* () {
       if (yield* resolutionCandidateIndexSchemaReady(sql)) return false;
+      const lookup = RESOLUTION_CANDIDATE_INDEX_TABLES[1];
+      const priorLookup = yield* sql<{
+        readonly type: string;
+        readonly name: string;
+        readonly sql: string | null;
+      }>`SELECT type, name,
+        CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
+        FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${lookup.name} COLLATE NOCASE LIMIT 1`;
+      // Reject unknown retained table definitions before any DDL or lookup read, especially a populated index rebuild.
+      if (
+        priorLookup.length > 0 &&
+        (priorLookup[0]?.type !== 'table' ||
+          priorLookup[0].name !== lookup.name ||
+          typeof priorLookup[0].sql !== 'string' ||
+          normalizeSchemaDefinition(priorLookup[0].sql) !== normalizeSchemaDefinition(lookup.sql))
+      )
+        return yield* CodeGraphStoreError.of('Resolution candidate index schema is incompatible.');
       // Fence the exact unpublished pre-generation prototype without scanning/rebuilding any table or index.
       const predecessor = yield* sql<{readonly sql: string | null}>`SELECT
         CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
@@ -278,15 +295,11 @@ export const ensureResolutionCandidateIndexSchema = Effect.fn('codeGraph.ensureC
         yield* sql.unsafe('DROP TRIGGER snapshots_candidate_invalidate_update');
       // Creating a missing secondary index over retained rows is unbounded foreground recovery.
       // Refuse only optional evidence until canonical schema restoration; first creation on an empty table is safe.
-      const lookup = RESOLUTION_CANDIDATE_INDEX_TABLES[1];
-      const priorLookup = yield* sql<{readonly sql: string | null}>`SELECT
-        CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
-        FROM sqlite_master WHERE type = 'table' AND name = ${lookup.name} LIMIT 1`;
-      const pathIndex = yield* sql`SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_lookup_path' LIMIT 1`;
+      const pathIndex = yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'index'
+        AND name = 'snapshot_candidate_lookup_path' COLLATE NOCASE LIMIT 1`;
       const blocked =
         pathIndex.length === 0 &&
-        typeof priorLookup[0]?.sql === 'string' &&
-        normalizeSchemaDefinition(priorLookup[0].sql) === normalizeSchemaDefinition(lookup.sql) &&
+        priorLookup.length > 0 &&
         (yield* sql`SELECT 1 FROM snapshot_candidate_lookup LIMIT 1`).length > 0;
       const alreadyBlocked =
         blocked &&

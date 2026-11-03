@@ -357,6 +357,87 @@ describe('complete reverse resolution candidate evidence', () => {
       }).pipe(provideDatabase),
   );
 
+  for (const drift of ['extra-column-check', 'oversized-definition', 'case-variant-name'] as const) {
+    effectIt.effect(`refuses incompatible populated lookup ${drift} before any index creation`, () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        const paths = Array.from({length: 1507}, (_, n) => `incompatible-${n}.ts`);
+        yield* createSnapshot(sql, 'base', paths);
+        yield* stage(
+          sql,
+          'base',
+          paths,
+          EffectArray.map(paths, path => reference(path, path)),
+        );
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        yield* sql.unsafe('DROP INDEX snapshot_candidate_lookup_path');
+        if (drift === 'case-variant-name') {
+          yield* sql.unsafe('ALTER TABLE snapshot_candidate_lookup RENAME TO renamed_candidate_lookup');
+          yield* sql.unsafe('ALTER TABLE renamed_candidate_lookup RENAME TO SNAPSHOT_CANDIDATE_LOOKUP');
+        } else {
+          const check = drift === 'oversized-definition' ? ` AND '${pipe('x', EffectString.repeat(8193))}' <> ''` : '';
+          yield* sql.unsafe(
+            `ALTER TABLE snapshot_candidate_lookup ADD COLUMN extra TEXT CHECK (extra IS NULL${check})`,
+          );
+        }
+        const beforeLookup =
+          yield* sql`SELECT * FROM snapshot_candidate_lookup ORDER BY snapshot_id, resolution_domain, lookup_key, evidence_path`;
+        const beforeFiles = yield* sql`SELECT * FROM snapshot_candidate_files ORDER BY snapshot_id, path`;
+        const beforeReceipts = yield* sql`SELECT * FROM snapshot_candidate_receipts ORDER BY snapshot_id`;
+        const beforeBindings =
+          yield* sql`SELECT * FROM snapshot_candidate_generations ORDER BY snapshot_id, kind, path`;
+        const beforeAuthority = yield* sql`SELECT * FROM snapshot_candidate_authority`;
+        const beforeSchema = yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`;
+        let ddlAttempts = 0;
+        const guarded = new Proxy(sql, {
+          get(target, key, receiver) {
+            if (key !== 'unsafe') return Reflect.get(target, key, receiver);
+            return (text: string, parameters: readonly unknown[] = []) => {
+              if (/^\s*(?:CREATE|DROP|ALTER)\b/iu.test(text)) {
+                ddlAttempts += 1;
+                return Effect.die('Incompatible lookup must refuse before DDL, including hidden index rebuild');
+              }
+              return sql.unsafe(text, parameters);
+            };
+          },
+        });
+        const failure = yield* ensureResolutionCandidateIndexSchema(guarded).pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: 'CodeGraphStoreError',
+          message: 'Resolution candidate index schema is incompatible.',
+        });
+        expect(ddlAttempts).toBe(0);
+        expect(
+          yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'snapshot_candidate_lookup_path' COLLATE NOCASE`,
+        ).toEqual([]);
+        expect(
+          yield* sql`SELECT * FROM snapshot_candidate_lookup ORDER BY snapshot_id, resolution_domain, lookup_key, evidence_path`,
+        ).toEqual(beforeLookup);
+        expect(yield* sql`SELECT * FROM snapshot_candidate_files ORDER BY snapshot_id, path`).toEqual(beforeFiles);
+        expect(yield* sql`SELECT * FROM snapshot_candidate_receipts ORDER BY snapshot_id`).toEqual(beforeReceipts);
+        expect(yield* sql`SELECT * FROM snapshot_candidate_generations ORDER BY snapshot_id, kind, path`).toEqual(
+          beforeBindings,
+        );
+        expect(yield* sql`SELECT * FROM snapshot_candidate_authority`).toEqual(beforeAuthority);
+        expect(yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`).toEqual(beforeSchema);
+        expect(yield* selectResolutionCandidateIndexClosure(sql, query(paths[0]))).toBeUndefined();
+      }).pipe(provideDatabase),
+    );
+  }
+
+  effectIt.effect('recreates a missing path index only when its canonical lookup table is empty', () =>
+    Effect.gen(function* () {
+      const sql = yield* setup;
+      yield* sql.unsafe('DROP INDEX snapshot_candidate_lookup_path');
+      expect(yield* ensureResolutionCandidateIndexSchema(sql)).toBe(true);
+      expect(yield* resolutionCandidateIndexSchemaReady(sql)).toBe(true);
+      expect(
+        (yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'snapshot_candidate_lookup_path'`)
+          .length,
+      ).toBe(1);
+    }).pipe(provideDatabase),
+  );
+
   effectIt.effect('blocks populated missing-index recovery without rebuilding or touching retained proof', () =>
     Effect.gen(function* () {
       const sql = yield* setup;
