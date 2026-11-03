@@ -21,6 +21,7 @@ import {decodeBoundedWorkflowJson} from '../../src/workflow_memory/journal_codec
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 
 import {runCloseout} from './native-closeout-diagnostics.js';
+import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
 
 import * as EffectRecord from 'effect/Record';
 
@@ -104,6 +105,8 @@ describe('native closeout lifecycle', () => {
       expect(f.controllerRunId).toBe('plan-run');
 
       const {proposal} = yield* prepare(f);
+      const refreshes = closeoutSpanDiagnostics();
+      let outputRefreshesBeforeArchive: number | undefined;
       const target = loaded.owned[0];
       const store = f.store;
       let lost = false;
@@ -118,6 +121,8 @@ describe('native closeout lifecycle', () => {
             Effect.andThen(() => {
               if (!lost && uri === target.uri) {
                 lost = true;
+                outputRefreshesBeforeArchive =
+                  refreshes.snapshot().totals['recall.refreshDerivedLexicalIndex']?.started ?? 0;
                 return Effect.fail(
                   ResourceIoFailed.make({
                     uri,
@@ -132,10 +137,17 @@ describe('native closeout lifecycle', () => {
           ),
       };
       const first = yield* commandResult(
-        f.closeout('finish').pipe(Effect.provideService(ResourceStore, interruptedStore)),
+        f.closeout('finish').pipe(
+          Effect.provideService(ResourceStore, interruptedStore),
+          Effect.withTracer(refreshes.tracer),
+        ),
       );
       expect(Result.isFailure(first)).toBe(true);
       expect(lost).toBe(true);
+      // Output lexical freshness completes once before any owned draft is retired.
+      expect(outputRefreshesBeforeArchive).toBe(1);
+      // The interrupted archive batch still makes its one bounded cleanup attempt.
+      expect(refreshes.snapshot().totals['recall.refreshDerivedLexicalIndex']?.started).toBe(2);
       const interruptedImage = yield* journalImage(f);
       expect(interruptedImage.status).toBe('archiving');
 
@@ -176,6 +188,7 @@ describe('native closeout lifecycle', () => {
       const loaded = yield* f.load();
       expect(loaded.spec?.kind).toBe('spec');
       yield* prepare(f);
+      const refreshes = closeoutSpanDiagnostics();
 
       let lost = false;
       let observedReceiptRename = 0;
@@ -236,7 +249,10 @@ describe('native closeout lifecycle', () => {
           }),
       };
       const first = yield* commandResult(
-        f.closeout('finish').pipe(Effect.provideService(FileSystem.FileSystem, interceptedFilesystem)),
+        f.closeout('finish').pipe(
+          Effect.provideService(FileSystem.FileSystem, interceptedFilesystem),
+          Effect.withTracer(refreshes.tracer),
+        ),
       );
       if (!lost)
         throw new Error(
@@ -244,6 +260,8 @@ describe('native closeout lifecycle', () => {
         );
       expect(Result.isFailure(first)).toBe(true);
       expect(lost).toBe(true);
+      // A lost output receipt flushes committed output invalidations once during cleanup.
+      expect(refreshes.snapshot().totals['recall.refreshDerivedLexicalIndex']?.started).toBe(1);
       yield* assertOwnedState(f, loaded.owned, 'active');
       const interrupted = yield* journalImage(f);
       expect(interrupted.status).toBe('prepared');

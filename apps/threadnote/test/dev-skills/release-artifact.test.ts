@@ -1,5 +1,6 @@
 import {Schema} from 'effect';
 import {parseWatchResponse, parseWatchWorkResponse} from './release-artifact.js';
+import {removeCompiledFixture} from './native-release-cleanup.js';
 import {Array as EffectArray} from 'effect';
 import {spawn, spawnSync} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
@@ -60,7 +61,7 @@ it.skipIf(!archive)(
       bodyFailure = {error};
     } finally {
       try {
-        await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+        await removeCompiledFixture(temporary);
       } catch (error) {
         cleanupFailure = {error};
       }
@@ -191,7 +192,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(failure.stdout.equals(expected.stdout)).toBe(true);
     expect(failure.stderr.equals(expected.stderr)).toBe(true);
   } finally {
-    await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+    await removeCompiledFixture(temporary);
   }
 }, 60_000);
 
@@ -446,7 +447,7 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     bodyFailure = {error};
   } finally {
     try {
-      await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+      await removeCompiledFixture(temporary);
     } catch (error) {
       cleanupFailure = {error};
     }

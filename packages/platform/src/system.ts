@@ -56,7 +56,16 @@ interface NativePathModuleShape {
 }
 
 interface NativeOperatingSystemModuleShape {
-  readonly cpus: () => readonly {readonly model: string}[];
+  readonly cpus: () => readonly {
+    readonly model: string;
+    readonly times: {
+      readonly user: number;
+      readonly nice: number;
+      readonly sys: number;
+      readonly idle: number;
+      readonly irq: number;
+    };
+  }[];
   readonly release: () => string;
   readonly totalmem: () => number;
 }
@@ -90,6 +99,7 @@ export interface FileSystemPathAuthority extends FileSystemIdentity {
 }
 
 interface RuntimeDirectoryEntry {
+  readonly isFile: () => boolean;
   readonly isDirectory: () => boolean;
   readonly name: string | Uint8Array;
 }
@@ -507,7 +517,10 @@ export async function runtimeDirectoryNamePage(path: string, entryLimit: number)
 }
 
 /** Scoped callers retain this native iterator; every read advances at most 64 directory entries. */
-export async function runtimeOpenTextDirectoryNameReader(root: string) {
+export async function runtimeOpenTextDirectoryNameReader(
+  root: string,
+  options: {readonly entryKind?: 'directory' | 'file'} = {},
+) {
   const directory = await openRuntimeDirectory(root, {bufferSize: 32, encoding: 'utf8'});
   let closed = false;
   const close = async () => {
@@ -528,7 +541,7 @@ export async function runtimeOpenTextDirectoryNameReader(root: string) {
           await close();
           return {names, done: true};
         }
-        if (entry.isDirectory())
+        if (options.entryKind === 'file' ? entry.isFile() : entry.isDirectory())
           names.push(
             typeof entry.name === 'string' ? entry.name : new TextDecoder('utf-8', {fatal: true}).decode(entry.name),
           );
@@ -564,6 +577,8 @@ export interface SystemInfoShape {
   readonly availableDiskBytes: (path: string) => Effect.Effect<number | undefined, unknown>;
   /** Versioned cross-observer identity; optional for legacy injected SystemInfo adapters. */
   readonly canonicalProcessStartIdentity?: (processId: number) => Effect.Effect<string | undefined>;
+  /** Cumulative host CPU counters; absence is unknown capacity, never an idle observation. */
+  readonly cpuTimes?: Effect.Effect<SystemCpuTimes | undefined>;
   readonly currentDirectory: () => string;
   readonly environment: () => NodeJS.ProcessEnv;
   readonly developmentEntrypoint: string;
@@ -595,6 +610,12 @@ export interface SystemInfoShape {
   readonly tempDirectory: string;
   readonly userId?: number;
   readonly userName: string;
+}
+
+export interface SystemCpuTimes {
+  readonly logicalCpus: number;
+  readonly idleMilliseconds: number;
+  readonly totalMilliseconds: number;
 }
 
 export interface SystemHardwareInfo {
@@ -716,6 +737,17 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
         architecture: runtimeArchitecture,
         availableDiskBytes: path => availableDiskBytes(path, runtimePlatform, process.env, diskCapacityProbeAdapters),
         canonicalProcessStartIdentity,
+        cpuTimes: Effect.try(() => {
+          const processors = nativeOperatingSystemModule.cpus();
+          if (processors.length === 0) return undefined;
+          let idleMilliseconds = 0;
+          let totalMilliseconds = 0;
+          for (const {times} of processors) {
+            idleMilliseconds += times.idle;
+            totalMilliseconds += times.user + times.nice + times.sys + times.idle + times.irq;
+          }
+          return {logicalCpus: processors.length, idleMilliseconds, totalMilliseconds};
+        }).pipe(Effect.orElseSucceed(() => undefined)),
         currentDirectory: () => process.cwd(),
         environment: () => process.env,
         developmentEntrypoint: entrypoint.developmentEntrypoint,

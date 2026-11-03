@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
 import {Context, Effect, Schema} from 'effect';
-import type {FileSystem, Path, Crypto} from 'effect';
+import type {FileSystem, Path} from 'effect';
 import type {PlatformError} from 'effect/PlatformError';
 import type {SystemInfo} from '@threadnote/platform/system';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
@@ -33,7 +34,7 @@ export interface SourceConfigurationFailure extends Error {
   readonly message: string;
 }
 export type ConfigurationError = SourceConfigurationFailure | PlatformError;
-export type ConfigurationServices = FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo;
+export type ConfigurationServices = FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo;
 export interface SourceConfigurationStoreShape {
   readonly read: (config: ConfigurationHome) => Effect.Effect<SourceConfiguration, ConfigurationError>;
   readonly write: (config: ConfigurationHome, value: SourceConfiguration) => Effect.Effect<string, unknown>;

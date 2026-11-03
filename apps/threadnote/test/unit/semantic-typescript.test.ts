@@ -4,7 +4,7 @@ import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
-import * as BunCrypto from '@effect/platform-bun/BunCrypto';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
@@ -17,6 +17,11 @@ import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {Observation, Position} from '@threadnote/semantic/contracts';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
+import {
+  makeTypeScriptRuntime,
+  typeScriptPolicyCommand,
+  typeScriptPolicyVersion,
+} from '../../src/semantic/providers/typescript_runtime.js';
 import {makeTypeScriptSession, validTextPosition} from '../../src/semantic/providers/typescript.js';
 import {
   makeSemanticCoordinator,
@@ -44,14 +49,43 @@ const observation = (text: string, overrides: Partial<Observation> = {}): Observ
 const options = (basis: Observation) => ({
   basis,
   tsserver: '/host/typescript/tsserver.js',
+  compiler: '/host/typescript/typescript.js',
+  sourceRoot: '/host/typescript',
+  verifyPolicy: Effect.void,
+  challenge: Effect.succeed(sha256HexSync('test-challenge')),
   maxMemoryMb: 256,
   startupMilliseconds: 1000,
 });
 const fakeClient = (request: (method: string, params: Schema.Json | undefined) => Effect.Effect<Schema.Json>) =>
   ({
     pid: 1,
-    request: (method, params) => {
+    request: (method: string, params?: Schema.Json, _milliseconds?: number): Effect.Effect<Schema.Json> => {
       if (method === 'initialize') return Effect.succeed({capabilities: {positionEncoding: 'utf-16'}});
+      if (
+        method === 'workspace/executeCommand' &&
+        typeof params === 'object' &&
+        params !== null &&
+        'arguments' in params &&
+        EffectArray.isArray(params.arguments) &&
+        params.arguments[0] === typeScriptPolicyCommand
+      ) {
+        const challenge = Schema.decodeUnknownSync(Schema.Struct({challenge: Schema.String}))(
+          params.arguments[1],
+        ).challenge;
+        return Effect.succeed({
+          success: true,
+          body: {
+            policy: typeScriptPolicyVersion,
+            launcher: '/host/typescript/tsserver.js',
+            compiler: '/host/typescript/typescript.js',
+            version: '6.0.3',
+            pid: 2,
+            instance: sha256HexSync('test-instance'),
+            challenge,
+            locked: true,
+          },
+        });
+      }
       if (
         method === 'workspace/executeCommand' &&
         typeof params === 'object' &&
@@ -131,6 +165,81 @@ describe('TypeScript observation fences', () => {
       expect(current.content).toBe(rebound.content);
       expect(current.projectEpoch).toBeGreaterThan(rebound.projectEpoch);
       expect((yield* session.query('definition', current, {line: 0, character: 4}, 1000)).status).toBe('ok');
+    }),
+  );
+  effectIt.effect('refuses unguarded or mismatched launcher proof before opening any source', () =>
+    Effect.gen(function* () {
+      for (const mode of ['missing', 'launcher', 'unlocked', 'challenge'] as const) {
+        const base = fakeClient(() => Effect.succeed(null));
+        const notifications: string[] = [];
+        const client: LspClient = {
+          ...base,
+          notify: method =>
+            Effect.sync(() => {
+              notifications.push(method);
+            }),
+          request: (method, params, milliseconds) =>
+            base.request(method, params, milliseconds).pipe(
+              Effect.map(raw => {
+                if (method !== 'workspace/executeCommand') return raw;
+                const proof = Schema.decodeUnknownSync(
+                  Schema.Struct({success: Schema.Boolean, body: Schema.Record(Schema.String, Schema.Json)}),
+                )(raw);
+                if (mode === 'missing') return {success: false};
+                return {
+                  ...proof,
+                  body: {
+                    ...proof.body,
+                    ...(mode === 'launcher'
+                      ? {launcher: '/repo/tsserver.js'}
+                      : mode === 'unlocked'
+                        ? {locked: false}
+                        : {challenge: sha256HexSync('wrong')}),
+                  },
+                };
+              }),
+            ),
+        };
+        expect((yield* makeTypeScriptSession(client, options(observation('x'))).pipe(Effect.exit))._tag).toBe(
+          'Failure',
+        );
+        expect(notifications).toEqual(['initialized']);
+      }
+    }),
+  );
+  effectIt.effect('invalidates the session when the guarded child process instance changes', () =>
+    Effect.gen(function* () {
+      const basis = observation('x');
+      const base = fakeClient(() => Effect.succeed([]));
+      let generation = 0;
+      let reads = 0;
+      const client: LspClient = {
+        ...base,
+        request: (method, params, milliseconds) =>
+          base.request(method, params, milliseconds).pipe(
+            Effect.map(raw => {
+              if (method === 'textDocument/definition') reads++;
+              if (
+                method !== 'workspace/executeCommand' ||
+                !Schema.is(Schema.Struct({body: Schema.Struct({instance: Schema.String})}))(raw)
+              )
+                return raw;
+              const proof = Schema.decodeUnknownSync(
+                Schema.Struct({success: Schema.Boolean, body: Schema.Record(Schema.String, Schema.Json)}),
+              )(raw);
+              return {...proof, body: {...proof.body, instance: sha256HexSync(String(generation))}};
+            }),
+          ),
+      };
+      const session = yield* makeTypeScriptSession(client, options(basis));
+      const current = yield* session.upsert(basis, 'x', 'typescript', 1000);
+      generation++;
+      expect((yield* session.query('definition', current, {line: 0, character: 0}, 1000).pipe(Effect.exit))._tag).toBe(
+        'Failure',
+      );
+      expect(yield* session.available).toBe(false);
+      expect(reads).toBe(0);
+      expect(yield* session.observation(current.uri)).toBeUndefined();
     }),
   );
   it('candidate identity ignores object insertion order without merging different installations', () => {
@@ -290,7 +399,7 @@ describe('TypeScript observation fences', () => {
   );
 });
 const io = Layer.merge(BunFileSystem.layer, BunPath.layer);
-const coordinatorIo = Layer.mergeAll(io, BunCrypto.layer, TestSystemInfoLayer);
+const coordinatorIo = Layer.mergeAll(io, cryptoLayer, TestSystemInfoLayer);
 // Runtime coordination tests inject the version probe and run the real engine on Bun.
 // This is not the separate exact-Node candidate qualification smoke.
 const versionProbe = CommandExecutor.of({
@@ -631,7 +740,7 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
             path.join(project, 'tsconfig.json'),
             JSON.stringify({
               extends: '../base.json',
-              compilerOptions: {plugins: [{name: 'trap-plugin'}]},
+              compilerOptions: {strict: true},
               files: ['main.ts'],
             }),
           );
@@ -668,6 +777,13 @@ describe.skipIf(process.platform === 'win32')('semantic coordinator with injecte
           if (definition.status === 'ok') expect(definition.evidence.completeness).toBe('partial');
         }
         expect(yield* fs.exists(marker)).toBe(false);
+        yield* fs.writeFileString(
+          path.join(repo, 'base.json'),
+          JSON.stringify({compilerOptions: {plugins: [{name: 'trap-plugin'}]}}),
+        );
+        expect(yield* semanticTreeDigest(repo, true).pipe(Effect.flip)).toMatchObject({code: 'prerequisite'});
+        expect(yield* fs.exists(marker)).toBe(false);
+        yield* fs.writeFileString(path.join(repo, 'base.json'), '{"compilerOptions":{"strict":true}}');
         // An external config cannot supply an analysis basis that the selected worktree fingerprint never covers.
         yield* fs.writeFileString(path.join(root, 'outside.json'), '{"compilerOptions":{}}');
         yield* fs.writeFileString(
@@ -846,9 +962,20 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         });
         const client = yield* makeLspClient(wire);
         const basis = observation(source, {worktree: uri, project: uri, uri: fileUri});
+        const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn6-ts-host-'}));
+        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
+        const runtime = yield* makeTypeScriptRuntime({
+          home: privateHome,
+          sdkDirectory,
+          sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
+          worktree: yield* fs.realPath(root),
+        });
         const session = yield* makeTypeScriptSession(client, {
           ...options(basis),
-          tsserver: Bun.resolveSync('typescript/lib/tsserver.js', resolveFrom),
+          tsserver: runtime.launcher,
+          compiler: runtime.compiler,
+          sourceRoot: runtime.sourceRoot,
+          verifyPolicy: runtime.verify,
           startupMilliseconds: 15000,
         });
         yield* session.upsert(basis, source, 'typescript', 15000);
@@ -910,7 +1037,7 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         });
       }).pipe(
         // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow OS test entrypoint.
-        Effect.provide(io),
+        Effect.provide(coordinatorIo),
         Effect.provideService(ChildEnvironmentPolicy, {
           sanitizeExternal: env => env,
           preserveIntendedChild: env => env,

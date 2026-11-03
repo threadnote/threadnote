@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
@@ -25,6 +26,8 @@ import {projectContextBrief} from '../../src/projector.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const REPOSITORY_ID = Effect2.pipe('a', EffectString.repeat(64));
 const COMMIT = Effect2.pipe('b', EffectString.repeat(40));
 const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`;
@@ -34,7 +37,7 @@ const TASK = 'Verify installed native workflow foundation contracts and source r
 const TRUST = {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'} as const;
 
 function provideFixtureServices<A, E, R>(effect: Effect.Effect<A, E, R>) {
-  const layer = Layer.merge(BunServices.layer, citationSystemInfoLayer);
+  const layer = Layer.merge(platformServicesLayer, citationSystemInfoLayer);
   return Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }
 

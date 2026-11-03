@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -18,7 +19,7 @@ import {makePythonProject, pythonMetadataResponder} from '../../src/semantic/pro
 import {makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {semanticTreeDigest, semanticCatalogKey, makeSemanticCoordinator} from '../../src/semantic/coordinator.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
-const io = BunServices.layer;
+const io = Layer.merge(BunServices.layer, cryptoLayer);
 const commands = TestCommandExecutorLayer.pipe(Layer.provide(Layer.merge(io, TestSystemInfoLayer)));
 const initial = (uri: string, text: string, root: string): Observation => ({
   version: 1,

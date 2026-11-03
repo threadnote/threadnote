@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Context, Crypto, Deferred, Effect, Exit, FileSystem, Layer, Path, SynchronizedRef, Schema} from 'effect';
+import {Clock, Context, Deferred, Effect, Exit, FileSystem, Layer, Path, SynchronizedRef, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {maintainCodeGraphBuildHistoryUnit} from '../build_status.js';
@@ -42,6 +43,22 @@ import {type CodeGraphStoragePressure} from '../storage/pressure.js';
 import {codeGraphAnonymousTelemetryComponent, CodeGraphObservability} from '../runtime_ports.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+/** Only typed recovery categories reach logs; raw storage messages may contain private paths. */
+export function deferredCodeGraphMaintenanceFailureMessage(error: CodeGraphStoreFailure): string {
+  const actions = {
+    defer: 'wait for foreground work to finish and retry',
+    diagnose: 'run threadnote doctor and inspect graph storage health',
+    'fix-permissions': 'restore access to the Threadnote home and retry',
+    'free-space': 'free disk space and retry',
+    'manual-migration': 'run threadnote repair for the required migration',
+    'manual-rebuild': 'run threadnote repair to rebuild derived graph data',
+    'migrate-additive': 'run threadnote repair to update graph storage',
+    'reconnect-runtime': 'restart Threadnote with the current runtime',
+    'retry-read-only': 'retry after the current graph writer releases its lease',
+  } as const;
+  return `Deferred code graph maintenance failed: stage=deferred-maintenance; reason=${error.code}; action=${actions[error.recovery]}.`;
+}
 
 export const CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT = 128;
 export const CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_MILLISECONDS = 2_000;
@@ -186,7 +203,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
       const observability = yield* CodeGraphObservability;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       const reconciler = yield* makeLiveCodeGraphWorktreeReconciler();
       const orphanProvenanceCleaner = yield* makeLiveCodeGraphOrphanProvenanceCleaner();
@@ -283,7 +300,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
             },
           ).pipe(
             Effect.map(codeGraphRemovedViewProvenancePageResult),
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(CommandExecutor, command),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
@@ -305,7 +322,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
                 preparation,
                 use,
               ).pipe(
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, system),
@@ -319,7 +336,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
               ),
         withTargetLock: (input, worktreeId, effect, scopeId) =>
           withCodeGraphTargetWorktreeLock(input.threadnoteHome, input.checkoutId, worktreeId, effect, scopeId).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
@@ -459,7 +476,7 @@ export class CodeGraphMaintenanceCoordinator extends Context.Service<
               },
             ),
           ),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
@@ -834,7 +851,7 @@ export const makeCodeGraphMaintenanceCoordinator = Effect.fn('codeGraph.makeMain
         if (next !== undefined) {
           yield* execute(next.input, next.completion, next.budget).pipe(
             Effect.tapError(error =>
-              Effect.logWarning(`Deferred code graph maintenance failed (${error.code}).`).pipe(
+              Effect.logWarning(deferredCodeGraphMaintenanceFailureMessage(error)).pipe(
                 Effect.andThen(
                   onDeferredFailure === undefined
                     ? Effect.void

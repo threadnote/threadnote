@@ -65,6 +65,7 @@ const offsetClock = (clock: Clock.Clock, offset: () => bigint): Clock.Clock => (
 const fixture = (
   options: {
     legacy?: boolean;
+    atomic?: boolean;
     drift?: boolean;
     interrupt?: boolean;
     beforeEvidence?: () => Effect.Effect<void>;
@@ -164,6 +165,9 @@ const fixture = (
     let leased = false;
     const observedStore = CodeGraphStore.of({
       ...store,
+      readReadySnapshotCitationEvidence: options.atomic
+        ? () => Effect.die('Scoped projection must retain its lease instead of copying anchors')
+        : undefined,
       readySnapshot: (...args) =>
         Effect.gen(function* () {
           const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
@@ -307,6 +311,19 @@ describe('repository citation capture session', () => {
         expect(f.events).toEqual(['opening', 'lease', 'evidence', 'callback', 'closing', 'release', 'session-end']);
         yield* f.capture;
         expect(EffectArray.filter(f.events, event => event === 'lease')).toHaveLength(2);
+      }).pipe(TestClock.withLive),
+    );
+    test.effect('retains a scoped projection lease when atomic returned-anchor capture is available', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({atomic: true});
+        const output = yield* f.withCitations(citations =>
+          Effect.sync(() => {
+            expect(f.events).toEqual(['opening', 'lease', 'evidence']);
+            return citations.length;
+          }),
+        );
+        expect(output).toBe(1);
+        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
       }).pipe(TestClock.withLive),
     );
     test.effect('preserves callback error identity and releases without publishing a projection', () =>

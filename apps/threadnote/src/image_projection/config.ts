@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -77,7 +78,7 @@ export const writeImageProjectionConfiguration = Effect.fn('imageProjection.writ
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   value: ImageProjectionConfiguration,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* imageProjectionConfigurationPath(config);
@@ -95,7 +96,7 @@ export const writeImageProjectionConfiguration = Effect.fn('imageProjection.writ
           'Image projection configuration must not be a symbolic link.',
         );
       }
-      const temporary = path.join(directory, `.config.${yield* crypto.randomUUIDv4()}.tmp`);
+      const temporary = path.join(directory, `.config.${yield* crypto.uuidV4()}.tmp`);
       yield* fs.writeFileString(temporary, serialized, {mode: IMAGE_PROJECTION_CONFIGURATION_FILE_MODE});
       yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
       yield* fs.chmod(file, IMAGE_PROJECTION_CONFIGURATION_FILE_MODE);

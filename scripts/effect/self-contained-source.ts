@@ -8,8 +8,10 @@ const PYTHON_METADATA_SOURCES = new Set([
   'packages/manager/src/memory_editor_languages.ts',
 ]);
 const SEMANTIC_PYTHON_CATALOG_SOURCE = 'apps/threadnote/src/effect/semantic_cli.ts';
+const SEMANTIC_PYTHON_HOST_CATALOG_SOURCE = 'apps/threadnote/src/semantic/host_catalog.ts';
 const SEMANTIC_PYTHON_METADATA_SOURCES = new Set([
   SEMANTIC_PYTHON_CATALOG_SOURCE,
+  SEMANTIC_PYTHON_HOST_CATALOG_SOURCE,
   'apps/threadnote/src/semantic/coordinator.ts',
   'apps/threadnote/src/semantic/provider.ts',
   'apps/threadnote/src/semantic/providers/python.ts',
@@ -45,14 +47,16 @@ export function hasUndeclaredPythonRuntimeReference(relativePath: string, conten
     source =
       relativePath === SEMANTIC_PYTHON_CATALOG_SOURCE
         ? EffectString.replace("languages: ['python']", '')(source)
-        : Effect.pipe(
-            source,
-            EffectString.replaceAll(/\b(?:language|l)\s*===\s*'python'/gu, ''),
-            EffectString.replaceAll(/\blanguage:\s*'python'/gu, ''),
-            EffectString.replace("'candidate' | 'python' |", ''),
-            EffectString.replace("  'python',", ''),
-            EffectString.replace("'Experimental Python static-environment profile'", ''),
-          );
+        : relativePath === SEMANTIC_PYTHON_HOST_CATALOG_SOURCE
+          ? EffectString.replace("slot: 'python'", '')(source)
+          : Effect.pipe(
+              source,
+              EffectString.replaceAll(/\b(?:language|l)\s*===\s*'python'/gu, ''),
+              EffectString.replaceAll(/\blanguage:\s*'python'/gu, ''),
+              EffectString.replace("'candidate' | 'python' |", ''),
+              EffectString.replace("  'python',", ''),
+              EffectString.replace("'Experimental Python static-environment profile'", ''),
+            );
     return /['"`][^'"`\r\n]*\bpython(?:\d+(?:\.\d+)*)?(?:\.exe)?(?=\s|['"`;&|<>])/iu.test(source);
   }
   if (relativePath === 'apps/threadnote/src/dev_skills/manifest.ts') {

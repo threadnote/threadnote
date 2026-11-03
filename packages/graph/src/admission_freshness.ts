@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {codeGraphInventoryReuseContract, readCodeGraphInventoryReuseEnvironment} from './inventory/reuse.js';
 import type {CodeGraphLanguagePackRegistryShape} from './languages/registry.js';
 import type {CodeGraphLayout} from './layout.js';
@@ -171,7 +172,7 @@ export const recordCodeGraphSnapshotAdmission = Effect.fn('codeGraph.recordSnaps
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   if (options?.cleanOnly && snapshot.dirty) {
     return yield* CodeGraphAdmissionError.make({message: 'Dirty snapshots cannot establish clean-base admission.'});
   }
@@ -214,7 +215,7 @@ export const recordCodeGraphSnapshotAdmission = Effect.fn('codeGraph.recordSnaps
   // Two bounded files per worktree and scope avoid retaining proof for every historical snapshot.
   for (const clean of options?.cleanOnly ? [true] : snapshot.dirty ? [false] : [false, true]) {
     const destination = codeGraphSnapshotAdmissionReceiptPath(path, layout, layout.worktreeId, clean, scope?.scopeKey);
-    const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const temporary = `${destination}.${yield* crypto.uuidV4()}.tmp`;
     yield* Effect.gen(function* () {
       yield* fs.writeFileString(temporary, encoded, {flag: 'wx', mode: 0o600});
       yield* fs.rename(temporary, destination);

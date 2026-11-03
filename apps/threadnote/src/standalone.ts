@@ -1,3 +1,5 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {compiledHandoffSaveIdentity, HANDOFF_SAVE_WORKER_ARGUMENT} from './memory/handoff_save_contract.js';
 import {Array as EffectArray} from 'effect';
 import type {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
@@ -10,8 +12,15 @@ import type {ChildEnvironmentPolicy} from '@threadnote/platform/child-environmen
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {telemetryChildEnvironmentPolicyLayer} from './telemetry/session.js';
 import {
+  CONTEXT_MAINTENANCE_WORKER_ARGUMENT,
+  decodeContextMaintenanceWorkerRequest,
+  runContextMaintenanceWorker,
+} from './memory/context/maintenance_worker.js';
+import {
   CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT,
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
+  RECALL_EMBEDDING_WORKER_ARGUMENT,
+  RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
   CODE_GRAPH_ANALYSIS_WORKER_ARGUMENT,
   CODE_GRAPH_COMPACTION_WORKER_ARGUMENT,
   CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT,
@@ -32,9 +41,12 @@ const executableName = Effect2.pipe(
 );
 const arguments_ = process.argv.slice(2);
 const isModelSetupWorker = arguments_[0] === 'model-setup-worker';
+const isContextMaintenanceWorker = arguments_[0] === CONTEXT_MAINTENANCE_WORKER_ARGUMENT;
 const isModelSetupRequest = arguments_[0] === 'model-setup-request';
+const isHandoffSaveWorker = arguments_[0] === HANDOFF_SAVE_WORKER_ARGUMENT;
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
 const isCodeGraphEmbeddingWorker = arguments_[0] === CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT;
+const isRecallEmbeddingWorker = arguments_[0] === RECALL_EMBEDDING_WORKER_ARGUMENT;
 const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
 const isSemanticCoordinator = arguments_[0] === '__semantic-coordinator';
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
@@ -102,37 +114,43 @@ if (
   );
   runSignalTransparentMain(nativeWorkerProgram, {disableErrorReporting: true});
 } else {
-  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> = isModelSetupRequest
-    ? await automaticModelSetupProgram(arguments_.slice(1))
-    : isModelSetupWorker
-      ? await modelSetupWorkerProgram(arguments_.slice(1))
-      : isCodeGraphEmbeddingWorker
-        ? await graphEmbeddingWorkerProgram(arguments_.slice(1))
-        : isIntegrationSyncWorker
-          ? await integrationSyncWorkerProgram(arguments_.slice(1))
-          : isSemanticCoordinator
-            ? await semanticCoordinatorWorkerProgram(arguments_.slice(1))
-            : isRemoteMemoryService
-              ? await remoteMemoryServiceProgram()
-              : isOAuthM2MGraphCredentialHelper
-                ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
-                : isOAuthM2MRegistryCredentialHelper
-                  ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
-                  : isOAuthM2MPublisherRegistryCredentialHelper
-                    ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
-                    : isOAuthUserRegistryCredentialHelper
-                      ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
-                      : isGraphOAuthUserHelper
-                        ? await graphOAuthHelperProgram(arguments_.slice(1))
-                        : isRemoteMemoryOperator
-                          ? await remoteMemoryOperatorProgram(arguments_.slice(1))
-                          : isLocalModelWorker
-                            ? await localModelWorkerProgram(arguments_)
-                            : isCodeGraphParserWorker
-                              ? await codeGraphParserWorkerProgram(arguments_)
-                              : isGitWorktreeRegistrationWorker
-                                ? await gitWorktreeRegistrationWorkerProgram()
-                                : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
+  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> = isHandoffSaveWorker
+    ? await handoffSaveWorkerProgram()
+    : isModelSetupRequest
+      ? await automaticModelSetupProgram(arguments_.slice(1))
+      : isModelSetupWorker
+        ? await modelSetupWorkerProgram(arguments_.slice(1))
+        : isCodeGraphEmbeddingWorker
+          ? await graphEmbeddingWorkerProgram(arguments_.slice(1))
+          : isRecallEmbeddingWorker
+            ? await recallEmbeddingWorkerProgram(arguments_.slice(1))
+            : isIntegrationSyncWorker
+              ? await integrationSyncWorkerProgram(arguments_.slice(1))
+              : isSemanticCoordinator
+                ? await semanticCoordinatorWorkerProgram(arguments_.slice(1))
+                : isRemoteMemoryService
+                  ? await remoteMemoryServiceProgram()
+                  : isOAuthM2MGraphCredentialHelper
+                    ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
+                    : isOAuthM2MRegistryCredentialHelper
+                      ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
+                      : isOAuthM2MPublisherRegistryCredentialHelper
+                        ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
+                        : isOAuthUserRegistryCredentialHelper
+                          ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
+                          : isGraphOAuthUserHelper
+                            ? await graphOAuthHelperProgram(arguments_.slice(1))
+                            : isRemoteMemoryOperator
+                              ? await remoteMemoryOperatorProgram(arguments_.slice(1))
+                              : isLocalModelWorker
+                                ? await localModelWorkerProgram(arguments_)
+                                : isCodeGraphParserWorker
+                                  ? await codeGraphParserWorkerProgram(arguments_)
+                                  : isGitWorktreeRegistrationWorker
+                                    ? await gitWorktreeRegistrationWorkerProgram()
+                                    : isContextMaintenanceWorker
+                                      ? await contextMaintenanceWorkerProgram(arguments_.slice(1))
+                                      : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
     withCliDiagnostics,
@@ -140,18 +158,57 @@ if (
 
   BunRuntime.runMain(program, {
     disableErrorReporting:
+      isHandoffSaveWorker ||
       isModelSetupRequest ||
       isModelSetupWorker ||
       isLocalModelWorker ||
       isIntegrationSyncWorker ||
       isSemanticCoordinator ||
       isCodeGraphEmbeddingWorker ||
+      isRecallEmbeddingWorker ||
       isCodeGraphParserWorker ||
       isGitWorktreeRegistrationWorker ||
       isGraphOAuthUserHelper ||
       isOAuthUserRegistryCredentialHelper ||
       (!isMcpServer && !isMcpBroker),
   });
+}
+
+async function contextMaintenanceWorkerProgram(args: readonly string[]) {
+  const runtime = await import('./effect/runtime-bootstrap.js');
+  return Effect.gen(function* () {
+    const {config, owner} = yield* decodeContextMaintenanceWorkerRequest(args);
+    const work = Effect.gen(function* () {
+      // Started imports must settle on interruption before releasing the lease.
+      const maintenance = yield* fromPromiseInterruptibleAwaiting(
+        () => import('./memory/context/maintenance_control.js'),
+        cause => cause,
+      );
+      if ((yield* maintenance.readContextMaintenanceControl(config)).paused) return;
+      const command = yield* fromPromiseInterruptibleAwaiting(
+        () =>
+          applicationProgram(
+            [
+              '--home',
+              config.agentContextHome,
+              '--manifest',
+              config.manifestPath,
+              'context',
+              'maintain',
+              '--max-records',
+              '16',
+              '--json',
+            ],
+            false,
+            false,
+          ),
+        cause => cause,
+      );
+      yield* command;
+    });
+    const status = yield* runContextMaintenanceWorker(config.agentContextHome, owner, work);
+    if (status === 'deadline') process.exitCode = 1;
+  }).pipe(Effect.provide(runtime.StandaloneBrokerLayer));
 }
 
 async function automaticModelSetupProgram(arguments_: readonly string[]) {
@@ -227,7 +284,7 @@ async function graphOAuthHelperProgram(arguments_: readonly string[]) {
       Layer.merge(
         system.SystemInfo.layer,
         command.CommandExecutor.layer.pipe(Layer.provide(system.SystemInfo.layer)),
-      ).pipe(Layer.provideMerge(BunServices.layer)),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer))),
     ),
   );
 }
@@ -248,7 +305,7 @@ async function oauthUserRegistryCredentialHelperProgram(arguments_: readonly str
       Layer.merge(
         system.SystemInfo.layer,
         command.CommandExecutor.layer.pipe(Layer.provide(system.SystemInfo.layer)),
-      ).pipe(Layer.provideMerge(BunServices.layer)),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer))),
     ),
   );
 }
@@ -283,7 +340,7 @@ async function remoteMemoryOperatorProgram(arguments_: readonly string[]) {
           process.exitCode = code;
         }),
       ),
-      Effect.provide(BunServices.layer),
+      Effect.provide(Layer.merge(BunServices.layer, cryptoLayer)),
     );
 }
 
@@ -321,7 +378,7 @@ async function remoteMemoryServiceProgram() {
         ),
       );
     }),
-  ).pipe(Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)));
+  ).pipe(Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))));
 }
 
 function remoteMemoryServiceHelpProgram(): Effect.Effect<void, never, never> {
@@ -382,7 +439,7 @@ async function codeGraphDeepDiagnosticsWorkerProgram() {
         ),
       ),
     ),
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -405,7 +462,7 @@ async function codeGraphAutomaticCompactionWorkerProgram() {
         ),
       ),
     ),
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -461,17 +518,18 @@ async function gitWorktreeRegistrationWorkerProgram() {
     import('@threadnote/platform/system'),
   ]);
   return worker.gitWorktreeRegistrationWorkerProgram.pipe(
-    Effect.provide(Layer.merge(system.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(system.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
 async function localModelWorkerProgram(arguments_: readonly string[]) {
-  const [isolatedModel, model, systemModule, processDiagnostics, processLease] = await Promise.all([
+  const [isolatedModel, model, systemModule, processDiagnostics, processLease, admission] = await Promise.all([
     import('./effect/ai/isolated-local-model-runtime.js'),
     import('@threadnote/inference/engine/local-model-runtime'),
     import('@threadnote/platform/system'),
     import('./process/diagnostics.js'),
     import('./process/standalone_lease.js'),
+    import('@threadnote/inference/background/admission'),
   ]);
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(
@@ -480,12 +538,16 @@ async function localModelWorkerProgram(arguments_: readonly string[]) {
         processDiagnostics.withThreadnoteProcessRegistration(
           home,
           'local-model-worker',
-          Effect.scoped(isolatedModel.localModelWorkerServer.pipe(Effect.provide(model.localModelRuntimeLayer()))),
+          Effect.scoped(
+            isolatedModel.localModelWorkerServer.pipe(
+              Effect.provide(Layer.merge(model.localModelRuntimeLayer(), admission.BackgroundInferenceAdmission.layer)),
+            ),
+          ),
           'model-stdio',
         ),
       ),
     ),
-    Effect.provide(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
+    Effect.provide(Layer.merge(systemModule.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
   );
 }
 
@@ -511,7 +573,7 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
     ),
     Effect.provide(
       treeSitter.TreeSitterRuntime.layer.pipe(
-        Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
+        Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, Layer.merge(BunServices.layer, cryptoLayer))),
       ),
     ),
   );
@@ -525,7 +587,7 @@ async function semanticCoordinatorWorkerProgram(arguments_: readonly string[]) {
   ]);
   const ports = command.CommandExecutor.layer.pipe(
     Layer.provideMerge(system.SystemInfo.layer),
-    Layer.provideMerge(BunServices.layer),
+    Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)),
   );
   return coordinator.runSemanticCoordinatorWorker(arguments_).pipe(
     Effect.provide(ports),
@@ -598,10 +660,11 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       Effect.provide(runtime.StandaloneBrokerLayer),
     );
   }
-  const [runtime, processDiagnostics, processLease] = await Promise.all([
+  const [runtime, processDiagnostics, processLease, runtimeBootstrap] = await Promise.all([
     import('./effect/runtime.js'),
     import('./process/diagnostics.js'),
     import('./process/standalone_lease.js'),
+    import('./effect/runtime-bootstrap.js'),
   ]);
   if (isMcpServer) {
     const {mcpServerEffect} = await import('./mcp/server/index.js');
@@ -652,20 +715,28 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       .pipe(Effect.provide(runtime.ApplicationLayer));
   }
   const cliOperation = invocation.operation;
+  const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';
-  const processOperation = cliOperation === 'manage' ? 'manager-ui' : cliOperation;
+  const processOperation = isWatchCollector
+    ? 'workflow-watch-collector'
+    : cliOperation === 'manage'
+      ? 'manager-ui'
+      : cliOperation;
   const isStaticVersionRequest = arguments_.length === 1 && (arguments_[0] === '--version' || arguments_[0] === '-v');
+  const isLogsRequest = cliOperation === 'logs';
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(
     Effect.flatMap(home => {
-      const command = processDiagnostics.withThreadnoteProcessRegistration(
-        home,
-        processRole,
-        withCliOutputConsole(cliEffect(arguments_)),
-        processOperation,
-      );
+      const cli = withCliOutputConsole(cliEffect(arguments_));
+      // Filesystem-only support diagnostics must remain usable when inference coordination is unavailable.
+      const command = isLogsRequest
+        ? cli
+        : processDiagnostics.withThreadnoteProcessRegistration(home, processRole, cli, processOperation);
+      const applicationLayer = isLogsRequest
+        ? runtimeBootstrap.telemetryLayerForHome(home, 'invocation').pipe(Layer.provideMerge(runtime.ApplicationLayer))
+        : runtime.applicationLayerForHome(home, 'cli');
       return (isStaticVersionRequest ? Effect.scoped(command) : processLease.withStandaloneProcessLease(command)).pipe(
-        Effect.provide(runtime.applicationLayerForHome(home, 'cli')),
+        Effect.provide(applicationLayer),
       );
     }),
     Effect.provide(runtime.StandaloneBrokerLayer),
@@ -705,7 +776,11 @@ async function graphEmbeddingWorkerProgram(arguments_: readonly string[]) {
       Effect.gen(function* () {
         const protocolIndex = arguments_.indexOf('--protocol');
         const versionIndex = arguments_.indexOf('--version');
+        const nonceIndex = arguments_.indexOf('--launch-nonce');
+        const nonce = nonceIndex < 0 ? undefined : arguments_[nonceIndex + 1];
         if (
+          nonce === undefined ||
+          !/^[a-f0-9-]{36}$/u.test(nonce) ||
           arguments_[protocolIndex + 1] !== String(CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION) ||
           arguments_[versionIndex + 1] !== (yield* version.getThreadnoteVersion())
         )
@@ -714,7 +789,7 @@ async function graphEmbeddingWorkerProgram(arguments_: readonly string[]) {
           diagnostics.withThreadnoteProcessRegistration(
             home,
             'graph-embedding-worker',
-            worker.codeGraphEmbeddingWorkerProgram(home),
+            worker.codeGraphEmbeddingWorkerProgram(home, nonce),
             'graph-embedding',
           ),
         );
@@ -722,4 +797,64 @@ async function graphEmbeddingWorkerProgram(arguments_: readonly string[]) {
     ),
     Effect.provide(runtime.GraphEmbeddingWorkerLayer),
   );
+}
+
+async function recallEmbeddingWorkerProgram(arguments_: readonly string[]) {
+  const [runtime, worker, diagnostics, lease, version] = await Promise.all([
+    import('./effect/runtime.js'),
+    import('./recall/embedding_worker_process.js'),
+    import('./process/diagnostics.js'),
+    import('./process/standalone_lease.js'),
+    import('@threadnote/workspace/runtime-version'),
+  ]);
+  return normalizedProcessHome(arguments_, diagnostics.threadnoteHomeForProcess).pipe(
+    Effect.flatMap(home =>
+      Effect.gen(function* () {
+        const protocolIndex = arguments_.indexOf('--protocol');
+        const versionIndex = arguments_.indexOf('--version');
+        const nonceIndex = arguments_.indexOf('--launch-nonce');
+        const nonce = nonceIndex < 0 ? undefined : arguments_[nonceIndex + 1];
+        if (
+          nonce === undefined ||
+          !/^[a-f0-9-]{36}$/u.test(nonce) ||
+          arguments_[protocolIndex + 1] !== String(RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION) ||
+          arguments_[versionIndex + 1] !== (yield* version.getThreadnoteVersion())
+        )
+          return;
+        yield* lease.withStandaloneProcessLease(
+          diagnostics.withThreadnoteProcessRegistration(
+            home,
+            'cli',
+            worker.recallEmbeddingWorkerHomeProgram(home, nonce),
+            'recall-embedding',
+          ),
+        );
+      }),
+    ),
+    Effect.provide(runtime.RecallEmbeddingWorkerLayer),
+  );
+}
+
+async function handoffSaveWorkerProgram() {
+  if (!compiledHandoffSaveIdentity()) return Effect.void;
+  const [runtime, worker, admission] = await Promise.all([
+    import('./effect/runtime.js'),
+    import('./memory/handoff_save_operation.js'),
+    import('@threadnote/inference/background/admission'),
+  ]);
+  const [systemModule, lease] = await Promise.all([
+    import('@threadnote/platform/system'),
+    import('./process/standalone_lease.js'),
+  ]);
+  // A static layer has no boot-time graph/model maintenance. The owned writer is foreground work.
+  return Effect.gen(function* () {
+    const home = (yield* systemModule.SystemInfo).environment().THREADNOTE_HANDOFF_SAVE_HOME;
+    if (!home) return;
+    yield* lease.withStandaloneProcessLease(
+      (yield* admission.BackgroundInferenceAdmission).withForeground(home, worker.runHandoffSaveWorker(), {
+        existingHomeOnly: true,
+        nativeFree: true,
+      }),
+    );
+  }).pipe(Effect.provide(runtime.HandoffSaveWorkerLayer));
 }

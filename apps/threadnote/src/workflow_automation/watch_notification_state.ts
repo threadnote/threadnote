@@ -78,6 +78,34 @@ export const nativeWatchNotificationSchema = Schema.Struct({
 });
 export type NativeWatchNotification = typeof nativeWatchNotificationSchema.Type;
 
+/** Terminal arrival has no lease, delivery, disposition or collector authority. */
+export function matchesTerminalNativeWatchArrival(
+  value: NativeWatchNotification,
+  state: NativeWatchState,
+  route: {consumerId: string; wakeupId: string; eventKey: string; attemptId?: string},
+): boolean {
+  const pending = value.outbox;
+  return (
+    value.target.host === 'codex' &&
+    state.prState !== 'open' &&
+    state.events.length === 0 &&
+    state.delivery === null &&
+    state.acknowledged === state.nextSequence - 1 &&
+    !Array.some(state.work, item => item.status === 'open' || item.status === 'blocked') &&
+    value.consumerId === route.consumerId &&
+    value.wakeupId === route.wakeupId &&
+    state.consumer?.id === route.consumerId &&
+    state.consumer.wakeupId === route.wakeupId &&
+    pending?.status === 'queued' &&
+    pending.receipt !== undefined &&
+    pending.attempts > 0 &&
+    route.attemptId !== undefined &&
+    pending.attemptId === route.attemptId &&
+    pending.key === route.eventKey &&
+    (pending.consumedThrough === 0 || pending.consumedThrough === state.nextSequence - 1)
+  );
+}
+
 export function validateNativeWatchNotification(value: NativeWatchNotification, state: NativeWatchState): void {
   const consumer = state.consumer;
   if (
@@ -191,5 +219,5 @@ export function nativeWatchNotice(
   const locator = JSON.stringify({...route, eventKey: value.key, attemptId: value.attemptId});
   if (new TextEncoder().encode(locator).byteLength > 6144)
     throw new Error('Host notification route exceeds its byte budget.');
-  return `Threadnote watch event. Route=${locator}. Relay this home/watch with consumerId, wakeupId, eventKey and attemptId to claim arrival. Inspect durable delivery/work; preserve disposition and ACK semantics. Scope this home to this watch; preserve caller workspace and default home.`;
+  return `Threadnote watch event. Route=${locator}. Inspect first. If terminal/stopped, pending=0, deliveryId=null, work.open=work.blocked=0: no renewal, relay or ACK. Queued/consumedThrough=0 can survive ACK; interrupted monitoring alone is not failure. Otherwise relay exact route to claim arrival; persist disposition before ACK; retain unresolved work. Use routed home only here; keep caller cwd/default home.`;
 }

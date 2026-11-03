@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {isOneOf} from '@threadnote/platform/validation';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Crypto, Effect, Exit, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
+import {Cause, Clock, Effect, Exit, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
 import {CommandExecutor, CommandTimedOut, type CommandExecutionError} from '@threadnote/platform/command';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {CODE_GRAPH_IMPACT_QUERY_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
@@ -444,14 +445,14 @@ export const codeGraphImpactQueryWorkerProgram = (threadnoteHome: string) =>
   Effect.gen(function* () {
     const request = yield* readImpactQueryWorkerRequest;
     const query = yield* CodeGraphQueryService;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
     const telemetry: CodeGraphQueryTelemetryObservation[] = [];
     const observeRefresh = (identity: CodeGraphRefreshDemandIdentity) =>
       observeCodeGraphBackgroundDemand(identity).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),

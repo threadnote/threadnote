@@ -9,6 +9,7 @@ import {api, errorMessage} from '@threadnote/manager/ui/support';
 import {
   orderManagerProcessesByAttention,
   managerProcessIsActive,
+  recallEmbeddingProgressLabel,
   type ManageableManagerProcess,
 } from '@threadnote/manager/process/contracts';
 import * as EffectString from 'effect/String';
@@ -76,6 +77,7 @@ export function ProcessesPanel(): React.ReactElement {
               ? 'This session · Verified runtime'
               : `${processRoleLabel(process.role)}${process.activityRole ? ` · ${processRoleLabel(process.activityRole)} activity` : ''} · Started ${formatDuration(process.ageMilliseconds)} ago`}
           </p>
+          {process.embeddingProgress ? <p>{recallEmbeddingProgressLabel(process.embeddingProgress)}</p> : null}
         </div>
         <span className={`workspace-status ${current ? '' : unverified ? 'warn' : 'neutral'}`}>
           {current ? <Check aria-hidden="true" /> : <Circle aria-hidden="true" />}

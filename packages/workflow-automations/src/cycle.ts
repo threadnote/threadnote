@@ -105,14 +105,46 @@ const watchSchema = Schema.Struct({
   consumerId: text(256),
   evidence: text(),
 });
+const baseRefBindingSchema = Schema.Struct({
+  ref: text(512).check(
+    Schema.makeFilter(ref =>
+      nativeCycleHasControl(ref) ||
+      /[ ~^:?*[\\]/u.test(ref) ||
+      Effect.pipe(ref, EffectString.includes('..')) ||
+      Effect.pipe(ref, EffectString.includes('@{')) ||
+      Effect.pipe(ref, EffectString.endsWith('.')) ||
+      EffectArray.some(
+        EffectString.split(ref, '/'),
+        part =>
+          !part || Effect.pipe(part, EffectString.startsWith('.')) || Effect.pipe(part, EffectString.endsWith('.lock')),
+      )
+        ? 'Use one canonical Git tracking ref.'
+        : undefined,
+    ),
+  ),
+  remote: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)),
+  repository: text(512),
+});
 const prSchema = Schema.Struct({
   url: text(2048),
   headSha: gitObject,
   branch: text(256),
   baseBranch: text(256),
   state: Schema.Literals(['open', 'merged']),
-});
-const deliverySchema = Schema.Struct({
+  baseRefBinding: Schema.optionalKey(baseRefBindingSchema),
+}).check(
+  Schema.makeFilter(pr => {
+    const proof = pr.baseRefBinding;
+    if (!proof) return undefined;
+    const target = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/u.exec(pr.url);
+    return target &&
+      proof.ref === `refs/remotes/${proof.remote}/${pr.baseBranch}` &&
+      proof.repository === Effect.pipe(`https://github.com/${target[1]}/${target[2]}`, EffectString.toLowerCase)
+      ? undefined
+      : 'PR base binding is inconsistent.';
+  }),
+);
+export const NativeCycleDeliverySchema = Schema.Struct({
   phaseId: id,
   phaseHash: digest,
   delivery: Schema.Literals(['local', 'commit', 'pr']),
@@ -122,6 +154,15 @@ const deliverySchema = Schema.Struct({
   pr: Schema.optionalKey(prSchema),
   watch: Schema.optionalKey(watchSchema),
 });
+export type NativeCycleDelivery = typeof NativeCycleDeliverySchema.Type;
+const deliverySchema = NativeCycleDeliverySchema;
+
+function matchesPRBase(base: string, pr: typeof prSchema.Type): boolean {
+  const proof = pr.baseRefBinding;
+  return proof
+    ? base !== pr.baseBranch && (base === `${proof.remote}/${pr.baseBranch}` || base === proof.ref)
+    : base === pr.baseBranch;
+}
 const historySchema = Schema.Struct({
   phaseHash: digest,
   head: gitObject,
@@ -337,7 +378,7 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
         !/^https:\/\//u.test(pr.url) ||
         pr.headSha !== r.delivery.headSha ||
         pr.branch !== p.branch ||
-        pr.baseBranch !== p.baseBranch
+        !matchesPRBase(p.baseBranch, pr)
       )
         err('PR receipt does not match plan metadata.');
       if (
@@ -590,7 +631,7 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
       !/^https:\/\//u.test(pr.url) ||
       pr.headSha !== d.headSha ||
       pr.branch !== p.branch ||
-      pr.baseBranch !== p.baseBranch
+      !matchesPRBase(p.baseBranch, pr)
     )
       err('PR receipt does not match delivery metadata.');
     if (pr.state === 'open') {

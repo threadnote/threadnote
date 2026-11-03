@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Predicate} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -30,9 +31,11 @@ import {AUTOMATIC_DRAFT_PROMPT_VERSION} from '../../src/effect/ai/selected_gener
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 type Config = {account: string; agentContextHome: string};
 const fixture = <A, E, R>(use: (config: Config) => Effect.Effect<A, E, R>) =>
@@ -929,9 +932,11 @@ describe('private durable draft queue', () => {
             `
 import {Clock, Console, Effect, FileSystem, Layer} from ${module('node_modules/effect/dist/index.js')};
 import * as BunServices from ${module('node_modules/@effect/platform-bun/dist/BunServices.js')};
+import {cryptoLayer} from ${module('packages/platform/src/crypto.ts')};
 import {TestSystemInfoLayer} from ${module('apps/threadnote/test/helpers/system-layer.ts')};
 import {enqueueDraftWork, readDraftQueueStatus, claimDraftWork, markDraftWorkDispatched, finishDraftWork}
   from ${module('apps/threadnote/src/memory/context/maintenance_draft_queue.ts')};
+
 const config = ${JSON.stringify(config)};
 const work = ${JSON.stringify(work('process'))};
 const program = Effect.gen(function* () {
@@ -952,7 +957,7 @@ const program = Effect.gen(function* () {
   if (admitted.state === 'waiting') yield* fs.writeFileString(${JSON.stringify(waiting)}, admitted.reason);
   return {state: admitted.state, reason: admitted.reason};
 });
-await Effect.runPromise(Effect.scoped(program.pipe(Effect.tap(result => Console.log(JSON.stringify(result))), Effect.provide(TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer))))));
+await Effect.runPromise(Effect.scoped(program.pipe(Effect.tap(result => Console.log(JSON.stringify(result))), Effect.provide(TestSystemInfoLayer.pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)))))));
 `,
           );
           const contender = runCommandEffect(system.executablePath, [harness], {allowFailure: true, timeoutMs: 15_000});

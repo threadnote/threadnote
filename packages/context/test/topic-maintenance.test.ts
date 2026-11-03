@@ -801,6 +801,7 @@ describe('topic maintenance current evidence', () => {
               },
             };
             let statusReads = 0;
+            let discoveryReads = 0;
             let evidenceReads = 0;
             const tracer = Tracer.make({
               span(options) {
@@ -813,9 +814,14 @@ describe('topic maintenance current evidence', () => {
               status: () =>
                 Effect.sync(() => {
                   statusReads++;
+                  discoveryReads++;
                   return status;
                 }),
-              statusForPublishedIdentity: () => Effect.succeed(status),
+              statusForPublishedIdentity: () =>
+                Effect.sync(() => {
+                  statusReads++;
+                  return status;
+                }),
             });
             const storeLayer = Layer.mock(CodeGraphStore, {
               acquireSnapshotLease: () => Effect.succeed('lease'),
@@ -919,7 +925,7 @@ describe('topic maintenance current evidence', () => {
             const initial = yield* observe();
             expect(initial.outcome).toBe('unchanged');
             expect(initial.sources[0]?.historicalAvailable).toBe(true);
-            statusReads = evidenceReads = 0;
+            statusReads = discoveryReads = evidenceReads = 0;
             const unchangedPacket = yield* provide(
               buildTopicMaintenanceEvidencePacket(config, enrolledRecord, repo, initial),
             );
@@ -928,6 +934,7 @@ describe('topic maintenance current evidence', () => {
             expect(unchangedPacket.sources?.[0]?.newExcerpt.provenance).toBe('current-verified');
             expect(evidenceReads).toBe(1);
             expect(statusReads).toBe(2);
+            expect(discoveryReads).toBe(0);
             const readOnlyInitial = yield* observe(initial, {allowCapture: false});
             expect(readOnlyInitial.revision).toBe(initial.revision);
             expect((yield* observe(undefined, {allowCapture: false})).outcome).toBe('unavailable');
@@ -982,7 +989,7 @@ describe('topic maintenance current evidence', () => {
             expect(changed.outcome).toBe('review-required');
             expect(changed.revision).not.toBe(initial.revision);
             expect(changed.sources[0]?.historicalAvailable).toBe(true);
-            statusReads = evidenceReads = 0;
+            statusReads = discoveryReads = evidenceReads = 0;
             const changedPacket = yield* provide(
               buildTopicMaintenanceEvidencePacket(config, enrolledRecord, repo, changed),
             );
@@ -999,6 +1006,7 @@ describe('topic maintenance current evidence', () => {
             });
             expect(evidenceReads).toBe(2);
             expect(statusReads).toBe(2);
+            expect(discoveryReads).toBe(0);
             const mismatchedHash = projectTopicMaintenanceObservation(
               enrolledRecord,
               EffectArray.map(changed.sources, item => ({

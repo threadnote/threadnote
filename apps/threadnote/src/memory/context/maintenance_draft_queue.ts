@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Crypto, Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
@@ -144,7 +145,7 @@ function transaction<A, E, R>(config: Config, use: (tx: Transaction) => Effect.E
       });
     const write = (file: string, value: unknown) =>
       Effect.gen(function* () {
-        const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+        const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
         yield* Effect.gen(function* () {
           yield* fs.writeFileString(temporary, `${JSON.stringify(value)}\n`, {flag: 'wx', mode: 0o600});
           yield* syncWritableFile(fs, temporary);
@@ -449,7 +450,7 @@ export function claimDraftWork(
           continue;
         }
         if (options?.identity && options.identity !== work.identity) return waiting('foreground-priority');
-        const token = yield* (yield* Crypto.Crypto).randomUUIDv4();
+        const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
         const claim = {token, work, leaseUntil: tx.now + LEASE};
         tx.state.active = {...claim, dispatched: false, policyRevision: sha256HexSync(JSON.stringify(tx.state.policy))};
         tx.state.queued = EffectArray.filter(tx.state.queued, w => w.targetKey !== work.targetKey);

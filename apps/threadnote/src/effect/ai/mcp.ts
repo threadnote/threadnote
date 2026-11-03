@@ -1,3 +1,4 @@
+import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
 import {Array as EffectArray} from 'effect';
 import * as BunStdio from '@effect/platform-bun/BunStdio';
 import {Cause, Context, Effect, Layer, Logger, Option, Schema, Sink, Stdio} from 'effect';
@@ -102,6 +103,8 @@ type ToolFields = {
 };
 
 interface ToolDefinition<Fields extends ToolFields> {
+  /** Explicit promise that this handler never invokes local inference. Unmarked handlers block background work. */
+  readonly nativeFree?: true;
   readonly annotations?: ToolAnnotations;
   readonly description?: string;
   readonly inputSchema: Fields;
@@ -142,6 +145,7 @@ export interface McpRequestContext {
   readonly identity?: unknown;
   readonly policy?: unknown;
   readonly transport: 'http' | 'stdio';
+  readonly liveTransport?: true;
 }
 
 export interface McpHttpRequestContext {
@@ -308,122 +312,137 @@ export class EffectMcpServerRegistry {
     const resourceTemplates = [...this.#resourceTemplates];
     const registrations = [...this.#tools];
     const productionLogHome = options.productionLogHome;
-    return Layer.effectDiscard(
+    return Layer.unwrap(
       Effect.gen(function* () {
-        const server = yield* McpServer.McpServer;
-        options.prepareServer?.(server);
         const applicationServices = (yield* Effect.context<ApplicationServices>()).pipe(
           omitProductionLogPhaseRecorder,
           omitAnonymousTelemetryRecorder,
         );
-        for (const registration of resourceTemplates) {
-          yield* server.addResourceTemplate({
-            annotations: Context.empty(),
-            completions: {},
-            handle: uri =>
-              Effect.flatMap(CurrentMcpRequestContext, requestContext =>
-                withAnonymousTelemetry(
-                  {component: 'mcp', operation: 'resource-read'},
-                  registration.handle(uri, requestContext),
-                ).pipe(Effect.provideContext(applicationServices)),
-              ).pipe(Effect.catchCause(mcpResourceFailureResult)),
-            routerPath: registration.definition.routerPath,
-            template: McpSchema.ResourceTemplate.make({
-              _meta: registration.definition.meta,
-              description: registration.definition.description,
-              mimeType: registration.definition.mimeType,
-              name: registration.definition.name,
-              uriTemplate: registration.definition.uriTemplate,
-            }),
-          });
-        }
-        for (const registration of registrations) {
-          const input = Schema.Struct(registration.definition.inputSchema);
-          const flattenedInputSchema = flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(input).schema);
-          const inputSchema =
-            EffectRecord.keys(registration.definition.inputSchema).length === 0
-              ? {additionalProperties: false, properties: {}, type: 'object'}
-              : {
-                  ...(isMcpRecord(flattenedInputSchema) ? flattenedInputSchema : {}),
-                  additionalProperties: false,
-                };
-          yield* server.addTool({
-            annotations: Context.empty(),
-            tool: McpSchema.Tool.make({
-              annotations: registration.definition.annotations,
-              description: registration.definition.description,
-              inputSchema,
-              name: registration.name,
-            }),
-            handle: payload =>
-              Effect.flatMap(CurrentMcpProgressRequestAssociation, association =>
-                Effect.flatMap(McpSchema.McpRequestContext, client =>
-                  Effect.flatMap(CurrentMcpToolProgress, inheritedProgress => {
-                    // Effect's live protocol handlers dispatch through the
-                    // internal tool core instead of public server.callTool.
-                    // Rehydrate Threadnote progress at this surviving Effect
-                    // context boundary; HTTP has no transport association and
-                    // therefore keeps the inherited disabled implementation.
-                    const stdioClients = MCP_PROGRESS_BRIDGED_SERVERS.get(server);
-                    const progress =
-                      association === undefined || stdioClients === undefined
-                        ? inheritedProgress
-                        : makeMcpToolProgress(
-                            admitMcpProgressToken(association.progressToken, client.clientId, stdioClients),
-                            notification =>
-                              mcpProgressNotificationForCurrentRequest(notification).pipe(
-                                Effect.flatMap(outgoingNotification =>
-                                  mcpProgressCanRouteToClient(stdioClients, client.clientId)
-                                    ? server.notifications['notifications/progress'](outgoingNotification)
-                                    : Effect.void,
-                                ),
+        const admission = Context.get(applicationServices, BackgroundInferenceAdmission);
+        const foreground = <A, E, R>(program: Effect.Effect<A, E, R>, nativeFree = false) =>
+          productionLogHome === undefined
+            ? program
+            : admission.withForeground(productionLogHome, program, {nativeFree});
+        return Layer.effectDiscard(
+          Effect.gen(function* () {
+            const server = yield* McpServer.McpServer;
+            options.prepareServer?.(server);
+            for (const registration of resourceTemplates) {
+              yield* server.addResourceTemplate({
+                annotations: Context.empty(),
+                completions: {},
+                handle: uri =>
+                  Effect.flatMap(CurrentMcpRequestContext, requestContext =>
+                    withAnonymousTelemetry(
+                      {component: 'mcp', operation: 'resource-read'},
+                      foreground(registration.handle(uri, requestContext)),
+                    ).pipe(Effect.provideContext(applicationServices)),
+                  ).pipe(Effect.catchCause(mcpResourceFailureResult)),
+                routerPath: registration.definition.routerPath,
+                template: McpSchema.ResourceTemplate.make({
+                  _meta: registration.definition.meta,
+                  description: registration.definition.description,
+                  mimeType: registration.definition.mimeType,
+                  name: registration.definition.name,
+                  uriTemplate: registration.definition.uriTemplate,
+                }),
+              });
+            }
+            for (const registration of registrations) {
+              const input = Schema.Struct(registration.definition.inputSchema);
+              const flattenedInputSchema = flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(input).schema);
+              const inputSchema =
+                EffectRecord.keys(registration.definition.inputSchema).length === 0
+                  ? {additionalProperties: false, properties: {}, type: 'object'}
+                  : {
+                      ...(isMcpRecord(flattenedInputSchema) ? flattenedInputSchema : {}),
+                      additionalProperties: false,
+                    };
+              yield* server.addTool({
+                annotations: Context.empty(),
+                tool: McpSchema.Tool.make({
+                  annotations: registration.definition.annotations,
+                  description: registration.definition.description,
+                  inputSchema,
+                  name: registration.name,
+                }),
+                handle: payload =>
+                  Effect.flatMap(CurrentMcpProgressRequestAssociation, association =>
+                    Effect.flatMap(McpSchema.McpRequestContext, client =>
+                      Effect.flatMap(CurrentMcpToolProgress, inheritedProgress => {
+                        // Effect's live protocol handlers dispatch through the
+                        // internal tool core instead of public server.callTool.
+                        // Rehydrate Threadnote progress at this surviving Effect
+                        // context boundary; HTTP has no transport association and
+                        // therefore keeps the inherited disabled implementation.
+                        const stdioClients = MCP_PROGRESS_BRIDGED_SERVERS.get(server);
+                        const progress =
+                          association === undefined || stdioClients === undefined
+                            ? inheritedProgress
+                            : makeMcpToolProgress(
+                                admitMcpProgressToken(association.progressToken, client.clientId, stdioClients),
+                                notification =>
+                                  mcpProgressNotificationForCurrentRequest(notification).pipe(
+                                    Effect.flatMap(outgoingNotification =>
+                                      mcpProgressCanRouteToClient(stdioClients, client.clientId)
+                                        ? server.notifications['notifications/progress'](outgoingNotification)
+                                        : Effect.void,
+                                    ),
+                                  ),
+                              );
+                        return Effect.flatMap(CurrentMcpRequestContext, requestContext => {
+                          const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
+                            Effect.flatMap(parsed =>
+                              toolHandlerEffect(
+                                () =>
+                                  registration.handle(parsed, {
+                                    progress,
+                                    requestContext: {...requestContext, liveTransport: true},
+                                  }),
+                                applicationServices,
+                              ).pipe(
+                                Effect.matchCauseEffect({
+                                  onFailure: mcpToolFailureResult,
+                                  onSuccess: result => Effect.succeed(mcpCallToolResultWithTelemetryMetadata(result)),
+                                }),
                               ),
+                            ),
+                            Effect.catchCause(mcpToolFailureResult),
                           );
-                    return Effect.flatMap(CurrentMcpRequestContext, requestContext => {
-                      const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
-                        Effect.flatMap(parsed =>
-                          toolHandlerEffect(
-                            () => registration.handle(parsed, {progress, requestContext}),
-                            applicationServices,
-                          ).pipe(
-                            Effect.matchCauseEffect({
-                              onFailure: mcpToolFailureResult,
-                              onSuccess: result => Effect.succeed(mcpCallToolResultWithTelemetryMetadata(result)),
-                            }),
-                          ),
-                        ),
-                        Effect.catchCause(mcpToolFailureResult),
-                      );
-                      const loggedHandling =
-                        productionLogHome === undefined
-                          ? handling
-                          : withProductionLogging(
-                              productionLogHome,
-                              {
-                                component: 'mcp',
-                                operation: registration.name,
-                                reportedFailure: result => result.isError === true,
-                                reportedFailureType: 'McpToolError',
-                                writeTimeoutMilliseconds: MCP_PRODUCTION_LOG_WRITE_TIMEOUT_MILLISECONDS,
-                              },
-                              handling,
-                            );
-                      return withAnonymousTelemetry(
-                        {
-                          component: 'mcp',
-                          operation: registration.name,
-                          reportedFailure: result => result.isError === true,
-                          reportedFailureType: 'McpToolError',
-                          reportedOutcome: readAnonymousTelemetryReportedOutcome,
-                        },
-                        loggedHandling,
-                      ).pipe(Effect.provideContext(applicationServices));
-                    });
-                  }),
-                ),
-              ),
-          });
-        }
+                          const loggedHandling =
+                            productionLogHome === undefined
+                              ? handling
+                              : withProductionLogging(
+                                  productionLogHome,
+                                  {
+                                    component: 'mcp',
+                                    operation: registration.name,
+                                    reportedFailure: result => result.isError === true,
+                                    reportedFailureType: 'McpToolError',
+                                    writeTimeoutMilliseconds: MCP_PRODUCTION_LOG_WRITE_TIMEOUT_MILLISECONDS,
+                                  },
+                                  handling,
+                                );
+                          return withAnonymousTelemetry(
+                            {
+                              component: 'mcp',
+                              operation: registration.name,
+                              reportedFailure: result => result.isError === true,
+                              reportedFailureType: 'McpToolError',
+                              reportedOutcome: readAnonymousTelemetryReportedOutcome,
+                            },
+                            foreground(loggedHandling, registration.definition.nativeFree).pipe(
+                              Effect.catchCause(mcpToolFailureResult),
+                            ),
+                          ).pipe(Effect.provideContext(applicationServices));
+                        });
+                      }),
+                    ),
+                  ),
+              });
+            }
+          }),
+        );
       }),
     );
   }
@@ -441,11 +460,14 @@ export class EffectMcpServerAdapter extends EffectMcpServerRegistry {
 
   runStdio(): Effect.Effect<never, never, ApplicationServices> {
     return Layer.launch(
-      this.registrationLayer({
-        prepareServer: installCallToolProgressBridge,
-        productionLogHome: this.productionLogHome,
+      mcpStdioLayer({
+        name: this.name,
+        version: this.version,
+        registrations: this.registrationLayer({
+          prepareServer: installCallToolProgressBridge,
+          productionLogHome: this.productionLogHome,
+        }),
       }).pipe(
-        Layer.provide(mcpStdioLayer({name: this.name, version: this.version})),
         Layer.provide(stdioWithInstructionsLayer(this.instructions)),
         Layer.provide(Layer.succeed(Logger.LogToStderr)(true)),
       ),
@@ -461,14 +483,14 @@ export class EffectMcpServerAdapter extends EffectMcpServerRegistry {
     // Do not install the stdio compatibility bridge here. It intentionally
     // enforces one lifetime client, while Streamable HTTP must preserve SDK
     // client/session isolation for concurrent principals.
-    const serverLayer = McpServer.layerHttp({
+    return McpServer.layerHttp({
+      registrations: this.registrationLayer({productionLogHome: this.productionLogHome}),
       allowedOrigins: options.allowedOrigins,
       name: this.name,
       path: options.path,
       protocols: MCP_PROTOCOLS,
       version: this.version,
     }).pipe(Layer.orDie, Layer.provide(requestContextMiddleware.layer));
-    return this.registrationLayer({productionLogHome: this.productionLogHome}).pipe(Layer.provide(serverLayer));
   }
 }
 
@@ -771,7 +793,8 @@ const cancellationCompatibleProtocolLayer: Layer.Layer<RpcServer.Protocol, never
 function mcpStdioLayer(options: {
   readonly name: string;
   readonly version: string;
-}): Layer.Layer<McpServer.McpServer | McpSchema.McpServerClient, never, Stdio.Stdio> {
+  readonly registrations: Layer.Layer<never, never, McpServer.McpServer | ApplicationServices>;
+}) {
   // Effect 4.0.0-rc.112 still stringifies notifications/cancelled.requestId before
   // looking up the running RPC fiber. Move every external request id into a
   // private type-tagged namespace at the transport boundary so cancellation

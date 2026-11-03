@@ -1,7 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {BunCrypto, BunFileSystem, BunPath, BunTerminal} from '@effect/platform-bun';
-import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, PlatformError} from 'effect';
+import {BunFileSystem, BunPath, BunTerminal} from '@effect/platform-bun';
+import {Clock, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -44,7 +46,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, BunTerminal.layer);
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, cryptoLayer, BunTerminal.layer);
 function providePlatform<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.scoped(Layer.build(platform).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }
@@ -59,7 +61,7 @@ const fixture = (
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const temporary = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-setup-lifecycle-'});
     const root = yield* fs.realPath(temporary);
     const home = path.join(root, 'home');
@@ -181,7 +183,7 @@ const fixture = (
     });
     const context = Context.make(FileSystem.FileSystem, fs).pipe(
       Context.add(Path.Path, path),
-      Context.add(Crypto.Crypto, crypto),
+      Context.add(SecureRandom.SecureRandom, crypto),
       Context.add(SystemInfo, system),
       Context.add(HttpService, http),
       Context.add(CommandExecutor, commands),

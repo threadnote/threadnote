@@ -1,3 +1,5 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {Digest as EffectDigest} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectRecord from 'effect/Record';
@@ -5,7 +7,7 @@ import * as EffectString from 'effect/String';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Scoped Effect tests provide only filesystem/path/crypto services. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {ByteSize, Console, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
+import {ByteSize, Console, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -39,7 +41,7 @@ import {
   rustProviderVersion,
 } from '../../src/semantic/providers/rust.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
-const io = BunServices.layer;
+const io = Layer.merge(BunServices.layer, cryptoLayer);
 const commands = TestCommandExecutorLayer.pipe(Layer.provide(Layer.merge(io, TestSystemInfoLayer)));
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -367,7 +369,7 @@ describe('host SDK integrity bounds', () => {
   effectIt.effect('interrupts an in-flight SDK hash and permits a clean restart without changing the SDK', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* EffectDigest.Digest;
       const file = f.path.join(f.root, 'compiler');
       const bytes = new Uint8Array(2 * 1024 * 1024).fill(17);
       yield* f.fs.writeFile(file, bytes);
@@ -377,7 +379,7 @@ describe('host SDK integrity bounds', () => {
       let active = 0;
       const interrupted = yield* Effect.forkChild(
         semanticSdkDigest(f.root).pipe(
-          Effect.provideService(Crypto.Crypto, {
+          Effect.provideService(EffectDigest.Digest, {
             ...crypto,
             digest: (algorithm, input) =>
               Effect.gen(function* () {

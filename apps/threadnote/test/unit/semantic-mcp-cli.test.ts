@@ -1,15 +1,28 @@
 import {readFileSync} from '@threadnote/testing/node-fs';
-import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Effect, Option, Record as EffectRecord, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  Option,
+  Stdio,
+  Stream,
+  Record as EffectRecord,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {Command} from 'effect/cli';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {semanticCapabilities, formatSemanticCapabilities, makeSemanticCommand} from '../../src/effect/semantic_cli.js';
+import {
+  semanticCapabilities,
+  formatSemanticCapabilities,
+  readSemanticAgentQueryInput,
+} from '../../src/effect/semantic_cli.js';
+import {threadnoteCommand} from '../../src/effect/cli.js';
 import {EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
-import {registerSemanticTool} from '../../src/mcp/server/semantic.js';
+import {registerSemanticTool, registerSemanticQueryTool} from '../../src/mcp/server/semantic.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 describe('semantic capability discovery', () => {
@@ -35,7 +48,7 @@ describe('semantic capability discovery', () => {
     expect(result.readiness).toEqual({
       installation: 'not-assessed',
       project: 'not-assessed',
-      queries: 'public-integration-pending',
+      queries: 'requires-host-profile',
     });
     for (const provider of result.providers) {
       expect(provider.productionQualified).toBe(false);
@@ -127,8 +140,14 @@ describe('semantic capability discovery', () => {
   effectIt.effect('CLI JSON and registered MCP return the same canonical catalog and compact meaning', () =>
     Effect.gen(function* () {
       const cli = yield* captureConsole(
-        Command.runWith(makeSemanticCommand(), {version: 'test'})(['capabilities', '--language', 'java', '--json']),
-      ).pipe(provideTestLayer(BunServices.layer));
+        Command.runWith(threadnoteCommand, {version: 'test'})([
+          'semantic',
+          'capabilities',
+          '--language',
+          'java',
+          '--json',
+        ]),
+      ).pipe(provideTestLayer(ApplicationLayer));
       const registry = new EffectMcpServerRegistry();
       registerSemanticTool(registry);
       const mcp = yield* registry
@@ -141,5 +160,51 @@ describe('semantic capability discovery', () => {
         {type: 'text', text: formatSemanticCapabilities(semanticCapabilities({language: 'java'}))},
       ]);
     }),
+  );
+  effectIt.effect('CLI and MCP expose the same unsupported query with one compact default payload', () =>
+    Effect.gen(function* () {
+      const request = {callerCwd: '/unused', file: 'source.kt', language: 'kotlin', operation: 'symbols'};
+      const cli = yield* captureConsole(
+        Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'query', '--json']),
+      ).pipe(
+        provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(request)))})),
+        provideTestLayer(ApplicationLayer),
+      );
+      const registry = new EffectMcpServerRegistry();
+      registerSemanticQueryTool(registry, {
+        account: 'local',
+        user: 'test',
+        agentId: 'test',
+        agentContextHome: '/unused',
+        manifestPath: '/unused/manifest.json',
+      });
+      const canonical = JSON.parse(cli.output);
+      const agent = yield* registry.invokeTool('semantic_query', {request}).pipe(provideTestLayer(ApplicationLayer));
+      expect(agent.structuredContent).toBeUndefined();
+      expect(agent.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
+      const dual = yield* registry
+        .invokeTool('semantic_query', {request, responseFormat: 'dual'})
+        .pipe(provideTestLayer(ApplicationLayer));
+      expect(dual.content).toEqual(agent.content);
+      expect(dual.structuredContent).toEqual(canonical);
+    }),
+  );
+  effectIt.effect(
+    'stdin rejects oversized, malformed UTF-8 and incomplete JSON while preserving split codepoints',
+    () =>
+      Effect.gen(function* () {
+        for (const bytes of [new Uint8Array(65537), new Uint8Array([0xff]), new TextEncoder().encode('{')]) {
+          expect(
+            yield* readSemanticAgentQueryInput.pipe(provideTestLayer(Stdio.layerTest({stdin: Stream.make(bytes)}))),
+          ).toBeNull();
+        }
+        const bytes = new TextEncoder().encode(JSON.stringify({file: 'é.ts'}));
+        const split = bytes.indexOf(0xc3) + 1;
+        expect(
+          yield* readSemanticAgentQueryInput.pipe(
+            provideTestLayer(Stdio.layerTest({stdin: Stream.make(bytes.slice(0, split), bytes.slice(split))})),
+          ),
+        ).toEqual({file: 'é.ts'});
+      }),
   );
 });

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, Effect, Equal, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Effect, Equal, FileSystem, Option, Path, Schema} from 'effect';
 import {
   canonicalMemoryDocumentContent,
   isAgentArtifactUri,
@@ -487,7 +488,7 @@ const persistInventory = Effect.fn('contextMaintenance.persistInventory')(functi
   yield* fs
     .makeDirectory(path.dirname(file), {recursive: true})
     .pipe(withMaintenanceSnapshotDiagnostic('inventory-cache'));
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

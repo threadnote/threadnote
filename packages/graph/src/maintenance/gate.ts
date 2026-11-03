@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -149,7 +150,7 @@ const withCodeGraphMaintenanceIntentOwner = Effect.fn('codeGraph.withMaintenance
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const intent = codeGraphMaintenanceIntentPath(path, threadnoteHome);
   const processStartIdentity = yield* system.processStartIdentity(system.processId);
@@ -160,7 +161,7 @@ const withCodeGraphMaintenanceIntentOwner = Effect.fn('codeGraph.withMaintenance
     processId: system.processId,
     processStartIdentity,
     startedAt: DateTime.formatIso(yield* DateTime.now),
-    token: yield* crypto.randomUUIDv4(),
+    token: yield* crypto.uuidV4(),
   } satisfies MaintenanceIntentOwner;
   const token = JSON.stringify(owner);
   yield* fs.makeDirectory(path.dirname(intent), {recursive: true, mode: 0o700});
@@ -373,7 +374,7 @@ function codeGraphWorktreeLockFiles(
 function codeGraphFileLockActive(
   fs: FileSystem.FileSystem,
   lock: string,
-): Effect.Effect<boolean, unknown, Crypto.Crypto | Path.Path | SystemInfo> {
+): Effect.Effect<boolean, unknown, SecureRandom.SecureRandom | Path.Path | SystemInfo> {
   return Effect.gen(function* () {
     if (!(yield* fs.exists(lock))) return false;
     return yield* withExclusiveFileLock(

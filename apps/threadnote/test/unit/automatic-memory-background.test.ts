@@ -2123,13 +2123,17 @@ describe('automatic ordinary-memory background controls', () => {
         const module = (relative: string) => JSON.stringify(f.path.resolve(relative));
         const harness = f.path.join(f.home, 'background-process.mjs');
         const completed = f.path.join(f.home, 'background-child-completed');
-        // Only the provider boundary is stubbed. The ordinary CLI, durable wake,
-        // detached OS spawn, assessment, admission, generation and review save are production code.
+        // Declare the fixture entrypoint and stub only the provider. The private worker
+        // decoder/guard, detached OS spawn, assessment and draft save are production code.
         yield* f.fs.writeFileString(
           harness,
           `
 import {Effect} from ${module('node_modules/effect/dist/index.js')};
-import {ApplicationLayer} from ${module('apps/threadnote/src/effect/runtime.ts')};
+import {ApplicationLayer, StandaloneBrokerLayer} from ${module('apps/threadnote/src/effect/runtime.ts')};
+import {SystemInfo} from ${module('packages/platform/src/system.ts')};
+import {CONTEXT_MAINTENANCE_WORKER_ARGUMENT, decodeContextMaintenanceWorkerRequest,
+  runContextMaintenanceWorker} from ${module('apps/threadnote/src/memory/context/maintenance_worker.ts')};
+import {readContextMaintenanceControl} from ${module('apps/threadnote/src/memory/context/maintenance_control.ts')};
 import {provideTestLayer} from ${module('apps/threadnote/test/helpers/effect-layer.ts')};
 import {LocalModelStore} from ${module('packages/inference/src/models/store.ts')};
 import {LocalModelCatalog} from ${module('packages/inference/src/models/catalog.ts')};
@@ -2140,8 +2144,9 @@ import {compactAutomaticTopicDraftFixture} from ${module('apps/threadnote/test/h
 import {writeFile} from 'node:fs/promises';
 const config = ${JSON.stringify(f.config)};
 const args = process.argv.slice(2);
-const child = args.includes('maintain');
-const program = Effect.gen(function* () {
+const child = args[0] === CONTEXT_MAINTENANCE_WORKER_ARGUMENT;
+const program = config => Effect.gen(function* () {
+  const system = yield* SystemInfo;
   const original = yield* LocalModelStore;
   const manifest = yield* (yield* LocalModelCatalog).get(${JSON.stringify(f.modelId)});
   const installed = LocalModelStore.of({...original, status: (_home, selected) => Effect.succeed({
@@ -2167,11 +2172,25 @@ const program = Effect.gen(function* () {
     };
   });
   yield* (child ? runContextMaintainCommand(config, {sourceCwd: config.agentContextHome, maxRecords: 16, json: true}, generate)
-    : cliEffect(args)).pipe(Effect.provideService(LocalModelStore, installed));
+    : cliEffect(args)).pipe(
+    Effect.provideService(LocalModelStore, installed),
+    Effect.provideService(SystemInfo, SystemInfo.of({...system, developmentEntrypoint: ${JSON.stringify(harness)}})),
+  );
 });
+const application = config => program(config).pipe(provideTestLayer(ApplicationLayer));
+const execute = child ? Effect.gen(function* () {
+  const request = yield* decodeContextMaintenanceWorkerRequest(args.slice(1));
+  return yield* runContextMaintenanceWorker(request.config.agentContextHome, request.owner, Effect.gen(function* () {
+    if ((yield* readContextMaintenanceControl(request.config)).paused) return;
+    yield* application(request.config);
+  }));
+}).pipe(provideTestLayer(StandaloneBrokerLayer)) : application(config);
 try {
-  await Effect.runPromise(program.pipe(provideTestLayer(ApplicationLayer)));
-  if (child) await writeFile(${JSON.stringify(completed)}, 'completed');
+  const outcome = await Effect.runPromise(execute);
+  if (child) {
+    if (outcome !== 'completed') throw new Error('Maintenance worker returned: ' + outcome);
+    await writeFile(${JSON.stringify(completed)}, 'completed');
+  }
 } catch (error) {
   if (child) await writeFile(${JSON.stringify(completed)}, String(error));
   throw error;

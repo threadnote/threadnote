@@ -1,4 +1,5 @@
-import {Cause, Crypto, Effect, Exit, FileSystem, Option, Path, Queue} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Cause, Effect, Exit, FileSystem, Option, Path, Queue} from 'effect';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -7,7 +8,7 @@ import {publicRemoteMemoryError, remoteMemoryError} from '@threadnote/remote-mem
 export type {GitWorktreeLock} from '@threadnote/remote-memory/git/worktree-lock';
 import type {GitWorktreeLock} from '@threadnote/remote-memory/git/worktree-lock';
 
-type LockServices = Crypto.Crypto | Path.Path | SystemInfo;
+type LockServices = SecureRandom.SecureRandom | Path.Path | SystemInfo;
 interface LockRequest {
   readonly run: Effect.Effect<void, never, LockServices>;
   readonly reject: () => void;

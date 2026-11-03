@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
@@ -53,6 +54,8 @@ import type {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 function requiredRow<Row extends object>(row: Row | null): Row {
   if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
   return row;
@@ -61,7 +64,7 @@ function requiredRow<Row extends object>(row: Row | null): Row {
 const temporaryRoots: string[] = [];
 const storeLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 const embeddingLayer = Layer.succeed(
   CodeGraphEmbeddingIndex,

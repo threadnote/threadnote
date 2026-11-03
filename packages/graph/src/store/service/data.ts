@@ -8,7 +8,7 @@ import {DateTime, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDirectPersistentCapacityBoundary} from '../../disk/capacity.js';
-import {configureConnection, useDatabase, useReadOnlyDatabase} from '../session.js';
+import {configureConnection, useDatabase, useReadOnlyDatabase, withFreshCodeGraphReadTransaction} from '../session.js';
 import {CodeGraphStoreError} from '../../types.js';
 import {upsertRepository, storeError} from '../utilities.js';
 import {selectCachedCommittedFileKeys} from '../query/core.js';
@@ -164,6 +164,7 @@ type CodeGraphStoreDataMethods = Pick<
   | 'effectiveSnapshotFilesByContentHashes'
   | 'effectiveSnapshotSymbolsBySemanticLocators'
   | 'effectiveSnapshotCitationEvidence'
+  | 'readReadySnapshotCitationEvidence'
   | 'snapshotProjectClosureFiles'
   | 'reusableOverlayBase'
   | 'reusableReexports'
@@ -667,7 +668,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
       ),
     claimPersistentBuild: (databasePath, identity, snapshot, claim) =>
       Effect.gen(function* () {
-        const ownerToken = `${system.processId}:${yield* crypto.randomUUIDv4()}`;
+        const ownerToken = `${system.processId}:${yield* crypto.uuidV4()}`;
         const writerGate: CodeGraphWriterGate = effect => withWriterGate(databasePath, effect);
         yield* prepare(databasePath);
         yield* useDatabase(
@@ -930,6 +931,33 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
       prepare(databasePath).pipe(
         Effect.andThen(useReadOnlyDatabase(databasePath, selectEffectiveSnapshotCitationEvidence(snapshotId, request))),
         Effect.mapError(cause => storeError('load effective code graph citation evidence', cause)),
+      ),
+    readReadySnapshotCitationEvidence: (databasePath, expected, request) =>
+      withFreshCodeGraphReadTransaction(
+        databasePath,
+        Effect.gen(function* () {
+          const snapshot = yield* selectReadySnapshotById(expected.id);
+          if (
+            expected.state !== 'ready' ||
+            !snapshot ||
+            snapshot.repositoryId !== expected.repositoryId ||
+            snapshot.commit !== expected.commit ||
+            snapshot.extractorSet !== expected.extractorSet ||
+            snapshot.dirty !== expected.dirty ||
+            snapshot.graphContentId !== expected.graphContentId ||
+            snapshot.overlayFingerprint !== expected.overlayFingerprint ||
+            snapshot.scopeId !== expected.scopeId ||
+            snapshot.baseSnapshotId !== expected.baseSnapshotId ||
+            snapshot.fileCount !== expected.fileCount ||
+            snapshot.symbolCount !== expected.symbolCount ||
+            snapshot.edgeCount !== expected.edgeCount ||
+            snapshot.completedAt !== expected.completedAt
+          )
+            return undefined;
+          // Query status normalizes worktreeId for shared clean aliases;
+          // it is the independent caller/scope fence, not immutable data.
+          return yield* selectEffectiveSnapshotCitationEvidence(expected.id, request);
+        }),
       ),
     snapshotProjectClosureFiles: (databasePath, snapshotId, prefixes) =>
       fs.exists(databasePath).pipe(

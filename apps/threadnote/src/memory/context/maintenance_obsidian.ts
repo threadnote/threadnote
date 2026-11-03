@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   canonicalMemoryDocumentContent,
@@ -393,7 +394,7 @@ export const captureTopicObsidianEvidence = Effect.fn('topicObsidian.capture')(f
         previous.input.retentionDays === days;
       let review = prior;
       if (!same) {
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         const now = yield* Clock.currentTimeMillis;
         const intent = validateTopicMaintenanceObsidianCaptureIntent({
           version: 1,
@@ -414,8 +415,8 @@ export const captureTopicObsidianEvidence = Effect.fn('topicObsidian.capture')(f
             retentionDays: days,
             reservation: {
               version: 1,
-              operationId: yield* crypto.randomUUIDv4(),
-              pinId: yield* crypto.randomUUIDv4(),
+              operationId: yield* crypto.uuidV4(),
+              pinId: yield* crypto.uuidV4(),
               capturedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
               expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + days * 86_400_000)),
               accessHash: current.accessHash,

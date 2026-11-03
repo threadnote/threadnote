@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Context, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Context, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {
@@ -435,7 +436,7 @@ const writePublication = Effect.fn('workflowPublication.writeJournal')(function*
     Option.isSome(yield* fs.readLink(file).pipe(Effect.option))
   )
     return yield* workflowError('unsafe-journal', 'Publication journals cannot be symbolic links.');
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* fs.writeFileString(temporary, content, {mode: 0o600});
   yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });

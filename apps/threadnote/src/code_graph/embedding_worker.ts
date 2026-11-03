@@ -1,9 +1,9 @@
 import {Array as EffectArray} from 'effect';
-import {Clock, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
-import {runDetachedCommandEffect} from '@threadnote/platform/command';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
+import {makeBackgroundWorkerLifecycle, wakeBackgroundWorker} from '@threadnote/inference/background/worker-control';
 import {CodeGraphEmbeddingWorkerProcess} from '@threadnote/graph/runtime_ports';
 import {runtimeOpenTextDirectoryNameReader, SystemInfo} from '@threadnote/platform/system';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromise} from '@threadnote/platform/errors';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
@@ -29,6 +29,7 @@ export function codeGraphEmbeddingWorkerInvocation(
   developmentEntrypoint: string,
   home: string,
   version: string,
+  nonce?: string,
 ) {
   const executableName = Effect2.pipe(
     Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
@@ -46,16 +47,49 @@ export function codeGraphEmbeddingWorkerInvocation(
       String(CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION),
       '--version',
       version,
+      ...(nonce === undefined ? [] : ['--launch-nonce', nonce]),
     ],
   };
 }
 
+const graphWorkerControlOptions = Effect.fn('codeGraph.workerControlOptions')(function* (
+  home: string,
+  version: string,
+) {
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const command = yield* CommandExecutor;
+  return {
+    home,
+    receiptPath: codeGraphEmbeddingWorkerReceiptPath(path, home),
+    lockPath: codeGraphEmbeddingWorkerLockPath(path, home),
+    protocol: CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
+    version,
+    launch: (nonce: string) => {
+      const invocation = codeGraphEmbeddingWorkerInvocation(
+        system.executablePath,
+        system.developmentEntrypoint,
+        home,
+        version,
+        nonce,
+      );
+      return runDetachedCommandEffect(invocation.executable, invocation.arguments, {
+        env: {...system.environment(), THREADNOTE_HOME: home},
+      }).pipe(Effect.provideService(CommandExecutor, command));
+    },
+  };
+});
+
 /** Retains one directory handle; each page advances at most 64 names without home-sized arrays. */
-export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWorkerProgram')(function* (home: string) {
+export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWorkerProgram')(function* (
+  home: string,
+  nonce: string,
+) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const version = yield* getThreadnoteVersion();
   const canonical = yield* fs.realPath(home);
+  const lifecycle = yield* makeBackgroundWorkerLifecycle(yield* graphWorkerControlOptions(canonical, version), nonce);
   let directory: Awaited<ReturnType<typeof runtimeOpenTextDirectoryNameReader>> | undefined;
   let sequence = 0;
   const close = fromPromise('codeGraph.embeddingWorker.closeCatalog', async () => {
@@ -64,6 +98,7 @@ export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWor
   }).pipe(Effect.ignore);
   return yield* runCodeGraphEmbeddingWorker(canonical, {
     version,
+    lifecycle,
     catalogPage: after =>
       fromPromise('codeGraph.embeddingWorker.readCatalogPage', async () => {
         if (after === undefined) {
@@ -95,70 +130,13 @@ export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWor
   }).pipe(Effect.ensuring(close));
 });
 
-/** Wakes recorded demand only. Worker itself never creates queue rows. */
+/** Durable launch/exit metadata only; no foreground wait for worker readiness or model work. */
 export const wakeCodeGraphEmbeddingWorker = Effect.fn('codeGraph.wakeEmbeddingWorker')(function* (home: string) {
   const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const system = yield* SystemInfo;
   const canonical = yield* fs.realPath(home);
   const version = yield* getThreadnoteVersion();
-  const receipt = codeGraphEmbeddingWorkerReceiptPath(path, canonical);
-  const observe = Effect.gen(function* () {
-    if (!(yield* fs.exists(receipt))) return false;
-    if (Option.isSome(yield* fs.readLink(receipt).pipe(Effect.option))) return false;
-    if ((yield* fs.stat(receipt)).size > 4096) return false;
-    const content = yield* fs.readFileString(receipt);
-    const ReceiptSchema = Schema.Struct({
-      processId: Schema.optionalKey(Schema.Int),
-      processStartIdentity: Schema.optionalKey(Schema.String),
-      protocol: Schema.optionalKey(Schema.Int),
-      version: Schema.optionalKey(Schema.String),
-    });
-    const parsed: unknown = yield* Effect.try({
-      try: () => JSON.parse(content),
-      catch: () => CodeGraphEmbeddingWorkerProcessError.make({message: 'Embedding worker process operation failed.'}),
-    });
-    if (
-      !Schema.is(ReceiptSchema)(parsed) ||
-      typeof parsed.processId !== 'number' ||
-      typeof parsed.processStartIdentity !== 'string'
-    )
-      return false;
-    return (
-      parsed.protocol === CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION &&
-      parsed.version === version &&
-      system.isProcessRunning(parsed.processId) &&
-      (yield* system.processStartIdentity(parsed.processId)) === parsed.processStartIdentity
-    );
-  }).pipe(Effect.orElseSucceed(() => false));
-  return yield* withExclusiveFileLock(
-    fs,
-    `${codeGraphEmbeddingWorkerLockPath(path, canonical)}.spawn`,
-    {
-      retryIntervalMilliseconds: 10,
-      staleAfterMilliseconds: 120_000,
-      waitTimeoutMilliseconds: 3000,
-    },
-    Effect.gen(function* () {
-      if (yield* observe) return true;
-      const invocation = codeGraphEmbeddingWorkerInvocation(
-        system.executablePath,
-        system.developmentEntrypoint,
-        canonical,
-        version,
-      );
-      const started = yield* runDetachedCommandEffect(invocation.executable, invocation.arguments, {
-        env: {...system.environment(), THREADNOTE_HOME: canonical},
-      });
-      if (!started) return false;
-      const deadline = (yield* Clock.currentTimeMillis) + 3000;
-      do {
-        if (yield* observe) return true;
-        yield* Effect.sleep('50 millis');
-      } while ((yield* Clock.currentTimeMillis) < deadline);
-      return false;
-    }),
-  );
+  const result = yield* wakeBackgroundWorker(yield* graphWorkerControlOptions(canonical, version));
+  return result.state !== 'deferred';
 });
 
 export const codeGraphEmbeddingWorkerProcessLayer = Layer.effect(

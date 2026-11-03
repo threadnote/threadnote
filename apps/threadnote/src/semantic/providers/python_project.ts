@@ -1,8 +1,9 @@
+import {Digest as EffectDigest} from 'effect/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {parse as parseJsonc, type ParseError} from 'jsonc-parser';
 import {parse as parseToml} from 'smol-toml';
 import {Digest, Identifier} from '@threadnote/semantic/contracts';
@@ -57,7 +58,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const digest = yield* EffectDigest.Digest;
   if (!staticPath(options.runtime) || !staticPath(options.privateDirectory)) return yield* fail();
   const selected = yield* Schema.decodeEffect(PythonEnvironment)(options.environment);
   if (
@@ -264,7 +265,7 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
   }).pipe(
     Effect.provideService(FileSystem.FileSystem, fs),
     Effect.provideService(Path.Path, path),
-    Effect.provideService(Crypto.Crypto, crypto),
+    Effect.provideService(EffectDigest.Digest, digest),
   );
   yield* verify;
   yield* fs.makeDirectory(options.privateDirectory, {recursive: true, mode: 0o700});

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, DateTime, Effect} from 'effect';
+import {DateTime, Effect} from 'effect';
 import {getAgentAdapter} from '../../agent_integration/adapters.js';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -93,7 +94,7 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
   if (challenge.receipt !== undefined) {
     return yield* verifySecondSurfaceProofAttestationV1(config, challenge, challenge.receipt);
   }
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const recalled = (yield* captureConsole(
     runRecall(config, {
       callerCwd: input.callerCwd,

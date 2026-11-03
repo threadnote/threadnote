@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {withCodeGraphLeaseTiming} from '../lease_timing.js';
-import {Crypto, Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -71,7 +72,7 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
             Effect.catchIf(isFileLockTimeout, () =>
               Effect.succeed({reason: 'writer-busy', state: 'deferred'} as const),
             ),
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
           );
@@ -106,7 +107,7 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
               result: {reason: 'writer-busy', state: 'deferred'} as const,
             } as const),
           ),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
         );
@@ -131,7 +132,7 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
             Effect.catchIf(isFileLockTimeout, () =>
               Effect.succeed({reason: 'writer-busy', state: 'deferred'} as const),
             ),
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, system),
           );
@@ -210,7 +211,7 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
           Effect.catchIf(isFileLockTimeout, () =>
             Effect.succeed({reason: 'worktree-busy', state: 'deferred'} as const),
           ),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),
         );
@@ -236,7 +237,7 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
         }
         return ownerResult;
       }).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),

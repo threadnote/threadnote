@@ -1,10 +1,11 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 /* oxlint-disable effecttsgo/strict-effect-provide -- OS-facing bundle tests provide only Bun filesystem/crypto services. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, Order, Path, Schema, Stream} from 'effect';
+import {Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Order, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {unzipSync} from 'fflate';
 import fc from 'fast-check';
@@ -40,6 +41,11 @@ import {
   javaFileUri,
 } from '../../src/semantic/providers/java_snapshot.js';
 import {preparedSessionFixture} from '../fixtures/semantic/jvm/prepared-session.js';
+
+class PreparedEditFixture extends Context.Service<
+  PreparedEditFixture,
+  {readonly fixture: Effect.Success<ReturnType<typeof preparedSessionFixture>>; readonly digest: string}
+>()('@threadnote/threadnote/test/unit/semantic-java-diagnostics.test/PreparedEditFixture') {}
 
 const model: JavaDiagnosticModel = {
   projectUri: 'file:///private/projection',
@@ -253,6 +259,38 @@ const limitedSession = Effect.fn('test.limitedJavaSession')(function* (limits?: 
 
 describe('Java request diagnostics', () => {
   describe.skipIf(process.platform === 'win32')('prepared session source admission', () => {
+    effectIt.effect(
+      'refuses cached observation publication after late SDK drift without issuing provider queries',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* preparedSessionFixture();
+          let armed = false;
+          let checks = 0;
+          const made = yield* f.create([], options => {
+            Reflect.set(
+              options.runtime,
+              'verify',
+              Effect.gen(function* () {
+                if (armed && ++checks === 2)
+                  yield* f.fs.writeFileString(
+                    f.path.join(f.javaHome, 'release'),
+                    'changed SDK during observation publication',
+                  );
+              }),
+            );
+          });
+          const session = yield* made.result;
+          const observed = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+          expect(yield* session.observation(observed.uri)).toEqual(observed);
+          const calls = made.calls.length;
+          armed = true;
+          const result = yield* session.observation(observed.uri).pipe(Effect.result);
+          expect(result._tag).toBe('Failure');
+          expect(checks).toBe(2);
+          expect(made.calls).toHaveLength(calls);
+          expect(yield* session.available).toBe(false);
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
     effectIt.effect('refuses a closed host before initialization and captures its lifecycle predicate', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
@@ -276,7 +314,7 @@ describe('Java request diagnostics', () => {
         ).toMatchObject({code: 'closing'});
         expect(made.calls).toHaveLength(calls);
         expect(yield* session.available).toBe(false);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
     effectIt.effect('refuses reads and diagnostic delivery when the host closes during compiler IO', () =>
       Effect.gen(function* () {
@@ -308,39 +346,37 @@ describe('Java request diagnostics', () => {
               expect(yield* session.available).toBe(false);
             }),
           );
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
-    effectIt.effect.prop(
-      'preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard',
-      [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
-      ([suffix]) =>
-        Effect.gen(function* () {
-          for (const target of ['source', 'sdk', 'model', 'private', 'library', 'inventory'] as const) {
-            yield* Effect.scoped(
-              Effect.gen(function* () {
-                const f = yield* preparedSessionFixture();
-                yield* f.prepared.verifySource;
-                yield* f.prepared.verify;
-                const files = {
-                  source: f.path.join(f.source, 'Main.java'),
-                  sdk: f.path.join(f.javaHome, 'release'),
-                  model: f.metadataFile,
-                  private: f.path.join(f.prepared.project, '.settings/org.eclipse.jdt.core.prefs'),
-                  library: f.library,
-                  inventory: f.path.join(f.path.dirname(f.metadataFile), 'unexpected'),
-                };
-                const original = target === 'inventory' ? '' : yield* f.fs.readFileString(files[target]);
-                yield* f.fs.writeFileString(files[target], original + suffix, {mode: 0o600});
-                const source = yield* Effect.exit(f.prepared.verifySource);
-                const full = yield* Effect.exit(f.prepared.verify);
-                expect(source._tag).toBe(target === 'sdk' ? 'Success' : 'Failure');
-                expect(full._tag).toBe('Failure');
-              }),
-            );
-          }
-        }).pipe(Effect.provide(BunServices.layer)),
-      {arbitrary: {runs: 8}},
-    );
+    for (const target of ['source', 'sdk', 'model', 'private', 'library', 'inventory'] as const) {
+      effectIt.effect.prop(
+        `preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard (${target})`,
+        [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
+        ([suffix]) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* preparedSessionFixture();
+              yield* f.prepared.verifySource;
+              yield* f.prepared.verify;
+              const files = {
+                source: f.path.join(f.source, 'Main.java'),
+                sdk: f.path.join(f.javaHome, 'release'),
+                model: f.metadataFile,
+                private: f.path.join(f.prepared.project, '.settings/org.eclipse.jdt.core.prefs'),
+                library: f.library,
+                inventory: f.path.join(f.path.dirname(f.metadataFile), 'unexpected'),
+              };
+              const original = target === 'inventory' ? '' : yield* f.fs.readFileString(files[target]);
+              yield* f.fs.writeFileString(files[target], original + suffix, {mode: 0o600});
+              const source = yield* Effect.exit(f.prepared.verifySource);
+              const full = yield* Effect.exit(f.prepared.verify);
+              expect(source._tag).toBe(target === 'sdk' ? 'Success' : 'Failure');
+              expect(full._tag).toBe('Failure');
+            }),
+          ).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+        {arbitrary: {runs: 8}},
+      );
+    }
     effectIt.effect('retains exactly two full guards and retires on SDK drift inside a source-only exchange', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
@@ -378,7 +414,7 @@ describe('Java request diagnostics', () => {
           yield* Effect.flip(session.query('definition', observation, {line: 0, character: 13}, 1000)),
         ).toMatchObject({code: 'prerequisite'});
         expect(yield* session.available).toBe(false);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
     effectIt.effect('rejects SDK drift before compiler IO, on provider error, and before diagnostic delivery', () =>
       Effect.gen(function* () {
@@ -410,7 +446,7 @@ describe('Java request diagnostics', () => {
             }),
           );
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
     effectIt.effect.prop(
       'binds compiler values independently of key order and rejects a changed value before initialize',
@@ -441,7 +477,7 @@ describe('Java request diagnostics', () => {
             expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
             expect(made.calls).toEqual([]);
           } else expect(yield* (yield* made.result).available).toBe(true);
-        }).pipe(Effect.provide(BunServices.layer)),
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
       {arbitrary: {runs: 16}},
     );
 
@@ -455,7 +491,7 @@ describe('Java request diagnostics', () => {
         });
         expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
         expect(made.calls).toEqual([]);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect('keeps matcher exhaustion a typed capacity refusal without changing the attached view', () =>
@@ -475,7 +511,7 @@ describe('Java request diagnostics', () => {
         expect(made.calls).toHaveLength(before);
         expect(yield* session.observation(current.uri)).toEqual(current);
         expect(yield* session.available).toBe(true);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect('uses the verified v2 model, accepts compiler key permutations and preserves unsaved text', () =>
@@ -508,7 +544,7 @@ describe('Java request diagnostics', () => {
         expect((yield* session.diagnostics(next, 1000)).observation).toEqual(next);
         expect(yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'))).toBe(f.texts['Main.java']);
         yield* f.prepared.verify;
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect('refuses every mismatched snapshot basis before initializing the provider', () =>
@@ -537,7 +573,7 @@ describe('Java request diagnostics', () => {
           expect(yield* Effect.flip(made.result)).toMatchObject({code: 'prerequisite'});
           expect(made.calls).toEqual([]);
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect('refuses excluded, non-Java, absent and outside inputs without changing the view or wire', () =>
@@ -565,7 +601,7 @@ describe('Java request diagnostics', () => {
           expect(yield* session.observation(uri)).toBeUndefined();
           expect(yield* session.available).toBe(true);
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect('returns the physical canonical observation for an alias without mutating its caller', () =>
@@ -585,70 +621,83 @@ describe('Java request diagnostics', () => {
         expect(yield* session.observation(current.uri)).toEqual(current);
         const open = EffectArray.findFirst(made.calls, call => call.method === 'textDocument/didOpen');
         expect(open).toMatchObject({value: {params: {textDocument: {uri: current.uri}}}});
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
+    // Exhaust the complete finite domain instead of sampling duplicate tuples
+    // inside one cumulative property deadline.
+    const excludedEditCases = EffectArray.flatMap(['Excluded.java', 'Readme.txt'] as const, excluded =>
+      EffectArray.flatMap([0, 1, 2], position =>
+        EffectArray.map([false, true], reverse => ({excluded, position, reverse})),
+      ),
+    );
     for (const representation of ['changes', 'documentChanges'] as const) {
-      effectIt.effect.prop(
-        `never returns a partial Java edit set when any target is excluded (${representation})`,
-        [
-          Schema.Literals(['Excluded.java', 'Readme.txt']),
-          Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
-          Schema.Boolean,
-        ],
-        ([excluded, position, reverse]) =>
-          Effect.gen(function* () {
-            const f = yield* preparedSessionFixture();
-            const before = yield* semanticTreeDigest(f.project);
-            const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
-            const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
-            const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
-            const edits = [{range, newText: 'Next'}];
-            const edit: Schema.Json =
-              representation === 'changes'
-                ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
-                : {
-                    documentChanges: EffectArray.map(targets, name => ({
-                      textDocument: {uri: f.uris[name], version: null},
-                      edits,
-                    })),
-                  };
-            const safeAction = {
-              title: 'Safe',
-              edit: {changes: {[f.uris['Included.java']]: edits}},
-            };
-            for (const operation of ['rename', 'code-action'] as const) {
-              const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
-              const wireBefore = JSON.stringify(response);
-              const made = yield* f.create(response);
-              const session = yield* made.result;
-              const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
-              const result = yield* session.prepare(
-                operation,
-                current,
-                {line: 0, character: 15},
-                operation === 'rename' ? 'Next' : undefined,
-                1000,
-              );
-              if (operation === 'rename') expect(result.status).toBe('unsupported');
-              else {
-                expect(result.status).toBe('ok');
-                if (result.status === 'ok')
-                  expect(result.items).toEqual([
-                    expect.objectContaining({
-                      title: 'Safe',
-                      files: [expect.objectContaining({uri: f.uris['Included.java']})],
-                    }),
-                  ]);
+      // Share only immutable project inputs across cases. f.create still gives
+      // every operation a fresh session, notification stream and request state.
+      const fixtureLayer = Layer.effect(
+        PreparedEditFixture,
+        Effect.gen(function* () {
+          const fixture = yield* preparedSessionFixture();
+          return {fixture, digest: yield* semanticTreeDigest(fixture.project)};
+        }),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
+      effectIt.layer(fixtureLayer)(layerIt => {
+        layerIt.effect.each(excludedEditCases)(
+          `never returns a partial Java edit set when any target is excluded (${representation}, $excluded, position $position, reverse $reverse)`,
+          ({excluded, position, reverse}) =>
+            Effect.gen(function* () {
+              const {fixture: f, digest} = yield* PreparedEditFixture;
+              const before = yield* semanticTreeDigest(f.project);
+              expect(before).toBe(digest);
+              const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
+              const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
+              const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
+              const edits = [{range, newText: 'Next'}];
+              const edit: Schema.Json =
+                representation === 'changes'
+                  ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
+                  : {
+                      documentChanges: EffectArray.map(targets, name => ({
+                        textDocument: {uri: f.uris[name], version: null},
+                        edits,
+                      })),
+                    };
+              const safeAction = {
+                title: 'Safe',
+                edit: {changes: {[f.uris['Included.java']]: edits}},
+              };
+              for (const operation of ['rename', 'code-action'] as const) {
+                const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
+                const wireBefore = JSON.stringify(response);
+                const made = yield* f.create(response);
+                const session = yield* made.result;
+                const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+                const result = yield* session.prepare(
+                  operation,
+                  current,
+                  {line: 0, character: 15},
+                  operation === 'rename' ? 'Next' : undefined,
+                  1000,
+                );
+                if (operation === 'rename') expect(result.status).toBe('unsupported');
+                else {
+                  expect(result.status).toBe('ok');
+                  if (result.status === 'ok')
+                    expect(result.items).toEqual([
+                      expect.objectContaining({
+                        title: 'Safe',
+                        files: [expect.objectContaining({uri: f.uris['Included.java']})],
+                      }),
+                    ]);
+                }
+                expect(JSON.stringify(response)).toBe(wireBefore);
+                expect(yield* session.available).toBe(true);
+                expect(yield* session.observation(current.uri)).toEqual(current);
               }
-              expect(JSON.stringify(response)).toBe(wireBefore);
-              expect(yield* session.available).toBe(true);
-              expect(yield* session.observation(current.uri)).toEqual(current);
-            }
-            expect(yield* semanticTreeDigest(f.project)).toBe(before);
-          }).pipe(Effect.provide(BunServices.layer)),
-        {arbitrary: {runs: 16}},
-      );
+              expect(yield* semanticTreeDigest(f.project)).toBe(before);
+            }),
+        );
+      });
     }
 
     effectIt.effect('refuses complete Java edit sets with overlaps, duplicate targets or conflicting versions', () =>
@@ -702,7 +751,7 @@ describe('Java request diagnostics', () => {
             expect(yield* session.available).toBe(true);
           }
         expect(yield* semanticTreeDigest(f.project)).toBe(before);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
     effectIt.effect.prop(
@@ -746,7 +795,7 @@ describe('Java request diagnostics', () => {
           expect(JSON.stringify(response)).toBe(original);
           expect(yield* session.observation(current.uri)).toEqual(current);
           expect(yield* semanticTreeDigest(f.project)).toBe(before);
-        }).pipe(Effect.provide(BunServices.layer)),
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
       {arbitrary: {runs: 16}},
     );
 
@@ -782,7 +831,7 @@ describe('Java request diagnostics', () => {
           expect(yield* session.available).toBe(true);
           expect(yield* f.fs.readFileString(f.path.join(f.source, 'Excluded.java'))).toBe(f.texts['Excluded.java']);
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   });
 
@@ -829,7 +878,7 @@ describe('Java request diagnostics', () => {
             expect((yield* f.session.observation(f.uri(slot)))?.content).toBe(sha256HexSync(value));
           expect(yield* f.session.available).toBe(true);
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 32}},
   );
 
@@ -848,7 +897,7 @@ describe('Java request diagnostics', () => {
       yield* f.attach(1, 'bbbbbbbb', 2);
       expect(yield* Effect.flip(f.attach(0, 'aaaaa', 4))).toMatchObject({code: 'capacity'});
       expect(yield* f.session.available).toBe(true);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('retains the shared default text limit when a backend does not select smaller limits', () =>
@@ -856,7 +905,7 @@ describe('Java request diagnostics', () => {
       const f = yield* limitedSession();
       const text = EffectString.repeat(2 * 1024 * 1024 + 1)('a');
       expect((yield* f.attach(0, text, 1)).content).toBe(sha256HexSync(text));
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('refuses invalid host limits before initializing the provider', () =>
@@ -890,7 +939,7 @@ describe('Java request diagnostics', () => {
         ).toBe('Failure');
         expect(initialized).toBe(false);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   it('uses Java literal tilde spelling without decoding a physical percent sequence', () => {
@@ -934,7 +983,7 @@ describe('Java request diagnostics', () => {
         sourceRoots: ['file:///project/source~/'],
         libraries: ['file:///cache/dependency~.jar'],
       });
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   it('binds full projection metadata and refuses missing, unsolicited or changed model evidence', () => {
     const projection = projectionImage();
@@ -1106,7 +1155,7 @@ describe('Java request diagnostics', () => {
           }),
         ))._tag,
       ).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   it('binds every supplied compiler option independently of object-key order', () => {
     fc.assert(
@@ -1179,7 +1228,7 @@ describe('Java request diagnostics', () => {
         }),
       );
       expect(yield* requestJavaDiagnostics(native, selected, Effect.void)(request, 1000)).toEqual(observed.diagnostics);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   it('round-trips well-formed Unicode type snapshots without mutation and rejects replay against changed text', () => {
     fc.assert(
@@ -1309,7 +1358,7 @@ describe('Java request diagnostics', () => {
       expect((yield* session.query('type-definition', current, typePosition, 1000)).status).toBe('ok');
       expect((yield* session.query('type-definition', current, typePosition, 1000)).status).toBe('ok');
       expect(new Set(tokens).size).toBe(2);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses a delayed type-definition snapshot after a shared-view update', () =>
     Effect.gen(function* () {
@@ -1339,7 +1388,7 @@ describe('Java request diagnostics', () => {
       yield* session.upsert({...current, content: sha256HexSync(changed), documentVersion: 2}, changed, 'java', 1000);
       yield* Deferred.succeed(release, undefined);
       expect((yield* Fiber.join(pending)).status).toBe('stale');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('distinguishes directory identities from files and preserves ordered path identities', () =>
     Effect.gen(function* () {
@@ -1359,7 +1408,7 @@ describe('Java request diagnostics', () => {
       expect(f.path.resolve(yield* f.path.fromFileUrl(new URL(identity.sourceRoots[0])))).toBe(root);
       expect(f.path.resolve(yield* f.path.fromFileUrl(new URL(identity.sourceRoots[1])))).toBe(f.directory);
       expect(yield* f.path.fromFileUrl(new URL(identity.libraries[0]))).toBe(jar);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   it('accepts only the exact request and complete independently observed source/model inventory', () => {
     const native = report();
@@ -1614,7 +1663,7 @@ describe('Java request diagnostics', () => {
         expect((yield* session.diagnostics(current, 1000)).added).toHaveLength(1);
         yield* session.prepare('code-action', current, {line: 0, character: 1}, undefined, 1000);
         expect(action).toMatchObject({context: {diagnostics: [diagnostic]}});
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect(
@@ -1655,7 +1704,7 @@ describe('Java request diagnostics', () => {
         yield* session.upsert({...dependency, documentVersion: 2}, dependencyText, 'java', 1000);
         yield* Deferred.succeed(response, [diagnostic]);
         expect((yield* Fiber.join(pending))._tag).toBe('Failure');
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('refuses the session when the exact diagnostic extension command is missing', () =>
@@ -1683,7 +1732,7 @@ describe('Java request diagnostics', () => {
         ))._tag,
       ).toBe('Failure');
       expect(notifications).toBe(0);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('materializes exact embedded bytes privately and rejects later tampering', () =>
@@ -1697,7 +1746,7 @@ describe('Java request diagnostics', () => {
       yield* fs.writeFileString(bundle.file, 'changed');
       expect((yield* Effect.exit(bundle.verify))._tag).toBe('Failure');
       expect((yield* Effect.exit(materializeJavaDiagnosticBundle(directory)))._tag).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('rejects a relative materialization directory before writing any bundle', () =>
@@ -1709,7 +1758,7 @@ describe('Java request diagnostics', () => {
       expect(path.isAbsolute(relative)).toBe(false);
       expect((yield* Effect.exit(materializeJavaDiagnosticBundle(relative)))._tag).toBe('Failure');
       expect(yield* fs.readDirectory(directory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('binds embedded classes, metadata and build provenance to the exact checked-in sources', () =>
@@ -1765,7 +1814,7 @@ describe('Java request diagnostics', () => {
         Array.from(yield* fs.readFile(path.join(root, resources[1]))),
       );
       expect(Array.from(entries['plugin.xml'])).toEqual(Array.from(yield* fs.readFile(path.join(root, resources[2]))));
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 });
 
@@ -1859,7 +1908,7 @@ const analysisFixture = Effect.fn('test.javaAnalysisFixture')(function* () {
 });
 
 const AnalysisTestLayer = Layer.mergeAll(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   Layer.succeed(ChildEnvironmentPolicy, {
     sanitizeExternal: () => ({}),
     preserveIntendedChild: () => ({}),

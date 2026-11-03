@@ -1,4 +1,5 @@
-import {Console, Crypto, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Console, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {HttpService} from '@threadnote/platform/http';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -73,8 +74,8 @@ export const stopVerifiedLegacyLocalAi = Effect.fn('legacyRuntime.stopLocalAi')(
     return;
   }
 
-  const crypto = yield* Crypto.Crypto;
-  const challenge = yield* crypto.randomUUIDv4();
+  const crypto = yield* SecureRandom.SecureRandom;
+  const challenge = yield* crypto.uuidV4();
   const host = config.host === '::1' ? '[::1]' : config.host;
   const response = yield* HttpService.pipe(
     Effect.flatMap(http =>

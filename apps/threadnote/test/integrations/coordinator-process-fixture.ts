@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
   SourceCoordinator,
@@ -14,6 +15,8 @@ import {Clock, Effect, FileSystem, Layer} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const [action, home] = process.argv.slice(2);
 if (!home) throw new Error('A temporary coordinator home is required.');
@@ -133,8 +136,8 @@ const filesystem = Layer.effect(
       },
     };
   }),
-).pipe(Layer.provide(BunServices.layer));
-const base = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, filesystem);
+).pipe(Layer.provide(platformServicesLayer));
+const base = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer, filesystem);
 
 if (
   Effect2.pipe(action, effectOptionalString =>

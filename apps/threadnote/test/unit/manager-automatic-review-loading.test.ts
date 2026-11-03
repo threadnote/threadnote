@@ -169,6 +169,10 @@ effectIt.effect(
         ...query,
         status: (...args) =>
           query.status(...args).pipe(Effect.map(status => ({...status, stale: true, freshness: 'stale' as const}))),
+        statusForPublishedIdentity: (...args) =>
+          query
+            .statusForPublishedIdentity(...args)
+            .pipe(Effect.map(status => ({...status, stale: true, freshness: 'stale' as const}))),
       };
       invalidateManagerReviewReadiness(f.config);
       const unavailable = yield* readManagerReviewEligibility(f.config, [generated]).pipe(
@@ -199,25 +203,31 @@ effectIt.effect(
       let calls = 0;
       const observed: CodeGraphQueryService['Service'] = {
         ...query,
-        status: (...args) => Effect.sync(() => calls++).pipe(Effect.andThen(query.status(...args))),
+        status: vi.fn(query.status),
+        statusForPublishedIdentity: (...args) =>
+          Effect.sync(() => calls++).pipe(Effect.andThen(query.statusForPublishedIdentity(...args))),
       };
       const opened = yield* f.read().pipe(Effect.provideService(CodeGraphQueryService, observed));
       expect(opened).toMatchObject({status: 200, body: {kind: 'automatic-memory-review', project: 'fixture'}});
       expect(calls).toBe(2);
+      expect(observed.status).not.toHaveBeenCalled();
       expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
       calls = 0;
       const changed: CodeGraphQueryService['Service'] = {
         ...query,
-        status: (...args) =>
+        status: observed.status,
+        statusForPublishedIdentity: (...args) =>
           Effect.gen(function* () {
             if (++calls === 2)
               yield* f.fs.writeFileString(f.path.join(f.root, 'source.ts'), 'export const timeout0 = 90;\n');
-            return yield* query.status(...args);
+            return yield* query.statusForPublishedIdentity(...args);
           }),
       };
       const withheld = yield* f.read().pipe(Effect.provideService(CodeGraphQueryService, changed));
       expect(withheld).toMatchObject({status: 200, body: {kind: 'topic-maintenance-recovery'}});
       expect(JSON.stringify(withheld)).not.toContain('The timeout');
+      expect(calls).toBe(2);
+      expect(changed.status).not.toHaveBeenCalled();
       expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
 );
@@ -308,9 +318,17 @@ const status: CodeGraphStatus = {
   stale: false,
 };
 const options = {manifestPath: '/synthetic/manifest.yaml', observeWorktree: true, requestMaintenance: false};
-const read = (project?: string) =>
+const read = (
+  project?: string,
+  method: 'legacy' | 'published' = 'legacy',
+  expected: Parameters<CodeGraphQueryService['Service']['statusForPublishedIdentity']>[2] = status.identity,
+) =>
   CodeGraphQueryService.pipe(
-    Effect.flatMap(query => query.status('/synthetic/home', '/synthetic/repository', {...options, project})),
+    Effect.flatMap(query =>
+      method === 'legacy'
+        ? query.status('/synthetic/home', '/synthetic/repository', {...options, project})
+        : query.statusForPublishedIdentity('/synthetic/home', '/synthetic/repository', expected, {...options, project}),
+    ),
   );
 const service = (observe: CodeGraphQueryService['Service']['status']) =>
   CodeGraphQueryService.of({
@@ -319,120 +337,264 @@ const service = (observe: CodeGraphQueryService['Service']['status']) =>
     purge: () => Effect.fail(TestError.make({message: 'Unexpected graph purge.'})),
     status: observe,
     statusForIdentity: () => Effect.fail(TestError.make({message: 'Unexpected identity status lookup.'})),
-    statusForPublishedIdentity: () => Effect.fail(TestError.make({message: 'Unexpected published identity lookup.'})),
+    statusForPublishedIdentity: (home, cwd, _expected, options) => observe(home, cwd, options),
   });
 
-effectIt.effect('finishes sixteen repeated two-second observations within the thirty-second read deadline', () =>
-  Effect.gen(function* () {
-    let calls = 0;
-    const started = yield* Clock.currentTimeMillis;
-    const verification = Effect.forEach(Array.from({length: 16}), () => read()).pipe(
-      withAutomaticReviewCodeObservations,
-      Effect.timeout('30 seconds'),
-      Effect.provideService(
-        CodeGraphQueryService,
-        service(() => Effect.sync(() => calls++).pipe(Effect.andThen(Effect.sleep('2 seconds')), Effect.as(status))),
+for (const method of ['legacy', 'published'] as const) {
+  effectIt.effect(
+    `finishes sixteen repeated two-second observations within the thirty-second read deadline (${method})`,
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const started = yield* Clock.currentTimeMillis;
+        const verification = Effect.forEach(Array.from({length: 16}), () => read(undefined, method)).pipe(
+          withAutomaticReviewCodeObservations,
+          Effect.timeout('30 seconds'),
+          Effect.provideService(
+            CodeGraphQueryService,
+            service(() =>
+              Effect.sync(() => calls++).pipe(Effect.andThen(Effect.sleep('2 seconds')), Effect.as(status)),
+            ),
+          ),
+        );
+        const fiber = yield* verification.pipe(Effect.forkChild);
+        yield* TestClock.adjust('4 seconds');
+        expect(yield* Fiber.join(fiber)).toHaveLength(16);
+        expect(calls).toBe(2);
+        expect((yield* Clock.currentTimeMillis) - started).toBe(4000);
+      }),
+  );
+
+  effectIt.effect.prop(
+    `performs exactly one opening and closing check per selected project within each read (${method})`,
+    {
+      projects: Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3}))).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(32),
       ),
+    },
+    ({projects}) =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const program = Effect.forEach(projects, project => read(String(project), method)).pipe(
+          withAutomaticReviewCodeObservations,
+          Effect.provideService(
+            CodeGraphQueryService,
+            service((_home, _cwd, selected) =>
+              Effect.sync(() => {
+                calls.push(selected!.project!);
+                return status;
+              }),
+            ),
+          ),
+        );
+        expect(yield* program).toEqual(EffectArray.map(projects, () => status));
+        expect(calls).toHaveLength(new Set(projects).size * 2);
+        yield* program;
+        expect(calls).toHaveLength(new Set(projects).size * 4);
+      }),
+    {arbitrary: {runs: 24}},
+  );
+
+  for (const [change, after] of [
+    ['source drift', {...status, stale: true}],
+    ['unavailable observation', {...status, freshness: 'deferred' as const}],
+    ['snapshot replacement', {...status, readySnapshot: {...status.readySnapshot!, id: 'replacement'}}],
+    ['repository access change', {...status, identity: {...status.identity, repositoryId: 'other'}}],
+    [
+      'scope change',
+      {
+        ...status,
+        projectCoverage: {
+          project: 'other',
+          kind: 'project' as const,
+          configuredRoots: ['src'],
+          rootComponents: 1,
+          dependencyComponents: 0,
+          completeness: 'complete' as const,
+          negativeProof: 'selected-graph-only' as const,
+          observedWorktreeCommit: status.identity.headCommit,
+          reusedEquivalentSnapshot: false,
+        },
+      },
+    ],
+  ] as const) {
+    effectIt.effect(`withholds the result after closing ${change} (${method})`, () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const result = yield* Effect.all([read(undefined, method), read(undefined, method)]).pipe(
+          withAutomaticReviewCodeObservations,
+          Effect.provideService(
+            CodeGraphQueryService,
+            service(() => Effect.succeed(++calls === 1 ? status : after)),
+          ),
+          Effect.result,
+        );
+        expect(Result.isFailure(result)).toBe(true);
+        expect(calls).toBe(2);
+      }),
     );
-    const fiber = yield* verification.pipe(Effect.forkChild);
-    yield* TestClock.adjust('4 seconds');
-    expect(yield* Fiber.join(fiber)).toHaveLength(16);
-    expect(calls).toBe(2);
-    expect((yield* Clock.currentTimeMillis) - started).toBe(4000);
+  }
+
+  effectIt.effect(
+    `does not reuse stale observations, observer callbacks, or maintenance-capable reads (${method})`,
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const query = service(() => Effect.sync(() => calls++).pipe(Effect.as({...status, stale: true})));
+        yield* Effect.forEach(Array.from({length: 4}), () => read(undefined, method)).pipe(
+          withAutomaticReviewCodeObservations,
+          Effect.provideService(CodeGraphQueryService, query),
+        );
+        expect(calls).toBe(4);
+        const live = service(() => Effect.sync(() => calls++).pipe(Effect.as(status)));
+        yield* CodeGraphQueryService.pipe(
+          Effect.flatMap(selected =>
+            Effect.forEach([{}, {...options, afterIdentityObserved: () => Effect.void}], extra =>
+              method === 'legacy'
+                ? selected.status('/synthetic/home', '/synthetic/repository', {...extra, observeWorktree: true})
+                : selected.statusForPublishedIdentity('/synthetic/home', '/synthetic/repository', status.identity, {
+                    ...extra,
+                    observeWorktree: true,
+                  }),
+            ),
+          ),
+          withAutomaticReviewCodeObservations,
+          Effect.provideService(CodeGraphQueryService, live),
+        );
+        expect(calls).toBe(6);
+      }),
+  );
+}
+
+effectIt.effect('keeps legacy methods and each expected published identity on independent observation fences', () =>
+  Effect.gen(function* () {
+    const calls: string[] = [];
+    const legacy = service(() => Effect.sync(() => calls.push('legacy')).pipe(Effect.as(status)));
+    const query = {
+      ...legacy,
+      statusForPublishedIdentity: (
+        _home: string,
+        _cwd: string,
+        expected: Parameters<CodeGraphQueryService['Service']['statusForPublishedIdentity']>[2],
+      ) => Effect.sync(() => calls.push(JSON.stringify(expected))).pipe(Effect.as(status)),
+    };
+    const expected = [
+      status.identity,
+      {...status.identity, checkoutId: 'another-checkout'},
+      {...status.identity, repositoryId: 'another-repository'},
+      {...status.identity, worktreeId: 'another-worktree'},
+    ];
+    const reads = [read(), ...EffectArray.map(expected, identity => read(undefined, 'published', identity))];
+    const program = Effect.all([...reads, ...reads]).pipe(
+      withAutomaticReviewCodeObservations,
+      Effect.provideService(CodeGraphQueryService, query),
+    );
+    expect(yield* program).toHaveLength(10);
+    const observed = ['legacy', ...EffectArray.map(expected, identity => JSON.stringify(identity))];
+    expect(calls).toEqual([...observed, ...observed]);
   }),
 );
 
-effectIt.effect.prop(
-  'performs exactly one opening and closing check per selected project within each read',
-  {
-    projects: Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3}))).check(
-      Schema.isMinLength(1),
-      Schema.isMaxLength(32),
-    ),
-  },
-  ({projects}) =>
-    Effect.gen(function* () {
-      const calls: string[] = [];
-      const program = Effect.forEach(projects, project => read(String(project))).pipe(
-        withAutomaticReviewCodeObservations,
-        Effect.provideService(
-          CodeGraphQueryService,
-          service((_home, _cwd, selected) =>
-            Effect.sync(() => {
-              calls.push(selected!.project!);
-              return status;
-            }),
-          ),
-        ),
-      );
-      expect(yield* program).toEqual(EffectArray.map(projects, () => status));
-      expect(calls).toHaveLength(new Set(projects).size * 2);
-      yield* program;
-      expect(calls).toHaveLength(new Set(projects).size * 4);
-    }),
-  {arbitrary: {runs: 24}},
-);
-
-for (const [change, after] of [
-  ['source drift', {...status, stale: true}],
-  ['unavailable observation', {...status, freshness: 'deferred' as const}],
-  ['snapshot replacement', {...status, readySnapshot: {...status.readySnapshot!, id: 'replacement'}}],
-  ['repository access change', {...status, identity: {...status.identity, repositoryId: 'other'}}],
-  [
-    'scope change',
-    {
-      ...status,
-      projectCoverage: {
-        project: 'other',
-        kind: 'project' as const,
-        configuredRoots: ['src'],
-        rootComponents: 1,
-        dependencyComponents: 0,
-        completeness: 'complete' as const,
-        negativeProof: 'selected-graph-only' as const,
-        observedWorktreeCommit: status.identity.headCommit,
-        reusedEquivalentSnapshot: false,
-      },
-    },
-  ],
-] as const) {
-  effectIt.effect(`withholds the result after closing ${change}`, () =>
+for (const method of ['legacy', 'published'] as const) {
+  effectIt.effect(`keys project observations when the lazy read executes (${method})`, () =>
     Effect.gen(function* () {
       let calls = 0;
-      const result = yield* Effect.all([read(), read()]).pipe(
-        withAutomaticReviewCodeObservations,
-        Effect.provideService(
-          CodeGraphQueryService,
-          service(() => Effect.succeed(++calls === 1 ? status : after)),
-        ),
-        Effect.result,
+      const query = service((_home, _cwd, selected) =>
+        Effect.sync(() => {
+          calls++;
+          return {...status, databasePath: selected!.project!};
+        }),
       );
-      expect(Result.isFailure(result)).toBe(true);
-      expect(calls).toBe(2);
+      const result = yield* CodeGraphQueryService.pipe(
+        Effect.flatMap(current =>
+          Effect.gen(function* () {
+            const selected = {...options, project: 'first'};
+            const pending =
+              method === 'legacy'
+                ? current.status('/synthetic/home', '/synthetic/repository', selected)
+                : current.statusForPublishedIdentity(
+                    '/synthetic/home',
+                    '/synthetic/repository',
+                    status.identity,
+                    selected,
+                  );
+            selected.project = 'second';
+            const initial = yield* pending;
+            const separate = yield* read('first', method);
+            return [initial.databasePath, separate.databasePath];
+          }),
+        ),
+        withAutomaticReviewCodeObservations,
+        Effect.provideService(CodeGraphQueryService, query),
+      );
+      expect(result).toEqual(['second', 'first']);
+      expect(calls).toBe(4);
     }),
   );
 }
 
-effectIt.effect('does not reuse stale observations, observer callbacks, or maintenance-capable reads', () =>
+effectIt.effect('keys expected identity when the lazy published read executes', () =>
   Effect.gen(function* () {
     let calls = 0;
-    const query = service(() => Effect.sync(() => calls++).pipe(Effect.as({...status, stale: true})));
-    yield* Effect.forEach(Array.from({length: 4}), () => read()).pipe(
+    const query = {
+      ...service(() => Effect.fail(TestError.make({message: 'Unexpected full-discovery lookup.'}))),
+      statusForPublishedIdentity: (
+        _home: string,
+        _cwd: string,
+        expected: Parameters<CodeGraphQueryService['Service']['statusForPublishedIdentity']>[2],
+      ) =>
+        Effect.sync(() => {
+          calls++;
+          return {...status, identity: {...status.identity, ...expected}};
+        }),
+    };
+    const result = yield* CodeGraphQueryService.pipe(
+      Effect.flatMap(current =>
+        Effect.gen(function* () {
+          const expected = {...status.identity, checkoutId: 'first'};
+          const pending = current.statusForPublishedIdentity(
+            '/synthetic/home',
+            '/synthetic/repository',
+            expected,
+            options,
+          );
+          expected.checkoutId = 'second';
+          const initial = yield* pending;
+          const separate = yield* current.statusForPublishedIdentity(
+            '/synthetic/home',
+            '/synthetic/repository',
+            {...status.identity, checkoutId: 'first'},
+            options,
+          );
+          return [initial.identity.checkoutId, separate.identity.checkoutId];
+        }),
+      ),
       withAutomaticReviewCodeObservations,
       Effect.provideService(CodeGraphQueryService, query),
     );
+    expect(result).toEqual(['second', 'first']);
     expect(calls).toBe(4);
-    const live = service(() => Effect.sync(() => calls++).pipe(Effect.as(status)));
-    yield* CodeGraphQueryService.pipe(
-      Effect.flatMap(selected =>
-        Effect.forEach([{}, {...options, afterIdentityObserved: () => Effect.void}], extra =>
-          selected.status('/synthetic/home', '/synthetic/repository', {...extra, observeWorktree: true}),
-        ),
+  }),
+);
+
+effectIt.effect('preserves absent published-identity capability on legacy services', () =>
+  Effect.gen(function* () {
+    let calls = 0;
+    const query = {...service(() => Effect.sync(() => calls++).pipe(Effect.as(status)))};
+    expect(Reflect.deleteProperty(query, 'statusForPublishedIdentity')).toBe(true);
+    const result = yield* CodeGraphQueryService.pipe(
+      Effect.flatMap(current =>
+        Effect.gen(function* () {
+          expect(typeof current.statusForPublishedIdentity).toBe('undefined');
+          return yield* read();
+        }),
       ),
       withAutomaticReviewCodeObservations,
-      Effect.provideService(CodeGraphQueryService, live),
+      Effect.provideService(CodeGraphQueryService, query),
     );
-    expect(calls).toBe(6);
+    expect(result).toEqual(status);
+    expect(calls).toBe(2);
   }),
 );
 

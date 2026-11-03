@@ -1,5 +1,5 @@
+import {SecureRandom} from 'effect/crypto';
 import * as Clock from 'effect/Clock';
-import * as Crypto from 'effect/Crypto';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
 import * as Exit from 'effect/Exit';
@@ -211,7 +211,7 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
           return;
         }
         if (pending.status === 'failed') return;
-        const attemptId = yield* (yield* Crypto.Crypto).randomUUIDv4();
+        const attemptId = yield* (yield* SecureRandom.SecureRandom).uuidV4();
         notification = {
           ...notification,
           outbox: {

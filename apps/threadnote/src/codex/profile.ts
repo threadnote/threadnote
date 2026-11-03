@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {normalizeTeamName} from '../share/index.js';
@@ -96,12 +97,12 @@ export const persistCodexCloudProfile = Effect.fn('codexCloud.persistProfile')(f
   };
   const existing = yield* readCodexCloudProfile(config.agentContextHome);
   if (existing && JSON.stringify(existing) === JSON.stringify(profile)) return existing;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const target = yield* codexCloudProfilePath(config.agentContextHome);
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.profile.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(directory, `.profile.${yield* crypto.uuidV4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* fs.writeFileString(temporary, `${JSON.stringify(profile, undefined, 2)}\n`, {mode: 0o600});
   yield* fs.rename(temporary, target).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));

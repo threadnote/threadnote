@@ -1,5 +1,5 @@
 import {isTicketResponse} from '../api/response_guards.js';
-import React, {createContext, useContext, useEffect, useMemo, useSyncExternalStore} from 'react';
+import React, {createContext, useContext, useEffect, useLayoutEffect, useMemo, useSyncExternalStore} from 'react';
 import {createManagerLiveClient} from './client.js';
 import {createManagerLiveSnapshotProjection} from './snapshot_projection.js';
 import type {ManagerLiveResource} from './contracts.js';
@@ -9,7 +9,23 @@ import {api} from '../ui/support.js';
 
 type Client = ReturnType<typeof createManagerLiveClient>;
 const LiveContext = createContext<Client | undefined>(undefined);
+const ProjectScopeContext = createContext<ReadonlySet<string> | undefined>(undefined);
 const loading: {readonly status: 'loading'} = {status: 'loading'};
+
+/** The shell supplies current manifest membership; unknown membership uses ordinary REST readers. */
+export function ManagerLiveProjectScope(props: {
+  readonly projects: readonly string[] | undefined;
+  readonly children: React.ReactNode;
+}): React.ReactElement {
+  const client = useContext(LiveContext);
+  const projects = useMemo(() => new Set(props.projects), [props.projects]);
+  // Fence the whole wire set before passive query cleanups remove resources one by one.
+  useLayoutEffect(() => {
+    client?.setProjectScope(projects);
+    return () => client?.setProjectScope(new Set());
+  }, [client, projects]);
+  return <ProjectScopeContext.Provider value={projects}>{props.children}</ProjectScopeContext.Provider>;
+}
 
 /** A Manager tab owns one socket. Account changes dispose the old cache and socket. */
 export function ManagerLiveProvider(props: {
@@ -80,11 +96,16 @@ export function useManagerLiveQuery<T>(
   isData: (value: unknown) => value is T,
 ) {
   const client = useContext(LiveContext);
+  const projects = useContext(ProjectScopeContext);
   const projectSnapshot = useMemo(() => createManagerLiveSnapshotProjection<T>(), []);
   const readerRef = React.useRef(reader);
   readerRef.current = reader;
-  const resourceKey = resource === undefined ? '' : JSON.stringify(resource);
-  const stableResource = useMemo(() => resource, [resourceKey]);
+  const eligibleResource =
+    resource && 'project' in resource && projects !== undefined && !projects.has(resource.project)
+      ? undefined
+      : resource;
+  const resourceKey = eligibleResource === undefined ? '' : JSON.stringify(eligibleResource);
+  const stableResource = useMemo(() => eligibleResource, [resourceKey]);
   const subscribe = React.useCallback(
     (listener: () => void) =>
       client && stableResource

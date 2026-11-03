@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {InvalidModelOutput, InferenceInterrupted} from '@threadnote/inference/engine/errors';
-import {Cause, Clock, Crypto, Effect, Exit, Option, Schema} from 'effect';
+import {Cause, Clock, Effect, Exit, Option, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {saveTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {
@@ -58,7 +59,7 @@ export function withTopicGenerationObservation<A, E, R>(
 ) {
   return Effect.uninterruptibleMask(restore =>
     Effect.gen(function* () {
-      const id = Effect2.pipe(yield* (yield* Crypto.Crypto).randomUUIDv4(), EffectString.replaceAll('-', ''));
+      const id = Effect2.pipe(yield* (yield* SecureRandom.SecureRandom).uuidV4(), EffectString.replaceAll('-', ''));
       const observation = new TopicGenerationObservation(
         home,
         {

@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
@@ -37,12 +38,14 @@ import {SystemInfo} from '@threadnote/platform/system';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const GIB = 1024 * 1024 * 1024;
 const AUTOMATIC_COMPACTION_RECEIPT_FILE = 'automatic-compaction-v1.json';
-const AutomaticCompactionReceiptTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const AutomaticCompactionReceiptTestLayer = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer);
 const AutomaticCompactionIsolatedTestLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 class AutomaticCompactionTestError extends Schema.TaggedError<

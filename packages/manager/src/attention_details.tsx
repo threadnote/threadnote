@@ -23,7 +23,7 @@ import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import type {ManagerContextHealthResponseV1} from './attention/contracts.js';
 import {DetailModal, MemoryBody} from './detail_modal.js';
-import {api, errorMessage, ManagerApiError} from './ui/support.js';
+import {api, CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS, errorMessage, ManagerApiError} from './ui/support.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {evidenceReadError, retryEvidenceRead} from './attention/evidence_refresh.js';
@@ -452,7 +452,7 @@ export function HealthDetail(props: {
       const current = await api<ManagerContextHealthResponseV1>(
         `/api/context-health?project=${encodeURIComponent(props.project)}`,
         undefined,
-        {signal: controller.signal, timeoutMilliseconds: 30_000},
+        {signal: controller.signal, timeoutMilliseconds: CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS},
         isManagerContextHealthResponseV1,
       );
       if (controller.signal.aborted) return;

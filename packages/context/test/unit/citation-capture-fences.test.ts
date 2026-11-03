@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
@@ -15,6 +16,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '../../src/citation/capture.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const SOURCE = 'export const value = 1;\n';
 const REPOSITORY_ID = Effect2.pipe('1', EffectString.repeat(64));
@@ -54,7 +57,7 @@ const system = SystemInfo.of({
   userName: 'test',
 });
 const PlatformLayer = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   Layer.succeed(
     CommandExecutor,
     CommandExecutor.of({

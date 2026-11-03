@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Cause, Console, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Cause, Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {createRemoteMemorySql} from '@threadnote/remote-memory/postgres/control_plane';
 import {
@@ -766,4 +767,4 @@ function operatorHelp(): string {
   );
 }
 
-export type RemoteMemoryOperatorFileServices = Crypto.Crypto | FileSystem.FileSystem | Path.Path;
+export type RemoteMemoryOperatorFileServices = SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path;

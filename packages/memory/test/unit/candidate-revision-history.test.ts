@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Result} from 'effect';
@@ -12,11 +13,13 @@ import {
   withCandidateReviewLock,
 } from '@threadnote/memory/candidate';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 function provideBun<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.scoped(
     Layer.build(
       Layer.merge(
-        BunServices.layer,
+        platformServicesLayer,
         SystemInfo.layer.pipe(
           Layer.provide(
             Layer.mergeAll(

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Clock, Context, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -182,7 +183,7 @@ export class CodeGraphQueryService extends Context.Service<
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const fs = yield* FileSystem.FileSystem;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const command = yield* CommandExecutor;
       const system = yield* SystemInfo;
       const store = yield* CodeGraphStore;
@@ -193,7 +194,7 @@ export class CodeGraphQueryService extends Context.Service<
       const withRepositoryServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
           Effect.provideService(CommandExecutor, command),
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, system),

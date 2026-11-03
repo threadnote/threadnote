@@ -36,7 +36,7 @@ function parseContentionGraphStatus(stdout: string) {
   return {identity: {checkoutId: value.identity.checkoutId}, readySnapshot: {id: value.readySnapshot.id}};
 }
 
-it('refuses a strict save promptly while the graph writer is busy and retries after its release', async () => {
+it('captures strict and deferred references promptly while an unrelated graph writer is held', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threadnote-citation-contention-'));
   const repository = join(root, 'repository');
   const home = join(root, 'home');
@@ -94,22 +94,28 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
       'contention.md',
     );
 
-    for (const mode of [[], ['--dry-run']]) {
-      const failure = await run([...args, ...mode], 10_000).then(
-        () => undefined,
-        (error: {code?: number; killed?: boolean; stderr?: string}) => error,
-      );
-      expect(failure?.killed, failure?.stderr).not.toBe(true);
-      expect(failure?.code, failure?.stderr).toBe(1);
-      expect(failure?.stderr).toContain('citation storage is busy');
-      expect(failure?.stderr).toContain('no indexing was started');
-      expect(await readFile(lock, 'utf8')).toBe(owner);
-      await expect(readFile(memory, 'utf8')).rejects.toThrow();
-    }
+    await run([...args, '--dry-run'], 10_000);
+    await expect(readFile(memory, 'utf8')).rejects.toThrow();
+    expect(await readFile(lock, 'utf8')).toBe(owner);
 
-    // A private deferred write must keep the original reference intent while
-    // the fixture-owned writer is present, without starting another index.
-    const pending: {path: string; uri: string}[] = [];
+    const assertStoredCitation = async (stdout: string, filename: string) => {
+      expect(stdout).toContain('Stored memory:');
+      expect(stdout).not.toContain('threadnote graph index');
+      const uri = Effect.pipe(
+        stdout,
+        EffectString.match(/Stored memory: (threadnote:\/\/\S+)/u),
+        Effect.Option.getOrElse(() => null),
+      )?.[1];
+      expect(uri).toBeDefined();
+      const content = await readFile(filename, 'utf8');
+      expect(content).toContain('Keep the source invariant.');
+      expect(uri && parseMemoryDocument(uri, content)?.metadata.codeCitations).toEqual([
+        expect.objectContaining({path: 'source.ts', target: {kind: 'file'}, sourceSnapshotId: status.readySnapshot.id}),
+      ]);
+    };
+    await assertStoredCitation((await run(args, 10_000)).stdout, memory);
+    expect(await readFile(lock, 'utf8')).toBe(owner);
+
     for (const [topic, deferArgs] of [
       ['default', []],
       ['explicit', ['--defer-code-refs']],
@@ -118,51 +124,17 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
         EffectArray.filter(args, argument => argument !== '--require-current-code-refs'),
         argument => (argument === 'contention' ? `contention-${topic}` : argument),
       );
-      const pendingPath = join(dirname(memory), `contention-${topic}.md`);
-      await run([...deferredArgs, ...deferArgs, '--dry-run']);
-      await expect(readFile(pendingPath, 'utf8')).rejects.toThrow();
-      const savedPending = await run([...deferredArgs, ...deferArgs]);
-      expect(savedPending.stdout).toContain('Stored memory:');
-      expect(savedPending.stdout).not.toContain('threadnote graph index');
-      const pendingContent = await readFile(pendingPath, 'utf8');
-      const pendingDocument = parseMemoryDocument(
-        Effect.pipe(
-          savedPending.stdout,
-          EffectString.match(/Stored memory: (threadnote:\/\/\S+)/u),
-          Effect.Option.getOrElse(() => null),
-        )?.[1] ?? '',
-        pendingContent,
-      );
-      expect(pendingDocument).toBeDefined();
-      expect(pendingDocument?.metadata.codeCitations ?? []).toEqual([]);
+      const filename = join(dirname(memory), `contention-${topic}.md`);
+      await run([...deferredArgs, ...deferArgs, '--dry-run'], 10_000);
+      await expect(readFile(filename, 'utf8')).rejects.toThrow();
+      await assertStoredCitation((await run([...deferredArgs, ...deferArgs], 10_000)).stdout, filename);
       expect(await readFile(lock, 'utf8')).toBe(owner);
-      pending.push({path: pendingPath, uri: pendingDocument!.uri});
     }
-
+    const after = parseContentionGraphStatus((await run(['graph', 'status', '--json'])).stdout);
+    expect(after.readySnapshot.id).toBe(status.readySnapshot.id);
     await rm(lock);
-    const finalized = JSON.parse(
-      (await run(['finalize-code-refs', ...EffectArray.flatMap(pending, item => ['--uri', item.uri])])).stdout,
-    );
-    expect(finalized).toMatchObject({finalizedCount: 2, failedCount: 0, pendingCount: 0});
-    for (const item of pending) {
-      const content = await readFile(item.path, 'utf8');
-      expect(parseMemoryDocument(item.uri, content)?.metadata.codeCitations).toEqual([
-        expect.objectContaining({path: 'source.ts', sourceSnapshotId: status.readySnapshot.id}),
-      ]);
-    }
-    const saved = await run(args);
-    expect(saved.stdout).toContain('Stored memory:');
-    const content = await readFile(memory, 'utf8');
-    expect(content).toContain('Keep the source invariant.');
-    const uri = Effect.pipe(
-      saved.stdout,
-      EffectString.match(/Stored memory: (threadnote:\/\/\S+)/u),
-      Effect.Option.getOrElse(() => null),
-    )?.[1];
-    expect(uri).toBeDefined();
-    expect(uri && parseMemoryDocument(uri, content)?.metadata.codeCitations).toEqual([
-      expect.objectContaining({path: 'source.ts', target: {kind: 'file'}}),
-    ]);
+    const afterArgs = EffectArray.map(args, argument => (argument === 'contention' ? 'contention-after' : argument));
+    await assertStoredCitation((await run(afterArgs, 10_000)).stdout, join(dirname(memory), 'contention-after.md'));
   } finally {
     await rm(root, {recursive: true, force: true});
   }

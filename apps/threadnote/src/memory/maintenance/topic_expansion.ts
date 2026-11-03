@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import {CODE_GRAPH_CITATION_CAPSULE_RETENTION} from '@threadnote/graph/citation/capsule';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {codeGraphQueryScopeReceipt} from '@threadnote/graph/query/scope';
@@ -574,7 +575,7 @@ export const restartTopicDependencyExpansion = Effect.fn('topicExpansion.restart
         const prior = yield* restartableExpansion(config, preview);
         const previousSuccessor = prior.dependencyExpansion!.successor;
         const operation = previousSuccessor?.operation ?? {
-          id: yield* (yield* Crypto.Crypto).randomUUIDv4(),
+          id: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
           generation: (preview.operation?.generation ?? 0) + 1,
           predecessorRevision: preview.revision,
           predecessorApprovalDigest: preview.approvalDigest,

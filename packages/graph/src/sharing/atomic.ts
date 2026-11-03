@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path, Schema, Stream} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path, Schema, Stream} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {graphSharingFailure} from './errors.js';
 
@@ -13,8 +14,8 @@ export const writePrivateJsonFile = Effect.fn('codeGraph.sharing.writePrivateJso
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option))) {
     return yield* graphSharingFailure(`Refusing to replace a graph-sharing symbolic link: ${destination}`);
   }
-  const crypto = yield* Crypto.Crypto;
-  const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const temporary = `${destination}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporary, `${JSON.stringify(value)}\n`, {mode: 0o600});
   yield* fs
     .rename(temporary, destination)
@@ -48,8 +49,8 @@ export const writePrivateBytesFile = Effect.fn('codeGraph.sharing.writePrivateBy
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option))) {
     return yield* graphSharingFailure(`Refusing to replace a graph-sharing symbolic link: ${destination}`);
   }
-  const crypto = yield* Crypto.Crypto;
-  const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const temporary = `${destination}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFile(temporary, bytes, {mode: 0o600});
   yield* fs
     .rename(temporary, destination)

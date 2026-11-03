@@ -1,7 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
-import {Context, Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
+import {Context, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {mkdtemp, readdir, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -31,7 +33,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
-const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, TestSystemInfoLayer);
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, cryptoLayer, TestSystemInfoLayer);
 function providePlatform<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.scoped(Layer.build(platform).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }
@@ -61,7 +63,7 @@ const fixture = (environment: NodeJS.ProcessEnv = {}) =>
     });
     let launches = 0;
     const forbidden = () => Effect.die('Unexpected network or command operation');
-    const context = (yield* Effect.context<Crypto.Crypto | FileSystem.FileSystem | Path.Path>()).pipe(
+    const context = (yield* Effect.context<SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path>()).pipe(
       Context.add(SystemInfo, system),
       Context.add(
         HttpService,

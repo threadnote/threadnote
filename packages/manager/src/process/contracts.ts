@@ -22,6 +22,14 @@ export interface ManageableManagerProcess {
   readonly activityRole?: Exclude<ManagerProcessRole, 'legacy'>;
   readonly ageMilliseconds: number;
   readonly currentOperation?: string;
+  readonly embeddingProgress?: {
+    readonly state: 'queued' | 'deferred-cpu' | 'deferred-foreground' | 'preparing' | 'running' | 'blocked' | 'corrupt';
+    readonly reason?: string;
+    readonly phase?: 'metadata' | 'resolve' | 'hydrate' | 'embed' | 'retire' | 'ready';
+    readonly completed?: number;
+    readonly total?: number;
+    readonly reusedDocuments?: number;
+  };
   readonly parentProcessId: number;
   readonly parentRole?: ManagerProcessRole;
   readonly processId: number;
@@ -32,6 +40,43 @@ export interface ManageableManagerProcess {
   readonly startedAt: string;
   readonly terminable: boolean;
   readonly terminationBlockedReason?: 'current-manager' | 'identity-unverified' | 'legacy-process';
+}
+
+export function recallEmbeddingProgressLabel(progress: NonNullable<ManageableManagerProcess['embeddingProgress']>) {
+  const work =
+    progress.phase === 'hydrate'
+      ? 'Preparing documents'
+      : progress.phase === 'embed'
+        ? 'Embedding chunks'
+        : progress.phase === 'retire'
+          ? 'Cleaning obsolete versions'
+          : progress.phase === 'ready'
+            ? 'Verifying completion'
+            : progress.phase === 'resolve'
+              ? 'Resolving documents'
+              : progress.phase === 'metadata'
+                ? 'Reading document metadata'
+                : undefined;
+  const count =
+    progress.completed !== undefined && progress.total !== undefined && progress.total > 0
+      ? ` · ${progress.completed} / ${progress.total}`
+      : '';
+  const waiting =
+    progress.state === 'deferred-cpu'
+      ? 'Waiting for spare CPU'
+      : progress.state === 'deferred-foreground'
+        ? 'Waiting for foreground work'
+        : progress.reason === 'fair-turn'
+          ? 'Sharing capacity with graph indexing'
+          : progress.reason === 'inference-active'
+            ? 'Waiting for active inference'
+            : progress.reason === 'source-changed'
+              ? 'Memory changed; continuing latest version'
+              : progress.state === 'blocked' || progress.state === 'corrupt'
+                ? 'Needs attention'
+                : undefined;
+  if (work === undefined) return waiting ?? 'Progress unavailable';
+  return `${waiting ? waiting + ' · ' : ''}${work}${count}`;
 }
 
 export interface ManagerProcessDiagnostics {

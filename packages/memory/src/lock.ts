@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Path} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -32,7 +33,9 @@ export function withMemoryUriLocks<A, E, R>(
       ),
     );
     const sortedLockPaths = lockPaths.sort();
-    const protect = (index: number): Effect.Effect<A, unknown, R | Crypto.Crypto | Path.Path | SystemInfo> =>
+    const protect = (
+      index: number,
+    ): Effect.Effect<A, unknown, R | SecureRandom.SecureRandom | Path.Path | SystemInfo> =>
       index >= sortedLockPaths.length
         ? effect
         : withExclusiveFileLock(fs, sortedLockPaths[index], MEMORY_LOCK_OPTIONS, protect(index + 1));

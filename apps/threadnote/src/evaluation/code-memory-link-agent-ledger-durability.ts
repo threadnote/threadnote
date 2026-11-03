@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Path} from 'effect';
 import {syncWritableFile} from '@threadnote/platform/file/durability';
 import type {CodeMemoryLinkAgentLedgerLayout} from './code-memory-link-agent-attempts.js';
 
@@ -44,12 +45,12 @@ export const durablyReplaceCodeMemoryLinkAgentLedger = Effect.fn('codeMemoryLink
   targetInput: string,
   content: string,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const target = path.resolve(targetInput);
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.durable.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.uuidV4()}.durable.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

@@ -186,9 +186,11 @@ const CORE_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_query',
   'context_brief',
   'read_context',
   'list_context',
+  'memory_write_status',
   'remember_context',
   'finalize_code_refs',
   'inspect_obsidian_note',
@@ -580,7 +582,7 @@ describe('Threadnote MCP toolsets', () => {
           scope: 'distribution-catalog',
           status: 'ok',
           requestedLanguage: 'java',
-          readiness: {installation: 'not-assessed', project: 'not-assessed', queries: 'public-integration-pending'},
+          readiness: {installation: 'not-assessed', project: 'not-assessed', queries: 'requires-host-profile'},
           providers: [
             {
               id: 'jdtls',
@@ -600,6 +602,24 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
+  it('returns one canonical compact semantic query result by default over public MCP', async () => {
+    await withMcpClient(async client => {
+      const request = {callerCwd: '/unused', file: 'source.kt', language: 'kotlin', operation: 'symbols'};
+      const agent = await client.callTool({name: 'semantic_query', arguments: {request}});
+      expect(agent.isError).not.toBe(true);
+      expect(agent.structuredContent).toBeUndefined();
+      const text = readRequiredStringField(agent.content[0], 'text');
+      expect(JSON.parse(text)).toMatchObject({
+        version: 1,
+        status: 'unsupported',
+        reason: 'Kotlin remains deferred',
+        evidence: null,
+      });
+      const dual = await client.callTool({name: 'semantic_query', arguments: {request, responseFormat: 'dual'}});
+      expect(dual.content).toEqual(agent.content);
+      expect(dual.structuredContent).toEqual(JSON.parse(text));
+    });
+  });
   it('advertises only the core tools by default', async () => {
     await withMcpClient(
       async client => {
@@ -611,15 +631,30 @@ describe('Threadnote MCP toolsets', () => {
         for (const fullOnlyTool of ['archive', 'compact_context', 'forget', 'share_conflicts', 'share_skill']) {
           expect(EffectArray.map(tools.tools, tool => tool.name)).not.toContain(fullOnlyTool);
         }
-        const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         const discoveryTool = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_capabilities'),
         )!;
-        const existingCoreTools = EffectArray.filter(tools.tools, tool => tool.name !== 'semantic_capabilities');
-        // Preserve the existing catalog budget; bound the one new discovery definition separately.
-        expect(Buffer.byteLength(JSON.stringify(existingCoreTools))).toBeLessThanOrEqual(36000);
+        const queryTool = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_query'),
+        )!;
+        const status = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'memory_write_status'),
+        );
+        const mainCore = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
+        );
+        const existingCore = EffectArray.filter(mainCore, tool => tool.name !== 'memory_write_status');
+        // Preserve both prior catalog budgets and bound each added descriptor separately.
+        expect(Buffer.byteLength(JSON.stringify(existingCore))).toBeLessThanOrEqual(36_000);
+        expect(status).toBeDefined();
+        expect(discoveryTool).toBeDefined();
+        expect(queryTool).toBeDefined();
+        expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
+        expect(Buffer.byteLength(JSON.stringify(mainCore))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(discoveryTool))).toBeLessThanOrEqual(512);
-        expect(serializedToolsBytes).toBeLessThanOrEqual(36513); // Existing array + discovery + one comma.
+        expect(Buffer.byteLength(JSON.stringify(queryTool))).toBeLessThanOrEqual(1024);
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(38_038);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

@@ -14,3 +14,5 @@ export {
 } from '@threadnote/platform/windows-disk-worker-contract';
 export const LOCAL_MODEL_WORKER_ARGUMENT = '--threadnote-local-model-worker';
 export const INTEGRATION_SYNC_WORKER_ARGUMENT = '--threadnote-integration-sync-worker';
+export const RECALL_EMBEDDING_WORKER_ARGUMENT = '--threadnote-recall-embedding-worker-v1';
+export const RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION = 1;

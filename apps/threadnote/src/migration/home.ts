@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Console, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {
   LEGACY_OPENVIKING_HOME_DIRECTORY,
@@ -291,7 +292,7 @@ export const migrateOpenVikingHome = (
 ): Effect.Effect<
   HomeMigrationResult,
   HomeMigrationError,
-  Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo
+  SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
 > =>
   migrateOpenVikingHomeImpl(options).pipe(
     Effect.filterOrFail(isHomeMigrationResult, result =>
@@ -788,7 +789,7 @@ function inspectLegacyDerivedShareState(
   legacyInventory: HomeInventory,
   root: ManagedShareRecoveryRoot,
   state: {readonly gitdirExists: boolean; readonly worktreeExists: boolean},
-): Effect.Effect<LegacyDerivedShareState | undefined, never, Crypto.Crypto> {
+): Effect.Effect<LegacyDerivedShareState | undefined, never, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const migration = root.migration;
     if (!migration) return undefined;
@@ -839,7 +840,7 @@ function compareLegacyDerivedTree(
         readonly legacyRootRelative: string;
         readonly migration: LegacyShareMigration;
       },
-): Effect.Effect<ReadonlySet<string> | undefined, unknown, Crypto.Crypto> {
+): Effect.Effect<ReadonlySet<string> | undefined, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     if (!(yield* isOwnedDirectory(fs, currentRoot)) || !(yield* isOwnedDirectory(fs, options.legacyRoot))) {
       return undefined;
@@ -1223,7 +1224,7 @@ function removeTransientLegacyDerivedGitEntries(
   fs: FileSystem.FileSystem,
   path: Path.Path,
   migration: LegacyShareMigration,
-): Effect.Effect<void, unknown, Crypto.Crypto> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const inventory = yield* inventoryHome(fs, path, migration.finalGitdir, () => true);
     const transientFiles = new Set(
@@ -1260,7 +1261,7 @@ function copyMissingLegacyTree(
   targetRoot: string,
   stagingRoot: string,
   include: (relativePath: string) => boolean,
-): Effect.Effect<void, unknown, Crypto.Crypto> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const inventory = yield* inventoryHome(fs, path, sourceRoot, include);
     for (const entry of inventory.entries) {
@@ -1304,7 +1305,7 @@ function installStagedShareEntry(
   staged: string,
   target: string,
   expected: InventoryEntry,
-): Effect.Effect<void, unknown, Crypto.Crypto> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     if (yield* pathEntryExists(fs, target)) {
       if (yield* inventoryEntryMatches(fs, target, expected)) {
@@ -1330,7 +1331,7 @@ function inventoryEntryMatches(
   fs: FileSystem.FileSystem,
   target: string,
   expected: InventoryEntry,
-): Effect.Effect<boolean, never, Crypto.Crypto> {
+): Effect.Effect<boolean, never, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     if (!(yield* pathEntryExists(fs, target))) return false;
     if (expected.type === 'file') {
@@ -1385,10 +1386,13 @@ function inventoryHome(
   path: Path.Path,
   root: string,
   include: (relativePath: string) => boolean,
-): Effect.Effect<HomeInventory, unknown, Crypto.Crypto> {
+): Effect.Effect<HomeInventory, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const entries: InventoryEntry[] = [];
-    const visit = (directory: string, relativeDirectory: string): Effect.Effect<void, unknown, Crypto.Crypto> =>
+    const visit = (
+      directory: string,
+      relativeDirectory: string,
+    ): Effect.Effect<void, unknown, SecureRandom.SecureRandom> =>
       Effect.gen(function* () {
         const names = (yield* fs.readDirectory(directory)).sort((left, right) =>
           Effect2.pipe(left, EffectString.localeCompare(right)),
@@ -1493,7 +1497,7 @@ function verifyCopiedInventory(
   path: Path.Path,
   stage: string,
   expected: HomeInventory,
-): Effect.Effect<void, unknown, Crypto.Crypto> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const actual = yield* inventoryHome(fs, path, stage, () => true);
     if (actual.treeSha256 !== expected.treeSha256) {
@@ -1511,7 +1515,11 @@ function findResumableStage(
   parent: string,
   targetHome: string,
   legacyHome: string,
-): Effect.Effect<{readonly path: string; readonly receipt: HomeMigrationReceipt} | undefined, unknown, Crypto.Crypto> {
+): Effect.Effect<
+  {readonly path: string; readonly receipt: HomeMigrationReceipt} | undefined,
+  unknown,
+  SecureRandom.SecureRandom
+> {
   return Effect.gen(function* () {
     const prefix = `${path.basename(targetHome)}.migrate-`;
     const names = EffectArray.filter(

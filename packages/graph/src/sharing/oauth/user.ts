@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {dlopen} from 'bun:ffi';
-import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {createRemoteAccessTokenVerifier, type AccessTokenClaims} from '@threadnote/protocol/access-token';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -281,8 +282,8 @@ export const configureRegistryOAuthUser = Effect.fn('codeGraph.sharing.configure
   );
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option)))
     return yield* graphSharingFailure('Registry OAuth binding must not be a symbolic link.');
-  const crypto = yield* Crypto.Crypto;
-  const staged = `${destination}.${yield* crypto.randomUUIDv4()}.pending`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const staged = `${destination}.${yield* crypto.uuidV4()}.pending`;
   const replaced = Option.getOrUndefined(
     EffectArray.findFirst(existing, binding => binding.coordinatorUrl === validated.coordinatorUrl),
   );

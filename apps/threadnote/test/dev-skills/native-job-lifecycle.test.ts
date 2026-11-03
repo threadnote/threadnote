@@ -3,6 +3,8 @@ import {
   String as EffectString,
   Effect,
   Exit,
+  Deferred,
+  Fiber,
   FileSystem,
   Record as EffectRecord,
   Result,
@@ -32,6 +34,8 @@ import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {decodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js';
 import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journal_storage.js';
 import {
+  advanceNativeJobProgress,
+  type NativeJobProgress,
   CurrentNativeJobAutoLaunch,
   nativeJobId,
   nativeJobStatus,
@@ -249,6 +253,85 @@ describe('native private job lifecycle', () => {
       expect(new Set(EffectArray.map(native.operations, item => object(object(item).intent).operationId)).size).toBe(
         native.operations.length,
       );
+    }).pipe(run),
+  );
+
+  it('keeps job progress monotone and invariant under duplicate and reordered proof replay', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            count: fc.integer({min: 0, max: 4096}),
+            root: fc.boolean(),
+            at: fc.integer({min: 0, max: 100_000}),
+          }),
+          {minLength: 1, maxLength: 20},
+        ),
+        proofs => {
+          const fold = (items: typeof proofs) => {
+            let current: NativeJobProgress | undefined;
+            for (const proof of items) {
+              const previous = current;
+              current = advanceNativeJobProgress(current, proof.count, proof.root, proof.at);
+              expect(current.verifiedOperations).toBeGreaterThanOrEqual(previous?.verifiedOperations ?? 0);
+              expect(current.lastProgressAt).toBeGreaterThanOrEqual(previous?.lastProgressAt ?? 0);
+              if (previous?.rootVerified) expect(current.rootVerified).toBe(true);
+              expect(current.stage).toBe(current.rootVerified ? 'finalizing' : 'canonical-work');
+            }
+            return current;
+          };
+          expect(fold(EffectArray.flatMap(EffectArray.reverse(proofs), proof => [proof, proof]))).toEqual(fold(proofs));
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
+  effectIt.effect('shows exact job-owned canonical progress while finalization remains running', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const head = yield* commit(f.repo, 'source');
+      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      yield* f.init();
+      yield* f.call(f.write({operationId: 'unrelated-old', artifactKey: 'unrelated-old'}));
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document(
+          {head, files: [{path: 'source.ts', sha256: sha256HexSync('export const fixture = true;\n')}]},
+          ['source.ts'],
+        ),
+        ready: false,
+        expectedRevision: null,
+      };
+      const accepted = object(yield* submit(f, work));
+      const jobId = requiredString(accepted.jobId);
+      const finalizing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const worker = yield* runNativeJobWorker(f.config, 'native-run', jobId, input =>
+        f.call(input).pipe(
+          Effect.tap(() => Deferred.succeed(finalizing, undefined)),
+          Effect.tap(() => Deferred.await(release)),
+        ),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(finalizing);
+      const statusRequest = {...f.base('job'), command: 'status', jobId};
+      const status = object(yield* f.call(statusRequest));
+      expect(status.status).toBe('running');
+      const progress = object(status.progress);
+      expect(progress.rootVerified).toBe(true);
+      expect(progress.stage).toBe('finalizing');
+      const native = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
+      expect(progress.verifiedOperations).toBe(native.operations.length - 1);
+      expect(progress.lastProgressAt).toBeGreaterThan(0);
+      expect(JSON.stringify(status).length).toBeLessThan(1024);
+      expect(object(yield* f.call(statusRequest)).progress).toEqual(status.progress);
+      expect(object(yield* f.call({...f.base('job'), command: 'result', jobId})).result).toBeUndefined();
+      yield* Deferred.succeed(release, undefined);
+      expect(object(yield* Fiber.join(worker)).status).toBe('completed');
+      expect(object(yield* f.call(statusRequest)).progress).toEqual(status.progress);
     }).pipe(run),
   );
 

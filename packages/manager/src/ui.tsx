@@ -1,8 +1,8 @@
 import {LibraryReaderHeader, LibraryScopeControls, LibraryContentTabs} from './library_controls.js';
+import {ManagerLiveProjectScope} from './live/provider.js';
 import {
   isCheckssharesResponse,
   isCodeGraphLocalDiagnosticsReport,
-  isGraphCatalog,
   isGraphIndexActionResponse,
   isJobResponse2,
   isManagerGraphViewRemovalResponse,
@@ -43,7 +43,7 @@ import {DevSkillsPanel} from './dev_skills/view.js';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 
-import {useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
+import {readManagerGraphCatalog, useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
@@ -93,7 +93,6 @@ import {
   type GraphCatalog,
 } from '@threadnote/manager/graph';
 import {
-  GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
   actionProgressLabel,
   api,
   clampSidebarWidth,
@@ -170,6 +169,7 @@ function App({
   const [panel, setPanel] = useState<PanelName>('home');
   const [state, setState] = useState<StateResponse | undefined>();
   const [graphCatalog, setGraphCatalog] = useState<GraphCatalog | undefined>();
+  const [liveProjects, setLiveProjects] = useState<readonly string[]>();
   const [graphCatalogError, setGraphCatalogError] = useState('');
   const graphCatalogRef = useRef<GraphCatalog | undefined>(undefined);
   const graphCatalogAuthoritativeRef = useRef(false);
@@ -190,6 +190,7 @@ function App({
   const [loadedUri, setLoadedUri] = useState<string | undefined>();
   const canonicalizedSelectionRef = useRef<string | undefined>(undefined);
   const selectionReadEpoch = useRef(0);
+  const libraryRefreshEpoch = useRef(0);
   const draftRef = useRef<ManagerDraft | undefined>(undefined);
   const [pendingCanonical, setPendingCanonical] = useState<MemoryResponse | undefined>();
   const [availability, dispatchAvailability] = useReducer(managerAvailabilityTransition, initialManagerAvailability);
@@ -402,29 +403,28 @@ function App({
     () => uniqueSelectorValues(['default', ...EffectArray.map(shares, share => share.name), target.team]),
     [shares, target.team],
   );
-  function markRuntimeLost(): void {
+  function markRuntimeLost(invalidateLibraryRefresh = true): void {
+    setLiveProjects(undefined);
+    if (invalidateLibraryRefresh) libraryRefreshEpoch.current++;
     selectionReadEpoch.current++;
     canonicalizedSelectionRef.current = undefined;
     dispatchAvailability('runtime-lost');
   }
   async function refreshAll(): Promise<void> {
+    const epoch = ++libraryRefreshEpoch.current;
+    setLiveProjects(undefined);
     let nextTree: TreeResponse | undefined;
     const failures = await settleManagerRefreshTasks([
       {
         label: 'Graph indexes',
         run: async () => {
           try {
-            const catalog = await api<GraphCatalog>(
-              '/api/graphs',
-              undefined,
-              {
-                timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-              },
-              isGraphCatalog,
-            );
+            const catalog = await readManagerGraphCatalog();
             graphCatalogAuthoritativeRef.current = true;
             graphCatalogRef.current = catalog;
             setGraphCatalog(catalog);
+            if (epoch === libraryRefreshEpoch.current)
+              setLiveProjects(EffectArray.map(catalog.configuredProjects ?? [], project => project.name));
             setGraphCatalogError('');
           } catch (cause) {
             setGraphCatalogError(errorMessage(cause));
@@ -437,11 +437,12 @@ function App({
         run: async () => {
           try {
             const next = await api<StateResponse>('/api/state', undefined, undefined, isStateResponse);
+            if (epoch !== libraryRefreshEpoch.current) return;
             setState(next);
             onAccount(next.config.account);
             dispatchAvailability('runtime-ready');
           } catch (cause) {
-            markRuntimeLost();
+            if (epoch === libraryRefreshEpoch.current) markRuntimeLost(false);
             throw cause;
           }
         },
@@ -451,9 +452,9 @@ function App({
         run: async () => {
           try {
             nextTree = await api<TreeResponse>('/api/tree', undefined, undefined, isTreeResponse);
-            setLibraryError('');
+            if (epoch === libraryRefreshEpoch.current) setLibraryError('');
           } catch (cause) {
-            setLibraryError(errorMessage(cause));
+            if (epoch === libraryRefreshEpoch.current) setLibraryError(errorMessage(cause));
             throw cause;
           }
         },
@@ -467,6 +468,7 @@ function App({
           ),
       },
     ]);
+    if (epoch !== libraryRefreshEpoch.current) return;
     if (nextTree) {
       setTree(nextTree.tree);
       setResourceTree(nextTree.resourcesTree);
@@ -474,17 +476,9 @@ function App({
     setAttentionRefreshGeneration(generation => generation + 1);
     toastMessage(failures.length === 0 ? 'Refreshed' : `Refresh incomplete · ${EffectArray.join(failures, ' · ')}`);
   }
-
   async function refreshGraphCatalog(notify = true): Promise<void> {
     try {
-      const next = await api<GraphCatalog>(
-        '/api/graphs',
-        undefined,
-        {
-          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-        },
-        isGraphCatalog,
-      );
+      const next = await readManagerGraphCatalog();
       graphCatalogAuthoritativeRef.current = true;
       graphCatalogRef.current = next;
       setGraphCatalog(next);
@@ -496,7 +490,6 @@ function App({
       toastMessage(message);
     }
   }
-
   async function refreshGraphDiagnostics(
     options: {readonly analyze: boolean; readonly deep: boolean},
     notify = true,
@@ -532,7 +525,6 @@ function App({
       if (!background) setGraphAdministrationBusy(undefined);
     }
   }
-
   async function runGraphAdministration(action: GraphAdministrationAction): Promise<void> {
     const label = graphAdministrationActionLabel(action);
     setGraphAdministrationBusy(label);
@@ -694,7 +686,6 @@ function App({
     setResourceTree(next.resourcesTree);
     return next;
   }
-
   async function reloadSelected(uri: string): Promise<void> {
     if (isResourceUri(uri)) {
       await loadResource(uri).catch(() => undefined);
@@ -702,7 +693,6 @@ function App({
       await loadMemory(uri).catch(() => undefined);
     }
   }
-
   async function saveCurrent(): Promise<void> {
     if (saveOwned.current || manualEdit.pending) return;
     saveOwned.current = true;
@@ -1992,7 +1982,7 @@ function App({
       {manualEdit.dialog}
     </div>
   );
-  return app;
+  return <ManagerLiveProjectScope projects={liveProjects}>{app}</ManagerLiveProjectScope>;
 }
 
 export function mountManager(options: {readonly integrations: readonly IntegrationRegistration[]}): void {
