@@ -8038,6 +8038,165 @@ h4 {
   background: none;
   border-color: var(--line);
 }
+.process-row {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 18px;
+}
+.process-row > svg {
+  flex-shrink: 0;
+  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+.process-row-heading,
+.process-heading-copy,
+.process-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.process-row-heading {
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.process-heading-copy {
+  min-width: 0;
+}
+.process-heading-copy strong {
+  overflow-wrap: anywhere;
+}
+.process-row-actions {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.process-row-actions button {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+.process-role-badge,
+.process-provenance {
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--panel-raised);
+}
+.process-status-running {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.process-status-idle,
+.process-status-legacy {
+  color: var(--muted);
+  background: var(--sidebar-bg);
+}
+.process-lane-metadata,
+.process-lane-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 9px 0 0;
+}
+.process-lane-context {
+  margin-top: 7px;
+}
+.process-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.process-fact > svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.process-fact dt {
+  color: var(--muted);
+}
+.process-fact dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.process-fact-metric {
+  background: var(--panel-raised);
+}
+.process-fact-metric dd {
+  font-weight: 500;
+}
+.process-cpu-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: var(--warn);
+}
+.process-cpu-critical {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.process-cpu-warn :is(dt, svg),
+.process-cpu-critical :is(dt, svg) {
+  color: inherit;
+}
+.process-fact-path {
+  flex: 1 1 340px;
+  border-color: transparent;
+  padding-left: 0;
+}
+.process-fact-path dd {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+}
+.process-path-value {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.process-fact-branch {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.process-fact-branch > svg,
+.process-fact-branch dd {
+  color: var(--accent);
+}
+.process-row .process-missing,
+.process-row .process-stop-reason {
+  font-size: 10px;
+  margin-top: 6px;
+}
+.process-row .process-progress {
+  color: var(--accent);
+  margin-top: 6px;
+}
+@media (max-width: 700px) {
+  .process-row {
+    padding: 12px;
+    gap: 8px;
+  }
+  .process-row-actions {
+    margin-left: 0;
+  }
+  .process-fact-path {
+    flex-basis: 100%;
+  }
+}
 .health-technical {
   margin-top: 20px;
   border-top: 1px solid var(--line);

@@ -36,6 +36,18 @@ describe('packaged stdio process lifecycle', () => {
     const lifecycle = await startLifecycleMcpClient();
     expect(await pathExists(join(home, 'models', 'selection.json'))).toBe(false);
     try {
+      const diagnostics = await processDiagnostics();
+      const server = EffectOption.getOrThrow(
+        EffectArray.findFirst(diagnostics.processes, value => value.processId === lifecycle.mcpProcessId),
+      );
+      const worker = EffectOption.getOrThrow(
+        EffectArray.findFirst(diagnostics.processes, value => value.processId === lifecycle.workerProcessId),
+      );
+      expect(server.displayContext?.client).toEqual({name: 'threadnote-lifecycle-e2e', version: '4.0.0'});
+      expect(worker.displayContext?.client).toEqual(server.displayContext?.client);
+      expect(worker.displayContext?.owner?.processId).toBe(lifecycle.mcpProcessId);
+      expect(server.cpu?.state).toBe('sampled');
+      expect(worker.cpu?.state).toBe('sampled');
       await lifecycle.client.close();
       await expectProcessesToExit([lifecycle.mcpProcessId, lifecycle.workerProcessId]);
     } finally {
@@ -140,6 +152,11 @@ interface ProcessDiagnostics {
     readonly parentRole?: string;
     readonly processId: number;
     readonly role: string;
+    readonly cpu?: {readonly state: 'sampling' | 'sampled' | 'unavailable'};
+    readonly displayContext?: {
+      readonly client?: {readonly name: string; readonly version?: string};
+      readonly owner?: {readonly processId: number};
+    };
   }>;
 }
 
