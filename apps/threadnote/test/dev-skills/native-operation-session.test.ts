@@ -1,5 +1,5 @@
 import {it} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Result, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, PlatformError, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -123,30 +123,61 @@ describe('native child lower-memory sessions', () => {
           [memoryPath, memoryBlocked],
         ] as const;
         const targets = new Map(EffectArray.map(barriers, ([file, barrier]) => [f.path.basename(file), barrier]));
+        // Windows sharing refusals may be immediate; exercise the cumulative AlreadyExists wait path here.
+        const held = new Set(targets.keys());
+        const memoryName = f.path.basename(memoryPath);
+        const accountName = f.path.basename(accountPath);
         const observedContention = new Set<string>();
         let accountHeld = false;
         const observed = FileSystem.FileSystem.of({
           ...f.fs,
-          writeFileString: (file, content, options) =>
-            f.fs.writeFileString(file, content, options).pipe(
+          writeFileString: (file, content, options) => {
+            const name = f.path.basename(file);
+            return (
+              options?.flag === 'wx' && held.has(name)
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: 'AlreadyExists',
+                      method: 'writeFileString',
+                      module: 'FileSystem',
+                      pathOrDescriptor: file,
+                    }),
+                  )
+                : f.fs.writeFileString(file, content, options)
+            ).pipe(
               Effect.tapError(() => {
-                const barrier = options?.flag === 'wx' ? targets.get(f.path.basename(file)) : undefined;
+                const barrier = options?.flag === 'wx' ? targets.get(name) : undefined;
                 if (!barrier) return Effect.void;
-                observedContention.add(f.path.basename(file));
+                observedContention.add(name);
                 return Deferred.succeed(barrier, undefined).pipe(Effect.asVoid);
               }),
               Effect.tap(() => {
-                if (file !== memoryPath || options?.flag !== 'wx' || accountHeld) return Effect.void;
-                accountHeld = true;
-                return f.fs.writeFileString(accountPath, owner);
+                if (name !== memoryName || options?.flag !== 'wx' || accountHeld) return Effect.void;
+                return f.fs.writeFileString(accountPath, owner).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      accountHeld = true;
+                      held.add(accountName);
+                    }),
+                  ),
+                );
               }),
-            ),
+            );
+          },
         });
         for (const [file] of barriers) yield* f.fs.writeFileString(file, owner);
         const releaser = yield* Effect.forEach(
           barriers,
           ([file, barrier]) =>
-            Deferred.await(barrier).pipe(Effect.andThen(Effect.sleep(400)), Effect.andThen(f.fs.remove(file))),
+            Deferred.await(barrier).pipe(
+              Effect.andThen(Effect.sleep(400)),
+              Effect.andThen(f.fs.remove(file)),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  held.delete(f.path.basename(file));
+                }),
+              ),
+            ),
           {concurrency: 'unbounded'},
         ).pipe(Effect.forkChild);
         const request = f.write({
@@ -164,14 +195,17 @@ describe('native child lower-memory sessions', () => {
             Effect.timeoutOption('5 seconds'),
           );
         yield* Fiber.interrupt(releaser);
+        const releaseExit = yield* Fiber.await(releaser);
         expect(outcome).toMatchObject({
           _tag: 'Some',
           value: {_tag: 'Failure', failure: {code: 'memory-busy', retryable: true}},
         });
         if (outcome._tag !== 'Some' || Result.isSuccess(outcome.value)) throw new Error('Expected native busy');
         const message = outcome.value.failure.message;
+        expect(releaseExit, message).toMatchObject({_tag: 'Success'});
         expect(observedContention).toEqual(new Set(targets.keys()));
-        expect(accountHeld).toBe(true);
+        expect(accountHeld, message).toBe(true);
+        expect(yield* f.fs.exists(accountPath)).toBe(true);
         expect(message).toContain('canonical-account');
         expect(message).toContain(`PID ${system.processId}`);
         expect(message).toMatch(/start [a-f0-9]{16}/u);
