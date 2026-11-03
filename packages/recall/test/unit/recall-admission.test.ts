@@ -37,6 +37,7 @@ import {
 } from '@threadnote/recall/index';
 import {resolveMemoryIdentityAliases} from '@threadnote/recall/memory/identity';
 import {readRecallIdentityAdmissionCut} from '../../src/index/admission.js';
+import {recallLogicalScope} from '../../src/index/freshness.js';
 import {withRecallPublicationLock} from '../../src/index/stale_marker.js';
 
 const system = SystemInfo.layer.pipe(
@@ -349,6 +350,7 @@ effectIt.effect('preserves programming defects in read-only readiness checks', (
       pointerPath: f.database + '.pointer.json',
       fixedDatabasePath: f.database,
       schemaVersion: 13,
+      logicalScope: recallLogicalScope(f.config, false),
     }).pipe(Effect.exit);
     expect(Exit.isFailure(exit)).toBe(true);
     if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBe(defect);

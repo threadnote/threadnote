@@ -2,7 +2,12 @@ import {RecallReadMaintenancePort} from './read_maintenance.js';
 import {SecureRandom} from 'effect/crypto';
 import {vectorIndexStatus, VectorIndexCorrupt} from '@threadnote/recall/vector-index';
 import {lexicalRefreshDisposition} from '@threadnote/recall/mcp/refresh';
-import {loadRecallIndexData, recallIndexStatus, RecallIndexCorrupt} from '@threadnote/recall/index';
+import {
+  loadRecallIndexData,
+  recallIndexStatus,
+  RecallIndexCorrupt,
+  RecallIndexSourceChanged,
+} from '@threadnote/recall/index';
 import {Array as EffectArray, Clock, Context, Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
@@ -65,6 +70,8 @@ export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(
     forceRefresh: demand.reconcile === true,
   }).pipe(Effect.result);
   if (result._tag === 'Failure') {
+    if (Schema.is(RecallIndexSourceChanged)(result.failure))
+      return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
     yield* failRecallLexicalRefresh(scope, revision);
     return {state: 'deferred' as const, reason: 'lexical-maintenance-failed', delay: 1000};
   }

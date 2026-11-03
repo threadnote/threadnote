@@ -2,6 +2,7 @@ import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {expandPath} from '@threadnote/platform/paths';
 import {SEED_STATE_FILE} from '@threadnote/workspace/constants';
@@ -14,6 +15,58 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const SEED_FILE_MTIME_TOLERANCE_MILLISECONDS = 1;
+
+/** Input identity only: selected live source/access validation remains mandatory. */
+export const recallResourcePolicyInputProof = Effect.fn('recall.resourcePolicyInputProof')(
+  function* (config: {readonly agentContextHome: string; readonly manifestPath?: string}) {
+    if (!config.manifestPath) return 'no-seed-policy';
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const read = (filename: string) =>
+      Effect.gen(function* () {
+        const info = yield* fs.stat(filename);
+        if (info.type !== 'File' || Number(info.size) > 8 * 1024 * 1024) return undefined;
+        const raw = yield* fs.readFileString(filename);
+        if (new TextEncoder().encode(raw).byteLength > 8 * 1024 * 1024) return undefined;
+        return raw;
+      });
+    const manifest = yield* read(config.manifestPath);
+    const state = yield* read(path.join(config.agentContextHome, SEED_STATE_FILE));
+    if (manifest === undefined || state === undefined) return undefined;
+    const valid = yield* Effect.try(() => {
+      parseSeedManifest(manifest, config.manifestPath!);
+      const value: unknown = JSON.parse(state);
+      if (
+        typeof value !== 'object' ||
+        value === null ||
+        !('version' in value) ||
+        value.version !== 1 ||
+        !('files' in value) ||
+        typeof value.files !== 'object' ||
+        value.files === null ||
+        EffectArray.isArray(value.files)
+      )
+        return false;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Decoded JSON records have heterogeneous unknown values, validated below.
+      const entries: readonly unknown[] = Object.values(value.files);
+      return EffectArray.every(
+        entries,
+        entry =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          'mtimeMs' in entry &&
+          typeof entry.mtimeMs === 'number' &&
+          Number.isFinite(entry.mtimeMs) &&
+          'size' in entry &&
+          typeof entry.size === 'number' &&
+          Number.isSafeInteger(entry.size) &&
+          entry.size >= 0,
+      );
+    });
+    return valid ? sha256HexSync(JSON.stringify([config.manifestPath, manifest, state])) : undefined;
+  },
+  Effect.orElseSucceed(() => undefined),
+);
 
 interface SeedStateEntry {
   readonly mtimeMs: number;

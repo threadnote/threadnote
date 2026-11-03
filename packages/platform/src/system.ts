@@ -235,11 +235,18 @@ export function runtimeLstat(path: string): Promise<RuntimeBigIntStats> {
 }
 
 /** Read one regular file without following a stable symbolic-link target and reject path/file races. */
-export async function runtimeReadBoundedStableRegularFile(path: string, maximumBytes: number): Promise<Uint8Array> {
+export async function runtimeReadBoundedStableRegularFile(
+  path: string,
+  maximumBytes: number,
+  expected?: RuntimeBigIntStats,
+): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes >= Number.MAX_SAFE_INTEGER) {
     throw SystemOperationError.make({message: 'Invalid read bound.'});
   }
   const pathBefore = await nativeFileSystemPromises.lstat(path, {bigint: true});
+  if (expected !== undefined && !sameStableRegularFile(expected, pathBefore)) {
+    throw SystemOperationError.make({message: 'Target changed since preparation.'});
+  }
   if (!stableRegularFile(pathBefore) || pathBefore.size > BigInt(maximumBytes)) {
     throw SystemOperationError.make({message: 'Target is not a bounded stable regular file.'});
   }

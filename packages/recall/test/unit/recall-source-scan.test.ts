@@ -111,7 +111,11 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
   const {expected, scan} = yield* fixture(sources);
   yield* Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    expect(yield* scan(sql)).toEqual({scannedSourceCount: expected.length, skippedOversizedDocumentCount: 0});
+    expect(yield* scan(sql)).toEqual({
+      scannedSourceCount: expected.length,
+      skippedOversizedDocumentCount: 0,
+      omittedSourceInputs: new Map(),
+    });
     const rows = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
     expect(rows).toEqual(expected);
     for (const row of expected) {
