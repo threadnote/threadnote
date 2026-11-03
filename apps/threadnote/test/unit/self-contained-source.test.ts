@@ -22,6 +22,7 @@ const workflowSources = EffectArray.map(
 const semanticSources = EffectArray.map(
   [
     'apps/threadnote/src/effect/semantic_cli.ts',
+    'apps/threadnote/src/semantic/host_catalog.ts',
     'apps/threadnote/src/semantic/coordinator.ts',
     'apps/threadnote/src/semantic/provider.ts',
     'apps/threadnote/src/semantic/providers/python.ts',
@@ -140,6 +141,19 @@ describe('self-contained source Python boundary', () => {
     )!;
     expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/effect/other.ts', catalog.content)).toBe(true);
     for (const extra of ["const extra = {languages: ['python']};", "const extra = {language: 'python'};"])
+      expect(hasUndeclaredPythonRuntimeReference(catalog.path, `${catalog.content}\n${extra}`)).toBe(true);
+  });
+
+  it('consumes only the singular host catalog slot without granting protocol or neighboring-path exceptions', () => {
+    const catalog = EffectOption.getOrUndefined(
+      EffectArray.findFirst(semanticSources, source => source.path === 'apps/threadnote/src/semantic/host_catalog.ts'),
+    )!;
+    expect(hasUndeclaredPythonRuntimeReference('apps/threadnote/src/semantic/other.ts', catalog.content)).toBe(true);
+    for (const extra of [
+      "const extra = {slot: 'python'};",
+      "const extra = {language: 'python'};",
+      "const extra = {languages: ['python']};",
+    ])
       expect(hasUndeclaredPythonRuntimeReference(catalog.path, `${catalog.content}\n${extra}`)).toBe(true);
   });
 

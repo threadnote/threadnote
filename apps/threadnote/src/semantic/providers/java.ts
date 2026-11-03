@@ -716,6 +716,14 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       );
     return {
       ...session,
+      observation: (uri: string) =>
+        Effect.gen(function* () {
+          yield* verify;
+          const captured = yield* session.observation(uri);
+          yield* verify;
+          const current = yield* session.observation(uri);
+          return captured && current && observationKey(captured) === observationKey(current) ? current : undefined;
+        }),
       upsert: (...args: Parameters<typeof session.upsert>) =>
         Effect.gen(function* () {
           const fixed = structuredClone(args[0]);

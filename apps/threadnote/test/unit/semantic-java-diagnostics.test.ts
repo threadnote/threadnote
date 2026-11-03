@@ -253,6 +253,38 @@ const limitedSession = Effect.fn('test.limitedJavaSession')(function* (limits?: 
 
 describe('Java request diagnostics', () => {
   describe.skipIf(process.platform === 'win32')('prepared session source admission', () => {
+    effectIt.effect(
+      'refuses cached observation publication after late SDK drift without issuing provider queries',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* preparedSessionFixture();
+          let armed = false;
+          let checks = 0;
+          const made = yield* f.create([], options => {
+            Reflect.set(
+              options.runtime,
+              'verify',
+              Effect.gen(function* () {
+                if (armed && ++checks === 2)
+                  yield* f.fs.writeFileString(
+                    f.path.join(f.javaHome, 'release'),
+                    'changed SDK during observation publication',
+                  );
+              }),
+            );
+          });
+          const session = yield* made.result;
+          const observed = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+          expect(yield* session.observation(observed.uri)).toEqual(observed);
+          const calls = made.calls.length;
+          armed = true;
+          const result = yield* session.observation(observed.uri).pipe(Effect.result);
+          expect(result._tag).toBe('Failure');
+          expect(checks).toBe(2);
+          expect(made.calls).toHaveLength(calls);
+          expect(yield* session.available).toBe(false);
+        }).pipe(Effect.provide(BunServices.layer)),
+    );
     effectIt.effect('refuses a closed host before initialization and captures its lifecycle predicate', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
