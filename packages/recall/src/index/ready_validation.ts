@@ -3,7 +3,7 @@ import {parseResourceId} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {fromPromise} from '@threadnote/platform/errors';
-import {isExternalResourceUri} from '@threadnote/store/external-resource';
+import {externalResourceAccess, isExternalResourceUri} from '@threadnote/store/external-resource';
 import {indexCandidate, recallIndexCandidateIsEligible} from './candidate.js';
 import {recallProjectMatches} from './selection.js';
 import {recallWorkspaceScopeMatches} from './scope.js';
@@ -54,6 +54,29 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
       uri => Effect.cached(readLive(uri)).pipe(Effect.map(read => [uri, read] as const)),
     ),
   );
+  const externalChecks = new Map(
+    yield* Effect.forEach(
+      EffectArray.filter(
+        EffectArray.flatMap(selected, candidate =>
+          EffectArray.map([candidate.uri, ...(candidate.equivalentUris ?? [])], uri => ({
+            uri,
+            hash: candidate.contentHash,
+          })),
+        ),
+        source => isExternalResourceUri(source.uri) && source.hash !== undefined,
+      ),
+      source =>
+        Effect.cached(
+          externalResourceAccess(
+            {home: config.agentContextHome, account: config.account, user: config.user},
+            source.uri,
+            undefined,
+            source.hash,
+          ),
+        ).pipe(Effect.map(check => [JSON.stringify([source.uri, source.hash]), check] as const)),
+    ),
+  );
+  const indexedByUri = new Map(EffectArray.map(selected, candidate => [candidate.uri, candidate] as const));
   return (
     candidate: RecallCandidate,
     options: {
@@ -65,7 +88,33 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
     },
   ) =>
     Effect.gen(function* () {
-      if (isExternalResourceUri(candidate.uri)) return true; // The live external authorization/hash fence runs separately.
+      if (isExternalResourceUri(candidate.uri)) {
+        const indexed = indexedByUri.get(candidate.uri);
+        if (indexed?.authority !== 'external' || indexed.trust !== 'untrusted' || indexed.contentHash === undefined)
+          return false;
+        const check = externalChecks.get(JSON.stringify([indexed.uri, indexed.contentHash]));
+        return (
+          check !== undefined &&
+          (yield* check) &&
+          recallIndexCandidateIsEligible(
+            {
+              ...(options.eligibility ?? {
+                kind: 'candidate-policy',
+                authority: 'any',
+                projects: {mode: 'unrestricted'},
+              }),
+              externalResources: {[indexed.uri]: indexed.contentHash},
+            },
+            indexed,
+          ) &&
+          recallProjectMatches(options.project, indexed.fields?.project) &&
+          recallWorkspaceScopeMatches(
+            options.workspaceScope,
+            indexed.fields?.workspaceScope,
+            options.workspaceScopeMode,
+          )
+        );
+      }
       const read = cache.get(candidate.uri);
       if (!read) return false;
       const live = yield* read;

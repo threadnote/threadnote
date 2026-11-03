@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import {normalizeRecallProject, recallAuthorityIsEligible, type RecallEligibilityPolicy} from '../eligibility.js';
 import type {RecallSqlPredicate} from './scope.js';
+import {recallSelectionDefersExternalAuthorization} from './read_policy.js';
 import * as EffectRecord from 'effect/Record';
 
 export function recallApprovedAuthoritative(
@@ -32,14 +33,18 @@ export function recallEligibilityPredicate(
     ' AND ',
   );
   const access = policy?.externalResources ?? {};
-  const externalPredicate =
-    EffectRecord.keys(access).length === 0
+  const deferred = recallSelectionDefersExternalAuthorization(policy);
+  const externalPredicate = deferred
+    ? '1 = 1'
+    : EffectRecord.keys(access).length === 0
       ? outside
       : `(${outside} OR EXISTS (SELECT 1 FROM json_each(?) AS external_access WHERE external_access.key = ${alias}.uri ${externalHashExpression === false ? '' : `AND external_access.value = ${externalHashExpression}`}))`;
-  const externalParams = [
-    ...EffectArray.flatMap(roots, root => [root, `${root}/`, `${root}0`]),
-    ...(EffectRecord.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
-  ];
+  const externalParams = deferred
+    ? []
+    : [
+        ...EffectArray.flatMap(roots, root => [root, `${root}/`, `${root}0`]),
+        ...(EffectRecord.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
+      ];
   if (policy === undefined || policy.kind === 'pinned-hard-uri-bypass') {
     return {params: externalParams, restricted: true, sql: externalPredicate};
   }

@@ -10,7 +10,19 @@ import {
 } from './index/result.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
-import type {SqlError} from 'effect/sql/SqlError';
+import {
+  readyRecallSelectionPolicy,
+  useRecallDatabaseReadOnly,
+  recallSelectionDefersExternalAuthorization,
+  DEFAULT_RECALL_QUERY_RESULT_LIMIT as DEFAULT_QUERY_RESULT_LIMIT,
+  MAX_READY_RECALL_SOURCE_CHECKS,
+  normalizeRecallExactTerms,
+  RecallReadyReadIncomplete,
+  type RecallReadyExactWindow,
+  type RecallMetadataRow,
+  loadRecallMetadata,
+  numericMetadata,
+} from './index/read_policy.js';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
@@ -188,11 +200,6 @@ interface RecallDocumentRow {
   readonly uri: string;
 }
 
-interface RecallMetadataRow {
-  readonly key: string;
-  readonly value: string;
-}
-
 interface RecallTermStatisticRow {
   readonly document_frequency: number;
   readonly term: string;
@@ -202,7 +209,6 @@ const RECALL_INDEX_DATABASE_VERSION = 13;
 const RECALL_INDEX_POINTER_VERSION = 1;
 const ACTIVE_DATABASE_FILENAME = `active-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
 const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
-const DEFAULT_QUERY_RESULT_LIMIT = 100;
 const QUERY_POSTING_POOL_MULTIPLIER = 5;
 const MINIMUM_QUERY_POSTING_POOL = 500;
 let staleGenerationCounter = 0;
@@ -355,6 +361,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
       const fs = yield* FileSystem.FileSystem;
       const pathService = yield* Path.Path;
       let readState: RecallReadyReadState | undefined;
+      const exactWindows: RecallReadyExactWindow[] = [];
       if (options.readyOnly) {
         yield* sql.unsafe('PRAGMA busy_timeout = 50');
         const metadata = yield* loadRecallMetadata(sql);
@@ -401,11 +408,13 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
           indexLockHeld,
         );
       }
-      const externalResources = yield* loadExternalResourceAccess({
-        home: config.agentContextHome,
-        account: config.account,
-        user: config.user,
-      });
+      const externalResources = options.readyOnly
+        ? {}
+        : yield* loadExternalResourceAccess({
+            home: config.agentContextHome,
+            account: config.account,
+            user: config.user,
+          });
       const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
       const allowedExternalCandidate = (candidate: RecallCandidate) =>
         !isExternalResourceUri(candidate.uri)
@@ -413,10 +422,19 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
           : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
               Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
             );
-      const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy => ({
-        ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
-        externalResources,
-      });
+      const filterUriMatches = <A>(matches: readonly A[]) =>
+        options.readyOnly
+          ? Effect.succeed(matches)
+          : filterExternalUriMatches(matches, externalLocation, externalResources);
+      const filterData = (data: RecallIndexData) =>
+        options.readyOnly ? Effect.succeed(data) : filterExternalRecallData(data, allowedExternalCandidate);
+      const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy =>
+        options.readyOnly
+          ? readyRecallSelectionPolicy(policy)
+          : {
+              ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
+              externalResources,
+            };
       const effectiveOptions =
         'selections' in options
           ? {
@@ -428,13 +446,9 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
             }
           : {...options, eligibility: accessEligibility(options.eligibility)};
       let result: unknown = yield* 'anchors' in effectiveOptions
-        ? selectRecallCodeLinks(sql, effectiveOptions).pipe(
-            Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
-          )
+        ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
         : 'memorySeeds' in effectiveOptions
-          ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(
-              Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
-            )
+          ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
           : Effect.gen(function* () {
               const metadata = yield* loadRecallMetadata(sql);
               const generation = metadata.get('content_generation') ?? '';
@@ -450,24 +464,31 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
                   metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
                 );
               return 'terms' in effectiveOptions
-                ? yield* selectRecallExactMatches(sql, effectiveOptions).pipe(
-                    Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
-                  )
+                ? yield* selectRecallExactMatches(
+                    sql,
+                    effectiveOptions,
+                    options.readyOnly ? exactWindows : undefined,
+                  ).pipe(Effect.flatMap(filterUriMatches))
                 : 'selections' in effectiveOptions
                   ? yield* Effect.forEach(
                       effectiveOptions.selections,
                       selection =>
                         selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
-                          Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
+                          Effect.flatMap(filterData),
                         ),
                       {concurrency: 1},
                     )
-                  : yield* selectData(effectiveOptions).pipe(
-                      Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
-                    );
+                  : yield* selectData(effectiveOptions).pipe(Effect.flatMap(filterData));
             });
       if (options.readyOnly) {
-        const validated = yield* validateRecallReadyResult(sql, config, options, result, decodeCandidateRow);
+        const validated = yield* validateRecallReadyResult(
+          sql,
+          config,
+          options,
+          result,
+          decodeCandidateRow,
+          exactWindows,
+        );
         result = validated.result;
         if (validated.removed && readState?.freshness !== 'stale') {
           const maintenance = yield* requestReadyRecallMaintenance({
@@ -872,6 +893,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   loadIdentityConflicts: ReturnType<typeof RecallIndexIdentity.createRecallIdentityConflictLoader>,
   physicalDocumentCount?: number,
 ) {
+  const readySelection = recallSelectionDefersExternalAuthorization(options.eligibility);
   if (options.query === undefined) {
     const rows =
       options.memoryIds !== undefined
@@ -880,20 +902,27 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
             [...new Set(options.memoryIds)].sort(),
             options.allowedUriScopes,
             options.eligibility,
+            readySelection ? MAX_READY_RECALL_SOURCE_CHECKS + 1 : undefined,
           )
-        : options.allowedUriScopes?.length ||
+        : readySelection ||
+            options.allowedUriScopes?.length ||
             recallEligibilityPolicyRestrictsCandidates(options.eligibility) ||
             options.limit !== undefined ||
             options.project !== undefined ||
             options.workspaceScope !== undefined
-          ? yield* selectRecallDocumentSample(sql, options)
+          ? yield* selectRecallDocumentSample(
+              sql,
+              readySelection ? {...options, limit: options.limit ?? DEFAULT_QUERY_RESULT_LIMIT} : options,
+            )
           : yield* sql<RecallDocumentRow>`SELECT id, uri, candidate_json FROM documents ORDER BY uri`;
-    const logicalCandidates = deduplicateLogicalRecallCandidates(
-      EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
-        recallIndexCandidateIsEligible(options.eligibility, candidate),
-      ),
+    if (readySelection && rows.length > MAX_READY_RECALL_SOURCE_CHECKS)
+      return yield* RecallIndexOperationError.make({message: 'Ready identity selection exceeds its bounded window.'});
+    const selected = EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
+      recallIndexCandidateIsEligible(options.eligibility, candidate),
     );
-    const candidates = options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
+    const logicalCandidates = readySelection ? selected : deduplicateLogicalRecallCandidates(selected);
+    const candidates =
+      readySelection || options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
     const identityConflicts = yield* loadIdentityConflicts(
       options.allowedUriScopes,
       options.eligibility,
@@ -903,7 +932,11 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
       candidates: RecallIndexIdentity.markRecallIdentityConflicts(candidates, identityConflicts),
       corpusStatistics,
       generation,
-      queryExhaustive: options.memoryIds !== undefined || options.limit === undefined,
+      queryExhaustive:
+        options.memoryIds !== undefined ||
+        (readySelection
+          ? rows.length < boundedRecallPhysicalCandidateLimit(options.limit ?? DEFAULT_QUERY_RESULT_LIMIT)
+          : options.limit === undefined),
     } satisfies RecallIndexData;
   }
   const selected: RecallCandidate[] = [];
@@ -1014,7 +1047,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
       }
     }
   }
-  const deduplicated = deduplicateLogicalRecallCandidates(selected);
+  const deduplicated = readySelection ? selected : deduplicateLogicalRecallCandidates(selected);
   const requiredUriSet = new Set(requiredUris);
   const requiredCandidates = EffectArray.filter(
     deduplicated,
@@ -1026,11 +1059,13 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   );
   const rankedCandidates = EffectArray.filter(deduplicated, candidate => !requiredCandidates.includes(candidate)).slice(
     0,
-    resultLimit,
+    readySelection ? candidateDecodeLimit : resultLimit,
   );
   const candidates = [...requiredCandidates, ...rankedCandidates];
   const recentCandidates = EffectArrayPipe(
-    deduplicateLogicalRecallCandidates(EffectArray.map(recentRows, decodeCandidateRow)),
+    readySelection
+      ? EffectArray.map(recentRows, decodeCandidateRow)
+      : deduplicateLogicalRecallCandidates(EffectArray.map(recentRows, decodeCandidateRow)),
     __effectArrayValues =>
       EffectArray.filter(
         __effectArrayValues,
@@ -1055,7 +1090,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
     postingTerms: EffectArray.map(postingRows, posting => posting.term),
     queryTerms,
     rankedDocumentCount: rankedIds.length,
-    resultLimit,
+    resultLimit: readySelection ? candidateDecodeLimit : resultLimit,
   });
   const identityConflicts = yield* loadIdentityConflicts(
     options.allowedUriScopes,
@@ -1076,30 +1111,26 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
 const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function* (
   sql: SqlClient.SqlClient,
   options: LoadRecallExactMatchesOptions,
+  readyWindows?: RecallReadyExactWindow[],
 ) {
-  const terms = [
-    ...new Map(
-      EffectArray.map(
-        EffectArray.filter(
-          EffectArray.map(options.terms, term => Effect2.pipe(term, EffectString.trim)),
-          Boolean,
-        ),
-        term => [Effect2.pipe(term, EffectString.toLocaleLowerCase()), term] as const,
-      ),
-    ).values(),
-  ];
+  const terms = normalizeRecallExactTerms(options.terms);
   const scopes = [...new Set(EffectArray.map(options.uriScopes, stripRecallAnchor))];
   const limitPerTerm = Math.max(0, Math.floor(options.limitPerTerm ?? 25));
   if (terms.length === 0 || scopes.length === 0 || limitPerTerm === 0) {
     return [] satisfies readonly RecallExactMatch[];
   }
   const matchedTermsByUri = new Map<string, Set<string>>();
+  let remaining = MAX_READY_RECALL_SOURCE_CHECKS;
   for (const scopeUri of scopes) {
     const scope = combineRecallSqlPredicates(
       recallUriScopePredicate('d', [scopeUri]),
       recallEligibilityPredicate('d', options.eligibility),
     );
     for (const term of terms) {
+      if (options.readyOnly && --remaining < 0)
+        return yield* RecallReadyReadIncomplete.make({
+          message: 'Ready exact selection exceeds its bounded work window.',
+        });
       const phrase = `"${Effect2.pipe(normalizeRecallSearchText(term), EffectString.replaceAll('"', '""'))}"`;
       const rows = yield* sql.unsafe<{readonly uri: string}>(
         `SELECT d.uri
@@ -1109,13 +1140,23 @@ const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function
            AND ${scope.sql}
          ORDER BY d.uri
          LIMIT ?`,
-        [phrase, ...scope.params, limitPerTerm],
+        [phrase, ...scope.params, options.readyOnly ? boundedRecallPhysicalCandidateLimit(limitPerTerm) : limitPerTerm],
       );
       for (const row of rows) {
+        if (options.readyOnly && --remaining < 0)
+          return yield* RecallReadyReadIncomplete.make({
+            message: 'Ready exact selection exceeds its bounded work window.',
+          });
         const matched = matchedTermsByUri.get(row.uri) ?? new Set<string>();
         matched.add(term);
         matchedTermsByUri.set(row.uri, matched);
       }
+      readyWindows?.push({
+        scope: scopeUri,
+        term,
+        uris: EffectArray.map(rows, row => row.uri),
+        complete: rows.length < boundedRecallPhysicalCandidateLimit(limitPerTerm),
+      });
     }
   }
   return EffectArray.map(
@@ -1219,31 +1260,6 @@ function useRecallDatabase<A, E, R>(
     Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
       Effect.withSpan('recall.acquireDatabase'),
       Effect.flatMap(context => effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'))),
-    ),
-  );
-}
-
-function useRecallDatabaseReadOnly<A, E, R>(
-  databasePath: string,
-  effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-): Effect.Effect<A, E | SqlError, Exclude<R, SqlClient.SqlClient>> {
-  return Effect.scoped(
-    Layer.build(
-      SqliteClient.layer({
-        create: false,
-        busyTimeout: 50,
-        disableWAL: true,
-        filename: databasePath,
-        readonly: true,
-        readwrite: false,
-      }).pipe(Layer.orDie),
-    ).pipe(
-      Effect.flatMap(context =>
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          return yield* sql.withTransaction(effect);
-        }).pipe(Effect.provide(context)),
-      ),
     ),
   );
 }
@@ -1795,17 +1811,6 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
   }
   yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
 });
-
-function loadRecallMetadata(sql: SqlClient.SqlClient) {
-  return sql<RecallMetadataRow>`SELECT key, value FROM metadata`.pipe(
-    Effect.map(rows => new Map(EffectArray.map(rows, row => [row.key, row.value]))),
-  );
-}
-
-function numericMetadata(metadata: ReadonlyMap<string, string>, key: string): number {
-  const value = Number(metadata.get(key) ?? '0');
-  return Number.isFinite(value) ? value : 0;
-}
 
 /**
  * Legacy URI edges retain only a locator digest. Re-resolve every such row

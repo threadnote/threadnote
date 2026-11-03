@@ -17,6 +17,7 @@ import {
   readRecallIndexData,
   readRecallIndexDataBatch,
   readRecallExactMatches,
+  loadRecallExactMatches,
   recallIndexStatus,
   recallIndexDatabaseFilename,
   readRecallMemoryIdentities,
@@ -85,6 +86,26 @@ const eligibility = {
 } as const;
 
 describe('ready lexical readers', () => {
+  effectIt.effect('retains binary SQL order for an exact limit before sorting the returned union', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename} = yield* fixture;
+      for (const name of ['Z.md', 'a.md'])
+        yield* fs.writeFileString(
+          path.join(path.dirname(filename), name),
+          EffectString.replace('Useful alpha sentinel evidence.', 'orderneedle source')(body()),
+        );
+      yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true, memoryIds: []});
+      const options = {
+        includeInactive: false,
+        terms: [' orderneedle '],
+        uriScopes: ['threadnote://user/me/memories'],
+        limitPerTerm: 1,
+      };
+      const expected = yield* loadRecallExactMatches(config, options);
+      expect(EffectArray.map(expected, match => match.uri)).toEqual(['threadnote://user/me/memories/durable/Z.md']);
+      expect(yield* readRecallExactMatches(config, options)).toEqual(expected);
+    }).pipe(provide),
+  );
   effectIt.effect('bounds concurrent canonical checks and preserves deterministic candidate order', () =>
     Effect.gen(function* () {
       const {fs, path, config, filename} = yield* fixture;

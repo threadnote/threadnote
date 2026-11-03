@@ -75,6 +75,7 @@ export function selectRecallDocumentRowsByMemoryIds(
   memoryIds: readonly string[],
   allowedUriScopes: readonly string[] | undefined,
   eligibility: RecallEligibilityPolicy | undefined,
+  rowLimit?: number,
 ) {
   return Effect.gen(function* () {
     const rows: RecallDocumentSampleRow[] = [];
@@ -94,10 +95,11 @@ export function selectRecallDocumentRowsByMemoryIds(
            FROM documents AS d
            WHERE ${scope.sql}
              AND json_extract(d.candidate_json, '$.memoryId') IN (${parameters})
-           ORDER BY d.uri`,
-          [...scope.params, ...batch],
+           ORDER BY d.uri${rowLimit === undefined ? '' : ' LIMIT ?'}`,
+          [...scope.params, ...batch, ...(rowLimit === undefined ? [] : [rowLimit - rows.length])],
         )),
       );
+      if (rowLimit !== undefined && rows.length >= rowLimit) break;
     }
     return rows;
   });
