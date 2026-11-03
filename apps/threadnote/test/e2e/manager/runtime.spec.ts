@@ -15,7 +15,10 @@ async function runtimeSection(page: import('@playwright/test').Page) {
     .click();
 }
 
-test('S17 process inspection and guarded termination affect only a benign owned runtime', async ({page, manager}) => {
+test('S17 process inspection and guarded termination affect only a benign owned runtime', async ({
+  page,
+  manager,
+}, testInfo) => {
   const sentinel = await manager.remember('Preserve the runtime sentinel.', 'runtime-sentinel');
   const before = await manager.cli(['read', sentinel]);
   const child = manager.launch(candidateBinary, [
@@ -35,14 +38,41 @@ test('S17 process inspection and guarded termination affect only a benign owned 
     .getByRole('navigation', {name: 'Manager sections'})
     .getByRole('button', {name: 'Processes', exact: true})
     .click();
-  const inspect = page.getByRole('button', {name: new RegExp(`^Inspect .+ process ${pid}$`, 'u')});
-  const row = page.getByRole('listitem').filter({has: inspect});
-  await inspect.click();
-  const detail = page.getByRole('dialog');
-  await expect(detail).toContainText(`PID ${pid}`);
-  await expect(detail).toContainText('Private arguments and environment variables stay hidden.');
-  await detail.getByRole('button', {name: 'Close details', exact: true}).click();
-  const stop = row.getByRole('button', {name: new RegExp(`^Terminate .+ process ${pid}$`, 'u')});
+  const stop = page.getByRole('button', {name: new RegExp(`^Terminate .+ process ${pid}$`, 'u')});
+  const row = page.getByRole('listitem').filter({has: stop});
+  await expect(row).toContainText(`PID ${pid}`);
+  for (const field of ['CPU', 'Memory', 'Parent', 'Age', 'Version', 'Worktree', 'Branch', 'Idle'])
+    await expect(row).toContainText(new RegExp(field, 'iu'));
+  await expect(row.getByRole('button', {name: /Inspect|Details/u})).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(row.locator('dt').filter({hasText: /^CPU$/u}).locator('..').locator('dd')).toHaveText(/^\d+\.\d%$/u);
+  for (const theme of ['Light', 'Dark']) {
+    await page.setViewportSize({width: 1280, height: 900});
+    await page.getByRole('button', {name: theme, exact: true}).click();
+    const cpuColors = await page.locator('html').evaluate(element => {
+      const style = getComputedStyle(element);
+      const colors: string[][] = [];
+      for (const [foreground, background] of [
+        ['--warn', '--warn-soft'],
+        ['--danger', '--danger-soft'],
+      ]) {
+        colors.push([style.getPropertyValue(foreground), style.getPropertyValue(background)]);
+      }
+      return colors;
+    });
+    for (const [foreground, background] of cpuColors)
+      expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
+
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({width, height: 900});
+      await row.scrollIntoViewIfNeeded();
+      await expect(stop).toBeVisible();
+      expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      if (width === 1280) expect((await row.boundingBox())!.height).toBeLessThan(180);
+      await row.screenshot({path: testInfo.outputPath(`process-lane-${EffectString.toLowerCase(theme)}-${width}.png`)});
+    }
+  }
+  await page.setViewportSize({width: 1280, height: 900});
   await stop.click();
   const confirm = page.getByRole('dialog', {name: 'Terminate Threadnote process?', exact: true});
   await confirm.getByRole('button', {name: 'Cancel', exact: true}).click();
@@ -234,3 +264,18 @@ test('S17 operations footer opens the real process inventory for a fixture-owned
   const contents = await Promise.all(EffectArray.map(files, file => readFile(join(directory, file), 'utf8')));
   expect(EffectArray.join(contents, '\n')).toContain('github-e2e-needle');
 });
+
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (color: string) => {
+    const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(EffectString.trim(color));
+    if (!match) throw Error(`Expected an RGB hex color, received ${color}`);
+    const channels = EffectArray.map([match[1], match[2], match[3]], value => {
+      const channel = Number.parseInt(value, 16) / 255;
+      return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const first = luminance(foreground);
+  const second = luminance(background);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}

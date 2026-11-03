@@ -15,6 +15,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 let reactRoot: Root | undefined;
+let cpuPercent: number;
 let fetchOriginal: typeof fetch;
 let requests: Array<{readonly body?: Record<string, unknown>; readonly path: string}>;
 
@@ -22,6 +23,7 @@ beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   fetchOriginal = globalThis.fetch;
   requests = [];
+  cpuPercent = 250;
   vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
     const path =
       typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
@@ -53,6 +55,7 @@ beforeEach(() => {
             processId: 80297,
             processRef: `tnp_${Effect.pipe('a', EffectString.repeat(64))}`,
             role: 'graph-compaction-worker',
+            cpu: {state: 'sampling', sampledAt: new Date().toISOString()},
             rssBytes: 100 * 1_024 * 1_024,
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
@@ -65,6 +68,16 @@ beforeEach(() => {
             processId: 80300,
             processRef: `tnp_${Effect.pipe('b', EffectString.repeat(64))}`,
             role: 'mcp',
+            cpu: {state: 'sampled', percent: cpuPercent, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
+            displayContext: {
+              client: {name: 'Codex', version: '1.2'},
+              workspace: {
+                state: 'active',
+                path: '/work/projects/a-very-long-worktree-name/packages/application',
+                observedAt: new Date().toISOString(),
+              },
+              branch: {state: 'branch', name: 'feature/process-lanes'},
+            },
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
           },
@@ -85,6 +98,7 @@ beforeEach(() => {
             parentProcessId: 1,
             processId: 80276,
             role: 'manager',
+            cpu: {state: 'sampled', percent: 0, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: false,
             terminationBlockedReason: 'current-manager',
@@ -112,7 +126,7 @@ describe('Manager Processes panel', () => {
     expect(processList?.querySelectorAll('[role="listitem"]')).toHaveLength(5);
     expect(document.body.textContent).toContain('Graph compaction worker');
     expect(document.body.textContent).toContain('Compact graph storage');
-    expect(document.body.textContent).toContain('This session · Verified runtime');
+    expect(document.body.textContent).toContain('Current');
     expect(document.body.textContent).toContain('MCP server');
     expect(document.body.textContent).toContain('Graph builder activity');
     expect(document.body.textContent).toContain('Graph query worker');
@@ -126,10 +140,65 @@ describe('Manager Processes panel', () => {
     expect(stop?.title).toBe('Terminate Graph compaction worker');
     expect(stop?.disabled).toBe(false);
     expect(managerStop).toBeNull();
-    await act(async () =>
-      document.querySelector<HTMLButtonElement>('[aria-label="Inspect Manager process 80276"]')?.click(),
+    expect(document.querySelector('[aria-label="Inspect Manager process 80276"]')).toBeNull();
+    expect(document.querySelector('dialog')).toBeNull();
+    expect(document.body.textContent).toContain('80276');
+  });
+
+  it('shows metrics and workspace/client context inline with separate activity and identity badges', async () => {
+    await renderProcesses();
+    const text = document.querySelector('[aria-label="Threadnote process inventory"]')?.textContent;
+    for (const value of [
+      'CPU',
+      '250.0%',
+      '0.0%',
+      'Sampling…',
+      'Unavailable',
+      '100.0 MiB',
+      'PID 80297',
+      'Parent',
+      'Version',
+      'Worktree',
+      '/work/projects/a-very-long-worktree-name/packages/application',
+      'feature/process-lanes',
+      'Codex v1.2',
+      'chat title',
+      'Not reported:',
+      'The current Manager process is protected',
+    ])
+      expect(text).toContain(value);
+    expect(document.querySelector('.process-status-running')?.textContent).toContain('Running');
+    expect(document.querySelector('.process-status-idle')?.textContent).toContain('Idle');
+    expect(document.querySelector('.process-row .process-identity-current')?.textContent).toContain('Current');
+    expect(document.body.textContent).not.toContain('Inspect');
+    expect(document.querySelectorAll('.process-fact > svg').length).toBeGreaterThan(10);
+    const compaction = document.querySelector('.process-row');
+    expect(compaction?.querySelector('.process-lane-metadata')?.textContent).not.toContain('Compact graph storage');
+    expect(compaction?.querySelectorAll('.process-missing')).toHaveLength(1);
+  });
+
+  it.each([
+    [0, 'normal'],
+    [49.9, 'normal'],
+    [50, 'warn'],
+    [99, 'warn'],
+    [99.9, 'warn'],
+    [100, 'critical'],
+    [250, 'critical'],
+    [49.96, 'warn'],
+    [99.96, 'critical'],
+  ])('colors the displayed CPU value %s as %s', async (percent, tone) => {
+    cpuPercent = Number(percent);
+    await renderProcesses();
+    const row = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...document.querySelectorAll('.process-row')], element =>
+        Effect.pipe(element.textContent ?? '', EffectString.includes('PID 80300')),
+      ),
     );
-    expect(document.querySelector('dialog')?.textContent).toContain('80276');
+    const badge = row?.querySelector('.process-fact-metric');
+    expect(badge?.classList.contains(`process-cpu-${tone}`)).toBe(true);
+    expect(badge?.textContent).toContain(`${Number(percent).toFixed(1)}%`);
+    expect(document.querySelector('.process-status-running')?.textContent).toContain('Running');
   });
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {

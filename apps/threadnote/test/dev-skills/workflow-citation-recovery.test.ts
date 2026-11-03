@@ -4,6 +4,7 @@ import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -13,7 +14,8 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {finalizeDeferredCodeAnchors} from '../../src/memory/deferred/code_anchor.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import {loadWorkflowJournal, workflowLocation} from '../../src/workflow_memory/journal.js';
+import {loadWorkflowJournal, workflowLocation, withWorkflowLock} from '../../src/workflow_memory/journal.js';
+import {executeWorkflowOperation} from '../../src/workflow_memory/artifacts.js';
 import {reconcileWorkflowCitationEnrichment} from '../../src/workflow_memory/citation_recovery.js';
 import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -120,6 +122,79 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (
 });
 
 describe('workflow deferred citation recovery', () => {
+  effectIt.effect('captures enrichment and serializes its receipt history outside shared memory locks', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.call({
+        ...f.create,
+        operationId: 'sibling',
+        artifactKey: 'sibling',
+        codeRefs: [],
+      });
+      const state = yield* loadWorkflowJournal(f.config, f.binding.bindingId).pipe(
+        Effect.provideService(SystemInfo, f.context),
+      );
+      const held = new Set<string>();
+      const historyLocks: number[] = [];
+      const graphLocks: number[] = [];
+      const memoryRoot = f.path.join(f.config.agentContextHome, 'threadnote', 'memory-locks');
+      const fs = FileSystem.FileSystem.of({
+        ...f.fs,
+        writeFileString: (file, content, options) =>
+          f.fs.writeFileString(file, content, options).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (EffectString.startsWith(memoryRoot)(file) && options?.flag === 'wx') held.add(file);
+              }),
+            ),
+          ),
+        remove: (file, options) =>
+          f.fs.remove(file, options).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                held.delete(file);
+              }),
+            ),
+          ),
+      });
+      const sibling = new Proxy(state.operations.sibling, {
+        ownKeys: target => {
+          historyLocks.push(held.size);
+          return Reflect.ownKeys(target);
+        },
+      });
+      const initial = {...state, operations: {...state.operations, sibling}};
+      const query = yield* CodeGraphQueryService;
+      const guarded = CodeGraphQueryService.of({
+        ...query,
+        status: (...args) =>
+          Effect.sync(() => {
+            graphLocks.push(held.size);
+          }).pipe(Effect.andThen(query.status(...args))),
+      });
+      const recovered = yield* withWorkflowLock(
+        f.config,
+        f.binding.bindingId,
+        executeWorkflowOperation(f.config, initial, {
+          protocolVersion: 1,
+          action: 'recover',
+          bindingId: f.binding.bindingId,
+          operationId: f.create.operationId,
+        }),
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(SystemInfo, f.context),
+        Effect.provideService(CodeGraphQueryService, guarded),
+      );
+      expect(recovered).toMatchObject({status: 'ok', revision: sha256HexSync(f.content)});
+      expect(historyLocks.length).toBeGreaterThan(0);
+      expect(graphLocks.length).toBeGreaterThan(0);
+      expect(EffectArray.every(historyLocks, count => count === 0)).toBe(true);
+      expect(EffectArray.every(graphLocks, count => count === 0)).toBe(true);
+      expect(held.size).toBe(0);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('recovers exact native partial enrichment when an original reference is absent', () =>
     Effect.gen(function* () {
       const codeRefs = ['src/value.ts', 'src/removed.ts'];

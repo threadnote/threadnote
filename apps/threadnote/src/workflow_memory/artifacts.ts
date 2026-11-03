@@ -1,7 +1,9 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {DateTime, Effect, FileSystem, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
-import {ResourceStore, ResourceNotFound} from '@threadnote/store/resource-store';
+import {ResourceStore, ResourceNotFound, type ResourceStoreMutation} from '@threadnote/store/resource-store';
+import {withCanonicalMutationLock} from '@threadnote/store/resource/mutation_generation';
+import {resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
 import {makeResourceIdScopeChecker, parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {
@@ -26,25 +28,23 @@ import {
 } from '../workflow_automation/native_jobs.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {readWorkflowSharedRoots} from './scopes.js';
-import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, verifyWorkflowEvidenceBytes} from './evidence.js';
+import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from './evidence.js';
 import {
   discardDeferredCodeAnchorIntent,
   discardOtherDeferredCodeAnchorIntents,
-  stageDeferredCodeAnchorIntent,
+  prepareDeferredCodeAnchorIntent,
+  persistPreparedDeferredCodeAnchorIntent,
+  schedulePreparedDeferredCodeAnchorIntent,
   withDeferredCodeAnchorMutationLocks,
   type DeferredCodeAnchorWriteRequest,
 } from '../memory/deferred/code_anchor.js';
-import {
-  resolveAuthoredMemoryRelations,
-  verifyAuthoredMemoryRelationTargetIdentities,
-  memoryIdentityWriteLockKeys,
-} from '../memory/relations.js';
+import {resolveAuthoredMemoryRelations, memoryIdentityWriteLockKeys} from '../memory/relations.js';
 import {
   readOptionalResource,
   workflowLocation,
   writeJournalFile,
-  persistWorkflowState,
-  assertWorkflowTransition,
+  prepareWorkflowState,
+  persistPreparedWorkflowState,
 } from './journal.js';
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
 import {reconcileWorkflowCitationEnrichment} from './citation_recovery.js';
@@ -495,135 +495,205 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   const intentDigest = yield* sha256Hex(stableJson({...request, mutation: undefined}));
   if (existing && request.action !== 'recover' && existing.intentDigest !== intentDigest)
     return yield* workflowError('operation-intent-conflict', 'This operationId already belongs to different intent.');
-  let operation = existing ?? (yield* prepareWorkflowOperation(config, initial, request));
-  let prepared = {...initial, operations: {...initial.operations, [operationId]: operation}};
-  const finalArtifacts = {...prepared.artifacts, [operation.artifact.canonicalUri]: operation.artifact};
-  if (operation.request.action === 'archive' && operation.sourceUri) delete finalArtifacts[operation.sourceUri];
-  if (existing?.status !== 'verified' || operation.request.action === 'archive')
-    yield* assertWorkflowTransition(config, prepared, {
-      ...prepared,
-      artifacts: finalArtifacts,
-      operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
-    });
-  if (!existing) yield* writeJournalFile(config, prepared);
+  const original = existing ?? (yield* prepareWorkflowOperation(config, initial, request));
+  const prepared = {...initial, operations: {...initial.operations, [operationId]: original}};
   const store = yield* ResourceStore;
   const fs = yield* FileSystem.FileSystem;
-  let artifact = operation.artifact;
-  const isArchive = operation.request.action === 'archive';
-  if (operation.status === 'verified' && initial.artifacts[artifact.canonicalUri]?.revision !== artifact.revision)
+  const path = yield* Path.Path;
+  if (
+    original.status === 'verified' &&
+    initial.artifacts[original.artifact.canonicalUri]?.revision !== original.artifact.revision
+  )
     return yield* workflowError(
       'operation-superseded',
       'A later operation changed or retired this artifact. The earlier operation cannot recreate it.',
     );
-  yield* withDeferredCodeAnchorMutationLocks(
-    fs,
-    config,
-    [
-      artifact.canonicalUri,
-      operation.sourceUri,
-      ...EffectArray.map(operation.relations, target => target.uri),
-      ...EffectArray.flatMap(operation.request.evidenceRefs ?? [], ref => [
-        ref.uri,
-        memoryIdentityLockKey(ref.memoryId),
-      ]),
-      ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
-    ],
-    Effect.gen(function* () {
-      yield* verifyWorkflowEvidence(config, initial.binding, operation.request.evidenceRefs);
-      const current = yield* readOptionalResource(config, artifact.canonicalUri);
-      const enriched = yield* reconcileWorkflowCitationEnrichment(config, initial.binding, operation, current);
-      if (enriched) {
-        yield* trackPotentialWorkflowMutation(config, [enriched.artifact.canonicalUri]);
-        operation = {...enriched, status: 'verified'};
-        artifact = enriched.artifact;
-        prepared = yield* persistWorkflowState(config, prepared, {
-          ...prepared,
-          artifacts: {...prepared.artifacts, [artifact.canonicalUri]: artifact},
-          operations: {...prepared.operations, [operationId]: operation},
-        });
-      }
-      if (operation.status === 'verified' && current !== operation.desired)
-        return yield* workflowError(
-          'revision-conflict',
-          'A verified operation no longer matches its stored artifact; replay cannot restore overwritten or removed state.',
-        );
-      if (
-        current !== undefined &&
-        current !== operation.desired &&
-        current !== (isArchive ? undefined : operation.before)
-      )
-        return yield* workflowError(
-          'revision-conflict',
-          'The destination differs from both the pinned preimage and postimage.',
-        );
-      if (!isArchive && operation.status !== 'verified')
-        yield* trackPotentialWorkflowMutation(config, [
-          artifact.canonicalUri,
-          ...(operation.sourceUri ? [operation.sourceUri] : []),
-        ]);
-      if (isArchive) {
-        const source = yield* readOptionalResource(config, operation.sourceUri!);
-        if (source !== operation.before && !(source === undefined && current === operation.desired))
-          return yield* workflowError(
-            'revision-conflict',
-            'Archive source changed or disappeared without its verified archived copy.',
-          );
-        if (operation.status !== 'verified' || source !== undefined)
-          yield* trackPotentialWorkflowMutation(config, [artifact.canonicalUri, operation.sourceUri!]);
-        if (current === undefined)
-          yield* store.write(workflowLocation(config), artifact.canonicalUri, operation.desired, {mode: 'create'});
-        if (source !== undefined)
-          yield* store.remove(workflowLocation(config), operation.sourceUri!, {
-            expectedFingerprint: yield* store.fingerprint(operation.before!),
-          });
-      } else if (current !== operation.desired) {
-        const staged = operation.deferredCodeAnchor
-          ? yield* stageDeferredCodeAnchorIntent(config, {
-              memoryContent: operation.desired,
-              memoryMetadata: parseMemoryDocument(artifact.canonicalUri, operation.desired)!.metadata,
-              memoryUri: artifact.canonicalUri,
-              request: operation.deferredCodeAnchor,
-            })
-          : undefined;
-        const admitted = yield* CurrentNativeJobSourceView;
-        const promotion =
-          (operation.request.role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
-          Effect2.pipe(operation.request.role ?? '', EffectString.startsWith('closeout-'));
-        yield* store.writeChecked(
-          workflowLocation(config),
-          artifact.canonicalUri,
-          operation.desired,
-          {
-            mode: operation.before === undefined ? 'create' : 'replace',
-            ...(operation.before === undefined
-              ? {}
-              : {expectedFingerprint: yield* store.fingerprint(operation.before)}),
-          },
-          (admitted && promotion ? assertNativeJobLiveSource(admitted) : Effect.void).pipe(
-            Effect.andThen(verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations)),
-            Effect.andThen(verifyWorkflowEvidenceBytes(config, initial.binding, operation.request.evidenceRefs)),
-          ),
-        );
-        if (staged) yield* discardOtherDeferredCodeAnchorIntents(config, artifact.canonicalUri, staged.intentId);
-        else yield* discardDeferredCodeAnchorIntent(config, artifact.canonicalUri);
-      }
-      if (isArchive) yield* discardDeferredCodeAnchorIntent(config, operation.sourceUri!);
-      if ((yield* store.read(workflowLocation(config), artifact.canonicalUri)) !== operation.desired)
-        return yield* workflowError(
-          'readback-conflict',
-          'Artifact readback differs from the exact journaled document.',
-        );
-    }),
-  );
-  if (existing?.status === 'verified')
-    return {...(yield* readWorkflowArtifact(config, prepared, artifact.canonicalUri)), operationId};
+  const observed = original.deferredCodeAnchor
+    ? yield* readOptionalResource(config, original.artifact.canonicalUri)
+    : undefined;
+  const enriched = yield* reconcileWorkflowCitationEnrichment(config, initial.binding, original, observed);
+  const operation = enriched ? {...enriched, status: 'verified' as const} : original;
+  const artifact = operation.artifact;
+  const isArchive = operation.request.action === 'archive';
   const artifacts = {...prepared.artifacts, [artifact.canonicalUri]: artifact};
   if (isArchive && operation.sourceUri) delete artifacts[operation.sourceUri];
-  const updated = yield* persistWorkflowState(config, prepared, {
-    ...prepared,
-    artifacts,
-    operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
-  });
+  const needsReceipt = existing?.status !== 'verified' || enriched !== undefined;
+  const receipt =
+    needsReceipt || isArchive
+      ? yield* prepareWorkflowState(config, prepared, {
+          ...prepared,
+          artifacts,
+          operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
+        })
+      : undefined;
+  // The original intent remains the crash-recovery authority until exact canonical readback succeeds.
+  if (!existing) yield* writeJournalFile(config, prepared);
+  const expectedFingerprint = operation.before === undefined ? undefined : yield* store.fingerprint(operation.before);
+  const deferredMetadata = operation.deferredCodeAnchor
+    ? parseMemoryDocument(artifact.canonicalUri, operation.desired)!.metadata
+    : undefined;
+  const deferred =
+    !isArchive && operation.deferredCodeAnchor && !enriched && (deferredMetadata?.codeCitations?.length ?? 0) === 0
+      ? yield* prepareDeferredCodeAnchorIntent(config, {
+          memoryContent: operation.desired,
+          memoryMetadata: deferredMetadata!,
+          memoryUri: artifact.canonicalUri,
+          request: operation.deferredCodeAnchor,
+        })
+      : undefined;
+  let staged: Effect.Success<ReturnType<typeof persistPreparedDeferredCodeAnchorIntent>> | undefined;
+  yield* withWorkflowEvidenceAdmission(
+    config,
+    initial.binding,
+    operation.request.evidenceRefs ?? [],
+    operation.relations,
+    check =>
+      withDeferredCodeAnchorMutationLocks(
+        fs,
+        config,
+        [
+          artifact.canonicalUri,
+          operation.sourceUri,
+          ...EffectArray.map(operation.relations, target => target.uri),
+          ...EffectArray.flatMap(operation.request.evidenceRefs ?? [], ref => [
+            ref.uri,
+            memoryIdentityLockKey(ref.memoryId),
+          ]),
+          ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
+        ],
+        Effect.gen(function* () {
+          const current = yield* readOptionalResource(config, artifact.canonicalUri);
+          if (
+            original.deferredCodeAnchor &&
+            current !== observed &&
+            current !== operation.desired &&
+            current !== operation.before
+          )
+            return yield* workflowError(
+              'evidence-busy',
+              'Deferred citation state changed during preparation; retry the same operation.',
+            );
+          if (enriched) {
+            yield* trackPotentialWorkflowMutation(config, [enriched.artifact.canonicalUri]);
+          }
+          if (operation.status === 'verified' && current !== operation.desired)
+            return yield* workflowError(
+              'revision-conflict',
+              'A verified operation no longer matches its stored artifact; replay cannot restore overwritten or removed state.',
+            );
+          if (
+            current !== undefined &&
+            current !== operation.desired &&
+            current !== (isArchive ? undefined : operation.before)
+          )
+            return yield* workflowError(
+              'revision-conflict',
+              'The destination differs from both the pinned preimage and postimage.',
+            );
+          if (!isArchive && operation.status !== 'verified')
+            yield* trackPotentialWorkflowMutation(config, [
+              artifact.canonicalUri,
+              ...(operation.sourceUri ? [operation.sourceUri] : []),
+            ]);
+          if (isArchive) {
+            const source = yield* readOptionalResource(config, operation.sourceUri!);
+            if (source !== operation.before && !(source === undefined && current === operation.desired))
+              return yield* workflowError(
+                'revision-conflict',
+                'Archive source changed or disappeared without its verified archived copy.',
+              );
+            if (operation.status !== 'verified' || source !== undefined)
+              yield* trackPotentialWorkflowMutation(config, [artifact.canonicalUri, operation.sourceUri!]);
+            const mutations: ResourceStoreMutation[] = [];
+            if (current === undefined)
+              mutations.push({
+                type: 'write',
+                uri: artifact.canonicalUri,
+                content: operation.desired,
+                options: {mode: 'create'},
+              });
+            if (source !== undefined)
+              mutations.push({type: 'remove', uri: operation.sourceUri!, options: {expectedFingerprint}});
+            const verifyArchive = check.pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  if (
+                    current !== undefined &&
+                    (yield* readOptionalResource(config, artifact.canonicalUri)) !== operation.desired
+                  )
+                    return yield* workflowError(
+                      'revision-conflict',
+                      'The archived copy changed before source retirement.',
+                    );
+                  if (source === undefined && (yield* readOptionalResource(config, operation.sourceUri!)) !== undefined)
+                    return yield* workflowError(
+                      'revision-conflict',
+                      'The retired source reappeared before recovery admission.',
+                    );
+                }),
+              ),
+            );
+            if (mutations.length) yield* store.mutateChecked(workflowLocation(config), mutations, verifyArchive);
+            else
+              yield* withCanonicalMutationLock(
+                fs,
+                path,
+                config.agentContextHome,
+                config.account,
+                resourceAccountMutationLockPolicy,
+                verifyArchive,
+              );
+          } else if (current !== operation.desired) {
+            if (deferred) staged = yield* persistPreparedDeferredCodeAnchorIntent(config, deferred);
+            const admitted = yield* CurrentNativeJobSourceView;
+            const promotion =
+              (operation.request.role === 'authoring-root' && (yield* CurrentNativeJobReadyPromotion)) ||
+              Effect2.pipe(operation.request.role ?? '', EffectString.startsWith('closeout-'));
+            yield* store.writeChecked(
+              workflowLocation(config),
+              artifact.canonicalUri,
+              operation.desired,
+              {
+                mode: operation.before === undefined ? 'create' : 'replace',
+                ...(expectedFingerprint === undefined ? {} : {expectedFingerprint}),
+              },
+              // Git status is retained live validation and can scale with the checkout; it captures no source objects.
+              (admitted && promotion ? assertNativeJobLiveSource(admitted) : Effect.void).pipe(Effect.andThen(check)),
+            );
+            if (staged) yield* discardOtherDeferredCodeAnchorIntents(config, artifact.canonicalUri, staged.intentId);
+            else yield* discardDeferredCodeAnchorIntent(config, artifact.canonicalUri);
+          } else {
+            yield* withCanonicalMutationLock(
+              fs,
+              path,
+              config.agentContextHome,
+              config.account,
+              resourceAccountMutationLockPolicy,
+              check.pipe(
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    if ((yield* readOptionalResource(config, artifact.canonicalUri)) !== operation.desired)
+                      return yield* workflowError(
+                        'revision-conflict',
+                        'The committed postimage changed before recovery admission.',
+                      );
+                  }),
+                ),
+              ),
+            );
+          }
+          if (isArchive) yield* discardDeferredCodeAnchorIntent(config, operation.sourceUri!);
+          if ((yield* store.read(workflowLocation(config), artifact.canonicalUri)) !== operation.desired)
+            return yield* workflowError(
+              'readback-conflict',
+              'Artifact readback differs from the exact journaled document.',
+            );
+        }),
+      ),
+  );
+  if (deferred) yield* schedulePreparedDeferredCodeAnchorIntent(config, deferred.intent);
+  if (!needsReceipt) return {...(yield* readWorkflowArtifact(config, prepared, artifact.canonicalUri)), operationId};
+  const updated = yield* persistPreparedWorkflowState(config, receipt!);
   yield* refreshWorkflowRecall(config, [artifact.canonicalUri, ...(operation.sourceUri ? [operation.sourceUri] : [])]);
   return {...(yield* readWorkflowArtifact(config, updated, artifact.canonicalUri)), operationId};
 });

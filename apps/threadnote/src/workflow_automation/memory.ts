@@ -3,6 +3,9 @@ import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
+import {RecallIdentityAdmissionBusy} from '@threadnote/recall/index';
+import {FileLockTimeout, fileLockBusyMessage} from '@threadnote/platform/file/lock';
+import {ResourceIoFailed} from '@threadnote/store/resource-store';
 import {
   WorkflowAutomationError,
   WorkflowMemory,
@@ -20,6 +23,19 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 export const nativeWorkflowError = (error: unknown): WorkflowAutomationError => {
   if (Schema.is(WorkflowAutomationError)(error)) return error;
+  const lock = Schema.is(FileLockTimeout)(error)
+    ? error
+    : Schema.is(ResourceIoFailed)(error) && Schema.is(FileLockTimeout)(error.cause)
+      ? error.cause
+      : undefined;
+  if (lock)
+    return WorkflowAutomationError.make({
+      code: lock.category === 'memory' || lock.category === 'canonical-account' ? 'memory-busy' : 'admission-busy',
+      message: fileLockBusyMessage(lock),
+      retryable: true,
+    });
+  if (Schema.is(RecallIdentityAdmissionBusy)(error))
+    return WorkflowAutomationError.make({code: 'admission-busy', message: error.message, retryable: true});
   if (Schema.is(CodeGraphStoreBusyError)(error))
     return WorkflowAutomationError.make({
       code: 'evidence-busy',

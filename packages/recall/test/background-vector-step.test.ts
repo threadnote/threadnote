@@ -17,6 +17,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import type {SecureRandom} from 'effect/crypto';
 import {describe, expect, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -87,7 +88,9 @@ const fixture = Effect.gen(function* () {
     status: () => Effect.succeed(installed),
     verify: () => Effect.succeed(installed),
   });
-  const testContext = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo>();
+  const testContext = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+  >();
   let inputs = 0;
   let beforeInference = Effect.void as Effect.Effect<void, unknown>;
   const runtime = LocalModelRuntime.of({
@@ -140,7 +143,9 @@ const fixture = Effect.gen(function* () {
     store,
     runtime,
     inputs: () => inputs,
-    before: (program: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo>) => {
+    before: (
+      program: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>,
+    ) => {
       beforeInference = program.pipe(Effect.provide(testContext));
     },
   };

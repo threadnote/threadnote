@@ -14,6 +14,11 @@ import {emitAnonymousTelemetryEvent, withAnonymousTelemetry} from './telemetry.j
 import {triggerAutoUpdateIfEnabled} from '../release/auto_update.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  sanitizeThreadnoteProcessClientInfo,
+  setThreadnoteProcessClientInfo,
+  type ThreadnoteProcessClientInfo,
+} from '../process/diagnostics.js';
 
 const AUTO_UPDATE_CHECK_INTERVAL_MILLISECONDS = 15 * 60 * 1_000;
 
@@ -29,6 +34,10 @@ const mcpBrokerProgram = Effect.gen(function* () {
     takePreparedAgentSessionEnvironment(system.environment(), 'mcp-broker-runtime'),
   ).pipe(Effect.catchCause(() => succeedUndefined));
   const brokerFailureEvents = yield* Queue.dropping<McpBrokerFailureEvent>(64);
+  const clientInfoEvents = yield* Queue.dropping<ThreadnoteProcessClientInfo>(1);
+  yield* Effect.forkScoped(
+    Effect.forever(Queue.take(clientInfoEvents).pipe(Effect.flatMap(setThreadnoteProcessClientInfo))),
+  );
   yield* Effect.forkScoped(
     Effect.forever(Queue.take(brokerFailureEvents).pipe(Effect.flatMap(emitMcpBrokerFailureEvent), Effect.ignoreCause)),
   );
@@ -60,6 +69,10 @@ const mcpBrokerProgram = Effect.gen(function* () {
   yield* Effect.tryPromise({
     try: () =>
       runMcpBroker({
+        onClientInfo: value => {
+          const info = sanitizeThreadnoteProcessClientInfo(value);
+          if (info) Queue.offerUnsafe(clientInfoEvents, info);
+        },
         input: Bun.stdin.stream() as AsyncIterable<Uint8Array>,
         onFailure: event => {
           Queue.offerUnsafe(brokerFailureEvents, event);

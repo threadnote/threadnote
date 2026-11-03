@@ -12,7 +12,12 @@ import {
   Schema,
 } from 'effect';
 import * as Effect2 from 'effect';
-import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {
+  FileLockTimeout,
+  fileLockBusyMessage,
+  withExclusiveFileLock,
+  withNativeFileLockWaitBudget,
+} from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {codeGraphFileContentHashMatchesBytes} from '@threadnote/graph/content_identity';
@@ -35,12 +40,19 @@ import {
 import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
 import * as EffectString from 'effect/String';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+const retryableContention = (error: unknown): error is WorkflowAutomationError =>
+  Schema.is(WorkflowAutomationError)(error) &&
+  error.retryable === true &&
+  ['memory-busy', 'admission-busy', 'state-busy', 'job-busy', 'evidence-busy'].includes(error.code);
+const resumeAfterContention = (runId: string, jobId: string) =>
+  `Inspect status/result and existing canonical receipts, then resume job ${jobId} in run ${runId} with the same operation IDs after contention clears.`;
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const witnessLimit = 4 * 1024 * 1024;
 const receiptLimit = 64 * 1024;
 const workerLockOptions = {
+  category: 'native-worker',
   createParentDirectory: false,
   retryIntervalMilliseconds: 25,
   staleAfterMilliseconds: 300_000,
@@ -522,6 +534,7 @@ const withJobLock = <A, E, R>(
       fs,
       file + '.lock',
       {
+        category: 'native-job',
         createParentDirectory: false,
         retryIntervalMilliseconds: 25,
         staleAfterMilliseconds: 300_000,
@@ -530,8 +543,14 @@ const withJobLock = <A, E, R>(
       },
       program,
     ).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
-        Effect.fail(fail('job-busy', 'Another process is updating this job.')),
+      Effect.catchIf(Schema.is(FileLockTimeout), error =>
+        Effect.fail(
+          WorkflowAutomationError.make({
+            code: 'job-busy',
+            message: `${fileLockBusyMessage(error)} ${resumeAfterContention(runId, jobId)}`,
+            retryable: true,
+          }),
+        ),
       ),
     );
   });
@@ -985,6 +1004,7 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         const error = result.failure;
         const code = Schema.is(WorkflowAutomationError)(error) ? error.code : 'job-failed';
         const stop = code === 'job-stopped';
+        const contended = retryableContention(error);
         const blocked = /drift|conflict|approval|source|evidence|publication|busy/u.test(code);
         current = yield* transition(config, runId, jobId, state => ({
           ...state,
@@ -992,20 +1012,28 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           code,
           action: stop
             ? 'Resume this exact job after reviewing partial receipts.'
-            : blocked
-              ? 'Reconcile the original source, authority and canonical receipts; re-review before same-intent resume.'
-              : 'Inspect canonical receipts and retry this exact job only after resolving the failure.',
+            : contended
+              ? `${error.code === 'evidence-busy' ? 'Evidence admission is busy.' : error.message} ${resumeAfterContention(runId, jobId)}`
+              : blocked
+                ? 'Reconcile the original source, authority and canonical receipts; re-review before same-intent resume.'
+                : 'Inspect canonical receipts and retry this exact job only after resolving the failure.',
           updatedAt: Date.now(),
         }));
       }
       return nativeJobStatus(current.state);
-    }).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
-        Effect.fail(fail('job-busy', 'The original worker still owns this job.')),
+    }),
+  ).pipe(
+    Effect.catchIf(Schema.is(FileLockTimeout), error =>
+      Effect.fail(
+        WorkflowAutomationError.make({
+          code: 'job-busy',
+          message: `${fileLockBusyMessage(error)} ${resumeAfterContention(runId, jobId)}`,
+          retryable: true,
+        }),
       ),
     ),
   );
-});
+}, withNativeFileLockWaitBudget);
 export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   config: RuntimeConfig,
   input: unknown,

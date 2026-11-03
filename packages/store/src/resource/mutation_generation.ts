@@ -1,6 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
-import {Effect, FileSystem, Option, Path, Schema} from 'effect';
-import {resourceAccountMutationGenerationPath} from './lock.js';
+import {Context, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {withExclusiveFileLock, type ExclusiveFileLockOptions} from '@threadnote/platform/file/lock';
+import {resourceAccountMutationGenerationPath, resourceAccountMutationLockPath} from './lock.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -16,6 +17,58 @@ export class CanonicalMutationGenerationInvalid extends Schema.TaggedError<
 export interface CanonicalMutationGenerationTransition {
   readonly currentGeneration: string;
   readonly previousGeneration: string;
+}
+
+interface MutationFence {
+  readonly home: string;
+  readonly account: string;
+  active: boolean;
+  transition?: CanonicalMutationGenerationTransition;
+}
+const CurrentMutationFence = Context.Reference<MutationFence | undefined>('threadnote/CanonicalMutationFence', {
+  defaultValue: () => undefined,
+});
+
+/** Mint an unforgeable request-local capability only after the real account lock is acquired. */
+export function withCanonicalMutationLock<A, E, R>(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  home: string,
+  account: string,
+  options: ExclusiveFileLockOptions,
+  effect: Effect.Effect<A, E, R>,
+) {
+  return withExclusiveFileLock(
+    fs,
+    resourceAccountMutationLockPath(path, home, account),
+    options,
+    Effect.acquireUseRelease(
+      Effect.sync((): MutationFence => ({home, account, active: true})),
+      fence => effect.pipe(Effect.provideService(CurrentMutationFence, fence)),
+      fence =>
+        Effect.sync(() => {
+          fence.active = false;
+        }),
+    ),
+  );
+}
+
+/** Inherited invalidation fibers may use only a transition advanced by this still-owned fence. */
+export function canonicalMutationInvalidationIsCurrent(
+  home: string,
+  account: string,
+  transition: CanonicalMutationGenerationTransition | undefined,
+) {
+  return Effect.gen(function* () {
+    const fence = yield* CurrentMutationFence;
+    return (
+      fence?.active === true &&
+      fence.home === home &&
+      fence.account === account &&
+      transition !== undefined &&
+      fence.transition === transition
+    );
+  });
 }
 
 /**
@@ -79,10 +132,13 @@ export const advanceCanonicalMutationGeneration = Effect.fn('resourceMutationGen
     Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)),
   );
   yield* syncMutationGenerationDirectory(fs, directory);
-  return {
+  const transition = {
     currentGeneration: generation,
     previousGeneration,
   } satisfies CanonicalMutationGenerationTransition;
+  const fence = yield* CurrentMutationFence;
+  if (fence?.active && fence.home === home && fence.account === account) fence.transition = transition;
+  return transition;
 });
 
 function syncMutationGenerationDirectory(fs: FileSystem.FileSystem, directory: string): Effect.Effect<void, never> {
