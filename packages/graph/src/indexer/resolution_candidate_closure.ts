@@ -61,6 +61,7 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
     readonly files: readonly CodeGraphInventoryFile[];
     readonly workspace: CodeGraphWorkspace;
   };
+  readonly baseSnapshotId?: string;
   readonly baseFileSetFingerprint: string;
   readonly baseFiles: readonly CodeGraphInventoryFile[];
   readonly candidateReexports: readonly ProjectResolutionReexportCandidate[];
@@ -85,41 +86,65 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
       PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
     );
   }
-  const metadata = yield* cachedFactsMetadata(
-    input.store,
-    input.layout.databasePath,
-    input.baseFiles,
-    input.languagePacks,
-  );
-  if (metadata.files !== input.baseFiles.length || metadata.bytesByPath.size !== input.baseFiles.length) {
-    return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
-  }
-  const plan = planProjectResolutionCandidateScan({bytesByPath: metadata.bytesByPath, files: input.baseFiles});
-  if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, input.currentChangedFiles.length);
+  const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
+  const stableAttribution =
+    input.baseAttributionContext === undefined &&
+    input.committedWorkspace.fingerprint === input.currentWorkspace.fingerprint &&
+    input.baseFiles.length === input.currentFiles.length &&
+    EffectArray.every(input.baseFiles, file => {
+      const current = currentByPath.get(file.path);
+      return current?.language === file.language && current.mode === file.mode;
+    });
+  let scan: ProjectResolutionCandidateClosure | undefined =
+    input.baseSnapshotId && stableAttribution && input.store.resolutionCandidateIndexClosure
+      ? yield* input.store
+          .resolutionCandidateIndexClosure(input.layout.databasePath, {
+            snapshotId: input.baseSnapshotId,
+            workspaceFingerprint: input.committedWorkspace.fingerprint,
+            fileSetFingerprint: input.baseFileSetFingerprint,
+            initialLookupKeys: input.initialLookupKeys,
+            additionalReexports: input.candidateReexports,
+            maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
+          })
+          .pipe(Effect.orElseSucceed(() => undefined))
+      : undefined;
+  if (scan === undefined) {
+    const metadata = yield* cachedFactsMetadata(
+      input.store,
+      input.layout.databasePath,
+      input.baseFiles,
+      input.languagePacks,
+    );
+    if (metadata.files !== input.baseFiles.length || metadata.bytesByPath.size !== input.baseFiles.length) {
+      return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
+    }
+    const plan = planProjectResolutionCandidateScan({bytesByPath: metadata.bytesByPath, files: input.baseFiles});
+    if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, input.currentChangedFiles.length);
 
-  const attributeBaseFacts = createFactsAttributor(
-    input.baseAttributionContext?.files ?? input.baseFiles,
-    input.baseAttributionContext?.workspace ?? input.committedWorkspace,
-  );
-  const scan = yield* scanProjectResolutionCandidateClosure({
-    additionalReexports: input.candidateReexports,
-    initialLookupKeys: input.initialLookupKeys,
-    maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
-    plan,
-    loadPage: (files: readonly CodeGraphInventoryFile[]) =>
-      loadCachedFacts(input.store, input.layout.databasePath, files, input.languagePacks).pipe(
-        Effect.map(loaded => {
-          const rawFacts = EffectArray.flatMap(files, file => {
-            const facts = loaded.facts.get(file.path);
-            return facts === undefined ? [] : [input.languagePacks.postprocessFile(file, facts)];
-          });
-          return {
-            bytesByPath: loaded.bytesByPath,
-            facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
-          };
-        }),
-      ),
-  });
+    const attributeBaseFacts = createFactsAttributor(
+      input.baseAttributionContext?.files ?? input.baseFiles,
+      input.baseAttributionContext?.workspace ?? input.committedWorkspace,
+    );
+    scan = yield* scanProjectResolutionCandidateClosure({
+      additionalReexports: input.candidateReexports,
+      initialLookupKeys: input.initialLookupKeys,
+      maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
+      plan,
+      loadPage: (files: readonly CodeGraphInventoryFile[]) =>
+        loadCachedFacts(input.store, input.layout.databasePath, files, input.languagePacks).pipe(
+          Effect.map(loaded => {
+            const rawFacts = EffectArray.flatMap(files, file => {
+              const facts = loaded.facts.get(file.path);
+              return facts === undefined ? [] : [input.languagePacks.postprocessFile(file, facts)];
+            });
+            return {
+              bytesByPath: loaded.bytesByPath,
+              facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
+            };
+          }),
+        ),
+    });
+  }
   if (scan.mode === 'fallback') return resolutionCandidateScanFallback(scan, input.currentChangedFiles.length);
 
   const selectedPaths = new Set([
@@ -148,7 +173,6 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
     return {mode: 'fallback', reason: 'project-closure-incomplete'} satisfies IncrementalOverlayPreassessment;
   }
 
-  const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
   const selectedFiles = EffectArray.filter(
     EffectArray.map([...selectedPaths].sort(compareCodeUnits), path => currentByPath.get(path)),
     (file): file is CodeGraphInventoryFile => file !== undefined,
@@ -512,7 +536,9 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       facts,
       files: input.selectedFiles,
       mode: 'compatible',
+      candidateFacts: attributedFacts,
       proportionalWork: {
+        ...(input.scan.candidateIndex ? {candidateIndex: input.scan.candidateIndex} : {}),
         ...(input.candidateWork ? {membershipCandidate: input.candidateWork} : {}),
         attributionContextFiles: input.scan.scannedFiles,
         baseFactsLoaded: input.selectedFiles.length,

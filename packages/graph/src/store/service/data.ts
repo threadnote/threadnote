@@ -1,3 +1,5 @@
+import {stageResolutionCandidateIndex, finishResolutionCandidateIndex} from '../resolution/candidate_index_write.js';
+import {selectResolutionCandidateIndexClosure} from '../resolution/candidate_index_read.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {
   selectScopeApplicability,
@@ -103,6 +105,9 @@ import {
 
 type CodeGraphStoreDataMethods = Pick<
   CodeGraphStoreShape,
+  | 'stageResolutionCandidateIndex'
+  | 'finishResolutionCandidateIndex'
+  | 'resolutionCandidateIndexClosure'
   | 'initialize'
   | 'prepareActivation'
   | 'finalizePersistentMaterializationPlan'
@@ -188,6 +193,51 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
         ),
     }).pipe(Effect.flatMap(spoolPath => removePersistentMaterializationSpool(runtime, spoolPath)));
   return {
+    stageResolutionCandidateIndex: (databasePath, input, protector) =>
+      prepare(databasePath).pipe(
+        Effect.andThen(
+          useDatabase(
+            databasePath,
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* ensureSchemaInitialized(databasePath, sql);
+              yield* stageResolutionCandidateIndex(
+                sql,
+                input,
+                effect => withWriterGate(databasePath, effect),
+                protector,
+              );
+            }),
+          ),
+        ),
+        Effect.mapError(cause => storeError('stage resolution candidate index', cause)),
+      ),
+    finishResolutionCandidateIndex: (databasePath, input, protector) =>
+      prepare(databasePath).pipe(
+        Effect.andThen(
+          useDatabase(
+            databasePath,
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* ensureSchemaInitialized(databasePath, sql);
+              return yield* finishResolutionCandidateIndex(
+                sql,
+                input,
+                effect => withWriterGate(databasePath, effect),
+                protector,
+              );
+            }),
+          ),
+        ),
+        Effect.mapError(cause => storeError('finish resolution candidate index', cause)),
+      ),
+    resolutionCandidateIndexClosure: (databasePath, input) =>
+      useReadOnlyDatabase(
+        databasePath,
+        Effect.flatMap(SqlClient.SqlClient, sql =>
+          sql.withTransaction(selectResolutionCandidateIndexClosure(sql, input)),
+        ),
+      ).pipe(Effect.mapError(cause => storeError('read resolution candidate index', cause))),
     initialize: (databasePath, options) =>
       prepare(databasePath).pipe(
         Effect.andThen(

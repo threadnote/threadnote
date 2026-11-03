@@ -1,5 +1,7 @@
+import {RESOLUTION_CANDIDATE_INDEX_TABLES} from './resolution/candidate_index.js';
 import {Array as EffectArray} from 'effect';
-import {Effect, Option} from 'effect';
+import {Effect, Option, pipe} from 'effect';
+import * as EffectString from 'effect/String';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {compareCodeUnits} from '../ordering.js';
@@ -544,6 +546,12 @@ interface RetiredSnapshotCleanupSpec {
 }
 
 const RETIRED_SNAPSHOT_CLEANUP_SPECS = [
+  ...EffectArray.map(RESOLUTION_CANDIDATE_INDEX_TABLES, table => ({
+    table: table.name,
+    keyColumns: table.keyColumns,
+    batchRows: 1_000,
+    maximumBatchRows: 1_000,
+  })),
   {
     batchRows: 5_000,
     keyColumns: ['snapshot_id', 'edge_id', 'tier', 'lookup_key'],
@@ -762,7 +770,12 @@ const clearSnapshotOwnedRows = Effect.fn('codeGraph.clearSnapshotOwnedRows')(fun
   const runWrite: CodeGraphWriterGate = writerGate ?? (effect => effect);
   yield* clearCompactLexicalSnapshotRows(sql, snapshotId, runWrite, ownerToken);
   for (const spec of RETIRED_SNAPSHOT_CLEANUP_SPECS) {
-    if (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE && !(yield* tableExists(sql, spec.table))) continue;
+    if (
+      (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE ||
+        pipe(spec.table, EffectString.startsWith('snapshot_candidate_'))) &&
+      !(yield* tableExists(sql, spec.table))
+    )
+      continue;
     let batchRows: number = spec.batchRows;
     for (;;) {
       const startedAt = performance.now();

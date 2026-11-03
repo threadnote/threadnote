@@ -1,12 +1,11 @@
+import {makeResolutionCandidateEvidenceBuilder} from './candidate_evidence.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
-import {CodeGraphProcessActivity} from '../runtime_ports.js';
 import type {CodeGraphBuildOwnerIdentity} from '../build/owner.js';
-import type {CodeGraphBuildResourceCoordinator} from '../build/resources.js';
 import {canonicalCodeGraphMonikers} from '../cross_repository/monikers.js';
 import {isNonResumableCodeGraphBuildFailure} from '../disk/capacity.js';
 import {coordinateCodeGraphBuild, measureCodeGraphAttribution} from './build_coordination.js';
@@ -83,7 +82,6 @@ import {
   type ReusableCleanSnapshotInput,
 } from './snapshot_reuse.js';
 import type {
-  CodeGraphIndexOptions,
   CodeGraphBuildAndActivateInput,
   CodeGraphSourceVerification,
   CommittedBaseResult,
@@ -117,7 +115,6 @@ import {
   shardDonorIds,
   type CodeGraphDirectPersistentCapacityProtector,
   type CodeGraphMaterializationSpoolContext,
-  type CodeGraphRetiredSnapshotCleanupProgress,
   type CodeGraphReusableCleanBase,
   type CodeGraphStagingProgress,
   type CodeGraphStoreShape,
@@ -145,74 +142,7 @@ export function settleInterruptedCodeGraphBuild(
     : store.releasePersistentBuild(databasePath, snapshotId, CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY, ownerToken);
 }
 
-export function withCodeGraphProcessLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  lockPath: string,
-  onContention: () => Effect.Effect<void>,
-  builderOperation: string,
-  effect: Effect.Effect<A, E, R>,
-  coordination?: {
-    readonly onAcquired: () => Effect.Effect<void, never>;
-    readonly onCompleted: () => Effect.Effect<void, never>;
-  },
-) {
-  return Effect.flatMap(CodeGraphProcessActivity, activity =>
-    activity.withActivity(
-      'graph-waiter',
-      'repository-lock',
-      withExclusiveFileLock(
-        fs,
-        lockPath,
-        {
-          ...CODE_GRAPH_LOCK_OPTIONS,
-          onContention,
-          ...(coordination ? {onAcquired: coordination.onAcquired, onCompleted: coordination.onCompleted} : {}),
-        },
-        activity.withActivity('graph-builder', builderOperation, effect),
-      ),
-    ),
-  );
-}
-
-export function writerSessionOptions(
-  layout: CodeGraphLayout,
-  options: Pick<CodeGraphIndexOptions, 'onProgress' | 'onSqliteWriterConfigured' | 'sqliteWriterTuning'>,
-  resumeProgress: () => Effect.Effect<void, unknown>,
-  resources?: CodeGraphBuildResourceCoordinator,
-) {
-  return {
-    cleanupCompletedBuildRows: true,
-    ...(options.onSqliteWriterConfigured ? {onSqliteWriterConfigured: options.onSqliteWriterConfigured} : {}),
-    onWriterContention: () =>
-      (resources?.assertWriterMayWait ?? Effect.void).pipe(
-        Effect.orDie,
-        Effect.andThen(options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
-        Effect.ignore,
-      ),
-    onWriterAcquired: () =>
-      (resources?.acquireWriter ?? Effect.void).pipe(Effect.orDie, Effect.andThen(resumeProgress()), Effect.ignore),
-    onWriterReleased: () => (resources?.releaseWriter ?? Effect.void).pipe(Effect.orDie),
-    sqliteWriterTuning: {
-      reconstructibleBuildSynchronous: 'normal' as const,
-      ...options.sqliteWriterTuning,
-    },
-    writerLockPath: layout.databaseWriteLockPath,
-  } as const;
-}
-
-export function retiredSnapshotCleanupReporter(onProgress: CodeGraphIndexOptions['onProgress']) {
-  return (progress: CodeGraphRetiredSnapshotCleanupProgress) =>
-    (
-      onProgress?.({
-        completed: progress.snapshotsCompleted,
-        pagesCompleted: progress.pagesCompleted,
-        phase: 'reclaiming',
-        rowsDeleted: progress.rowsDeleted,
-        total: progress.snapshotsTotal,
-        unit: 'snapshots',
-      }) ?? Effect.void
-    ).pipe(Effect.ignore);
-}
+export {withCodeGraphProcessLock, writerSessionOptions, retiredSnapshotCleanupReporter} from './build_session.js';
 
 export {prepareReadyAnalysisSummary, reuseReadySnapshot};
 
@@ -1046,6 +976,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
   const extractionDiagnostics: string[] = [...workspace.diagnostics];
   let materializedFiles = 0;
   let materializedShardFilesReused = 0;
+  const candidateEvidence = makeResolutionCandidateEvidenceBuilder(input, runPreparation, persistentCapacityGuard);
   let materializedShardCacheDeferredFiles = 0;
   let materializedShardCacheDeferredRawFactBytes = 0;
   let materializedShardAssociationsComplete = directPersistentMaterialization;
@@ -1217,19 +1148,17 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     let materializedRows: CodeGraphMaterializationRows = {};
     const stageMilliseconds: Partial<Record<CodeGraphMaterializationActivity['stage'], number>> = {};
     const metrics = (finalFactsBytesTotal?: number): CodeGraphMaterializationMetrics => ({
-      attributionMilliseconds,
       batchesCompleted,
       batchesTotal,
       cachedFactBytesCompleted,
       cachedFactBytesTotal,
-      ...replayMetrics,
+      ...candidateEvidence.metrics(replayMetrics, {loadingMilliseconds, attributionMilliseconds, stageMilliseconds}),
       ...(changedFactBytesCompleted === undefined ? {} : {changedFactBytesCompleted}),
       ...(fallbackAssessment === undefined ? {} : {fallbackAssessment}),
       ...(fallbackBoundary === undefined ? {} : {fallbackBoundary}),
       ...(fallbackReason === undefined ? {} : {fallbackReason}),
       factsBytesCompleted,
       ...(finalFactsBytesTotal === undefined ? {} : {factsBytesTotal: finalFactsBytesTotal}),
-      loadingMilliseconds,
       mode: 'full',
       ...(incrementalAssessment?.resolutionPublicationAssessment
         ? {
@@ -1240,7 +1169,6 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       rows: materializedRows,
       sourceBytesCompleted,
       sourceBytesTotal,
-      stageMilliseconds: {...stageMilliseconds},
       // Only publish cumulative subphase evidence at the terminal update to avoid sustained allocator pressure.
       ...(finalFactsBytesTotal === undefined ? {} : {subphaseMilliseconds: materializationSubphases.snapshot()}),
       storage: {
@@ -1624,6 +1552,14 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       const finalBatchPreparationStartedAt = performance.now();
       const finalBatches = yield* runPreparation(Effect.sync(() => finalCodeGraphFactBatches(facts)));
       materializationSubphases.add('factBatchPreparation', performance.now() - finalBatchPreparationStartedAt);
+      if (directPersistentMaterialization)
+        yield* candidateEvidence.stageFull({
+          files,
+          facts,
+          bounded: EffectArray.flatMap(finalBatches, batch => EffectArray.map(batch, fact => fact.facts)),
+          warm: materializedShardBatchComplete,
+          attributeFacts,
+        });
       batchesTotal += Math.max(0, finalBatches.length - 1);
       if (extractionDiagnostics.length < 100) {
         extractionDiagnostics.push(
@@ -1830,6 +1766,26 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         onSome: token => input.store.releaseSnapshotLease(input.layout.databasePath, token).pipe(Effect.ignore),
       }),
   );
+  if (input.store.stageResolutionCandidateIndex && input.store.finishResolutionCandidateIndex) {
+    if (incrementalApplied && incrementalAssessment?.mode === 'eligible')
+      yield* candidateEvidence.stageIncremental(incrementalAssessment);
+    if (directPersistentMaterialization || incrementalApplied) {
+      const complete = yield* input.store.finishResolutionCandidateIndex(
+        input.layout.databasePath,
+        {
+          snapshotId: ready.id,
+          workspaceFingerprint: workspace.fingerprint,
+          fileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.files),
+          inheritedSnapshotId: input.committedBase?.foldForward?.logicalSnapshotId,
+        },
+        persistentCapacityGuard,
+      );
+      if (!complete && extractionDiagnostics.length < 100)
+        extractionDiagnostics.push(
+          'Resolution candidate evidence is incomplete or incompatible; future updates retain the existing safe discovery fallback.',
+        );
+    }
+  }
   const activated = yield* input.store.currentLexicalReadySnapshotById(input.layout.databasePath, ready.id);
   if (!activated) {
     return yield* CodeGraphIndexOperationError.make({
@@ -1977,6 +1933,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       stagedFiles: foldForwardMaterialization?.stagedFiles ?? materializedFiles,
       totalFiles,
     },
+    ...(candidateEvidence.enabled ? {candidateIndexBuild: candidateEvidence.summary()} : {}),
     reusedFiles,
     skippedFiles: input.inventory.skipped,
     snapshot: activatedReady,
