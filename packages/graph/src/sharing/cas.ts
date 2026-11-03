@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {readBoundedPrivateBytes, writePrivateBytesFile} from './atomic.js';
 import {parseSha256Digest, sha256Digest, sha256HexFromDigest} from './digest.js';
@@ -21,13 +22,13 @@ export const putCasBytes = Effect.fn('codeGraph.sharing.putCasBytes')(function* 
 export const putCasFile = Effect.fn('codeGraph.sharing.putCasFile')(function* (casRoot: string, sourcePath: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   if (Option.isSome(yield* fs.readLink(sourcePath).pipe(Effect.option))) {
     return yield* graphSharingFailure('CAS source must not be a symbolic link.');
   }
   const incoming = path.join(casRoot, 'incoming');
   yield* fs.makeDirectory(incoming, {recursive: true, mode: 0o700});
-  const staging = path.join(incoming, `${yield* crypto.randomUUIDv4()}.tmp`);
+  const staging = path.join(incoming, `${yield* crypto.uuidV4()}.tmp`);
   return yield* Effect.acquireUseRelease(
     fs.copyFile(sourcePath, staging).pipe(Effect.as(staging)),
     stagingPath =>

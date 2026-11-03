@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
@@ -247,7 +248,7 @@ function planMigration(
   path: Path.Path,
   dataRoot: string,
   legacyRoot: string,
-): Effect.Effect<StorageLayoutMigrationReceipt, unknown, Crypto.Crypto> {
+): Effect.Effect<StorageLayoutMigrationReceipt, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     yield* assertLegacyStorageAncestors(fs, path, path.dirname(dataRoot));
     if ((yield* inspectLegacyRoot(fs, legacyRoot)) !== 'directory') {
@@ -334,7 +335,7 @@ function verifyResumedTargetDigest(
   source: string | undefined,
   target: string,
   account: AccountMigration,
-): Effect.Effect<string, unknown, Crypto.Crypto> {
+): Effect.Effect<string, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const targetDigest = yield* digestDirectory(fs, path, target, (candidate, type) =>
       shouldIncludeLegacyCanonicalStorePath(path, legacyRoot, candidate, type),
@@ -457,10 +458,13 @@ function digestDirectory(
   path: Path.Path,
   root: string,
   include: (candidate: string, type: string) => boolean = () => true,
-): Effect.Effect<string, unknown, Crypto.Crypto> {
+): Effect.Effect<string, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const entries: string[] = [];
-    const visit = (directory: string, relativeDirectory: string): Effect.Effect<void, unknown, Crypto.Crypto> =>
+    const visit = (
+      directory: string,
+      relativeDirectory: string,
+    ): Effect.Effect<void, unknown, SecureRandom.SecureRandom> =>
       Effect.gen(function* () {
         for (const name of (yield* fs.readDirectory(directory)).sort()) {
           const absolute = path.join(directory, name);
@@ -504,7 +508,7 @@ function digestMergedDirectories(
   sourceRoot: string,
   targetRoot: string,
   include: (candidate: string, type: string) => boolean = () => true,
-): Effect.Effect<string, unknown, Crypto.Crypto> {
+): Effect.Effect<string, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     if (
       Option.isSome(yield* fs.readLink(targetRoot).pipe(Effect.option)) ||
@@ -520,7 +524,7 @@ function digestMergedDirectories(
       sourceDirectory: string | undefined,
       targetDirectory: string | undefined,
       relativeDirectory: string,
-    ): Effect.Effect<void, unknown, Crypto.Crypto> =>
+    ): Effect.Effect<void, unknown, SecureRandom.SecureRandom> =>
       Effect.gen(function* () {
         const names = new Set<string>();
         if (sourceDirectory) {
@@ -603,7 +607,7 @@ function mergeDirectories(
     sourceDirectory: string,
     targetDirectory: string,
     relativeDirectory: string,
-  ): Effect.Effect<void, unknown, Crypto.Crypto> =>
+  ): Effect.Effect<void, unknown, SecureRandom.SecureRandom> =>
     Effect.gen(function* () {
       for (const name of (yield* fs.readDirectory(sourceDirectory)).sort()) {
         const source = path.join(sourceDirectory, name);

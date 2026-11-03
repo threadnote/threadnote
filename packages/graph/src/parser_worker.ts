@@ -1,18 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {
-  Context,
-  Crypto,
-  Effect,
-  FileSystem,
-  Layer,
-  Option,
-  Path,
-  Predicate,
-  Queue,
-  Stdio,
-  Stream,
-  Schema,
-} from 'effect';
+import {Context, Effect, FileSystem, Layer, Option, Path, Predicate, Queue, Stdio, Stream, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -256,12 +244,12 @@ export class CodeGraphParserPool extends Context.Service<CodeGraphParserPool, Co
 
 export function codeGraphParserPoolLayer(
   options: CodeGraphParserPoolOptions = {},
-): Layer.Layer<CodeGraphParserPool, never, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
+): Layer.Layer<CodeGraphParserPool, never, SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo> {
   return Layer.effect(
     CodeGraphParserPool,
     Effect.acquireRelease(
       Effect.gen(function* () {
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const system = yield* SystemInfo;
@@ -474,7 +462,7 @@ export function codeGraphParserPoolLayer(
 }
 
 function withGlobalParserSlot<A, E, R>(
-  crypto: Crypto.Crypto,
+  crypto: SecureRandom.SecureRandom['Service'],
   fs: FileSystem.FileSystem,
   path: Path.Path,
   system: SystemInfoShape,
@@ -496,7 +484,7 @@ function withGlobalParserSlot<A, E, R>(
       },
       effect,
     ).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(Path.Path, path),
       Effect.provideService(SystemInfo, system),
       Effect.asSome,

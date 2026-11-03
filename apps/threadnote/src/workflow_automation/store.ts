@@ -1,4 +1,5 @@
-import {Context, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Context, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -160,7 +161,7 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
   });
   const file = (yield* statePath(config, state.runId, true))!;
   const fs = yield* FileSystem.FileSystem;
-  const temporary = file + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   return yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
     // Revalidate parent ownership and destination bytes immediately before commit.

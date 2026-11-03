@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {runtimeEntrypointLayer} from '@threadnote/threadnote/effect/runtime-entrypoint';
 import {Effect, Layer, Schema} from 'effect';
 import {telemetryChildEnvironmentPolicyLayer} from '@threadnote/threadnote/telemetry/session';
@@ -19,7 +20,9 @@ export function provideScriptLayer<A, E, R, Services, LayerError, LayerRequireme
   layer: Layer.Layer<Services, LayerError, LayerRequirements>,
 ) {
   const runtimePorts = Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer);
-  const completeLayer = Layer.merge(layer.pipe(Layer.provide(runtimePorts)), runtimePorts);
+  const completeLayer = Layer.merge(layer.pipe(Layer.provide(runtimePorts)), runtimePorts).pipe(
+    Layer.provideMerge(cryptoLayer),
+  );
   return Effect.scoped(
     Layer.build(completeLayer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );

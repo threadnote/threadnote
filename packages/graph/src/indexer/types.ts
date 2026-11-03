@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import type {SystemInfoShape} from '@threadnote/platform/system';
 import type {BoundedCodeGraphFact} from '../fact/budget.js';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
@@ -168,7 +169,7 @@ export interface DirectPersistentCapacityProtection {
     path: string,
     boundary: CodeGraphDirectPersistentCapacityBoundary,
   ) => Effect.Effect<number | undefined, unknown>;
-  readonly crypto: Crypto.Crypto;
+  readonly crypto: SecureRandom.SecureRandom['Service'];
   readonly maintenance: CodeGraphMaintenanceCoordinatorShape;
   readonly path: Path.Path;
   readonly system: SystemInfoShape;

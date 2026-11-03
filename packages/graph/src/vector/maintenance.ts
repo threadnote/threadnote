@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './generation_schema.js';
-import {Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -262,7 +263,7 @@ export const withPreparedCodeGraphRemovedViewVectorUnit = Effect.fn('codeGraph.w
     yield* ensureVectorUnitDeadline(preparation);
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const system = yield* SystemInfo;
     const inventory = yield* inspectVectorDatabases(fs, path, input.threadnoteHome, input.checkoutId).pipe(
       Effect.match({onFailure: () => undefined, onSuccess: value => value}),
@@ -313,7 +314,7 @@ export const withPreparedCodeGraphRemovedViewVectorUnit = Effect.fn('codeGraph.w
       ).pipe(
         Effect.map(onSuccess),
         Effect.orElseSucceed(() => preservedResult()),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
         Effect.provideService(Path.Path, path),
         Effect.provideService(SystemInfo, system),
       );
@@ -413,7 +414,7 @@ export const runCodeGraphOrdinaryVectorMaintenanceUnit = Effect.fn('codeGraph.ru
     yield* ensureOrdinaryVectorUnitDeadline(preparation);
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const system = yield* SystemInfo;
     const firstInventory = yield* inspectVectorDatabases(fs, path, input.threadnoteHome, input.checkoutId).pipe(
       Effect.match({onFailure: () => undefined, onSuccess: value => value}),
@@ -469,7 +470,7 @@ export const runCodeGraphOrdinaryVectorMaintenanceUnit = Effect.fn('codeGraph.ru
 function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
   fs: FileSystem.FileSystem,
   path: Path.Path,
-  crypto: Crypto.Crypto,
+  crypto: SecureRandom.SecureRandom['Service'],
   system: SystemInfoShape,
   input: CodeGraphOrdinaryVectorMaintenanceUnitInput,
   inventory: VectorDatabaseInventory,
@@ -481,7 +482,7 @@ function runCodeGraphOrdinaryVectorMaintenanceWithCursor(
 ): Effect.Effect<
   CodeGraphOrdinaryVectorMaintenanceUnitResult,
   unknown,
-  Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo
+  SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo
 > {
   return Effect.gen(function* () {
     if (remainingSteps <= 0) return ordinaryVectorModelUnavailable();
@@ -852,7 +853,7 @@ function withAllOrdinaryVectorModelLocks<A, E, R>(
   preparation: CodeGraphOrdinaryVectorMaintenanceUnitPreparation,
   use: Effect.Effect<A, E, R>,
   index = 0,
-): Effect.Effect<A, unknown, R | Crypto.Crypto | Path.Path | SystemInfo> {
+): Effect.Effect<A, unknown, R | SecureRandom.SecureRandom | Path.Path | SystemInfo> {
   const candidate = candidates[index];
   if (candidate === undefined) return use;
   return withExclusiveFileLock(
@@ -1083,7 +1084,7 @@ function readOrdinaryVectorCursor(
 function writeOrdinaryVectorCursorCas(
   fs: FileSystem.FileSystem,
   path: Path.Path,
-  crypto: Crypto.Crypto,
+  crypto: SecureRandom.SecureRandom['Service'],
   authority: OrdinaryVectorCursorAuthority,
   expectedToken: string | undefined,
   nextToken: string | undefined,
@@ -1358,7 +1359,7 @@ function selectVectorUnitCandidate(
 function verifyVectorUnitInventory(
   fs: FileSystem.FileSystem,
   path: Path.Path,
-  crypto: Crypto.Crypto,
+  crypto: SecureRandom.SecureRandom['Service'],
   system: SystemInfoShape,
   input: CodeGraphRemovedViewVectorUnitInput,
   entry: CodeGraphRemovedViewVectorUnitEntry,
@@ -1413,7 +1414,7 @@ function verifyVectorUnitInventory(
     }
     return {state: 'complete'} as const;
   }).pipe(
-    Effect.provideService(Crypto.Crypto, crypto),
+    Effect.provideService(SecureRandom.SecureRandom, crypto),
     Effect.provideService(Path.Path, path),
     Effect.provideService(SystemInfo, system),
   );
@@ -1495,7 +1496,7 @@ function withAllSnapshotVectorModelLocks<A, E, R>(
   candidates: readonly VectorDatabaseCandidate[],
   use: Effect.Effect<A, E, R>,
   index = 0,
-): Effect.Effect<A, unknown, R | Crypto.Crypto | Path.Path | SystemInfo> {
+): Effect.Effect<A, unknown, R | SecureRandom.SecureRandom | Path.Path | SystemInfo> {
   const candidate = candidates[index];
   if (candidate === undefined) return use;
   return withExclusiveFileLock(

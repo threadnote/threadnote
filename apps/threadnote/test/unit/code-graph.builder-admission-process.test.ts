@@ -34,6 +34,7 @@ describe('builder admission process boundary', () => {
             import {Effect, FileSystem, Layer} from 'effect';
             import * as BunServices from '@effect/platform-bun/BunServices';
             import * as BunRuntime from '@effect/platform-bun/BunRuntime';
+            import {cryptoLayer} from '@threadnote/platform/crypto';
             import {withCodeGraphBuilderAdmission} from ${JSON.stringify(moduleUrl)};
             import {TestSystemInfoLayer} from ${JSON.stringify(systemLayerUrl)};
             BunRuntime.runMain(Effect.gen(function* () {
@@ -44,7 +45,7 @@ describe('builder admission process boundary', () => {
                 onWaiting: fs.writeFileString(${JSON.stringify(path.join(home, `${name}.queued`))}, '').pipe(Effect.orDie),
                 threadnoteHome: ${JSON.stringify(home)},
               }, fs.writeFileString(${JSON.stringify(path.join(home, `${name}.started`))}, '').pipe(Effect.andThen(Effect.never)));
-            }).pipe(Effect.provide(Layer.merge(TestSystemInfoLayer, BunServices.layer))));
+            }).pipe(Effect.provide(Layer.mergeAll(TestSystemInfoLayer, BunServices.layer, cryptoLayer))));
           `,
                   ],
                   stderr: 'inherit',

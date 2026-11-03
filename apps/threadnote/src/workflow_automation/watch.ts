@@ -1,6 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import * as Array from 'effect/Array';
 import * as Clock from 'effect/Clock';
-import * as Crypto from 'effect/Crypto';
 import * as Effect from 'effect/Effect';
 import * as Schema from 'effect/Schema';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -559,7 +559,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
           const saved = yield* writeNativeWatch(config, {...envelope, state}, existing?.revision ?? null);
           return {stored: saved, token: null, recoveryToken: collector?.token};
         }
-        const token = yield* (yield* Crypto.Crypto).randomUUIDv4();
+        const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
         const saved = yield* writeNativeWatch(
           config,
           {

@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {
   mkdir as boundaryMkdir,
   rename as boundaryRename,
@@ -100,6 +101,7 @@ const source = {
 };
 const platform = Layer.mergeAll(
   BunServices.layer,
+  cryptoLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

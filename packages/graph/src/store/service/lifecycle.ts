@@ -307,7 +307,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
     acquireSnapshotLease: (databasePath, snapshotId, durationMilliseconds, options) =>
       Effect.gen(function* () {
         const observe = options?.onTiming;
-        const token = `${options?.retainedBase === true ? 'retained-base:' : ''}${system.processId}:${yield* withCodeGraphLeaseTiming(observe, 'token', crypto.randomUUIDv4())}`;
+        const token = `${options?.retainedBase === true ? 'retained-base:' : ''}${system.processId}:${yield* withCodeGraphLeaseTiming(observe, 'token', crypto.uuidV4())}`;
         const acquired = yield* withCodeGraphLeaseTiming(observe, 'prepare', prepare(databasePath)).pipe(
           Effect.andThen(
             withCodeGraphLeaseTiming(
@@ -364,7 +364,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
     retainViewSnapshotLease: (databasePath, worktreeId, snapshotId, durationMilliseconds, options) =>
       Effect.gen(function* () {
         yield* validateViewRemovalTarget(worktreeId, snapshotId);
-        const candidateToken = `${system.processId}:${yield* crypto.randomUUIDv4()}`;
+        const candidateToken = `${system.processId}:${yield* crypto.uuidV4()}`;
         return yield* withWriterGate(
           databasePath,
           Effect.gen(function* () {
@@ -479,7 +479,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
             ? Option.none<CodeGraphActivationLease>()
             : Option.some({
                 durationMilliseconds: validatedSnapshotLeaseDuration(promotionLeaseDurationMilliseconds),
-                token: `${system.processId}:${yield* crypto.randomUUIDv4()}`,
+                token: `${system.processId}:${yield* crypto.uuidV4()}`,
               });
         yield* prepare(databasePath);
         const completedPersistentSnapshot = yield* useDatabase(

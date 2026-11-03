@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, Layer} from 'effect';
 import {TestConsole} from 'effect/testing';
@@ -14,7 +15,7 @@ const configurationLayer = sourceConfigurationStoreLayer(
   makeSourceConfigurationRegistry({sources: [linearSourceCodec], projections: []}),
 );
 const baseServices = Layer.mergeAll(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

@@ -1,7 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   Array as Arr,
   Clock,
-  Crypto,
   Effect,
   FileSystem,
   Option,
@@ -167,8 +167,8 @@ export interface ManagerLiveOptions {
 }
 
 export const makeManagerLive = Effect.fn('manager.live.make')(function* (options: ManagerLiveOptions) {
-  const crypto = yield* Crypto.Crypto;
-  const epoch = yield* crypto.randomUUIDv4();
+  const crypto = yield* SecureRandom.SecureRandom;
+  const epoch = yield* crypto.uuidV4();
   const topics: readonly ManagerLiveTopic[] = [
     ...new Set<ManagerLiveTopic>([
       'context-maintenance',
@@ -255,7 +255,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
         const gate = yield* Semaphore.make(1);
         const wake = yield* PubSub.sliding<void>({capacity: 1, replay: 1});
         const incoming = yield* Queue.dropping<string>(limits.incomingFrames);
-        const connectionKey = yield* crypto.randomUUIDv4();
+        const connectionKey = yield* crypto.uuidV4();
         const close = writer.write(new Socket.CloseEvent(1008, 'Live session closed')).pipe(Effect.ignoreCause);
         const connection: LiveConnection = {
           key: connectionKey,
@@ -513,7 +513,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
       if (tickets.size >= limits.tickets) return json(429, {error: 'Too many pending live sessions'});
       const requested = yield* readTicketTopics(request).pipe(Effect.orElseSucceed(() => undefined));
       if (requested === undefined) return json(400, {error: 'Invalid live session request'});
-      const ticket = yield* crypto.randomUUIDv4();
+      const ticket = yield* crypto.uuidV4();
       const expiresAt = now + limits.ticketLifetimeMilliseconds;
       const requestedSnapshots = Str.split(request.headers[MANAGER_LIVE_SNAPSHOT_HEADER] ?? '', ',');
       const snapshots = Arr.filter(

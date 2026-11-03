@@ -1,4 +1,5 @@
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -133,7 +134,7 @@ describe('remote memory operator ci-control command', () => {
   );
 });
 
-const testLayer = provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer));
+const testLayer = provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer));
 
 function capabilities(available: readonly 'manage_context_ci'[]): RemoteMemoryOperatorAdapter['capabilities'] {
   return {available, unavailable: {}, version: 1};

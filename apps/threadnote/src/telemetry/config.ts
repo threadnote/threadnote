@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -115,7 +116,7 @@ export const writeTelemetryConfiguration = Effect.fn('telemetry.writeConfigurati
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   value: TelemetryConfiguration,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* telemetryConfigurationPath(config);
@@ -133,7 +134,7 @@ export const writeTelemetryConfiguration = Effect.fn('telemetry.writeConfigurati
           message: 'Telemetry configuration must not be a symbolic link.',
         });
       }
-      const temporary = path.join(directory, `.config.${yield* crypto.randomUUIDv4()}.tmp`);
+      const temporary = path.join(directory, `.config.${yield* crypto.uuidV4()}.tmp`);
       yield* fs.writeFileString(temporary, serialized, {mode: TELEMETRY_CONFIGURATION_FILE_MODE});
       yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
       yield* fs.chmod(file, TELEMETRY_CONFIGURATION_FILE_MODE);
@@ -147,7 +148,7 @@ export const createEnabledTelemetryConfiguration = Effect.fn('telemetry.createEn
   endpoint = DEFAULT_TELEMETRY_ENDPOINT,
   autoAccept = false,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   return enabledTelemetryConfiguration(
     endpoint,
     Base64Url.encode(yield* crypto.randomBytes(TELEMETRY_SESSION_SALT_BYTES)),

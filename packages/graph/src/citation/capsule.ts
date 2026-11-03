@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
-import {Array as EffectArray, Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {Array as EffectArray, Clock, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
 import {
   runtimePlatform,
@@ -403,8 +404,8 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
           ? selectCodeGraphCitationCapsuleRetention(physical, now)
           : {retain: physical, retire: []};
       if (!EffectArray.some(selection.retain, value => value.id === capsule.id)) return false;
-      const crypto = yield* Crypto.Crypto;
-      const temporary = path.join(directory, `pending-${yield* crypto.randomUUIDv4()}`);
+      const crypto = yield* SecureRandom.SecureRandom;
+      const temporary = path.join(directory, `pending-${yield* crypto.uuidV4()}`);
       yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
       yield* fs.chmod(temporary, 0o600);
       yield* fs

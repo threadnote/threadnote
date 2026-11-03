@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Console, Crypto, DateTime, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
+import {Console, DateTime, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {observeProcessInstanceIdentity, processInstanceIdentityMatches} from './process_identity.js';
 import {compareVersions} from '../release/version/compare.js';
@@ -112,8 +113,8 @@ export function withStandaloneProcessLease<A, E, R>(
       const root = installationRoot(path, system);
       const release = yield* readValidatedRelease(fs, path, path.dirname(system.executablePath), root);
       if (!release) return yield* effect;
-      const crypto = yield* Crypto.Crypto;
-      const token = yield* crypto.randomUUIDv4();
+      const crypto = yield* SecureRandom.SecureRandom;
+      const token = yield* crypto.uuidV4();
       const processStartIdentity = yield* observeProcessInstanceIdentity(system, system.processId);
       const leaseDirectory = path.join(root, 'leases', release.version);
       const leasePath = path.join(leaseDirectory, `${system.processId}.json`);

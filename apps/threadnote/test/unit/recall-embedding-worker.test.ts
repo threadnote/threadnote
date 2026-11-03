@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
+import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
@@ -114,9 +115,9 @@ describe('recall embedding worker', () => {
     Effect.gen(function* () {
       const f = yield* fixture;
       const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
-      const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>().pipe(
-        Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, Crypto.Crypto)),
-      );
+      const context = yield* Effect.context<
+        FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+      >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
       let raced = false;
       const admission = BackgroundInferenceAdmission.of({
         ...immediate,
@@ -165,9 +166,9 @@ describe('recall embedding worker', () => {
         const f = yield* fixture;
         const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
         const catalog = yield* LocalModelCatalog;
-        const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>().pipe(
-          Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, Crypto.Crypto)),
-        );
+        const context = yield* Effect.context<
+          FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+        >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
         let switched = false;
         const admission = BackgroundInferenceAdmission.of({
           ...immediate,
@@ -234,9 +235,9 @@ describe('recall embedding worker', () => {
     Effect.gen(function* () {
       const f = yield* fixture;
       let changes = 0;
-      const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>().pipe(
-        Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, Crypto.Crypto)),
-      );
+      const context = yield* Effect.context<
+        FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+      >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
       const runtime = LocalModelRuntime.of({
         ...f.runtime,
         embedMany: request =>

@@ -1,6 +1,8 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, Deferred, Effect, FileSystem, Fiber, Layer, Path} from 'effect';
+import {Clock, Deferred, Effect, FileSystem, Fiber, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
@@ -25,7 +27,7 @@ const policy = Layer.mergeAll(
     sanitizeExternal: environment => environment,
   }),
 );
-const platform = Layer.mergeAll(BunServices.layer, SystemInfo.layer.pipe(Layer.provide(policy)));
+const platform = Layer.mergeAll(BunServices.layer, cryptoLayer, SystemInfo.layer.pipe(Layer.provide(policy)));
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -52,7 +54,7 @@ const fixture = Effect.gen(function* () {
       }),
   };
   const owner = {
-    token: yield* (yield* Crypto.Crypto).randomUUIDv4(),
+    token: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
     processId: actual.processId,
     processStartIdentity: 'fixture-self',
   };
@@ -459,7 +461,7 @@ describe('background launch and exit control', () => {
                   const next = yield* makeBackgroundWorkerLifecycle(claimedOptions, f.launches.at(-1)!);
                   const replacement = {
                     ...f.owner,
-                    token: yield* (yield* Crypto.Crypto).randomUUIDv4(),
+                    token: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
                     processStartIdentity: 'second-process',
                   };
                   yield* f.withHomeLock(next.activate(replacement));
@@ -488,7 +490,10 @@ describe('background launch and exit control', () => {
                     .runtimeVersion,
                 ).toBe(f.options.version);
                 if (gap === 'replaced-lock') {
-                  lock = JSON.stringify({...JSON.parse(lock!), token: yield* (yield* Crypto.Crypto).randomUUIDv4()});
+                  lock = JSON.stringify({
+                    ...JSON.parse(lock!),
+                    token: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
+                  });
                   yield* f.fs.writeFileString(f.options.lockPath, lock);
                   yield* f.fs.utimes(f.options.lockPath, 0, 0);
                 }

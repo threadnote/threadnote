@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Effect, FileSystem, Path, Result, Schema} from 'effect';
 import type {LocalModelCatalogShape, LocalModelRole} from './catalog.js';
 import * as EffectRecord from 'effect/Record';
 
@@ -50,12 +51,12 @@ export const writeModelSelection = Effect.fn('models.writeSelection')(function* 
   home: string,
   selection: ModelSelection,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const directory = path.join(home, 'models');
   const target = path.join(directory, 'selection.json');
-  const temporary = path.join(directory, `.selection.${yield* crypto.randomUUIDv4()}.tmp`);
+  const temporary = path.join(directory, `.selection.${yield* crypto.uuidV4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* fs.writeFileString(temporary, `${JSON.stringify(selection, undefined, 2)}\n`, {mode: 0o600});
   yield* fs.rename(temporary, target);

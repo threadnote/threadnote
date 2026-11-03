@@ -151,6 +151,7 @@ describe('prepared spool budget process boundary', () => {
                 import {Effect, FileSystem, Layer} from 'effect';
                 import * as BunServices from '@effect/platform-bun/BunServices';
                 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
+                import {cryptoLayer} from '@threadnote/platform/crypto';
                 import {withCodeGraphPreparedSpoolBudget} from ${JSON.stringify(moduleUrl)};
                 import {TestSystemInfoLayer} from ${JSON.stringify(systemLayerUrl)};
                 BunRuntime.runMain(withCodeGraphPreparedSpoolBudget({
@@ -162,7 +163,7 @@ describe('prepared spool budget process boundary', () => {
                   const fs = yield* FileSystem.FileSystem;
                   yield* fs.writeFileString(${JSON.stringify(started)}, '');
                   return yield* Effect.never;
-                })).pipe(Effect.provide(Layer.merge(TestSystemInfoLayer, BunServices.layer))));
+                })).pipe(Effect.provide(Layer.mergeAll(TestSystemInfoLayer, BunServices.layer, cryptoLayer))));
               `,
             ],
             stderr: 'inherit',

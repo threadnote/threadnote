@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {uriSegment} from '@threadnote/store/resource-segment';
@@ -176,7 +177,7 @@ export const reserveWorkflowNameFamily = Effect.fn('workflowAutomation.reserveNa
       const serialized = stableJson(next) + '\n';
       if (new TextEncoder().encode(serialized).byteLength > MAX_BYTES)
         return yield* issue('Name registry reached its byte limit. No existing receipt was changed.');
-      const temporary = file + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+      const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
         if ((yield* read) !== before || (yield* fs.realPath(directory)) !== directory)

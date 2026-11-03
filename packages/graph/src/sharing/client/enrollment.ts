@@ -1,4 +1,5 @@
-import {Clock, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Clock, Effect, FileSystem, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {readBoundedPrivateBytes, writePrivateJsonFile} from '../atomic.js';
 import type {GraphControlClientScope, GraphControlCredential} from '../control/credentials.js';
@@ -134,7 +135,7 @@ export const enrollGraphControlClient = Effect.fn('codeGraph.sharing.enrollContr
       if (state === undefined || state.identity !== identity || state.worker !== undefined) {
         state = {
           identity,
-          operationId: yield* (yield* Crypto.Crypto).randomUUIDv4(),
+          operationId: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
           schemaVersion: 1,
         };
         yield* writePrivateJsonFile(target, state);

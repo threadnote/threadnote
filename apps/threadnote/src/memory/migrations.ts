@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as yaml from 'js-yaml';
-import {Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Console, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
@@ -1211,7 +1212,7 @@ const existingDurableMemoryHashes = Effect.fn('memory.existingDurableMemoryHashe
 const collectDurableMemoryHashes: (
   root: string,
   hashes: Set<string>,
-) => Effect.Effect<void, unknown, Crypto.Crypto | FileSystem.FileSystem | Path.Path> = Effect.fn(
+) => Effect.Effect<void, unknown, SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path> = Effect.fn(
   'memory.collectDurableMemoryHashes',
 )(function* (root: string, hashes: Set<string>) {
   const fs = yield* FileSystem.FileSystem;

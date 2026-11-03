@@ -1,5 +1,5 @@
+import {SecureRandom} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
-import * as Crypto from 'effect/Crypto';
 import * as Effect from 'effect/Effect';
 import * as FileSystem from 'effect/FileSystem';
 import * as Option from 'effect/Option';
@@ -280,7 +280,7 @@ export const writeNativeWatch = Effect.fn('workflowAutomation.writeState')(funct
   });
   const file = (yield* statePath(config, state.state.watchId, true))!;
   const fs = yield* FileSystem.FileSystem;
-  const temporary = file + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   return yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
     // Revalidate parent ownership and destination bytes immediately before commit.

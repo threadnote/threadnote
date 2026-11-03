@@ -1,4 +1,5 @@
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Clock, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {codeGraphRepositoriesRoot, codeGraphRepositoryRoot} from '../layout.js';
@@ -177,7 +178,7 @@ const writeAutomaticCompactionReceipt = Effect.fn('codeGraph.writeAutomaticCompa
   threadnoteHome: string,
   receipt: CodeGraphAutomaticCompactionReceipt,
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const authority = yield* inspectAutomaticCompactionReceiptRoot(fs, path, threadnoteHome, receipt.checkoutId);
   const root = authority.root;
   const target = path.join(root, CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_FILE);
@@ -188,10 +189,7 @@ const writeAutomaticCompactionReceipt = Effect.fn('codeGraph.writeAutomaticCompa
   if (new TextEncoder().encode(content).byteLength > CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_BYTES_MAXIMUM) {
     return yield* CodeGraphAutomaticCompactionReceiptError.make({message: 'Compaction receipt is too large.'});
   }
-  const temporary = path.join(
-    root,
-    `.${CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_FILE}.${yield* crypto.randomUUIDv4()}.tmp`,
-  );
+  const temporary = path.join(root, `.${CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_FILE}.${yield* crypto.uuidV4()}.tmp`);
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
     yield* syncWritableFile(fs, temporary);

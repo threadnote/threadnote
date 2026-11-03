@@ -1,9 +1,10 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {ByteSize, DateTime, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -343,7 +344,7 @@ describe('candidate-memory formation', () => {
       });
       expect(review.candidates[0]?.proposedText).toContain('## Verification performed\n- Focused checks passed.');
       expect(review.candidates[0]?.proposedText).toContain('## Unresolved risks\n- Follow-up review may refine this.');
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   effectIt.effect('omits an all-empty structured closeout instead of creating an empty durable candidate', () =>
@@ -366,7 +367,7 @@ describe('candidate-memory formation', () => {
       );
       expect(review.structuredCloseout).toBeUndefined();
       expect(review.candidates).toEqual([]);
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   it('recommends no action for a duplicate stable memory', async () => {
@@ -465,7 +466,7 @@ describe('candidate-memory formation', () => {
         destructiveLossRisk: false,
         requiresExplicitApproval: false,
       });
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   it('flags material character and line loss at compact boundaries monotonically', () => {
@@ -673,7 +674,7 @@ describe('candidate-memory formation', () => {
             uid: Option.none(),
           } satisfies FileSystem.File.Info),
       });
-      const WindowsTestLayer = Layer.mergeAll(BunCrypto.layer, BunPath.layerWin32, WindowsFileSystemLayer);
+      const WindowsTestLayer = Layer.mergeAll(cryptoLayer, BunPath.layerWin32, WindowsFileSystemLayer);
       const records = yield* readActiveProjectMemories(
         {account: 'local', agentContextHome, user: 'me'},
         'threadnote',
@@ -778,7 +779,7 @@ describe('candidate review persistence', () => {
         reviewId: review.reviewId,
         version: 2,
       });
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   effectIt.effect('persists replacement-safety refresh revisions and audit events', () =>
@@ -819,7 +820,7 @@ describe('candidate review persistence', () => {
         candidateId,
         revision: 2,
       });
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   effectIt.effect('retains destructive replacement approval in review and aggregate audit events', () =>
@@ -877,7 +878,7 @@ describe('candidate review persistence', () => {
         },
       );
       expect(EffectArray.filter(auditEvents, event => event.allowDestructiveReplacement === true)).toHaveLength(2);
-    }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
+    }).pipe(provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
   it('serializes concurrent decisions for one review and deduplicates audit writes', async () => {

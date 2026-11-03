@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Context, Crypto, Effect, FileSystem, Layer, Path, Ref, Schema} from 'effect';
+import {Clock, Context, Effect, FileSystem, Layer, Path, Ref, Schema} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -626,14 +627,14 @@ const exportSignedGeneration = Effect.fn('codeGraph.sharing.exportSignedGenerati
     };
   },
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const cwd = yield* commandCwd(options.cwd);
   const identity = yield* resolveRepositoryIdentity(cwd);
   const casRoot = yield* resolveGraphShareCasRoot(config.agentContextHome, options.cas);
   const key = yield* loadPublisherKey(config.agentContextHome);
-  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
+  const spool = path.join(casRoot, 'spool', `${yield* crypto.uuidV4()}.cgcp`);
   const exported = yield* runCodeGraphCheckpointExport(config, {
     cwd,
     expectedSnapshotId: expected.snapshotId,

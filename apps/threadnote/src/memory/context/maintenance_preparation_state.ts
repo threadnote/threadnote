@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
-import {Crypto, Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertAutomaticMaintenanceAssessment,
@@ -213,7 +214,7 @@ const writeCache = Effect.fn('automaticPreparation.writeCache')(function* (
   if (encoded.byteLength > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_BYTES : AUTOMATIC_PREPARATION_MAX_BYTES))
     return yield* AutomaticPreparationError.make({reason: 'cache-size-limit'});
   yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

@@ -1,6 +1,7 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -48,7 +49,7 @@ const reranker = {...manifest, id: 'manual-reranker', role: 'reranker' as const}
 const platform = Layer.mergeAll(
   BunFileSystem.layer,
   BunPath.layer,
-  BunCrypto.layer,
+  cryptoLayer,
   Layer.effect(
     SystemInfo,
     Effect.gen(function* () {

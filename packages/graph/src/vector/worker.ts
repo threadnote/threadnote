@@ -1,4 +1,5 @@
-import {Clock, Crypto, Effect, Exit, FileSystem, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Clock, Effect, Exit, FileSystem, Path, Schema} from 'effect';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
 import {
   BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
@@ -117,7 +118,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const {home, layout, lane, owner} = input;
   const capacity = yield* makeCodeGraphVectorRetirementCapacityProtector({
     databasePath: layout.databasePath,
@@ -215,7 +216,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
         return yield* claimCodeGraphEmbeddingDemand(yield* SqlClient.SqlClient, {
           ...lane,
           abandonedOwnerToken,
-          owner: {...owner, token: yield* crypto.randomUUIDv4()},
+          owner: {...owner, token: yield* crypto.uuidV4()},
           model,
           // Use the cleanup cutoff: an owner expiring during this turn must wait for the next turn's proof.
           now,
@@ -439,11 +440,11 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const store = yield* CodeGraphStore;
   const canonicalHome = yield* fs.realPath(home);
   const owner = {
-    token: yield* crypto.randomUUIDv4(),
+    token: yield* crypto.uuidV4(),
     processId: system.processId,
     processStartIdentity: (yield* system.processStartIdentity(system.processId)) ?? '',
   };

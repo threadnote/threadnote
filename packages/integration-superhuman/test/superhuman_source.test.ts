@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -60,13 +61,15 @@ import * as Effect2 from 'effect';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {Option as EffectOption} from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const configurationRegistry = makeSourceConfigurationRegistry<SourceConfig, ProjectionConfig>({
   sources: [superhumanSourceCodec],
   projections: [],
 });
 
 const baseServices = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

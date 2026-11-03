@@ -1,9 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   Array as EffectArray,
   Clock,
   Cause,
   Context,
-  Crypto,
   Effect,
   FileSystem,
   Option,
@@ -476,7 +476,7 @@ const writeInput = Effect.fn('nativeJobs.writeInput')(function* (
       return yield* fail('job-intent-conflict', 'This job identity already retains different immutable input.');
     return;
   }
-  const temporary = inputFile + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = inputFile + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
     if ((yield* jobPath(config, receipt.runId, receipt.jobId)) !== file || (yield* fs.exists(inputFile)))
@@ -495,7 +495,7 @@ const write = Effect.fn('nativeJobs.write')(function* (
   const serialized = stableJson(decode(state)) + '\n';
   if (Buffer.byteLength(serialized) > receiptLimit)
     return yield* fail('job-capacity', 'Job receipt exceeds its fixed byte limit.');
-  const temporary = file + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   return yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
     const previous = yield* readAt(file);

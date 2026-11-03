@@ -27,15 +27,16 @@
     "./windows-disk-worker-contract": "./src/windows-disk-worker-contract.ts",
     "./windows_system": "./src/windows_system.ts",
     "./runtime-entrypoint": "./src/runtime-entrypoint.ts",
-    "./validation": "./src/validation.ts"
+    "./validation": "./src/validation.ts",
+    "./crypto": "./src/crypto.ts"
   },
   "dependencies": {
-    "effect": "4.0.7",
-    "@effect/platform-bun": "4.0.7"
+    "effect": "4.1.2",
+    "@effect/platform-bun": "4.1.2"
   },
   "devDependencies": {
     "@threadnote/testing": "workspace:*",
-    "@effect/vitest": "4.0.7",
+    "@effect/vitest": "4.1.2",
     "vitest": "5.0.5",
     "fast-check": "4.10.2"
   },

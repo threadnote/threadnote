@@ -1,6 +1,8 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {runtimeEntrypointLayer} from './runtime-entrypoint.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Crypto, Effect, Layer} from 'effect';
+import {Effect, Layer} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -26,8 +28,8 @@ export const commandLayer = CommandExecutor.layer.pipe(
 
 export const StandaloneBrokerLayer = Layer.mergeAll(
   systemLayer,
-  BunServices.layer,
-  commandLayer.pipe(Layer.provide(BunServices.layer)),
+  Layer.merge(BunServices.layer, cryptoLayer),
+  commandLayer.pipe(Layer.provide(Layer.merge(BunServices.layer, cryptoLayer))),
 );
 
 export function standaloneBrokerLayerForHome(home: string) {
@@ -47,7 +49,7 @@ export function telemetryLayerForHome(
       if (fallbackScope === 'broker' && !bridgeToBrokerProgram) {
         environment.THREADNOTE_MCP_BROKER_CHILD = '1';
       }
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const configuration = yield* boundedTelemetryConfiguration(home);
       if (configuration === undefined) return anonymousTelemetryLayer();
       const randomBytes = yield* crypto.randomBytes(16).pipe(

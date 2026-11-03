@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
@@ -20,8 +21,10 @@ import * as Effect2 from 'effect';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {Array as EffectArray} from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const base = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

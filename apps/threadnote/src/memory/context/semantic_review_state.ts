@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryRecord} from '@threadnote/memory/document';
@@ -116,7 +117,7 @@ export const writeSemanticReviewState = Effect.fn('semanticReview.writeState')(f
       'Semantic review storage is full. Preserve receipts and remove unused previews before continuing.',
     );
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

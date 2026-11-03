@@ -1,4 +1,5 @@
 import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
 import {codeGraphEmbeddingWorkerProcessLayer} from '../code_graph/embedding_worker.js';
 import {recallEmbeddingWakeLayer, resumeExistingRecallEmbeddingDemand} from '../recall/embedding_worker_process.js';
@@ -137,7 +138,7 @@ export {ModelSetupWorkerLayer} from './model-setup-runtime.js';
 
 export const ApplicationLayer = ApplicationServicesLayer.pipe(
   Layer.provideMerge(codeGraphRuntimeAdapters),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)),
   Layer.provideMerge(BunHttpClient.layer),
 );
 
@@ -178,6 +179,6 @@ const backgroundEmbeddingWorkerLayer = Layer.mergeAll(
   systemLayer,
   BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
   isolatedLocalModelRuntimeLayer({background: true, maximumRequestAttempts: 1}).pipe(Layer.provideMerge(systemLayer)),
-).pipe(Layer.provideMerge(BunServices.layer), Layer.provideMerge(BunHttpClient.layer));
+).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)), Layer.provideMerge(BunHttpClient.layer));
 export const RecallEmbeddingWorkerLayer = backgroundEmbeddingWorkerLayer;
 export const GraphEmbeddingWorkerLayer = codeGraphStoreLayer.pipe(Layer.provideMerge(backgroundEmbeddingWorkerLayer));

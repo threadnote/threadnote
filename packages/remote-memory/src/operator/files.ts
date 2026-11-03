@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {canonicalResourceUri, validatePortableSegment} from '@threadnote/store/resource-id';
 import {
   REMOTE_MEMORY_PORTABILITY_VERSION,
@@ -98,8 +99,8 @@ export const writeRemoteMemoryExportBundle = Effect.fn('remoteMemory.operator.wr
   if (yield* fs.exists(output)) {
     return yield* operatorFileError('The export output directory already exists.');
   }
-  const crypto = yield* Crypto.Crypto;
-  const staging = path.join(path.dirname(output), `.threadnote-remote-export-${yield* crypto.randomUUIDv4()}`);
+  const crypto = yield* SecureRandom.SecureRandom;
+  const staging = path.join(path.dirname(output), `.threadnote-remote-export-${yield* crypto.uuidV4()}`);
   yield* fs.makeDirectory(staging, {mode: 0o700, recursive: false});
   return yield* Effect.gen(function* () {
     for (const file of plan.files) {

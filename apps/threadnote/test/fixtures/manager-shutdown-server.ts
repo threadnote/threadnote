@@ -1,9 +1,12 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {createInterface} from 'node:readline';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Context, Deferred, Effect, Layer} from 'effect';
 import {HttpServer, HttpServerRequest, HttpServerResponse} from 'effect/http';
 import {makeManagerLive, managerLiveHttpLayer, serveManagerLive} from '../../src/manager/live.js';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 let stop: Deferred.Deferred<void> | undefined;
 let releaseResponse: Deferred.Deferred<void> | undefined;
@@ -89,4 +92,4 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.ensuring(Effect.sync(() => input.close())));
 
 // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This fixture is the owned child-process application entrypoint.
-BunRuntime.runMain(program.pipe(Effect.provide(BunServices.layer)));
+BunRuntime.runMain(program.pipe(Effect.provide(platformServicesLayer)));

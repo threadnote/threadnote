@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as EffectString from 'effect/String';
-import {Clock, Crypto, DateTime, Effect} from 'effect';
+import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
@@ -92,7 +93,7 @@ export const recallVectorTarget = Effect.fn('recall.vectorTarget')(function* (
         yield* sql`UPDATE vector_generations SET job_id = ${job} WHERE generation = ${legacy[0].generation} AND job_id IN (${legacyJob},${previousSharedJob})`;
         return legacy[0];
       }
-      const generation = `${yield* Clock.currentTimeMillis}-${EffectString.slice(0, 8)(yield* (yield* Crypto.Crypto).randomUUIDv4())}`;
+      const generation = `${yield* Clock.currentTimeMillis}-${EffectString.slice(0, 8)(yield* (yield* SecureRandom.SecureRandom).uuidV4())}`;
       yield* sql`INSERT INTO vector_generations (generation,job_id,corpus_generation,model_id,model_sha256,dimensions,embedding_recipe,chunker_version,normalized,chunk_count,state,created_at,scope_mapping_version)
       VALUES (${generation},${job},${source.generation},${manifest.id},${manifest.sha256},${manifest.dimensions},${recallVectorStorage.recipe(manifest)},${RECALL_CHUNKER_VERSION},'l2',0,'building',${DateTime.formatIso(yield* DateTime.now)},1)`;
       yield* sql`INSERT INTO idle_recall_targets (generation,phase) VALUES (${generation},'metadata')`;
