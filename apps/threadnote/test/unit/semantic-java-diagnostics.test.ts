@@ -348,37 +348,35 @@ describe('Java request diagnostics', () => {
           );
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
-    effectIt.effect.prop(
-      'preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard',
-      [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
-      ([suffix]) =>
-        Effect.gen(function* () {
-          for (const target of ['source', 'sdk', 'model', 'private', 'library', 'inventory'] as const) {
-            yield* Effect.scoped(
-              Effect.gen(function* () {
-                const f = yield* preparedSessionFixture();
-                yield* f.prepared.verifySource;
-                yield* f.prepared.verify;
-                const files = {
-                  source: f.path.join(f.source, 'Main.java'),
-                  sdk: f.path.join(f.javaHome, 'release'),
-                  model: f.metadataFile,
-                  private: f.path.join(f.prepared.project, '.settings/org.eclipse.jdt.core.prefs'),
-                  library: f.library,
-                  inventory: f.path.join(f.path.dirname(f.metadataFile), 'unexpected'),
-                };
-                const original = target === 'inventory' ? '' : yield* f.fs.readFileString(files[target]);
-                yield* f.fs.writeFileString(files[target], original + suffix, {mode: 0o600});
-                const source = yield* Effect.exit(f.prepared.verifySource);
-                const full = yield* Effect.exit(f.prepared.verify);
-                expect(source._tag).toBe(target === 'sdk' ? 'Success' : 'Failure');
-                expect(full._tag).toBe('Failure');
-              }),
-            );
-          }
-        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-      {arbitrary: {runs: 8}},
-    );
+    for (const target of ['source', 'sdk', 'model', 'private', 'library', 'inventory'] as const) {
+      effectIt.effect.prop(
+        `preserves source and artifact refusal in both guards while reserving SDK bytes for the full guard (${target})`,
+        [Schema.NonEmptyString.check(Schema.isMaxLength(32))],
+        ([suffix]) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* preparedSessionFixture();
+              yield* f.prepared.verifySource;
+              yield* f.prepared.verify;
+              const files = {
+                source: f.path.join(f.source, 'Main.java'),
+                sdk: f.path.join(f.javaHome, 'release'),
+                model: f.metadataFile,
+                private: f.path.join(f.prepared.project, '.settings/org.eclipse.jdt.core.prefs'),
+                library: f.library,
+                inventory: f.path.join(f.path.dirname(f.metadataFile), 'unexpected'),
+              };
+              const original = target === 'inventory' ? '' : yield* f.fs.readFileString(files[target]);
+              yield* f.fs.writeFileString(files[target], original + suffix, {mode: 0o600});
+              const source = yield* Effect.exit(f.prepared.verifySource);
+              const full = yield* Effect.exit(f.prepared.verify);
+              expect(source._tag).toBe(target === 'sdk' ? 'Success' : 'Failure');
+              expect(full._tag).toBe('Failure');
+            }),
+          ).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+        {arbitrary: {runs: 8}},
+      );
+    }
     effectIt.effect('retains exactly two full guards and retires on SDK drift inside a source-only exchange', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
@@ -626,8 +624,15 @@ describe('Java request diagnostics', () => {
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 
+    // Exhaust the complete finite domain instead of sampling duplicate tuples
+    // inside one cumulative property deadline.
+    const excludedEditCases = EffectArray.flatMap(['Excluded.java', 'Readme.txt'] as const, excluded =>
+      EffectArray.flatMap([0, 1, 2], position =>
+        EffectArray.map([false, true], reverse => ({excluded, position, reverse})),
+      ),
+    );
     for (const representation of ['changes', 'documentChanges'] as const) {
-      // Share only immutable project inputs across samples. f.create still gives
+      // Share only immutable project inputs across cases. f.create still gives
       // every operation a fresh session, notification stream and request state.
       const fixtureLayer = Layer.effect(
         PreparedEditFixture,
@@ -637,14 +642,9 @@ describe('Java request diagnostics', () => {
         }),
       ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
       effectIt.layer(fixtureLayer)(layerIt => {
-        layerIt.effect.prop(
-          `never returns a partial Java edit set when any target is excluded (${representation})`,
-          [
-            Schema.Literals(['Excluded.java', 'Readme.txt']),
-            Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
-            Schema.Boolean,
-          ],
-          ([excluded, position, reverse]) =>
+        layerIt.effect.each(excludedEditCases)(
+          `never returns a partial Java edit set when any target is excluded (${representation}, $excluded, position $position, reverse $reverse)`,
+          ({excluded, position, reverse}) =>
             Effect.gen(function* () {
               const {fixture: f, digest} = yield* PreparedEditFixture;
               const before = yield* semanticTreeDigest(f.project);
@@ -696,7 +696,6 @@ describe('Java request diagnostics', () => {
               }
               expect(yield* semanticTreeDigest(f.project)).toBe(before);
             }),
-          {arbitrary: {runs: 16}},
         );
       });
     }
