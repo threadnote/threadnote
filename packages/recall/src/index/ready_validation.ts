@@ -1,4 +1,4 @@
-import {String as EffectString, Clock, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, String as EffectString, Clock, Effect, FileSystem, Path} from 'effect';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
@@ -28,7 +28,32 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
   const policy =
     canonicalUris.size > 0 ? yield* loadCanonicalResourcePolicy(config, cause => cause, canonicalUris) : undefined;
   const now = yield* Clock.currentTimeMillis;
-  const cache = new Map<string, RecallCandidate | undefined>();
+  const readLive = (uri: string) =>
+    Effect.gen(function* () {
+      const id = yield* Effect.try(() => parseResourceId(uri));
+      if (
+        id.namespace !== 'resources' &&
+        !(id.namespace === 'user' && id.segments[0] === uriSegment(config.user) && id.segments[1] === 'memories')
+      )
+        return undefined;
+      const filename = path.join(root, id.namespace, ...id.segments);
+      if (!boundary) return undefined;
+      const relative = path.relative(boundary, yield* fs.realPath(filename));
+      if (relative === '..' || EffectString.startsWith('..' + path.sep)(relative) || path.isAbsolute(relative))
+        return undefined;
+      const bytes = yield* fromPromise('recall.readReadyCanonicalSource', () =>
+        runtimeReadBoundedStableRegularFile(filename, 512 * 1024),
+      );
+      const content = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+      const canonical = policy ? yield* verifyCanonicalResource(fs, uri, content, policy) : false;
+      return yield* Effect.try(() => indexCandidate(uri, content, canonical));
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  const cache = new Map(
+    yield* Effect.forEach(
+      [...new Set(EffectArray.flatMap(selected, candidate => [candidate.uri, ...(candidate.equivalentUris ?? [])]))],
+      uri => Effect.cached(readLive(uri)).pipe(Effect.map(read => [uri, read] as const)),
+    ),
+  );
   return (
     candidate: RecallCandidate,
     options: {
@@ -41,29 +66,9 @@ export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(f
   ) =>
     Effect.gen(function* () {
       if (isExternalResourceUri(candidate.uri)) return true; // The live external authorization/hash fence runs separately.
-      let live = cache.get(candidate.uri);
-      if (!cache.has(candidate.uri)) {
-        live = yield* Effect.gen(function* () {
-          const id = yield* Effect.try(() => parseResourceId(candidate.uri));
-          if (
-            id.namespace !== 'resources' &&
-            !(id.namespace === 'user' && id.segments[0] === uriSegment(config.user) && id.segments[1] === 'memories')
-          )
-            return undefined;
-          const filename = path.join(root, id.namespace, ...id.segments);
-          if (!boundary) return undefined;
-          const relative = path.relative(boundary, yield* fs.realPath(filename));
-          if (relative === '..' || EffectString.startsWith('..' + path.sep)(relative) || path.isAbsolute(relative))
-            return undefined;
-          const bytes = yield* fromPromise('recall.readReadyCanonicalSource', () =>
-            runtimeReadBoundedStableRegularFile(filename, 512 * 1024),
-          );
-          const content = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes));
-          const canonical = policy ? yield* verifyCanonicalResource(fs, candidate.uri, content, policy) : false;
-          return yield* Effect.try(() => indexCandidate(candidate.uri, content, canonical));
-        }).pipe(Effect.orElseSucceed(() => undefined));
-        cache.set(candidate.uri, live);
-      }
+      const read = cache.get(candidate.uri);
+      if (!read) return false;
+      const live = yield* read;
       if (!live || live.text !== candidate.text || live.memoryId !== candidate.memoryId) return false;
       if (!options.includeInactive && live.status !== undefined && live.status !== 'active') return false;
       if (

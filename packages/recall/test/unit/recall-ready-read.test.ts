@@ -15,6 +15,7 @@ import {
   expireRecallIndexValidation,
   loadRecallIndexData,
   readRecallIndexData,
+  readRecallIndexDataBatch,
   readRecallExactMatches,
   recallIndexStatus,
   recallIndexDatabaseFilename,
@@ -84,6 +85,66 @@ const eligibility = {
 } as const;
 
 describe('ready lexical readers', () => {
+  effectIt.effect('bounds concurrent canonical checks and preserves deterministic candidate order', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, filename} = yield* fixture;
+      for (let i = 0; i < 24; i++)
+        yield* fs.writeFileString(
+          path.join(path.dirname(filename), `parallel-${i}.md`),
+          EffectString.replace('Useful alpha sentinel evidence.', `parallelcheck source ${i}`)(body()),
+        );
+      const options = {includeInactive: false, query: 'parallelcheck', limit: 64};
+      const expected = yield* loadRecallIndexData(config, {...options, forceRefresh: true});
+      expect(expected.candidates).toHaveLength(24);
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let active = 0;
+      let maximum = 0;
+      const reads = new Map<string, number>();
+      const tracedFs = {
+        ...fs,
+        realPath: (target: string) =>
+          !EffectString.startsWith('parallel-')(path.basename(target))
+            ? fs.realPath(target)
+            : Effect.acquireUseRelease(
+                Effect.sync(() => {
+                  active++;
+                  maximum = Math.max(maximum, active);
+                  reads.set(target, (reads.get(target) ?? 0) + 1);
+                  return active;
+                }),
+                count =>
+                  (count === 8 ? Deferred.succeed(entered, undefined) : Effect.void).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.andThen(fs.realPath(target)),
+                  ),
+                () =>
+                  Effect.sync(() => {
+                    active--;
+                  }),
+              ),
+      };
+      const reader = yield* readRecallIndexDataBatch(config, {
+        includeInactive: false,
+        selections: [
+          {query: 'parallelcheck', limit: 64},
+          {query: 'parallelcheck', limit: 64},
+        ],
+      }).pipe(Effect.provideService(FileSystem.FileSystem, tracedFs), Effect.forkScoped);
+      yield* Deferred.await(entered).pipe(Effect.timeout('2 seconds'));
+      expect(maximum).toBe(8);
+      yield* Deferred.succeed(release, undefined);
+      const actual = yield* Fiber.join(reader);
+      for (const selection of actual)
+        expect(EffectArray.map(selection.candidates, candidate => candidate.uri)).toEqual(
+          EffectArray.map(expected.candidates, candidate => candidate.uri),
+        );
+      expect(actual).toHaveLength(2);
+      expect(maximum).toBe(8);
+      expect(reads.size).toBe(24);
+      expect([...reads.values()]).toEqual(Array.from({length: 24}, () => 1));
+    }).pipe(provide),
+  );
   effectIt.effect('rejects an unsupported ready schema without modifying the database', () =>
     Effect.gen(function* () {
       const {fs, path, config} = yield* fixture;

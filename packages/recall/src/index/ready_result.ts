@@ -62,21 +62,25 @@ export const validateRecallReadyResult = Effect.fn('recall.validateReadyResult')
     Effect.gen(function* () {
       const filter = (candidates: readonly RecallCandidate[]) =>
         Effect.gen(function* () {
-          const kept: RecallCandidate[] = [];
-          for (const candidate of candidates) {
-            if (!(yield* validate(candidate, selection))) {
-              removed = true;
-              continue;
-            }
-            const equivalentUris = candidate.equivalentUris
-              ? yield* Effect.filter(candidate.equivalentUris, uri =>
-                  validate({...candidate, uri, equivalentUris: undefined}, selection),
-                )
-              : undefined;
-            if ((equivalentUris?.length ?? 0) !== (candidate.equivalentUris?.length ?? 0)) removed = true;
-            kept.push({...candidate, ...(equivalentUris ? {equivalentUris} : {})});
-          }
-          return kept;
+          const checked = yield* Effect.forEach(
+            candidates,
+            candidate =>
+              Effect.gen(function* () {
+                if (!(yield* validate(candidate, selection))) {
+                  removed = true;
+                  return undefined;
+                }
+                const equivalentUris = candidate.equivalentUris
+                  ? yield* Effect.filter(candidate.equivalentUris, uri =>
+                      validate({...candidate, uri, equivalentUris: undefined}, selection),
+                    )
+                  : undefined;
+                if ((equivalentUris?.length ?? 0) !== (candidate.equivalentUris?.length ?? 0)) removed = true;
+                return {...candidate, ...(equivalentUris ? {equivalentUris} : {})};
+              }),
+            {concurrency: 8},
+          );
+          return EffectArray.filter(checked, (candidate): candidate is RecallCandidate => candidate !== undefined);
         });
       const candidates = yield* filter(data.candidates);
       const recentCandidates = data.recentCandidates ? yield* filter(data.recentCandidates) : undefined;
@@ -87,8 +91,12 @@ export const validateRecallReadyResult = Effect.fn('recall.validateReadyResult')
       validateData(data, {...options.selections[i], includeInactive: options.includeInactive}),
     );
   } else if (matches) {
-    const eligibleUris = new Set<string>();
-    for (const candidate of projected) if (yield* validate(candidate, options)) eligibleUris.add(candidate.uri);
+    const eligibleUris = new Set(
+      EffectArray.map(
+        yield* Effect.filter(projected, candidate => validate(candidate, options), {concurrency: 8}),
+        candidate => candidate.uri,
+      ),
+    );
     const kept = EffectArray.filter(matches, match => eligibleUris.has(uriOf(match)));
     removed = kept.length !== matches.length;
     result = kept;

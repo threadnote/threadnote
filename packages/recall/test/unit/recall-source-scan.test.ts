@@ -2,12 +2,13 @@ import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {DateTime, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources} from '@threadnote/recall/index/refresh';
+import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
+import {RECALL_REFRESH_SOURCE_TABLE, scanRecallSources, stageRecallSources} from '@threadnote/recall/index/refresh';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -67,21 +68,23 @@ const fixture = Effect.fn('test.recallSourceScanFixture')(function* (sources: re
     });
   }
   expected.sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
+  const config = {account: 'acct', agentContextHome: home, user: 'allowed'};
+  const policy = {
+    entryKeyByUri: new Map(
+      EffectArray.flatMap(expected, row =>
+        row.authority_policy_key === null ? [] : [[row.uri, row.authority_policy_key]],
+      ),
+    ),
+    sourcePathByUri: new Map<string, string>(),
+  };
   const scan = (sql: SqlClient.SqlClient) =>
     scanRecallSources(
       sql,
       fs,
       path,
-      {account: 'acct', agentContextHome: home, user: 'allowed'},
+      config,
       true,
-      {
-        entryKeyByUri: new Map(
-          EffectArray.flatMap(expected, row =>
-            row.authority_policy_key === null ? [] : [[row.uri, row.authority_policy_key]],
-          ),
-        ),
-        sourcePathByUri: new Map(),
-      },
+      policy,
       new Set(
         EffectArray.map(
           EffectArray.filter(expected, row => row.invalidated === 1),
@@ -89,8 +92,19 @@ const fixture = Effect.fn('test.recallSourceScanFixture')(function* (sources: re
         ),
       ),
     );
-  return {expected, scan};
+  return {expected, scan, fs, path, config, policy};
 });
+const seedPersistedInventory = (sql: SqlClient.SqlClient, skipped = 0) =>
+  Effect.gen(function* () {
+    yield* sql.unsafe('CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    yield* sql.unsafe(
+      "INSERT INTO metadata VALUES ('content_generation', 'baseline'), ('oversized_document_count', ?)",
+      [String(skipped)],
+    );
+    yield* sql.unsafe(
+      `CREATE TABLE documents AS SELECT uri, source_path, source_modified_at, source_size, authority_policy_key FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`,
+    );
+  });
 const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* (sources: readonly Source[]) {
   const {expected, scan} = yield* fixture(sources);
   yield* Effect.gen(function* () {
@@ -116,6 +130,349 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
 
 describe('Recall source staging', () => {
   effectIt.layer(BunServices.layer)(it => {
+    it.effect('forces hydration of an invalidated file with unchanged size and modification time', () =>
+      Effect.gen(function* () {
+        const {expected, scan, fs, path, config, policy} = yield* fixture(sources(1));
+        const target = expected[0];
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          yield* fs.writeFileString(target.source_path, EffectString.repeat(target.source_size)('x'));
+          const originalTime = DateTime.toDateUtc(DateTime.makeUnsafe(target.source_modified_at!));
+          yield* fs.utimes(target.source_path, originalTime, originalTime);
+          const result = yield* stageRecallSources(sql, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([target.uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          expect(result.mode).toBe('touched');
+          expect(yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`)).toEqual([
+            {...target, invalidated: 1},
+          ]);
+        }).pipe(withDatabase);
+      }),
+    );
+    for (const uncertainty of ['generation', 'oversized-count', 'prefix', 'foreign-user', 'unknown-missing'] as const) {
+      it.effect(`requests full rehydration when ${uncertainty} prevents a proved touched pass`, () =>
+        Effect.gen(function* () {
+          const {expected, scan, fs, path, config, policy} = yield* fixture(sources(1));
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* scan(sql);
+            yield* seedPersistedInventory(sql);
+            if (uncertainty === 'oversized-count')
+              yield* sql.unsafe("UPDATE metadata SET value = 'unknown' WHERE key = 'oversized_document_count'");
+            const uri =
+              uncertainty === 'prefix'
+                ? 'threadnote://resources'
+                : uncertainty === 'foreign-user'
+                  ? 'threadnote://user/other/memories/forbidden.md'
+                  : uncertainty === 'unknown-missing'
+                    ? 'threadnote://resources/missing.md'
+                    : expected[0].uri;
+            const result = yield* stageRecallSources(sql, fs, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: new Set([uri]),
+              mode: {kind: 'touched', contentGeneration: uncertainty === 'generation' ? 'wrong' : 'baseline'},
+            });
+            expect(result).toMatchObject({
+              mode: 'full',
+              forceAllSources: true,
+              scannedSourceCount: 1,
+              skippedOversizedDocumentCount: 0,
+            });
+            expect((yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE}`))[0].uri).toBe(
+              expected[0].uri,
+            );
+          }).pipe(withDatabase);
+        }),
+      );
+    }
+    fcEffectProp(
+      it,
+      'touched inventories equal a clean scan after finite file mutations without changing persisted rows',
+      {
+        actions: fc.array(
+          fc.record({
+            id: fc.integer({min: 0, max: 5}),
+            action: fc.constantFrom('write', 'delete', 'move'),
+            body: fc.string({maxLength: 32}),
+          }),
+          {minLength: 1, maxLength: 8},
+        ),
+      },
+      ({actions}) =>
+        Effect.gen(function* () {
+          const {scan, fs, path, config, policy} = yield* fixture(sources(3));
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* scan(sql);
+            yield* seedPersistedInventory(sql);
+            const before = yield* sql.unsafe('SELECT * FROM documents ORDER BY uri');
+            const touched = new Set<string>();
+            for (const action of actions) {
+              const name = `source-${EffectString.padStart(3, '0')(String(action.id))}.md`;
+              const segments = action.id % 2 === 0 ? ['resources'] : ['user', 'allowed', 'memories'];
+              const filename = path.join(config.agentContextHome, 'data', 'acct', ...segments, name);
+              const uri =
+                action.id % 2 === 0 ? `threadnote://resources/${name}` : `threadnote://user/allowed/memories/${name}`;
+              touched.add(uri);
+              if (action.action === 'delete') yield* fs.remove(filename, {force: true});
+              else if (action.action === 'write') yield* fs.writeFileString(filename, action.body);
+              else if (yield* fs.exists(filename)) {
+                const moved = path.join(config.agentContextHome, 'data', 'acct', 'resources', 'moved-' + name);
+                yield* fs.rename(filename, moved);
+                touched.add(`threadnote://resources/moved-${name}`);
+              }
+            }
+            const result = yield* stageRecallSources(sql, fs, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: touched,
+              mode: {kind: 'touched', contentGeneration: 'baseline'},
+            });
+            const staged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            const full = yield* scanRecallSources(sql, fs, path, config, true, policy, touched);
+            expect(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+            ).toEqual(staged);
+            expect(result.skippedOversizedDocumentCount).toBe(full.skippedOversizedDocumentCount);
+            expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
+          }).pipe(withDatabase);
+        }),
+      {fastCheck: {numRuns: 12}},
+    );
+    for (const change of ['grow', 'shrink', 'delete-oversized', 'retain-other-oversized'] as const) {
+      it.effect(`preserves oversized inventory counts for ${change}`, () =>
+        Effect.gen(function* () {
+          const {scan, expected, fs, path, config, policy} = yield* fixture(sources(2));
+          const target = expected[0];
+          const other = expected[1];
+          if (change === 'shrink' || change === 'delete-oversized')
+            yield* fs.writeFileString(target.source_path, EffectString.repeat(512 * 1024 + 1)('x'));
+          if (change === 'retain-other-oversized')
+            yield* fs.writeFileString(other.source_path, EffectString.repeat(512 * 1024 + 1)('x'));
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const baseline = yield* scan(sql);
+            yield* seedPersistedInventory(sql, baseline.skippedOversizedDocumentCount);
+            if (change === 'delete-oversized') yield* fs.remove(target.source_path);
+            else
+              yield* fs.writeFileString(
+                target.source_path,
+                change === 'grow' ? EffectString.repeat(512 * 1024 + 1)('x') : 'small',
+              );
+            const result = yield* stageRecallSources(sql, fs, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: new Set([target.uri]),
+              mode: {kind: 'touched', contentGeneration: 'baseline'},
+            });
+            expect(result.mode).toBe(change === 'shrink' || change === 'delete-oversized' ? 'full' : 'touched');
+            expect(result.forceAllSources).toBe(result.mode === 'full');
+            const staged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            const full = yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([target.uri]));
+            expect(result.skippedOversizedDocumentCount).toBe(full.skippedOversizedDocumentCount);
+            expect(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+            ).toEqual(staged);
+          }).pipe(withDatabase);
+        }),
+      );
+    }
+    it.effect('retains a verified decomposed source path for its normalized URI', () =>
+      Effect.gen(function* () {
+        const {scan, fs, path, config, policy} = yield* fixture(sources(1));
+        const filename = path.join(config.agentContextHome, 'data', 'acct', 'resources', 'e\u0301.md');
+        yield* fs.writeFileString(filename, 'before');
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          yield* fs.writeFileString(filename, 'after');
+          const uri = 'threadnote://resources/%C3%A9.md';
+          const result = yield* stageRecallSources(sql, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          const canonicalExists = yield* fs.exists(path.join(path.dirname(filename), '\u00e9.md'));
+          expect(result.mode).toBe(canonicalExists ? 'touched' : 'full');
+          const staged = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
+          yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([uri]));
+          expect(
+            yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+          ).toEqual(staged);
+        }).pipe(withDatabase);
+      }),
+    );
+    for (const move of [
+      {
+        kind: 'case-rename',
+        from: 'A.md',
+        to: 'a.md',
+        uris: ['threadnote://resources/A.md', 'threadnote://resources/a.md'],
+      },
+      {kind: 'case-upsert', from: 'A.md', to: 'a.md', uris: ['threadnote://resources/a.md']},
+      {kind: 'normalization-rename', from: 'e\u0301.md', to: '\u00e9.md', uris: ['threadnote://resources/%C3%A9.md']},
+    ]) {
+      it.effect(`preserves the complete current inventory after ${move.kind}`, () =>
+        Effect.gen(function* () {
+          const {scan, fs, path, config, policy} = yield* fixture(sources(1));
+          const root = path.join(config.agentContextHome, 'data', 'acct', 'resources');
+          const from = path.join(root, move.from);
+          const to = path.join(root, move.to);
+          yield* fs.writeFileString(from, 'before');
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* scan(sql);
+            yield* seedPersistedInventory(sql);
+            if (move.kind === 'case-upsert') {
+              const replacement = path.join(root, 'replacement.tmp');
+              yield* fs.writeFileString(replacement, 'after');
+              yield* fs.rename(replacement, to);
+            } else yield* fs.rename(from, to);
+            const touched = new Set(move.uris);
+            const result = yield* stageRecallSources(sql, fs, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: touched,
+              mode: {kind: 'touched', contentGeneration: 'baseline'},
+            });
+            if (move.kind !== 'normalization-rename') expect(result.mode).toBe('full');
+            const staged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            yield* scanRecallSources(sql, fs, path, config, true, policy, touched);
+            expect(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+            ).toEqual(staged);
+          }).pipe(withDatabase);
+        }),
+      );
+    }
+    it.effect('refuses ambiguous canonical and decomposed spellings when the filesystem permits both', () =>
+      Effect.gen(function* () {
+        const {scan, fs, path, config, policy} = yield* fixture(sources(1));
+        const root = path.join(config.agentContextHome, 'data', 'acct', 'resources');
+        const decomposed = path.join(root, 'e\u0301.md');
+        const canonical = path.join(root, '\u00e9.md');
+        yield* fs.writeFileString(decomposed, 'old');
+        const distinctNames = !(yield* fs.exists(canonical));
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          const before = yield* sql.unsafe('SELECT * FROM documents ORDER BY uri');
+          yield* fs.writeFileString(canonical, 'new');
+          const uri = 'threadnote://resources/%C3%A9.md';
+          const staged = yield* stageRecallSources(sql, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          }).pipe(Effect.exit);
+          if (distinctNames) expect(Exit.isFailure(staged)).toBe(true);
+          else {
+            expect(Exit.isSuccess(staged)).toBe(true);
+            const inventory = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([uri]));
+            expect(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+            ).toEqual(inventory);
+          }
+          expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
+        }).pipe(withDatabase);
+      }),
+    );
+    it.effect(
+      'stages one touched file among two thousand without walking canonical roots or changing persisted rows',
+      () =>
+        Effect.gen(function* () {
+          const {expected, scan, fs, path, config, policy} = yield* fixture(sources(2048));
+          for (const provider of ['superhuman', 'pocket', 'linear', 'github'])
+            yield* fs.makeDirectory(
+              path.join(
+                config.agentContextHome,
+                'data',
+                'acct',
+                'resources',
+                'external',
+                provider,
+                'project-a',
+                'docs',
+                'doc_1',
+              ),
+              {recursive: true},
+            );
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* scan(sql);
+            yield* seedPersistedInventory(sql);
+            const target = expected[1500];
+            yield* fs.writeFileString(target.source_path, 'changed target');
+            let directoryReads = 0;
+            let unrelatedFileStats = 0;
+            let externalPolicyReads = 0;
+            const traced = {
+              ...fs,
+              readDirectory: (...args: Parameters<typeof fs.readDirectory>) => {
+                directoryReads++;
+                return fs.readDirectory(...args);
+              },
+              stat: (filename: string) => {
+                if (filename !== target.source_path && EffectString.endsWith('.md')(filename)) unrelatedFileStats++;
+                return fs.stat(filename);
+              },
+            };
+            const before = yield* sql.unsafe('SELECT * FROM documents ORDER BY uri');
+            const result = yield* stageRecallSources(sql, traced, path, config, {
+              includeInactive: true,
+              canonicalResourcePolicy: policy,
+              invalidatedUris: new Set([target.uri]),
+              mode: {kind: 'touched', contentGeneration: 'baseline'},
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, traced),
+              Effect.provideService(ExternalSourcePolicy, {
+                current: () =>
+                  Effect.sync(() => {
+                    externalPolicyReads++;
+                    return {enabled: true, configFingerprint: EffectString.repeat(64)('a'), project: null};
+                  }),
+              }),
+            );
+            expect(result).toMatchObject({mode: 'touched', scannedSourceCount: 1, skippedOversizedDocumentCount: 0});
+            expect(directoryReads).toBe(0);
+            expect(unrelatedFileStats).toBe(0);
+            expect(externalPolicyReads).toBe(0);
+            expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY uri')).toEqual(before);
+            const staged = yield* sql.unsafe<SourceRow>(
+              `SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`,
+            );
+            expect(staged).toHaveLength(expected.length);
+            expect(
+              EffectArray.map(
+                EffectArray.filter(staged, row => row.invalidated === 1),
+                row => row.uri,
+              ),
+            ).toEqual([target.uri]);
+            yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([target.uri]));
+            expect(
+              yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+            ).toEqual(staged);
+          }).pipe(withDatabase);
+        }),
+    );
     for (const count of [0, 1, 255, 256, 257, 513]) {
       it.effect(`stages complete metadata and indexed locator lookups for ${count} sources`, () =>
         verifyInventory(sources(count)),
