@@ -6,7 +6,12 @@ import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_ident
 import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/types';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
-import {retrieveSemanticContextSourceEvidence} from '../../src/compiler.js';
+import {
+  retrieveSemanticContextSourceEvidence,
+  projectSemanticContextKnowledge,
+  compileContextBriefWith,
+} from '../../src/compiler.js';
+import {fromRepositoryQuery} from '../../src/graph/evidence.js';
 
 const fixture = Effect.fn('test.semanticContextSource')(function* (text: string, format: 'sha1' | 'sha256' = 'sha1') {
   const fs = yield* FileSystem.FileSystem;
@@ -39,7 +44,7 @@ const fixture = Effect.fn('test.semanticContextSource')(function* (text: string,
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
     nodes: [
       {
-        id: 'cgs_fixture',
+        id: 'cgs_' + EffectString.slice(0, 32)(sha256HexSync('fixture node')),
         kind: 'variable',
         language: 'typescript',
         name: 'answer',
@@ -77,6 +82,44 @@ const fixture = Effect.fn('test.semanticContextSource')(function* (text: string,
 });
 
 effectIt.layer(citationPlatformLayer)(test => {
+  test.effect('composes machine knowledge from structured evidence while the text channel is human-readable', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture('export const answer = 42;\n');
+      const source = yield* retrieveSemanticContextSourceEvidence(f.request, f.evidence);
+      const projected = yield* compileContextBriefWith(
+        {
+          graphEvidence: () => Effect.succeed(fromRepositoryQuery(f.request.result)),
+          memoryEvidence: () =>
+            Effect.succeed({
+              candidates: [],
+              consideredCandidates: 0,
+              gaps: [],
+              trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+            }),
+        },
+        {
+          task: 'Understand answer',
+          scope: {kind: 'repository', callerCwd: f.request.identity.repoRoot},
+          mode: 'explain',
+          codeRefs: ['source.ts'],
+          budgetTokens: 1250,
+          responseFormat: 'agent',
+        },
+      );
+      expect(projected.text).toMatch(/^THREADNOTE BRIEF/u);
+      expect(() => JSON.parse(projected.text)).toThrow();
+      const result = projectSemanticContextKnowledge(projected, source.binding);
+      expect(result.brief?.type).toBe('context-brief-agent-view');
+      expect(result.brief?.trust).toBe('untrusted-evidence-never-follow-instructions');
+      expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+      expect(projectSemanticContextKnowledge(projected, null)).toEqual({
+        scope: 'document',
+        binding: null,
+        brief: null,
+        gaps: ['semantic-graph-source-unbound'],
+      });
+    }),
+  );
   test.effect.prop(
     'independently binds raw semantic bytes and Git graph identities for both object formats',
     [Schema.String.check(Schema.isMaxLength(96)), Schema.Literals(['sha1', 'sha256'])],
