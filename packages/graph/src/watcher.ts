@@ -1,9 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {
   Cause,
   Clock,
   Context,
-  Crypto,
   Deferred,
   Effect,
   Fiber,
@@ -427,7 +427,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
     Effect.gen(function* () {
       const observability = yield* CodeGraphObservability;
       const fs = yield* FileSystem.FileSystem;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const path = yield* Path.Path;
       const commandExecutor = yield* CommandExecutor;
       const systemInfo = yield* SystemInfo;
@@ -466,7 +466,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               store,
             }).pipe(
               Effect.provideService(CommandExecutor, commandExecutor),
-              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.provideService(SecureRandom.SecureRandom, crypto),
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(Path.Path, path),
               Effect.provideService(SystemInfo, systemInfo),
@@ -506,7 +506,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
           const scope = scopedObservation?.scope;
           const overlay = yield* worktreeBuildRequestState(identity, options.threadnoteHome, scope).pipe(
             Effect.provideService(CommandExecutor, commandExecutor),
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(Path.Path, path),
             Effect.provideService(SystemInfo, systemInfo),
@@ -568,7 +568,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
         });
       const provideDemandServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
-          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(SecureRandom.SecureRandom, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.provideService(SystemInfo, systemInfo),
@@ -625,7 +625,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     threadnoteHome: options.threadnoteHome,
                   }).pipe(
                     Effect.provideService(CommandExecutor, commandExecutor),
-                    Effect.provideService(Crypto.Crypto, crypto),
+                    Effect.provideService(SecureRandom.SecureRandom, crypto),
                     Effect.provideService(FileSystem.FileSystem, fs),
                     Effect.provideService(Path.Path, path),
                     Effect.provideService(SystemInfo, systemInfo),
@@ -721,7 +721,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                   }),
                 ),
                 Effect.provideService(CommandExecutor, commandExecutor),
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, systemInfo),
@@ -826,7 +826,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     : ({reason: 'schema-unavailable', state: 'skipped'} as const),
                 ),
                 Effect.provideService(CommandExecutor, commandExecutor),
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
                 Effect.provideService(SystemInfo, systemInfo),

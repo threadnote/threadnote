@@ -1,5 +1,8 @@
+import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
 import {codeGraphEmbeddingWorkerProcessLayer} from '../code_graph/embedding_worker.js';
+import {recallEmbeddingWakeLayer, resumeExistingRecallEmbeddingDemand} from '../recall/embedding_worker_process.js';
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -110,6 +113,7 @@ const codeGraphQueryLayer = CodeGraphQueryService.layer.pipe(Layer.provideMerge(
 const codeGraphWatcherLayer = CodeGraphWatcher.layer.pipe(Layer.provideMerge(codeGraphIndexerLayer));
 
 const ApplicationServicesLayer = Layer.mergeAll(
+  BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
   cliOutputLayer,
   graphEmbeddingWorkerProcessLayer,
   threadnoteCliFormatterLayer,
@@ -134,9 +138,11 @@ export {ModelSetupWorkerLayer} from './model-setup-runtime.js';
 
 export const ApplicationLayer = ApplicationServicesLayer.pipe(
   Layer.provideMerge(codeGraphRuntimeAdapters),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)),
   Layer.provideMerge(BunHttpClient.layer),
 );
+
+export const HandoffSaveWorkerLayer = recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer));
 
 /**
  * Runtime application layer with explicit-consent anonymous telemetry. The
@@ -147,9 +153,13 @@ export function applicationLayerForHome(home: string, entrypoint: 'cli' | 'mcp')
     Layer.provideMerge(
       deferredCodeAnchorRefreshSchedulerLayer.pipe(
         Layer.provideMerge(
-          Layer.effectDiscard(Effect.forkScoped(resumeExistingCodeGraphEmbeddingDemand(home))).pipe(
-            Layer.provideMerge(ApplicationLayer),
-          ),
+          Layer.effectDiscard(
+            Effect.forkScoped(
+              Effect.all([resumeExistingCodeGraphEmbeddingDemand(home), resumeExistingRecallEmbeddingDemand(home)], {
+                concurrency: 2,
+              }).pipe(Effect.asVoid),
+            ),
+          ).pipe(Layer.provideMerge(recallEmbeddingWakeLayer.pipe(Layer.provideMerge(ApplicationLayer)))),
         ),
       ),
     ),
@@ -161,12 +171,14 @@ export {telemetryLayerForHomeForTest} from './runtime-bootstrap.js';
 
 export type ApplicationServices = Layer.Success<typeof ApplicationLayer>;
 
-/** Background retries are durable; one model child deadline per lane attempt. */
-export const GraphEmbeddingWorkerLayer = Layer.mergeAll(
-  codeGraphStoreLayer,
+/** No foreground profile can enter either automatic document worker. */
+const backgroundEmbeddingWorkerLayer = Layer.mergeAll(
   localModelCatalogLayer,
   localModelStoreLayer,
   commandLayer,
   systemLayer,
-  isolatedLocalModelRuntimeLayer({maximumRequestAttempts: 1}).pipe(Layer.provideMerge(systemLayer)),
-).pipe(Layer.provideMerge(BunServices.layer), Layer.provideMerge(BunHttpClient.layer));
+  BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
+  isolatedLocalModelRuntimeLayer({background: true, maximumRequestAttempts: 1}).pipe(Layer.provideMerge(systemLayer)),
+).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)), Layer.provideMerge(BunHttpClient.layer));
+export const RecallEmbeddingWorkerLayer = backgroundEmbeddingWorkerLayer;
+export const GraphEmbeddingWorkerLayer = codeGraphStoreLayer.pipe(Layer.provideMerge(backgroundEmbeddingWorkerLayer));

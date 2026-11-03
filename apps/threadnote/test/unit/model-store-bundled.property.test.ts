@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -21,11 +22,13 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {Array as EffectArray} from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const modelStoreTestLayer = (options: LocalModelStoreLayerOptions = {}) =>
   LocalModelStore.layerWith(options).pipe(
     Layer.provideMerge(HttpService.layer),
     Layer.provideMerge(TestSystemInfoLayer),
-    Layer.provideMerge(BunServices.layer),
+    Layer.provideMerge(platformServicesLayer),
   );
 
 describe('bundled model installation', () => {
@@ -152,7 +155,7 @@ describe('bundled model installation', () => {
           expect(yield* fs.exists(store.path(home, manifest))).toBe(false);
           expect(yield* fs.exists(`${store.path(home, manifest)}.partial`)).toBe(false);
         }).pipe(provideTestLayer(layer));
-      }).pipe(provideTestLayer(BunServices.layer), Effect.scoped),
+      }).pipe(provideTestLayer(platformServicesLayer), Effect.scoped),
     ),
   );
 
@@ -180,7 +183,7 @@ describe('bundled model installation', () => {
         if (Result.isFailure(result)) expect(result.failure._tag).toBe('ModelStoreIoFailed');
         expect(yield* fs.exists(`${store.path(home, manifest)}.partial`)).toBe(false);
       }).pipe(provideTestLayer(layer));
-    }).pipe(provideTestLayer(BunServices.layer), Effect.scoped),
+    }).pipe(provideTestLayer(platformServicesLayer), Effect.scoped),
   );
 });
 

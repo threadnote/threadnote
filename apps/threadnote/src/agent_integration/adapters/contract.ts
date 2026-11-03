@@ -1,4 +1,5 @@
-import {Schema, type Crypto, type FileSystem, type Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Schema, type FileSystem, type Path} from 'effect';
 import type {Effect} from 'effect';
 import type {CommandExecutor} from '@threadnote/platform/command';
 import type {SystemInfo} from '@threadnote/platform/system';
@@ -115,7 +116,7 @@ export interface AgentAdapterActionOptions {
 }
 
 export type AgentAdapterRuntimeServices =
-  CommandExecutor | Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo;
+  CommandExecutor | SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo;
 
 export type AgentAdapterMutation = (
   config: RuntimeConfig,

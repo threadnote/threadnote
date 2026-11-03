@@ -1,4 +1,5 @@
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -13,7 +14,7 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-const testLayer = provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer));
+const testLayer = provideTestLayer(Layer.mergeAll(cryptoLayer, BunFileSystem.layer, BunPath.layer));
 const noDatabase = {
   createAdapter: () => {
     throw new Error('Operations must never create a database adapter.');

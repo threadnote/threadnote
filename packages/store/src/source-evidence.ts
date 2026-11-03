@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimePlatform} from '@threadnote/platform/system';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -333,9 +334,9 @@ export const captureSourceEvidence = Effect.fn('sourceEvidence.capture')(functio
         Effect2.Option.getOrElse(() => -1),
       );
       if (fragmentStart < 0) return yield* invalid('Fragment is absent from the exact sanitized imported revision.');
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const now = yield* Clock.currentTimeMillis;
-      const pinId = yield* crypto.randomUUIDv4();
+      const pinId = yield* crypto.uuidV4();
       const citation: SourceEvidenceCitationV1 = {
         version: 1,
         provider: inspected.provider,

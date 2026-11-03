@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -27,8 +28,10 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const base = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

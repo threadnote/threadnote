@@ -205,7 +205,7 @@ interface RecallIndexPointer {
   readonly version: typeof RECALL_INDEX_POINTER_VERSION;
 }
 
-class RecallIndexCorrupt extends Schema.TaggedError<RecallIndexCorrupt, {readonly brand: unique symbol}>()(
+export class RecallIndexCorrupt extends Schema.TaggedError<RecallIndexCorrupt, {readonly brand: unique symbol}>()(
   'RecallIndexCorrupt',
   {
     cause: Schema.optionalKey(Schema.Defect()),

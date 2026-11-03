@@ -23,7 +23,12 @@ import {ContextMaintenanceView} from './attention/maintenance_view.js';
 import {TopicReviewDialog} from './attention/topic_review.js';
 import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
-import {api, errorMessage, ManagerApiError} from '@threadnote/manager/ui/support';
+import {
+  api,
+  CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS,
+  errorMessage,
+  ManagerApiError,
+} from '@threadnote/manager/ui/support';
 import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -448,7 +453,7 @@ function ProjectContextHealthPanel(
       api<ManagerContextHealthResponseV1>(
         `/api/context-health?project=${encodeURIComponent(props.project)}`,
         undefined,
-        {signal, timeoutMilliseconds: 8_000},
+        {signal, timeoutMilliseconds: CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS},
         isManagerContextHealthResponseV1,
       ),
     [props.project],
@@ -712,7 +717,7 @@ function ProjectContextHealthPanel(
     void api<ManagerContextHealthResponseV1>(
       `/api/context-health?project=${encodeURIComponent(props.project)}&after=${encodeURIComponent(nextCursor)}`,
       undefined,
-      {signal: requestController.current?.signal, timeoutMilliseconds: 8_000},
+      {signal: requestController.current?.signal, timeoutMilliseconds: CONTEXT_HEALTH_REQUEST_TIMEOUT_MILLISECONDS},
       isManagerContextHealthResponseV1,
     )
       .then(next => {

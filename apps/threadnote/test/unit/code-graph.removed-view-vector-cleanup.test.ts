@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -22,12 +23,14 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {Array as EffectArray} from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 function requiredRow<Row extends object>(row: Row | null): Row {
   if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
   return row;
 }
 
-const RemovedViewVectorTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const RemovedViewVectorTestLayer = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer);
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const WORKTREE_ID = Effect2.pipe('b', EffectString.repeat(64));
 const SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;

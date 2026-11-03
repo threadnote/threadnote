@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {findAgentSurface} from '@threadnote/integrations/catalog';
 import {resolveDevSkillsTarget} from '../agent_integration/skill_targets.js';
-import {Console, Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {Console, Effect, FileSystem, Option, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {
@@ -216,8 +217,8 @@ export const recordSetupWorkflowCheckpoint = Effect.fn('setup.recordWorkflowChec
   if (EffectArray.some(prior, entry => entry.operationId === identity.operationId)) return;
   if (prior.length >= 512)
     return yield* SetupOperationError.make({message: 'Workflow setup history limit reached; preserve checkpoints.'});
-  const crypto = yield* Crypto.Crypto;
-  const temporary = `${file}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const temporary = `${file}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
   const content = JSON.stringify([...prior, {...identity, choice: disabled ? 'disabled' : 'default'}]) + '\n';
   yield* fs.writeFileString(temporary, content, {mode: 0o600, flag: 'wx'});

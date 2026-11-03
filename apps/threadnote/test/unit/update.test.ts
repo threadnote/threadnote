@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
@@ -7,7 +8,7 @@ import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
-import {Cause, Crypto, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
+import {Cause, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
@@ -2092,7 +2093,7 @@ describe('post-update validation', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const baseSystem = yield* SystemInfo;
           const temporaryRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-post-update-deferred-home-'});
           const fixtureRoot = path.join(temporaryRoot, 'tool');
@@ -2119,7 +2120,7 @@ describe('post-update validation', () => {
               Effect.gen(function* () {
                 executions += 1;
                 yield* migrateThreadnoteStorageLayout({apply: true, home}).pipe(
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fs),
                   Effect.provideService(Path.Path, path),
                   Effect.provideService(SystemInfo, system),
@@ -2158,7 +2159,7 @@ describe('post-update validation', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const baseSystem = yield* SystemInfo;
           const temporaryRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-post-update-repair-marker-'});
           const fixtureRoot = path.join(temporaryRoot, 'tool');
@@ -2186,7 +2187,7 @@ describe('post-update validation', () => {
               Effect.gen(function* () {
                 executions += 1;
                 yield* migrateThreadnoteStorageLayout({apply: true, home}).pipe(
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fs),
                   Effect.provideService(Path.Path, path),
                   Effect.provideService(SystemInfo, system),

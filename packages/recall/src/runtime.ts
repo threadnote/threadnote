@@ -1,3 +1,4 @@
+import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
@@ -45,11 +46,8 @@ import {
   type RecallOperationalWarning,
 } from './warning.js';
 import {
-  ensureVectorIndex,
-  rebuildVectorIndex,
   selectedSemanticScores,
   VectorCorpusGenerationChanged,
-  VectorIndexCorrupt,
   vectorIndexGenerationReadiness,
   vectorIndexMatchesGeneration,
 } from './vector-index.js';
@@ -762,21 +760,40 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
   const corpusGeneration = lexicalStatus.generation;
-  const vectorReadiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, corpusGeneration);
+  const vectorReadiness = yield* vectorIndexGenerationReadiness(
+    config.agentContextHome,
+    manifest,
+    corpusGeneration,
+    yield* loadRecallVectorAuthorizationKey(config),
+  );
   if (vectorReadiness === 'corrupt') {
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
   if (vectorReadiness === 'missing' || vectorReadiness === 'stale') {
     return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
-  const scores = yield* selectedSemanticScores(config, query, {
+  return yield* selectedSemanticScores(config, query, {
     corpusGeneration,
     currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
     allowedUriScopes,
     eligibility,
     limit,
-  });
-  return {corpusGeneration, scores, state: 'available'} satisfies McpReadOnlySemanticScoresAttempt;
+  }).pipe(
+    Effect.map(scores =>
+      scores === undefined
+        ? {manifest, state: 'refreshable' as const}
+        : {corpusGeneration, scores, state: 'available' as const},
+    ),
+    Effect.catchCauseIf(
+      cause =>
+        cause.reasons.length > 0 &&
+        EffectArray.every(
+          cause.reasons,
+          reason => Cause.isFailReason(reason) && Schema.is(VectorCorpusGenerationChanged)(reason.error),
+        ),
+      () => Effect.succeed({manifest, state: 'refreshable' as const}),
+    ),
+  );
 });
 
 const semanticResultMatchesLexicalSnapshot = Effect.fn('recall.semanticResultMatchesLexicalSnapshot')(function* (
@@ -870,14 +887,17 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     limit: 0,
     query: '',
   });
-  let corpusGeneration = snapshot.generation;
-  if (!(yield* vectorIndexMatchesGeneration(config.agentContextHome, manifest, corpusGeneration))) {
-    const index = yield* loadRecallIndexData(config, {includeInactive: false});
-    corpusGeneration = index.generation;
-    yield* ensureVectorIndex(config, manifest, index.candidates, {
+  const corpusGeneration = snapshot.generation;
+  if (
+    !(yield* vectorIndexMatchesGeneration(
+      config.agentContextHome,
+      manifest,
       corpusGeneration,
-      currentCorpusGeneration: fence,
-    });
+      yield* loadRecallVectorAuthorizationKey(config),
+    ))
+  ) {
+    yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
+    return {corpusGeneration, scores: undefined};
   }
   return yield* selectedSemanticScores(config, query, {
     allowedUriScopes,
@@ -886,26 +906,8 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     eligibility,
     limit,
   }).pipe(
+    Effect.tap(scores => (scores === undefined ? scheduleMcpRecallBackgroundRefresh(config, manifest) : Effect.void)),
     Effect.map(scores => ({corpusGeneration, scores})),
-    Effect.catchIf(
-      (error): error is VectorIndexCorrupt => Schema.is(VectorIndexCorrupt)(error),
-      () =>
-        Effect.gen(function* () {
-          const index = yield* loadRecallIndexData(config, {includeInactive: false});
-          yield* rebuildVectorIndex(config, manifest, index.candidates, {
-            corpusGeneration: index.generation,
-            currentCorpusGeneration: fence,
-          });
-          const scores = yield* selectedSemanticScores(config, query, {
-            allowedUriScopes,
-            corpusGeneration: index.generation,
-            currentCorpusGeneration: fence,
-            eligibility,
-            limit,
-          });
-          return {corpusGeneration: index.generation, scores};
-        }),
-    ),
   );
 });
 
@@ -954,15 +956,8 @@ function semanticRecallCooldownWarning(): string {
   );
 }
 
-function semanticRecallRefreshingWarning(schedule: McpRecallBackgroundRefreshSchedule): string {
-  const activity =
-    schedule === 'scheduled'
-      ? 'A single background refresh was scheduled'
-      : 'A single background refresh is already running';
-  return (
-    `Local AI recall warning: semantic indexes are stale or missing. ${activity}; ` +
-    'lexical recall continued without waiting.'
-  );
+function semanticRecallRefreshingWarning(_schedule: McpRecallBackgroundRefreshSchedule): string {
+  return 'Local AI recall warning: semantic indexes are stale or missing; background refresh is queued for idle. Lexical recall continued without waiting.';
 }
 
 function semanticRecallStructuralWarning(): string {

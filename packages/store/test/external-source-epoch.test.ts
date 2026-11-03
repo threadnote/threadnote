@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Result, Schema} from 'effect';
@@ -23,10 +24,12 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const fingerprint = Effect2.pipe('a', EffectString.repeat(64));
 const epoch = Effect2.pipe('b', EffectString.repeat(64));
 const base = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(

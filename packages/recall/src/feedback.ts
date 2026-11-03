@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {RECALL_RANKER_VERSION} from './rank.js';
@@ -226,12 +227,12 @@ function writeFeedbackEvents(
   fs: FileSystem.FileSystem,
   path: string,
   events: readonly RecallFeedbackEvent[],
-): Effect.Effect<void, unknown, Crypto.Crypto | Path.Path> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom | Path.Path> {
   return Effect.gen(function* () {
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-    const crypto = yield* Crypto.Crypto;
-    const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const crypto = yield* SecureRandom.SecureRandom;
+    const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
     const content =
       events.length === 0
         ? ''

@@ -1,10 +1,10 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {
   Cause,
   Clock,
   Console,
   Context,
-  Crypto,
   Effect,
   Exit,
   FileSystem,
@@ -163,10 +163,8 @@ export function withProductionLogging<A, E, R>(
   return Effect.gen(function* () {
     const startedAt = yield* Clock.currentTimeMillis;
     const system = yield* SystemInfo;
-    const crypto = yield* Crypto.Crypto;
-    const invocationId = yield* crypto
-      .randomUUIDv4()
-      .pipe(Effect.orElseSucceed(() => `${system.processId}-${startedAt}`));
+    const crypto = yield* SecureRandom.SecureRandom;
+    const invocationId = yield* crypto.uuidV4().pipe(Effect.orElseSucceed(() => `${system.processId}-${startedAt}`));
     const version = yield* getThreadnoteVersion().pipe(Effect.orElseSucceed(() => 'unknown'));
     const operation = safeDiagnosticLabel(options.operation, 'unknown');
     const base = {
@@ -387,7 +385,7 @@ function appendProductionLogs(
   home: string,
   entries: readonly ProductionLogEntry[],
   policy: ProductionLogPolicy,
-): Effect.Effect<void, never, FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto> {
+): Effect.Effect<void, never, FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -447,7 +445,7 @@ function appendProductionLogs(
 }
 
 function boundedInvocationLogWrite(
-  write: Effect.Effect<void, never, FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>,
+  write: Effect.Effect<void, never, FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>,
   timeoutMilliseconds: number | undefined,
 ) {
   return timeoutMilliseconds === undefined ? write : write.pipe(Effect.timeout(timeoutMilliseconds), Effect.ignore);
@@ -462,8 +460,8 @@ function writeProductionLogBatch(
   enforcePosixFileMode: boolean,
 ) {
   return Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
-    const suffix = yield* crypto.randomUUIDv4();
+    const crypto = yield* SecureRandom.SecureRandom;
+    const suffix = yield* crypto.uuidV4();
     const activeTemporaryPath = `${activePath}.temporary-${suffix}`;
     const disposition = yield* appendToExistingProductionLog(
       fs,

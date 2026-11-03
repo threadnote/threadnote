@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   withMaintenanceControlPauseFence,
@@ -62,10 +63,12 @@ export {
   maintenanceAnchorChunksComplete,
   duplicateArchiveSafe,
 } from './maintenance_policy.js';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {succeedUndefined} from '@threadnote/platform/optional';
+import {CONTEXT_MAINTENANCE_WORKER_ARGUMENT} from './maintenance_worker.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
@@ -1676,13 +1679,20 @@ export const runContextMaintenanceScheduler = Effect.fn('contextMaintenance.sche
   config: RuntimeConfig,
 ) {
   for (;;) {
-    yield* wakeContextMaintenance(config).pipe(Effect.ignore);
+    yield* wakeContextMaintenance(config, {bindToParent: true}).pipe(Effect.ignore);
     yield* Effect.sleep('30 seconds');
   }
 });
 
-export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(function* (config: RuntimeConfig) {
+export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(function* (
+  config: RuntimeConfig,
+  options: {readonly bindToParent?: boolean} = {},
+) {
   const system = yield* SystemInfo;
+  const startIdentity = options.bindToParent
+    ? yield* system.canonicalProcessStartIdentity?.(system.processId) ?? succeedUndefined
+    : undefined;
+  if (options.bindToParent && startIdentity === undefined) return false;
   const state = yield* withStateLock(
     config,
     Effect.gen(function* () {
@@ -1699,18 +1709,20 @@ export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(funct
     effectOptionalString =>
       effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
   );
-  const script = executableName === 'bun' || executableName === 'bun.exe' ? system.processArguments[1] : undefined;
+  const script = executableName === 'bun' || executableName === 'bun.exe' ? system.developmentEntrypoint : undefined;
   const args = [
     ...(script === undefined ? [] : [script]),
-    '--home',
-    config.agentContextHome,
-    '--manifest',
-    config.manifestPath,
-    'context',
-    'maintain',
-    '--max-records',
-    '16',
-    '--json',
+    CONTEXT_MAINTENANCE_WORKER_ARGUMENT,
+    JSON.stringify({
+      config: {
+        account: config.account,
+        agentContextHome: config.agentContextHome,
+        agentId: config.agentId,
+        manifestPath: config.manifestPath,
+        user: config.user,
+      },
+      ...(startIdentity === undefined ? {} : {owner: {processId: system.processId, startIdentity}}),
+    }),
   ];
   return yield* runDetachedCommandEffect(system.executablePath, args, {
     cwd: system.currentDirectory(),
@@ -1810,7 +1822,7 @@ export const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
   const encoded = new TextEncoder().encode(JSON.stringify(value));
   if (encoded.length > MAX_STATE_BYTES) return yield* fail('Maintenance state exceeds its write boundary.');
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* (yield* SecureRandom.SecureRandom).uuidV4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

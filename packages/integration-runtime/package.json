@@ -9,17 +9,17 @@
     "./coordinator-transport": "./src/coordinator-transport.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.7",
-    "@effect/sql-sqlite-bun": "4.0.7",
+    "@effect/platform-bun": "4.1.2",
+    "@effect/sql-sqlite-bun": "4.1.2",
     "@threadnote/integration-core": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.7",
+    "effect": "4.1.2",
     "js-yaml": "^5.5.0"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.7",
+    "@effect/vitest": "4.1.2",
     "fast-check": "4.10.2",
     "vitest": "5.0.5"
   }

@@ -675,6 +675,17 @@ export interface CodeGraphStoreShape {
     snapshotId: string,
     request: CodeGraphEffectiveSnapshotCitationEvidenceRequest,
   ) => Effect.Effect<CodeGraphEffectiveSnapshotCitationEvidence, CodeGraphStoreFailure>;
+  /**
+   * Copy bounded citation rows and verify their ready snapshot in one fresh,
+   * read-only transaction. The transaction ends before returning the copy;
+   * it neither acquires a writer lease nor inherits a caller's transaction.
+   * Callers must retain source bytes and independently reobserve freshness.
+   */
+  readonly readReadySnapshotCitationEvidence?: (
+    databasePath: string,
+    expected: CodeGraphSnapshot,
+    request: CodeGraphEffectiveSnapshotCitationEvidenceRequest,
+  ) => Effect.Effect<CodeGraphEffectiveSnapshotCitationEvidence | undefined, CodeGraphStoreFailure>;
   readonly snapshotProjectClosureFiles?: (
     databasePath: string,
     snapshotId: string,

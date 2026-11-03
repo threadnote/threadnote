@@ -2,7 +2,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
@@ -10,7 +10,9 @@ import {
   CodeGraphDatabaseSession,
   withCodeGraphDeferredTransaction,
   withCodeGraphReadTransaction,
+  withFreshCodeGraphReadTransaction,
 } from '@threadnote/graph/store/session';
+import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
 import {TestError} from '@threadnote/testing/test-error';
 
 const fixture = Effect.gen(function* () {
@@ -42,11 +44,40 @@ const fixture = Effect.gen(function* () {
       program,
     ).pipe(Effect.provideService(CodeGraphDatabaseSession, session));
   const select = sql<{readonly value: number}>`SELECT value FROM evidence ORDER BY value`;
-  return {read, select, sql};
+  return {databasePath, read, select, sql};
 });
 
 describe('code graph read transactions', () => {
   effectIt.layer(BunServices.layer)(it => {
+    it.effect('preserves typed busy failures and pure or mixed interruption at the fresh-reader boundary', () =>
+      Effect.gen(function* () {
+        const {databasePath} = yield* fixture;
+        const busy = CodeGraphStoreBusyError.of('fixture busy');
+        const typed = yield* withFreshCodeGraphReadTransaction(databasePath, Effect.fail(busy)).pipe(Effect.result);
+        expect(typed._tag).toBe('Failure');
+        if (typed._tag === 'Failure') expect(typed.failure).toBe(busy);
+        const defect = {code: 'SQLITE_BUSY', message: 'private fixture path'};
+        const translated = yield* withFreshCodeGraphReadTransaction(databasePath, Effect.die(defect)).pipe(
+          Effect.result,
+        );
+        expect(translated).toMatchObject({failure: {code: 'busy', retryable: true, recovery: 'defer'}});
+        for (const cause of [
+          Cause.interrupt(123),
+          Cause.combine(Cause.interrupt(123), Cause.die(defect)),
+          Cause.combine(Cause.interrupt(123), Cause.fail(busy)),
+        ]) {
+          const exit = yield* withFreshCodeGraphReadTransaction(databasePath, Effect.failCause(cause)).pipe(
+            Effect.exit,
+          );
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (Exit.isFailure(exit)) {
+            expect(Cause.hasInterrupts(exit.cause)).toBe(true);
+            expect(Cause.hasDies(exit.cause)).toBe(Cause.hasDies(cause));
+            expect(Cause.hasFails(exit.cause)).toBe(Cause.hasFails(cause));
+          }
+        }
+      }).pipe(TestClock.withLive),
+    );
     it.effect('reuses existing native and nested read transactions without competing semaphore tags', () =>
       Effect.gen(function* () {
         const {read, select, sql} = yield* fixture;

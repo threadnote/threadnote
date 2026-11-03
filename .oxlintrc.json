@@ -23,6 +23,7 @@
     "Buffer": "readonly",
     "THREADNOTE_STANDALONE": "readonly",
     "THREADNOTE_VERSION": "readonly",
+    "THREADNOTE_RUNTIME_SOURCE_IDENTITY": "readonly",
     "process": "readonly"
   },
   "ignorePatterns": [

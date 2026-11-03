@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -426,7 +427,7 @@ export const makeCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeWorktree
 
 export const makeLiveCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeLiveWorktreeReconciler')(function* () {
   const command = yield* CommandExecutor;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const store = yield* CodeGraphStore;
@@ -434,7 +435,7 @@ export const makeLiveCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeLive
   const provideLive = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
       Effect.provideService(CommandExecutor, command),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
       Effect.provideService(SystemInfo, system),

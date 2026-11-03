@@ -1,3 +1,5 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -5,7 +7,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -34,12 +36,14 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 function requiredRow<Row extends object>(row: Row | null): Row {
   if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
   return row;
 }
 
-const OrdinaryVectorTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const OrdinaryVectorTestLayer = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer);
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const PREPARATION = {
   deadlineMonotonicMilliseconds: 250,
@@ -654,7 +658,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const system = yield* SystemInfo;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-proof-lock-'});
           const input = yield* makeVectorHome(fs, path, home);
@@ -697,7 +701,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
                   onSuccess: () => undefined,
                 }),
                 Effect.provideService(Path.Path, path),
-                Effect.provideService(Crypto.Crypto, crypto),
+                Effect.provideService(SecureRandom.SecureRandom, crypto),
                 Effect.provideService(SystemInfo, system),
               ),
           });

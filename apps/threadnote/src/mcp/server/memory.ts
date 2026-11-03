@@ -1,3 +1,4 @@
+import {CurrentHandoffSaveObserver, personalHandoffReplacement} from '../../memory/handoff_save_contract.js';
 import * as MigrationSchema from 'effect/Schema';
 import {Array as EffectArray} from 'effect';
 import {validateTopicDependencyExpansionPreview} from '@threadnote/memory/topic-maintenance-expansion';
@@ -545,6 +546,7 @@ export interface PreparedPersonalMemoryWrite {
   readonly expectedReplaceContent?: string;
   readonly finalMetadata: MemoryMetadata;
   readonly isInPlaceUpdate: boolean;
+  readonly sourceWitnesses?: readonly {readonly uri: string; readonly revision: string; readonly memoryId?: string}[];
   readonly memory: string;
   readonly memoryUri: string;
 }
@@ -615,6 +617,9 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
           : {...inputParams.metadata, memoryId: replacementMemoryId},
       replaceUri: replacement?.canonicalUri ?? inputParams.replaceUri,
     };
+    const observer = yield* CurrentHandoffSaveObserver;
+    if (observer && params.replaceUri !== undefined && !personalHandoffReplacement(params.replaceUri, config.user))
+      return argumentError('Owned handoff saves require a canonical personal handoff replacement.');
     const result = yield* writeDurableMemoryResolved(config, params);
     if (result.isError !== true && !params.deferRecallIndexRefresh) {
       const memoryUri = memoryUriFromWriteResult(result);
@@ -623,7 +628,28 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
         (uri): uri is string => uri !== undefined,
       );
       if (invalidatedUris.length > 0) {
-        yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, invalidatedUris);
+        if (observer) yield* observer.stage('canonical-observed');
+        const refresh = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(
+          config,
+          invalidatedUris,
+          undefined,
+          observer?.stage,
+        );
+        if (refresh.state === 'blocked')
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: `Canonical memory committed at ${memoryUri}; lexical recall is pending. Run threadnote repair. Read the existing record instead of creating it again.`,
+              },
+            ],
+            structuredContent: {
+              ...result.structuredContent,
+              mutationOutcome: 'canonical-committed',
+              recallReadiness: 'lexical-pending',
+            },
+          };
       }
     }
     return result;
@@ -765,6 +791,8 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
             request: params.deferredCodeAnchor,
           })
         : undefined;
+      const observer = yield* CurrentHandoffSaveObserver;
+      if (observer) yield* observer.stage('canonical-possibly-applied');
       yield* params.expectedSourceContent?.length
         ? writeMemoryFileChecked(
             config,
@@ -818,6 +846,8 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
       };
       return result;
     });
+    const observer = yield* CurrentHandoffSaveObserver;
+    if (observer) yield* observer.stage('canonical-wait');
     return yield* params.deferredCodeAnchor
       ? withDeferredCodeAnchorMutationLocks(fs, config, uris, mutation)
       : withMemoryUriLocks(fs, config.agentContextHome, uris, mutation);
@@ -1025,16 +1055,23 @@ export function preparePersonalMemoryWrite(
   config: RuntimeConfig,
   inputParams: Pick<
     WriteDurableMemoryParams,
-    'bodyText' | 'expectedReplaceContent' | 'expectedReplaceMemoryId' | 'metadata' | 'replaceUri'
+    | 'bodyText'
+    | 'expectedReplaceContent'
+    | 'expectedReplaceMemoryId'
+    | 'expectedSourceContent'
+    | 'metadata'
+    | 'replaceUri'
   >,
 ) {
   return Effect.gen(function* () {
+    const observer = yield* CurrentHandoffSaveObserver;
+    if (observer) yield* observer.stage('preparing');
     const replacement = inputParams.replaceUri
       ? yield* resolveLocalMemoryReplacementTarget(config, inputParams.replaceUri)
       : undefined;
     const replacementMemoryId =
       inputParams.expectedReplaceMemoryId ?? replacement?.memoryId ?? inputParams.metadata.memoryId;
-    return yield* preparePersonalMemoryWriteResolved(config, {
+    const prepared = yield* preparePersonalMemoryWriteResolved(config, {
       ...inputParams,
       expectedReplaceContent: inputParams.expectedReplaceContent ?? replacement?.record?.content,
       metadata:
@@ -1043,6 +1080,19 @@ export function preparePersonalMemoryWrite(
           : {...inputParams.metadata, memoryId: replacementMemoryId},
       replaceUri: replacement?.canonicalUri ?? inputParams.replaceUri,
     });
+    const withWitnesses = {
+      ...prepared,
+      sourceWitnesses:
+        inputParams.expectedSourceContent === undefined
+          ? undefined
+          : EffectArray.map(inputParams.expectedSourceContent, source => ({
+              uri: source.uri,
+              revision: sha256HexSync(canonicalMemoryDocumentContent(source.content)),
+              ...(source.memoryId ? {memoryId: source.memoryId} : {}),
+            })),
+    };
+    if (observer) yield* observer.prepared(withWitnesses);
+    return withWitnesses;
   });
 }
 

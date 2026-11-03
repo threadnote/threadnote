@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Layer} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -16,4 +17,4 @@ export const citationSystemInfoLayer = SystemInfo.layer.pipe(Layer.provide(polic
 export const citationPlatformLayer = Layer.mergeAll(
   citationSystemInfoLayer,
   CommandExecutor.layer.pipe(Layer.provideMerge(citationSystemInfoLayer), Layer.provide(policy)),
-).pipe(Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));

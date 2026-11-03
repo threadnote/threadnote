@@ -12,6 +12,11 @@ import {readThreadnoteProcessDiagnostics} from '@threadnote/threadnote/process/d
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  observeRecallEmbeddingDemand,
+  readRecallEmbeddingDemand,
+  requestRecallEmbeddings,
+} from '@threadnote/recall/background/demand';
 
 const ProcessListSchema = Schema.Struct({
   processes: Schema.Array(
@@ -32,6 +37,65 @@ function parseProcessList(value: unknown): {
 }
 
 describe('Manager process API', () => {
+  it.effect('reports recall progress only for the current demand and verified worker identity', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const native = yield* SystemInfo;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-progress-api-'});
+      const config = testConfig(home);
+      const pid = 1_234_604;
+      yield* writeRegistration(fs, home, pid, 'recall-worker-token', {
+        role: 'cli',
+        baseRole: 'cli',
+        currentOperation: 'recall-embedding',
+      });
+      const system = SystemInfo.of({
+        ...native,
+        isProcessRunning: id => id === pid,
+        processStartIdentity: () => Effect.succeed('identity-a'),
+      });
+      yield* requestRecallEmbeddings(config);
+      const desired = (yield* readRecallEmbeddingDemand(config))!.desired!;
+      const read = handleManagerProcessRequest({
+        body: Effect.succeed({}),
+        config,
+        method: 'GET',
+        url: new URL('http://localhost/api/processes'),
+      }).pipe(Effect.provideService(SystemInfo, system));
+      const progress = {phase: 'hydrate' as const, completed: 12, total: 30, reusedDocuments: 8};
+      yield* observeRecallEmbeddingDemand(config, desired, {
+        state: 'queued',
+        reason: 'fair-turn',
+        failures: 0,
+        owner: {processId: pid, processStartIdentity: 'identity-a'},
+        progress,
+      });
+      expect((yield* read)?.body).toMatchObject({
+        processes: [
+          {
+            embeddingProgress: {
+              state: 'queued',
+              reason: 'fair-turn',
+              ...progress,
+            },
+          },
+        ],
+      });
+      yield* observeRecallEmbeddingDemand(config, desired, {
+        state: 'queued',
+        failures: 0,
+        owner: {processId: pid, processStartIdentity: 'reused-pid'},
+        progress,
+      });
+      expect((yield* read)?.body).toMatchObject({
+        processes: [expect.not.objectContaining({embeddingProgress: expect.anything()})],
+      });
+      yield* requestRecallEmbeddings(config);
+      expect((yield* read)?.body).toMatchObject({
+        processes: [expect.not.objectContaining({embeddingProgress: expect.anything()})],
+      });
+    }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer)),
+  );
   it.effect('requires explicit confirmation before process termination', () =>
     Effect.gen(function* () {
       const response = yield* handleManagerProcessRequest({

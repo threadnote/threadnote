@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Console, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -809,9 +810,9 @@ const writeProjectionState = Effect.fn('obsidian.writeProjectionState')(function
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {
     mode: PROJECTION_PRIVATE_FILE_MODE,
   });
@@ -870,10 +871,10 @@ const writeProjectionFile = Effect.fn('obsidian.writeProjectionFile')(function* 
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const target = yield* safeProjectionTarget(root, file.relativePath);
   yield* fs.makeDirectory(pathService.dirname(target), {recursive: true});
-  const temporaryPath = `${target}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporaryPath = `${target}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, file.content, {mode: PROJECTION_NOTE_FILE_MODE});
   yield* fs
     .rename(temporaryPath, target)
@@ -915,7 +916,7 @@ function assertSafeProjectionRelativePath(relativePath: string): void {
 function fileContentHash(
   fs: FileSystem.FileSystem,
   path: string,
-): Effect.Effect<string | undefined, never, Crypto.Crypto> {
+): Effect.Effect<string | undefined, never, SecureRandom.SecureRandom> {
   return fs.readFile(path).pipe(Effect.flatMap(sha256Hex), Effect.option, Effect.map(Option.getOrUndefined));
 }
 

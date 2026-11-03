@@ -168,7 +168,11 @@ async function flush() {
 }
 function button(label: string): HTMLButtonElement {
   for (const item of host.querySelectorAll<HTMLButtonElement>('button')) {
-    if (EffectString.trim(item.textContent ?? '') === label || item.querySelector('strong')?.textContent === label)
+    if (
+      EffectString.trim(item.textContent ?? '') === label ||
+      item.querySelector('strong')?.textContent === label ||
+      item.getAttribute('aria-label') === label
+    )
       return item;
   }
   throw new Error('Missing synthetic UI button: ' + label);
@@ -244,6 +248,204 @@ it('rejects a pre-loss selected REST completion after ACK while fresh recovery i
   await act(async () => reads[1].resolve(memory('Owned post-loss body')));
   await flush();
   expect(host.textContent).toContain('Owned post-loss body');
+});
+
+it.each(['success', 'failure'] as const)(
+  'ignores a pre-loss library %s after fresh recovery has completed',
+  async outcome => {
+    const socket = await mountAndSelect();
+    await act(async () => reads[0].resolve(memory('Original readable body')));
+    await flush();
+    holdTree = true;
+    await act(async () => button('Refresh manager').click());
+    await flush();
+    expect(heldTrees).toHaveLength(1);
+    await loseAndReconnect(socket);
+    expect(heldTrees).toHaveLength(2);
+
+    holdTree = false;
+    await act(async () => heldTrees[1].resolve(json(trees())));
+    await flush();
+    expect(reads).toHaveLength(2);
+    await act(async () => reads[1].resolve(memory('Fresh recovered body')));
+    await flush();
+    expect(host.textContent).toContain('Fresh recovered body');
+
+    await act(async () =>
+      heldTrees[0].resolve(outcome === 'success' ? json(trees()) : json({error: 'Old failure'}, 503)),
+    );
+    await flush();
+    expect(reads).toHaveLength(2);
+    expect(host.textContent).toContain('Fresh recovered body');
+    expect(host.textContent).not.toContain('Memory library unavailable');
+  },
+);
+
+it('ignores a pre-loss runtime failure after the current recovery read succeeds', async () => {
+  const socket = await mountAndSelect();
+  await act(async () => reads[0].resolve(memory('Original readable body')));
+  await flush();
+  const originalFetch = globalThis.fetch;
+  const oldState = deferred<Response>();
+  let holdState = true;
+  vi.stubGlobal('fetch', (input: RequestInfo | URL) =>
+    new URL(String(input), 'http://localhost').pathname === '/api/state' && holdState
+      ? oldState.promise
+      : originalFetch(input),
+  );
+  await act(async () => button('Refresh manager').click());
+  await flush();
+  holdState = false;
+  await loseAndReconnect(socket);
+  expect(reads).toHaveLength(2);
+  await act(async () => reads[1].resolve(memory('Fresh recovered body')));
+  await flush();
+  expect(host.querySelector('.toast')?.textContent).toBe('Refreshed');
+  await act(async () => oldState.resolve(json({error: 'Old runtime failure'}, 503)));
+  await flush();
+  expect(reads).toHaveLength(2);
+  expect(host.textContent).toContain('Fresh recovered body');
+  expect(host.textContent).not.toContain('Manager disconnected');
+  expect(host.querySelector('.toast')?.textContent).toBe('Refreshed');
+});
+
+it.each(['success', 'failure'] as const)(
+  'keeps current runtime failure and independent library %s when an obsolete runtime succeeds',
+  async libraryOutcome => {
+    const socket = await mountAndSelect();
+    await act(async () => reads[0].resolve(memory('Original readable body')));
+    await flush();
+    const originalFetch = globalThis.fetch;
+    const oldState = deferred<Response>();
+    let currentRefresh = false;
+    const currentTree = trees();
+    currentTree.tree.children = [
+      selected,
+      {...other, name: 'Current library entry', metadata: {...other.metadata!, topic: 'Current library entry'}},
+    ];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname;
+      if (pathname === '/api/state')
+        return currentRefresh ? json({error: 'Current runtime failure'}, 503) : oldState.promise;
+      if (pathname === '/api/tree' && currentRefresh)
+        return libraryOutcome === 'success' ? json(currentTree) : json({error: 'Current library failure'}, 503);
+      return originalFetch(input);
+    });
+    await act(async () => button('Refresh manager').click());
+    await flush();
+    currentRefresh = true;
+    await loseAndReconnect(socket);
+    expect(host.textContent).toContain('Manager disconnected');
+    expect(host.textContent).not.toContain('Original readable body');
+    if (libraryOutcome === 'success') {
+      expect(host.querySelector(`button[title="${other.uri}"]`)?.textContent).toContain('Current library entry');
+      expect(host.textContent).not.toContain('Memory library unavailable');
+      expect(reads).toHaveLength(2);
+      await act(async () => reads[1].resolve(memory('Fresh body waits for runtime')));
+      await flush();
+      expect(host.textContent).not.toContain('Fresh body waits for runtime');
+    } else {
+      expect(host.textContent).toContain('Memory library unavailable: Current library failure');
+      expect(reads).toHaveLength(1);
+    }
+    const currentResult = host.querySelector('.toast')?.textContent;
+    expect(currentResult).toContain('Refresh incomplete');
+    expect(currentResult).toContain('Runtime: Current runtime failure');
+    if (libraryOutcome === 'failure') expect(currentResult).toContain('Memory library: Current library failure');
+    const currentSocketCount = FakeManagerSocket.instances.length;
+    expect(host.querySelector('.workspace-footer-meta')?.textContent).toContain('vfixture');
+    await act(async () =>
+      oldState.resolve(
+        json({
+          agents: [],
+          config: {user: 'test', account: 'obsolete-account', agentContextHome: '/tmp/threadnote-reconnect'},
+          autoUpdate: {effectivePolicy: 'notify'},
+          updateAvailable: false,
+          version: 'obsolete-runtime',
+        }),
+      ),
+    );
+    await flush();
+    expect(FakeManagerSocket.instances).toHaveLength(currentSocketCount);
+    expect(host.querySelector('.workspace-footer-meta')?.textContent).toContain('vfixture');
+    expect(host.textContent).not.toContain('obsolete-runtime');
+    expect(host.textContent).toContain('Manager disconnected');
+    expect(host.textContent).not.toContain('Original readable body');
+    expect(host.querySelector('.toast')?.textContent).toBe(currentResult);
+  },
+);
+
+it('rejects a pre-loss library response even before the recovery refresh starts', async () => {
+  const socket = await mountAndSelect();
+  await act(async () => reads[0].resolve(memory('Original readable body')));
+  await flush();
+  holdTree = true;
+  await act(async () => button('Refresh manager').click());
+  await flush();
+  expect(heldTrees).toHaveLength(1);
+  await act(async () => {
+    socket.close();
+    socket.onclose?.(new CloseEvent('close'));
+  });
+  await flush();
+  await act(async () => heldTrees[0].resolve(json(trees())));
+  await flush();
+  expect(reads).toHaveLength(1);
+  expect(host.textContent).not.toContain('Original readable body');
+  await act(async () => vi.advanceTimersByTimeAsync(1_000));
+  await flush();
+  await connect(FakeManagerSocket.instances.at(-1)!);
+  expect(heldTrees).toHaveLength(2);
+  holdTree = false;
+  await act(async () => heldTrees[1].resolve(json(trees())));
+  await flush();
+  expect(reads).toHaveLength(2);
+  await act(async () => reads[1].resolve(memory('Fresh post-loss body')));
+  await flush();
+  expect(host.textContent).toContain('Fresh post-loss body');
+});
+
+it('keeps recovered read authority when multiple older library refreshes finish in any order', async () => {
+  await fc.assert(
+    fc.asyncProperty(fc.shuffledSubarray([0, 1, 2, 3], {minLength: 4, maxLength: 4}), async order => {
+      reads = [];
+      heldTrees = [];
+      holdTree = false;
+      pathReads = new Map();
+      FakeManagerSocket.instances = [];
+      try {
+        const socket = await mountAndSelect();
+        await act(async () => reads[0].resolve(memory('Original readable body')));
+        await flush();
+        holdTree = true;
+        for (let index = 0; index < 4; index++) {
+          await act(async () => button('Refresh manager').click());
+          await flush();
+        }
+        expect(heldTrees).toHaveLength(4);
+        await loseAndReconnect(socket);
+        expect(heldTrees).toHaveLength(5);
+        holdTree = false;
+        await act(async () => heldTrees[4].resolve(json(trees())));
+        await flush();
+        expect(reads).toHaveLength(2);
+        await act(async () => reads[1].resolve(memory('Fresh recovered body')));
+        await flush();
+        for (const index of order) {
+          await act(async () => heldTrees[index].resolve(json(trees())));
+          await flush();
+          expect(reads).toHaveLength(2);
+          expect(host.textContent).toContain('Fresh recovered body');
+        }
+      } finally {
+        await act(async () => {
+          for (const root of roots.splice(0)) root.unmount();
+        });
+        host.replaceChildren();
+      }
+    }),
+    {numRuns: 8, seed: 974975},
+  );
 });
 
 it('keeps actions unavailable on a failed current read and recovers in the next episode', async () => {

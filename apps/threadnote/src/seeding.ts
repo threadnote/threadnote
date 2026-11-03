@@ -625,10 +625,29 @@ export function runInitManifest(config: RuntimeConfig, options: InitManifestOpti
       return;
     }
 
-    yield* fs.makeDirectory(path.dirname(manifestPath), {recursive: true});
-    yield* fs.writeFileString(manifestPath, output, {mode: 0o600});
+    const outputBytes = new TextEncoder().encode(output);
+    const unchanged = yield* fs.stat(manifestPath).pipe(
+      Effect.flatMap(info =>
+        Number(info.size) === outputBytes.byteLength
+          ? fs
+              .readFile(manifestPath)
+              .pipe(
+                Effect.map(
+                  current =>
+                    current.byteLength === outputBytes.byteLength &&
+                    current.every((byte, index) => byte === outputBytes[index]),
+                ),
+              )
+          : Effect.succeed(false),
+      ),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!unchanged) {
+      yield* fs.makeDirectory(path.dirname(manifestPath), {recursive: true});
+      yield* fs.writeFileString(manifestPath, output, {mode: 0o600});
+    }
     yield* fs.chmod(manifestPath, 0o600);
-    yield* log(`Wrote manifest: ${manifestPath}`);
+    yield* log(`${unchanged ? 'Manifest unchanged' : 'Wrote manifest'}: ${manifestPath}`);
     yield* log('Seed with:');
     yield* log('  threadnote seed --dry-run');
     yield* log('  threadnote seed');

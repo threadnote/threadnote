@@ -6,6 +6,7 @@ import {Deferred, Effect, Fiber, Ref} from 'effect';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
 import {
+  deferredCodeGraphMaintenanceFailureMessage,
   CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_MILLISECONDS,
   CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_UNITS,
   CODE_GRAPH_MAINTENANCE_LANES,
@@ -26,6 +27,29 @@ import * as Effect2 from 'effect';
 type CompletedMaintenanceResult = Extract<CodeGraphRoutineMaintenanceResult, {readonly state: 'completed'}>;
 
 describe('code graph maintenance lanes', () => {
+  effectIt.effect('reports safe actionable deferred failures including unknown storage errors', () =>
+    Effect.sync(() => {
+      for (const [code, recovery, action] of [
+        ['busy', 'defer', 'wait for foreground work'],
+        ['no-space', 'free-space', 'free disk space'],
+        ['unknown', 'diagnose', 'run threadnote doctor'],
+      ] as const) {
+        const message = deferredCodeGraphMaintenanceFailureMessage(
+          CodeGraphStoreError.of('/private/secret raw SQL', {
+            code,
+            recovery,
+            operation: '/private/path raw SQL',
+          }),
+        );
+        expect(message).toContain('stage=deferred-maintenance');
+        expect(message).toContain('reason=' + code);
+        expect(message).toContain(action);
+        expect(message).not.toContain('/private');
+        expect(message).not.toContain('raw SQL');
+      }
+    }),
+  );
+
   effectIt.effect('completes only absent or stale provenance and defers malformed legacy authority', () =>
     Effect.sync(() => {
       for (const result of [

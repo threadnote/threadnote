@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -126,7 +127,7 @@ export interface CodeGraphVectorRetirementCapacityProtectionOptions {
 export const makeCodeGraphVectorRetirementCapacityProtector = Effect.fn(
   'codeGraph.makeVectorRetirementCapacityProtector',
 )(function* (options: CodeGraphVectorRetirementCapacityProtectionOptions) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -152,7 +153,7 @@ export const makeCodeGraphVectorRetirementCapacityProtector = Effect.fn(
       },
       transaction,
     ).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
       Effect.provideService(SystemInfo, system),

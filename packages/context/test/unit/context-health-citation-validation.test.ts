@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -30,6 +31,8 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const policy = Layer.mergeAll(
   Layer.succeed(ChildEnvironmentPolicy, {
     preserveIntendedChild: environment => environment,
@@ -42,7 +45,7 @@ const platform = Layer.mergeAll(
   system,
   CommandExecutor.layer.pipe(Layer.provideMerge(system), Layer.provide(policy)),
   Layer.succeed(CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry([])),
-).pipe(Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(platformServicesLayer));
 
 describe('complete health evidence validation', () => {
   effectIt.layer(platform)(it => {

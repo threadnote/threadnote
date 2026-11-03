@@ -2530,6 +2530,9 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
     status: exactStatus,
     store: CodeGraphStore.of({
       ...originalStore,
+      // This fixture supplies legacy leased evidence, rather than a persisted
+      // ready snapshot for the live atomic reader.
+      readReadySnapshotCitationEvidence: undefined,
       acquireSnapshotLease: () => Effect.succeed('fixture-lease'),
       effectiveSnapshotCitationEvidence: (
         _databasePath: string,

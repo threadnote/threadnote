@@ -1,4 +1,5 @@
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {succeedUndefined} from '../optional.js';
 import {sha256Hex} from '../digest.js';
 import {fromPromise} from '../errors.js';
@@ -134,7 +135,7 @@ function tryAcquireFileLock(
   lockPath: string,
   token: string,
   options: ExclusiveFileLockOptions,
-): Effect.Effect<boolean, unknown, Crypto.Crypto | SystemInfo> {
+): Effect.Effect<boolean, unknown, SecureRandom.SecureRandom | SystemInfo> {
   return Effect.gen(function* () {
     yield* recoverStaleFileLock(fs, lockPath, options);
     if (
@@ -160,7 +161,7 @@ function recoverStaleFileLock(
   fs: FileSystem.FileSystem,
   lockPath: string,
   options: ExclusiveFileLockOptions,
-): Effect.Effect<void, unknown, Crypto.Crypto | SystemInfo> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom | SystemInfo> {
   return Effect.gen(function* () {
     const guardPath = recoveryGuardPath(lockPath);
     const lockNeedsRecovery = yield* staleDeadLockToken(fs, lockPath, options);
@@ -185,7 +186,7 @@ function acquireRecoveryGuard(
   lockPath: string,
   guardPath: string,
   options: Pick<ExclusiveFileLockOptions, 'staleAfterMilliseconds' | 'useCanonicalProcessStartIdentity'>,
-): Effect.Effect<string | undefined, unknown, Crypto.Crypto | SystemInfo> {
+): Effect.Effect<string | undefined, unknown, SecureRandom.SecureRandom | SystemInfo> {
   return Effect.gen(function* () {
     const token = yield* fileLockToken(options.useCanonicalProcessStartIdentity === true);
     if (yield* tryWriteLockToken(fs, guardPath, token)) {
@@ -329,7 +330,7 @@ function refreshFileLockLease(
 }
 
 const fileLockToken = Effect.fn('fileLock.token')(function* (useCanonicalProcessStartIdentity: boolean) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
   const processStartIdentity = yield* selectedProcessStartIdentity(
     system,
@@ -339,7 +340,7 @@ const fileLockToken = Effect.fn('fileLock.token')(function* (useCanonicalProcess
   return JSON.stringify({
     processId: system.processId,
     ...(processStartIdentity ? {processStartIdentity} : {}),
-    token: yield* crypto.randomUUIDv4(),
+    token: yield* crypto.uuidV4(),
     version: 1,
   } satisfies FileLockOwner);
 });

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {Clock, Crypto, Effect, FileSystem, Path, Schema, Stream} from 'effect';
+import {Clock, Effect, FileSystem, Path, Schema, Stream} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {AccessTokenClaims} from '@threadnote/protocol/access-token';
 import {writePrivateJsonFile} from '../atomic.js';
@@ -152,7 +153,7 @@ export const enrollGraphControlWorker = Effect.fn('codeGraph.sharing.enrollContr
         operationId,
         principalId,
         ...(input.request.signingPublicKey === undefined ? {} : {signingPublicKey: input.request.signingPublicKey}),
-        workerId: `gw_${Effect2.pipe(yield* (yield* Crypto.Crypto).randomUUIDv4(), EffectString.replaceAll('-', ''))}`,
+        workerId: `gw_${Effect2.pipe(yield* (yield* SecureRandom.SecureRandom).uuidV4(), EffectString.replaceAll('-', ''))}`,
       };
       // Recheck after state I/O and immediately before a durable write or replay acknowledgement.
       const latest = yield* input.readCurrentPolicy;

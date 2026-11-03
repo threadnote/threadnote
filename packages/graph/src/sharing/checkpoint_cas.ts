@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
 import {
@@ -181,10 +182,10 @@ const materializeSharedCheckpoint = Effect.fn('codeGraph.sharing.materializeChec
     for (const chunk of metadata.chunks) {
       yield* ensureSharedLayerBlob(input.casRoot, chunk.digest, input.coordinatorUrl, input.blobSource);
     }
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const spool = path.join(input.casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
+    const spool = path.join(input.casRoot, 'spool', `${yield* crypto.uuidV4()}.cgcp`);
     return yield* Effect.acquireUseRelease(
       fs.makeDirectory(path.dirname(spool), {recursive: true, mode: 0o700}).pipe(Effect.as(spool)),
       spoolPath =>

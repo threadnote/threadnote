@@ -155,6 +155,23 @@ describe('MCP toolsets', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('keeps runnable quoting in MCP setup and removal previews', () =>
+    Effect.gen(function* () {
+      const baseSystem = yield* SystemInfo;
+      const config = yield* fixtureRuntime;
+      const testSystem = SystemInfo.of({
+        ...baseSystem,
+        platform: 'linux',
+        environment: () => ({...baseSystem.environment(), THREADNOTE_BIN_DIR: "/opt/threadnote's bin"}),
+      });
+      const preview = yield* captureConsole(runMcpInstall(config, 'codex', {name: 'team-memory'})).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+      );
+      expect(preview.output).toContain('codex mcp remove team-memory\n');
+      expect(preview.output).toContain(`'${join("/opt/threadnote'\"'\"'s bin", 'threadnote-mcp-server')}'`);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('installs the full stdio toolset when requested', () =>
     Effect.gen(function* () {
       expect(yield* dryRunOutput('full')).toContain('THREADNOTE_MCP_TOOLSET=full');

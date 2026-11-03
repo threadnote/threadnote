@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
+import {Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {syncDirectoryBestEffort} from '@threadnote/platform/file/durability';
@@ -561,7 +562,7 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
     fs,
     options.ledgerLockPath,
     Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const path = yield* Path.Path;
       const system = yield* SystemInfo;
       yield* ensureLedgerRoot(fs, options.ledgerRoot, system.platform);
@@ -614,7 +615,7 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       if (projection.state === 'unknown' || projection.filesystems.length < 1 || projection.filesystems.length > 2) {
         return {state: 'unknown'} as const;
       }
-      const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4()}`);
+      const token = sha256HexSync(`${system.processId}\0${yield* crypto.uuidV4()}`);
       const receipt: CodeGraphDiskReservationReceipt = {
         calibrationIdentity: projection.calibrationIdentity,
         filesystems: [...projection.filesystems].sort((left, right) =>
@@ -632,7 +633,7 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       if (yield* fs.exists(receiptPath)) {
         return yield* CodeGraphDiskReservationLedgerError.make({message: 'Disk reservation token collided.'});
       }
-      const temporaryToken = sha256HexSync(`${token}\0${yield* crypto.randomUUIDv4()}`);
+      const temporaryToken = sha256HexSync(`${token}\0${yield* crypto.uuidV4()}`);
       const temporaryPath = path.join(options.ledgerRoot, `.${name}.${temporaryToken}.tmp`);
       yield* Effect.scoped(
         Effect.gen(function* () {

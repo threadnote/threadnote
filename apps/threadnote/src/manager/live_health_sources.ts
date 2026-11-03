@@ -1,8 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {
   Clock,
   Context,
-  Crypto,
   Deferred,
   Effect,
   Fiber,
@@ -266,7 +266,7 @@ export const makeManagerHealthLiveSources = Effect.fn('manager.healthLive.source
   const path = yield* Path.Path;
   const query = yield* CodeGraphQueryService;
   const environment = yield* Effect.context<
-    | Crypto.Crypto
+    | SecureRandom.SecureRandom
     | Effect.Services<ReturnType<typeof observeLiveWorktree>>
     | Effect.Services<ReturnType<typeof guidanceHealthObservationPaths>>
     | Effect.Services<ReturnType<typeof makeCodeGraphCitationRepositoryRouteObservation>>

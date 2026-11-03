@@ -40,7 +40,7 @@ describe('Bun distribution contract', () => {
   it('uses Bun as the only application runtime and build toolchain', async () => {
     const manifest = parsePackageManifest(JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')));
     const allDependencies = {...manifest.dependencies, ...manifest.devDependencies};
-    const effectVersion = '4.0.7';
+    const effectVersion = '4.1.2';
 
     expect(manifest.packageManager).toMatch(/^bun@/);
     expect(manifest.trustedDependencies).toEqual([]);

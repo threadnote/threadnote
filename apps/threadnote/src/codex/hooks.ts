@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Console, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {Console, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {CODEX_HOOKS_PATH, HOOK_CODEX_RESUME_COMMAND} from '../constants.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {isJsonObject, parseJsonConfigObject} from '../utils.js';
@@ -91,8 +92,8 @@ export const runCodexHooksInstall = Effect.fn('hooks.installCodex')(function* (o
   }
 
   yield* fs.makeDirectory(pathService.dirname(configPath), {recursive: true, mode: 0o700});
-  const crypto = yield* Crypto.Crypto;
-  const temporary = pathService.join(pathService.dirname(configPath), `.hooks.${yield* crypto.randomUUIDv4()}.tmp`);
+  const crypto = yield* SecureRandom.SecureRandom;
+  const temporary = pathService.join(pathService.dirname(configPath), `.hooks.${yield* crypto.uuidV4()}.tmp`);
   yield* fs.writeFileString(temporary, `${JSON.stringify(next, undefined, 2)}\n`, {flag: 'wx', mode: 0o600});
   yield* Effect.gen(function* () {
     if ((yield* readCodexHooksConfigFile(fs, configPath)) !== current) {

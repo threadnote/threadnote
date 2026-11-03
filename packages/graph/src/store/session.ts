@@ -1,5 +1,5 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Cause, Context, Effect, Layer, Option, Path} from 'effect';
+import {Cause, Context, Effect, Layer, Option, Path, Result} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
 import type {
@@ -9,6 +9,7 @@ import type {
   CodeGraphSqliteWriterTuning,
 } from './shape.js';
 import {CODE_GRAPH_SCHEMA_VERSION, CodeGraphStoreError, type CodeGraphStoreFailure} from '../types.js';
+import {classifyCodeGraphStoreFailure} from './failure.js';
 
 export interface CodeGraphDatabaseSessionShape extends CodeGraphDatabaseSessionOptions {
   readonly databasePath: string;
@@ -72,6 +73,31 @@ export const withCodeGraphReadTransaction = <A, E, R>(
       {readOnly: true},
     );
   });
+
+/**
+ * Copy bounded evidence using a new read-only client, independently of any
+ * caller-owned transaction. Keep source retention and callbacks outside it.
+ */
+export const withFreshCodeGraphReadTransaction = <A, E, R>(
+  databasePath: string,
+  read: Effect.Effect<A, E, R | SqlClient.SqlClient>,
+) =>
+  useDatabaseDirect(
+    databasePath,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      return yield* sql.withTransaction(read);
+    }),
+    true,
+  ).pipe(
+    Effect.mapError(error => classifyCodeGraphStoreFailure('copy ready code graph citation evidence', error)),
+    // SQLite client acquisition uses Layer.orDie. Translate its defects at
+    // this boundary, without reclassifying typed failures or cancellation.
+    Effect.catchCauseFilter(
+      cause => (Cause.hasInterrupts(cause) ? Result.fail(cause) : Cause.findDefect(cause)),
+      defect => Effect.fail(classifyCodeGraphStoreFailure('copy ready code graph citation evidence', defect)),
+    ),
+  );
 
 function withDeferredReadTransaction<A, E, R>(sql: SqlClient.SqlClient, read: Effect.Effect<A, E, R>) {
   // Writable SQLite clients default to BEGIN IMMEDIATE. A ready read must

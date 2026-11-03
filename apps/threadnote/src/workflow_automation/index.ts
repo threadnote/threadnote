@@ -32,7 +32,7 @@ import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
 import {runNativeWatch} from './watch.js';
 import {runNativeCloseout} from './closeout.js';
-import {CurrentNativeJobBoundary, runNativeJob} from './native_jobs.js';
+import {CurrentNativeJobBoundary, CurrentNativeJobProgress, runNativeJob} from './native_jobs.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
   CurrentWorkflowReadCache,
@@ -365,6 +365,15 @@ const save = Effect.fn('workflowAutomation.save')(function* (
       },
       pending.revision,
     );
+  const progress = yield* CurrentNativeJobProgress;
+  if (progress)
+    yield* progress({
+      runId: stored.state.runId,
+      generation: stored.state.generation,
+      bindingId: stored.state.bindingId,
+      operationId: request.operationId,
+      rootVerified: intent.role === 'authoring-root',
+    });
   return {...version, status: 'ok' as const, runId: stored.state.runId, operationId: request.operationId, artifact};
 });
 
@@ -413,6 +422,15 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
       },
       stored.revision,
     );
+  const progress = yield* CurrentNativeJobProgress;
+  if (progress)
+    yield* progress({
+      runId: stored.state.runId,
+      generation: stored.state.generation,
+      bindingId: stored.state.bindingId,
+      operationId,
+      rootVerified: operation.intent.role === 'authoring-root',
+    });
   return {...version, status: 'ok' as const, runId: stored.state.runId, operationId, artifact};
 });
 

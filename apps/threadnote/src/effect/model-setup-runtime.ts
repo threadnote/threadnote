@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
@@ -14,7 +15,7 @@ export const localModelStoreLayer = LocalModelStore.layer.pipe(
 export const localModelCatalogLayer = LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS);
 
 export const ModelSetupWorkerLayer = Layer.mergeAll(localModelCatalogLayer, localModelStoreLayer, systemLayer).pipe(
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)),
   Layer.provideMerge(BunHttpClient.layer),
 );
 

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import type {DoctorCheck} from '@threadnote/protocol/doctor';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {readOpenedFileSystemIdentity, readPathFileSystemIdentity} from '@threadnote/platform/system';
@@ -895,7 +896,7 @@ export const purgeCodeGraphIndex = Effect.fn('codeGraph.purgeIndex')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   if (!/^[0-9a-f]{64}$/.test(checkoutId)) {
     return yield* CodeGraphMaintenanceError.make({message: 'Code graph checkout identity is invalid.'});
   }
@@ -958,7 +959,7 @@ export const purgeCodeGraphIndex = Effect.fn('codeGraph.purgeIndex')(function* (
                     yield* options.interlock?.beforeRemoval?.() ?? Effect.void;
                     const quarantine = path.join(
                       path.dirname(verified.path),
-                      `.${checkoutId}.${yield* crypto.randomUUIDv4()}.purging`,
+                      `.${checkoutId}.${yield* crypto.uuidV4()}.purging`,
                     );
                     yield* fs.rename(verified.path, quarantine);
                     const moved = yield* inspectQuarantinedCodeGraphIndexPurgeTarget(fs, quarantine);
@@ -1151,7 +1152,7 @@ function cleanTemporaryVectorFiles(
   directory: string,
   dryRun: boolean,
   interlock?: CodeGraphRepairInterlock,
-): Effect.Effect<number, unknown, Crypto.Crypto> {
+): Effect.Effect<number, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const verified = yield* inspectCodeGraphIndexPurgeTarget(fs, path, threadnoteHome, checkoutId);
     if (!sameCodeGraphIndexPurgeTarget(repositoryTarget, verified)) {
@@ -1191,7 +1192,7 @@ function cleanTemporaryMaterializationSpoolFiles(
   retainedIncompleteSnapshotIds: ReadonlySet<string>,
   dryRun: boolean,
   interlock?: CodeGraphRepairInterlock,
-): Effect.Effect<number, unknown, Crypto.Crypto> {
+): Effect.Effect<number, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     const verified = yield* inspectCodeGraphIndexPurgeTarget(fs, path, threadnoteHome, checkoutId);
     if (!sameCodeGraphIndexPurgeTarget(repositoryTarget, verified)) {
@@ -1240,7 +1241,7 @@ function cleanTemporaryMaterializationSpoolFile(
   fileName: string,
   dryRun: boolean,
   interlock?: CodeGraphRepairInterlock,
-): Effect.Effect<number, unknown, Crypto.Crypto> {
+): Effect.Effect<number, unknown, SecureRandom.SecureRandom> {
   return Effect.scoped(
     Effect.gen(function* () {
       const info = yield* fs.stat(candidate);
@@ -1260,8 +1261,8 @@ function cleanTemporaryMaterializationSpoolFile(
       yield* verifyCodeGraphSpoolCleanupAuthority(fs, path, threadnoteHome, checkoutId, repositoryTarget, target);
       if (dryRun) return 1;
       yield* interlock?.beforeSpoolQuarantine?.(candidate) ?? Effect.void;
-      const crypto = yield* Crypto.Crypto;
-      const quarantine = path.join(repositoryTarget.path, `.${fileName}.${yield* crypto.randomUUIDv4()}.repair`);
+      const crypto = yield* SecureRandom.SecureRandom;
+      const quarantine = path.join(repositoryTarget.path, `.${fileName}.${yield* crypto.uuidV4()}.repair`);
       yield* fs.rename(candidate, quarantine);
       return yield* Effect.gen(function* () {
         yield* verifyCodeGraphSpoolCleanupAuthority(fs, path, threadnoteHome, checkoutId, repositoryTarget, {
@@ -1337,7 +1338,7 @@ function cleanTemporaryVectorFilesContained(
   directory: string,
   dryRun: boolean,
   interlock?: CodeGraphRepairInterlock,
-): Effect.Effect<number, unknown, Crypto.Crypto> {
+): Effect.Effect<number, unknown, SecureRandom.SecureRandom> {
   return Effect.gen(function* () {
     let removed = 0;
     for (const name of yield* fs.readDirectory(directory)) {

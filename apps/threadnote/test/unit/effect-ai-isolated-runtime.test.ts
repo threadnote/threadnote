@@ -4,7 +4,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, Fiber, Layer, Schema} from 'effect';
-import {describe} from 'vitest';
+import {describe, vi} from 'vitest';
 import {
   isolatedLocalModelRuntimeLayer,
   localModelWorkerSpawnOptions,
@@ -14,6 +14,12 @@ import {
   type LocalModelWorkerSpawner,
 } from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
 import {EmbeddingFailed} from '@threadnote/inference/engine/errors';
+import {
+  BACKGROUND_INFERENCE_ENV,
+  BackgroundInferenceDeferred,
+  BackgroundInferenceAdmission,
+  CurrentBackgroundBatchAuthority,
+} from '@threadnote/inference/background/admission';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
@@ -32,7 +38,335 @@ const generationManifest = EffectOption.getOrUndefined(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
 )!;
 
+const backgroundAuthority = {
+  home: '/fixture-home',
+  domain: 'recall' as const,
+  owner: {
+    processId: 101,
+    identityKind: 'canonical' as const,
+    startIdentity: 'fixture-parent',
+    token: '00000000-0000-4000-8000-000000000001',
+  },
+};
+
 describe('isolated local model runtime', () => {
+  effectIt.effect('enforces the production background deadline when a caller asks for a longer one', () => {
+    const requested = Promise.withResolvers<void>();
+    const worker = new FakeWorkerProcess(() => requested.resolve());
+    const layer = isolatedLocalModelRuntimeLayer({
+      background: true,
+      requestDeadlineMs: 120_000,
+      idleTimeoutMs: 0,
+      spawnWorker: () => worker,
+    }).pipe(Layer.provide(TestSystemInfoLayer));
+    return Effect.acquireUseRelease(
+      Effect.sync(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})),
+      () =>
+        Effect.gen(function* () {
+          const runtime = yield* LocalModelRuntime;
+          const request = yield* runtime
+            .embedMany({
+              inputs: ['bounded'],
+              manifest: embeddingManifest,
+              modelPath: '/models/embedding.gguf',
+            })
+            .pipe(Effect.forkChild);
+          yield* Effect.promise(() => requested.promise);
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(9_999));
+          expect(request.pollUnsafe()).toBeUndefined();
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1));
+          expect(Exit.isFailure(yield* Fiber.await(request))).toBe(true);
+          expect(worker.killed).toBe(true);
+        }).pipe(provideTestLayer(layer), Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority)),
+      () => Effect.sync(() => vi.useRealTimers()),
+    );
+  });
+
+  effectIt.effect('waits for native background exit acknowledgment after cancellation', () => {
+    const stopped = Promise.withResolvers<number>();
+    const killed = Promise.withResolvers<void>();
+    const requested = Promise.withResolvers<void>();
+    const worker = new FakeWorkerProcess(() => requested.resolve());
+    const layer = isolatedLocalModelRuntimeLayer({
+      background: true,
+      idleTimeoutMs: 0,
+      spawnWorker: () => ({
+        exited: stopped.promise,
+        stderr: worker.stderr,
+        stdout: worker.stdout,
+        write: line => worker.write(line),
+        closeInput: () => worker.closeInput(),
+        kill: () => {
+          worker.kill();
+          killed.resolve();
+        },
+      }),
+    }).pipe(Layer.provide(TestSystemInfoLayer));
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const request = yield* runtime
+        .embedMany({
+          inputs: ['cancel'],
+          manifest: embeddingManifest,
+          modelPath: '/models/embedding.gguf',
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => requested.promise);
+      const interruption = yield* Fiber.interrupt(request).pipe(Effect.forkChild);
+      yield* Effect.promise(() => killed.promise);
+      yield* Effect.yieldNow;
+      expect(request.pollUnsafe()).toBeUndefined();
+      stopped.resolve(137);
+      yield* Fiber.join(interruption);
+      expect(Exit.isFailure(yield* Fiber.await(request))).toBe(true);
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => stopped.resolve(137))),
+      provideTestLayer(layer),
+      Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority),
+    );
+  });
+
+  effectIt.effect('isolates the background profile from inherited foreground worker environments', () =>
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      const inherited = {...system, environment: () => ({[BACKGROUND_INFERENCE_ENV]: '1'})};
+      expect(localModelWorkerSpawnOptions(inherited).environment[BACKGROUND_INFERENCE_ENV]).toBeUndefined();
+      expect(localModelWorkerSpawnOptions(inherited, {background: true}).environment[BACKGROUND_INFERENCE_ENV]).toBe(
+        '1',
+      );
+    }).pipe(provideTestLayer(TestSystemInfoLayer)),
+  );
+
+  effectIt.effect('rejects oversized background batches before starting a worker', () => {
+    let starts = 0;
+    const layer = isolatedLocalModelRuntimeLayer({
+      background: true,
+      spawnWorker: () => {
+        starts += 1;
+        return new FakeWorkerProcess(() => {});
+      },
+    }).pipe(Layer.provide(TestSystemInfoLayer));
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const exit = yield* Effect.exit(
+        runtime.embedMany({
+          inputs: ['first', 'second'],
+          manifest: embeddingManifest,
+          modelPath: '/models/embedding.gguf',
+        }),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(starts).toBe(0);
+    }).pipe(provideTestLayer(layer), Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority));
+  });
+
+  effectIt.effect('bounds a background request to one attempt even when a caller requests retries', () => {
+    const workers: FakeWorkerProcess[] = [];
+    const layer = isolatedLocalModelRuntimeLayer({
+      background: true,
+      maximumRequestAttempts: 2,
+      requestDeadlineMs: 10,
+      idleTimeoutMs: 0,
+      spawnWorker: options => {
+        expect(options.environment[BACKGROUND_INFERENCE_ENV]).toBe('1');
+        const worker = new FakeWorkerProcess(() => {});
+        workers.push(worker);
+        return worker;
+      },
+    }).pipe(Layer.provide(TestSystemInfoLayer));
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(
+            runtime.embedMany({
+              inputs: ['bounded'],
+              manifest: embeddingManifest,
+              modelPath: '/models/embedding.gguf',
+            }),
+          ),
+        ),
+      ).toBe(true);
+      expect(workers).toHaveLength(1);
+      expect(workers[0].killed).toBe(true);
+    }).pipe(provideTestLayer(layer), Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority));
+  });
+
+  effectIt.effect('does not spawn a background native worker without current batch authority', () => {
+    let starts = 0;
+    const layer = isolatedLocalModelRuntimeLayer({
+      background: true,
+      spawnWorker: () => {
+        starts++;
+        return new FakeWorkerProcess(() => {});
+      },
+    }).pipe(Layer.provide(TestSystemInfoLayer));
+    return Effect.gen(function* () {
+      const result = yield* (yield* LocalModelRuntime)
+        .embedMany({inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'})
+        .pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') expect(Schema.is(BackgroundInferenceDeferred)(result.failure)).toBe(true);
+      expect(starts).toBe(0);
+    }).pipe(provideTestLayer(layer));
+  });
+  for (const capacityMode of [undefined, 'spare-cpu-v2'] as const)
+    effectIt.effect(
+      `uses a distinct ${capacityMode ?? 'idle'} opcode and never downgrades after old-worker rejection`,
+      () => {
+        const operation = capacityMode ? 'embedManyCapacityV2' : 'embedManyIdleV1';
+        const worker = new FakeWorkerProcess(request => {
+          worker.stdoutFeed.push(
+            JSON.stringify({protocol: 1, id: 'invalid', ok: false, error: {tag: 'WorkerProtocolInvalid'}}) + '\n',
+          );
+          expect(request.operation).toBe(operation);
+          expect(request.payload).toMatchObject({
+            authority: {...backgroundAuthority, ...(capacityMode ? {capacityMode} : {})},
+          });
+        });
+        const layer = isolatedLocalModelRuntimeLayer({
+          background: true,
+          idleTimeoutMs: 0,
+          spawnWorker: () => worker,
+        }).pipe(Layer.provide(TestSystemInfoLayer));
+        return Effect.gen(function* () {
+          const result = yield* (yield* LocalModelRuntime)
+            .embedMany({inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'})
+            .pipe(Effect.result);
+          expect(result._tag).toBe('Failure');
+          expect(worker.writes).toHaveLength(1);
+          expect(worker.writes[0]?.operation).toBe(operation);
+        }).pipe(
+          provideTestLayer(layer),
+          Effect.provideService(CurrentBackgroundBatchAuthority, {
+            ...backgroundAuthority,
+            ...(capacityMode ? {capacityMode} : {}),
+          }),
+        );
+      },
+    );
+
+  effectIt.effect('rejects both opcode/authority mode mismatches before entering admission or inference', () =>
+    Effect.gen(function* () {
+      const input = new AsyncFeed<string | Uint8Array>();
+      const output: string[] = [];
+      let admissions = 0;
+      for (const operation of ['embedManyIdleV1', 'embedManyCapacityV2'])
+        input.push(
+          JSON.stringify({
+            protocol: 1,
+            id: operation,
+            operation,
+            payload: {
+              authority: {
+                ...backgroundAuthority,
+                ...(operation === 'embedManyIdleV1' ? {capacityMode: 'spare-cpu-v2'} : {}),
+              },
+              request: {inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'},
+            },
+          }) + '\n',
+        );
+      input.end();
+      const system = yield* SystemInfo;
+      yield* serveWorker(
+        LocalModelRuntime.of({
+          diagnostics: Effect.die('must not execute'),
+          embedMany: () => Effect.die('must not execute'),
+          generate: () => Effect.die('must not execute'),
+          rerank: () => Effect.die('must not execute'),
+        }),
+        {
+          input,
+          writeLine: line => {
+            output.push(line);
+            return Promise.resolve();
+          },
+        },
+      ).pipe(
+        Effect.provideService(SystemInfo, {...system, environment: () => ({[BACKGROUND_INFERENCE_ENV]: '1'})}),
+        Effect.provideService(BackgroundInferenceAdmission, {
+          withForeground: (_home, program) => program,
+          runBatch: () => Effect.die('must not select a batch'),
+          withExecution: (_authority, program) =>
+            Effect.sync(() => {
+              admissions++;
+            }).pipe(Effect.andThen(program)),
+        }),
+      );
+      expect(admissions).toBe(0);
+      expect(output).toHaveLength(2);
+      for (const line of output)
+        expect(JSON.parse(line)).toMatchObject({ok: false, error: {tag: 'WorkerProtocolInvalid'}});
+    }).pipe(provideTestLayer(TestSystemInfoLayer)),
+  );
+  effectIt.effect('maps child execution deferral without exposing authority or treating it as a model failure', () => {
+    const worker = new FakeWorkerProcess(request =>
+      worker.stdoutFeed.push(
+        JSON.stringify({protocol: 1, id: request.id, ok: false, error: {tag: 'BackgroundInferenceDeferred'}}) + '\n',
+      ),
+    );
+    const layer = isolatedLocalModelRuntimeLayer({background: true, idleTimeoutMs: 0, spawnWorker: () => worker}).pipe(
+      Layer.provide(TestSystemInfoLayer),
+    );
+    return Effect.gen(function* () {
+      const result = yield* (yield* LocalModelRuntime)
+        .embedMany({inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'})
+        .pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(Schema.is(BackgroundInferenceDeferred)(result.failure)).toBe(true);
+        expect(JSON.stringify(result.failure)).not.toContain(backgroundAuthority.owner.token);
+      }
+      expect(worker.writes).toHaveLength(1);
+    }).pipe(provideTestLayer(layer), Effect.provideService(CurrentBackgroundBatchAuthority, backgroundAuthority));
+  });
+  effectIt.effect('rejects unauthorised idle frames and foreground opcodes in a private background child', () =>
+    Effect.gen(function* () {
+      const input = new AsyncFeed<string | Uint8Array>();
+      const output: string[] = [];
+      let inference = 0;
+      for (const operation of ['embedMany', 'generate', 'rerank', 'embedManyIdleV1'])
+        input.push(
+          JSON.stringify({
+            protocol: 1,
+            id: operation,
+            operation,
+            payload:
+              operation === 'embedManyIdleV1'
+                ? {
+                    authority: backgroundAuthority,
+                    request: {inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'},
+                  }
+                : {inputs: ['bounded'], manifest: embeddingManifest, modelPath: '/fake/model.gguf'},
+          }) + '\n',
+        );
+      input.end();
+      const system = yield* SystemInfo;
+      yield* serveWorker(
+        LocalModelRuntime.of({
+          diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 1}),
+          embedMany: () =>
+            Effect.sync(() => {
+              inference++;
+              return [[1, 0]];
+            }),
+          generate: () => Effect.die('must not infer'),
+          rerank: () => Effect.die('must not infer'),
+        }),
+        {
+          input,
+          writeLine: line => {
+            output.push(line);
+            return Promise.resolve();
+          },
+        },
+      ).pipe(Effect.provideService(SystemInfo, {...system, environment: () => ({[BACKGROUND_INFERENCE_ENV]: '1'})}));
+      expect(inference).toBe(0);
+      expect(output).toHaveLength(4);
+      expect(JSON.parse(output[3])).toMatchObject({ok: false, error: {tag: 'BackgroundInferenceDeferred'}});
+    }).pipe(provideTestLayer(TestSystemInfoLayer)),
+  );
+
   effectIt.effect('round-trips the effective native embedding context plan in diagnostics', () => {
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(request => {

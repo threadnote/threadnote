@@ -15,7 +15,7 @@ import {
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, PlatformError, Schema} from 'effect';
+import {Effect, FileSystem, PlatformError, Schema, type Scope} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect} from 'vitest';
 import {runInitManifest, runSeed, runSeedSkills, seedDependencyGraphs} from '@threadnote/threadnote/seeding';
@@ -39,7 +39,8 @@ const seedStateProjectSchema = Schema.StructWithRest(
 
 const GIT_ENV_KEYS = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
 
-const run = <A, E>(effect: Effect.Effect<A, E, ApplicationServices>) => effect.pipe(provideTestLayer(ApplicationLayer));
+const run = <A, E>(effect: Effect.Effect<A, E, ApplicationServices | Scope.Scope>) =>
+  effect.pipe(provideTestLayer(ApplicationLayer));
 
 const captureConsole = <E>(effect: Effect.Effect<void, E, ApplicationServices>) =>
   effect.pipe(
@@ -907,6 +908,247 @@ describe('init-manifest', () => {
   afterEach(async () => {
     await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
+
+  const manifestFixture = Effect.gen(function* () {
+    const contextHome = yield* Effect.acquireRelease(
+      Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-idempotent-manifest-'))),
+      directory => Effect.promise(() => rm(directory, {force: true, recursive: true})),
+    );
+    const fileSystem = yield* FileSystem.FileSystem;
+    const repos = [join(contextHome, 'alpha'), join(contextHome, 'beta'), join(contextHome, 'gamma')] as const;
+    yield* Effect.forEach(repos, repo => fileSystem.makeDirectory(repo), {discard: true});
+    const manifestPath = join(contextHome, 'seed-manifest.yaml');
+    const config: RuntimeConfig = {
+      account: 'local',
+      agentContextHome: contextHome,
+      agentId: 'threadnote',
+      manifestPath,
+      user: 'denys',
+    };
+    const writes: string[] = [];
+    const chmods: number[] = [];
+    const observedFileSystem = FileSystem.FileSystem.of({
+      ...fileSystem,
+      writeFileString: (target, content, options) =>
+        Effect.suspend(() => {
+          if (String(target) === manifestPath) writes.push(content);
+          return fileSystem.writeFileString(target, content, options);
+        }),
+      chmod: (target, mode) =>
+        Effect.suspend(() => {
+          if (String(target) === manifestPath) chmods.push(mode);
+          return fileSystem.chmod(target, mode);
+        }),
+    });
+    const initialize = (
+      options: Parameters<typeof runInitManifest>[1] = {},
+      override: FileSystem.FileSystem = observedFileSystem,
+    ) =>
+      runInitManifest(config, {path: manifestPath, repo: [repos[0]], ...options}).pipe(
+        Effect.provideService(FileSystem.FileSystem, override),
+        captureEffectConsole,
+      );
+    return {fileSystem: observedFileSystem, initialize, manifestPath, repos, writes, chmods};
+  });
+
+  effectIt.effect('does not rewrite byte-identical canonical manifests', () =>
+    run(
+      Effect.gen(function* () {
+        const {fileSystem, initialize, manifestPath, writes} = yield* manifestFixture;
+        yield* initialize();
+        expect(writes).toHaveLength(1);
+        const before = yield* fileSystem.readFile(manifestPath);
+        const manifestBefore = yield* readSeedManifest(manifestPath);
+
+        yield* initialize();
+
+        expect(yield* fileSystem.readFile(manifestPath)).toEqual(before);
+        expect(yield* readSeedManifest(manifestPath)).toEqual(manifestBefore);
+        expect(writes).toHaveLength(1);
+      }),
+    ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect('skips identical replacement bytes while enforcing permissions and writes changed replacements', () =>
+    run(
+      Effect.gen(function* () {
+        const {fileSystem, initialize, manifestPath, repos, writes, chmods} = yield* manifestFixture;
+        yield* initialize();
+        const before = yield* fileSystem.readFile(manifestPath);
+        yield* fileSystem.chmod(manifestPath, 0o644);
+        const beforeNoOp = chmods.length;
+
+        yield* initialize({replace: true});
+
+        expect(writes).toHaveLength(1);
+        expect(yield* fileSystem.readFile(manifestPath)).toEqual(before);
+        expect(EffectArray.drop(chmods, beforeNoOp)).toEqual([0o600]);
+
+        const beforeChange = chmods.length;
+        yield* initialize({replace: true, repo: [repos[1]]});
+
+        expect(writes).toHaveLength(2);
+        expect(EffectArray.map((yield* readSeedManifest(manifestPath)).projects, project => project.name)).toEqual([
+          'beta',
+        ]);
+        expect(EffectArray.drop(chmods, beforeChange)).toEqual([0o600]);
+      }),
+    ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect('keeps dry-run nonmutating for missing and existing manifests', () =>
+    run(
+      Effect.gen(function* () {
+        const {fileSystem, initialize, manifestPath, repos, writes, chmods} = yield* manifestFixture;
+        const missing = yield* initialize({dryRun: true});
+        expect(missing.output).toContain('# Would write');
+        expect(yield* fileSystem.exists(manifestPath)).toBe(false);
+        expect(writes).toHaveLength(0);
+        expect(chmods).toHaveLength(0);
+
+        yield* initialize();
+        const before = yield* fileSystem.readFile(manifestPath);
+        yield* fileSystem.chmod(manifestPath, 0o644);
+        const beforeDryRun = chmods.length;
+        const existing = yield* initialize({dryRun: true, replace: true, repo: [repos[1]]});
+
+        expect(existing.output).toContain('# Would write');
+        expect(writes).toHaveLength(1);
+        expect(yield* fileSystem.readFile(manifestPath)).toEqual(before);
+        expect(chmods).toHaveLength(beforeDryRun);
+      }),
+    ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect.each(['stat', 'readFile'] as const)(
+    'falls back to the original write when comparison %s fails and preserves write errors',
+    method =>
+      run(
+        Effect.gen(function* () {
+          const {fileSystem, initialize, manifestPath, writes} = yield* manifestFixture;
+          yield* initialize();
+          const denied = PlatformError.systemError({
+            _tag: 'PermissionDenied',
+            description: 'injected comparison failure',
+            method,
+            module: 'FileSystem',
+            pathOrDescriptor: manifestPath,
+          });
+          const unavailable = FileSystem.FileSystem.of({
+            ...fileSystem,
+            stat: target =>
+              String(target) === manifestPath && method === 'stat' ? Effect.fail(denied) : fileSystem.stat(target),
+            readFile: target =>
+              String(target) === manifestPath && method === 'readFile'
+                ? Effect.fail(denied)
+                : fileSystem.readFile(target),
+          });
+          yield* initialize({}, unavailable);
+          expect(writes).toHaveLength(2);
+
+          const writeFailure = PlatformError.systemError({
+            _tag: 'PermissionDenied',
+            description: 'injected manifest write failure',
+            method: 'writeFileString',
+            module: 'FileSystem',
+            pathOrDescriptor: manifestPath,
+          });
+          const unwritable = FileSystem.FileSystem.of({
+            ...unavailable,
+            writeFileString: (target, content, options) =>
+              String(target) === manifestPath
+                ? Effect.fail(writeFailure)
+                : fileSystem.writeFileString(target, content, options),
+          });
+          expect(yield* initialize({}, unwritable).pipe(Effect.flip)).toBe(writeFailure);
+        }),
+      ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect('preserves validation and no-op chmod failures', () =>
+    run(
+      Effect.gen(function* () {
+        const {fileSystem, initialize, manifestPath, writes} = yield* manifestFixture;
+        yield* fileSystem.writeFileString(manifestPath, 'projects: [\n');
+        expect(yield* initialize().pipe(Effect.flip)).toMatchObject({_tag: 'ManifestOperationError'});
+        expect(writes).toHaveLength(1);
+        yield* fileSystem.remove(manifestPath);
+        yield* initialize();
+        const chmodFailure = PlatformError.systemError({
+          _tag: 'PermissionDenied',
+          description: 'injected manifest chmod failure',
+          method: 'chmod',
+          module: 'FileSystem',
+          pathOrDescriptor: manifestPath,
+        });
+        const denied = FileSystem.FileSystem.of({
+          ...fileSystem,
+          chmod: (target, mode) =>
+            String(target) === manifestPath ? Effect.fail(chmodFailure) : fileSystem.chmod(target, mode),
+        });
+        expect(yield* initialize({}, denied).pipe(Effect.flip)).toBe(chmodFailure);
+        expect(writes).toHaveLength(2);
+      }),
+    ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect('rewrites different bytes even when UTF-8 decoding yields the same text', () =>
+    run(
+      Effect.gen(function* () {
+        const {fileSystem, initialize, manifestPath, writes} = yield* manifestFixture;
+        yield* initialize();
+        const initial = yield* fileSystem.readFileString(manifestPath);
+        yield* fileSystem.writeFileString(
+          manifestPath,
+          `${initial}worksets:\n  - name: sample\n    description: \uFFFD\n    projects: [alpha]\n`,
+        );
+        yield* initialize();
+        const canonical = yield* fileSystem.readFile(manifestPath);
+        const malformed = Uint8Array.from(canonical);
+        const marker = malformed.indexOf(0xef);
+        expect([...malformed.slice(marker, marker + 3)]).toEqual([0xef, 0xbf, 0xbd]);
+        malformed.set([0xf0, 0x9f, 0x98], marker);
+        yield* fileSystem.writeFile(manifestPath, malformed);
+        expect(yield* fileSystem.readFileString(manifestPath)).toBe(new TextDecoder().decode(canonical));
+        const beforeWrites = writes.length;
+
+        yield* initialize();
+
+        expect(writes).toHaveLength(beforeWrites + 1);
+        expect(yield* fileSystem.readFile(manifestPath)).toEqual(canonical);
+      }),
+    ).pipe(TestClock.withLive),
+  );
+
+  effectIt.effect.prop(
+    'is byte-idempotent across repeated merge and replacement calls',
+    [
+      Schema.Struct({
+        projectCount: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3})),
+        repetitions: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3})),
+        replace: Schema.Boolean,
+        reversed: Schema.Boolean,
+      }),
+    ],
+    ([input]) =>
+      run(
+        Effect.gen(function* () {
+          const {fileSystem, initialize, manifestPath, repos, writes} = yield* manifestFixture;
+          const selected = EffectArray.take(repos, input.projectCount);
+          const repo = input.reversed ? EffectArray.reverse(selected) : selected;
+          yield* initialize({repo});
+          const before = yield* fileSystem.readFile(manifestPath);
+          const manifestBefore = yield* readSeedManifest(manifestPath);
+          for (let repeat = 0; repeat < input.repetitions; repeat += 1) {
+            yield* initialize({repo, replace: input.replace});
+          }
+          expect(writes).toHaveLength(1);
+          expect(yield* fileSystem.readFile(manifestPath)).toEqual(before);
+          expect(yield* readSeedManifest(manifestPath)).toEqual(manifestBefore);
+        }),
+      ).pipe(TestClock.withLive),
+    {arbitrary: {runs: 8, maxShrinks: 12, concurrency: 1, seed: 'init-manifest-idempotence'}},
+  );
 
   effectIt.effect('preserves worksets while adding a repo', () =>
     Effect.gen(function* () {

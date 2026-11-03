@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -25,6 +26,8 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -37,7 +40,7 @@ const systemLayer = SystemInfo.layer.pipe(
   ),
 );
 const base = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   systemLayer,
   Layer.succeed(ResourceRecallInvalidation, {expire: () => Effect.void}),
 );
