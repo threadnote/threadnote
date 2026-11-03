@@ -7,7 +7,7 @@ import {ManagerOperationsFooter} from '../../src/operations_footer.js';
 import {ManagerProcessesProvider} from '../../src/process/live.js';
 import {ProcessesPanel} from '../../src/processes_view.js';
 import {ManagerDialogProvider} from '../../src/dialog.js';
-import type {ManageableManagerProcess} from '../../src/process/contracts.js';
+import {type ManageableManagerProcess, recallEmbeddingProgressLabel} from '../../src/process/contracts.js';
 
 const process = (operation: string, processId = 1): ManageableManagerProcess => ({
   ageMilliseconds: 1_000,
@@ -92,6 +92,13 @@ it('polls operations across page changes, shares the inventory, handles failures
       'Sharing capacity with graph indexing · Preparing documents · 12 / 30',
     );
     expect(container.querySelector('.process-workspace')?.textContent).toContain('Started');
+    processes = [
+      {...process('recall-embedding', 5), role: 'cli', embeddingProgress: {state: 'deferred-cpu', reason: 'cpu-busy'}},
+    ];
+    await tick();
+    expect(container.querySelector('.process-workspace')?.textContent).toContain('Waiting for spare CPU');
+    expect(container.querySelector('.process-workspace')?.textContent).not.toContain('Reading document metadata');
+    expect(container.querySelector('.process-workspace')?.textContent).not.toContain('12 / 30');
     await act(async () => root.unmount());
     const requests = fetch.mock.calls.length;
     await tick();
@@ -102,4 +109,27 @@ it('polls operations across page changes, shares the inventory, handles failures
     vi.unstubAllGlobals();
     vi.useRealTimers();
   }
+});
+
+it.each([
+  ['deferred-cpu', 'Waiting for spare CPU'],
+  ['deferred-foreground', 'Waiting for foreground work'],
+  ['blocked', 'Needs attention'],
+  ['corrupt', 'Needs attention'],
+  ['queued', 'Progress unavailable'],
+  ['preparing', 'Progress unavailable'],
+  ['running', 'Progress unavailable'],
+] as const)('does not infer a preparation phase from %s', (state, label) => {
+  expect(recallEmbeddingProgressLabel({state, completed: 12, total: 30})).toBe(label);
+});
+
+it.each([
+  ['metadata', 'Reading document metadata'],
+  ['resolve', 'Resolving documents'],
+  ['hydrate', 'Preparing documents'],
+  ['embed', 'Embedding chunks'],
+  ['retire', 'Cleaning obsolete versions'],
+  ['ready', 'Verifying completion'],
+] as const)('retains the explicit %s preparation phase and count', (phase, label) => {
+  expect(recallEmbeddingProgressLabel({state: 'queued', phase, completed: 12, total: 30})).toBe(`${label} · 12 / 30`);
 });

@@ -54,7 +54,9 @@ export function recallEmbeddingProgressLabel(progress: NonNullable<ManageableMan
             ? 'Verifying completion'
             : progress.phase === 'resolve'
               ? 'Resolving documents'
-              : 'Reading document metadata';
+              : progress.phase === 'metadata'
+                ? 'Reading document metadata'
+                : undefined;
   const count =
     progress.completed !== undefined && progress.total !== undefined && progress.total > 0
       ? ` · ${progress.completed} / ${progress.total}`
@@ -73,6 +75,7 @@ export function recallEmbeddingProgressLabel(progress: NonNullable<ManageableMan
               : progress.state === 'blocked' || progress.state === 'corrupt'
                 ? 'Needs attention'
                 : undefined;
+  if (work === undefined) return waiting ?? 'Progress unavailable';
   return `${waiting ? waiting + ' · ' : ''}${work}${count}`;
 }
 
