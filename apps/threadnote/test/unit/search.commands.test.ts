@@ -318,6 +318,49 @@ describe('foreground index rebuild', () => {
     ),
   );
 
+  effectIt.effect.each(['selection', 'authorization'] as const)(
+    'rejects %s drift after vector activation and before final success',
+    change =>
+      test(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          if (change === 'authorization') yield* f.addExternal;
+          let fired = false;
+          const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom>();
+          const lateChange =
+            change === 'selection'
+              ? writeModelSelection(f.home, {version: 1, roles: {embedding: alternate.id}})
+              : Effect.sync(f.changeAccess);
+          const fs: FileSystem.FileSystem = {
+            ...f.fs,
+            remove: (filename, options) =>
+              f.fs.remove(filename, options).pipe(
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    if (!fired && filename === `${f.home}/indexes/vectors/${manifest.id}/active.json`) {
+                      fired = true;
+                      yield* lateChange.pipe(Effect.provide(context));
+                    }
+                  }),
+                ),
+              ),
+          };
+          const result = yield* f.run().pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.result);
+          expect(fired).toBe(true);
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result))
+            expect(result.failure).toMatchObject({
+              _tag: 'SearchCommandError',
+              message: 'Recall inputs changed during preparation. Run `threadnote index rebuild` again.',
+            });
+          expect(EffectArray.some(f.output, EffectString.includes('indexes are ready'))).toBe(false);
+          // The final fence rejects late drift; it does not promise rollback of an already activated mapping.
+          expect((yield* vectorIndexStatus(f.home, manifest)).ready).toBe(true);
+          expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
+        }),
+      ),
+  );
+
   fcEffectProp(
     effectIt,
     'repeated rebuild preserves canonical bytes and reuses verified vector values',
