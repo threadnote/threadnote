@@ -146,7 +146,12 @@ export function withWorkflowLock<A, E, R>(config: RuntimeConfig, bindingId: stri
     return yield* withExclusiveFileLock(
       fs,
       `${file}.lock`,
-      {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 300_000, waitTimeoutMilliseconds: 30_000},
+      {
+        category: 'native-journal',
+        retryIntervalMilliseconds: 25,
+        staleAfterMilliseconds: 300_000,
+        waitTimeoutMilliseconds: 30_000,
+      },
       body,
     );
   });

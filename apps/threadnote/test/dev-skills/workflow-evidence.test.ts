@@ -277,7 +277,7 @@ describe('prepared workflow evidence admission', () => {
             }),
           ),
         );
-        expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIdentityAdmissionBusy'}});
+        expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'FileLockTimeout', category: 'recall-index'}});
         expect(injected).toBe(true);
         expect(yield* f.store.stat(f.location, destination).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
         expect(yield* f.fs.readFileString(database + '.stale')).toBe(marker);

@@ -1,5 +1,5 @@
 import {SecureRandom} from 'effect/crypto';
-import {Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
+import {Clock, Context, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {succeedUndefined} from '../optional.js';
 import {sha256Hex} from '../digest.js';
 import {fromPromise} from '../errors.js';
@@ -13,6 +13,15 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 export interface ExclusiveFileLockOptions {
+  readonly category?:
+    | 'memory'
+    | 'canonical-account'
+    | 'recall-index'
+    | 'native-run'
+    | 'native-authoring'
+    | 'native-journal'
+    | 'native-job'
+    | 'native-worker';
   /** Existing-home workers must never recreate a directory removed by uninstall. Defaults to true. */
   readonly createParentDirectory?: boolean;
   readonly heartbeatIntervalMilliseconds?: number;
@@ -40,6 +49,11 @@ export class FileLockTimeout extends Schema.TaggedError<FileLockTimeout, {readon
   {
     lockPath: Schema.String,
     message: Schema.String,
+    category: Schema.optionalKey(Schema.String),
+    waitedMilliseconds: Schema.optionalKey(Schema.Finite),
+    cumulativeWaitMilliseconds: Schema.optionalKey(Schema.Finite),
+    ownerProcessId: Schema.optionalKey(Schema.Finite),
+    ownerStartFingerprint: Schema.optionalKey(Schema.String),
   },
 ) {
   static of(lockPath: string): FileLockTimeout {
@@ -48,6 +62,57 @@ export class FileLockTimeout extends Schema.TaggedError<FileLockTimeout, {readon
       message: `Timed out waiting for local lock ${lockPath}.`,
     });
   }
+}
+
+interface NativeWaitReservation {
+  readonly nanos: bigint;
+  readonly started: bigint;
+}
+interface NativeWaitBudget {
+  remainingNanos: bigint;
+  waitedNanos: bigint;
+  readonly reservations: Set<NativeWaitReservation>;
+  active: boolean;
+}
+const CurrentNativeWaitBudget = Context.Reference<NativeWaitBudget | undefined>('threadnote/NativeFileLockWaitBudget', {
+  defaultValue: () => undefined,
+});
+
+/** One native attempt, including nested dispatch and inherited acquisition fibers. */
+export function withNativeFileLockWaitBudget<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    if ((yield* CurrentNativeWaitBudget)?.active) return yield* effect;
+    return yield* Effect.acquireUseRelease(
+      Effect.sync((): NativeWaitBudget => ({
+        remainingNanos: 2_000_000_000n,
+        waitedNanos: 0n,
+        reservations: new Set(),
+        active: true,
+      })),
+      budget => effect.pipe(Effect.provideService(CurrentNativeWaitBudget, budget)),
+      budget =>
+        Effect.sync(() => {
+          budget.active = false;
+        }),
+    );
+  });
+}
+
+/** Select only bounded diagnostics; lock paths and owner tokens never belong in native output. */
+export function fileLockBusyMessage(error: FileLockTimeout): string {
+  const owner =
+    error.ownerProcessId === undefined
+      ? ''
+      : ` Holder PID ${error.ownerProcessId}${error.ownerStartFingerprint ? `, start ${error.ownerStartFingerprint}` : ''}.`;
+  const waiting =
+    error.waitedMilliseconds !== undefined && error.cumulativeWaitMilliseconds !== undefined
+      ? `Acquisition wait ${error.waitedMilliseconds}ms here, ${error.cumulativeWaitMilliseconds}ms in this attempt.`
+      : error.waitedMilliseconds !== undefined
+        ? `Acquisition wait ${error.waitedMilliseconds}ms here; cumulative wait unavailable.`
+        : error.cumulativeWaitMilliseconds !== undefined
+          ? `Cumulative acquisition wait ${error.cumulativeWaitMilliseconds}ms in this attempt; local wait unavailable.`
+          : 'Acquisition wait unavailable.';
+  return `${error.category ?? 'local'} lock is busy.${owner} ${waiting} Preserve the same IDs, inspect existing receipts, and retry or resume the same intent after contention clears.`;
 }
 
 export interface FileLockOwner {
@@ -97,6 +162,67 @@ export function withExclusiveFileLock<A, E, R>(
       yield* fs.makeDirectory(pathService.dirname(lockPath), {recursive: true});
     const token = yield* fileLockToken(options.useCanonicalProcessStartIdentity === true);
     const startedAt = yield* Clock.currentTimeMillis;
+    const budget = yield* CurrentNativeWaitBudget;
+    const clock = yield* Clock.Clock;
+    let waitedNanos = 0n;
+    const timeout = Effect.gen(function* () {
+      if (budget === undefined)
+        return yield* FileLockTimeout.make({
+          lockPath,
+          message: FileLockTimeout.of(lockPath).message,
+          ...(options.category === undefined ? {} : {category: options.category}),
+        });
+      const owner = Option.getOrUndefined(yield* readExclusiveFileLockOwner(fs, lockPath));
+      const observedAt = clock.monotonicTimeNanosUnsafe();
+      let cumulative = budget.waitedNanos;
+      for (const reservation of budget.reservations) cumulative += observedAt - reservation.started;
+      const error = FileLockTimeout.make({
+        lockPath,
+        message: 'Native lock acquisition is busy.',
+        category: options.category ?? 'local',
+        waitedMilliseconds: Number(waitedNanos / 1_000_000n),
+        cumulativeWaitMilliseconds: Number(cumulative / 1_000_000n),
+        ...(owner === undefined ? {} : {ownerProcessId: owner.processId}),
+        ...(owner?.processStartIdentity === undefined
+          ? {}
+          : {
+              ownerStartFingerprint: EffectString.slice(0, 16)(yield* sha256Hex(owner.processStartIdentity)),
+            }),
+      });
+      return yield* FileLockTimeout.make({...error, message: fileLockBusyMessage(error)});
+    });
+    const retry =
+      budget === undefined
+        ? Effect.gen(function* () {
+            if ((yield* Clock.currentTimeMillis) - startedAt >= options.waitTimeoutMilliseconds) return yield* timeout;
+            yield* Effect.sleep(options.retryIntervalMilliseconds);
+          })
+        : Effect.acquireUseRelease(
+            Effect.sync(() => {
+              const localRemaining =
+                BigInt(Math.max(0, Math.floor(options.waitTimeoutMilliseconds * 1_000_000))) - waitedNanos;
+              const requested = BigInt(Math.max(0, Math.floor(options.retryIntervalMilliseconds * 1_000_000)));
+              const available = budget.active ? budget.remainingNanos : 0n;
+              const granted = requested < available ? requested : available;
+              const nanos = granted < localRemaining ? granted : localRemaining;
+              if (nanos <= 0n) return undefined;
+              // Reserve before yielding so concurrent contenders cannot spend the same allowance.
+              budget.remainingNanos -= nanos;
+              const reservation = {nanos, started: clock.monotonicTimeNanosUnsafe()};
+              budget.reservations.add(reservation);
+              return reservation;
+            }),
+            reservation => (reservation === undefined ? timeout : Effect.sleep(Number(reservation.nanos) / 1_000_000)),
+            reservation =>
+              Effect.sync(() => {
+                if (reservation === undefined) return;
+                const actual = clock.monotonicTimeNanosUnsafe() - reservation.started;
+                budget.reservations.delete(reservation);
+                waitedNanos += actual;
+                budget.waitedNanos += actual;
+                budget.remainingNanos += reservation.nanos - actual;
+              }),
+          );
     let contentionReported = false;
     const heartbeatIntervalMilliseconds =
       options.heartbeatIntervalMilliseconds ?? Math.max(1, Math.floor(options.staleAfterMilliseconds / 3));
@@ -108,7 +234,13 @@ export function withExclusiveFileLock<A, E, R>(
       }),
     );
     for (;;) {
-      const attempted = yield* tryAcquireFileLock(fs, lockPath, token, options).pipe(
+      const attempted = yield* tryAcquireFileLock(
+        fs,
+        lockPath,
+        token,
+        options,
+        budget === undefined ? undefined : {retry, timeout},
+      ).pipe(
         Effect.flatMap(acquired => (acquired ? protectedEffect.pipe(Effect.asSome) : Effect.succeedNone)),
         // Register release around the acquisition itself. Interruption or an
         // I/O failure after the atomic token write must not strand a lock owned
@@ -121,11 +253,7 @@ export function withExclusiveFileLock<A, E, R>(
         yield* options.onContention?.(lockPath) ?? Effect.void;
         contentionReported = true;
       }
-      const now = yield* Clock.currentTimeMillis;
-      if (now - startedAt >= options.waitTimeoutMilliseconds) {
-        return yield* FileLockTimeout.of(lockPath);
-      }
-      yield* Effect.sleep(options.retryIntervalMilliseconds);
+      yield* retry;
     }
   });
 }
@@ -135,6 +263,10 @@ function tryAcquireFileLock(
   lockPath: string,
   token: string,
   options: ExclusiveFileLockOptions,
+  nativeWait?: {
+    readonly retry: Effect.Effect<void, FileLockTimeout>;
+    readonly timeout: Effect.Effect<never, FileLockTimeout>;
+  },
 ): Effect.Effect<boolean, unknown, SecureRandom.SecureRandom | SystemInfo> {
   return Effect.gen(function* () {
     yield* recoverStaleFileLock(fs, lockPath, options);
@@ -145,6 +277,7 @@ function tryAcquireFileLock(
         token,
         options.windowsSharingViolationRetryLimit,
         options.retryIntervalMilliseconds,
+        nativeWait,
       ))
     ) {
       return false;
@@ -265,6 +398,10 @@ function tryWriteLockToken(
   token: string,
   windowsSharingViolationRetryLimit = 0,
   retryIntervalMilliseconds = 0,
+  nativeWait?: {
+    readonly retry: Effect.Effect<void, FileLockTimeout>;
+    readonly timeout: Effect.Effect<never, FileLockTimeout>;
+  },
 ): Effect.Effect<boolean, unknown, SystemInfo> {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
@@ -281,10 +418,11 @@ function tryWriteLockToken(
       if (attempted.error instanceof PlatformError.PlatformError && attempted.error.reason._tag === 'AlreadyExists') {
         return false;
       }
-      if (retry >= retryLimit || !isWindowsSharingViolation(attempted.error, system.platform)) {
+      if (!isWindowsSharingViolation(attempted.error, system.platform)) {
         return yield* attempted.error;
       }
-      yield* Effect.sleep(retryIntervalMilliseconds);
+      if (retry >= retryLimit) return yield* nativeWait?.timeout ?? Effect.fail(attempted.error);
+      yield* nativeWait?.retry ?? Effect.sleep(retryIntervalMilliseconds);
     }
   });
 }

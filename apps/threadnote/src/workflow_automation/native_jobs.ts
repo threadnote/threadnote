@@ -12,7 +12,12 @@ import {
   Schema,
 } from 'effect';
 import * as Effect2 from 'effect';
-import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {
+  FileLockTimeout,
+  fileLockBusyMessage,
+  withExclusiveFileLock,
+  withNativeFileLockWaitBudget,
+} from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {codeGraphFileContentHashMatchesBytes} from '@threadnote/graph/content_identity';
@@ -41,6 +46,7 @@ const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const witnessLimit = 4 * 1024 * 1024;
 const receiptLimit = 64 * 1024;
 const workerLockOptions = {
+  category: 'native-worker',
   createParentDirectory: false,
   retryIntervalMilliseconds: 25,
   staleAfterMilliseconds: 300_000,
@@ -522,6 +528,7 @@ const withJobLock = <A, E, R>(
       fs,
       file + '.lock',
       {
+        category: 'native-job',
         createParentDirectory: false,
         retryIntervalMilliseconds: 25,
         staleAfterMilliseconds: 300_000,
@@ -530,8 +537,10 @@ const withJobLock = <A, E, R>(
       },
       program,
     ).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
-        Effect.fail(fail('job-busy', 'Another process is updating this job.')),
+      Effect.catchIf(Schema.is(FileLockTimeout), error =>
+        Effect.fail(
+          WorkflowAutomationError.make({code: 'job-busy', message: fileLockBusyMessage(error), retryable: true}),
+        ),
       ),
     );
   });
@@ -999,13 +1008,15 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         }));
       }
       return nativeJobStatus(current.state);
-    }).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
-        Effect.fail(fail('job-busy', 'The original worker still owns this job.')),
+    }),
+  ).pipe(
+    Effect.catchIf(Schema.is(FileLockTimeout), error =>
+      Effect.fail(
+        WorkflowAutomationError.make({code: 'job-busy', message: fileLockBusyMessage(error), retryable: true}),
       ),
     ),
   );
-});
+}, withNativeFileLockWaitBudget);
 export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   config: RuntimeConfig,
   input: unknown,

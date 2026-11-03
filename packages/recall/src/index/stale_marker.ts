@@ -76,6 +76,7 @@ function withStaleMarkerPublication<A, E, R>(
       fs,
       lockPath,
       {
+        category: 'recall-index',
         heartbeatIntervalMilliseconds: 10_000,
         retryIntervalMilliseconds: 100,
         staleAfterMilliseconds: 60_000,

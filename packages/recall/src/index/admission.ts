@@ -1,5 +1,5 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {FileLockTimeout} from '@threadnote/platform/file/lock';
+import {FileLockTimeout, fileLockBusyMessage} from '@threadnote/platform/file/lock';
 import {readPathFileSystemIdentity} from '@threadnote/platform/system';
 import {
   CanonicalMutationGenerationInvalid,
@@ -28,9 +28,11 @@ export class RecallIdentityAdmissionBusy extends Schema.TaggedError<
   {readonly brand: unique symbol}
 >()('RecallIdentityAdmissionBusy', {message: Schema.String}) {}
 
-const busy = () =>
+const busy = (timeout?: FileLockTimeout) =>
   RecallIdentityAdmissionBusy.make({
-    message: 'Recall identity evidence changed or is busy; retry the same intent.',
+    message: timeout
+      ? fileLockBusyMessage(timeout)
+      : 'Recall identity evidence changed or is busy; retry the same intent.',
   });
 const CurrentIdentityPreparation = Context.Reference<number | undefined>('threadnote/RecallIdentityPreparation', {
   defaultValue: () => undefined,
@@ -53,7 +55,10 @@ export function normalizeRecallIdentityPreparation<A, E, R>(effect: Effect.Effec
             (Schema.is(SqlError)(error) && error.reason._tag === 'LockTimeoutError')
           );
         },
-        () => Effect.fail(busy()),
+        cause => {
+          const error = Cause.squash(cause);
+          return Effect.fail(busy(Schema.is(FileLockTimeout)(error) ? error : undefined));
+        },
       ),
     );
   });

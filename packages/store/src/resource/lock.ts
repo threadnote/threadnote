@@ -4,6 +4,7 @@ import {validatePortableSegment} from '@threadnote/store/resource-id';
 
 /** The ordinary account mutation coordinator policy, shared by writers and settled readers. */
 export const resourceAccountMutationLockPolicy = {
+  category: 'canonical-account',
   heartbeatIntervalMilliseconds: 10_000,
   retryIntervalMilliseconds: 25,
   staleAfterMilliseconds: 30_000,

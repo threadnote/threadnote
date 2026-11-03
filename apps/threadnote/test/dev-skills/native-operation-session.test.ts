@@ -6,7 +6,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
+import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
 import {
   expireRecallIndexValidation,
   loadRecallMemoryIdentities,
@@ -40,6 +40,157 @@ const fixture = Effect.gen(function* () {
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
 describe('native child lower-memory sessions', () => {
+  for (const pinned of [false, true])
+    it.effect(`preserves memory-busy through lexical admission with pinned evidence=${pinned}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        yield* loadRecallMemoryIdentities(f.config, {
+          allowedUriScopes: [f.artifact.uri],
+          memoryIds: [f.artifact.memoryId],
+        });
+        const lock = f.path.join(
+          f.home,
+          'threadnote',
+          'memory-locks',
+          sha256HexSync('threadnote-internal://deferred-code-anchor-mutations/local/tester') + '.lock',
+        );
+        yield* f.fs.writeFileString(
+          lock,
+          JSON.stringify({
+            version: 1,
+            processId: system.processId,
+            processStartIdentity: 'holder-start',
+            token: 'private-token',
+          }),
+        );
+        const request = f.write({
+          operationId: 'pinned-memory-busy',
+          artifactKey: 'pinned-memory-busy',
+          ...(pinned
+            ? {evidenceRefs: [{uri: f.artifact.uri, memoryId: f.artifact.memoryId, revision: f.artifact.revision}]}
+            : {}),
+        });
+        const outcome = yield* f.call(request).pipe(Effect.result, Effect.timeoutOption('5 seconds'));
+        expect(outcome).toMatchObject({
+          _tag: 'Some',
+          value: {_tag: 'Failure', failure: {code: 'memory-busy', retryable: true}},
+        });
+        if (EffectOption.isNone(outcome) || !Result.isFailure(outcome.value)) throw new Error('Expected busy result');
+        const message = outcome.value.failure.message;
+        expect(message).toContain('memory lock is busy');
+        expect(message).toContain(`Holder PID ${system.processId}`);
+        expect(message).toMatch(/start [a-f0-9]{16}/);
+        expect(message).toMatch(/Acquisition wait \d+ms here, \d+ms in this attempt/);
+        for (const unsafe of [f.home, 'holder-start', 'private-token']) expect(message).not.toContain(unsafe);
+        yield* f.fs.remove(lock);
+        expect(yield* f.call({...f.base('recover'), operationId: 'pinned-memory-busy'})).toMatchObject({status: 'ok'});
+      }).pipe(run),
+    );
+
+  for (const pinned of [false, true])
+    it.effect(`shares real native acquisition waiting with pinned evidence=${pinned}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        const rawStart = 'private-holder-start /do-not-print';
+        const rawToken = 'private-holder-token';
+        const owner = JSON.stringify({
+          version: 1,
+          processId: system.processId,
+          processStartIdentity: rawStart,
+          token: rawToken,
+        });
+        const runPath = (yield* f.fs.realPath(f.statePath())) + '.lock';
+        const journalPath = f.path.join(f.home, 'workflow-memory', f.bindingId + '.json.lock');
+        const memoryPath = f.path.join(
+          f.home,
+          'threadnote',
+          'memory-locks',
+          sha256HexSync('threadnote-internal://deferred-code-anchor-mutations/local/tester') + '.lock',
+        );
+        const accountPath = resourceAccountMutationLockPath(f.path, f.home, f.config.account);
+        yield* loadRecallMemoryIdentities(f.config, {
+          allowedUriScopes: [f.artifact.uri],
+          memoryIds: [f.artifact.memoryId],
+        });
+        const runBlocked = yield* Deferred.make<void>();
+        const journalBlocked = yield* Deferred.make<void>();
+        const memoryBlocked = yield* Deferred.make<void>();
+        const barriers = [
+          [runPath, runBlocked],
+          [journalPath, journalBlocked],
+          [memoryPath, memoryBlocked],
+        ] as const;
+        const targets = new Map(EffectArray.map(barriers, ([file, barrier]) => [f.path.basename(file), barrier]));
+        const observedContention = new Set<string>();
+        let accountHeld = false;
+        const observed = FileSystem.FileSystem.of({
+          ...f.fs,
+          writeFileString: (file, content, options) =>
+            f.fs.writeFileString(file, content, options).pipe(
+              Effect.tapError(() => {
+                const barrier = options?.flag === 'wx' ? targets.get(f.path.basename(file)) : undefined;
+                if (!barrier) return Effect.void;
+                observedContention.add(f.path.basename(file));
+                return Deferred.succeed(barrier, undefined).pipe(Effect.asVoid);
+              }),
+              Effect.tap(() => {
+                if (file !== memoryPath || options?.flag !== 'wx' || accountHeld) return Effect.void;
+                accountHeld = true;
+                return f.fs.writeFileString(accountPath, owner);
+              }),
+            ),
+        });
+        for (const [file] of barriers) yield* f.fs.writeFileString(file, owner);
+        const releaser = yield* Effect.forEach(
+          barriers,
+          ([file, barrier]) =>
+            Deferred.await(barrier).pipe(Effect.andThen(Effect.sleep(400)), Effect.andThen(f.fs.remove(file))),
+          {concurrency: 'unbounded'},
+        ).pipe(Effect.forkChild);
+        const request = f.write({
+          operationId: 'cumulative-native',
+          artifactKey: 'cumulative-native',
+          ...(pinned
+            ? {evidenceRefs: [{uri: f.artifact.uri, memoryId: f.artifact.memoryId, revision: f.artifact.revision}]}
+            : {}),
+        });
+        const outcome = yield* f
+          .call(request)
+          .pipe(
+            Effect.provideService(FileSystem.FileSystem, observed),
+            Effect.result,
+            Effect.timeoutOption('5 seconds'),
+          );
+        yield* Fiber.interrupt(releaser);
+        expect(outcome).toMatchObject({
+          _tag: 'Some',
+          value: {_tag: 'Failure', failure: {code: 'memory-busy', retryable: true}},
+        });
+        if (outcome._tag !== 'Some' || Result.isSuccess(outcome.value)) throw new Error('Expected native busy');
+        const message = outcome.value.failure.message;
+        expect(observedContention).toEqual(new Set(targets.keys()));
+        expect(accountHeld).toBe(true);
+        expect(message).toContain('canonical-account');
+        expect(message).toContain(`PID ${system.processId}`);
+        expect(message).toMatch(/start [a-f0-9]{16}/u);
+        const waiting = /Acquisition wait ([0-9]+)ms here, ([0-9]+)ms in this attempt/u.exec(message);
+        expect(waiting).not.toBeNull();
+        expect(Number(waiting?.[1])).toBeLessThan(1900);
+        expect(Number(waiting?.[2])).toBeGreaterThanOrEqual(2000);
+        expect(Number(waiting?.[2])).toBeLessThan(2500);
+        expect(message).not.toContain(f.home);
+        expect(message).not.toContain(rawStart);
+        expect(message).not.toContain(rawToken);
+        expect(yield* f.fs.exists(runPath)).toBe(false);
+        expect(yield* f.fs.exists(journalPath)).toBe(false);
+        expect(yield* f.fs.readDirectory(f.path.dirname(memoryPath))).toEqual([]);
+        yield* f.fs.remove(accountPath);
+        expect(yield* f.call({...f.base('recover'), operationId: 'cumulative-native'})).toMatchObject({status: 'ok'});
+      }).pipe(run),
+    );
+
   for (const route of ['session', 'executor'] as const)
     it.effect(`returns busy during initial ${route} evidence preparation and resumes the same operation`, () =>
       Effect.gen(function* () {
@@ -99,7 +250,7 @@ describe('native child lower-memory sessions', () => {
           value: {
             _tag: 'Failure',
             failure:
-              route === 'session' ? {_tag: 'RecallIdentityAdmissionBusy'} : {code: 'evidence-busy', retryable: true},
+              route === 'session' ? {_tag: 'RecallIdentityAdmissionBusy'} : {code: 'admission-busy', retryable: true},
           },
         });
         expect(sharedAcquisitions).toBe(0);

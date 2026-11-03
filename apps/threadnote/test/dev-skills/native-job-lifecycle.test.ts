@@ -169,6 +169,58 @@ const readyMetadata = (f: Effect.Success<ReturnType<typeof nativeFixture>>, doc:
   });
 
 describe('native private job lifecycle', () => {
+  effectIt.effect('direct workers establish acquisition accounting before their first lease admission', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      yield* f.init();
+      const accepted = object(
+        yield* submit(f, {
+          ...f.base('authoring'),
+          command: 'save',
+          document: document(null),
+          ready: false,
+          expectedRevision: null,
+        }),
+      );
+      const jobId = requiredString(accepted.jobId);
+      const system = yield* SystemInfo;
+      const rawStart = 'private-worker-start /sensitive/path';
+      const rawToken = 'private-worker-token';
+      const lock = f.path.join(
+        yield* f.fs.realPath(f.home),
+        'workflow-automations',
+        'native-v1',
+        'jobs',
+        'native-run',
+        jobId + '.json.worker.lock',
+      );
+      yield* f.fs.writeFileString(
+        lock,
+        JSON.stringify({version: 1, processId: system.processId, processStartIdentity: rawStart, token: rawToken}),
+      );
+      let dispatched = false;
+      const result = yield* runNativeJobWorker(f.config, 'native-run', jobId, input => {
+        dispatched = true;
+        return f.call(input);
+      }).pipe(Effect.result);
+      expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'job-busy', retryable: true}});
+      if (Result.isSuccess(result)) throw new Error('Expected contended worker');
+      const error = result.failure;
+      if (!Schema.is(WorkflowAutomationError)(error)) throw new Error('Expected native error');
+      expect(error.message).toContain('native-worker');
+      expect(error.message).toContain(`PID ${system.processId}`);
+      expect(error.message).toMatch(/start [a-f0-9]{16}/u);
+      expect(error.message).toContain('ms in this attempt');
+      expect(error.message).not.toContain(lock);
+      expect(error.message).not.toContain(rawStart);
+      expect(error.message).not.toContain(rawToken);
+      expect(dispatched).toBe(false);
+      yield* f.fs.remove(lock);
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call)).status).toBe('completed');
+    }).pipe(run),
+  );
+
   it('keeps derived identity and bounded status independent of request ordering and payload size', () => {
     fc.assert(
       fc.property(fc.string({minLength: 1, maxLength: 1200}), fc.string({minLength: 1, maxLength: 1200}), (a, b) => {

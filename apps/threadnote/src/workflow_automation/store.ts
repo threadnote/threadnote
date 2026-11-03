@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import {Context, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {FileLockTimeout, fileLockBusyMessage, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
@@ -195,22 +195,24 @@ export function withNativeWorkflowLock<A, E, R>(
       fs,
       file + '.lock',
       {
+        category: 'native-run',
         createParentDirectory: false,
         retryIntervalMilliseconds: 25,
         staleAfterMilliseconds: 300_000,
         waitTimeoutMilliseconds: 2_000,
       },
-      body,
+      Effect.result(body),
     ).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
+      Effect.catchIf(Schema.is(FileLockTimeout), error =>
         Effect.fail(
           WorkflowAutomationError.make({
             code: 'state-busy',
-            message: 'Another call owns this native run. Retry the same run and operation after it completes.',
+            message: fileLockBusyMessage(error),
             retryable: true,
           }),
         ),
       ),
+      Effect.flatMap(Effect.fromResult),
     );
   });
 }
@@ -225,16 +227,20 @@ export function withNativeAuthoringLock<A, E, R>(config: RuntimeConfig, runId: s
       fs,
       file + '.authoring.lock',
       {
+        category: 'native-authoring',
         createParentDirectory: false,
         retryIntervalMilliseconds: 25,
         staleAfterMilliseconds: 300_000,
         waitTimeoutMilliseconds: 2_000,
       },
-      body,
+      Effect.result(body),
     ).pipe(
-      Effect.catchIf(Schema.is(FileLockTimeout), () =>
-        Effect.fail(issue('state-busy', 'Another authoring transaction owns this run; retry the same intent.')),
+      Effect.catchIf(Schema.is(FileLockTimeout), error =>
+        Effect.fail(
+          WorkflowAutomationError.make({code: 'state-busy', message: fileLockBusyMessage(error), retryable: true}),
+        ),
       ),
+      Effect.flatMap(Effect.fromResult),
     );
   });
 }
