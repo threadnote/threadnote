@@ -8038,6 +8038,72 @@ h4 {
   background: none;
   border-color: var(--line);
 }
+.process-row {
+  align-items: flex-start;
+}
+.process-row > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.process-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 220px;
+}
+.process-status-running {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.process-status-idle,
+.process-status-legacy {
+  color: var(--muted);
+  background: var(--sidebar-bg);
+}
+.process-lane-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
+  gap: 10px 18px;
+  margin: 14px 0 0;
+}
+.process-lane-metadata > div {
+  min-width: 0;
+}
+.process-lane-metadata dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+.process-lane-metadata dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.process-lane-metadata small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+}
+.process-lane-path {
+  grid-column: 1 / -1;
+}
+.process-row .process-stop-reason {
+  margin-top: 12px;
+}
+@media (max-width: 700px) {
+  .process-row {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    padding: 14px 12px;
+  }
+  .process-row-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    max-width: none;
+  }
+}
 .health-technical {
   margin-top: 20px;
   border-top: 1px solid var(--line);

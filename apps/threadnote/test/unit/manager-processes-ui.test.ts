@@ -53,6 +53,7 @@ beforeEach(() => {
             processId: 80297,
             processRef: `tnp_${Effect.pipe('a', EffectString.repeat(64))}`,
             role: 'graph-compaction-worker',
+            cpu: {state: 'sampling', sampledAt: new Date().toISOString()},
             rssBytes: 100 * 1_024 * 1_024,
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
@@ -65,6 +66,16 @@ beforeEach(() => {
             processId: 80300,
             processRef: `tnp_${Effect.pipe('b', EffectString.repeat(64))}`,
             role: 'mcp',
+            cpu: {state: 'sampled', percent: 250, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
+            displayContext: {
+              client: {name: 'Codex', version: '1.2'},
+              workspace: {
+                state: 'active',
+                path: '/work/projects/a-very-long-worktree-name/packages/application',
+                observedAt: new Date().toISOString(),
+              },
+              branch: {state: 'branch', name: 'feature/process-lanes'},
+            },
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
           },
@@ -85,6 +96,7 @@ beforeEach(() => {
             parentProcessId: 1,
             processId: 80276,
             role: 'manager',
+            cpu: {state: 'sampled', percent: 0, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: false,
             terminationBlockedReason: 'current-manager',
@@ -126,10 +138,37 @@ describe('Manager Processes panel', () => {
     expect(stop?.title).toBe('Terminate Graph compaction worker');
     expect(stop?.disabled).toBe(false);
     expect(managerStop).toBeNull();
-    await act(async () =>
-      document.querySelector<HTMLButtonElement>('[aria-label="Inspect Manager process 80276"]')?.click(),
-    );
-    expect(document.querySelector('dialog')?.textContent).toContain('80276');
+    expect(document.querySelector('[aria-label="Inspect Manager process 80276"]')).toBeNull();
+    expect(document.querySelector('dialog')).toBeNull();
+    expect(document.body.textContent).toContain('80276');
+  });
+
+  it('shows metrics and workspace/client context inline with separate activity and identity badges', async () => {
+    await renderProcesses();
+    const text = document.querySelector('[aria-label="Threadnote process inventory"]')?.textContent;
+    for (const value of [
+      'CPU',
+      '250.0%',
+      '0.0%',
+      'Sampling…',
+      'Unavailable',
+      '100.0 MiB',
+      'PID 80297',
+      'Parent',
+      'Version',
+      'Worktree',
+      '/work/projects/a-very-long-worktree-name/packages/application',
+      'feature/process-lanes',
+      'Codex v1.2',
+      'Chat title',
+      'Not provided by client',
+      'The current Manager process is protected',
+    ])
+      expect(text).toContain(value);
+    expect(document.querySelector('.process-status-running')?.textContent).toContain('Running');
+    expect(document.querySelector('.process-status-idle')?.textContent).toContain('Idle');
+    expect(document.querySelector('.process-row .process-identity-current')?.textContent).toContain('Current');
+    expect(document.body.textContent).not.toContain('Inspect');
   });
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {

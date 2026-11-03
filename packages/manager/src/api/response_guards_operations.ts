@@ -35,8 +35,7 @@ const ApiSchema1452 = Schema.Struct({
   issues: ApiSchema7608,
 });
 const ApiSchema1542 = Schema.Struct({ticket: Schema.String});
-const ApiSchema7640 = Schema.Union([
-  Schema.Undefined,
+const registeredProcessRoleSchema = Schema.Union([
   Schema.Literal('cli'),
   Schema.Literal('graph-builder'),
   Schema.Literal('graph-embedding-worker'),
@@ -51,6 +50,7 @@ const ApiSchema7640 = Schema.Union([
   Schema.Literal('mcp'),
   Schema.Literal('mcp-broker'),
 ]);
+const ApiSchema7640 = Schema.Union([Schema.Undefined, registeredProcessRoleSchema]);
 const ApiSchema7641 = Schema.Union([
   Schema.Undefined,
   Schema.Literal('cli'),
@@ -92,6 +92,28 @@ const ApiSchema7649 = Schema.Union([
   Schema.Literal('legacy-process'),
 ]);
 const ApiSchema6061 = Schema.Struct({
+  displayContext: Schema.optionalKey(
+    Schema.Struct({
+      launchDirectory: Schema.optionalKey(Schema.String),
+      client: Schema.optionalKey(Schema.Struct({name: Schema.String, version: Schema.optionalKey(Schema.String)})),
+      workspace: Schema.optionalKey(
+        Schema.Union([
+          Schema.Struct({state: Schema.Literals(['active', 'last']), path: Schema.String, observedAt: Schema.String}),
+          Schema.Struct({state: Schema.Literal('multiple'), observedAt: Schema.String}),
+        ]),
+      ),
+      owner: Schema.optionalKey(
+        Schema.Struct({processId: Schema.Int.check(Schema.isGreaterThan(0)), role: registeredProcessRoleSchema}),
+      ),
+      branch: Schema.optionalKey(
+        Schema.Union([
+          Schema.Struct({state: Schema.Literal('branch'), name: Schema.String}),
+          Schema.Struct({state: Schema.Literal('detached'), commit: Schema.String}),
+          Schema.Struct({state: Schema.Literal('unavailable')}),
+        ]),
+      ),
+    }),
+  ),
   cpu: Schema.optionalKey(
     Schema.Union([
       Schema.Struct({

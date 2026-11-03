@@ -15,7 +15,10 @@ async function runtimeSection(page: import('@playwright/test').Page) {
     .click();
 }
 
-test('S17 process inspection and guarded termination affect only a benign owned runtime', async ({page, manager}) => {
+test('S17 process inspection and guarded termination affect only a benign owned runtime', async ({
+  page,
+  manager,
+}, testInfo) => {
   const sentinel = await manager.remember('Preserve the runtime sentinel.', 'runtime-sentinel');
   const before = await manager.cli(['read', sentinel]);
   const child = manager.launch(candidateBinary, [
@@ -35,14 +38,26 @@ test('S17 process inspection and guarded termination affect only a benign owned 
     .getByRole('navigation', {name: 'Manager sections'})
     .getByRole('button', {name: 'Processes', exact: true})
     .click();
-  const inspect = page.getByRole('button', {name: new RegExp(`^Inspect .+ process ${pid}$`, 'u')});
-  const row = page.getByRole('listitem').filter({has: inspect});
-  await inspect.click();
-  const detail = page.getByRole('dialog');
-  await expect(detail).toContainText(`PID ${pid}`);
-  await expect(detail).toContainText('Private arguments and environment variables stay hidden.');
-  await detail.getByRole('button', {name: 'Close details', exact: true}).click();
-  const stop = row.getByRole('button', {name: new RegExp(`^Terminate .+ process ${pid}$`, 'u')});
+  const stop = page.getByRole('button', {name: new RegExp(`^Terminate .+ process ${pid}$`, 'u')});
+  const row = page.getByRole('listitem').filter({has: stop});
+  await expect(row).toContainText(`PID ${pid}`);
+  for (const field of ['CPU', 'Memory', 'Parent', 'Age', 'Version', 'Worktree', 'Branch', 'Idle'])
+    await expect(row).toContainText(field);
+  await expect(row.getByRole('button', {name: /Inspect|Details/u})).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(row.locator('dt').filter({hasText: /^CPU$/u}).locator('..').locator('dd')).toHaveText(/^\d+\.\d%$/u);
+  for (const theme of ['Light', 'Dark']) {
+    await page.setViewportSize({width: 1280, height: 900});
+    await page.getByRole('button', {name: theme, exact: true}).click();
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({width, height: 900});
+      await row.scrollIntoViewIfNeeded();
+      await expect(stop).toBeVisible();
+      expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await row.screenshot({path: testInfo.outputPath(`process-lane-${EffectString.toLowerCase(theme)}-${width}.png`)});
+    }
+  }
+  await page.setViewportSize({width: 1280, height: 900});
   await stop.click();
   const confirm = page.getByRole('dialog', {name: 'Terminate Threadnote process?', exact: true});
   await confirm.getByRole('button', {name: 'Cancel', exact: true}).click();

@@ -23,7 +23,8 @@ describe('process display context', () => {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-display-budget-'});
       const native = yield* SystemInfo;
-      const longPath = '/' + EffectString.repeat('"', 4090);
+      const longPath = '/' + EffectString.repeat(4090)('"');
+      expect(longPath.length).toBe(4091);
       const mocked = FileSystem.FileSystem.of({
         ...fs,
         realPath: value => (value === '/virtual-launch' ? Effect.succeed(longPath) : fs.realPath(value)),
@@ -259,7 +260,7 @@ describe('process display context', () => {
         name: 'Codex',
         version: '1',
       });
-      for (const name of ['unknown', '', 'bad\nname', EffectString.repeat('x', 129), 12])
+      for (const name of ['unknown', '', 'bad\nname', EffectString.repeat(129)('x'), 12])
         expect(sanitizeThreadnoteProcessClientInfo({name})).toBeUndefined();
     }),
   );

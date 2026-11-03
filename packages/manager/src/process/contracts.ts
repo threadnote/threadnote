@@ -24,6 +24,18 @@ export interface ManageableManagerProcess {
   readonly ageMilliseconds: number;
   readonly currentOperation?: string;
   readonly cpu?: ProcessCpuObservation;
+  readonly displayContext?: {
+    readonly launchDirectory?: string;
+    readonly client?: {readonly name: string; readonly version?: string};
+    readonly workspace?:
+      | {readonly state: 'active' | 'last'; readonly path: string; readonly observedAt: string}
+      | {readonly state: 'multiple'; readonly observedAt: string};
+    readonly owner?: {readonly processId: number; readonly role: Exclude<ManagerProcessRole, 'legacy'>};
+    readonly branch?:
+      | {readonly state: 'branch'; readonly name: string}
+      | {readonly state: 'detached'; readonly commit: string}
+      | {readonly state: 'unavailable'};
+  };
   readonly embeddingProgress?: {
     readonly state: 'queued' | 'deferred-cpu' | 'deferred-foreground' | 'preparing' | 'running' | 'blocked' | 'corrupt';
     readonly reason?: string;
