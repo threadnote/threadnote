@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {semanticHostSelection} from './host_catalog.js';
-import {Clock, Crypto, Effect, FileSystem, Path, String as EffectString} from 'effect';
+import {Clock, Effect, FileSystem, Path, String as EffectString} from 'effect';
 import type {Observation, QueryOutcome} from '@threadnote/semantic/contracts';
 import {createQuerySnapshot, queryPage, type Continuation, type QuerySnapshot} from '@threadnote/semantic/views';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -28,7 +29,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const namespace = sha256HexSync(yield* crypto.randomBytes(32));
   const store = makeSemanticAgentQueryStore(namespace, (observation, milliseconds) =>
     coordinator.observe(observation, milliseconds),

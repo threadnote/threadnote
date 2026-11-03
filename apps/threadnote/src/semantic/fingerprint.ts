@@ -1,6 +1,7 @@
+import {Digest as EffectDigest} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Crypto, Effect, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -24,8 +25,8 @@ export const boundedFileDigest = Effect.fn('semantic.boundedFileDigest')(functio
   file: string,
   maximumBytes: number,
 ) {
-  const crypto = yield* Crypto.Crypto;
-  const hash = yield* crypto.digest('SHA-256', yield* readBounded(file, maximumBytes));
+  const digest = yield* EffectDigest.Digest;
+  const hash = yield* digest.digest(EffectDigest.sha256, yield* readBounded(file, maximumBytes));
   return EffectArray.join(
     Array.from(hash, byte => EffectString.padStart(2, '0')(byte.toString(16))),
     '',

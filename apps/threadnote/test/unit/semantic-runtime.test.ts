@@ -4,7 +4,7 @@ import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
-import * as BunCrypto from '@effect/platform-bun/BunCrypto';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Cause, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
@@ -59,7 +59,7 @@ const fakeWire = Effect.gen(function* () {
   };
   return {wire, sent, incoming, finishes: () => finishes};
 });
-const admissionLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, TestSystemInfoLayer);
+const admissionLayer = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, cryptoLayer, TestSystemInfoLayer);
 const javaCandidate = (): JavaHostCandidate => ({
   runtimeCandidate: {
     serverDirectory: '/qualified/jdtls',

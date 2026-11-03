@@ -1,7 +1,8 @@
+import {Digest as EffectDigest} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope} from 'effect';
+import {Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope} from 'effect';
 import {
   canonicalFileUri,
   FileUri,
@@ -499,7 +500,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
     const diagnosticModel = captureJavaSnapshotModel(options.diagnosticModel);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
-    const crypto = yield* Crypto.Crypto;
+    const digest = yield* EffectDigest.Digest;
     const serviceReady = yield* Deferred.make<void, LspFault>();
     const basis = structuredClone(options.basis);
     const settings = structuredClone(prepared.settings);
@@ -558,7 +559,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         Effect.asVoid,
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(EffectDigest.Digest, digest),
         Effect.onExit(exit => (Exit.isFailure(exit) ? retire : Effect.void)),
       );
     const sourceVerify = checkSource(preparedModel ? preparedModel.verifySource : prepared.verify);

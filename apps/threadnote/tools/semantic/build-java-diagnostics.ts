@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {zipSync, type Zippable} from 'fflate';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import * as EffectArray from 'effect/Array';
@@ -172,7 +173,12 @@ const program = Effect.scoped(
   }),
 );
 
-const base = Layer.mergeAll(BunServices.layer, runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer);
+const base = Layer.mergeAll(
+  BunServices.layer,
+  cryptoLayer,
+  runtimeEntrypointLayer,
+  telemetryChildEnvironmentPolicyLayer,
+);
 const ports = CommandExecutor.layer.pipe(Layer.provideMerge(SystemInfo.layer.pipe(Layer.provideMerge(base))));
 // oxlint-disable-next-line effecttsgo/strict-effect-provide -- The development compiler entry point provides its OS/service graph.
 if (import.meta.main) BunRuntime.runMain(program.pipe(Effect.provide(ports)));

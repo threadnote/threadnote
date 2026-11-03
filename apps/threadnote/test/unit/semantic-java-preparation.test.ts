@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Focused filesystem and deterministic clock tests, without application services. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -384,7 +385,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
 });
 
 const preparationCompositionLayer = Layer.merge(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   Layer.succeed(ChildEnvironmentPolicy, {
     sanitizeExternal: environment => environment,
     preserveIntendedChild: environment => environment,
@@ -834,7 +835,7 @@ describe('Java qualified JRE container spelling', () => {
       expect(EffectArray.filter(trailing.image.rawClasspath, entry => entry.path === jre + '/')).toEqual(expected);
       expect(trailing.metadata['.classpath']).toContain(jre + '/');
       expect(trailing.digest).not.toBe(plain.digest);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect.prop(
@@ -864,7 +865,7 @@ describe('Java qualified JRE container spelling', () => {
           if (extra === '' || extra === '/') expect(projection).not.toThrow();
           else expect(projection).toThrow();
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
 });
@@ -923,7 +924,7 @@ describe('Java passive prepared project', () => {
         expect(f.methods).toEqual(methods);
         expect(yield* f.fs.readFileString(f.sealed.metadataFile)).toBe(original);
         expect(yield* semanticTreeDigest(f.project)).toBe(f.sealed.model.sourceDigest);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   for (const mutation of [
     'metadata',
@@ -961,7 +962,7 @@ describe('Java passive prepared project', () => {
           yield* f.fs.writeFileString(file, content, {mode: 0o600});
         }
         expect(Exit.isFailure(yield* Effect.exit(prepared.verify))).toBe(true);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   for (const replaced of ['project', '.settings'])
     effectIt.effect(`refuses ${replaced} substitution before writing outside the private project`, () =>
@@ -989,7 +990,7 @@ describe('Java passive prepared project', () => {
         expect(substituted).toBe(true);
         expect(Exit.isFailure(result)).toBe(true);
         expect(yield* semanticSdkDigest(f.javaHome)).toBe(sdkDigest);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   effectIt.effect.prop(
     'isolates independent passive copies while conserving the prepared input',
@@ -1018,7 +1019,7 @@ describe('Java passive prepared project', () => {
         expect(yield* f.fs.readFileString(f.sealed.metadataFile)).toBe(original);
         expect(yield* f.fs.readFileString(f.sealed.model.libraries[0].file)).toBe(payload);
         expect(yield* semanticTreeDigest(f.project)).toBe(f.sealed.model.sourceDigest);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 8}},
   );
   effectIt.effect('refuses overlapping private roots before constructing a project', () =>
@@ -1029,7 +1030,7 @@ describe('Java passive prepared project', () => {
           Exit.isFailure(yield* Effect.exit(makeJavaPreparedProject({...f.materializerOptions, privateDirectory}))),
         ).toBe(true);
       expect(yield* f.fs.readDirectory(f.materializerOptions.privateDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 });
 
@@ -1064,7 +1065,7 @@ describe('Java prepared model sealing', () => {
         expect(javaPreparedModelJson(loaded.model)).toBe(content);
         expect(f.methods).toEqual(methods);
         expect(yield* f.fs.readFileString(sealed.metadataFile)).toBe(content);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   for (const mutation of [
     'metadata',
@@ -1109,7 +1110,7 @@ describe('Java prepared model sealing', () => {
           yield* f.fs.writeFileString(f.path.join(root, 'Main.java'), 'class Main {}\n');
         }
         expect((yield* Effect.exit(loaded.verify))._tag).toBe('Failure');
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   effectIt.effect('refuses forged optional absence even with a matching current worktree digest', () =>
     Effect.gen(function* () {
@@ -1135,7 +1136,7 @@ describe('Java prepared model sealing', () => {
           ))._tag,
         ).toBe('Failure');
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   for (const changed of ['config', 'SDK', 'artifact-inventory'] as const)
     effectIt.effect(`refuses late ${changed} drift during persisted verification`, () =>
@@ -1185,7 +1186,7 @@ describe('Java prepared model sealing', () => {
           yield* Deferred.succeed(release, undefined);
           expect((yield* Effect.exit(Fiber.join(verifying)))._tag).toBe('Failure');
         }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
   effectIt.effect('refuses noncanonical JSON and metadata symlinks before using persisted facts', () =>
     Effect.gen(function* () {
@@ -1209,7 +1210,7 @@ describe('Java prepared model sealing', () => {
       expect(
         (yield* Effect.exit(loadJavaPreparedModel({...options, metadataDigest: sealed.metadataDigest})))._tag,
       ).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'round trips sealed artifact payloads without changing their pinned bytes or model',
@@ -1244,7 +1245,7 @@ describe('Java prepared model sealing', () => {
         yield* loaded.verify;
         expect(javaPreparedModelJson(loaded.model)).toBe(javaPreparedModelJson(sealed.model));
         expect(yield* f.fs.readFileString(sealed.metadataFile)).toBe(javaPreparedModelJson(sealed.model));
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
   it('keeps canonical model bytes stable under compiler key reordering and JSON round trips', () => {
@@ -1322,7 +1323,7 @@ describe('Java prepared model sealing', () => {
       expect(sha256HexSync(yield* f.fs.readFile(original))).toBe(sha256HexSync(baseline));
       expect(sha256HexSync(yield* f.fs.readFile(copied))).toBe(sha256HexSync(baseline));
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('binds observed preference absence to the original captured input inventory', () =>
     Effect.gen(function* () {
@@ -1354,7 +1355,7 @@ describe('Java prepared model sealing', () => {
       expect(yield* f.fs.exists(copied)).toBe(true);
       expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses non-UTF8 sources and resource encoding overrides despite a UTF8 project default', () =>
     Effect.gen(function* () {
@@ -1375,7 +1376,7 @@ describe('Java prepared model sealing', () => {
         expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('records validated original UTF8 bytes and preference inputs without retaining setup paths', () =>
     Effect.gen(function* () {
@@ -1388,7 +1389,7 @@ describe('Java prepared model sealing', () => {
       expect(sealed.model.projectCharset).toBe('UTF-8');
       expect(sealed.model.sourceEncoding).toEqual(f.observation.model.sourceEncoding);
       expect(yield* f.fs.readFileString(sealed.metadataFile)).not.toContain(f.runtimeDirectory);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses a native charset witness for a different source set or source bytes', () =>
     Effect.gen(function* () {
@@ -1399,7 +1400,7 @@ describe('Java prepared model sealing', () => {
         });
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'source charset images ignore enumeration order, preserve inputs and detect renamed or changed sources',
@@ -1459,7 +1460,7 @@ describe('Java prepared model sealing', () => {
         expect(first.sources.length).toBe(2);
         expect(image(first.sources)).toEqual(image(second.sources));
         expect(sha256HexSync(yield* fs.readFile(file))).toBe(sha256HexSync(bytes));
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
   effectIt.effect('refuses SDK drift during the final native observation before issuing a witness', () =>
@@ -1476,7 +1477,7 @@ describe('Java prepared model sealing', () => {
       expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(2);
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('authenticates the copy receipt and cleanup owner before preparation admission', () =>
     Effect.gen(function* () {
@@ -1503,7 +1504,7 @@ describe('Java prepared model sealing', () => {
         code: 'prerequisite',
       });
       expect(f.methods).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses a model paired with copied metadata changed during its observation', () =>
     Effect.gen(function* () {
@@ -1520,7 +1521,7 @@ describe('Java prepared model sealing', () => {
       expect((yield* Fiber.join(observing))._tag).toBe('Failure');
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses a changed cached model even when copied output bytes stay unchanged', () =>
     Effect.gen(function* () {
@@ -1528,7 +1529,7 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('retains an Error received after ServiceReady during the native observation', () =>
     Effect.gen(function* () {
@@ -1536,7 +1537,7 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('retires a completed observation when a later setup Error arrives before sealing', () =>
     Effect.gen(function* () {
@@ -1544,7 +1545,7 @@ describe('Java prepared model sealing', () => {
       yield* f.emitError;
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('keeps a missing readiness signal bounded and prevents a raw report from completing setup', () =>
     Effect.gen(function* () {
@@ -1567,7 +1568,7 @@ describe('Java prepared model sealing', () => {
       }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
       expect(EffectArray.contains(f.methods, 'workspace/executeCommand')).toBe(false);
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('does not mix completed reports from two independent input proofs', () =>
     Effect.gen(function* () {
@@ -1577,7 +1578,7 @@ describe('Java prepared model sealing', () => {
       expect((yield* Effect.exit(sealJavaPreparedModel(second.observation, first.options)))._tag).toBe('Failure');
       expect(yield* first.fs.readDirectory(first.artifactDirectory)).toEqual([]);
       expect(yield* second.fs.readDirectory(second.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('requires a genuine setup runtime and preserves a completed observation after rejected reuse', () =>
     Effect.gen(function* () {
@@ -1596,7 +1597,7 @@ describe('Java prepared model sealing', () => {
       expect(yield* Effect.flip(f.observe)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
       const sealed = yield* sealJavaPreparedModel(observed, {...f.options, requestToken: observed.requestToken});
       expect(sealed.model.sourceDigest).toBe(f.options.inputs.sourceDigest);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('does not initialize or issue a model witness after a pre-import metadata insertion', () =>
     Effect.gen(function* () {
@@ -1609,7 +1610,7 @@ describe('Java prepared model sealing', () => {
       expect(f.methods).toEqual([]);
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('never upgrades initialization, readiness or observation-token failures into sealable outputs', () =>
     Effect.gen(function* () {
@@ -1621,7 +1622,7 @@ describe('Java prepared model sealing', () => {
         expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('cancels a pending native observation without issuing a completed setup witness', () =>
     Effect.gen(function* () {
@@ -1634,7 +1635,7 @@ describe('Java prepared model sealing', () => {
       expect(yield* Effect.flip(f.observe)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('rejects a copied-only Gradle script before import even when it is inside the project cache', () =>
     Effect.gen(function* () {
@@ -1654,7 +1655,7 @@ describe('Java prepared model sealing', () => {
         'ext.changedModel = true\n',
       );
       expect((yield* Effect.exit(inputs.verify))._tag).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses named metadata inserted during copying before issuing the initial proof', () =>
     Effect.gen(function* () {
@@ -1684,7 +1685,7 @@ describe('Java prepared model sealing', () => {
       expect(yield* f.fs.readFileString(f.path.join(f.project, 'pom.xml'))).toBe(
         '<project>captured build configuration</project>',
       );
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('rejects newly added copied build configuration outside the closed importer-output policy', () =>
     Effect.gen(function* () {
@@ -1702,7 +1703,7 @@ describe('Java prepared model sealing', () => {
         expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('uses only proof-owned source identities when a host options object retains extra fields', () =>
     Effect.gen(function* () {
@@ -1723,7 +1724,7 @@ describe('Java prepared model sealing', () => {
       expect(sealed.model.project).toBe(f.project);
       expect(sealed.model.sourceDigest).toBe(f.options.inputs.sourceDigest);
       expect(hostGuards).toBeGreaterThanOrEqual(3);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('bounds ownership acquisition and cleanup even inside masked resource lifecycle steps', () =>
     Effect.gen(function* () {
@@ -1769,7 +1770,7 @@ describe('Java prepared model sealing', () => {
         expect((yield* Fiber.await(sealing))._tag).toBe('Failure');
         expect((yield* f.fs.readDirectory(f.artifactDirectory)).length).toBe(1);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('bounds copied-input acquisition when canonical filesystem inspection stalls', () =>
     Effect.gen(function* () {
@@ -1791,7 +1792,7 @@ describe('Java prepared model sealing', () => {
       yield* TestClock.adjust(45001);
       expect(yield* Effect.flip(Fiber.join(copy))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
       expect(yield* f.fs.readDirectory(workspace.directory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'binds every copied original build input, including metadata and nested configuration',
@@ -1813,7 +1814,7 @@ describe('Java prepared model sealing', () => {
         expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
         expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
   effectIt.effect('rejects forged proofs and keeps generated metadata outside the strict input image', () =>
@@ -1826,7 +1827,7 @@ describe('Java prepared model sealing', () => {
       yield* f.fs.writeFileString(f.path.join(f.copiedProject, '.classpath'), '<classpath/>');
       expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('retains replaced artifact parents and children instead of deleting another directory', () =>
     Effect.gen(function* () {
@@ -1860,7 +1861,7 @@ describe('Java prepared model sealing', () => {
         expect(yield* f.fs.readFileString(f.path.join(replaced, 'unowned-sentinel'))).toBe('preserve replacement');
         expect(yield* f.fs.exists(retained)).toBe(true);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('rejects sealed JAR or metadata mutations during the last publication awaits', () =>
     Effect.gen(function* () {
@@ -1884,7 +1885,7 @@ describe('Java prepared model sealing', () => {
         expect(result._tag).toBe('Failure');
         expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       }
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses an aliased cache ancestor before calling the bounded content reader', () =>
     Effect.gen(function* () {
@@ -1907,7 +1908,7 @@ describe('Java prepared model sealing', () => {
       expect(aliasReads).toBe(0);
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       expect(yield* f.fs.readFileString(f.path.join(outside, 'library.jar'))).toBe(f.jarText);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('preserves compiler and ordered classpath facts after the setup workspace is removed', () =>
     Effect.gen(function* () {
@@ -1944,7 +1945,7 @@ describe('Java prepared model sealing', () => {
       expect(EffectString.includes(f.runtimeDirectory)(stored)).toBe(false);
       expect(yield* f.fs.readFileString(sealed.model.libraries[0].file)).toBe(f.jarText);
       expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('refuses unknown wire fields, authority selectors, conflicting roots and changed dependencies', () =>
     Effect.gen(function* () {
@@ -1989,7 +1990,7 @@ describe('Java prepared model sealing', () => {
       yield* f.fs.writeFileString(f.jar, 'changed dependency');
       expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('captures the observation before an asynchronous host guard and removes canceled output', () =>
     Effect.gen(function* () {
@@ -2030,7 +2031,7 @@ describe('Java prepared model sealing', () => {
       yield* Deferred.await(writing);
       yield* Fiber.interrupt(canceled);
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect('removes sealed output when a copied source changes during metadata publication', () =>
     Effect.gen(function* () {
@@ -2049,7 +2050,7 @@ describe('Java prepared model sealing', () => {
       expect(result._tag).toBe('Failure');
       expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
       expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'canonical metadata round trips without losing classpath order or depending on object-key order',
@@ -2080,7 +2081,7 @@ describe('Java prepared model sealing', () => {
         );
         expect(JSON.parse(encoded).resolvedClasspath).toEqual(model.resolvedClasspath);
         expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
 });
@@ -2118,7 +2119,7 @@ describe('Java pinned runtime and preparation boundary', () => {
       expect(claim._tag).toBe('Failure');
       expect(yield* fs.exists(workspace.directory)).toBe(false);
       expect((yield* Effect.exit(workspace.confirmDrained({drained: true, stdioClosed: true})))._tag).toBe('Failure');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect(
     'rejects an unqualified captured configuration image before any private write or downstream launch',
@@ -2148,7 +2149,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         expect(writes).toEqual([]);
         expect(launched).toBe(false);
         expect(Array.from(captured)).toEqual(before);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'retains the entire workspace through finalizer failure until a complete drain receipt exists',
@@ -2171,7 +2172,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         expect(yield* fs.exists(marker)).toBe(
           !EffectArray.some(receipts, receipt => receipt.drained && receipt.stdioClosed),
         );
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 32}},
   );
   effectIt.effect('cleans an unused workspace and refuses a second provider claim', () =>
@@ -2189,7 +2190,7 @@ describe('Java pinned runtime and preparation boundary', () => {
       yield* used.confirmDrained({drained: true, stdioClosed: true});
       yield* Scope.close(usedScope, Exit.void);
       expect(yield* fs.exists(used.directory)).toBe(false);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'requires independent positive provider and build drains before deleting a preparation workspace',
@@ -2245,7 +2246,7 @@ describe('Java pinned runtime and preparation boundary', () => {
           expect(Cause.pretty(closed.cause)).toContain('Synthetic provider drain defect');
           expect(Cause.pretty(closed.cause)).toContain('Synthetic build drain defect');
         }
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 64}},
   );
   effectIt.effect(
@@ -2280,7 +2281,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         expect((yield* Fiber.join(closing))._tag).toBe('Failure');
         expect(interrupted).toBe(true);
         expect(yield* fs.exists(workspace.directory)).toBe(true);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
   effectIt.effect.prop(
     'attempts detached build cleanup when the preparation program was already interrupted',
@@ -2319,7 +2320,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         yield* Fiber.interrupt(preparation);
         expect(attempts).toEqual(['provider', 'build']);
         expect(yield* fs.exists(directory)).toBe(!buildDrained);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 16}},
   );
   effectIt.effect('reports missing host setup with exact server and separate project/runtime prerequisites', () =>
@@ -2334,7 +2335,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         requiredSdkVersion: '25.0.5+8',
       });
       expect(error).toHaveProperty('nextAction', expect.stringContaining('21.0.13+9'));
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect('rejects caller-selected JVM arguments before touching any host SDK', () =>
@@ -2357,7 +2358,7 @@ describe('Java pinned runtime and preparation boundary', () => {
       expect(error).toMatchObject({_tag: 'SemanticSetupFault', reason: 'incompatible'});
       expect(reads).toEqual([]);
       expect(JSON.stringify(malicious)).toBe(before);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   effectIt.effect.prop(
@@ -2393,7 +2394,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         expect(error).toMatchObject({_tag: 'SemanticSetupFault', reason: 'incompatible'});
         expect(reads).toEqual([]);
         expect(JSON.stringify(changed)).toBe(before);
-      }).pipe(Effect.provide(BunServices.layer)),
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     {arbitrary: {runs: 32}},
   );
 
@@ -2414,7 +2415,7 @@ describe('Java pinned runtime and preparation boundary', () => {
       );
       expect(error).toMatchObject({_tag: 'SemanticSetupFault', component: 'sdk', reason: 'incompatible'});
       expect(reads).toEqual([]);
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   macEffect('refuses an aliased SDK root and changed SDK contents', () =>
@@ -2437,7 +2438,7 @@ describe('Java pinned runtime and preparation boundary', () => {
         });
       }
       expect(yield* fs.readFileString(path.join(sdk, 'server.jar'))).toBe('unqualified replacement');
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
   macEffect('bounds the entire SDK preflight even when host filesystem access stalls', () =>
@@ -2455,6 +2456,6 @@ describe('Java pinned runtime and preparation boundary', () => {
       yield* Deferred.await(entered);
       yield* TestClock.adjust(45001);
       expect(yield* Effect.flip(Fiber.join(fiber))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
-    }).pipe(Effect.provide(BunServices.layer)),
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 });

@@ -1,3 +1,4 @@
+import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import {
   JavaHostCandidate,
   SemanticHostCatalog,
@@ -19,7 +20,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
-import {Cause, Clock, Crypto, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope, Semaphore} from 'effect';
+import {Cause, Clock, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Scope, Semaphore} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
@@ -241,7 +242,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   const path = yield* Path.Path;
   const scope = yield* Effect.scope;
   const command = yield* CommandExecutor;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const digest = yield* EffectDigest.Digest;
   const system = yield* SystemInfo;
   const home = yield* fs.realPath(catalog.dataHome);
   if (home !== path.resolve(catalog.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
@@ -515,7 +517,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               Effect.andThen(Effect.suspend(() => providerGuard)),
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(Path.Path, path),
-              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.provideService(SecureRandom.SecureRandom, crypto),
+              Effect.provideService(EffectDigest.Digest, digest),
             );
             let api: SemanticSession;
             if ('runtimeCandidate' in candidate) {
@@ -892,7 +895,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   if (!Schema.is(Digest)(options.token) || !Schema.is(FileUri)(options.worktree))
     return yield* LspFault.make({code: 'protocol'});
   yield* fs.makeDirectory(options.directory, {recursive: true, mode: 0o700});
@@ -1167,7 +1170,7 @@ export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(funct
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const home = yield* fs.realPath(launch.dataHome);
   if (home !== path.resolve(launch.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
   if (launch.java) yield* verifyJavaCoordinatorDirectory(launch.java, home, launch.worktree);
@@ -1356,7 +1359,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const identity = yield* system.canonicalProcessStartIdentity?.(system.processId) ?? succeedUndefined;
   if (!identity || system.platform === 'win32') return yield* LspFault.make({code: 'prerequisite'});
   const owner: Instance = {pid: system.processId, identity};
@@ -1430,7 +1433,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
       }),
     ).pipe(
       Effect.provideService(SystemInfo, system),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(Path.Path, path),
     );
   const status = transaction(ledger =>

@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {Database} from 'bun:sqlite';
@@ -26,7 +27,7 @@ const system = SystemInfo.layer.pipe(
   ),
 );
 const base = Layer.mergeAll(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   system,
   Layer.succeed(ResourceRecallInvalidation, {expire: () => Effect.void}),
 );

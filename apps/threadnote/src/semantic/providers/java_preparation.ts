@@ -1,7 +1,8 @@
+import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Clock, Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundedFileDigest, readBounded, semanticSdkDigest, semanticTreeDigest} from '../fingerprint.js';
@@ -314,7 +315,7 @@ export const copyJavaPreparationInputs = Effect.fn('semantic.copyJavaPreparation
     if (!['maven', 'gradle'].includes(selected.build)) return yield* fail();
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const digest = yield* EffectDigest.Digest;
     yield* selected.workspace.verify;
     const {verify: worktreeGuard} = yield* ownDirectory(selected.worktree);
     const {verify: projectGuard} = yield* ownDirectory(selected.project);
@@ -450,7 +451,7 @@ export const copyJavaPreparationInputs = Effect.fn('semantic.copyJavaPreparation
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(EffectDigest.Digest, digest),
       );
     const verify = verifyImage(false);
     yield* verify;
@@ -803,7 +804,7 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
     return yield* Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
+      const random = yield* SecureRandom.SecureRandom;
       const root = proof.workspace.directory;
       if (
         !EffectString.startsWith(root + path.sep)(runtime.directory) ||
@@ -953,7 +954,7 @@ export const observeJavaPreparedImport = Effect.fn('semantic.observeJavaPrepared
       const outputDigest = yield* semanticTreeDigest(inputs.copiedWorktree);
       const observe = Effect.gen(function* () {
         yield* healthy;
-        const requestToken = 'java-prepare-' + (yield* crypto.randomUUIDv4());
+        const requestToken = 'java-prepare-' + (yield* random.uuidV4());
         const raw = yield* client.request(
           'workspace/executeCommand',
           {command: javaPreparedModelCommand, arguments: [{protocolVersion: 1, requestToken}]},

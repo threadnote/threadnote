@@ -4,7 +4,7 @@ import * as EffectString from 'effect/String';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
-import * as BunCrypto from '@effect/platform-bun/BunCrypto';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
@@ -399,7 +399,7 @@ describe('TypeScript observation fences', () => {
   );
 });
 const io = Layer.merge(BunFileSystem.layer, BunPath.layer);
-const coordinatorIo = Layer.mergeAll(io, BunCrypto.layer, TestSystemInfoLayer);
+const coordinatorIo = Layer.mergeAll(io, cryptoLayer, TestSystemInfoLayer);
 // Runtime coordination tests inject the version probe and run the real engine on Bun.
 // This is not the separate exact-Node candidate qualification smoke.
 const versionProbe = CommandExecutor.of({
