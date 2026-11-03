@@ -394,7 +394,11 @@ export class EffectMcpServerRegistry {
                           const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
                             Effect.flatMap(parsed =>
                               toolHandlerEffect(
-                                () => registration.handle(parsed, {progress, requestContext: {...requestContext, liveTransport: true}}),
+                                () =>
+                                  registration.handle(parsed, {
+                                    progress,
+                                    requestContext: {...requestContext, liveTransport: true},
+                                  }),
                                 applicationServices,
                               ).pipe(
                                 Effect.matchCauseEffect({
@@ -427,7 +431,9 @@ export class EffectMcpServerRegistry {
                               reportedFailureType: 'McpToolError',
                               reportedOutcome: readAnonymousTelemetryReportedOutcome,
                             },
-                            foreground(loggedHandling, registration.definition.nativeFree).pipe(Effect.catchCause(mcpToolFailureResult)),
+                            foreground(loggedHandling, registration.definition.nativeFree).pipe(
+                              Effect.catchCause(mcpToolFailureResult),
+                            ),
                           ).pipe(Effect.provideContext(applicationServices));
                         });
                       }),

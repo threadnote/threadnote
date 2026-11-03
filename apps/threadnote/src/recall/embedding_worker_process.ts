@@ -1,4 +1,5 @@
-import {Clock, Crypto, Effect, Exit, FileSystem, Layer, Path, Schema, type Result} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Clock, Effect, Exit, FileSystem, Layer, Path, Schema, type Result} from 'effect';
 import {
   inspectBackgroundWorkerControl,
   BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
@@ -122,7 +123,7 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
   const identity = yield* system.processStartIdentity(system.processId);
   if (!identity) return;
   const owner = {
-    token: yield* (yield* Crypto.Crypto).randomUUIDv4(),
+    token: yield* (yield* SecureRandom.SecureRandom).uuidV4(),
     processId: system.processId,
     processStartIdentity: identity,
   };

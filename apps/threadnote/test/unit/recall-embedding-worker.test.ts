@@ -115,9 +115,9 @@ describe('recall embedding worker', () => {
     Effect.gen(function* () {
       const f = yield* fixture;
       const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
-      const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>().pipe(
-        Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)),
-      );
+      const context = yield* Effect.context<
+        FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+      >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
       let raced = false;
       const admission = BackgroundInferenceAdmission.of({
         ...immediate,
@@ -166,9 +166,9 @@ describe('recall embedding worker', () => {
         const f = yield* fixture;
         const initial = (yield* readRecallEmbeddingDemand(f.config))!.desired!;
         const catalog = yield* LocalModelCatalog;
-        const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>().pipe(
-          Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)),
-        );
+        const context = yield* Effect.context<
+          FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+        >().pipe(Effect.map(Context.pick(FileSystem.FileSystem, Path.Path, SystemInfo, SecureRandom.SecureRandom)));
         let switched = false;
         const admission = BackgroundInferenceAdmission.of({
           ...immediate,

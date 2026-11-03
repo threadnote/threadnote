@@ -1,8 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {
   Array as EffectArray,
   Cause,
   Clock,
-  Crypto,
   Effect,
   FileSystem,
   Option,
@@ -93,7 +93,7 @@ const writeState = Effect.fn('backgroundWorker.writeState')(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(stateSchema))(state);
-  const temporary = controlPath(options) + '.' + (yield* (yield* Crypto.Crypto).randomUUIDv4()) + '.tmp';
+  const temporary = controlPath(options) + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   yield* Effect.acquireUseRelease(
     fs.writeFileString(temporary, encoded + '\n', {mode: 0o600, flag: 'wx'}),
     () => syncWritableFile(fs, temporary).pipe(Effect.andThen(fs.rename(temporary, controlPath(options)))),
@@ -242,7 +242,7 @@ const launch = Effect.fn('backgroundWorker.launch')(function* (
   state: State,
   recovery: {readonly staleReceipt?: typeof staleReceiptSchema.Type; readonly staleLock?: BackgroundWorkerOwner} = {},
 ) {
-  const nonce = yield* (yield* Crypto.Crypto).randomUUIDv4();
+  const nonce = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   const starting: State = {
     version: 1,
     protocol: options.protocol,
@@ -325,7 +325,7 @@ export const makeBackgroundWorkerLifecycle = Effect.fn('backgroundWorker.lifecyc
   options: BackgroundWorkerControlOptions,
   nonce: string,
 ) {
-  const services = yield* Effect.context<FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo>();
+  const services = yield* Effect.context<FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo>();
   const workerGuarded = <A, E, R>(program: Effect.Effect<A, E, R>) => guarded(options, program, 1000);
   let claimed = false;
   let observedSequence: number | undefined;

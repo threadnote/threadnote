@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -108,7 +109,7 @@ export const fixtureLayer = Layer.mergeAll(
     runBatch: (_home, _domain, program) => program.pipe(Effect.map(value => ({state: 'completed' as const, value}))),
   }),
   TestCommandExecutorLayer,
-).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
 export const seed = (home: string, count = 65, catalogId = checkoutId, viewId = worktreeId) =>
   Effect.gen(function* () {
     const checkoutId = catalogId;
