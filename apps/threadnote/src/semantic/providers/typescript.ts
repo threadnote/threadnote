@@ -416,6 +416,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         const snapshot: DiagnosticSnapshot = {observation: fixed, items: [...items.values()]};
         const delta: DiagnosticDelta = {
           ...snapshot,
+          evidence: evidence(fixed),
           added: EffectArray.filter(snapshot.items, item => !old.has(item.id)),
           remaining: EffectArray.filter(snapshot.items, item => old.has(item.id)),
           resolved: previous

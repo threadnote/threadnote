@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import {semanticHostSelection} from './host_catalog.js';
-import {Clock, Effect, FileSystem, Path, String as EffectString} from 'effect';
-import type {Observation, QueryOutcome} from '@threadnote/semantic/contracts';
+import {Array as EffectArray, Clock, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
+import {Evidence, Observation, observationKey, type QueryOutcome} from '@threadnote/semantic/contracts';
 import {createQuerySnapshot, queryPage, type Continuation, type QuerySnapshot} from '@threadnote/semantic/views';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -12,6 +12,7 @@ import {
 import type {makeSemanticCoordinator} from './coordinator.js';
 import {readBounded} from './fingerprint.js';
 import {LspFault} from './lsp_transport.js';
+import {SemanticSessionFault} from './provider.js';
 
 interface RetainedQuery {
   readonly binding: string;
@@ -23,7 +24,7 @@ interface RetainedQuery {
 
 /** Saved-disk sessions are host-owned and remain in the existing coordinator between CLI invocations. */
 export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries')(function* (
-  coordinator: Effect.Success<ReturnType<typeof makeSemanticCoordinator>>,
+  coordinator: Pick<Effect.Success<ReturnType<typeof makeSemanticCoordinator>>, 'observe' | 'attach' | 'use'>,
   worktree: string,
   runtimeIdentity: string,
 ) {
@@ -91,7 +92,46 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     };
     const attached = yield* coordinator.attach(seed, text, request.language, request.environment);
     const outcome = yield* coordinator.use(attached.observation, request.milliseconds, api =>
-      api.query(request.operation, attached.observation, request.position, request.milliseconds),
+      request.operation === 'diagnostics'
+        ? Effect.gen(function* () {
+            const snapshot = yield* api.diagnostics(attached.observation, request.milliseconds);
+            if (snapshot.evidence === undefined)
+              return {
+                version: 1 as const,
+                status: 'unsupported' as const,
+                reason: 'Provider does not publish observation-bound diagnostic coverage',
+                evidence: null,
+              };
+            const observed = yield* Schema.decodeEffect(Observation)(snapshot.observation).pipe(
+              Effect.mapError(() => SemanticSessionFault.make({reason: 'provider'})),
+            );
+            const evidence = yield* Schema.decodeEffect(Evidence)(snapshot.evidence).pipe(
+              Effect.mapError(() => SemanticSessionFault.make({reason: 'provider'})),
+            );
+            if (evidence.basis !== 'semantic') return yield* SemanticSessionFault.make({reason: 'provider'});
+            if (
+              observationKey(observed) !== observationKey(attached.observation) ||
+              observationKey(evidence.observation) !== observationKey(observed)
+            )
+              return yield* SemanticSessionFault.make({reason: 'stale'});
+            return {
+              version: 1 as const,
+              status: 'ok' as const,
+              evidence: {...evidence, scope: 'document:' + sha256HexSync(observed.uri)},
+              // Public reads retain the full current set, independently of delivery deltas.
+              items: EffectArray.map(snapshot.items, item => ({
+                id: item.id,
+                range: {
+                  start: {line: item.range.start.line, character: item.range.start.character},
+                  end: {line: item.range.end.line, character: item.range.end.character},
+                },
+                code: item.code,
+                category: item.category,
+                message: item.message,
+              })),
+            };
+          })
+        : api.query(request.operation, attached.observation, request.position, request.milliseconds),
     );
     if (outcome.status !== 'ok') return outcome;
     const now = yield* Clock.currentTimeMillis;

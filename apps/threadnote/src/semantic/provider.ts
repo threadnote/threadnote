@@ -117,6 +117,8 @@ export interface DiagnosticSnapshot {
   readonly items: readonly SemanticDiagnostic[];
 }
 export interface DiagnosticDelta extends DiagnosticSnapshot {
+  /** Additive internal metadata; public reads require this observation-bound coverage proof. */
+  readonly evidence?: Evidence;
   readonly added: readonly SemanticDiagnostic[];
   readonly remaining: readonly SemanticDiagnostic[];
   readonly resolved: readonly {
@@ -838,6 +840,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       const present = new Set(EffectArray.map(snapshot.items, item => item.id));
       const delta: DiagnosticDelta = {
         ...snapshot,
+        evidence: evidence(fixed),
         added: EffectArray.filter(snapshot.items, item => !old.has(item.id)),
         remaining: EffectArray.filter(snapshot.items, item => old.has(item.id)),
         resolved: previous
