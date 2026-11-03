@@ -523,7 +523,7 @@ export const loadRecallMemoryIdentities = Effect.fn('recall.loadMemoryIdentities
   return data.candidates;
 });
 
-export {RecallIdentityAdmissionBusy} from './index/admission.js';
+export {RecallIdentityAdmissionBusy, withRecallIdentityPreparation} from './index/admission.js';
 
 /** Prepare outside memory locks; consume the check once under the canonical account mutation fence. */
 export function withRecallIdentityAdmission<A, E, R, E2, R2>(

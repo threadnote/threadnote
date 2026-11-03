@@ -193,6 +193,16 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
   const cache = yield* CurrentWorkflowReadCache;
   const compact = cache?.compactJournal || hasPackedWorkflowScopes(state.binding);
   const serialized = yield* validateWorkflowInput(() => serializeWorkflowJournal(state, compact));
+  yield* writeSerializedJournalFile(config, state, serialized, compact);
+});
+
+const writeSerializedJournalFile = Effect.fn('workflowMemory.writeSerializedJournalFile')(function* (
+  config: RuntimeConfig,
+  state: WorkflowJournal,
+  serialized: string,
+  compact = false,
+) {
+  const cache = yield* CurrentWorkflowReadCache;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* journalPath(config, state.binding.bindingId);
@@ -482,13 +492,33 @@ export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(fun
   previous: WorkflowJournal,
   updated: WorkflowJournal,
 ) {
+  return yield* persistPreparedWorkflowState(config, yield* prepareWorkflowState(config, previous, updated));
+});
+
+/** Encode both WAL completion images before taking shared memory locks. */
+export const prepareWorkflowState = Effect.fn('workflowMemory.prepareState')(function* (
+  config: RuntimeConfig,
+  previous: WorkflowJournal,
+  updated: WorkflowJournal,
+) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
   yield* validateTransition(config, previous, prepared);
-  yield* writeJournalFile(config, prepared);
-  yield* reconcileManifest(config, prepared, true);
   const committed = {...prepared, manifestCommitted: true};
-  yield* writeJournalFile(config, committed);
-  return committed;
+  const cache = yield* CurrentWorkflowReadCache;
+  const compact = cache?.compactJournal || hasPackedWorkflowScopes(prepared.binding);
+  const pendingBytes = yield* validateWorkflowInput(() => serializeWorkflowJournal(prepared, compact));
+  const committedBytes = yield* validateWorkflowInput(() => serializeWorkflowJournal(committed, compact));
+  return {prepared, committed, pendingBytes, committedBytes, compact};
+});
+
+export const persistPreparedWorkflowState = Effect.fn('workflowMemory.persistPreparedState')(function* (
+  config: RuntimeConfig,
+  image: Effect.Success<ReturnType<typeof prepareWorkflowState>>,
+) {
+  yield* writeSerializedJournalFile(config, image.prepared, image.pendingBytes, image.compact);
+  yield* reconcileManifest(config, image.prepared, true);
+  yield* writeSerializedJournalFile(config, image.committed, image.committedBytes, image.compact);
+  return image.committed;
 });
 
 export const bindWorkflow = Effect.fn('workflowMemory.bind')(function* (

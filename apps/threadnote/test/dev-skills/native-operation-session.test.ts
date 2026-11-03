@@ -1,10 +1,17 @@
 import {it} from '@effect/vitest';
-import {Deferred, Effect, Fiber, Result, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
+import {
+  expireRecallIndexValidation,
+  loadRecallMemoryIdentities,
+  recallIndexDatabaseFilename,
+} from '@threadnote/recall/index';
 import {withNativeWorkflowMemorySession, runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
@@ -33,6 +40,80 @@ const fixture = Effect.gen(function* () {
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
 describe('native child lower-memory sessions', () => {
+  for (const route of ['session', 'executor'] as const)
+    it.effect(`returns busy during initial ${route} evidence preparation and resumes the same operation`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const evidenceRefs = [{uri: f.artifact.uri, memoryId: f.artifact.memoryId, revision: f.artifact.revision}];
+        const operationId = 'initial-readiness';
+        const body = 'Same intent after readiness contention.\n';
+        const request = {
+          protocolVersion: 1,
+          action: 'create',
+          bindingId: f.bindingId,
+          operationId,
+          artifactKey: 'initial-readiness',
+          role: 'evidence',
+          sourceRunId: 'native-run',
+          storageKind: 'durable',
+          body,
+          bodySha256: sha256HexSync(body),
+          expectedRevision: null,
+          evidenceRefs,
+        };
+        const nativeRequest = f.write({operationId, artifactKey: 'initial-readiness', body, evidenceRefs});
+        const session = (input: unknown) =>
+          withNativeWorkflowMemorySession(f.config, f.bindingId, (_admission, call) => call(input)).pipe(
+            Effect.provideService(SystemInfo, f.scopedSystem),
+          );
+        yield* loadRecallMemoryIdentities(f.config, {
+          allowedUriScopes: [f.artifact.uri],
+          memoryIds: [f.artifact.memoryId],
+        });
+        yield* expireRecallIndexValidation(f.home, false);
+        let sharedAcquisitions = 0;
+        const observed = FileSystem.FileSystem.of({
+          ...f.fs,
+          writeFileString: (file, content, options) => {
+            if (
+              EffectString.startsWith(f.path.join(f.home, 'threadnote', 'memory-locks'))(file) &&
+              options?.flag === 'wx'
+            )
+              sharedAcquisitions++;
+            return f.fs.writeFileString(file, content, options);
+          },
+        });
+        const attempt = route === 'session' ? session(request) : f.call(nativeRequest);
+        const outcome = yield* withExclusiveFileLock(
+          f.fs,
+          f.path.join(f.home, 'locks', 'indexes', 'lexical', recallIndexDatabaseFilename(false) + '.lock'),
+          resourceAccountMutationLockPolicy,
+          attempt.pipe(
+            Effect.provideService(FileSystem.FileSystem, observed),
+            Effect.result,
+            Effect.timeoutOption(500),
+          ),
+        );
+        expect(outcome).toMatchObject({
+          _tag: 'Some',
+          value: {
+            _tag: 'Failure',
+            failure:
+              route === 'session' ? {_tag: 'RecallIdentityAdmissionBusy'} : {code: 'evidence-busy', retryable: true},
+          },
+        });
+        expect(sharedAcquisitions).toBe(0);
+        const recovered = route === 'session' ? yield* session(request) : yield* f.call(nativeRequest);
+        expect(recovered).toMatchObject({status: 'ok'});
+        const replay =
+          route === 'session'
+            ? yield* session({protocolVersion: 1, action: 'recover', bindingId: f.bindingId, operationId})
+            : yield* f.call({...f.base('recover'), operationId});
+        expect(replay).toEqual(recovered);
+        expect(yield* f.store.read(f.location, f.artifact.uri)).toContain('MEMORY');
+      }).pipe(run),
+    );
+
   it.effect('reloads actual writes without recursive locking and revokes escaped calls after return', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

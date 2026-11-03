@@ -59,6 +59,17 @@ export function normalizeRecallIdentityPreparation<A, E, R>(effect: Effect.Effec
   });
 }
 
+/** Internal native entry policy; it grants no freshness proof or acquisition allowance. */
+export function withRecallIdentityPreparation<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const owner = yield* Effect.fiberId;
+    return yield* effect.pipe(
+      normalizeRecallIdentityPreparation,
+      Effect.provideService(CurrentIdentityPreparation, owner),
+    );
+  });
+}
+
 type Check = Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>;
 
 /** The mode is private, fiber-bound and restored before the caller takes its memory locks. */
@@ -77,7 +88,7 @@ export function withPreparedRecallIdentityAdmission<A, E, R, EPrepare, RPrepare,
         yield* prepare;
         if ((yield* readCut) !== before) return yield* busy();
         return {cut: before, owner, active: true, consumed: false};
-      }).pipe(normalizeRecallIdentityPreparation, Effect.provideService(CurrentIdentityPreparation, owner));
+      }).pipe(withRecallIdentityPreparation);
     }).pipe(Effect.interruptible),
     admission =>
       use(

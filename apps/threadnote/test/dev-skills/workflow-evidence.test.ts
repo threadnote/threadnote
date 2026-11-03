@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -798,6 +798,41 @@ describe('workflow admitted evidence references', () => {
       );
       let nestedAccountLockAttempts = 0;
       let injected = false;
+      const preparationLocks: number[] = [];
+      const held = new Set<string>();
+      const scanLocks: {name: string; held: number}[] = [];
+      const observedFs = FileSystem.FileSystem.of({
+        ...f.fs,
+        writeFileString: (file, content, options) =>
+          f.fs.writeFileString(file, content, options).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (
+                  EffectString.startsWith(f.path.join(f.home, 'threadnote', 'memory-locks'))(file) &&
+                  options?.flag === 'wx'
+                )
+                  held.add(file);
+              }),
+            ),
+          ),
+        remove: (file, options) =>
+          f.fs.remove(file, options).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                held.delete(file);
+              }),
+            ),
+          ),
+      });
+      const parent = yield* Effect.tracer;
+      const tracer = Tracer.make({
+        ...parent,
+        span(options) {
+          if (options.name === 'recall.scanSources' || options.name === 'recall.refreshDatabase')
+            scanLocks.push({name: options.name, held: held.size});
+          return parent.span(options);
+        },
+      });
       const lockPath = f.path.join(f.home, 'locks', 'resources', f.config.account, 'mutations.lock');
       const guardedFs = FileSystem.FileSystem.of({
         ...f.fs,
@@ -811,8 +846,25 @@ describe('workflow admitted evidence references', () => {
       });
       const store = yield* ResourceStore;
       const result = yield* f.call(request).pipe(
+        Effect.provideService(FileSystem.FileSystem, observedFs),
+        Effect.withTracer(tracer),
         Effect.provideService(ResourceStore, {
           ...store,
+          read: (location, uri, options) =>
+            store.read(location, uri, options).pipe(
+              Effect.tap(() =>
+                uri !== prior.uri
+                  ? Effect.void
+                  : f.fs.readDirectory(f.path.join(f.home, 'threadnote', 'memory-locks')).pipe(
+                      Effect.orElseSucceed(() => []),
+                      Effect.tap(locks =>
+                        Effect.sync(() => {
+                          preparationLocks.push(locks.length);
+                        }),
+                      ),
+                    ),
+              ),
+            ),
           writeChecked: (location, uri, content, options, check) =>
             store.write(location, unrelatedUri, unrelatedContent, {mode: 'create'}).pipe(
               Effect.tap(() =>
@@ -831,12 +883,28 @@ describe('workflow admitted evidence references', () => {
               ),
             ),
         }),
+        Effect.result,
       );
-      expect(result).toMatchObject({status: 'ok', verifiedReadback: true, body});
+      expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIdentityAdmissionBusy'}});
       expect(injected).toBe(true);
       expect(nestedAccountLockAttempts).toBe(0);
+      expect(preparationLocks.length).toBeGreaterThan(0);
+      expect(Effect2.Array.every(preparationLocks, count => count === 0)).toBe(true);
+      expect(Effect2.Array.some(scanLocks, event => event.name === 'recall.scanSources')).toBe(true);
+      expect(Effect2.Array.some(scanLocks, event => event.name === 'recall.refreshDatabase')).toBe(true);
+      expect(Effect2.Array.every(scanLocks, event => event.held === 0)).toBe(true);
       expect(yield* f.store.read(f.location, prior.uri)).toBe(prior.content);
       expect(yield* f.store.read(f.location, unrelatedUri)).toBe(unrelatedContent);
+      const destination = `${rootUri}/durable/projects/fixture/workflow-${target.binding.bindingId}-recall-race.md`;
+      expect(yield* f.store.stat(f.location, destination).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+      expect(
+        yield* f.call({
+          protocolVersion: 1,
+          action: 'recover',
+          bindingId: target.binding.bindingId,
+          operationId: request.operationId,
+        }),
+      ).toMatchObject({status: 'ok', verifiedReadback: true, body});
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
