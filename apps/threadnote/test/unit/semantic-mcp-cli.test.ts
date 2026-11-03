@@ -51,6 +51,8 @@ describe('semantic capability discovery', () => {
       queries: 'requires-host-profile',
     });
     expect(result.readSurface.operations).toContain('diagnostics');
+    expect(result.readSurface.operations).toContain('context');
+    expect(result.readSurface.pending).not.toContain('context');
     expect(result.readSurface.pending).not.toContain('diagnostics');
     for (const provider of result.providers) {
       expect(provider.productionQualified).toBe(false);

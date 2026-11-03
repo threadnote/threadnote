@@ -1,5 +1,8 @@
-import {Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
-import {canonicalFileUri, observationKey} from '@threadnote/semantic/contracts';
+import {Array as EffectArray, Clock, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
+import {canonicalFileUri, Observation, observationKey, type Evidence} from '@threadnote/semantic/contracts';
+import {AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN} from '@threadnote/protocol/agent-response';
+import type {SemanticContextKnowledgeV1, ContextBriefRequestV1} from '@threadnote/context/types';
+import {compileSemanticContextKnowledge} from '../context_brief/index.js';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -23,6 +26,28 @@ const fail = (status: Exclude<SemanticAgentQueryResult['status'], 'ok'>, reason:
   reason,
   evidence: null,
 });
+const EndpointRefusal = Schema.Struct({status: Schema.Literal('unavailable'), reason: Schema.String});
+const endpointFailure = (cause: string) =>
+  fail(
+    cause === 'invalid'
+      ? 'invalid-request'
+      : cause === 'timeout'
+        ? 'timeout'
+        : cause === 'stale' || cause === 'rejected'
+          ? 'stale'
+          : cause === 'conflict'
+            ? 'conflict'
+            : 'unavailable',
+    cause === 'invalid'
+      ? 'Position or target is invalid for the selected source view'
+      : cause === 'timeout'
+        ? 'Semantic query deadline expired'
+        : cause === 'rejected' || cause === 'stale'
+          ? 'Source view or analysis prerequisites changed; start a new query'
+          : cause === 'conflict'
+            ? 'Source view ownership conflicts with this query'
+            : 'Semantic provider prerequisites or capacity are unavailable; inspect host setup without running a build or download',
+  );
 
 const compiledRuntimeIdentity = Effect.gen(function* () {
   // The first public binding qualifies standalone bytes. Source-mode protocol generations need a separate source-closure witness.
@@ -44,17 +69,27 @@ const compiledRuntimeIdentity = Effect.gen(function* () {
 });
 
 /** Host-only injectable ports. Public JSON cannot supply these dependencies or their authority. */
-export interface SemanticAgentQueryHost {
+export interface SemanticAgentQueryHost<ContextR = never> {
   readonly runtimeIdentity: typeof compiledRuntimeIdentity;
   readonly connect: typeof ensureSemanticEndpoint;
+  readonly context?: (
+    config: RuntimeConfig,
+    input: ContextBriefRequestV1,
+    evidence: Evidence,
+  ) => Effect.Effect<SemanticContextKnowledgeV1, unknown, ContextR>;
 }
-const host: SemanticAgentQueryHost = {runtimeIdentity: compiledRuntimeIdentity, connect: ensureSemanticEndpoint};
+const host = {
+  runtimeIdentity: compiledRuntimeIdentity,
+  connect: ensureSemanticEndpoint,
+  context: compileSemanticContextKnowledge,
+};
 
-const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(function* (
-  services: SemanticAgentQueryHost,
+const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(function* <ContextR>(
+  services: SemanticAgentQueryHost<ContextR>,
   config: RuntimeConfig,
   input: unknown,
 ) {
+  const startedAt = yield* Clock.currentTimeMillis;
   const invalid = () =>
     fail(
       'invalid-request',
@@ -75,18 +110,30 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
   );
   if (parsed._tag === 'Failure') return parsed.failure;
   const request = parsed.success;
+  const contextQuery = request.operation === 'context';
+  if (contextQuery && (!request.task || !request.position || request.cursor))
+    return fail('invalid-request', 'Context requires task and position; start a new request without a cursor');
+  if (!contextQuery && (request.task !== undefined || request.budgetTokens !== undefined))
+    return fail('invalid-request', 'Task and context budget apply only to the context operation');
   if (!Schema.is(SemanticLanguage)(request.language))
     return fail(
       'unsupported',
       request.language === 'kotlin' ? 'Kotlin remains deferred' : 'No semantic provider is selected for this language',
     );
-  if (!Schema.is(SemanticAgentReadOperation)(request.operation))
+  if (!contextQuery && !Schema.is(SemanticAgentReadOperation)(request.operation))
     return fail(
       'unsupported',
-      'This surface supports saved-disk navigation and document diagnostics; public context and changes remain pending',
+      'This surface supports saved-disk navigation, document diagnostics and context; changes remain pending',
     );
   const language = request.language;
-  const operation = request.operation;
+  const operation = contextQuery ? 'hover' : request.operation;
+  if (!Schema.is(SemanticAgentReadOperation)(operation)) return invalid();
+  const limit = contextQuery
+    ? Math.min(request.maxBytes ?? 8192, (request.budgetTokens ?? 1500) * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN)
+    : (request.maxBytes ?? 3200);
+  const remaining = Effect.gen(function* () {
+    return Math.max(1, (request.milliseconds ?? 10000) - ((yield* Clock.currentTimeMillis) - startedAt));
+  });
   if (operation === 'diagnostics' && request.position !== undefined)
     return fail('invalid-request', 'Diagnostics reports the attached document; omit position');
   const path = yield* Path.Path;
@@ -156,38 +203,15 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       ...(request.position ? {position: request.position} : {}),
       ...(request.environment ? {environment: request.environment} : {}),
       maxItems: request.maxItems ?? 20,
-      maxBytes: request.maxBytes ?? 3200,
-      milliseconds: request.milliseconds ?? 10000,
+      maxBytes: limit,
+      milliseconds: yield* remaining,
       ...(request.cursor ? {cursor: request.cursor} : {}),
     },
   });
-  const result = yield* Schema.decodeUnknownEffect(SemanticAgentQueryResult)(raw).pipe(
+  let result = yield* Schema.decodeUnknownEffect(SemanticAgentQueryResult)(raw).pipe(
     Effect.catch(() => {
-      const rejected = Schema.Struct({status: Schema.Literal('unavailable'), reason: Schema.String});
-      if (!Schema.is(rejected)(raw)) return Effect.fail(LspFault.make({code: 'protocol'}));
-      const cause = raw.reason;
-      return Effect.succeed(
-        fail(
-          cause === 'invalid'
-            ? 'invalid-request'
-            : cause === 'timeout'
-              ? 'timeout'
-              : cause === 'stale' || cause === 'rejected'
-                ? 'stale'
-                : cause === 'conflict'
-                  ? 'conflict'
-                  : 'unavailable',
-          cause === 'invalid'
-            ? 'Position or target is invalid for the selected source view'
-            : cause === 'timeout'
-              ? 'Semantic query deadline expired'
-              : cause === 'rejected' || cause === 'stale'
-                ? 'Source view or analysis prerequisites changed; start a new query'
-                : cause === 'conflict'
-                  ? 'Source view ownership conflicts with this query'
-                  : 'Semantic provider prerequisites or capacity are unavailable; inspect host setup without running a build or download',
-        ),
-      );
+      if (!Schema.is(EndpointRefusal)(raw)) return Effect.fail(LspFault.make({code: 'protocol'}));
+      return Effect.succeed(endpointFailure(raw.reason));
     }),
   );
   if (result.evidence) {
@@ -218,14 +242,78 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       return fail('stale', 'Coordinator returned an incompatible retained page');
     if (
       result.items.length > (request.maxItems ?? 20) ||
-      new TextEncoder().encode(JSON.stringify(result)).length > (request.maxBytes ?? 3200)
+      new TextEncoder().encode(JSON.stringify(result)).length > limit
     )
       return fail('budget-exceeded', 'Coordinator response exceeds the requested page limits');
-  } else if (new TextEncoder().encode(JSON.stringify(result)).length > (request.maxBytes ?? 3200)) {
+  } else if (new TextEncoder().encode(JSON.stringify(result)).length > limit) {
     return fail(
       result.status,
       'Operation returned ' + result.status + '; source metadata omitted because it exceeds the requested budget',
     );
+  }
+  if (contextQuery && result.status === 'ok') {
+    if (result.next !== null || !services.context)
+      return fail('unavailable', 'Complete document evidence and context composition are required');
+    const budgetTokens = Math.max(
+      800,
+      Math.min(
+        1500,
+        Math.floor(
+          (limit - new TextEncoder().encode(JSON.stringify(result)).length - 768) /
+            AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
+        ),
+      ),
+    );
+    let knowledge = yield* services
+      .context(
+        config,
+        {
+          task: request.task!,
+          scope: {kind: 'repository', callerCwd: worktreePath},
+          codeRefs: [EffectArray.join(EffectString.split(path.sep)(path.relative(worktreePath, filePath)), '/')],
+          mode: 'explain',
+          budgetTokens,
+        },
+        result.evidence,
+      )
+      .pipe(
+        Effect.orElseSucceed((): SemanticContextKnowledgeV1 => ({
+          scope: 'document',
+          binding: null,
+          brief: null,
+          gaps: ['knowledge-unavailable'],
+        })),
+      );
+    const closing = yield* endpoint
+      .request({
+        operation: 'agent-observe',
+        observation: result.evidence.observation,
+        milliseconds: yield* remaining,
+      })
+      .pipe(Effect.result);
+    if (closing._tag === 'Failure')
+      return Schema.is(LspFault)(closing.failure) && closing.failure.code === 'timeout'
+        ? endpointFailure('timeout')
+        : endpointFailure('provider');
+    if (Schema.is(EndpointRefusal)(closing.success)) return endpointFailure(closing.success.reason);
+    const verified = yield* Schema.decodeUnknownEffect(Observation)(closing.success).pipe(Effect.result);
+    if (verified._tag === 'Failure') return endpointFailure('provider');
+    if (observationKey(verified.success) !== observationKey(result.evidence.observation))
+      return fail('stale', 'Semantic source or configuration changed during context composition');
+    const facts = result.items;
+    const page = () => ({
+      ...result,
+      items: [{kind: 'context', semantic: facts, knowledge}],
+      offset: 0,
+      remaining: 0,
+      next: null,
+    });
+    if (new TextEncoder().encode(JSON.stringify(page())).length > limit) {
+      knowledge = {...knowledge, brief: null, gaps: [...knowledge.gaps, 'knowledge-output-budget-exhausted']};
+    }
+    result = yield* Schema.decodeUnknownEffect(SemanticAgentQueryResult)(page());
+    if (new TextEncoder().encode(JSON.stringify(result)).length > limit)
+      return fail('budget-exceeded', 'Mandatory context evidence exceeds the requested output budget');
   }
   const current = yield* readSemanticHostProfile(config, worktree);
   return current.digest === selected.digest
@@ -234,7 +322,11 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
 });
 
 /** One normalized application flow, with narrow host ports for focused boundary tests. */
-export const runSemanticAgentQueryWith = (services: SemanticAgentQueryHost, config: RuntimeConfig, input: unknown) =>
+export const runSemanticAgentQueryWith = <ContextR = never>(
+  services: SemanticAgentQueryHost<ContextR>,
+  config: RuntimeConfig,
+  input: unknown,
+) =>
   executeSemanticAgentQueryWith(services, config, input).pipe(
     Effect.timeoutOption(Schema.is(SemanticAgentQuery)(input) ? (input.milliseconds ?? 10000) : 45000),
     Effect.map(result => (result._tag === 'None' ? fail('timeout', 'Semantic query deadline expired') : result.value)),
@@ -257,5 +349,20 @@ export const runSemanticAgentQueryWith = (services: SemanticAgentQueryHost, conf
   );
 
 /** Production CLI and MCP use exactly the same host binding and outcome semantics. */
-export const runSemanticAgentQuery = (config: RuntimeConfig, input: unknown) =>
-  runSemanticAgentQueryWith(host, config, input);
+export const runSemanticAgentQuery = (config: RuntimeConfig, input: unknown, knowledgeAuthorized = true) =>
+  runSemanticAgentQueryWith(
+    knowledgeAuthorized
+      ? host
+      : {
+          ...host,
+          context: () =>
+            Effect.succeed<SemanticContextKnowledgeV1>({
+              scope: 'document',
+              binding: null,
+              brief: null,
+              gaps: ['knowledge-not-authorized'],
+            }),
+        },
+    config,
+    input,
+  );

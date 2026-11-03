@@ -4,6 +4,7 @@ import type {AgentToolResponseMeasurement} from '@threadnote/protocol/agent-resp
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import type {VerifiedProcedureEvidence} from './procedure/selection.js';
+import type {Evidence} from '@threadnote/semantic/contracts';
 import {Predicate} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -609,6 +610,28 @@ export interface ProjectedContextBriefV1 {
   readonly measurement: AgentToolResponseMeasurement;
   readonly structuredContent: ContextBriefV1;
   readonly text: string;
+}
+
+/** The two source identities are independently verified against the same current bytes. */
+export interface SemanticContextSourceBindingV1 {
+  readonly version: 1;
+  readonly scope: 'document';
+  readonly observation: string;
+  readonly semanticContent: Evidence['observation']['content'];
+  readonly graph: {
+    readonly repositoryId: string;
+    readonly snapshotId: string;
+    readonly path: string;
+    readonly contentHash: string;
+  };
+}
+
+/** Knowledge retains its own freshness, trust, authority and omission metadata. */
+export interface SemanticContextKnowledgeV1 {
+  readonly scope: 'document';
+  readonly binding: SemanticContextSourceBindingV1 | null;
+  readonly brief: ContextBriefAgentViewV1 | null;
+  readonly gaps: readonly string[];
 }
 
 /**

@@ -1,5 +1,10 @@
 import {Array as EffectArray} from 'effect';
-import {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
+import {
+  compileContextBriefWith,
+  retrieveSemanticContextSourceEvidence,
+  type ContextBriefCompilerDependencies,
+} from '@threadnote/context/compiler';
+import type {Evidence} from '@threadnote/semantic/contracts';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
@@ -22,13 +27,14 @@ import {
   unavailableContextBriefGraphEvidence,
 } from '@threadnote/context/graph/evidence';
 import {retrieveContextBriefSourceEvidence} from '@threadnote/context/graph/source_evidence';
+import type {ContextBriefSourceEvidenceRequest} from '@threadnote/context/graph/source_evidence';
 import {
   unavailableContextBriefCodeLinkedMemoryEvidence,
   unavailableContextBriefMemoryEvidence,
 } from '@threadnote/context/memory-evidence';
 import {retrieveContextBriefCodeLinkedMemoryEvidence, retrieveContextBriefMemoryEvidence} from './memory_evidence.js';
 import {planContextBrief} from '@threadnote/context/planner';
-import {projectContextBrief} from '@threadnote/context/projector';
+import {projectContextBrief, parseContextBriefJsonText} from '@threadnote/context/projector';
 import type {
   ContextBriefGraphEvidenceV1,
   ContextBriefLogicalResultV1,
@@ -37,6 +43,8 @@ import type {
   ContextBriefRequestV1,
   ContextBriefResponseFormat,
   ProjectedContextBriefV1,
+  SemanticContextKnowledgeV1,
+  SemanticContextSourceBindingV1,
 } from '@threadnote/context/types';
 
 export interface ContextBriefRuntimeCompilerSources<
@@ -57,6 +65,13 @@ export interface ContextBriefRuntimeCompilerSources<
 
 /** Internal compiler controls for reviewed callers; never part of the Context Brief request schema. */
 interface ContextBriefCompilerOptions {
+  readonly sourceEvidence?: (
+    request: ContextBriefSourceEvidenceRequest,
+  ) => Effect.Effect<
+    Effect.Success<ReturnType<typeof retrieveContextBriefSourceEvidence>>,
+    unknown,
+    Effect.Services<ReturnType<typeof retrieveContextBriefSourceEvidence>>
+  >;
   readonly allowedMemoryUriScopes?: readonly string[];
   readonly codeLinkedMemoryOnly?: boolean;
   readonly includeProcedureEvidence?: boolean;
@@ -217,7 +232,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
             retrieveContextBriefGraphEvidence(
               config,
               graphPlan,
-              request => retrieveContextBriefSourceEvidence(request),
+              options.sourceEvidence ?? retrieveContextBriefSourceEvidence,
               readBudget,
             ),
           codeLinkedMemoryEvidence: codePlan =>
@@ -298,6 +313,36 @@ export const compileContextBrief = Effect.fn('contextBrief.compile')(function* (
   input: ContextBriefRequestV1 | unknown,
 ) {
   return yield* compileContextBriefRuntime(config, input);
+});
+
+/** Only exact document links enter semantic context; ordinary Context Brief behavior is unchanged. */
+export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticKnowledge')(function* (
+  config: RuntimeConfig,
+  input: ContextBriefRequestV1,
+  evidence: Evidence,
+): Effect.fn.Return<
+  SemanticContextKnowledgeV1,
+  unknown,
+  Effect.Services<ReturnType<typeof compileContextBriefRuntime>>
+> {
+  let binding: SemanticContextSourceBindingV1 | null = null;
+  const projected = yield* compileContextBriefRuntime(
+    config,
+    {...input, detail: 'source', responseFormat: 'agent'},
+    {
+      codeLinkedMemoryOnly: true,
+      includeProcedureEvidence: false,
+      sourceEvidence: (request: ContextBriefSourceEvidenceRequest) =>
+        retrieveSemanticContextSourceEvidence(request, evidence).pipe(
+          Effect.map(result => {
+            binding = result.binding;
+            return result.source;
+          }),
+        ),
+    },
+  );
+  if (binding === null) return {scope: 'document', binding: null, brief: null, gaps: ['semantic-graph-source-unbound']};
+  return {scope: 'document', binding, brief: parseContextBriefJsonText(projected.text), gaps: []};
 });
 
 /** Cloud callers supply their validated share roots; unscoped procedure discovery stays disabled. */
