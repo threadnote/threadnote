@@ -13,7 +13,11 @@ import {Array as EffectArray, Record as EffectRecord} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 
 /** Use the shipped MCP write boundary against only this test's disposable account. */
-export async function fixtureTool(manager: ManagerRuntime, name: string, args: Record<string, unknown>) {
+export async function fixtureTool(
+  manager: Pick<ManagerRuntime, 'environment' | 'home' | 'root'>,
+  name: string,
+  args: Record<string, unknown>,
+) {
   const env: Record<string, string> = EffectRecord.fromEntries(
     EffectArray.map(DEFAULT_INHERITED_ENV_VARS, key => [key, '']),
   );
@@ -26,12 +30,54 @@ export async function fixtureTool(manager: ManagerRuntime, name: string, args: R
     env,
     stderr: 'pipe',
   });
+  const stderrLimit = 65_536;
+  let stderrBytes = 0;
+  // Drain before connecting: an unread SDK PassThrough can backpressure the child.
+  // Retain only a capped byte count, never stderr contents or request arguments.
+  transport.stderr?.on('data', (chunk: Uint8Array) => {
+    stderrBytes = Math.min(stderrLimit, stderrBytes + chunk.byteLength);
+  });
+  const tool = EffectArray.contains(
+    [
+      'review_session_context',
+      'context_topic_enrollment',
+      'context_maintain',
+      'context_maintenance_status',
+      'context_maintenance_packet',
+      'context_maintenance_draft',
+      'context_maintenance_review',
+    ],
+    name,
+  )
+    ? name
+    : 'other-fixture-tool';
+  const action =
+    typeof args.action === 'string' &&
+    EffectArray.contains(['inspect', 'preview', 'enroll', 'resume', 'run', 'pause'], args.action)
+      ? args.action
+      : 'none';
   const client = new Client({name: 'manager-e2e', version: '1.0.0'});
+  let phase: 'connect' | 'tools-call' = 'connect';
+  const started = performance.now();
   try {
     await client.connect(transport);
+    phase = 'tools-call';
     const result = await client.callTool({name, arguments: args});
-    if (result.isError) throw new Error(`Fixture MCP ${name} failed: ${JSON.stringify(result.content)}`);
+    if (result.isError) throw new Error('Fixture MCP returned an error result.');
     return result;
+  } catch (cause) {
+    throw new Error(
+      `Fixture MCP boundary failed: ${JSON.stringify({
+        tool,
+        action,
+        phase,
+        elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+        stderrBytesUpToLimit: stderrBytes,
+        stderrLimit,
+        stderrDiscarded: true,
+      })}`,
+      {cause},
+    );
   } finally {
     await client.close();
     await transport.close();
