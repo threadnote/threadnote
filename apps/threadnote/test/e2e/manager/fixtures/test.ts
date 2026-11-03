@@ -94,9 +94,21 @@ export const test = base.extend<ManagerFixtures>({
       responseChecks.push(
         (async () => {
           const url = new URL(response.url());
-          // An empty disposable account has no team. The API explicitly reports that unavailable state.
-          if (url.pathname === '/api/shares/conflicts' && response.status() === 409) {
+          const expected = EffectArray.filter(
+            [
+              {
+                path: '/api/shares/conflicts',
+                status: 409,
+                error: 'No shared teams configured. Run: threadnote share init <remote-url>',
+              },
+              ...manager.expectedErrors,
+            ],
+            item => item.path === url.pathname && item.status === response.status(),
+          );
+          if (expected.length) {
             const body = await response.text().catch(async () => {
+              if (response.request().method() !== 'GET')
+                throw new Error('Could not verify intentional mutation error response.');
               // Navigation may cancel the browser's body read after headers arrived.
               const current = await fetch(response.url(), {
                 headers: {authorization: `Bearer ${manager.token}`},
@@ -104,9 +116,7 @@ export const test = base.extend<ManagerFixtures>({
               });
               return current.text();
             });
-            if (
-              body === JSON.stringify({error: 'No shared teams configured. Run: threadnote share init <remote-url>'})
-            ) {
+            if (EffectArray.some(expected, item => body === JSON.stringify({error: item.error}))) {
               expectedResponses.add(response.url());
               return;
             }

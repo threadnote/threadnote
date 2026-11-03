@@ -36,6 +36,7 @@ export function redactManagerLog(text: string): string {
 }
 
 export class ManagerRuntime {
+  readonly expectedErrors: {readonly path: string; readonly status: number; readonly error: string}[] = [];
   readonly environment: NodeJS.ProcessEnv;
   readonly home: string;
   readonly manifest: string;

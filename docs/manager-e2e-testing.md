@@ -6,11 +6,13 @@ asset resolution. Tests never attach to an existing Manager or global installati
 
 ```sh
 bun install --frozen-lockfile
-node node_modules/@playwright/test/cli.js install --with-deps chromium firefox webkit
+bun --bun node_modules/@playwright/test/cli.js install --with-deps chromium firefox webkit
 bun run test:e2e:manager -- --project=chromium smoke.spec.ts
 bun run test:e2e:manager:ui
 bun run test:e2e:manager:report
 ```
+
+Node 24 is required for the nested runner lifecycle probe; the package entrypoints run through Bun.
 
 The default matrix runs Chromium scenarios plus tests tagged `@compat` in Firefox
 and WebKit. Set `THREADNOTE_MANAGER_E2E_FULL_BROWSERS=1` to run the entire suite in
@@ -22,7 +24,7 @@ The build runs once before the tests. During iteration, after building the curre
 source, use the runner directly for a focused file or title:
 
 ```sh
-node node_modules/@playwright/test/cli.js test -c playwright.manager.config.ts --project=chromium --grep 'S01'
+bun --bun node_modules/@playwright/test/cli.js test -c playwright.manager.config.ts --project=chromium --grep 'S01'
 ```
 
 Fixtures strip inherited credentials and isolate home, account, manifest, Git

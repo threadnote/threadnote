@@ -6,8 +6,7 @@ import {ManagerRuntime} from './fixtures/runtime.js';
 import {configureProviders} from './fixtures/providers.js';
 import {pipe} from 'effect';
 import * as EffectString from 'effect/String';
-import {findExecutable} from './fixtures/environment.js';
-import {repositoryRoot} from './fixtures/environment.js';
+import {findExecutable, repositoryRoot} from './fixtures/environment.js';
 import {Array as EffectArray} from 'effect';
 
 test('S01 simultaneous homes remain isolated and cleanup includes the detached coordinator', async () => {
@@ -105,7 +104,7 @@ test('S01 runner timeout, interruption and retry replace fixtures during agent w
     driver.environment.MANAGER_E2E_LIFECYCLE_MODE = mode;
     driver.environment.MANAGER_E2E_LIFECYCLE_OUTPUT = info.outputPath(mode);
     try {
-      const child = driver.launch(process.execPath, [
+      const child = driver.launch(findExecutable('node'), [
         join(repositoryRoot, 'node_modules/@playwright/test/cli.js'),
         'test',
         '--config',
@@ -138,6 +137,7 @@ test('S01 runner timeout, interruption and retry replace fixtures during agent w
         await expect(fetch(record.origin, {signal: AbortSignal.timeout(500)})).rejects.toThrow();
       }
     } finally {
+      await info.attach(`lifecycle-driver-${mode}`, {body: driver.output, contentType: 'text/plain'});
       await driver.dispose();
     }
   }
