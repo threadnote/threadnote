@@ -1,3 +1,4 @@
+import {RECALL_LOGICAL_SCOPE_CHANGED_REASON} from '../index/freshness.js';
 import {loadRecallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import * as EffectString from 'effect/String';
 import {Cause, Effect, Schema} from 'effect';
@@ -167,7 +168,8 @@ export function lexicalRefreshDisposition(status: RecallIndexStatus): 'current' 
   if (status.ready && status.generation) return 'current';
   if (
     status.reason === 'not built; run `threadnote repair`' ||
-    status.reason === 'canonical documents changed; run `threadnote repair`'
+    status.reason === 'canonical documents changed; run `threadnote repair`' ||
+    status.reason === RECALL_LOGICAL_SCOPE_CHANGED_REASON
   ) {
     return 'refreshable';
   }

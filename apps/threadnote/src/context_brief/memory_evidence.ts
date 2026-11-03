@@ -1,3 +1,4 @@
+import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
 import {Array as EffectArray} from 'effect';
 import {
   contextBriefCodeLinkRecallGaps,
@@ -11,8 +12,13 @@ import {
   stableUnique,
 } from '@threadnote/context/memory-evidence';
 export * from '@threadnote/context/memory-evidence';
-import {Effect, FileSystem, Option, Path, Result, Schedule, Schema} from 'effect';
-import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
+import {Clock, Effect, FileSystem, Option, Path, Result, Schedule, Schema} from 'effect';
+import {
+  boundedMemoryAuthority,
+  boundedMemoryTrust,
+  canonicalMemoryDocumentContent,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {parseCandidateReview} from '@threadnote/memory/candidate';
 import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,28 +26,19 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {resolveWorkset} from '@threadnote/workspace/manifest';
 import {readMemoryRecordsByUri} from '../memory/index.js';
 import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
-import {
-  finalizeDeferredCodeAnchorsForRoute,
-  type DeferredCodeAnchorRouteFinalizationReceiptV1,
-} from '../memory/deferred/code_anchor.js';
 
 import {isMemoryId} from '@threadnote/memory/identity-alias';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 
-import {
-  expireRecallIndexValidation,
-  loadRecallCodeLinks,
-  loadRecallIndexData,
-  loadRecallMemoryIdentities,
-} from '@threadnote/recall/index';
+import {readRecallCodeLinks, readRecallIndexData, readRecallMemoryIdentities} from '@threadnote/recall/index';
 import {
   deriveRecallEligibilityPolicy,
+  recallCandidateIsEligible,
   normalizeRecallProjectNames,
   type RecallEligibilityPolicy,
 } from '@threadnote/recall/eligibility';
 import {classifyMemoryIdentityCandidates} from '@threadnote/recall/memory/identity';
 import {resolveWorkspaceRepoName} from '../utils.js';
-import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {
   ContextBriefMemoryCandidateV1,
@@ -50,9 +47,6 @@ import type {
   ContextBriefScopeV1,
 } from '@threadnote/context/types';
 const MEMORY_RETRIEVAL_MULTIPLIER = 4;
-const CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT = 4;
-const CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_PASSES = 2;
-const CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_WAIT_MILLISECONDS = 1_000;
 const CONTEXT_BRIEF_CODE_ANCHOR_READ_RETRIES = 2;
 const CONTEXT_BRIEF_CODE_ANCHOR_RETRY_MILLISECONDS = 25;
 import {MEMORY_RECALL_EMPTY_GAP} from '@threadnote/context/memory-evidence';
@@ -137,7 +131,7 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
   allowedUriScopes: readonly string[] = [contextBriefMemoryUriScope(config.user)],
 ) {
   const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
-  const index = yield* loadRecallIndexData(config, {
+  const index = yield* readRecallIndexData(config, {
     allowedUriScopes,
     eligibility: scopedEligibility.policy,
     includeInactive: false,
@@ -163,6 +157,7 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
     new Map(),
     plan.requireResolvableMemoryIdentity,
     allowedUriScopes,
+    scopedEligibility.policy,
   );
   const candidates = read.candidates;
   return {
@@ -171,6 +166,7 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
     gaps: [
       ...(candidates.length === 0 ? [MEMORY_RECALL_EMPTY_GAP] : []),
       ...(scopedEligibility.gap === undefined ? [] : [scopedEligibility.gap]),
+      ...(index.readState?.freshness === 'stale' ? ['memory-recall-index-stale'] : []),
       ...(read.stableIdentityUnavailable ? ['stable-memory-identity-unavailable'] : []),
     ],
     trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
@@ -184,8 +180,6 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     plan: ContextBriefPlanV1['codeAnchors'],
     options: {
       readonly allowedUriScopes?: readonly string[];
-      /** @internal Privacy-safe receipts for diagnosing first-read recovery. */
-      readonly onFinalizationReceipt?: (receipt: DeferredCodeAnchorRouteFinalizationReceiptV1) => void;
     } = {},
   ) {
     const requested = plan.codeRefs.length;
@@ -273,70 +267,26 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     }
     const resolvedOrdinals = EffectArray.map(resolvedAnchors, anchor => anchor.anchorOrdinal);
     const identity = yield* resolveRepositoryIdentity(callerCwd).pipe(Effect.option);
-    const attemptedUris: string[] = [];
-    // Scoped cloud reads must not finalize pending memories outside their share boundary.
-    let finalizationUnavailable = options.allowedUriScopes === undefined && identity._tag === 'None';
-    let refreshAfterContention = false;
+    // The original private intents retain source/CAS ownership. Readers only wake the home host.
+    let finalizationUnavailable = options.allowedUriScopes === undefined;
     if (identity._tag === 'Some' && options.allowedUriScopes === undefined) {
-      let remainingLimit = CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT;
-      for (let pass = 0; pass < CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_PASSES; pass++) {
-        const previousAttemptCount = attemptedUris.length;
-        const receipt = yield* withCodeAnchorFinalizationAnonymousTelemetry(
-          'context-brief',
-          finalizeDeferredCodeAnchorsForRoute(
-            config,
-            {
-              callerCwd,
-              kind: 'repository',
-              repositoryId: identity.value.repositoryId,
-              worktreeId: identity.value.worktreeId,
-            },
-            {
-              limit: remainingLimit,
-              onAttemptedUri: uri => {
-                attemptedUris.push(uri);
-              },
-              preferredCodeRefs: plan.codeRefs,
-              waitTimeoutMilliseconds: CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_WAIT_MILLISECONDS,
-            },
-          ),
-        ).pipe(
-          Effect.asSome,
-          Effect.catchCause(() => Effect.succeedNone),
-        );
-        finalizationUnavailable = receipt._tag === 'None' || receipt.value.state !== 'completed';
-        if (receipt._tag === 'None') break;
-        yield* Effect.sync(() => options.onFinalizationReceipt?.(receipt.value)).pipe(Effect.ignoreCause);
-        // Admission is counted even if the deadline interrupted the attempt
-        // before it produced a completed-item receipt.
-        remainingLimit -= Math.max(receipt.value.scannedCount, attemptedUris.length - previousAttemptCount);
-        // Another owner can commit without invoking our attempted-URI hook.
-        refreshAfterContention ||= receipt.value.state === 'contended';
-        // Retry a deadline before admission or a contended route once, with
-        // the same per-pass deadline and remaining admitted-memory budget.
-        if (
-          receipt.value.state !== 'contended' ||
-          receipt.value.pendingCount > 0 ||
-          receipt.value.failedCount > 0 ||
-          remainingLimit <= 0
-        )
-          break;
-      }
+      const deferred = yield* deferRecallReadMaintenance(config, {
+        kind: 'anchors',
+        callerCwd,
+        repositoryId: identity.value.repositoryId,
+        worktreeId: identity.value.worktreeId,
+        codeRefs: [...plan.codeRefs],
+      });
+      finalizationUnavailable = deferred !== 'current';
     }
-    const invalidationFailed =
-      attemptedUris.length === 0
-        ? false
-        : yield* expireRecallIndexValidation(config.agentContextHome, false, attemptedUris).pipe(
-            Effect.as(false),
-            Effect.catchCause(() => Effect.succeed(true)),
-          );
-    const forceRecallRefresh = refreshAfterContention || invalidationFailed;
     let truncatedSelectorCount = 0;
-    const linked = yield* loadRecallCodeLinks(config, {
+    const linked = yield* readRecallCodeLinks(config, {
       allowedUriScopes: options.allowedUriScopes ?? [contextBriefMemoryUriScope(config.user)],
       anchors: EffectArray.map(resolvedAnchors, resolved => resolved.anchor),
+      onReadState: state => {
+        finalizationUnavailable ||= state.freshness === 'stale';
+      },
       eligibility: scopedEligibility.policy,
-      ...(forceRecallRefresh ? {forceRefresh: true} : {}),
       includeInactive: false,
       limit: plan.candidateLimit,
       onSearchTruncated: count => {
@@ -368,6 +318,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
         matchesByUri,
         true,
         options.allowedUriScopes,
+        scopedEligibility.policy,
       ),
     );
     if (Result.isFailure(readCandidatesResult)) {
@@ -450,13 +401,29 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
   codeLinkMatchesByUri: ReadonlyMap<string, NonNullable<ContextBriefMemoryCandidateV1['codeLinkMatches']>> = new Map(),
   requireResolvableMemoryIdentity = false,
   allowedUriScopes: readonly string[] = [contextBriefMemoryUriScope(config.user)],
+  eligibility?: RecallEligibilityPolicy,
 ) {
   const scopedUris = EffectArray.filter(
     rankedUris,
     __effectArrayValue =>
       !!(uri => EffectArray.some(allowedUriScopes, scope => resourceIdIsWithin(uri, scope)))(__effectArrayValue),
   );
-  const records = yield* readMemoryRecordsByUri(config, scopedUris);
+  const now = yield* Clock.currentTimeMillis;
+  const scopedUriSet = new Set(scopedUris);
+  const records = EffectArray.filter(
+    yield* readMemoryRecordsByUri(config, scopedUris),
+    record =>
+      scopedUriSet.has(record.uri) &&
+      contextBriefMemoryRecordIsEligible(record) &&
+      !(record.metadata.validFrom !== undefined && Date.parse(record.metadata.validFrom) > now) &&
+      !(record.metadata.validTo !== undefined && Date.parse(record.metadata.validTo) < now) &&
+      (eligibility === undefined ||
+        recallCandidateIsEligible(eligibility, {
+          ...record.metadata,
+          authority: boundedMemoryAuthority(record.uri, record.metadata),
+          trust: boundedMemoryTrust(record.uri, record.metadata),
+        })),
+  );
   const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record]));
   const memoryIds = [
     ...new Set(
@@ -469,7 +436,7 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
   ];
   const identityCandidates =
     requireResolvableMemoryIdentity && memoryIds.length > 0
-      ? yield* loadRecallMemoryIdentities(config, {allowedUriScopes, memoryIds})
+      ? yield* readRecallMemoryIdentities(config, {allowedUriScopes, memoryIds}).pipe(Effect.orElseSucceed(() => []))
       : [];
   const resolvableMemoryIds = new Set(
     EffectArray.filter(

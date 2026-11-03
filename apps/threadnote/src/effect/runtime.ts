@@ -1,3 +1,4 @@
+import {recallReadMaintenanceLayer} from '../recall/read_maintenance.js';
 import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
@@ -180,5 +181,7 @@ const backgroundEmbeddingWorkerLayer = Layer.mergeAll(
   BackgroundInferenceAdmission.layer.pipe(Layer.provideMerge(systemLayer)),
   isolatedLocalModelRuntimeLayer({background: true, maximumRequestAttempts: 1}).pipe(Layer.provideMerge(systemLayer)),
 ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)), Layer.provideMerge(BunHttpClient.layer));
-export const RecallEmbeddingWorkerLayer = backgroundEmbeddingWorkerLayer;
+export const RecallEmbeddingWorkerLayer = recallReadMaintenanceLayer.pipe(
+  Layer.provideMerge(Layer.merge(ApplicationLayer, backgroundEmbeddingWorkerLayer)),
+);
 export const GraphEmbeddingWorkerLayer = codeGraphStoreLayer.pipe(Layer.provideMerge(backgroundEmbeddingWorkerLayer));

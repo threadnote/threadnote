@@ -1,3 +1,4 @@
+import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
 import {SecureRandom} from 'effect/crypto';
 import {parseThreadnotePack, canonicalPackRoot, packTargetForCurrentUser} from './pack.js';
 import {pipe as EffectArrayPipe} from 'effect';
@@ -25,7 +26,6 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
-import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
 import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {resolveRecallScope} from './recall_scope.js';
@@ -118,7 +118,7 @@ import {
   selectedRecallCandidateUris,
   type RecallSemanticScoresResult,
 } from '@threadnote/recall/runtime';
-import {loadRecallExactMatches} from '@threadnote/recall/index';
+import {readRecallExactMatches} from '@threadnote/recall/index';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
@@ -395,8 +395,13 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const {memoryConnections, query} = yield* attemptSync(() => parseRecallCliInput(options));
   const navigationOnly = query.length === 0;
   if (options.dryRun !== true) {
-    yield* withAnonymousTelemetryPhase('recall.shared-sync', syncSharedReposAndLog(config));
-    yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncSourcesAndLog(config));
+    const deferred = yield* deferRecallReadMaintenance(config, {kind: 'synchronize', sources: true});
+    if (deferred !== 'current')
+      yield* Console.warn(
+        deferred === 'queued'
+          ? 'Automatic synchronization is queued in the background; recall uses ready local data.'
+          : 'Automatic synchronization enqueue was not confirmed; recall uses ready local data.',
+      );
   }
   const includeWorkspaceComponent = !navigationOnly && options.inferScope !== false && !options.uri && !options.workset;
   const workspaceOptions = options.callerCwd
@@ -824,24 +829,6 @@ function formatSharedCompactAudit(audit: {
     '\n',
   );
 }
-
-const syncSourcesAndLog = Effect.fn('memory.syncSourcesAndLog')(function* (config: RuntimeConfig) {
-  const syncResult = yield* syncSourcesBeforeRecall(config).pipe(
-    Effect.catch(error => {
-      const message = error instanceof Error ? error.message : String(error);
-      return Console.error(`Auto-sync warning: Source refresh failed: ${message}`).pipe(Effect.as(undefined));
-    }),
-  );
-  if (!syncResult) {
-    return;
-  }
-  if (syncResult.syncedSources.length > 0) {
-    yield* Console.error(`Auto-synced sources: ${EffectArray.join(syncResult.syncedSources, ', ')}`);
-  }
-  for (const warning of syncResult.warnings) {
-    yield* Console.error(`Auto-sync warning: ${warning}`);
-  }
-});
 
 const printRecallHygieneNudges = Effect.fn('memory.printRecallHygieneNudges')(function* (
   config: RuntimeConfig,
@@ -1442,7 +1429,7 @@ const collectNativeExactMemoryMatches = Effect.fn('memory.collectNativeExactMemo
 ) {
   const terms = exactRecallTerms(query);
   if (terms.length === 0) return {matches: [], operationalWarnings: []};
-  const result = yield* loadRecallExactMatches(config, {
+  const result = yield* readRecallExactMatches(config, {
     eligibility: options.eligibility,
     includeInactive: options.includeArchived,
     limitPerTerm: 25,

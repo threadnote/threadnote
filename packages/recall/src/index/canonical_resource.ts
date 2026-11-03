@@ -23,6 +23,7 @@ interface SeedStateEntry {
 export function loadCanonicalResourcePolicy<E>(
   config: {readonly agentContextHome: string; readonly manifestPath?: string},
   makeError: (input: {readonly cause: unknown; readonly message: string}) => E,
+  selectedUris?: ReadonlySet<string>,
 ): Effect.Effect<
   CanonicalResourcePolicy,
   never,
@@ -47,7 +48,14 @@ export function loadCanonicalResourcePolicy<E>(
     });
     const entryKeyByUri = new Map<string, string>();
     const sourcePathByUri = new Map<string, string>();
-    for (const [uri, recorded] of [...seedState].sort(([left], [right]) =>
+    const entries =
+      selectedUris === undefined
+        ? [...seedState]
+        : EffectArray.flatMap([...selectedUris], uri => {
+            const recorded = seedState.get(uri);
+            return recorded === undefined ? [] : [[uri, recorded] as const];
+          });
+    for (const [uri, recorded] of entries.sort(([left], [right]) =>
       Effect2.pipe(left, EffectString.localeCompare(right)),
     )) {
       const source = yield* resolveSeededResourceSource(fs, manifest.projects, uri, recorded);

@@ -1,3 +1,4 @@
+import {loadRecallIndexData} from '@threadnote/recall/index';
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -42,6 +43,7 @@ describe('Context Brief stable memory identity eligibility', () => {
         task: 'conflicting identity evidence',
       });
 
+      yield* loadRecallIndexData(config, {includeInactive: false});
       const retrieval = yield* retrieveContextBriefMemoryEvidence(config, plan.memory);
 
       expect(retrieval.candidates.length).toBeGreaterThan(0);
@@ -92,6 +94,7 @@ describe('Context Brief stable memory identity eligibility', () => {
         ),
       );
 
+      yield* loadRecallIndexData(config, {includeInactive: false});
       const retrieve = (callerCwd: string) => {
         const plan = planContextBrief({
           budgetTokens: 1_500,

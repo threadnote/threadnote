@@ -21,8 +21,8 @@ import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtim
 import {loadRecallFeedback} from './feedback.js';
 import {
   currentRecallCorpusGeneration,
-  loadRecallIndexData,
-  loadRecallIndexDataBatch,
+  readRecallIndexData,
+  readRecallIndexDataBatch,
   recallIndexStatus,
   recallUriMatchesScopes,
 } from './index.js';
@@ -42,6 +42,7 @@ import {recallLexicalTerms, recallTokens} from './tokenize.js';
 import {normalizeRecallRerankerScore} from './reranker-score.js';
 import {
   lexicalIndexUnavailableWarning,
+  recallReadStateWarnings,
   mergeRecallOperationalWarnings,
   type RecallOperationalWarning,
 } from './warning.js';
@@ -356,7 +357,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         project: input.project,
         query: input.feedbackQuery,
       }),
-      loadRecallIndexDataBatch(config, {
+      readRecallIndexDataBatch(config, {
         includeInactive: input.includeInactive,
         selections: [...topicalIndexSelections, ...workspaceIndexSelections, ...branchIndexSelections],
       }).pipe(Effect.result),
@@ -364,7 +365,13 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     {concurrency: 2},
   );
   const recallIndexes = Result.isSuccess(recallIndexResult) ? recallIndexResult.success : [];
-  const operationalWarnings = Result.isFailure(recallIndexResult) ? [lexicalIndexUnavailableWarning()] : [];
+  const operationalWarnings = Result.isFailure(recallIndexResult)
+    ? [lexicalIndexUnavailableWarning()]
+    : [
+        ...mergeRecallOperationalWarnings(
+          ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
+        ),
+      ];
   const flattenedRecallIndexes = recallIndexes;
   const generations = [
     ...new Set(
@@ -461,7 +468,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     (input.eligibility !== undefined || (input.project?.trim().length ?? 0) > 0) &&
     EffectArray.some(broadTopicalRecallIndexes, index => recallCrossScopeFallbackRequired(index?.queryExhaustive));
   const crossScopeFallbackResult = shouldLoadCrossScopeFallback
-    ? yield* loadRecallIndexData(config, {
+    ? yield* readRecallIndexData(config, {
         // An explicit URI restriction is a hard authorization boundary. Soft
         // preferred scopes already received their own topical pass above; the
         // one fallback query searches the authorized global corpus so the
@@ -544,16 +551,12 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       );
   const unreadIndexedMemoryUris = unreadIndexedMemoryRecordUris(indexedCandidates, records);
   const extraRecords = unreadIndexedMemoryUris.length > 0 ? yield* input.readRecords(unreadIndexedMemoryUris) : [];
-  const extraRecordUris = new Set(
-    EffectArray.map(extraRecords, record => Effect2.pipe(record.uri, EffectString.replace(/#.*$/, ''))),
-  );
-  const absentMemoryUris = EffectArray.filter(
-    unreadIndexedMemoryUris,
-    (uri, __effectArrayIndex) =>
-      __effectArrayIndex in unreadIndexedMemoryUris &&
-      !extraRecordUris.has(Effect2.pipe(uri, EffectString.replace(/#.*$/, ''))),
-  );
   const liveRecords = extraRecords.length > 0 ? [...records, ...extraRecords] : records;
+  const liveRecordUris = new Set(EffectArray.map(liveRecords, record => stripFragment(record.uri)));
+  const absentMemoryUris = EffectArray.filter(
+    [...new Set([...rankingUris, ...unreadIndexedMemoryUris])],
+    uri => EffectString.includes('/memories/')(uri) && !liveRecordUris.has(stripFragment(uri)),
+  );
   const expansionCandidates = EffectArrayPipe(
     mergeRecallExpansionCandidates(recallIndexCandidateSets, rankingUris, topicalRecallIndexCandidateSets.length),
     __effectArrayValues =>
@@ -882,7 +885,7 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
   allowedUriScopes?: readonly string[],
 ) {
   const fence = () => currentRecallCorpusGeneration(config);
-  const snapshot = yield* loadRecallIndexData(config, {
+  const snapshot = yield* readRecallIndexData(config, {
     includeInactive: false,
     limit: 0,
     query: '',
@@ -1321,7 +1324,7 @@ export const loadRecallExpansionVocabulary = Effect.fn('recall.loadExpansionVoca
   if (rankedVocabulary.length >= EXPANSION_VOCABULARY_LIMIT) {
     return rankedVocabulary;
   }
-  const index = yield* loadRecallIndexData(config, {
+  const index = yield* readRecallIndexData(config, {
     allowedUriScopes: input.allowedUriScopes,
     eligibility: input.eligibility,
     includeInactive: input.includeInactive,

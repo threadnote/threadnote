@@ -4,7 +4,7 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
-import {loadRecallMemoryIdentities} from '../index.js';
+import {readRecallMemoryIdentities} from '../index.js';
 
 interface MemoryIdentityRuntime {
   readonly account: string;
@@ -88,7 +88,7 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
       reason: 'scope-required',
     });
   }
-  const candidates = yield* loadRecallMemoryIdentities(config, {
+  const candidates = yield* readRecallMemoryIdentities(config, {
     allowedUriScopes,
     memoryIds,
     validateNow: options.validateNow,

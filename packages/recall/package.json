@@ -40,7 +40,8 @@
     "./vector-index": "./src/vector-index.ts",
     "./warning": "./src/warning.ts",
     "./background/demand": "./src/background/demand.ts",
-    "./background/vector-step": "./src/background/vector-step.ts"
+    "./background/vector-step": "./src/background/vector-step.ts",
+    "./background/lexical-demand": "./src/background/lexical-demand.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

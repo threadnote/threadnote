@@ -361,13 +361,15 @@ describe('resumable recall vector preparation', () => {
         const f = yield* fixture;
         const source = yield* openRecallVectorPreparationSource(f.config);
         const otherScope = {...f.config, user: 'another-user'};
-        const otherSource = yield* openRecallVectorPreparationSource(otherScope);
-        expect(otherSource.generation).toBe(source.generation);
-        expect(otherSource.authorizationKey).toBe(source.authorizationKey);
+
         const first = yield* recallVectorTarget(f.config, manifest, source);
         yield* prepareRecallVectorMetadata(f.config, manifest, source, first);
         const checkpoint = yield* recallVectorTarget(f.config, manifest, source);
         expect(checkpoint.phase).toBe('resolve');
+        yield* loadRecallIndexData(otherScope, {includeInactive: false, memoryIds: []});
+        const otherSource = yield* openRecallVectorPreparationSource(otherScope);
+        expect(otherSource.generation).toBe(source.generation);
+        expect(otherSource.authorizationKey).toBe(source.authorizationKey);
         expect(yield* recallVectorTarget(otherScope, manifest, otherSource)).toEqual(checkpoint);
         const distinct = yield* recallVectorTarget(otherScope, manifest, {
           ...otherSource,
@@ -397,14 +399,18 @@ describe('resumable recall vector preparation', () => {
           ),
           () =>
             Effect.gen(function* () {
-              const stepOther = stepRecallVectorPreparation(other, manifest, Effect.succeed(true)).pipe(
+              const stepOther = loadRecallIndexData(other, {includeInactive: false, memoryIds: []}).pipe(
+                Effect.andThen(stepRecallVectorPreparation(other, manifest, Effect.succeed(true))),
                 Effect.provideService(LocalModelStore, f.store),
                 Effect.provideService(LocalModelRuntime, f.runtime),
               );
               let firstDone = false;
               let secondDone = false;
               for (let turn = 0; turn < 500 && !(firstDone && secondDone); turn++) {
-                if (!firstDone) firstDone = (yield* f.step()).state === 'current';
+                if (!firstDone) {
+                  yield* loadRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
+                  firstDone = (yield* f.step()).state === 'current';
+                }
                 if (!secondDone) secondDone = (yield* stepOther).state === 'current';
               }
               expect(firstDone && secondDone).toBe(true);
@@ -426,6 +432,7 @@ describe('resumable recall vector preparation', () => {
                 ),
               ).toBeUndefined();
               expect(f.inputs()).toBe(before);
+              yield* loadRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
               yield* f.finish;
               expect(yield* vectorIndexGenerationReadiness(f.home, manifest, f.index.generation, firstKey)).toBe(
                 'current',
@@ -507,6 +514,7 @@ describe('resumable recall vector preparation', () => {
           () =>
             Effect.gen(function* () {
               const other = {...f.config, user: 'second'};
+              yield* loadRecallIndexData(other, {includeInactive: false, memoryIds: []});
               for (let turn = 0; turn < 500; turn++) {
                 const result = yield* stepRecallVectorPreparation(other, manifest, Effect.succeed(true)).pipe(
                   Effect.provideService(LocalModelStore, f.store),
@@ -536,6 +544,7 @@ describe('resumable recall vector preparation', () => {
                   db.close();
                 }
               });
+              yield* loadRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
               const before = f.inputs();
               expect(yield* f.step().pipe(Effect.result)).toMatchObject({
                 _tag: 'Failure',

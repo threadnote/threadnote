@@ -1,3 +1,19 @@
+export const RECALL_LOGICAL_SCOPE_CHANGED_REASON = 'logical scope changed; background lexical maintenance required';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+
+export const recallLogicalScope = (
+  config: {readonly account: string; readonly user: string; readonly manifestPath?: string},
+  includeInactive: boolean,
+) => sha256HexSync(JSON.stringify([config.account, config.user, config.manifestPath ?? null, includeInactive]));
+
+export const recallScopeIsCurrent = (
+  metadata: ReadonlyMap<string, string>,
+  config: {readonly account: string; readonly user: string; readonly manifestPath?: string},
+  includeInactive: boolean,
+) =>
+  metadata.get('logical_scope') === recallLogicalScope(config, includeInactive) &&
+  metadata.get('logical_scope_content_generation') === metadata.get('content_generation');
+
 export interface RecallIndexForegroundFreshness {
   readonly observedCanonicalMutationGeneration: string;
   readonly forceRefresh: boolean;

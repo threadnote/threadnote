@@ -13,9 +13,13 @@ import {exactRecallTerms, type ExactMatch, type RecallHit} from '@threadnote/rec
 import {resolveEffectAiConfiguration} from '../../effect/ai/consolidator.js';
 import {jevConfiguration} from '../../effect/ai/jev.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {loadRecallExactMatches} from '@threadnote/recall/index';
+import {readRecallExactMatches} from '@threadnote/recall/index';
 import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
-import {lexicalIndexUnavailableWarning, type RecallOperationalWarning} from '@threadnote/recall/warning';
+import {
+  lexicalIndexUnavailableWarning,
+  recallReadStateWarnings,
+  type RecallOperationalWarning,
+} from '@threadnote/recall/warning';
 import {
   exactMemoryScopes,
   MAX_WORKSET_PASSES,
@@ -147,7 +151,11 @@ const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatche
     };
   }
   const scopes = allowedUriScopes ?? exactMemoryScopes(config, includeArchived, query, undefined, undefined);
-  const result = yield* loadRecallExactMatches(config, {
+  let readState: import('@threadnote/recall/index').RecallReadyReadState | undefined;
+  const result = yield* readRecallExactMatches(config, {
+    onReadState: state => {
+      readState = state;
+    },
     eligibility,
     includeInactive: includeArchived,
     limitPerTerm: 25,
@@ -155,6 +163,6 @@ const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatche
     uriScopes: scopes,
   }).pipe(Effect.result);
   return Result.isSuccess(result)
-    ? {matches: result.success, operationalWarnings: []}
+    ? {matches: result.success, operationalWarnings: recallReadStateWarnings(readState)}
     : {matches: [], operationalWarnings: [lexicalIndexUnavailableWarning()]};
 });

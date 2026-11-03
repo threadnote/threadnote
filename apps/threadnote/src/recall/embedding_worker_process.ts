@@ -15,9 +15,15 @@ import {
   readRecallEmbeddingScope,
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
+import {
+  RecallLexicalDemandUnavailable,
+  readRecallLexicalScope,
+  RECALL_LEXICAL_DEMAND_DIRECTORY,
+} from '@threadnote/recall/background/lexical-demand';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
   makeRecallEmbeddingWorker,
+  runRecallLexicalWorkerUnit,
   RecallEmbeddingWorkerControlUnavailable,
   type RecallEmbeddingWorkerUnitResult,
 } from './embedding_worker.js';
@@ -94,14 +100,26 @@ export const recallEmbeddingWorkerControlState = Effect.fn('recall.workerControl
 });
 
 /** A physical page is at most64 names, including malformed/completed entries. */
-const openCatalog = Effect.fn('recall.openEmbeddingCatalog')(function* (home: string) {
+const openCatalog = Effect.fn('recall.openEmbeddingCatalog')(function* (
+  home: string,
+  kind: string = 'embedding-demand-v1',
+) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
-  const root = path.join(home, 'recall', 'embedding-demand-v1');
+  const root = path.join(home, 'recall', kind);
   if (!(yield* fs.exists(root))) return undefined;
   return yield* fromPromise('recall.openEmbeddingCatalog', () =>
     runtimeOpenTextDirectoryNameReader(root, {entryKind: 'file'}),
   );
+});
+
+const readCatalogEntry = Effect.fn('recall.readCatalogEntry')(function* (home: string, filename: string, kind: string) {
+  if (kind === RECALL_LEXICAL_DEMAND_DIRECTORY) {
+    const scope = yield* readRecallLexicalScope(home, filename).pipe(Effect.orElseSucceed(() => undefined));
+    return scope ? {kind: 'lexical' as const, scope} : undefined;
+  }
+  const scope = yield* readRecallEmbeddingScope(home, filename).pipe(Effect.orElseSucceed(() => undefined));
+  return scope ? {kind: 'embedding' as const, scope} : undefined;
 });
 
 export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorkerHome')(function* (
@@ -148,37 +166,43 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
         yield* lifecycle.beforeScan;
         let pending = false;
         let progressed = false;
-        yield* Effect.acquireUseRelease(
-          openCatalog(canonical),
-          directory =>
-            Effect.gen(function* () {
-              if (!directory) return;
-              for (;;) {
-                const page = yield* fromPromise('recall.readEmbeddingCatalogPage', () => directory.readPage(64));
-                for (const filename of page.names) {
-                  const scope = yield* readRecallEmbeddingScope(canonical, filename).pipe(
-                    Effect.orElseSucceed(() => undefined),
-                  );
-                  if (!scope) continue;
-                  const result = yield* unit(scope).pipe(Effect.result);
-                  yield* options.onUnitResult?.(scope, result) ?? Effect.void;
-                  if (result._tag === 'Failure') {
-                    // Retry metadata is the sole attempt budget. Stop this process if it cannot be saved.
-                    if (Schema.is(RecallEmbeddingWorkerControlUnavailable)(result.failure))
-                      return yield* result.failure;
-                    continue; // Unreadable catalog entries stay recorded without executing work.
+        for (const kind of [RECALL_LEXICAL_DEMAND_DIRECTORY, 'embedding-demand-v1']) {
+          yield* Effect.acquireUseRelease(
+            openCatalog(canonical, kind),
+            directory =>
+              Effect.gen(function* () {
+                if (!directory) return;
+                for (;;) {
+                  const page = yield* fromPromise('recall.readEmbeddingCatalogPage', () => directory.readPage(64));
+                  for (const filename of page.names) {
+                    const entry = yield* readCatalogEntry(canonical, filename, kind);
+                    if (!entry) continue;
+                    const scope = entry.scope;
+                    const result = yield* (
+                      entry.kind === 'lexical' ? runRecallLexicalWorkerUnit(entry.scope) : unit(entry.scope)
+                    ).pipe(Effect.result);
+                    yield* options.onUnitResult?.(scope, result) ?? Effect.void;
+                    if (result._tag === 'Failure') {
+                      // Retry metadata is the sole attempt budget. Stop this process if it cannot be saved.
+                      if (
+                        Schema.is(RecallEmbeddingWorkerControlUnavailable)(result.failure) ||
+                        Schema.is(RecallLexicalDemandUnavailable)(result.failure)
+                      )
+                        return yield* result.failure;
+                      continue; // Unreadable catalog entries stay recorded without executing work.
+                    }
+                    if (result.success.state === 'deferred' || result.success.state === 'checkpointed') pending = true;
+                    if (result.success.state === 'checkpointed') progressed = true;
                   }
-                  if (result.success.state === 'deferred' || result.success.state === 'checkpointed') pending = true;
-                  if (result.success.state === 'checkpointed') progressed = true;
+                  if (page.done) return;
                 }
-                if (page.done) return;
-              }
-            }),
-          directory =>
-            directory
-              ? fromPromise('recall.closeEmbeddingCatalog', () => directory.close()).pipe(Effect.ignore)
-              : Effect.void,
-        );
+              }),
+            directory =>
+              directory
+                ? fromPromise('recall.closeEmbeddingCatalog', () => directory.close()).pipe(Effect.ignore)
+                : Effect.void,
+          );
+        }
         const now = yield* Clock.currentTimeMillis;
         if (pending) idleSince = now;
         if (now - idleSince >= 2000) return;
@@ -198,25 +222,28 @@ export const resumeExistingRecallEmbeddingDemand = Effect.fn('recall.resumeExist
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(home))) return;
   const canonical = yield* fs.realPath(home);
-  const pending = yield* Effect.acquireUseRelease(
-    openCatalog(canonical),
-    directory =>
-      Effect.gen(function* () {
-        if (!directory) return false;
-        for (;;) {
-          const page = yield* fromPromise('recall.probeEmbeddingCatalogPage', () => directory.readPage(64));
-          for (const name of page.names)
-            if (yield* readRecallEmbeddingScope(canonical, name).pipe(Effect.orElseSucceed(() => undefined)))
-              return true;
-          if (page.done) return false;
-        }
-      }),
-    directory =>
-      directory
-        ? fromPromise('recall.closeEmbeddingCatalog', () => directory.close()).pipe(Effect.ignore)
-        : Effect.void,
-  );
-  if (pending) yield* wakeRecallEmbeddingWorker(canonical);
+  for (const kind of [RECALL_LEXICAL_DEMAND_DIRECTORY, 'embedding-demand-v1']) {
+    const pending = yield* Effect.acquireUseRelease(
+      openCatalog(canonical, kind),
+      directory =>
+        Effect.gen(function* () {
+          if (!directory) return false;
+          for (;;) {
+            const page = yield* fromPromise('recall.probeEmbeddingCatalogPage', () => directory.readPage(64));
+            for (const name of page.names) if (yield* readCatalogEntry(canonical, name, kind)) return true;
+            if (page.done) return false;
+          }
+        }),
+      directory =>
+        directory
+          ? fromPromise('recall.closeEmbeddingCatalog', () => directory.close()).pipe(Effect.ignore)
+          : Effect.void,
+    );
+    if (pending) {
+      yield* wakeRecallEmbeddingWorker(canonical);
+      return;
+    }
+  }
 });
 
 export const recallEmbeddingWakeLayer = Layer.effect(

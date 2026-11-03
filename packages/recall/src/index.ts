@@ -10,6 +10,7 @@ import {
 } from './index/result.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
+import type {SqlError} from 'effect/sql/SqlError';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
@@ -59,6 +60,9 @@ import {
 } from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
 import {
+  RECALL_LOGICAL_SCOPE_CHANGED_REASON,
+  recallLogicalScope,
+  recallScopeIsCurrent,
   recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh,
   recallIndexForegroundRefreshRequired,
 } from './index/freshness.js';
@@ -103,6 +107,10 @@ import {
   stageRecallRefreshAffectedTerms,
   type IndexedRecallSource,
 } from './index/refresh.js';
+import {validateRecallReadyResult} from './index/ready_result.js';
+import {requestRecallLexicalRefresh} from './background/lexical-demand.js';
+const requestReadyRecallMaintenance = (scope: Parameters<typeof requestRecallLexicalRefresh>[0]) =>
+  requestRecallLexicalRefresh(scope).pipe(Effect.timeout('100 millis'));
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -118,7 +126,7 @@ class RecallIndexOperationError extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
-interface RecallIndexConfig {
+export interface RecallIndexConfig {
   readonly account: string;
   readonly agentContextHome: string;
   readonly manifestPath?: string;
@@ -131,6 +139,7 @@ export interface RecallIndexData {
   readonly generation: string;
   /** True only when the query selection proves that no matching candidate was truncated. */
   readonly queryExhaustive: boolean;
+  readonly readState?: RecallReadyReadState;
   /** Independent canonical-timestamp lane; callers must still apply normal topical ranking. */
   readonly recentCandidates?: readonly RecallCandidate[];
 }
@@ -219,7 +228,18 @@ class RecallIndexSchemaIncompatible extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
-interface LoadRecallIndexOptions {
+export interface RecallReadyReadState {
+  readonly freshness: 'current' | 'stale';
+  readonly maintenance: 'unneeded' | 'queued' | 'unavailable';
+}
+
+interface RecallReadOptions {
+  /** Internal: never initialize, recover, or refresh the shared database. */
+  readonly readyOnly?: boolean;
+  readonly onReadState?: (state: RecallReadyReadState) => void;
+}
+
+interface LoadRecallIndexOptions extends RecallReadOptions {
   readonly allowedUriScopes?: readonly string[];
   readonly eligibility?: RecallEligibilityPolicy;
   readonly forceRefresh?: boolean;
@@ -240,14 +260,14 @@ interface LoadRecallIndexOptions {
   readonly workspaceScopeMode?: RecallWorkspaceScopeMode;
 }
 
-interface LoadRecallIndexBatchOptions {
+interface LoadRecallIndexBatchOptions extends RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
   readonly selections: readonly Omit<LoadRecallIndexOptions, 'forceRefresh' | 'includeInactive' | 'validateNow'>[];
 }
 
-interface LoadRecallExactMatchesOptions {
+interface LoadRecallExactMatchesOptions extends RecallReadOptions {
   readonly eligibility?: RecallEligibilityPolicy;
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
@@ -257,13 +277,13 @@ interface LoadRecallExactMatchesOptions {
   readonly uriScopes: readonly string[];
 }
 
-export interface LoadRecallCodeLinksOptions extends RecallCodeLinkQueryOptions {
+export interface LoadRecallCodeLinksOptions extends RecallCodeLinkQueryOptions, RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
 }
 
-export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptions {
+export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptions, RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
@@ -271,25 +291,47 @@ export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptio
   readonly onRefreshRepair?: () => void;
 }
 
+export type RecallIndexReadQuery =
+  | LoadRecallCodeLinksOptions
+  | LoadRecallMemoryLinksOptions
+  | LoadRecallIndexOptions
+  | LoadRecallIndexBatchOptions
+  | LoadRecallExactMatchesOptions;
+export type RecallIndexSelection = LoadRecallIndexOptions;
+
 const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(function* (
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
+  options: RecallIndexReadQuery,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const fixedDatabasePath = recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive);
-  yield* fs.makeDirectory(pathService.dirname(fixedDatabasePath), {recursive: true, mode: 0o700});
+  if (!options.readyOnly)
+    yield* fs.makeDirectory(pathService.dirname(fixedDatabasePath), {recursive: true, mode: 0o700});
+  config = {...config, agentContextHome: yield* fs.realPath(config.agentContextHome)};
   const databasePath = yield* resolveActiveRecallDatabasePath(
     fs,
     pathService,
     config.agentContextHome,
     options.includeInactive,
   );
+  if (options.readyOnly) {
+    return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options).pipe(
+      Effect.onError(() =>
+        requestReadyRecallMaintenance({...config, includeInactive: options.includeInactive}).pipe(Effect.ignore),
+      ),
+      Effect.catchCauseIf(
+        cause => !Cause.hasInterrupts(cause),
+        cause =>
+          Effect.fail(
+            RecallIndexOperationError.make({
+              cause,
+              message: 'No readable ready lexical snapshot is available; maintenance was requested.',
+            }),
+          ),
+      ),
+    );
+  }
   return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options).pipe(
     Effect.catchCauseIf(isRecoverableRecallIndexCause, firstCause =>
       recoverRecallIndex(fs, pathService, databasePath, fixedDatabasePath, config, options, firstCause),
@@ -301,38 +343,64 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
   databasePath: string,
   staleMarkerBasePath: string,
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
+  options: RecallIndexReadQuery,
   prepareForActivation = false,
   indexLockHeld = false,
 ) {
-  return yield* useRecallDatabase(
+  return yield* (options.readyOnly ? useRecallDatabaseReadOnly : useRecallDatabase)(
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* initializeRecallDatabase(sql);
+      if (!options.readyOnly) yield* initializeRecallDatabase(sql);
       const fs = yield* FileSystem.FileSystem;
       const pathService = yield* Path.Path;
-      yield* fs.chmod(databasePath, 0o600);
-      yield* ensureRecallDatabaseFresh(
-        sql,
-        fs,
-        pathService,
-        databasePath,
-        staleMarkerBasePath,
-        config,
-        {
-          forceRefresh: options.forceRefresh,
-          includeInactive: options.includeInactive,
-          onProgress: options.onProgress,
-          validateNow: 'validateNow' in options ? options.validateNow : undefined,
-        },
-        indexLockHeld,
-      );
+      let readState: RecallReadyReadState | undefined;
+      if (options.readyOnly) {
+        yield* sql.unsafe('PRAGMA busy_timeout = 50');
+        const metadata = yield* loadRecallMetadata(sql);
+        if (
+          metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION) ||
+          metadata.get('initialized') !== 'true' ||
+          !metadata.get('content_generation') ||
+          !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
+          !RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata)
+        )
+          return yield* RecallIndexCorrupt.make({message: 'No compatible ready lexical snapshot is available.'});
+        const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
+        const canonical = yield* readCanonicalMutationGeneration(
+          fs,
+          pathService,
+          config.agentContextHome,
+          config.account,
+        );
+        const stale = recallIndexForegroundRefreshRequired(
+          recallIndexForegroundFreshness(metadata, marker, canonical, {}),
+        );
+        const maintenance = stale
+          ? yield* requestReadyRecallMaintenance({...config, includeInactive: options.includeInactive}).pipe(
+              Effect.as('queued' as const),
+              Effect.orElseSucceed(() => 'unavailable' as const),
+            )
+          : 'unneeded';
+        readState = {freshness: stale ? 'stale' : 'current', maintenance};
+      } else {
+        yield* fs.chmod(databasePath, 0o600);
+        yield* ensureRecallDatabaseFresh(
+          sql,
+          fs,
+          pathService,
+          databasePath,
+          staleMarkerBasePath,
+          config,
+          {
+            forceRefresh: options.forceRefresh,
+            includeInactive: options.includeInactive,
+            onProgress: options.onProgress,
+            validateNow: 'validateNow' in options ? options.validateNow : undefined,
+          },
+          indexLockHeld,
+        );
+      }
       const externalResources = yield* loadExternalResourceAccess({
         home: config.agentContextHome,
         account: config.account,
@@ -359,7 +427,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
               })),
             }
           : {...options, eligibility: accessEligibility(options.eligibility)};
-      const result = yield* 'anchors' in effectiveOptions
+      let result: unknown = yield* 'anchors' in effectiveOptions
         ? selectRecallCodeLinks(sql, effectiveOptions).pipe(
             Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
           )
@@ -398,7 +466,28 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
                       Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
                     );
             });
-      const finalResult = result;
+      if (options.readyOnly) {
+        const validated = yield* validateRecallReadyResult(sql, config, options, result, decodeCandidateRow);
+        result = validated.result;
+        if (validated.removed && readState?.freshness !== 'stale') {
+          const maintenance = yield* requestReadyRecallMaintenance({
+            ...config,
+            includeInactive: options.includeInactive,
+          }).pipe(
+            Effect.as('queued' as const),
+            Effect.orElseSucceed(() => 'unavailable' as const),
+          );
+          readState = {freshness: 'stale', maintenance};
+        }
+        if (readState) options.onReadState?.(readState);
+      }
+      const withState = (data: RecallIndexData) => (readState ? {...data, readState} : data);
+      const finalResult =
+        'selections' in options
+          ? EffectArray.map(recallIndexDataBatchResult(result), withState)
+          : 'terms' in options || 'anchors' in options || 'memorySeeds' in options
+            ? result
+            : withState(recallIndexDataResult(result));
       if (prepareForActivation) {
         yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
         yield* sql.unsafe('PRAGMA journal_mode = DELETE');
@@ -414,12 +503,7 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
   failedDatabasePath: string,
   staleMarkerBasePath: string,
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
+  options: RecallIndexReadQuery,
   firstCause: Cause.Cause<unknown>,
 ) {
   return yield* withRecallIndexLock(fs, path, config.agentContextHome, options.includeInactive, () =>
@@ -535,7 +619,7 @@ export const loadRecallCodeLinks = Effect.fn('recall.loadCodeLinks')(function* (
       },
     }),
   );
-  if (options.forceRefresh === true || canonicalMismatchCount === 0) {
+  if (options.readyOnly || options.forceRefresh === true || canonicalMismatchCount === 0) {
     if (truncatedSelectorCount > 0) options.onSearchTruncated?.(truncatedSelectorCount);
     return first;
   }
@@ -571,7 +655,7 @@ export const loadRecallMemoryLinks = Effect.fn('recall.loadMemoryLinks')(functio
       },
     }),
   );
-  if (options.forceRefresh === true || canonicalMismatchCount === 0) {
+  if (options.readyOnly || options.forceRefresh === true || canonicalMismatchCount === 0) {
     if (truncatedSeedOrdinals.length > 0) options.onSearchTruncated?.(truncatedSeedOrdinals);
     return first;
   }
@@ -593,6 +677,43 @@ export const loadRecallMemoryLinks = Effect.fn('recall.loadMemoryLinks')(functio
   }
   return refreshed;
 });
+
+/** Ordinary recall must use these readers. Legacy loaders are maintenance boundaries. */
+export const readRecallIndexData = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallIndexOptions, 'forceRefresh' | 'readyOnly'>,
+) => loadRecallIndexData(config, {...options, readyOnly: true});
+export const readRecallIndexDataBatch = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallIndexBatchOptions, 'forceRefresh' | 'readyOnly'>,
+) => loadRecallIndexDataBatch(config, {...options, readyOnly: true});
+export const readRecallExactMatches = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallExactMatchesOptions, 'forceRefresh' | 'readyOnly'>,
+) => loadRecallExactMatches(config, {...options, readyOnly: true});
+export const readRecallCodeLinks = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallCodeLinksOptions, 'forceRefresh' | 'readyOnly'>,
+) => loadRecallCodeLinks(config, {...options, readyOnly: true});
+export const readRecallMemoryLinks = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallMemoryLinksOptions, 'forceRefresh' | 'readyOnly'>,
+) => loadRecallMemoryLinks(config, {...options, readyOnly: true});
+export const readRecallMemoryIdentities = (
+  config: RecallIndexConfig,
+  options: Parameters<typeof loadRecallMemoryIdentities>[1],
+) =>
+  readRecallIndexData(config, {...options, includeInactive: false}).pipe(
+    Effect.flatMap(data =>
+      data.readState?.freshness === 'stale'
+        ? Effect.fail(
+            RecallIndexOperationError.make({
+              message: 'Stable identity resolution requires a current lexical snapshot.',
+            }),
+          )
+        : Effect.succeed(data.candidates),
+    ),
+  );
 
 export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
   config: RecallIndexConfig,
@@ -639,6 +760,13 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
           reason: 'integrity sequence mismatch; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
+      if (!recallScopeIsCurrent(metadata, config, includeInactive))
+        return {
+          databasePath,
+          documentCount: 0,
+          ready: false,
+          reason: RECALL_LOGICAL_SCOPE_CHANGED_REASON,
+        } satisfies RecallIndexStatus;
       const canonicalMutationGeneration = yield* readCanonicalMutationGeneration(
         fs,
         path,
@@ -1098,17 +1226,25 @@ function useRecallDatabase<A, E, R>(
 function useRecallDatabaseReadOnly<A, E, R>(
   databasePath: string,
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-): Effect.Effect<A, E, Exclude<R, SqlClient.SqlClient>> {
+): Effect.Effect<A, E | SqlError, Exclude<R, SqlClient.SqlClient>> {
   return Effect.scoped(
     Layer.build(
       SqliteClient.layer({
         create: false,
+        busyTimeout: 50,
         disableWAL: true,
         filename: databasePath,
         readonly: true,
         readwrite: false,
       }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    ).pipe(
+      Effect.flatMap(context =>
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql.withTransaction(effect);
+        }).pipe(Effect.provide(context)),
+      ),
+    ),
   );
 }
 
@@ -1286,6 +1422,7 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
     config.account,
   );
   if (
+    recallScopeIsCurrent(metadata, config, options.includeInactive) &&
     !recallIndexForegroundRefreshRequired(
       recallIndexForegroundFreshness(metadata, staleMarker, canonicalMutationGeneration, options),
     )
@@ -1307,6 +1444,7 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
         config.account,
       );
       if (
+        recallScopeIsCurrent(lockedMetadata, config, options.includeInactive) &&
         !recallIndexForegroundRefreshRequired(
           recallIndexForegroundFreshness(lockedMetadata, lockedStaleMarker, lockedCanonicalMutationGeneration, options),
         )
@@ -1623,6 +1761,8 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         ['content_generation', contentGeneration],
         ['document_count', String(documentCount)],
         ['include_inactive', includeInactive ? 'true' : 'false'],
+        ['logical_scope', recallLogicalScope(config, includeInactive)],
+        ['logical_scope_content_generation', contentGeneration],
         ['initialized', 'true'],
         ['memory_identity_conflict_generation', contentGeneration],
         ['logical_document_count', String(logicalDocumentCount)],

@@ -1,3 +1,4 @@
+import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
 import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
@@ -110,7 +111,6 @@ import {
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
 import {mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
-import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
@@ -1092,52 +1092,49 @@ function runRecallTool(
 ) {
   return Effect.gen(function* () {
     const syncWarnings: string[] = [];
-    const syncedTeams = yield* withMcpProgressHeartbeat(
-      progress,
-      RECALL_MCP_PROGRESS.sharedSync,
-      withAnonymousTelemetryPhase(
-        'recall.shared-sync',
-        withProductionPhaseTiming(
-          'recall.shared-sync',
-          progressTiming.sharedSyncDelayMilliseconds === 0
-            ? syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)
-            : Effect.sleep(progressTiming.sharedSyncDelayMilliseconds).pipe(
-                Effect.andThen(syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)),
+    const syncedTeams =
+      params.syncTeam === undefined
+        ? []
+        : yield* withMcpProgressHeartbeat(
+            progress,
+            RECALL_MCP_PROGRESS.sharedSync,
+            withAnonymousTelemetryPhase(
+              'recall.shared-sync',
+              withProductionPhaseTiming(
+                'recall.shared-sync',
+                progressTiming.sharedSyncDelayMilliseconds === 0
+                  ? syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)
+                  : Effect.sleep(progressTiming.sharedSyncDelayMilliseconds).pipe(
+                      Effect.andThen(syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)),
+                    ),
               ),
-        ),
-      ),
-      progressTiming.heartbeatMilliseconds,
-    ).pipe(
-      Effect.map(syncResult => {
-        syncWarnings.push(...syncResult.warnings);
-        return syncResult.syncedTeams;
-      }),
-      Effect.catch(error => {
-        syncWarnings.push(errorMessage(error));
-        return Effect.succeed([] as readonly string[]);
-      }),
-    );
-    const sourceSyncWarnings: string[] = [];
-    const syncedSources = memoryScope
-      ? []
-      : yield* withMcpProgressHeartbeat(
-          progress,
-          RECALL_MCP_PROGRESS.obsidianSync,
-          withAnonymousTelemetryPhase(
-            'recall.obsidian-sync',
-            withProductionPhaseTiming('recall.obsidian-sync', syncSourcesBeforeRecall(config)),
-          ),
-          progressTiming.heartbeatMilliseconds,
-        ).pipe(
-          Effect.map(syncResult => {
-            sourceSyncWarnings.push(...syncResult.warnings);
-            return syncResult.syncedSources;
-          }),
-          Effect.catch(error => {
-            sourceSyncWarnings.push(`Source refresh failed: ${errorMessage(error)}`);
-            return Effect.succeed([] as readonly string[]);
-          }),
+            ),
+            progressTiming.heartbeatMilliseconds,
+          ).pipe(
+            Effect.map(syncResult => {
+              syncWarnings.push(...syncResult.warnings);
+              if ('deferred' in syncResult && syncResult.deferred)
+                syncWarnings.push('Shared synchronization is deferred while another writer is active.');
+              return syncResult.syncedTeams;
+            }),
+            Effect.catch(error => {
+              syncWarnings.push(errorMessage(error));
+              return Effect.succeed([] as readonly string[]);
+            }),
+          );
+    if (params.syncTeam === undefined) {
+      const deferred = yield* deferRecallReadMaintenance(config, {
+        kind: 'synchronize',
+        sources: memoryScope === undefined,
+        ...(memoryScope === undefined ? {} : {teams: cursorCloudScopeTeams(memoryScope)}),
+      });
+      if (deferred !== 'current')
+        syncWarnings.push(
+          deferred === 'queued'
+            ? 'Automatic synchronization is queued in the background; recall uses ready local data.'
+            : 'Automatic synchronization enqueue was not confirmed; recall uses ready local data.',
         );
+    }
     const workspaceContext = yield* withMcpProgressHeartbeat(
       progress,
       RECALL_MCP_PROGRESS.workspaceContext,
@@ -1345,15 +1342,10 @@ function runRecallTool(
     if (syncedTeams.length > 0) {
       sections.push(`Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}`);
     }
-    if (syncedSources.length > 0) {
-      sections.push(`Auto-synced sources: ${EffectArray.join(syncedSources, ', ')}`);
-    }
     for (const warning of syncWarnings) {
       sections.push(`Auto-sync warning: ${warning}`);
     }
-    for (const warning of sourceSyncWarnings) {
-      sections.push(`Auto-sync warning: ${warning}`);
-    }
+
     const rankedResultSections = new Set(
       EffectArray.filter([semanticSection, exactTail], (value): value is string => !!value),
     );

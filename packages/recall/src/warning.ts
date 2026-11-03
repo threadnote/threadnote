@@ -1,19 +1,44 @@
 export const RECALL_OPERATIONAL_WARNING_LIMIT = 4;
 
 export interface RecallOperationalWarning {
-  readonly code: 'lexical_index_unavailable';
+  readonly code: 'lexical_index_unavailable' | 'lexical_index_stale' | 'lexical_maintenance_unavailable';
   readonly message: string;
   readonly remediation: string;
 }
 
 const LEXICAL_INDEX_UNAVAILABLE_WARNING = {
   code: 'lexical_index_unavailable',
-  message: 'The lexical memory index could not be read or recovered; recall results may be incomplete.',
-  remediation: 'Run `threadnote doctor --dry-run`, then `threadnote repair`, and retry recall.',
+  message: 'The lexical memory index has no readable ready snapshot; recall results may be incomplete.',
+  remediation: 'Retry after background maintenance, or run `threadnote repair` for explicit maintenance.',
 } as const satisfies RecallOperationalWarning;
 
 export function lexicalIndexUnavailableWarning(): RecallOperationalWarning {
   return LEXICAL_INDEX_UNAVAILABLE_WARNING;
+}
+
+export function recallReadStateWarnings(
+  state: import('./index.js').RecallReadyReadState | undefined,
+): readonly RecallOperationalWarning[] {
+  if (state?.freshness !== 'stale') return [];
+  return [
+    {
+      code: 'lexical_index_stale',
+      message: 'Recall used the last ready lexical snapshot; recent changes may be absent.',
+      remediation:
+        state.maintenance === 'queued'
+          ? 'Lexical maintenance is queued in the background.'
+          : 'Background maintenance enqueue was not confirmed.',
+    },
+    ...(state.maintenance === 'unavailable'
+      ? [
+          {
+            code: 'lexical_maintenance_unavailable' as const,
+            message: 'Background lexical maintenance could not be queued.',
+            remediation: 'Run `threadnote repair` and retry recall.',
+          },
+        ]
+      : []),
+  ];
 }
 
 export function mergeRecallOperationalWarnings(

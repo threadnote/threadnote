@@ -18,9 +18,9 @@ import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/s
 import type {MemoryStatus} from '@threadnote/memory/types';
 import {recallCandidateIsEligible, type RecallEligibilityPolicy} from '../eligibility.js';
 import {
-  loadRecallIndexData,
-  loadRecallMemoryIdentities,
-  loadRecallMemoryLinks,
+  readRecallIndexData,
+  readRecallMemoryIdentities,
+  readRecallMemoryLinks,
   recallUriMatchesScopes,
 } from '../index.js';
 import {classifyMemoryIdentityCandidates} from './identity.js';
@@ -252,7 +252,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const premiseIndex =
     requestedMemoryIds.length === 0
       ? undefined
-      : yield* loadRecallIndexData(config, {
+      : yield* readRecallIndexData(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           includeInactive: true,
@@ -299,7 +299,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const rawLinks =
     premiseSeeds.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           includeInactive: true,
@@ -335,7 +335,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const index =
     allMemoryIds.length === 0
       ? undefined
-      : yield* loadRecallIndexData(config, {
+      : yield* readRecallIndexData(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           includeInactive: true,
@@ -388,7 +388,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const witnessedSupersederLinks =
     witnessedPremiseSources.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           directions: ['outgoing'],
           eligibility: input.eligibility,
@@ -422,7 +422,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const indexedSupersederLinks =
     currentnessIds.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
           directions: ['incoming'],
@@ -480,7 +480,7 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     ),
   ];
   if (missingSupersederIds.length > 0) {
-    const supersederIndex = yield* loadRecallIndexData(config, {
+    const supersederIndex = yield* readRecallIndexData(config, {
       allowedUriScopes: input.allowedUriScopes,
       eligibility: input.eligibility,
       includeInactive: true,
@@ -683,7 +683,7 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
     const indexed =
       identityIds.length === 0
         ? []
-        : yield* loadRecallMemoryIdentities(config, {
+        : yield* readRecallMemoryIdentities(config, {
             allowedUriScopes: input.allowedUriScopes,
             memoryIds: identityIds,
             validateNow: true,
@@ -695,7 +695,7 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
       ]),
     );
   } else if (aliasMemoryIds.size > 0) {
-    const indexed = yield* loadRecallMemoryIdentities(config, {
+    const indexed = yield* readRecallMemoryIdentities(config, {
       allowedUriScopes: input.allowedUriScopes,
       memoryIds: [...aliasMemoryIds],
       validateNow: true,

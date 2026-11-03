@@ -462,6 +462,7 @@ describe('recall runtime orchestration', () => {
         user: 'tester',
       };
       const rerankerCache = createRecallRerankerCache();
+      yield* loadRecallIndexData(config, {includeInactive: false}).pipe(provideTestLayer(ApplicationLayer));
       const prepare = () =>
         prepareRecallSections(config, {
           allowExactRescue: false,
@@ -588,6 +589,7 @@ describe('recall runtime orchestration', () => {
       );
       const recalled = yield* Effect.gen(function* () {
         const catalog = yield* LocalModelCatalog;
+        yield* loadRecallIndexData(config, {includeInactive: false});
         yield* selectLocalModel(home, catalog, 'embedding', embedding.id);
         return yield* captureConsole(
           runRecall(config, {
@@ -667,7 +669,7 @@ describe('recall runtime orchestration', () => {
       expect(prepared.operationalWarnings).toEqual([expect.objectContaining({code: 'lexical_index_unavailable'})]);
     }),
   );
-  effectIt.effect('distinguishes empty record hydration from a loaded set that omits a memory URI', () =>
+  effectIt.effect('rejects missing memories after empty or partial initial record hydration', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-empty-records-')));
       homes.push(home);
@@ -723,8 +725,20 @@ describe('recall runtime orchestration', () => {
         semanticResult: Option.none(),
       }).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(EffectArray.map(emptyHydration.ranked, ranked => ranked.uri)).toContain(presentUri);
+      expect(EffectArray.map(emptyHydration.ranked, ranked => ranked.uri)).not.toContain(presentUri);
       expect(EffectArray.map(loadedMissing.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
+      const deletedExact = yield* prepareRecallSections(config, {
+        allowExactRescue: true,
+        exactMatches: [{uri: ghostUri, terms: ['Present']}],
+        feedbackQuery: 'Present ranked memory body',
+        includeInactive: false,
+        limit: 5,
+        passes: [],
+        query: 'Present ranked memory body',
+        readRecords: () => Effect.succeed([]),
+        semanticResult: Option.none(),
+      }).pipe(provideTestLayer(ApplicationLayer));
+      expect(deletedExact.ranked).toEqual([]);
     }),
   );
   effectIt.effect('drops an indexed memory when extra record hydration misses an empty store', () =>
@@ -795,7 +809,7 @@ describe('recall runtime orchestration', () => {
       expect(EffectArray.map(prepared.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
     }),
   );
-  effectIt.effect('surfaces one CLI warning when exact and ranked lexical recovery both fail', () =>
+  effectIt.effect('surfaces one CLI warning when exact and ranked ready snapshots are unavailable', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-cli-index-warning-')));
       homes.push(home);
@@ -829,8 +843,8 @@ describe('recall runtime orchestration', () => {
           Effect2.Option.getOrElse(() => null),
         ),
       ).toHaveLength(1);
-      expect(recalled.output).toContain('could not be read or recovered');
-      expect(recalled.output).toContain('threadnote doctor --dry-run');
+      expect(recalled.output).toContain('no readable ready snapshot');
+      expect(recalled.output).toContain('threadnote repair');
     }),
   );
   effectIt.effect('uses a complete ranked expansion vocabulary without opening the lexical index', () =>

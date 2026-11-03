@@ -18,7 +18,13 @@ import {
 } from '@threadnote/store/external-resource';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
-import {loadRecallExactMatches, loadRecallIndexData} from '@threadnote/recall/index';
+import {
+  loadRecallExactMatches,
+  loadRecallIndexData,
+  readRecallIndexData,
+  readRecallIndexDataBatch,
+  readRecallExactMatches,
+} from '@threadnote/recall/index';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -138,6 +144,31 @@ describe('external source recall', () => {
         });
         expect(approved.candidates).toEqual([]);
         enabled = false;
+        expect(
+          (yield* readRecallIndexData(config, {
+            includeInactive: false,
+            query: 'needle',
+            requiredUris: uris,
+            eligibility: {kind: 'pinned-hard-uri-bypass'},
+          })).candidates,
+        ).toEqual([]);
+        expect(
+          EffectArray.flatMap(
+            yield* readRecallIndexDataBatch(config, {
+              includeInactive: false,
+              selections: [{query: 'needle'}, {requiredUris: uris}],
+            }),
+            data => data.candidates,
+          ),
+        ).toEqual([]);
+        expect(
+          yield* readRecallExactMatches(config, {
+            includeInactive: false,
+            uriScopes: ['threadnote://resources'],
+            terms: ['needle'],
+            eligibility: {kind: 'pinned-hard-uri-bypass'},
+          }),
+        ).toEqual([]);
         const pinned = yield* loadRecallIndexData(config, {
           includeInactive: false,
           query: 'needle',

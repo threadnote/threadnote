@@ -86,7 +86,7 @@ export const syncSharedReposBeforeAgentRead = Effect.fn('share.syncBeforeAgentRe
   const observed = yield* observeSharedRepositoryHomeLock(config.agentContextHome);
   if (observed === 'active') {
     markSharedAutoSyncDeferred(config);
-    return {syncedTeams: [] as readonly string[], warnings: [] as readonly string[]};
+    return {syncedTeams: [] as readonly string[], warnings: [] as readonly string[], deferred: true as const};
   }
   const sync = withSharedRepositoryLock(config, syncSharedReposBeforeAgentReadEffect(config, teamSelector), {
     waitTimeoutMilliseconds: SHARED_REPOSITORY_READ_LOCK_WAIT_TIMEOUT_MILLISECONDS,
@@ -97,6 +97,7 @@ export const syncSharedReposBeforeAgentRead = Effect.fn('share.syncBeforeAgentRe
         Effect.andThen(observeSharedRepositoryHomeLock(config.agentContextHome)),
         Effect.map(lockState => ({
           syncedTeams: [] as readonly string[],
+          deferred: true as const,
           warnings:
             lockState === 'unhealthy'
               ? ([SHARED_REPOSITORY_READ_UNHEALTHY_LOCK_WARNING] as readonly string[])
