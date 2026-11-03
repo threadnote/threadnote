@@ -1,7 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Array as EffectArray} from 'effect';
 import {recallCandidateIsValid} from '../candidate_validation.js';
-import {Effect, Exit, Path} from 'effect';
+import {Clock, Effect, Exit, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -14,7 +14,7 @@ import type {RecallCandidate} from '../rank.js';
 import {recallVectorStorage, VectorIndexCorrupt} from '../vector-index.js';
 import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../vector/preparation-identity.js';
 import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
-import type {RecallEmbeddingScope} from './demand.js';
+import type {RecallEmbeddingObservation, RecallEmbeddingScope} from './demand.js';
 import {
   assertRecallVectorTarget,
   hydrateRecallVectorDocuments,
@@ -180,7 +180,12 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
           yield* sql`UPDATE idle_recall_targets SET source_after = ${chunks[chunks.length - 1].chunk_id} WHERE generation = ${target.generation}`;
         }),
       );
-      return {state: 'pending' as const, phase: target.phase, inferred: inferred !== undefined};
+      return {
+        state: 'pending' as const,
+        phase: target.phase,
+        inferred: inferred !== undefined,
+        generation: target.generation,
+      };
     }
     // Live external authorization is distinct from canonical corpus freshness.
     for (let offset = 0; ; offset += 100) {
@@ -215,7 +220,12 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
       () =>
         verify.pipe(
           Effect.andThen(source.fence),
-          Effect.as({state: 'pending' as const, phase: 'retire' as const, inferred: false}),
+          Effect.as({
+            state: 'pending' as const,
+            phase: 'retire' as const,
+            inferred: false,
+            generation: target.generation,
+          }),
         ),
       (previousPointer, exit) =>
         Exit.isSuccess(exit)
@@ -243,7 +253,12 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
     yield* verify;
     yield* source.fence;
     const complete = yield* retireRecallVectorPreparation(config, manifest, target, source.generation);
-    return {state: 'pending' as const, phase: complete ? ('ready' as const) : target.phase, inferred: false};
+    return {
+      state: 'pending' as const,
+      phase: complete ? ('ready' as const) : target.phase,
+      inferred: false,
+      generation: target.generation,
+    };
   } else {
     yield* verify;
     yield* source.fence;
@@ -306,7 +321,7 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
       () =>
         verify.pipe(
           Effect.andThen(source.fence),
-          Effect.as({state: 'current' as const, phase: target.phase, inferred: false}),
+          Effect.as({state: 'current' as const, phase: target.phase, inferred: false, generation: target.generation}),
         ),
       (previous, exit) =>
         Exit.isSuccess(exit)
@@ -323,12 +338,59 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
           WHERE generation = ${target.generation}
           AND EXISTS (SELECT 1 FROM vector_generations WHERE generation = ${previous} AND state = 'ready') RETURNING generation`;
                 if (!restored.length) yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
-                // Ready targets have already discarded preparation chunks. Never demote them.
+                // Ready targets retain immutable preparation and must never be demoted.
               }),
             ),
     );
   }
-  return {state: 'pending' as const, phase: target.phase, inferred: false};
+  return {state: 'pending' as const, phase: target.phase, inferred: false, generation: target.generation};
+});
+
+/** Amortize admission over short preparation steps; every native request still ends the batch. */
+export const runRecallVectorPreparationBatch = Effect.fn('recall.prepareVectorBatch')(function* <R>(
+  config: RecallEmbeddingScope,
+  manifest: LocalModelManifest,
+  stillDesired: Effect.Effect<boolean, unknown, R>,
+) {
+  const started = yield* Clock.monotonicTimeNanos;
+  let result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+  for (
+    let step = 1;
+    step < 32 && result.state !== 'current' && ['metadata', 'resolve', 'hydrate', 'retire'].includes(result.phase);
+    step++
+  ) {
+    if ((yield* Clock.monotonicTimeNanos) - started >= 250_000_000n) break;
+    result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+  }
+  const path = yield* Path.Path;
+  const progress = yield* recallVectorStorage.read(
+    recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id),
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        readonly phase: NonNullable<RecallEmbeddingObservation['progress']>['phase'];
+        readonly cursor: number;
+        readonly documents: number;
+        readonly chunks: number;
+        readonly embedded: number;
+        readonly reused: number;
+      }>`SELECT t.phase,t.cursor,
+        (SELECT COUNT(*) FROM idle_recall_documents WHERE generation=t.generation) AS documents,
+        (SELECT COUNT(*) FROM idle_recall_chunks WHERE generation=t.generation) AS chunks,
+        (SELECT COUNT(*) FROM vector_chunks WHERE generation=t.generation) AS embedded,
+        (SELECT COUNT(*) FROM idle_recall_document_preparations WHERE generation=t.generation AND reused=1) AS reused
+        FROM idle_recall_targets t WHERE t.generation=${result.generation}`;
+      const row = rows[0];
+      if (!row) return undefined;
+      return {
+        phase: row.phase,
+        completed: row.phase === 'embed' || row.phase === 'retire' || row.phase === 'ready' ? row.embedded : row.cursor,
+        total: row.phase === 'hydrate' ? row.documents : row.phase === 'embed' ? row.chunks : 0,
+        reusedDocuments: row.reused,
+      };
+    }),
+  );
+  return {...result, progress};
 });
 
 function decodePreparedCandidate(text: string, expectedHash: string) {

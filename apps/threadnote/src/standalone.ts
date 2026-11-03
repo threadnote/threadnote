@@ -635,10 +635,11 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       Effect.provide(runtime.StandaloneBrokerLayer),
     );
   }
-  const [runtime, processDiagnostics, processLease] = await Promise.all([
+  const [runtime, processDiagnostics, processLease, runtimeBootstrap] = await Promise.all([
     import('./effect/runtime.js'),
     import('./process/diagnostics.js'),
     import('./process/standalone_lease.js'),
+    import('./effect/runtime-bootstrap.js'),
   ]);
   if (isMcpServer) {
     const {mcpServerEffect} = await import('./mcp/server/index.js');
@@ -697,17 +698,20 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       ? 'manager-ui'
       : cliOperation;
   const isStaticVersionRequest = arguments_.length === 1 && (arguments_[0] === '--version' || arguments_[0] === '-v');
+  const isLogsRequest = cliOperation === 'logs';
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(
     Effect.flatMap(home => {
-      const command = processDiagnostics.withThreadnoteProcessRegistration(
-        home,
-        processRole,
-        withCliOutputConsole(cliEffect(arguments_)),
-        processOperation,
-      );
+      const cli = withCliOutputConsole(cliEffect(arguments_));
+      // Filesystem-only support diagnostics must remain usable when inference coordination is unavailable.
+      const command = isLogsRequest
+        ? cli
+        : processDiagnostics.withThreadnoteProcessRegistration(home, processRole, cli, processOperation);
+      const applicationLayer = isLogsRequest
+        ? runtimeBootstrap.telemetryLayerForHome(home, 'invocation').pipe(Layer.provideMerge(runtime.ApplicationLayer))
+        : runtime.applicationLayerForHome(home, 'cli');
       return (isStaticVersionRequest ? Effect.scoped(command) : processLease.withStandaloneProcessLease(command)).pipe(
-        Effect.provide(runtime.applicationLayerForHome(home, 'cli')),
+        Effect.provide(applicationLayer),
       );
     }),
     Effect.provide(runtime.StandaloneBrokerLayer),

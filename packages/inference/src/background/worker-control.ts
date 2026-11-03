@@ -22,6 +22,11 @@ const ownerSchema = Schema.Struct({
   processId: Schema.Int.check(Schema.isGreaterThan(0)),
   processStartIdentity: Schema.String.check(Schema.isMaxLength(1024), Schema.isMinLength(1)),
 });
+const staleReceiptSchema = Schema.Struct({
+  ...ownerSchema.fields,
+  // A receipt can outlive several failed launches from later runtime versions.
+  runtimeVersion: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+});
 const stateSchema = Schema.Struct({
   version: Schema.Literals([1]),
   protocol: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -29,7 +34,7 @@ const stateSchema = Schema.Struct({
   wakeSequence: integer,
   starting: Schema.optionalKey(Schema.Struct({nonce: nonceSchema, expiresAt: integer})),
   active: Schema.optionalKey(Schema.Struct({nonce: nonceSchema, owner: ownerSchema})),
-  staleReceipt: Schema.optionalKey(ownerSchema),
+  staleReceipt: Schema.optionalKey(staleReceiptSchema),
   staleLock: Schema.optionalKey(ownerSchema),
 });
 type State = typeof stateSchema.Type;
@@ -167,7 +172,7 @@ const blockingOwner = Effect.fn('backgroundWorker.blockingOwner')(function* (
   const dead: BackgroundWorkerOwner[] = [];
   for (const owner of [deadState?.active?.owner, deadState?.staleReceipt, deadState?.staleLock])
     if (owner && !(yield* alive(owner))) dead.push(owner);
-  const recovery: {staleReceipt?: BackgroundWorkerOwner; staleLock?: BackgroundWorkerOwner} = {};
+  const recovery: {staleReceipt?: typeof staleReceiptSchema.Type; staleLock?: BackgroundWorkerOwner} = {};
   const text = yield* readRegular(options.receiptPath);
   if (text !== undefined) {
     const receipt = yield* Schema.decodeEffect(
@@ -181,7 +186,7 @@ const blockingOwner = Effect.fn('backgroundWorker.blockingOwner')(function* (
         }),
       ),
     )(text);
-    recovery.staleReceipt = Option.getOrUndefined(
+    const matchingOwner = Option.getOrUndefined(
       EffectArray.findFirst(
         dead,
         owner =>
@@ -190,9 +195,13 @@ const blockingOwner = Effect.fn('backgroundWorker.blockingOwner')(function* (
           receipt.processId === owner.processId &&
           receipt.processStartIdentity === owner.processStartIdentity &&
           receipt.protocol === deadState?.protocol &&
-          receipt.version === deadState?.runtimeVersion,
+          receipt.version ===
+            (owner === deadState?.staleReceipt
+              ? (deadState?.staleReceipt?.runtimeVersion ?? deadState?.runtimeVersion)
+              : deadState?.runtimeVersion),
       ),
     );
+    if (matchingOwner) recovery.staleReceipt = {...matchingOwner, runtimeVersion: receipt.version};
     if (system.isProcessRunning(receipt.processId) && !recovery.staleReceipt) return {reason: 'legacy-owner' as const};
   }
   if (!(yield* fs.exists(options.lockPath))) return recovery;
@@ -231,7 +240,7 @@ const compatible = (options: BackgroundWorkerControlOptions, state: State) =>
 const launch = Effect.fn('backgroundWorker.launch')(function* (
   options: BackgroundWorkerControlOptions,
   state: State,
-  recovery: {readonly staleReceipt?: BackgroundWorkerOwner; readonly staleLock?: BackgroundWorkerOwner} = {},
+  recovery: {readonly staleReceipt?: typeof staleReceiptSchema.Type; readonly staleLock?: BackgroundWorkerOwner} = {},
 ) {
   const nonce = yield* (yield* Crypto.Crypto).randomUUIDv4();
   const starting: State = {
@@ -261,13 +270,14 @@ export const wakeBackgroundWorker = Effect.fn('backgroundWorker.wake')(function*
     options,
     Effect.gen(function* () {
       const previous = yield* readState(options);
-      if (previous && !compatible(options, previous))
+      if (previous && previous.protocol !== options.protocol)
         return {state: 'deferred' as const, reason: 'legacy-owner' as const};
       const state: State = {
         ...(previous ?? {version: 1, protocol: options.protocol, runtimeVersion: options.version, wakeSequence: 0}),
         wakeSequence: (previous?.wakeSequence ?? 0) + 1,
       };
-      yield* writeState(options, state);
+      // A different runtime may recover only after the existing owner/nonce and file fences clear.
+      if (!previous || compatible(options, previous)) yield* writeState(options, state);
       if (state.active && (yield* alive(state.active.owner)))
         return compatible(options, state)
           ? {state: 'active' as const}
@@ -276,7 +286,7 @@ export const wakeBackgroundWorker = Effect.fn('backgroundWorker.wake')(function*
         return compatible(options, state)
           ? {state: 'starting' as const}
           : {state: 'deferred' as const, reason: 'legacy-owner' as const};
-      const blocker = yield* blockingOwner(options, compatible(options, state) ? state : undefined);
+      const blocker = yield* blockingOwner(options, state);
       if ('reason' in blocker) return {state: 'deferred' as const, reason: blocker.reason};
       return yield* launch(options, state, blocker);
     }),
@@ -292,6 +302,7 @@ export const wakeBackgroundWorker = Effect.fn('backgroundWorker.wake')(function*
 export const inspectBackgroundWorkerControl = Effect.fn('backgroundWorker.inspect')(
   function* (options: BackgroundWorkerControlOptions) {
     const state = yield* readState(options);
+    if (state && state.protocol !== options.protocol) return {state: 'legacy-owner' as const};
     if (state?.active && (yield* alive(state.active.owner))) {
       const system = yield* SystemInfo;
       const exact =
@@ -300,7 +311,7 @@ export const inspectBackgroundWorkerControl = Effect.fn('backgroundWorker.inspec
     }
     if (state?.starting && state.starting.expiresAt > (yield* Clock.currentTimeMillis))
       return {state: compatible(options, state) ? ('starting' as const) : ('legacy-owner' as const)};
-    const blocker = yield* blockingOwner(options, state && compatible(options, state) ? state : undefined);
+    const blocker = yield* blockingOwner(options, state);
     return {state: 'reason' in blocker ? blocker.reason : ('queued' as const)};
   },
   Effect.catchCauseIf(
