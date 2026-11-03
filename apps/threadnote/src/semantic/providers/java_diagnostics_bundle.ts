@@ -21,7 +21,7 @@ export const javaDiagnosticBundle = {
       '.prettierrc.json': '8425b7c3dd161f2a9f6492797d798805270245ea110d8396c51761080b485cc1',
       'tools/semantic/build-java-diagnostics.ts': 'c6177498abf8091ce5b34defe1ca22f7694948c989f2ac43988f5b6d829f392c',
       'apps/threadnote/tools/semantic/build-java-diagnostics.ts':
-        'd0524d853c805b1637588e7b4ef702dbb78c78e4690957691c7bae7de4c5fccd',
+        'cecf5be9564cf7ebc9535d595d01f9add8ca48b65791473084ba7f124fb3816d',
     },
     sdkDigests: {
       jdk: 'e55e2e5a8caf01f0fdd6437d9de55bddaadb7c1d3b5ee3eec96e963a0359bb1a',

@@ -1,6 +1,7 @@
+import {Digest as EffectDigest} from 'effect/crypto';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
-import {Cause, Crypto, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {Cause, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {boundedFileDigest, readBounded, semanticSdkDigest} from '../fingerprint.js';
@@ -207,7 +208,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
     if (!candidate) return yield* setupFault('provider', 'missing');
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const crypto = yield* Crypto.Crypto;
+    const digest = yield* EffectDigest.Digest;
     const selected = Object.freeze(
       structuredClone(
         yield* Schema.decodeEffect(JavaRuntimeCandidate, {onExcessProperty: 'error'})(candidate).pipe(
@@ -272,7 +273,7 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(EffectDigest.Digest, digest),
     );
     yield* verify;
     const launch = (

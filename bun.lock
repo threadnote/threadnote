@@ -517,10 +517,10 @@
     "packages/semantic": {
       "name": "@threadnote/semantic",
       "dependencies": {
-        "effect": "4.0.7",
+        "effect": "4.1.2",
       },
       "devDependencies": {
-        "@effect/vitest": "4.0.7",
+        "@effect/vitest": "4.1.2",
         "fast-check": "4.10.2",
         "vitest": "5.0.5",
       },
