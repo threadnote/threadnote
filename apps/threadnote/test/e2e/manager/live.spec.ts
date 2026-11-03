@@ -53,7 +53,7 @@ async function openMemory(page: Page, uri: string) {
   await expect(page.getByRole('button', {name: 'Edit', exact: true})).toBeEnabled();
 }
 
-test('S16 Home observes an external CLI mutation through the real live channel @compat', async ({page, manager}) => {
+test('S16 Home observes an external CLI mutation through the real live channel', async ({page, manager}) => {
   const sentinel = await manager.remember('Existing live sentinel.', 'live-sentinel');
   await liveTransport(page);
   const count = page.locator('.home-overview button').filter({hasText: 'Memories'}).locator('strong');
@@ -71,7 +71,7 @@ test('S16 Home observes an external CLI mutation through the real live channel @
 });
 
 for (const changed of [false, true]) {
-  test(`S16 transport recovery preserves an unsaved draft when canonical state ${changed ? 'changes' : 'stays unchanged'} @compat`, async ({
+  test(`S16 transport recovery preserves an unsaved draft when canonical state ${changed ? 'changes' : 'stays unchanged'}`, async ({
     page,
     manager,
   }) => {

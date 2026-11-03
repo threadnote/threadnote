@@ -27,7 +27,7 @@ async function memoryAction(page: Page, action: string): Promise<void> {
   await page.getByRole('menuitem', {name: action, exact: true}).click();
 }
 
-test('S03 library search, memory links and navigation preserve canonical identity @compat', async ({page, manager}) => {
+test('S03 library search, memory links and navigation preserve canonical identity', async ({page, manager}) => {
   const second = await manager.remember('A second mémoire — 日本語 🧭.', 'linked-memory', 'other-project');
   const identity = /memory_id: (tn_\S+)/u.exec(await manager.cli(['read', second]))?.[1];
   expect(identity).toMatch(/^tn_/u);
@@ -58,10 +58,7 @@ test('S03 library search, memory links and navigation preserve canonical identit
   expect(await manager.cli(['read', first])).toContain(`[Related memory](${second})`);
 });
 
-test('S04 rich editing and source mode save actual Markdown without changing identity @compat', async ({
-  page,
-  manager,
-}) => {
+test('S04 rich editing and source mode save actual Markdown without changing identity', async ({page, manager}) => {
   const uri = await manager.remember('# Original heading\n\nOriginal paragraph.', 'editable-memory');
   await openMemory(page, 'Editable memory');
   const before = await manager.cli(['read', uri]);

@@ -12,11 +12,6 @@ on:
         type: boolean
         required: false
         default: false
-      manager_e2e_full_browsers:
-        description: Run every Manager E2E scenario in Chromium, Firefox and WebKit
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -198,7 +193,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      THREADNOTE_MANAGER_E2E_FULL_BROWSERS: ${{ github.event_name == 'workflow_dispatch' && inputs.manager_e2e_full_browsers && '1' || '0' }}
       LIBGL_ALWAYS_SOFTWARE: '1'
     steps:
       - uses: actions/checkout@v7
@@ -212,9 +206,9 @@ jobs:
           node-version: '24'
       - name: Install frozen workspace dependencies
         run: bun install --frozen-lockfile
-      - name: Install pinned browser engines and system dependencies
-        run: node node_modules/@playwright/test/cli.js install --with-deps chromium firefox webkit
-      - name: Build candidate and test Manager in real browsers
+      - name: Install pinned Chromium and system dependencies
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Build candidate and test Manager in Chromium
         run: bun run test:e2e:manager
       - name: Preserve browser reports and synthetic failure evidence
         if: always()

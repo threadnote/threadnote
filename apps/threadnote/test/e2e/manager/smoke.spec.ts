@@ -1,6 +1,6 @@
 import {test, expect} from './fixtures/test.js';
 
-test('S01 opens the actual compiled Manager with protected APIs @compat', async ({page, manager, request}) => {
+test('S01 opens the actual compiled Manager with protected APIs', async ({page, manager, request}) => {
   await expect(page.getByRole('heading', {name: 'Threadnote', exact: true})).toBeVisible();
   expect((await manager.api('/api/state')).version).toBe(manager.expectedVersion);
   const denied = await request.get(manager.origin + '/api/tree');
@@ -44,7 +44,7 @@ test.describe('source asset resolution', () => {
 
 test.describe('populated disposable home', () => {
   test.use({managerScenario: 'populated'});
-  test('S01 reads a real CLI-authored memory in the browser @compat', async ({page}) => {
+  test('S01 reads a real CLI-authored memory in the browser', async ({page}) => {
     await page.getByRole('button', {name: 'Library', exact: true}).click();
     await page.locator('.tree-file').filter({hasText: 'Browser fixture'}).click();
     await expect(page.getByText('A synthetic memory for Manager browser coverage.', {exact: true})).toBeVisible();

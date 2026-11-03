@@ -123,10 +123,7 @@ test.describe('configured provider journeys', () => {
   }
 });
 
-test('S15 all five catalog forms require valid names and credentials before saving @compat', async ({
-  page,
-  manager,
-}) => {
+test('S15 all five catalog forms require valid names and credentials before saving', async ({page, manager}) => {
   await page
     .getByRole('navigation', {name: 'Manager sections'})
     .getByRole('button', {name: 'Integrations', exact: true})

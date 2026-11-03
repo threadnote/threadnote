@@ -1,6 +1,5 @@
 import {expect, test as base} from '@playwright/test';
 import {ManagerRuntime} from './runtime.js';
-import {configureSetup} from './setup.js';
 import {configureModel} from './model.js';
 import {configureProviders} from './providers.js';
 import {Array as EffectArray, pipe} from 'effect';
@@ -29,8 +28,6 @@ export const test = base.extend<ManagerFixtures>({
             PATH: process.env.PATH ?? '/usr/bin:/bin',
             HOME: home,
             USERPROFILE: home,
-            // Firefox 156 on macOS also resolves app-data through this Cocoa variable.
-            CFFIXED_USER_HOME: home,
             TMPDIR: home,
             TMP: home,
             TEMP: home,
@@ -58,7 +55,10 @@ export const test = base.extend<ManagerFixtures>({
     const manager = await ManagerRuntime.create();
     try {
       if (managerScenario === 'remote-model') await configureModel(manager);
-      if (managerScenario === 'model-setup') await configureSetup(manager);
+      if (managerScenario === 'model-setup') {
+        const {configureSetup} = await import('./setup.js');
+        await configureSetup(manager);
+      }
       await manager.start(managerMode);
       if (managerScenario === 'populated')
         await manager.remember(
@@ -116,7 +116,7 @@ export const test = base.extend<ManagerFixtures>({
               return '';
             });
             if (!body && response.request().method() === 'GET') {
-              // WebKit may return an empty body when navigation cancels the read after headers.
+              // Navigation can cancel a read after headers; verify its exact body through the same authenticated route.
               const current = await fetch(response.url(), {
                 headers: {authorization: `Bearer ${manager.token}`},
                 signal: AbortSignal.timeout(5_000),
@@ -155,10 +155,7 @@ export const test = base.extend<ManagerFixtures>({
         expectedResponses.add(request.url());
         return;
       }
-      if (
-        pipe(request.url(), EffectString.startsWith(manager.origin)) &&
-        !/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|cancelled|Load request cancelled)$/u.test(error)
-      )
+      if (pipe(request.url(), EffectString.startsWith(manager.origin)) && !/^net::ERR_ABORTED$/u.test(error))
         failures.push(`First-party request failed: ${new URL(request.url()).pathname}: ${error}`);
     });
     await page.route('**/*', async route => {

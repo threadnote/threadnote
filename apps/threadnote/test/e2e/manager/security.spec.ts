@@ -74,7 +74,7 @@ test('S18 missing authority, foreign live origins and reused tickets cannot muta
   }
 });
 
-test('S18 hostile Markdown, script URLs, instruction canaries and forged Mermaid messages remain inert @compat', async ({
+test('S18 hostile Markdown, script URLs, instruction canaries and forged Mermaid messages remain inert', async ({
   page,
   manager,
 }) => {

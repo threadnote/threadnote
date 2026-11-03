@@ -1,6 +1,6 @@
 import {test, expect} from './fixtures/test.js';
 
-test('S02 every shipped section opens in an empty account @compat', async ({page}) => {
+test('S02 every shipped section opens in an empty account', async ({page}) => {
   const navigation = page.getByRole('navigation', {name: 'Manager sections'});
   const sections = [
     'Home',
@@ -26,7 +26,7 @@ test('S02 every shipped section opens in an empty account @compat', async ({page
   }
 });
 
-test('S02 theme, keyboard navigation width and collapse persist after reload @compat', async ({page}) => {
+test('S02 theme, keyboard navigation width and collapse persist after reload', async ({page}) => {
   await page.getByRole('button', {name: 'Dark', exact: true}).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   const resize = page.getByRole('separator', {name: 'Resize navigation panel'});
@@ -43,7 +43,7 @@ test('S02 theme, keyboard navigation width and collapse persist after reload @co
   await expect(resize).toHaveAttribute('aria-valuenow', changed!);
 });
 
-test('S02 Home authors a user memory and the saved record survives reload @compat', async ({page, manager}) => {
+test('S02 Home authors a user memory and the saved record survives reload', async ({page, manager}) => {
   await page.getByRole('button', {name: 'New memory', exact: true}).first().click();
   await page.getByRole('textbox', {name: 'Memory title'}).fill('created-from-home');
   await page.getByPlaceholder('project', {exact: true}).fill('manager-e2e');

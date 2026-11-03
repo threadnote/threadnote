@@ -3,7 +3,7 @@ import {createRepository, indexRepository, rememberCited} from './fixtures/repos
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 
-test('S08 the real graph scene queries a symbol and opens indexed source and relationships @compat', async ({
+test('S08 the real graph scene queries a symbol and opens indexed source and relationships', async ({
   page,
   manager,
 }) => {
@@ -25,6 +25,12 @@ test('S08 the real graph scene queries a symbol and opens indexed source and rel
   await expect(page.getByRole('button', {name: 'Query graph', exact: true})).toBeEnabled();
   await page.getByText('Search and relationship filters', {exact: true}).click();
   await expect(page.locator('canvas')).toBeVisible();
+  expect(
+    await page.locator('canvas').evaluate((canvas: HTMLCanvasElement) => {
+      const context = canvas.getContext('webgl2');
+      return context !== null && !context.isContextLost();
+    }),
+  ).toBe(true);
   await page.getByRole('searchbox', {name: 'Find in current view', exact: true}).fill(repository.symbol);
   const result = page.locator('.graph-search-results').getByRole('button').filter({hasText: repository.symbol});
   await expect(result).toBeVisible();

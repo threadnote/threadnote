@@ -8,10 +8,7 @@ import {createAutomaticReview, fixtureTool, prepareAutomaticReview, proposeMemor
 import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray} from 'effect';
 
-test('S11 proposed memories require an explicit decision and survive defer/reopen/apply @compat', async ({
-  page,
-  manager,
-}) => {
+test('S11 proposed memories require an explicit decision and survive defer/reopen/apply', async ({page, manager}) => {
   const identity = await proposeMemory(manager, 'browser-review');
   await page.getByRole('button', {name: 'Refresh manager', exact: true}).click();
   await page

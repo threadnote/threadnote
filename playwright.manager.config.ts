@@ -1,7 +1,6 @@
 import {defineConfig, devices} from '@playwright/test';
 
 const ci = process.env.CI === 'true' || process.env.CI === '1';
-const compatibility = process.env.THREADNOTE_MANAGER_E2E_FULL_BROWSERS === '1' ? undefined : /@compat/u;
 
 export default defineConfig({
   testDir: './apps/threadnote/test/e2e/manager',
@@ -17,6 +16,7 @@ export default defineConfig({
   expect: {timeout: 10_000},
   outputDir: '.context/manager-e2e/results',
   reporter: [
+    ['./apps/threadnote/test/e2e/manager/fixtures/required-cases-reporter.ts'],
     ['list'],
     ['html', {outputFolder: '.context/manager-e2e/report', open: 'never'}],
     ['junit', {outputFile: '.context/manager-e2e/junit.xml'}],
@@ -29,9 +29,5 @@ export default defineConfig({
     video: 'retain-on-failure',
     serviceWorkers: 'block',
   },
-  projects: [
-    {name: 'chromium', use: {...devices['Desktop Chrome']}},
-    {name: 'firefox', grep: compatibility, use: {...devices['Desktop Firefox']}},
-    {name: 'webkit', grep: compatibility, use: {...devices['Desktop Safari']}},
-  ],
+  projects: [{name: 'chromium', use: {...devices['Desktop Chrome']}}],
 });

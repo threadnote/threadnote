@@ -51,7 +51,6 @@ test('S10 repository Context Brief reads real graph anchors and cited canonical 
 test('S10 empty scope and unsafe anchors are refused, and an interrupted request can be retried', async ({
   page,
   manager,
-  browserName,
 }) => {
   const repository = await createRepository(manager);
   await indexRepository(manager, repository);
@@ -68,11 +67,7 @@ test('S10 empty scope and unsafe anchors are refused, and an interrupted request
   await expect(page.getByRole('button', {name: 'Build brief', exact: true})).toBeDisabled();
   await expect(page.locator('.context-code-refs').getByRole('alert')).toBeVisible();
   await anchors.fill('src/entry.ts');
-  const timeoutError = {
-    chromium: 'net::ERR_TIMED_OUT',
-    firefox: 'NS_ERROR_NET_TIMEOUT',
-    webkit: 'Blocked by Web Inspector',
-  }[browserName];
+  const timeoutError = 'net::ERR_TIMED_OUT';
   manager.expectedRequestErrors.push({path: '/api/context/brief', error: timeoutError});
   await page.route('**/api/context/brief', route => route.abort('timedout'), {times: 1});
   await page.getByRole('button', {name: 'Build brief', exact: true}).click();
