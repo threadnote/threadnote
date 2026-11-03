@@ -62,10 +62,15 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
       if (errors.length) return yield* LspFault.make({code: 'prerequisite'});
       const configuration = yield* Schema.decodeUnknownEffect(
         Schema.Struct({
+          compilerOptions: Schema.optional(
+            Schema.Struct({
+              plugins: Schema.optional(Schema.Array(Schema.Json).check(Schema.isMaxLength(0))),
+            }),
+          ),
           extends: Schema.optional(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
           references: Schema.optional(Schema.Array(Schema.Struct({path: Schema.String}))),
         }),
-      )(raw);
+      )(raw).pipe(Effect.mapError(() => LspFault.make({code: 'prerequisite'})));
       const extensions =
         typeof configuration.extends === 'string' ? [configuration.extends] : (configuration.extends ?? []);
       for (const base of extensions) {
@@ -84,6 +89,9 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
         const resolved = path.resolve(path.dirname(file), reference.path);
         if (!EffectString.startsWith(canonical + path.sep)(resolved) || (yield* fs.realPath(resolved)) !== resolved)
           return yield* LspFault.make({code: 'prerequisite'});
+        yield* validateConfiguration(
+          (yield* fs.stat(resolved)).type === 'Directory' ? path.join(resolved, 'tsconfig.json') : resolved,
+        );
       }
     });
   const largeReads = sdk ? yield* Semaphore.make(1) : undefined;

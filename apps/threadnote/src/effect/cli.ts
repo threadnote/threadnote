@@ -1878,7 +1878,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('activate', makeActivationCommand(withScopedRuntime)),
   registerTopLevelCommand('guidance', makeGuidanceCommand(withScopedRuntime), guidanceCommandMetadata),
   registerTopLevelCommand('agents', makeAgentsCommand(withScopedRuntime), agentsCommandMetadata),
-  registerTopLevelCommand('semantic', makeSemanticCommand(), {productionLog: {mode: 'never'}}),
+  registerTopLevelCommand('semantic', makeSemanticCommand(withRuntimeEffect), {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('manage', manage),
   registerTopLevelCommand('processes', processes, {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('doctor', doctor),

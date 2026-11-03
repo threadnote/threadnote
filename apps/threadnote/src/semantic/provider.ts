@@ -92,6 +92,8 @@ export interface SemanticSession {
     | undefined,
     unknown
   >;
+  /** Provider-aware current observation; Java includes its own full publication fences. */
+  readonly observation: (uri: string) => Effect.Effect<Observation | undefined, unknown>;
   readonly available: Effect.Effect<boolean>;
   readonly invalidate: Effect.Effect<void>;
   readonly close: LspClient['close'];

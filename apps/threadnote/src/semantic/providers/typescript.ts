@@ -1,7 +1,7 @@
 import * as EffectArray from 'effect/Array';
-import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
 import {Effect, Exit, Option, Schema, Semaphore} from 'effect';
+import {typeScriptPolicyCommand, typeScriptPolicyVersion} from './typescript_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   Evidence,
@@ -58,6 +58,10 @@ export interface TypeScriptSessionOptions {
   readonly basis: Observation;
   /** Absolute SDK path comes only from the host-qualified candidate, never repository configuration. */
   readonly tsserver: string;
+  readonly compiler: string;
+  readonly sourceRoot: string;
+  readonly verifyPolicy: Effect.Effect<void, unknown>;
+  readonly challenge: Effect.Effect<string, unknown>;
   readonly maxMemoryMb: number;
   readonly startupMilliseconds: number;
 }
@@ -80,11 +84,14 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
   const basis = structuredClone(yield* decode(Observation, options.basis));
   if (
     !EffectString.startsWith('/')(options.tsserver) ||
+    !EffectString.startsWith('/')(options.compiler) ||
+    !EffectString.startsWith('/')(options.sourceRoot) ||
     !Number.isSafeInteger(options.maxMemoryMb) ||
     options.maxMemoryMb < 128 ||
     options.maxMemoryMb > 4096
   )
     return yield* invalid();
+  yield* options.verifyPolicy;
   const initialized = yield* client.request(
     'initialize',
     {
@@ -99,7 +106,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       initializationOptions: {
         disableAutomaticTypingAcquisition: true,
         plugins: [],
-        tsserver: {path: options.tsserver, fallbackPath: options.tsserver},
+        tsserver: {path: options.tsserver, fallbackPath: options.tsserver, useSyntaxServer: 'never'},
         maxTsServerMemory: options.maxMemoryMb,
       },
     },
@@ -139,13 +146,52 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       },
       milliseconds,
     );
-  const allowedRoots = [
-    decodeURIComponent(new URL(basis.worktree).pathname),
-    EffectString.slice(
-      0,
-      EffectOption.getOrElse(EffectString.lastIndexOf('/')(options.tsserver), () => -1),
-    )(options.tsserver),
-  ];
+  let processInstance: string | undefined;
+  const policy = (milliseconds: number) =>
+    Effect.gen(function* () {
+      const challenge = yield* options.challenge;
+      if (!/^[a-f0-9]{64}$/u.test(challenge)) return yield* invalid();
+      yield* options.verifyPolicy;
+      const raw = yield* client.request(
+        'workspace/executeCommand',
+        {
+          command: 'typescript.tsserverRequest',
+          arguments: [typeScriptPolicyCommand, {challenge}, {expectsResult: true, isAsync: false}],
+        },
+        Math.min(milliseconds, 2000),
+      );
+      const response = yield* decode(
+        Schema.Struct({
+          success: Schema.Literal(true),
+          body: Schema.Struct({
+            policy: Schema.Literal(typeScriptPolicyVersion),
+            launcher: Schema.Literal(options.tsserver),
+            compiler: Schema.Literal(options.compiler),
+            version: Schema.Literal('6.0.3'),
+            pid: Counter.check(Schema.isGreaterThan(0)),
+            instance: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+            challenge: Schema.Literal(challenge),
+            locked: Schema.Literal(true),
+          }),
+        }),
+        raw,
+      );
+      const instance = response.body.pid + ':' + response.body.instance;
+      if (invalidated || (processInstance !== undefined && processInstance !== instance))
+        return yield* SemanticSessionFault.make({reason: 'not-ready'});
+      processInstance = instance;
+    }).pipe(
+      Effect.timeoutOption(Math.min(milliseconds, 2000)),
+      Effect.flatMap(result => (Option.isSome(result) ? Effect.void : Effect.fail(LspFault.make({code: 'timeout'})))),
+      Effect.onExit(exit =>
+        Effect.sync(() => {
+          if (Exit.isFailure(exit)) invalidated = true;
+        }),
+      ),
+    );
+  // Initialization alone can silently fall back to an unguarded SDK. No document opens before this proof.
+  yield* policy(options.startupMilliseconds);
+  const allowedRoots = [decodeURIComponent(new URL(basis.worktree).pathname), options.sourceRoot];
   const contained = (file: string) =>
     EffectString.startsWith('/')(file) &&
     !EffectString.includes('//')(file) &&
@@ -189,6 +235,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
           !['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(language)
         )
           return yield* invalid();
+        yield* policy(milliseconds);
         const previous = documents.get(fixed.uri);
         if (
           previous &&
@@ -282,6 +329,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       if (!document) return stale();
       if (operation !== 'symbols' && (!position || !validTextPosition(document.text, position)))
         return yield* invalid();
+      yield* policy(milliseconds);
       const method = operation === 'symbols' ? 'textDocument/documentSymbol' : `textDocument/${operation}`;
       const response = yield* client.request(
         method,
@@ -293,6 +341,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
         milliseconds,
       );
       const project = yield* projectInfo(fixed.uri, milliseconds);
+      yield* policy(milliseconds);
       if (!current(fixed) || document.project?.configuration !== project.configuration) return stale();
       let items: Schema.Json[];
       if (operation === 'definition' || operation === 'references') {
@@ -350,6 +399,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
           }
         }
         const project = yield* projectInfo(fixed.uri, milliseconds);
+        yield* policy(milliseconds);
         if (
           !current(fixed) ||
           document.project?.configuration !== project.configuration ||
@@ -384,6 +434,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     });
   return {
     upsert,
+    verifyPolicy: policy(2000),
     available: Effect.sync(() => !invalidated),
     project: (uri: string) => Effect.sync(() => structuredClone(documents.get(uri)?.project)),
     query,
