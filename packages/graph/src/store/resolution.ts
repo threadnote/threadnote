@@ -928,9 +928,10 @@ const promoteSnapshot = Effect.fn('codeGraph.promoteSnapshot')(function* (
       ) {
         return yield* CodeGraphStoreError.of('Code graph removed view authority is invalid.');
       }
-      // Exact automatic reuse preserves the attachment epoch and every existing demand claim.
+      // Exact reuse preserves the attachment epoch and every existing demand claim,
+      // including structural-only builders racing an independent semantic publisher.
       // Decide under the same writer transaction as publication, never from a facade pre-read.
-      if (backgroundEmbeddingDemand && displacedSnapshotId === snapshotId && removedSnapshotId === undefined) {
+      if (displacedSnapshotId === snapshotId && removedSnapshotId === undefined) {
         return 0;
       }
       const observedLeaseCapacity = yield* snapshotPromotionLeaseCapacity(

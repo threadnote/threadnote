@@ -161,14 +161,19 @@ describe('deferred code-anchor workspace refresh', () => {
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
-  effectIt.effect('schedules still-present worktrees as background builder admission', () =>
+  effectIt.effect('schedules still-present worktrees as structural-only background builder admission', () =>
     Effect.gen(function* () {
       const fixture = yield* makeRefreshFixture();
       yield* fixture.fs.writeFileString(
         fixture.config.manifestPath,
         `version: 1\nprojects:\n  - name: selected\n    path: ${JSON.stringify(fixture.present)}\n    uri: threadnote://resources/repos/selected\n    seed: []\n    graph:\n      roots: [src]\n      closure: dependencies\n      include: []\n`,
       );
-      const scheduled: Array<{readonly admissionClass?: string; readonly cwd: string; readonly project?: string}> = [];
+      const scheduled: Array<{
+        readonly admissionClass?: string;
+        readonly cwd: string;
+        readonly project?: string;
+        readonly vectorPolicy?: string;
+      }> = [];
       yield* scheduleDeferredCodeAnchorWorkspaceRefresh(fixture.config, {
         cwd: fixture.present,
         worktreeId: Effect2.pipe('a', EffectString.repeat(64)),
@@ -197,6 +202,7 @@ describe('deferred code-anchor workspace refresh', () => {
                     Effect.sync(() => {
                       scheduled.push({
                         admissionClass: options.admissionClass,
+                        vectorPolicy: options.vectorPolicy,
                         cwd: options.cwd,
                         project: options.project?.name,
                       });
@@ -212,7 +218,9 @@ describe('deferred code-anchor workspace refresh', () => {
           ),
         ),
       );
-      expect(scheduled).toEqual([{admissionClass: 'background', cwd: fixture.present, project: 'selected'}]);
+      expect(scheduled).toEqual([
+        {admissionClass: 'background', vectorPolicy: 'off', cwd: fixture.present, project: 'selected'},
+      ]);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 

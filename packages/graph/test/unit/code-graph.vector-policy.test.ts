@@ -88,6 +88,28 @@ describe('graph vector completion policy', () => {
     ).toBe('background');
   });
 
+  it.each(['background', 'off'] as const)(
+    'preserves watcher %s policy through isolated child arguments',
+    vectorPolicy => {
+      const request = codeGraphWatcherRefreshIndexRequest({
+        admissionClass: 'background',
+        cwd: '/repo',
+        key: 'worktree',
+        threadnoteHome: '/home',
+        vectorPolicy,
+      });
+      expect(codeGraphIndexVectorPolicy(request)).toBe(vectorPolicy);
+      const plan = codeGraphIsolatedBuilderSpawnPlan(system, {
+        cwd: request.cwd,
+        threadnoteHome: request.threadnoteHome,
+        admissionClass: request.admissionClass,
+        vectorPolicy: request.vectorPolicy,
+      });
+      expect(plan.arguments.includes('--no-vectors')).toBe(vectorPolicy === 'off');
+      expect(plan.arguments.includes('--background-vectors')).toBe(vectorPolicy === 'background');
+    },
+  );
+
   fcProp(
     it,
     'isolates every policy across dirty targets and active/completed receipts without mutating inputs',
