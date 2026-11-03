@@ -19,7 +19,11 @@ import {canonicalFileUri, Counter, type Observation, type QueryOutcome} from '@t
 import type {Continuation} from '@threadnote/semantic/views';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {makeSemanticAgentQueryStore, semanticAgentQueryLimits} from '../../src/semantic/agent_query_store.js';
+import {
+  makeSemanticAgentDiskQueries,
+  makeSemanticAgentQueryStore,
+  semanticAgentQueryLimits,
+} from '../../src/semantic/agent_query_store.js';
 import {
   readSemanticHostProfile,
   semanticHostProfileName,
@@ -30,6 +34,7 @@ import {SemanticAgentQueryResult} from '../../src/semantic/agent_query_protocol.
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
+import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
 
 const profileIo = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 const queryIo = Layer.merge(profileIo, TestCommandExecutorLayer.pipe(Layer.provide(profileIo)));
@@ -245,6 +250,237 @@ const profileFixture = Effect.gen(function* () {
   const profileFile = path.join(home, 'semantic', 'profiles', semanticHostProfileName(config, worktree));
   const write = (value: unknown) => fs.writeFileString(profileFile, JSON.stringify(value), {mode: 0o600});
   return {fs, path, home, root, file, worktree, config, profile, profileFile, write};
+});
+
+type DiagnosticMode =
+  'ok' | 'missing-proof' | 'wrong-observation' | 'wrong-proof' | 'malformed-proof' | 'structural-proof' | 'timeout';
+const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (messages: readonly string[]) {
+  const f = yield* profileFixture;
+  yield* f.write(f.profile);
+  const started = yield* Deferred.make<void>();
+  const runtime = sha256HexSync('diagnostic-runtime');
+  const items = EffectArray.map(messages, (message, code) => ({
+    id: sha256HexSync(JSON.stringify([code, message])),
+    range: {start: {line: 0, character: 0}, end: {line: 0, character: 1}},
+    code,
+    category: 'error',
+    message,
+  }));
+  let mode: DiagnosticMode = 'ok';
+  let current: Observation | undefined;
+  let calls = 0;
+  const api: SemanticSession = {
+    upsert: () => Effect.die('The coordinator owns attachment'),
+    query: () => Effect.die('Diagnostics must not issue navigation queries'),
+    diagnostics: observed =>
+      Effect.gen(function* () {
+        calls++;
+        yield* Deferred.succeed(started, undefined);
+        if (mode === 'timeout') return yield* Effect.never;
+        const proof = outcome([], observed).evidence;
+        return {
+          observation: mode === 'wrong-observation' ? {...observed, projectEpoch: observed.projectEpoch + 1} : observed,
+          ...(mode === 'missing-proof'
+            ? {}
+            : {
+                evidence:
+                  mode === 'wrong-proof'
+                    ? {...proof, observation: {...observed, projectEpoch: observed.projectEpoch + 1}}
+                    : mode === 'malformed-proof'
+                      ? {...proof, scope: '\ninvalid'}
+                      : mode === 'structural-proof'
+                        ? {...proof, basis: 'structural' as const}
+                        : proof,
+              }),
+          items,
+          added: calls === 1 ? items : [],
+          remaining: calls === 1 ? [] : items,
+          resolved: [],
+        };
+      }),
+    project: () => Effect.die('The coordinator owns project verification'),
+    observation: () => Effect.succeed(current),
+    available: Effect.succeed(true),
+    invalidate: Effect.void,
+    close: Effect.die('No provider process exists in this fixture'),
+  };
+  const coordinator: Parameters<typeof makeSemanticAgentDiskQueries>[0] = {
+    attach: seed =>
+      Effect.sync(() => {
+        current = {
+          ...seed,
+          configuration: sha256HexSync('diagnostic-config'),
+          toolchain: sha256HexSync('diagnostic-tools'),
+          provider: {...seed.provider, version: 'v0.24.0', generation: 1},
+          projectEpoch: 1,
+        };
+        return {
+          observation: current,
+          status: 'experimental' as const,
+          completeness: 'partial' as const,
+          edits: 'preparation-only' as const,
+          project: undefined,
+        };
+      }),
+    observe: () => Effect.succeed(current),
+    use: (_observed, _milliseconds, action) => action(api),
+  };
+  const disk = yield* makeSemanticAgentDiskQueries(coordinator, f.worktree, runtime);
+  const services = yield* Effect.context<Effect.Services<ReturnType<typeof disk.query>>>();
+  const host: SemanticAgentQueryHost = {
+    runtimeIdentity: Effect.succeed(runtime),
+    connect: () =>
+      Effect.succeed({
+        request: body => {
+          if (body.operation !== 'agent-query') return Effect.die('Unexpected endpoint operation');
+          return disk.query(body.request).pipe(
+            Effect.provide(services),
+            Effect.catch(error =>
+              Effect.succeed({
+                status: 'unavailable',
+                reason: Schema.is(SemanticSessionFault)(error) ? error.reason : 'provider',
+              }),
+            ),
+            Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+            Effect.mapError(() => LspFault.make({code: 'protocol'})),
+          );
+        },
+      }),
+  };
+  return {
+    ...f,
+    host,
+    started,
+    items,
+    input: {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'diagnostics', maxBytes: 8192},
+    calls: () => calls,
+    status: disk.status,
+    mode: (value: DiagnosticMode) => {
+      mode = value;
+    },
+    drift: () => {
+      if (current) current = {...current, content: sha256HexSync('changed source')};
+    },
+  };
+});
+
+describe('host-bound public document diagnostics', () => {
+  effectIt.effect('projects only diagnostic summary fields without mutating provider payloads', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['reported message']);
+      const expected = structuredClone(f.items);
+      const item = f.items[0];
+      if (!item) throw new Error('Missing fixture diagnostic');
+      Object.assign(item, {data: {internal: 'item sentinel'}, source: 'provider metadata'});
+      Object.assign(item.range, {data: {internal: 'range sentinel'}});
+      Object.assign(item.range.start, {internal: 'start sentinel'});
+      Object.assign(item.range.end, {internal: 'end sentinel'});
+      const original = structuredClone(f.items);
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') expect(result.items).toEqual(expected);
+      expect(f.items).toEqual(original);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect.prop(
+    'pages reconstruct the complete current snapshot even when subsequent delivery deltas contain no added items',
+    [
+      Schema.Array(Schema.String.check(Schema.isMaxLength(80))).check(Schema.isMaxLength(12)),
+      Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(5)),
+    ],
+    ([messages, maxItems]) =>
+      Effect.gen(function* () {
+        const f = yield* diagnosticsFixture(messages);
+        const original = structuredClone(f.items);
+        const collected: Schema.Json[] = [];
+        let cursor: Continuation | undefined;
+        do {
+          const page = yield* runSemanticAgentQueryWith(f.host, f.config, {
+            ...f.input,
+            maxItems,
+            ...(cursor ? {cursor} : {}),
+          });
+          expect(page.status).toBe('ok');
+          if (page.status !== 'ok') throw new Error('Missing diagnostic page');
+          expect(page.evidence.scope).toContain('document:');
+          expect(page.evidence.completeness).toBe('partial');
+          expect(page.evidence.limitations).toEqual(['Fixture scope']);
+          expect(page.items.length).toBeLessThanOrEqual(maxItems);
+          expect(new TextEncoder().encode(JSON.stringify(page)).length).toBeLessThanOrEqual(f.input.maxBytes);
+          collected.push(...page.items);
+          cursor = page.next ?? undefined;
+        } while (cursor);
+        expect(collected).toEqual(original);
+        expect(f.calls()).toBe(1);
+        const repeated = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems});
+        expect(repeated.status).toBe('ok');
+        if (repeated.status === 'ok') expect(repeated.items).toEqual(EffectArray.take(original, maxItems));
+        expect(f.calls()).toBe(2);
+        expect(f.items).toEqual(original);
+      }).pipe(provideTestLayer(queryIo)),
+    {arbitrary: {runs: 16}},
+  );
+  effectIt.effect('distinguishes an empty diagnostic snapshot, unavailable proof and mismatched observations', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture([]);
+      const empty = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(empty.status).toBe('ok');
+      if (empty.status === 'ok') {
+        expect(empty.items).toEqual([]);
+        expect(empty.remaining).toBe(0);
+        expect(empty.next).toBeNull();
+        expect(empty.evidence.completeness).toBe('partial');
+      }
+      for (const [mode, status] of [
+        ['missing-proof', 'unsupported'],
+        ['wrong-observation', 'stale'],
+        ['wrong-proof', 'stale'],
+        ['malformed-proof', 'unavailable'],
+        ['structural-proof', 'unavailable'],
+      ] as const) {
+        f.mode(mode);
+        const before = f.status();
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe(status);
+        expect(result.evidence).toBeNull();
+        expect(f.status()).toEqual(before);
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('rejects stale diagnostic continuations without requesting a replacement snapshot', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first', 'second']);
+      const first = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, maxItems: 1});
+      if (first.status !== 'ok' || !first.next) throw new Error('Missing diagnostic continuation');
+      expect(
+        (yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, operation: 'symbols', cursor: first.next}))
+          .status,
+      ).toBe('stale');
+      expect(f.calls()).toBe(1);
+      f.drift();
+      const next = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, cursor: first.next});
+      expect(next.status).toBe('stale');
+      expect(f.calls()).toBe(1);
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('keeps diagnostics deadline-bound and rejects positional requests before provider work', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture(['first']);
+      expect(
+        (yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, position: {line: 0, character: 0}})).status,
+      ).toBe('invalid-request');
+      expect(f.calls()).toBe(0);
+      f.mode('timeout');
+      const pending = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 15}).pipe(
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(f.started);
+      yield* TestClock.adjust(15);
+      expect((yield* Fiber.join(pending)).status).toBe('timeout');
+      expect(f.status()).toEqual({snapshots: 0, retainedBytes: 0});
+    }).pipe(provideTestLayer(queryIo)),
+  );
 });
 
 describe('private semantic host profiles and the canonical application read', () => {

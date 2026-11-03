@@ -7,9 +7,14 @@ import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/wor
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ensureSemanticEndpoint} from './coordinator.js';
 import {LspFault} from './lsp_transport.js';
-import {SemanticLanguage, SemanticQuery, SemanticSessionFault} from './provider.js';
+import {SemanticLanguage, SemanticSessionFault} from './provider.js';
 import {readSemanticHostProfile, SemanticHostProfileFault} from './host_profile.js';
-import {SemanticAgentQuery, SemanticAgentQueryResult, semanticAgentQueryKey} from './agent_query_protocol.js';
+import {
+  SemanticAgentQuery,
+  SemanticAgentQueryResult,
+  SemanticAgentReadOperation,
+  semanticAgentQueryKey,
+} from './agent_query_protocol.js';
 import {semanticHostSelection} from './host_catalog.js';
 
 const fail = (status: Exclude<SemanticAgentQueryResult['status'], 'ok'>, reason: string): SemanticAgentQueryResult => ({
@@ -75,13 +80,15 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       'unsupported',
       request.language === 'kotlin' ? 'Kotlin remains deferred' : 'No semantic provider is selected for this language',
     );
-  if (!Schema.is(SemanticQuery)(request.operation))
+  if (!Schema.is(SemanticAgentReadOperation)(request.operation))
     return fail(
       'unsupported',
-      'This surface supports saved-disk navigation queries; public diagnostics, context and changes remain pending',
+      'This surface supports saved-disk navigation and document diagnostics; public context and changes remain pending',
     );
   const language = request.language;
   const operation = request.operation;
+  if (operation === 'diagnostics' && request.position !== undefined)
+    return fail('invalid-request', 'Diagnostics reports the attached document; omit position');
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   if (!path.isAbsolute(request.callerCwd))

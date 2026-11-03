@@ -50,6 +50,8 @@ describe('semantic capability discovery', () => {
       project: 'not-assessed',
       queries: 'requires-host-profile',
     });
+    expect(result.readSurface.operations).toContain('diagnostics');
+    expect(result.readSurface.pending).not.toContain('diagnostics');
     for (const provider of result.providers) {
       expect(provider.productionQualified).toBe(false);
       expect(provider.license.disposition).toBe('release-gated');

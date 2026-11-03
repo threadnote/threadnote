@@ -1,8 +1,7 @@
 import type {CliRuntimeRunner} from './cli_runtime_contract.js';
 import {runSemanticAgentQuery} from '../semantic/agent_queries.js';
-import {formatSemanticAgentQuery} from '../semantic/agent_query_protocol.js';
+import {formatSemanticAgentQuery, SemanticAgentReadOperation} from '../semantic/agent_query_protocol.js';
 import {LspFault} from '../semantic/lsp_transport.js';
-import {SemanticQuery} from '../semantic/provider.js';
 import {Array as EffectArray, Console, Effect, Schema, Stdio, Stream} from 'effect';
 import {Command} from 'effect/cli';
 import {Identifier} from '@threadnote/semantic/contracts';
@@ -54,10 +53,10 @@ export function semanticCapabilities(input: unknown = {}) {
     },
     readSurface: {
       scope: 'api-operations' as const,
-      operations: [...SemanticQuery.literals],
+      operations: [...SemanticAgentReadOperation.literals],
       view: 'disk' as const,
       providerCapabilities: 'assessed-per-project' as const,
-      pending: ['diagnostics', 'context', 'owned-overlays', 'changes'],
+      pending: ['context', 'owned-overlays', 'changes'],
     },
     providers,
     reason: deferred
@@ -66,7 +65,7 @@ export function semanticCapabilities(input: unknown = {}) {
         ? 'No selected provider for this language'
         : null,
     nextAction:
-      'Saved-disk reads require an enabled private host profile and standalone runtime. Public diagnostics, owned overlays and context composition remain pending; graph and memory remain available.',
+      'Saved-disk navigation and document diagnostics require an enabled private host profile and standalone runtime. Owned overlays and context composition remain pending; graph and memory remain available.',
   });
 }
 

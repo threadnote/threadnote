@@ -333,11 +333,13 @@ describe('TypeScript observation fences', () => {
       yield* session.upsert(a, 'x', 'typescript', 1000);
       const initial = yield* session.diagnostics(a, 1000);
       expect(initial.added).toHaveLength(1);
+      expect(initial.evidence).toMatchObject({basis: 'semantic', observation: a, completeness: 'partial'});
       expect((yield* session.diagnostics(a, 1000)).remaining).toHaveLength(1);
       mismatch = false;
       const b = yield* session.upsert(observation('y', {documentVersion: 2}), 'y', 'typescript', 1000);
       const cleared = yield* session.diagnostics(b, 1000);
       expect(cleared.items).toEqual([]);
+      expect(cleared.evidence).toMatchObject({basis: 'semantic', observation: b, completeness: 'partial'});
       expect(cleared.resolved).toMatchObject([{observation: a, resolvedIn: b}]);
       const exposed = yield* session.observation(b.uri);
       expect(exposed).toEqual(b);

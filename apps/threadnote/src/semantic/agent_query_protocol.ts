@@ -13,6 +13,7 @@ const MaxItems = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessTh
 const MaxBytes = Counter.check(Schema.isGreaterThanOrEqualTo(1024), Schema.isLessThanOrEqualTo(8 * 1024 * 1024));
 const Milliseconds = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(45000));
 const Cursor = Schema.Struct({...Continuation.fields, observation: Schema.String.check(Schema.isMaxLength(32768))});
+export const SemanticAgentReadOperation = Schema.Literals([...SemanticQuery.literals, 'diagnostics']);
 
 /** Transport-neutral public input. There are deliberately no executable, setup or arbitrary command fields. */
 export const SemanticAgentQuery = Schema.Struct({
@@ -37,7 +38,7 @@ export const SemanticAgentEndpointQuery = Schema.Struct({
   project: FileUri,
   uri: FileUri,
   language: SemanticLanguage,
-  operation: SemanticQuery,
+  operation: SemanticAgentReadOperation,
   position: Schema.optionalKey(Position),
   environment: Schema.optionalKey(Identifier),
   profile: Digest,
