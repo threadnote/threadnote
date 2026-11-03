@@ -52,6 +52,7 @@ type TraversalMode = 'impact' | 'path';
 type ManifestManagementView = 'projects' | 'worksets';
 
 interface DefinitionDraft {
+  readonly error?: string;
   readonly description: string;
   readonly mode: 'create' | 'edit';
   readonly name: string;
@@ -510,10 +511,10 @@ export function WorksetsPanel(): React.ReactElement {
       );
     } catch (cause) {
       if (Schema.is(ManagerApiError)(cause) && cause.code === 'revision-conflict') {
-        setNotice('The manifest changed. Definitions were refreshed; your draft is preserved for review and retry.');
+        setDefinitionDraft({...definitionDraft, error: 'Manifest changed. Review your draft and retry.'});
         await loadCatalog();
       } else {
-        setNotice(errorMessage(cause));
+        setDefinitionDraft({...definitionDraft, error: errorMessage(cause)});
       }
     } finally {
       setDefinitionBusy(false);
@@ -1912,6 +1913,11 @@ function DefinitionEditor(props: {
             </label>
           ))}
         </div>
+        {props.draft.error ? (
+          <p className="worksets-error" role="alert">
+            {props.draft.error}
+          </p>
+        ) : null}
         <footer>
           <button disabled={props.busy} onClick={props.onCancel} type="button">
             Cancel

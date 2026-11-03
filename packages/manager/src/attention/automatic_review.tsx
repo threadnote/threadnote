@@ -134,7 +134,7 @@ export function AutomaticMemoryReviewDialog(props: {
           result.state === 'pending' &&
           !result.ownerProposal &&
           !result.canFinishVerification &&
-          (!result.approval || result.approval.stage === 'preview') &&
+          (!result.approval || result.approval.stage === 'preview' || result.approval.stage === 'parked') &&
           !hasApplicablePreview(result)
         ) {
           setAction('preview');

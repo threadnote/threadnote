@@ -109,7 +109,7 @@ export const runSharePublish = Effect.fn('share.runSharePublish')(function* (
   }
   const hasPendingCodeRefs = yield* hasDeferredCodeAnchorIntent(config, sourceUri);
   if (hasPendingCodeRefs && options.allowUncitedPendingCodeRefs !== true) {
-    throw ShareOperationError.make({
+    return yield* ShareOperationError.make({
       message: `Refusing to publish ${sourceUri}: code citations are still pending. Prepare the graph and run \`threadnote finalize-code-refs --uri ${sourceUri}\`, or explicitly pass --allow-uncited-pending-code-refs to publish without them and discard the private intent.`,
     });
   }

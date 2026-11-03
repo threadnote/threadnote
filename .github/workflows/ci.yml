@@ -34,6 +34,7 @@ jobs:
       bazel_validation: ${{ steps.selection.outputs.bazel_validation }}
       compile_targets: ${{ steps.selection.outputs.compile_targets }}
       execute_bazel: ${{ steps.shards.outputs.execute_bazel }}
+      manager_e2e: ${{ steps.selection.outputs.manager_e2e }}
       recall_quality: ${{ steps.selection.outputs.recall_quality }}
       release_matrix: ${{ steps.selection.outputs.release_matrix }}
       shard_matrix: ${{ steps.shards.outputs.matrix }}
@@ -185,6 +186,39 @@ jobs:
       - name: Execute Bazel shard
         run: bun tools/ci/bazel-run-selected.mjs ".context/bazel-selection/shards/${{ matrix.id }}.json"
 
+  manager-e2e:
+    name: Manager browser E2E
+    needs: bazel-plan
+    if: needs.bazel-plan.outputs.manager_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Install pinned Chromium and system dependencies
+        run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Build candidate and test Manager in Chromium
+        run: bun run test:e2e:manager
+      - name: Preserve browser reports and synthetic failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: manager-e2e
+          path: .context/manager-e2e/
+          include-hidden-files: true
+          retention-days: 7
+
   recall-quality:
     name: Recall quality and non-inferiority
     needs: bazel-plan
@@ -324,6 +358,7 @@ jobs:
         bazel-plan,
         bazel-plan-validation,
         bazel-shards,
+        manager-e2e,
         recall-quality,
         windows-smoke,
         standalone-targets,
@@ -340,6 +375,8 @@ jobs:
           BAZEL_PLAN_RESULT: ${{ needs.bazel-plan.result }}
           BAZEL_PLAN_VALIDATION_RESULT: ${{ needs.bazel-plan-validation.result }}
           BAZEL_SHARDS_RESULT: ${{ needs.bazel-shards.result }}
+          MANAGER_E2E_SELECTED: ${{ needs.bazel-plan.outputs.manager_e2e }}
+          MANAGER_E2E_RESULT: ${{ needs.manager-e2e.result }}
           COMPILE_SELECTED: ${{ needs.bazel-plan.outputs.compile_targets }}
           RECALL_SELECTED: ${{ needs.bazel-plan.outputs.recall_quality }}
           RELEASE_SELECTED: ${{ needs.bazel-plan.outputs.release_matrix }}
@@ -361,6 +398,7 @@ jobs:
             test "$BAZEL_SHARDS_RESULT" = skipped
           fi
           if [ "$RECALL_SELECTED" = true ]; then test "$RECALL_RESULT" = success; fi
+          if [ "$MANAGER_E2E_SELECTED" = true ]; then test "$MANAGER_E2E_RESULT" = success; fi
           if [ "$WINDOWS_SELECTED" = true ]; then test "$WINDOWS_RESULT" = success; fi
           if [ "$COMPILE_SELECTED" = true ]; then test "$STANDALONE_RESULT" = success; fi
           if [ "$RELEASE_SELECTED" = true ]; then

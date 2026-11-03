@@ -129,6 +129,46 @@ const mixed = {
 };
 
 describe('Integration catalog', () => {
+  it('renders slug patterns valid under HTML Unicode sets and equivalent to the slug character contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(mixed))),
+    );
+    await render(
+      <IntegrationsPanel
+        integrations={managerIntegrations}
+        onChanged={async () => undefined}
+        onReviews={() => undefined}
+      />,
+    );
+    await act(async () => button('Add integration').click());
+    for (const label of [
+      'Import notes',
+      'Connect GitHub',
+      'Connect Linear',
+      'Connect Pocket',
+      'Connect Superhuman Docs',
+    ]) {
+      await act(async () => button(label).click());
+      const pattern = document.querySelector<HTMLInputElement>('dialog input[pattern][placeholder]')?.pattern;
+      expect(pattern).toBeDefined();
+      const regex = new RegExp(`^(?:${pattern})$`, 'v');
+      const model = (value: string) =>
+        value.length > 0 &&
+        EffectString.includes(value[0])('abcdefghijklmnopqrstuvwxyz0123456789') &&
+        EffectArray.every([...value], char => EffectString.includes(char)('abcdefghijklmnopqrstuvwxyz0123456789._-'));
+      fc.assert(
+        fc.property(fc.string({maxLength: 80}), value => {
+          expect(regex.test(value)).toBe(model(value));
+        }),
+        {numRuns: 80, examples: [['my-project'], ['a_b.c-9'], ['Bad'], ['a/b']]},
+      );
+      await act(async () =>
+        document.querySelector<HTMLButtonElement>('dialog button[aria-label="Close details"]')!.click(),
+      );
+    }
+  });
+
   it('registers official product images and filters by product or capability', () => {
     expect(MANAGER_STATIC_FILES['/integrations/obsidian.svg']?.sourceDirectory).toBe(
       'packages/integration-obsidian/static',

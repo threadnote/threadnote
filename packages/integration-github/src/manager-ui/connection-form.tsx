@@ -135,7 +135,7 @@ export function GitHubConnectionForm({
             <input
               required
               maxLength={128}
-              pattern="[a-z0-9][a-z0-9._-]*"
+              pattern="[a-z0-9](?:[a-z0-9._]|-)*"
               value={id}
               disabled={!!source}
               onChange={event => setId(event.target.value)}
@@ -196,7 +196,7 @@ export function GitHubConnectionForm({
               Project slug
               <input
                 required
-                pattern="[a-z0-9][a-z0-9._-]*"
+                pattern="[a-z0-9](?:[a-z0-9._]|-)*"
                 value={project}
                 onChange={event => setProject(event.target.value)}
                 placeholder="my-project"

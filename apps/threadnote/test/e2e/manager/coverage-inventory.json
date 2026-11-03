@@ -1,0 +1,480 @@
+{
+  "schemaVersion": 1,
+  "browser": "chromium",
+  "requirements": {
+    "R1": ["S01", "S20"],
+    "R2": ["S02", "S07", "S08", "S10", "S11", "S12", "S13", "S14", "S15", "S17"],
+    "R3": ["S03", "S04", "S05", "S06"],
+    "R4": ["S07", "S08", "S09", "S10"],
+    "R5": ["S06", "S11", "S12"],
+    "R6": ["S13", "S14", "S15"],
+    "R7": ["S16", "S17"],
+    "R8": ["S01", "S05", "S16", "S18", "S20"],
+    "R9": ["S02", "S04", "S19"],
+    "R10": ["S01", "S20"]
+  },
+  "sections": {
+    "Home": ["S02", "S16"],
+    "Library": ["S03", "S04", "S05", "S06", "S18", "S19"],
+    "Context": ["S10", "S17"],
+    "Reviews": ["S11"],
+    "Context Health": ["S12"],
+    "Graph": ["S08", "S09"],
+    "Worksets": ["S07", "S09"],
+    "Development workflows": ["S14"],
+    "Sharing": ["S13"],
+    "Integrations": ["S15"],
+    "Processes": ["S17"],
+    "Runtime Health": ["S17"]
+  },
+  "providers": {
+    "obsidian": {
+      "file": "integrations.spec.ts",
+      "title": "S15 obsidian settings, sync, read and reviewed disconnection preserve unmanaged source"
+    },
+    "github": {
+      "file": "integrations.spec.ts",
+      "title": "S15 github settings, sync, read and reviewed disconnection preserve unmanaged source"
+    },
+    "linear": {
+      "file": "integrations.spec.ts",
+      "title": "S15 linear settings, sync, read and reviewed disconnection preserve unmanaged source"
+    },
+    "pocket": {
+      "file": "integrations.spec.ts",
+      "title": "S15 pocket settings, sync, read and reviewed disconnection preserve unmanaged source"
+    },
+    "superhuman": {
+      "file": "integrations.spec.ts",
+      "title": "S15 superhuman settings, sync, read and reviewed disconnection preserve unmanaged source"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "S01",
+      "behavior": "Runtime, assets and isolation",
+      "tests": [
+        {
+          "file": "lifecycle.spec.ts",
+          "title": "S01 simultaneous homes remain isolated and cleanup includes the detached coordinator"
+        },
+        {
+          "file": "lifecycle.spec.ts",
+          "title": "S01 failed startup and timed out CLI both release owned processes and homes"
+        },
+        {
+          "file": "lifecycle.spec.ts",
+          "title": "S01 failed OS spawn and registered non-Bun descendants are cleaned up"
+        },
+        {
+          "file": "lifecycle.spec.ts",
+          "title": "S01 runner timeout, interruption and retry replace fixtures during agent work"
+        },
+        {
+          "file": "provider-feasibility.spec.ts",
+          "title": "S01 fixture boundaries reach every configured provider through the compiled coordinator"
+        },
+        {
+          "file": "runtime-boundaries.spec.ts",
+          "title": "S01 model policy, agent subprocess and release checks use disposable boundaries"
+        },
+        {
+          "file": "smoke.spec.ts",
+          "title": "S01 opens the actual compiled Manager with protected APIs"
+        },
+        {
+          "file": "smoke.spec.ts",
+          "title": "S01 source mode renders the same real Manager bundle"
+        },
+        {
+          "file": "smoke.spec.ts",
+          "title": "S01 reads a real CLI-authored memory in the browser"
+        }
+      ]
+    },
+    {
+      "id": "S02",
+      "behavior": "Shell and Home",
+      "tests": [
+        {
+          "file": "shell.spec.ts",
+          "title": "S02 every shipped section opens in an empty account"
+        },
+        {
+          "file": "shell.spec.ts",
+          "title": "S02 theme, keyboard navigation width and collapse persist after reload"
+        },
+        {
+          "file": "shell.spec.ts",
+          "title": "S02 Home authors a user memory and the saved record survives reload"
+        },
+        {
+          "file": "shell.spec.ts",
+          "title": "S02 project scope changes Home counts and the default project for authoring"
+        }
+      ]
+    },
+    {
+      "id": "S03",
+      "behavior": "Library search and navigation",
+      "tests": [
+        {
+          "file": "library.spec.ts",
+          "title": "S03 library search, memory links and navigation preserve canonical identity"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S03 resources are read-only, and removing an indexed copy preserves the source vault"
+        }
+      ]
+    },
+    {
+      "id": "S04",
+      "behavior": "Markdown editing and relations",
+      "tests": [
+        {
+          "file": "library.spec.ts",
+          "title": "S04 rich editing and source mode save actual Markdown without changing identity"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S04 unsupported rich Markdown remains editable verbatim through source fallback"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S04 move preserves memory identity and cancellation preserves the original document"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S04 structured relations resolve stable identities, survive reload and can be removed"
+        }
+      ]
+    },
+    {
+      "id": "S05",
+      "behavior": "Lifecycle, packs and bulk safety",
+      "tests": [
+        {
+          "file": "library.spec.ts",
+          "title": "S05 archive and forget require confirmation and leave a neighboring sentinel intact"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S05 Library pack export and import round-trip real local records"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S05 folder confirmation includes hidden descendants and cancel leaves all records intact"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S05 bulk keeps the real failed record selected after changing hidden descendants"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S05 malformed and escaping packs fail through the import UI without collateral writes"
+        }
+      ]
+    },
+    {
+      "id": "S06",
+      "behavior": "Reviewed consolidation",
+      "tests": [
+        {
+          "file": "library.spec.ts",
+          "title": "S06 consolidation requires paragraph review and confirmation before persistence"
+        },
+        {
+          "file": "library.spec.ts",
+          "title": "S06 a changed source invalidates reviewed consolidation before any result is saved"
+        }
+      ]
+    },
+    {
+      "id": "S07",
+      "behavior": "Projects and worksets",
+      "tests": [
+        {
+          "file": "worksets.spec.ts",
+          "title": "S07 project and workset definitions create, edit and delete without indexing or changing source"
+        },
+        {
+          "file": "worksets.spec.ts",
+          "title": "S07 S09 workset preparation publishes real repositories and converges after source changes"
+        },
+        {
+          "file": "worksets.spec.ts",
+          "title": "S07 invalid paths and duplicate project/workset definitions leave canonical configuration unchanged"
+        }
+      ]
+    },
+    {
+      "id": "S08",
+      "behavior": "Graph query and source inspection",
+      "tests": [
+        {
+          "file": "graph.spec.ts",
+          "title": "S08 the real graph scene queries a symbol and opens indexed source and relationships"
+        }
+      ]
+    },
+    {
+      "id": "S09",
+      "behavior": "Graph maintenance and scope fencing",
+      "tests": [
+        {
+          "file": "graph.spec.ts",
+          "title": "S09 graph view removal uses an exact preview, cancellation preserves it and confirmation preserves source"
+        },
+        {
+          "file": "graph.spec.ts",
+          "title": "S09 a delayed query from the old repository cannot replace the selected repository"
+        },
+        {
+          "file": "worksets.spec.ts",
+          "title": "S07 S09 workset preparation publishes real repositories and converges after source changes"
+        }
+      ]
+    },
+    {
+      "id": "S10",
+      "behavior": "Context Brief and scoped recall",
+      "tests": [
+        {
+          "file": "context.spec.ts",
+          "title": "S10 repository Context Brief reads real graph anchors and cited canonical memory"
+        },
+        {
+          "file": "context.spec.ts",
+          "title": "S10 empty scope and unsafe anchors are refused, and an interrupted request can be retried"
+        },
+        {
+          "file": "context.spec.ts",
+          "title": "S10 an unprepared repository reports missing graph evidence without silently indexing it"
+        },
+        {
+          "file": "context.spec.ts",
+          "title": "S10 bounded canonical pages retain the entire Unicode memory and scoped recall excludes neighbors"
+        }
+      ]
+    },
+    {
+      "id": "S11",
+      "behavior": "Proposed and automatic reviews",
+      "tests": [
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 proposed memories require an explicit decision and survive defer/reopen/apply"
+        },
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 an open review refuses a changed revision and rejection writes no memory"
+        },
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 an automatic review defers, resumes, applies and verifies the exact source-bound body"
+        },
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 an automatic approval refuses source changes and preserves the accepted target"
+        },
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 enrolled topics expose the proposal editor, cancel safely and verify an explicit update"
+        },
+        {
+          "file": "reviews.spec.ts",
+          "title": "S11 generation exposes pending and malformed-output failure, then retries a source-bound proposal"
+        }
+      ]
+    },
+    {
+      "id": "S12",
+      "behavior": "Context Health and maintenance",
+      "tests": [
+        {
+          "file": "health.spec.ts",
+          "title": "S12 Context Health exposes current evidence and maintenance controls without hidden memory edits"
+        },
+        {
+          "file": "health.spec.ts",
+          "title": "S12 unresolved relations require a reviewed edit and preserve authored content"
+        },
+        {
+          "file": "health.spec.ts",
+          "title": "S12 missing repository evidence remains unknown and offers no unsupported repair"
+        }
+      ]
+    },
+    {
+      "id": "S13",
+      "behavior": "Sharing and conflicts",
+      "tests": [
+        {
+          "file": "sharing.spec.ts",
+          "title": "S13 local Git team setup, cancel, rename, repository settings, sync and disconnect persist"
+        },
+        {
+          "file": "sharing.spec.ts",
+          "title": "S13 publishing and unpublishing require review and preserve the original personal memory"
+        },
+        {
+          "file": "sharing.spec.ts",
+          "title": "S13 shared conflicts bind the chosen resolution to exact reviewed versions"
+        },
+        {
+          "file": "sharing.spec.ts",
+          "title": "S13 a pending code citation cannot publish to a configured local team"
+        }
+      ]
+    },
+    {
+      "id": "S14",
+      "behavior": "Development workflow installation",
+      "tests": [
+        {
+          "file": "dev-skills.spec.ts",
+          "title": "S14 development workflows preview, cancel, install, update and remove only managed files"
+        },
+        {
+          "file": "dev-skills.spec.ts",
+          "title": "S14 unsupported hosts and unmanaged collisions cannot install workflows"
+        }
+      ]
+    },
+    {
+      "id": "S15",
+      "behavior": "All registered integrations",
+      "tests": [
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 all five catalog forms require valid names and credentials before saving"
+        },
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 obsidian settings, sync, read and reviewed disconnection preserve unmanaged source"
+        },
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 github settings, sync, read and reviewed disconnection preserve unmanaged source"
+        },
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 linear settings, sync, read and reviewed disconnection preserve unmanaged source"
+        },
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 pocket settings, sync, read and reviewed disconnection preserve unmanaged source"
+        },
+        {
+          "file": "integrations.spec.ts",
+          "title": "S15 superhuman settings, sync, read and reviewed disconnection preserve unmanaged source"
+        }
+      ]
+    },
+    {
+      "id": "S16",
+      "behavior": "Live recovery and authority rotation",
+      "tests": [
+        {
+          "file": "live.spec.ts",
+          "title": "S16 Home observes an external CLI mutation through the real live channel"
+        },
+        {
+          "file": "live.spec.ts",
+          "title": "S16 transport recovery preserves an unsaved draft when canonical state stays unchanged"
+        },
+        {
+          "file": "live.spec.ts",
+          "title": "S16 transport recovery preserves an unsaved draft when canonical state changes"
+        },
+        {
+          "file": "live.spec.ts",
+          "title": "S16 an old held read cannot overwrite fresh canonical content after live recovery"
+        },
+        {
+          "file": "live.spec.ts",
+          "title": "S16 capability fallback keeps canonical reads and writes real"
+        },
+        {
+          "file": "live.spec.ts",
+          "title": "S16 a full Manager restart rotates authority and opens its newly issued URL"
+        }
+      ]
+    },
+    {
+      "id": "S17",
+      "behavior": "Processes, diagnostics, models and updates",
+      "tests": [
+        {
+          "file": "runtime.spec.ts",
+          "title": "S17 process inspection and guarded termination affect only a benign owned runtime"
+        },
+        {
+          "file": "runtime.spec.ts",
+          "title": "S17 diagnostics, repair preview/cancel and local value reports preserve canonical knowledge"
+        },
+        {
+          "file": "runtime.spec.ts",
+          "title": "S17 update checks fail visibly, retry successfully and reject an incomplete release before installation"
+        },
+        {
+          "file": "runtime.spec.ts",
+          "title": "S17 operations footer opens the real process inventory for a fixture-owned sync"
+        },
+        {
+          "file": "runtime.spec.ts",
+          "title": "S17 model setup exposes progress, bounded access failure, explicit retry and stop without accepting an artifact"
+        }
+      ]
+    },
+    {
+      "id": "S18",
+      "behavior": "Browser and authorization safety",
+      "tests": [
+        {
+          "file": "security.spec.ts",
+          "title": "S18 missing authority, foreign live origins and reused tickets cannot mutate canonical state"
+        },
+        {
+          "file": "security.spec.ts",
+          "title": "S18 hostile Markdown, script URLs, instruction canaries and forged Mermaid messages remain inert"
+        }
+      ]
+    },
+    {
+      "id": "S19",
+      "behavior": "Keyboard, focus, zoom and Unicode",
+      "tests": [
+        {
+          "file": "accessibility.spec.ts",
+          "title": "S19 keyboard navigation, dialog focus containment and cancellation return focus without mutation"
+        },
+        {
+          "file": "accessibility.spec.ts",
+          "title": "S19 narrow desktop keeps long Unicode content and keyboard editing reachable"
+        },
+        {
+          "file": "accessibility.spec.ts",
+          "title": "S19 200 percent page zoom keeps long Unicode content and keyboard editing reachable"
+        }
+      ]
+    },
+    {
+      "id": "S20",
+      "behavior": "Reproducible Chromium qualification",
+      "tests": [
+        {
+          "file": "accessibility.spec.ts",
+          "title": "S20 pinned Chromium exposes real WebGL2 and compiled runtime identity"
+        }
+      ]
+    }
+  ],
+  "externalEvidenceLimits": [
+    "Provider responses and credentials are synthetic; no real OAuth or hosted availability claim.",
+    "Model setup exercises real worker progress, access refusal, retry and stop without accepting a multi-gigabyte artifact.",
+    "Updater checks and eligibility/failure gates are real; no host release payload is installed by browser tests.",
+    "The capability fallback alone injects live-session501; normal live tests forward real WebSocket frames and all canonical business APIs remain real."
+  ]
+}
