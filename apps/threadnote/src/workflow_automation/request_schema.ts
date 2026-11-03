@@ -139,7 +139,7 @@ export function nativeRequestSchema(input: unknown) {
                 requiredSelectedLanes: [nativeCycleCorrectnessLane, 'simplicity'],
                 requiredCompletedLanes: [nativeCycleCorrectnessLane, 'simplicity'],
                 specialistLanes:
-                  'Additional specialist lanes are optional; every selected lane must be complete. The orchestrator must not review source.',
+                  'Assess specialist lanes against the change risk and run every applicable lane. The schema enforces only the required correctness and simplicity pair plus completion of selected lanes; it cannot determine which specialists apply. The orchestrator must not review source.',
               },
             }
           : {}),

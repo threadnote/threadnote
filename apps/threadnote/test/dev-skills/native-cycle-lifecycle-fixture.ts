@@ -1,4 +1,12 @@
-import {Context, Effect, Array as EffectArray, String as EffectString, Predicate} from 'effect';
+import {
+  Context,
+  Effect,
+  Array as EffectArray,
+  String as EffectString,
+  Predicate,
+  type FileSystem,
+  type Path,
+} from 'effect';
 
 import {TestClock} from 'effect/testing';
 
@@ -153,6 +161,7 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   stackOnly = false,
   stacked = true,
   initialBindings?: Record<string, {branch: string; baseBranch: string}>,
+  beforeInit?: (repo: string) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | CommandExecutor>,
 ) {
   const diagnostics = yield* CycleDiagnostics;
   const graph = yield* GraphDiagnostics;
@@ -175,6 +184,7 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   yield* git(['add', 'source.ts']);
   yield* git(['commit', '-m', 'Fixture']);
   yield* git(['checkout', '-b', 'feature/' + phaseIds[0]]);
+  if (beforeInit) yield* beforeInit(f.repo);
   yield* f.init();
   const document = decodeNativeAuthoringDocument({
     format: 'threadnote-native-authoring',

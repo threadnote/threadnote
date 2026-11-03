@@ -114,11 +114,15 @@ it('uses all exact branch parents, suppresses self/shared-base inference and rej
 it.each(['commit', 'pr'] as const)(
   'does not return or directly deliver retained child proof until its %s parent is delivered',
   mode => {
-    let s = initializeNativeCycle(plan([phase('a'), phase('b')], mode));
+    const unboundParent = {...phase('a'), branch: 'feature-a'};
+    let s = initializeNativeCycle(plan([unboundParent, phase('b', 'a')], mode));
     s = validate(s, 'b');
     const bHash = s.phases.b.phaseHash;
+    const priorB = structuredClone(s.phases.b);
     s = reconcileNativeCyclePlan(s, {...s.plan, phases: [phase('a'), phase('b', 'a')]}, 'Stack binding').state;
     expect(s.phases.b.phaseHash).toBe(bHash);
+    expect(s.phases.b.validation).toEqual(priorB.validation);
+    expect(s.phases.b.history).toBeUndefined();
     expect(nextNativeCycle(s)).toEqual({action: 'implement', phaseId: 'a'});
     expect(() => recordNativeCycleDelivery(s, 'b', receipt(s, 'b'))).toThrow('effective parents');
     s = validate(s, 'a');
@@ -153,17 +157,30 @@ it('propagates material changes through the fixed point of alternating old and n
   }
   expect(s.phases.d.history).toBeUndefined();
 });
-it('keeps retargeted material validation while requiring a fresh delivery and preserving exact merged replay', () => {
+it('invalidates retargeted validation and requires fresh delivery while preserving exact merged replay', () => {
   let s = initializeNativeCycle(plan([phase('a'), phase('b', 'a')], 'pr'));
   s = recordNativeCycleDelivery(validate(s, 'a'), 'a', receipt(validate(s, 'a'), 'a'));
   s = validate(s, 'b');
   s = recordNativeCycleDelivery(s, 'b', receipt(s, 'b'));
   const updated = reconcileNativeCyclePlan(s, {...s.plan, phases: [phase('a'), phase('b')]}, 'Retarget main').state;
   expect(nativeCyclePhaseHash(updated.plan, 'b')).toBe(s.phases.b.phaseHash);
-  expect(updated.phases.b.validation).toEqual(s.phases.b.validation);
+  expect(updated.phases.b.status).toBe('stale');
+  expect(updated.phases.b.validation).toBeUndefined();
   expect(updated.phases.b.delivery).toBeUndefined();
-  expect(updated.phases.b.history?.[0].delivery).toEqual(s.phases.b.delivery);
-  const merged = recordNativeCycleDelivery(updated, 'b', receipt(updated, 'b', true));
+  expect(updated.phases.b.history?.[0]).toMatchObject({
+    validation: s.phases.b.validation,
+    delivery: s.phases.b.delivery,
+  });
+  expect(nextNativeCycle(updated)).toEqual({action: 'blocked', phaseId: 'b', reason: 'Retarget main'});
+  expect(() => recordNativeCycleDelivery(updated, 'b', receipt(updated, 'b', true))).toThrow('current validation');
+  const requalified = validate(updated, 'b');
+  expect(requalified.phases.b.status).toBe('validated');
+  expect(requalified.phases.b.history?.[0]).toMatchObject({
+    validation: s.phases.b.validation,
+    delivery: s.phases.b.delivery,
+  });
+  expect(nextNativeCycle(requalified)).toEqual({action: 'deliver', phaseId: 'b'});
+  const merged = recordNativeCycleDelivery(requalified, 'b', receipt(requalified, 'b', true));
   expect(recordNativeCycleDelivery(merged, 'b', receipt(merged, 'b', true))).toEqual(merged);
   expect(() => invalidateNativeCycle(merged, 'b', 'No rewrite')).toThrow('Merged');
 });
@@ -230,13 +247,23 @@ it.each(['pr', 'commit', 'local'] as const)(
       s = validate(s, id);
       s = recordNativeCycleDelivery(s, id, receipt(s, id));
     }
-    const priorB = s.phases.b;
+    const priorA = structuredClone(s.phases.a);
+    const priorB = structuredClone(s.phases.b);
+    const priorC = structuredClone(s.phases.c);
     s = reconcileNativeCyclePlan(
       s,
       {...s.plan, phases: [phase('a', 'p'), phase('b', 'a'), phase('c', 'b'), phase('p')]},
       'Retarget ancestor to pending parent',
     ).state;
-    expect(s.phases.b).toEqual(priorB);
+    expect(s.phases.a.status).toBe('stale');
+    expect(s.phases.b.status).toBe('stale');
+    expect(s.phases.c.status).toBe('stale');
+    expect(s.phases.p.status).toBe('pending');
+    expect(s.phases.b.validation).toBeUndefined();
+    expect(s.phases.b.delivery).toBeUndefined();
+    expect(s.phases.b.history?.[0]).toMatchObject({validation: priorB.validation, delivery: priorB.delivery});
+    expect(s.phases.a.history?.[0]).toMatchObject({validation: priorA.validation, delivery: priorA.delivery});
+    expect(s.phases.c.history?.[0]?.validation).toEqual(priorC.validation);
     expect(nativeCycleParentsReady(s, 'c')).toBe(false);
     expect(nextNativeCycle(s)).toEqual({action: 'implement', phaseId: 'p'});
     expect(() => validate(s, 'c')).toThrow('dependencies');
@@ -244,10 +271,26 @@ it.each(['pr', 'commit', 'local'] as const)(
     if (mode !== 'local') {
       expect(nativeCycleParentsReady(s, 'c')).toBe(false);
       s = recordNativeCycleDelivery(s, 'p', receipt(s, 'p'));
+      s = validate(s, 'a');
       expect(nextNativeCycle(s)).toEqual({action: 'deliver', phaseId: 'a'});
       s = recordNativeCycleDelivery(s, 'a', receipt(s, 'a'));
+    } else {
+      s = validate(s, 'a');
+    }
+    s = validate(s, 'b');
+    if (mode !== 'local') {
+      expect(nextNativeCycle(s)).toEqual({action: 'deliver', phaseId: 'b'});
+      s = recordNativeCycleDelivery(s, 'b', receipt(s, 'b'));
     }
     expect(nativeCycleParentsReady(s, 'c')).toBe(true);
-    expect(nextNativeCycle(s)).toEqual({action: 'implement', phaseId: 'c'});
+    expect(s.phases.c.status).toBe('stale');
+    expect(nextNativeCycle(s)).toEqual({
+      action: 'blocked',
+      phaseId: 'c',
+      reason: 'Retarget ancestor to pending parent',
+    });
+    s = validate(s, 'c');
+    expect(s.phases.c.status).toBe('validated');
+    expect(nextNativeCycle(s)).toEqual(mode === 'local' ? {action: 'complete'} : {action: 'deliver', phaseId: 'c'});
   },
 );
