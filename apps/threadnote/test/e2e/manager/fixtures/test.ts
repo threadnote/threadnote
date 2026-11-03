@@ -116,7 +116,17 @@ export const test = base.extend<ManagerFixtures>({
               });
               return current.text();
             });
-            if (EffectArray.some(expected, item => body === JSON.stringify({error: item.error}))) {
+            if (
+              EffectArray.some(
+                expected,
+                item =>
+                  body ===
+                  JSON.stringify({
+                    ...('code' in item && item.code !== undefined ? {code: item.code} : {}),
+                    error: item.error,
+                  }),
+              )
+            ) {
               expectedResponses.add(response.url());
               return;
             }
@@ -129,6 +139,14 @@ export const test = base.extend<ManagerFixtures>({
     });
     page.on('requestfailed', request => {
       const error = request.failure()?.errorText ?? 'unknown';
+      const url = new URL(request.url());
+      if (
+        url.origin === manager.origin &&
+        EffectArray.some(manager.expectedRequestErrors, item => item.path === url.pathname && item.error === error)
+      ) {
+        expectedResponses.add(request.url());
+        return;
+      }
       if (
         pipe(request.url(), EffectString.startsWith(manager.origin)) &&
         !/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|cancelled)$/u.test(error)

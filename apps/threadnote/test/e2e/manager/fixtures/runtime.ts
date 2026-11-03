@@ -36,7 +36,13 @@ export function redactManagerLog(text: string): string {
 }
 
 export class ManagerRuntime {
-  readonly expectedErrors: {readonly path: string; readonly status: number; readonly error: string}[] = [];
+  readonly expectedRequestErrors: {readonly path: string; readonly error: string}[] = [];
+  readonly expectedErrors: {
+    readonly path: string;
+    readonly status: number;
+    readonly error: string;
+    readonly code?: string;
+  }[] = [];
   readonly environment: NodeJS.ProcessEnv;
   readonly home: string;
   readonly manifest: string;
@@ -147,8 +153,8 @@ export class ManagerRuntime {
       throw new Error('Manager did not bind to its disposable fixture identity.');
   }
 
-  launch(command: string, args: readonly string[]): ChildProcess {
-    const child = spawn(command, [...args], {cwd: this.root, env: this.environment, stdio: ['pipe', 'pipe', 'pipe']});
+  launch(command: string, args: readonly string[], cwd = this.root): ChildProcess {
+    const child = spawn(command, [...args], {cwd, env: this.environment, stdio: ['pipe', 'pipe', 'pipe']});
     this.children.add(child);
     const consume = (chunk: Buffer) => {
       this.logs = pipe(this.logs + chunk.toString(), EffectString.slice(-24_000));
@@ -159,8 +165,8 @@ export class ManagerRuntime {
     return child;
   }
 
-  async cli(args: readonly string[], input?: string, timeoutMs = 30_000): Promise<string> {
-    const child = this.launch(candidateBinary, ['--home', this.home, '--manifest', this.manifest, ...args]);
+  async cli(args: readonly string[], input?: string, timeoutMs = 30_000, cwd = this.root): Promise<string> {
+    const child = this.launch(candidateBinary, ['--home', this.home, '--manifest', this.manifest, ...args], cwd);
     return new Promise((resolve, reject) => {
       let output = '';
       const timeout = setTimeout(() => {
