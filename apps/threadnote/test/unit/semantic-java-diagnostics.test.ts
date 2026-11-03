@@ -5,7 +5,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, Order, Path, Schema, Stream} from 'effect';
+import {Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Order, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {unzipSync} from 'fflate';
 import fc from 'fast-check';
@@ -41,6 +41,11 @@ import {
   javaFileUri,
 } from '../../src/semantic/providers/java_snapshot.js';
 import {preparedSessionFixture} from '../fixtures/semantic/jvm/prepared-session.js';
+
+class PreparedEditFixture extends Context.Service<
+  PreparedEditFixture,
+  {readonly fixture: Effect.Success<ReturnType<typeof preparedSessionFixture>>; readonly digest: string}
+>()('@threadnote/threadnote/test/unit/semantic-java-diagnostics.test/PreparedEditFixture') {}
 
 const model: JavaDiagnosticModel = {
   projectUri: 'file:///private/projection',
@@ -622,66 +627,78 @@ describe('Java request diagnostics', () => {
     );
 
     for (const representation of ['changes', 'documentChanges'] as const) {
-      effectIt.effect.prop(
-        `never returns a partial Java edit set when any target is excluded (${representation})`,
-        [
-          Schema.Literals(['Excluded.java', 'Readme.txt']),
-          Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
-          Schema.Boolean,
-        ],
-        ([excluded, position, reverse]) =>
-          Effect.gen(function* () {
-            const f = yield* preparedSessionFixture();
-            const before = yield* semanticTreeDigest(f.project);
-            const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
-            const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
-            const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
-            const edits = [{range, newText: 'Next'}];
-            const edit: Schema.Json =
-              representation === 'changes'
-                ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
-                : {
-                    documentChanges: EffectArray.map(targets, name => ({
-                      textDocument: {uri: f.uris[name], version: null},
-                      edits,
-                    })),
-                  };
-            const safeAction = {
-              title: 'Safe',
-              edit: {changes: {[f.uris['Included.java']]: edits}},
-            };
-            for (const operation of ['rename', 'code-action'] as const) {
-              const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
-              const wireBefore = JSON.stringify(response);
-              const made = yield* f.create(response);
-              const session = yield* made.result;
-              const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
-              const result = yield* session.prepare(
-                operation,
-                current,
-                {line: 0, character: 15},
-                operation === 'rename' ? 'Next' : undefined,
-                1000,
-              );
-              if (operation === 'rename') expect(result.status).toBe('unsupported');
-              else {
-                expect(result.status).toBe('ok');
-                if (result.status === 'ok')
-                  expect(result.items).toEqual([
-                    expect.objectContaining({
-                      title: 'Safe',
-                      files: [expect.objectContaining({uri: f.uris['Included.java']})],
-                    }),
-                  ]);
+      // Share only immutable project inputs across samples. f.create still gives
+      // every operation a fresh session, notification stream and request state.
+      const fixtureLayer = Layer.effect(
+        PreparedEditFixture,
+        Effect.gen(function* () {
+          const fixture = yield* preparedSessionFixture();
+          return {fixture, digest: yield* semanticTreeDigest(fixture.project)};
+        }),
+      ).pipe(Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
+      effectIt.layer(fixtureLayer)(layerIt => {
+        layerIt.effect.prop(
+          `never returns a partial Java edit set when any target is excluded (${representation})`,
+          [
+            Schema.Literals(['Excluded.java', 'Readme.txt']),
+            Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2})),
+            Schema.Boolean,
+          ],
+          ([excluded, position, reverse]) =>
+            Effect.gen(function* () {
+              const {fixture: f, digest} = yield* PreparedEditFixture;
+              const before = yield* semanticTreeDigest(f.project);
+              expect(before).toBe(digest);
+              const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
+              const safe = reverse ? ['Included.java', 'Main.java'] : ['Main.java', 'Included.java'];
+              const targets = [...EffectArray.take(safe, position), excluded, ...EffectArray.drop(safe, position)];
+              const edits = [{range, newText: 'Next'}];
+              const edit: Schema.Json =
+                representation === 'changes'
+                  ? {changes: EffectRecord.fromEntries(EffectArray.map(targets, name => [f.uris[name], edits]))}
+                  : {
+                      documentChanges: EffectArray.map(targets, name => ({
+                        textDocument: {uri: f.uris[name], version: null},
+                        edits,
+                      })),
+                    };
+              const safeAction = {
+                title: 'Safe',
+                edit: {changes: {[f.uris['Included.java']]: edits}},
+              };
+              for (const operation of ['rename', 'code-action'] as const) {
+                const response: Schema.Json = operation === 'rename' ? edit : [{title: 'Incomplete', edit}, safeAction];
+                const wireBefore = JSON.stringify(response);
+                const made = yield* f.create(response);
+                const session = yield* made.result;
+                const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+                const result = yield* session.prepare(
+                  operation,
+                  current,
+                  {line: 0, character: 15},
+                  operation === 'rename' ? 'Next' : undefined,
+                  1000,
+                );
+                if (operation === 'rename') expect(result.status).toBe('unsupported');
+                else {
+                  expect(result.status).toBe('ok');
+                  if (result.status === 'ok')
+                    expect(result.items).toEqual([
+                      expect.objectContaining({
+                        title: 'Safe',
+                        files: [expect.objectContaining({uri: f.uris['Included.java']})],
+                      }),
+                    ]);
+                }
+                expect(JSON.stringify(response)).toBe(wireBefore);
+                expect(yield* session.available).toBe(true);
+                expect(yield* session.observation(current.uri)).toEqual(current);
               }
-              expect(JSON.stringify(response)).toBe(wireBefore);
-              expect(yield* session.available).toBe(true);
-              expect(yield* session.observation(current.uri)).toEqual(current);
-            }
-            expect(yield* semanticTreeDigest(f.project)).toBe(before);
-          }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-        {arbitrary: {runs: 16}},
-      );
+              expect(yield* semanticTreeDigest(f.project)).toBe(before);
+            }),
+          {arbitrary: {runs: 16}},
+        );
+      });
     }
 
     effectIt.effect('refuses complete Java edit sets with overlaps, duplicate targets or conflicting versions', () =>

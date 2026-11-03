@@ -43,7 +43,9 @@ vi.mock('../../src/workflow_memory/artifacts.js', async importOriginal => {
   };
 });
 const transaction = EffectString.repeat(64)('a');
-const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
+const fixture = Effect.fn('test.closeoutCitationProjection')(function* (
+  options: {readonly atomicAvailable?: boolean} = {},
+) {
   const f = yield* nativeFixture();
   const system = yield* SystemInfo;
   const clock = yield* Clock.Clock;
@@ -145,6 +147,11 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
   });
   const observedStore = CodeGraphStore.of({
     ...graphStore,
+    // Counter assertions exercise legacy capture. Scoped projection must also retain
+    // its lease when the optional atomic reader is available.
+    readReadySnapshotCitationEvidence: options.atomicAvailable
+      ? () => Effect.die('Scoped projection must retain its lease instead of copying anchors')
+      : undefined,
     acquireSnapshotLease: (...args) =>
       graphStore.acquireSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => void counts.leases++))),
     releaseSnapshotLease: (...args) =>
@@ -200,6 +207,17 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* () {
     ) => projectNativeCloseoutKnowledge(f.config, state, original, transaction, documents, refs).pipe(apply),
   };
 });
+it.effect('retains the scoped projection lease when atomic citation reads are available', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture({atomicAvailable: true});
+    const document = yield* f.document('atomic-available', 'Scoped output.\n');
+    const projected = yield* f.project([document]);
+    const operations = EffectRecord.values(projected.journal.operations);
+    expect(operations).toHaveLength(1);
+    expect(parseMemoryDocument(document.uri, operations[0].desired)?.metadata.codeCitations).toHaveLength(1);
+    expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
+  }).pipe(provideNative, TestClock.withLive),
+);
 it.effect(
   'admits one real capture for D=3, preserves repeated-key relations and admits a following actual write afresh',
   () =>
