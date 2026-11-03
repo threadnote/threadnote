@@ -124,7 +124,7 @@ describe('Manager Processes panel', () => {
     expect(processList?.querySelectorAll('[role="listitem"]')).toHaveLength(5);
     expect(document.body.textContent).toContain('Graph compaction worker');
     expect(document.body.textContent).toContain('Compact graph storage');
-    expect(document.body.textContent).toContain('This session · Verified runtime');
+    expect(document.body.textContent).toContain('Current');
     expect(document.body.textContent).toContain('MCP server');
     expect(document.body.textContent).toContain('Graph builder activity');
     expect(document.body.textContent).toContain('Graph query worker');
@@ -160,8 +160,8 @@ describe('Manager Processes panel', () => {
       '/work/projects/a-very-long-worktree-name/packages/application',
       'feature/process-lanes',
       'Codex v1.2',
-      'Chat title',
-      'Not provided by client',
+      'chat title',
+      'Not reported:',
       'The current Manager process is protected',
     ])
       expect(text).toContain(value);
@@ -169,6 +169,10 @@ describe('Manager Processes panel', () => {
     expect(document.querySelector('.process-status-idle')?.textContent).toContain('Idle');
     expect(document.querySelector('.process-row .process-identity-current')?.textContent).toContain('Current');
     expect(document.body.textContent).not.toContain('Inspect');
+    expect(document.querySelectorAll('.process-fact > svg').length).toBeGreaterThan(10);
+    const compaction = document.querySelector('.process-row');
+    expect(compaction?.querySelector('.process-lane-metadata')?.textContent).not.toContain('Compact graph storage');
+    expect(compaction?.querySelectorAll('.process-missing')).toHaveLength(1);
   });
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {

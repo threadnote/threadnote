@@ -80,6 +80,7 @@ export type ThreadnoteProcessBranch =
   | {readonly state: 'unavailable'};
 export interface ThreadnoteProcessDisplayContext {
   readonly launchDirectory?: string;
+  readonly processDirectory?: string;
   readonly workspace?: ThreadnoteProcessWorkspace;
   readonly client?: ThreadnoteProcessClientInfo;
   readonly owner?: {readonly processId: number; readonly role: RegisteredThreadnoteProcessRole};
@@ -518,8 +519,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
   const identities = new Map(EffectArray.map(live, value => [value.processId, value.processStartIdentity] as const));
   const resourceByProcess = resources
     ? yield* sampleProcessResources(system, config.agentContextHome, selected, identities)
-    : new Map<number, {readonly rssBytes?: number; readonly cpu?: ProcessCpuObservation}>();
-  const branchByPath = resources ? yield* readDisplayBranches(selected) : new Map<string, ThreadnoteProcessBranch>();
+    : new Map<number, ResourceDisplay>();
   if (
     EffectArray.some(selected, value => value.processId === system.processId) &&
     resources &&
@@ -529,9 +529,18 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     if (Number.isSafeInteger(rssBytes) && rssBytes >= 0)
       resourceByProcess.set(system.processId, {...resourceByProcess.get(system.processId), rssBytes});
   }
-  const sorted = EffectArray.map(selected, value => ({
+  const contextual = EffectArray.map(selected, (value): ThreadnoteProcessDiagnostic => {
+    const {workingDirectory, ...metrics} = resourceByProcess.get(value.processId) ?? {};
+    const context = 'displayContext' in value ? value.displayContext : undefined;
+    return {
+      ...value,
+      ...metrics,
+      ...(workingDirectory ? {displayContext: {...context, processDirectory: workingDirectory}} : {}),
+    };
+  });
+  const branchByPath = resources ? yield* readDisplayBranches(contextual) : new Map<string, ThreadnoteProcessBranch>();
+  const sorted = EffectArray.map(contextual, value => ({
     ...value,
-    ...resourceByProcess.get(value.processId),
     ...('displayContext' in value && value.displayContext
       ? {
           displayContext: {
@@ -1156,7 +1165,9 @@ function inheritedDisplayContext(
 }
 
 function displayWorkspacePath(context: ThreadnoteProcessDisplayContext): string | undefined {
-  return context.workspace?.state === 'multiple' ? undefined : (context.workspace?.path ?? context.launchDirectory);
+  return context.workspace?.state === 'multiple'
+    ? undefined
+    : (context.workspace?.path ?? context.processDirectory ?? context.launchDirectory);
 }
 
 const displayBranchCaches = new WeakMap<
@@ -1366,7 +1377,11 @@ function removeRegistrationFile(fs: FileSystem.FileSystem, file: string) {
   return fs.remove(file, {force: true}).pipe(Effect.ignore);
 }
 
-type ResourceDisplay = {readonly cpu?: ProcessCpuObservation; readonly rssBytes?: number};
+type ResourceDisplay = {
+  readonly cpu?: ProcessCpuObservation;
+  readonly rssBytes?: number;
+  readonly workingDirectory?: string;
+};
 type ResourceSampleCache = {
   readonly gate: Semaphore.Semaphore;
   previous: ReadonlyMap<number, TimedProcessResourceCounters>;
@@ -1436,7 +1451,12 @@ function sampleProcessResources(
               ? {...value, monotonicMilliseconds: observedAt}
               : undefined;
           const cpu = processCpuObservation(currentCache.previous.get(processId), verified, sampledAt);
-          result.set(processId, {cpu, ...(value?.rssBytes === undefined ? {} : {rssBytes: value.rssBytes})});
+          const workingDirectory = verified ? safeDisplayPath(verified.workingDirectory) : undefined;
+          result.set(processId, {
+            cpu,
+            ...(value?.rssBytes === undefined ? {} : {rssBytes: value.rssBytes}),
+            ...(workingDirectory ? {workingDirectory} : {}),
+          });
           if (verified) previous.set(processId, verified);
         }
         currentCache.previous = previous;

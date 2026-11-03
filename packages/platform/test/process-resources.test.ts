@@ -10,6 +10,7 @@ import {
   parseProcessCpuTime,
   processCpuObservation,
   readProcessResourceCounters,
+  parseDarwinWorkingDirectories,
   type TimedProcessResourceCounters,
 } from '../src/process-resources.js';
 
@@ -26,6 +27,37 @@ const sample = (
 });
 
 describe('recent per-process resource observations', () => {
+  it('reads only requested cwd fields from NUL-delimited lsof output', () => {
+    expect([
+      ...parseDarwinWorkingDirectories(
+        'p42\0\nfcwd\0n/work/repo with spaces\0\np99\0\nfcwd\0n/private/other\0\np43\0\nftxt\0n/not-a-cwd\0',
+        [42, 43],
+      ),
+    ]).toEqual([[42, '/work/repo with spaces']]);
+    expect(parseDarwinWorkingDirectories('p42\0\nfcwd\0n/bad\npath\0', [42]).size).toBe(0);
+  });
+  it('round trips bounded cwd records without leaking unselected processes', () => {
+    FC.assert(
+      FC.property(
+        FC.uniqueArray(
+          FC.record({id: FC.integer({min: 1, max: 1000}), name: FC.stringMatching(/^[a-zA-Z0-9 _-]{1,40}$/u)}),
+          {selector: row => row.id, maxLength: 12},
+        ),
+        rows => {
+          const selected = EffectArray.filter(rows, row => row.id % 2 === 0);
+          const ids = EffectArray.map(selected, row => row.id);
+          const output = EffectArray.join(
+            EffectArray.map(rows, row => `p${row.id}\0\nfcwd\0n/work/${row.name}\0\n`),
+            '',
+          );
+          expect([...parseDarwinWorkingDirectories(output, ids)]).toEqual(
+            EffectArray.map(selected, row => [row.id, `/work/${row.name}`]),
+          );
+        },
+      ),
+      {numRuns: 64},
+    );
+  });
   it.each([
     [0, 0],
     [500, 100],
@@ -162,6 +194,7 @@ describe('recent per-process resource observations', () => {
             const idle = second.get(ids[1]);
             expect(first.size).toBe(2);
             expect(second.size).toBe(2);
+            if (process.platform === 'darwin') expect(second.get(ids[0])?.workingDirectory).toBe(process.cwd());
             if (!busy || !idle) throw new Error('Resource probe unavailable');
             expect(busy.cpuMilliseconds - first.get(ids[0])!.cpuMilliseconds).toBeGreaterThan(
               idle.cpuMilliseconds - first.get(ids[1])!.cpuMilliseconds + 50,

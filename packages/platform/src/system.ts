@@ -791,6 +791,10 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
             runtimePlatform,
             process.env,
             childEnvironmentPolicy.sanitizeExternal,
+            path =>
+              Effect.tryPromise({try: () => nativeFileSystemPromises.readlink(path), catch: () => undefined}).pipe(
+                Effect.orElseSucceed(() => undefined),
+              ),
           ),
         runtimeVersion: Bun.version,
         pathDelimiter: runtimePlatform === 'win32' ? ';' : ':',

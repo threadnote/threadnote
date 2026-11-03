@@ -247,7 +247,10 @@ describe('process display context', () => {
           const registered = EffectArray.filter(result.processes, row => row.role !== 'legacy');
           expect(registered).toHaveLength(1);
           expect(registered[0].processId).toBe(system.processId);
-          expect(registered[0].displayContext).toBeUndefined();
+          expect(registered[0].displayContext?.client).toBeUndefined();
+          expect(registered[0].displayContext?.workspace).toBeUndefined();
+          expect(registered[0].displayContext?.launchDirectory).toBeUndefined();
+          expect(registered[0].displayContext?.processDirectory).toBe(yield* fs.realPath(process.cwd()));
           expect(yield* fs.exists(file)).toBe(true);
         }),
       );

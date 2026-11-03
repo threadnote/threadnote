@@ -42,7 +42,7 @@ test('S17 process inspection and guarded termination affect only a benign owned 
   const row = page.getByRole('listitem').filter({has: stop});
   await expect(row).toContainText(`PID ${pid}`);
   for (const field of ['CPU', 'Memory', 'Parent', 'Age', 'Version', 'Worktree', 'Branch', 'Idle'])
-    await expect(row).toContainText(field);
+    await expect(row).toContainText(new RegExp(field, 'iu'));
   await expect(row.getByRole('button', {name: /Inspect|Details/u})).toHaveCount(0);
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(row.locator('dt').filter({hasText: /^CPU$/u}).locator('..').locator('dd')).toHaveText(/^\d+\.\d%$/u);
@@ -54,6 +54,7 @@ test('S17 process inspection and guarded termination affect only a benign owned 
       await row.scrollIntoViewIfNeeded();
       await expect(stop).toBeVisible();
       expect(await row.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      if (width === 1280) expect((await row.boundingBox())!.height).toBeLessThan(180);
       await row.screenshot({path: testInfo.outputPath(`process-lane-${EffectString.toLowerCase(theme)}-${width}.png`)});
     }
   }

@@ -26,6 +26,7 @@ export interface ManageableManagerProcess {
   readonly cpu?: ProcessCpuObservation;
   readonly displayContext?: {
     readonly launchDirectory?: string;
+    readonly processDirectory?: string;
     readonly client?: {readonly name: string; readonly version?: string};
     readonly workspace?:
       | {readonly state: 'active' | 'last'; readonly path: string; readonly observedAt: string}

@@ -1,12 +1,14 @@
 import {Array as EffectArray, Effect, Option, pipe} from 'effect';
 import * as EffectString from 'effect/String';
 import type {ChildEnvironmentPolicyShape} from './child-environment-policy.js';
+import {fromPromise} from './errors.js';
 
 export interface ProcessResourceCounters {
   readonly processId: number;
   readonly processStartIdentity: string;
   readonly cpuMilliseconds: number;
   readonly rssBytes?: number;
+  readonly workingDirectory?: string;
 }
 
 export interface TimedProcessResourceCounters extends ProcessResourceCounters {
@@ -56,6 +58,7 @@ export const readProcessResourceCounters = Effect.fn('system.processResources')(
   platform: NodeJS.Platform,
   environment: NodeJS.ProcessEnv,
   sanitizeExternal: ChildEnvironmentPolicyShape['sanitizeExternal'],
+  readLink?: (path: string) => Effect.Effect<string | undefined>,
 ) {
   const ids = [...new Set(EffectArray.filter(processIds, id => Number.isSafeInteger(id) && id > 0))].slice(0, 100);
   if (ids.length === 0) return new Map<number, ProcessResourceCounters>();
@@ -65,7 +68,29 @@ export const readProcessResourceCounters = Effect.fn('system.processResources')(
       ['/bin/ps', '-o', 'pid=,rss=,time=,lstart=', '-p', EffectArray.join(EffectArray.map(ids, String), ',')],
       env,
     );
-    return parseDarwinProcessResources(output, ids);
+    const before = parseDarwinProcessResources(output, ids);
+    const directories = parseDarwinWorkingDirectories(
+      yield* probeCommand(
+        ['/usr/sbin/lsof', '-a', '-p', EffectArray.join(EffectArray.map(ids, String), ','), '-d', 'cwd', '-Fn0'],
+        env,
+      ).pipe(Effect.timeoutOrElse({duration: 250, orElse: () => Effect.succeed('')})),
+      ids,
+    );
+    if (directories.size === 0) return before;
+    const after = parseDarwinProcessResources(
+      yield* probeCommand(
+        ['/bin/ps', '-o', 'pid=,rss=,time=,lstart=', '-p', EffectArray.join(EffectArray.map(ids, String), ',')],
+        env,
+      ),
+      ids,
+    );
+    const result = new Map<number, ProcessResourceCounters>();
+    for (const [id, row] of after) {
+      const workingDirectory =
+        before.get(id)?.processStartIdentity === row.processStartIdentity ? directories.get(id) : undefined;
+      result.set(id, {...row, ...(workingDirectory ? {workingDirectory} : {})});
+    }
+    return result;
   }
   if (platform === 'win32') {
     const output = yield* probeCommand(
@@ -95,11 +120,24 @@ export const readProcessResourceCounters = Effect.fn('system.processResources')(
   const rows = yield* Effect.forEach(
     ids,
     id =>
-      Effect.tryPromise({
-        try: () => Bun.file(`/proc/${id}/stat`).text(),
-        catch: () => undefined,
-      }).pipe(
-        Effect.map(text => parseLinuxProcessResources(text, id, ticks, pageBytes)),
+      fromPromise('processResources.stat', () => Bun.file(`/proc/${id}/stat`).text()).pipe(
+        Effect.flatMap(text =>
+          Effect.gen(function* () {
+            const before = parseLinuxProcessResources(text, id, ticks, pageBytes);
+            if (!before || !readLink) return before;
+            const workingDirectory = safeWorkingDirectory(yield* readLink(`/proc/${id}/cwd`));
+            if (!workingDirectory) return before;
+            const after = parseLinuxProcessResources(
+              yield* fromPromise('processResources.verifyStat', () => Bun.file(`/proc/${id}/stat`).text()),
+              id,
+              ticks,
+              pageBytes,
+            );
+            return after && before.processStartIdentity === after.processStartIdentity
+              ? {...after, workingDirectory}
+              : after;
+          }),
+        ),
         Effect.orElseSucceed(() => undefined),
       ),
     {concurrency: 8},
@@ -108,6 +146,37 @@ export const readProcessResourceCounters = Effect.fn('system.processResources')(
   for (const row of rows) if (row !== undefined) result.set(row.processId, row);
   return result;
 });
+
+function safeWorkingDirectory(value: unknown): string | undefined {
+  return typeof value === 'string' &&
+    pipe(value, EffectString.startsWith('/')) &&
+    !/[^\u0020-\u007e\u00a0-\u{10ffff}]/u.test(value) &&
+    new TextEncoder().encode(value).byteLength <= 4096
+    ? value
+    : undefined;
+}
+
+export function parseDarwinWorkingDirectories(
+  output: string,
+  processIds: readonly number[],
+): ReadonlyMap<number, string> {
+  const result = new Map<number, string>();
+  const selected = new Set(processIds);
+  let id = 0;
+  let cwd = false;
+  for (const raw of EffectString.split(output, '\0')) {
+    const field = pipe(raw, EffectString.replace(/^\n+/u, ''));
+    if (/^p\d+$/u.test(field)) {
+      id = Number(pipe(field, EffectString.slice(1)));
+      cwd = false;
+    } else if (pipe(field, EffectString.startsWith('f'))) cwd = field === 'fcwd';
+    else if (cwd && selected.has(id) && pipe(field, EffectString.startsWith('n'))) {
+      const path = safeWorkingDirectory(pipe(field, EffectString.slice(1)));
+      if (path) result.set(id, path);
+    }
+  }
+  return result;
+}
 
 function probeCommand(command: readonly string[], environment: NodeJS.ProcessEnv): Effect.Effect<string> {
   return Effect.acquireUseRelease(
@@ -123,7 +192,7 @@ function probeCommand(command: readonly string[], environment: NodeJS.ProcessEnv
       }),
     ),
     child =>
-      Effect.tryPromise(async () => {
+      fromPromise('processResources.probe', async () => {
         const [code, text] = await Promise.all([child.exited, new Response(child.stdout).text()]);
         return code === 0 && text.length <= PROBE_OUTPUT_LIMIT ? text : '';
       }),

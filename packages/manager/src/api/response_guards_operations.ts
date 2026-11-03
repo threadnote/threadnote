@@ -95,6 +95,7 @@ const ApiSchema6061 = Schema.Struct({
   displayContext: Schema.optionalKey(
     Schema.Struct({
       launchDirectory: Schema.optionalKey(Schema.String),
+      processDirectory: Schema.optionalKey(Schema.String),
       client: Schema.optionalKey(Schema.Struct({name: Schema.String, version: Schema.optionalKey(Schema.String)})),
       workspace: Schema.optionalKey(
         Schema.Union([

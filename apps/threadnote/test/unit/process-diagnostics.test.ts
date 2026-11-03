@@ -95,7 +95,16 @@ describe('process diagnostics', () => {
           Effect.sync(() => {
             probes++;
             return new Map([
-              [pid, {processId: pid, processStartIdentity: resourceIdentity, cpuMilliseconds: cpu, rssBytes: 1234}],
+              [
+                pid,
+                {
+                  processId: pid,
+                  processStartIdentity: resourceIdentity,
+                  cpuMilliseconds: cpu,
+                  rssBytes: 1234,
+                  workingDirectory: '/observed/worktree',
+                },
+              ],
             ]);
           }),
       });
@@ -109,6 +118,7 @@ describe('process diagnostics', () => {
         );
         expect(probes).toBe(1);
         expect(reads[0].processes[0].cpu?.state).toBe('sampling');
+        expect(reads[0].processes[0].displayContext?.processDirectory).toBe('/observed/worktree');
         cpu = 500;
         wallTime = 3_600_000_000_000n;
         yield* TestClock.adjust(500);
@@ -130,6 +140,10 @@ describe('process diagnostics', () => {
         expect((yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].cpu?.state).toBe(
           'unavailable',
         );
+        expect(
+          (yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].displayContext
+            ?.processDirectory,
+        ).toBeUndefined();
       }).pipe(
         Effect.provideService(SystemInfo, system),
         Effect.provideService(Clock.Clock, {...clock, currentTimeNanos: Effect.sync(() => wallTime)}),
