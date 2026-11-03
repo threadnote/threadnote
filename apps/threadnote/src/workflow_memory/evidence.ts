@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Effect, Schema} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -7,6 +7,11 @@ import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threa
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {RecallIdentityAdmissionBusy, withRecallIdentityAdmission} from '@threadnote/recall/index';
+import {
+  verifyAuthoredMemoryRelationTargetBytes,
+  verifyAuthoredMemoryRelationTargetIdentities,
+} from '../memory/relations.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   workflowError,
@@ -119,7 +124,7 @@ export const verifyWorkflowEvidence = Effect.fn('workflowMemory.verifyEvidence')
     return scopes;
   }).pipe(
     Effect.mapError(error =>
-      Schema.is(WorkflowMemoryError)(error)
+      Schema.is(WorkflowMemoryError)(error) || Schema.is(RecallIdentityAdmissionBusy)(error)
         ? error
         : workflowError(
             'evidence-conflict',
@@ -145,3 +150,33 @@ export const verifyWorkflowEvidenceBytes = Effect.fn('workflowMemory.verifyEvide
     yield* validateWorkflowInput(() => assertWorkflowEvidenceSnapshot(binding, ref, ref.uri, content));
   }
 });
+
+/** Each artifact or recovery prepares a fresh proof before entering its memory locks. */
+export function withWorkflowEvidenceAdmission<A, E, R>(
+  config: RuntimeConfig,
+  binding: WorkflowBinding,
+  refs: readonly WorkflowEvidenceReference[],
+  targets: Parameters<typeof verifyAuthoredMemoryRelationTargetIdentities>[1],
+  use: (
+    check: Effect.Effect<void, unknown, ResourceStore | FileSystem.FileSystem | Path.Path>,
+  ) => Effect.Effect<A, E, R>,
+) {
+  const pinnedRefs = EffectArray.map(refs, ref => ({...ref}));
+  const pinnedTargets = EffectArray.map(targets, target => ({
+    ...target,
+    ...(target.allowedUriScopes ? {allowedUriScopes: [...target.allowedUriScopes]} : {}),
+  }));
+  const bytes = verifyWorkflowEvidenceBytes(config, binding, pinnedRefs).pipe(
+    Effect.andThen(verifyAuthoredMemoryRelationTargetBytes(config, pinnedTargets)),
+  );
+  if (
+    !pinnedRefs.length &&
+    !EffectArray.some(pinnedTargets, target => !!(target.memoryId && target.allowedUriScopes?.length))
+  )
+    return use(bytes);
+  const prepare = verifyWorkflowEvidence(config, binding, pinnedRefs).pipe(
+    Effect.andThen(verifyAuthoredMemoryRelationTargetIdentities(config, pinnedTargets)),
+    Effect.asVoid,
+  );
+  return withRecallIdentityAdmission(config, prepare, check => use(check.pipe(Effect.andThen(bytes))));
+}

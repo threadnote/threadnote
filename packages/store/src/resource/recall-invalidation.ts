@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {Context, Effect, FileSystem, Path} from 'effect';
 import type {CanonicalMutationGenerationTransition} from './mutation_generation.js';
 import type {SystemInfo} from '@threadnote/platform/system';
+import type {SecureRandom} from 'effect/crypto';
 
 export interface ResourceRecallInvalidationShape {
   readonly expire: (
@@ -9,7 +10,7 @@ export interface ResourceRecallInvalidationShape {
     includeInactive: boolean,
     invalidatedUris: readonly string[],
     canonicalMutationGeneration: CanonicalMutationGenerationTransition,
-  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo>;
+  ) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>;
 }
 
 export class ResourceRecallInvalidation extends Context.Service<

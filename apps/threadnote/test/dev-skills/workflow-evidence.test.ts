@@ -1,13 +1,25 @@
 import {it as effectIt} from '@effect/vitest';
+import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {
+  expireRecallIndexValidation,
+  recallIndexDatabaseFilename,
+  withRecallIdentityAdmission,
+  loadRecallMemoryIdentities,
+} from '@threadnote/recall/index';
+import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from '@threadnote/store/resource/lock';
+import {CurrentResourceRecallInvalidationObserver} from '@threadnote/store/resource/recall-invalidation';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
+import {verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from '../../src/workflow_memory/evidence.js';
+import {verifyAuthoredMemoryRelationTargetIdentities} from '../../src/memory/relations.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -143,6 +155,247 @@ const fixture = Effect.fn('test.workflowEvidence.fixture')(function* (cloud = fa
 
 const evidence = (uri: string, memoryId: string, revision: string) => ({uri, memoryId, revision});
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
+
+describe('prepared workflow evidence admission', () => {
+  for (const kind of ['evidence', 'relation'] as const)
+    for (const boundary of ['lexical', 'sqlite', 'recovery-canonical'] as const)
+      effectIt.effect(`preserves busy during second-stage ${kind} ${boundary} preparation contention`, () =>
+        Effect.gen(function* () {
+          const f = yield* fixture();
+          const bound = yield* f.bind('second-stage-contention');
+          if (!('binding' in bound)) throw new Error('Expected consumer binding');
+          const prior = yield* f.seedProjectMemory('fixture');
+          const refs = [evidence(prior.uri, prior.memoryId, sha256HexSync(prior.content))];
+          const verify = Effect.gen(function* () {
+            if (kind === 'evidence') yield* verifyWorkflowEvidence(f.config, bound.binding, refs);
+            else
+              yield* verifyAuthoredMemoryRelationTargetIdentities(f.config, [{...prior, allowedUriScopes: [rootUri]}]);
+          });
+          const database = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+          const contended =
+            boundary === 'recovery-canonical'
+              ? Effect.sync(() => {
+                  const db = new Database(database);
+                  try {
+                    db.run("UPDATE metadata SET value = 'incompatible' WHERE key = 'schema_version'");
+                  } finally {
+                    db.close();
+                  }
+                }).pipe(
+                  Effect.andThen(
+                    withExclusiveFileLock(
+                      f.fs,
+                      resourceAccountMutationLockPath(f.path, f.home, f.config.account),
+                      resourceAccountMutationLockPolicy,
+                      verify,
+                    ),
+                  ),
+                )
+              : boundary === 'lexical'
+                ? withExclusiveFileLock(
+                    f.fs,
+                    f.path.join(f.home, 'locks', 'indexes', 'lexical', recallIndexDatabaseFilename(false) + '.lock'),
+                    resourceAccountMutationLockPolicy,
+                    verify,
+                  )
+                : Effect.acquireUseRelease(
+                    Effect.sync(() => {
+                      const db = new Database(database);
+                      db.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE');
+                      return db;
+                    }),
+                    () => verify,
+                    db =>
+                      Effect.sync(() => {
+                        db.exec('ROLLBACK');
+                        db.close();
+                      }),
+                  );
+          let entered = false;
+          const started = performance.now();
+          const result = yield* failure(
+            withRecallIdentityAdmission(
+              f.config,
+              expireRecallIndexValidation(f.home, false).pipe(Effect.andThen(contended)),
+              () =>
+                Effect.sync(() => {
+                  entered = true;
+                }),
+            ),
+          );
+          expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIdentityAdmissionBusy'}});
+          expect(entered).toBe(false);
+          expect(performance.now() - started).toBeLessThan(4000);
+          expect(yield* f.store.read(f.location, prior.uri)).toBe(prior.content);
+        }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+      );
+
+  for (const writer of ['marker', 'pointer-recovery'] as const)
+    effectIt.effect(`excludes ${writer} publication from the final pinned-byte window`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const bound = yield* f.bind('final-byte-publication');
+        if (!('binding' in bound)) throw new Error('Expected consumer binding');
+        const prior = yield* f.seedProjectMemory('fixture');
+        const refs = [evidence(prior.uri, prior.memoryId, sha256HexSync(prior.content))];
+        const destination = 'threadnote://resources/final-byte-publication/result.md';
+        const database = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+        let marker: string | undefined;
+        let injected = false;
+        const publication = Effect.gen(function* () {
+          injected = true;
+          if (writer === 'marker') return yield* expireRecallIndexValidation(f.home, false);
+          return yield* Effect.sync(() => {
+            const db = new Database(database);
+            try {
+              db.run("UPDATE metadata SET value = 'incompatible' WHERE key = 'schema_version'");
+            } finally {
+              db.close();
+            }
+          }).pipe(
+            Effect.andThen(
+              loadRecallMemoryIdentities(f.config, {
+                allowedUriScopes: [rootUri],
+                memoryIds: [prior.memoryId],
+                validateNow: true,
+              }),
+            ),
+            Effect.asVoid,
+          );
+        });
+        const result = yield* failure(
+          withWorkflowEvidenceAdmission(f.config, bound.binding, refs, [], check =>
+            Effect.gen(function* () {
+              marker = yield* f.fs.readFileString(database + '.stale');
+              return yield* f.store.writeChecked(
+                f.location,
+                destination,
+                'result',
+                {mode: 'create'},
+                check.pipe(Effect.andThen(publication)),
+              );
+            }),
+          ),
+        );
+        expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIdentityAdmissionBusy'}});
+        expect(injected).toBe(true);
+        expect(yield* f.store.stat(f.location, destination).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+        expect(yield* f.fs.readFileString(database + '.stale')).toBe(marker);
+        expect(yield* f.fs.exists(EffectString.replace(/\.sqlite$/, '.pointer.json')(database))).toBe(false);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+
+  effectIt.effect('coordinates cross-account invalidation and inherited post-write invalidation fibers', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const bound = yield* f.bind('account-publication');
+      if (!('binding' in bound)) throw new Error('Expected consumer binding');
+      const prior = yield* f.seedProjectMemory('fixture');
+      const refs = [evidence(prior.uri, prior.memoryId, sha256HexSync(prior.content))];
+      const database = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
+      const events: {account: string; inactive: boolean; succeeded: boolean}[] = [];
+      yield* withWorkflowEvidenceAdmission(f.config, bound.binding, refs, [], check =>
+        Effect.gen(function* () {
+          const marker = yield* f.fs.readFileString(database + '.stale');
+          yield* f.store.write(
+            {...f.location, account: 'another-account'},
+            'threadnote://resources/other.md',
+            'other',
+            {mode: 'create'},
+          );
+          expect(yield* f.fs.readFileString(database + '.stale')).toBe(marker);
+          yield* f.store.writeChecked(
+            f.location,
+            'threadnote://resources/admitted.md',
+            'admitted',
+            {mode: 'create'},
+            check,
+          );
+        }),
+      ).pipe(
+        Effect.provideService(CurrentResourceRecallInvalidationObserver, {
+          begin: (location, _uris, _transition, inactive) => succeeded => {
+            events.push({account: location.account, inactive, succeeded});
+          },
+        }),
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          {account: 'another-account', inactive: false, succeeded: false},
+          {account: 'another-account', inactive: true, succeeded: true},
+          {account: f.location.account, inactive: false, succeeded: true},
+          {account: f.location.account, inactive: true, succeeded: true},
+        ]),
+      );
+      expect(yield* f.store.read(f.location, prior.uri)).toBe(prior.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('requires fresh admission for each child after a canonical commit', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const bound = yield* f.bind('prepared-children');
+      if (!('binding' in bound)) throw new Error('Expected consumer binding');
+      const prior = yield* f.seedProjectMemory('fixture');
+      const refs = [evidence(prior.uri, prior.memoryId, sha256HexSync(prior.content))];
+      const firstUri = 'threadnote://resources/prepared-children/first.md';
+      const secondUri = 'threadnote://resources/prepared-children/second.md';
+
+      yield* withWorkflowEvidenceAdmission(f.config, bound.binding, refs, [], check =>
+        Effect.gen(function* () {
+          yield* f.store.writeChecked(f.location, firstUri, 'first', {mode: 'create'}, check);
+          expect(
+            yield* failure(f.store.writeChecked(f.location, secondUri, 'second', {mode: 'create'}, check)),
+          ).toMatchObject({_tag: 'Failure'});
+          expect(yield* failure(f.store.stat(f.location, secondUri))).toMatchObject({_tag: 'Failure'});
+        }),
+      );
+
+      yield* withWorkflowEvidenceAdmission(f.config, bound.binding, refs, [], check =>
+        f.store.writeChecked(f.location, secondUri, 'second', {mode: 'create'}, check),
+      );
+      expect(yield* f.store.read(f.location, firstUri)).toBe('first');
+      expect(yield* f.store.read(f.location, secondUri)).toBe('second');
+      expect(yield* f.store.read(f.location, prior.uri)).toBe(prior.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.prop(
+    'refuses a prepared commit after any canonical or marker-only invalidation',
+    {mutations: Schema.Array(Schema.Literals(['canonical', 'marker'])).check(Schema.isMaxLength(4))},
+    ({mutations}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const bound = yield* f.bind('prepared-invalidation');
+        if (!('binding' in bound)) throw new Error('Expected consumer binding');
+        const prior = yield* f.seedProjectMemory('fixture');
+        const refs = [evidence(prior.uri, prior.memoryId, sha256HexSync(prior.content))];
+        const destination = 'threadnote://resources/prepared-invalidation/result.md';
+        const result = yield* failure(
+          withWorkflowEvidenceAdmission(f.config, bound.binding, refs, [], check =>
+            Effect.gen(function* () {
+              for (const [index, mutation] of mutations.entries()) {
+                if (mutation === 'marker') yield* expireRecallIndexValidation(f.home, false);
+                else
+                  yield* f.store.write(
+                    f.location,
+                    `threadnote://resources/prepared-invalidation/unrelated-${index}.md`,
+                    'independent write',
+                    {mode: 'create'},
+                  );
+              }
+              return yield* f.store.writeChecked(f.location, destination, 'result', {mode: 'create'}, check);
+            }),
+          ),
+        );
+        // The model is the event history: any invalidation makes the earlier proof unusable.
+        expect(result._tag).toBe(mutations.length === 0 ? 'Success' : 'Failure');
+        expect((yield* failure(f.store.stat(f.location, destination)))._tag).toBe(result._tag);
+        expect(yield* f.store.read(f.location, prior.uri)).toBe(prior.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {arbitrary: {runs: 20}},
+  );
+});
 
 describe('workflow admitted evidence references', () => {
   effectIt.effect('admits exact same-project prior artifacts for read, alias, preflight, and a verified draft', () =>
