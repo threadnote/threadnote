@@ -1167,13 +1167,18 @@ describe('process diagnostics', () => {
           ]);
           const serialized = JSON.stringify(base);
           expect(serialized).not.toContain(temporaryRoot);
-          expect(serialized).not.toContain(process.cwd());
+          const fs = yield* FileSystem.FileSystem;
+          expect(base.processes[0].displayContext?.launchDirectory).toBe(yield* fs.realPath(process.cwd()));
+          const {displayContext: _display, ...publicIdentity} = base.processes[0];
+          expect(JSON.stringify(publicIdentity)).not.toContain(process.cwd());
           expect(serialized).not.toContain('token');
           const privateRegistration = yield* Effect.promise(() =>
             readFile(join(temporaryRoot!, 'runtime', 'processes', `${process.pid}.json`), 'utf8'),
           );
           expect(privateRegistration).not.toContain(temporaryRoot);
-          expect(privateRegistration).not.toContain(process.cwd());
+          const {displayContext: privateContext, ...privateIdentity} = JSON.parse(privateRegistration);
+          expect(privateContext.launchDirectory).toBe(yield* fs.realPath(process.cwd()));
+          expect(JSON.stringify(privateIdentity)).not.toContain(process.cwd());
 
           expect(base.processes[0]).not.toHaveProperty('activityRole');
 

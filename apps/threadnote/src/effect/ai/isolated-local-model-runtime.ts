@@ -825,8 +825,16 @@ function handleWorkerLine(runtime: LocalModelRuntimeShape, line: string): Effect
   );
 }
 
-function workerOperationLabel(operation: string): string {
-  return operation === 'embedMany' ? 'embed-many' : operation;
+export function workerOperationLabel(operation: string): string {
+  const labels: Record<WorkerOperation, string> = {
+    diagnostics: 'check-local-model',
+    embedMany: 'embed-many',
+    embedManyIdleV1: 'embed-many-idle',
+    embedManyCapacityV2: 'embed-many-capacity',
+    generate: 'generate-text',
+    rerank: 'rerank-results',
+  };
+  return isWorkerOperation(operation) ? labels[operation] : 'local-inference';
 }
 
 function dispatchWorkerRequest(
@@ -1310,7 +1318,7 @@ function withWorkerTransportDiagnostic<A extends object>(
   return attachAnonymousTelemetryDiagnostic(error, {
     domain: 'model-worker',
     errorType: error._tag ?? 'LocalModelWorkerError',
-    operation: workerOperationLabel(transport.operation),
+    operation: transport.operation === 'embedMany' ? 'embed-many' : transport.operation,
     reason: transport.reason,
   });
 }
