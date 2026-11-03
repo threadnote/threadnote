@@ -36,6 +36,7 @@ import {recallLogicalScope, RECALL_INVENTORY_POLICY_CHANGED_REASON} from '../../
 import {readRecallIdentityAdmissionCut} from '../../src/index/admission.js';
 import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
 import {normalizeRecallHydrationChanges} from '../../src/index/refresh_cut.js';
+import {readRecallStaleMarker} from '../../src/index/stale_marker.js';
 
 const system = SystemInfo.layer.pipe(
   Layer.provide(
@@ -133,6 +134,35 @@ function useDatabase<A>(filename: string, use: (db: Database) => A) {
     db => Effect.sync(() => db.close()),
   );
 }
+
+effectIt.effect('clears published invalidations when the configured home uses a filesystem alias', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(2);
+    const aliasDirectory = yield* f.fs.makeTempDirectoryScoped({prefix: 'recall-home-alias-'});
+    const alias = f.path.join(aliasDirectory, 'home');
+    yield* f.fs.symlink(f.home, alias);
+    const config = {...f.config, agentContextHome: alias};
+    const markerPath = f.path.join(f.home, 'indexes', 'lexical', 'active-v13.sqlite');
+    for (let i = 0; i < 2; i++) {
+      yield* f.write(0, `alpha updated ${i}`);
+      const events: RecallIndexProgress[] = [];
+      yield* loadRecallIndexData(config, {
+        includeInactive: false,
+        memoryIds: [],
+        onProgress: event =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+      });
+      expect((yield* readRecallStaleMarker(f.fs, markerPath))?.invalidatedUris).toEqual([]);
+      expect(EffectArray.filter(events, event => event.phase === 'indexing')[0]).toMatchObject({
+        scanned: 1,
+        total: 1,
+      });
+      expect((yield* recallIndexStatus(config)).ready).toBe(true);
+    }
+  }).pipe(provide, TestClock.withLive),
+);
 
 effectIt.effect('preserves hydration permission failures and programming defects', () =>
   Effect.gen(function* () {

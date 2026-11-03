@@ -306,7 +306,17 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
     selected.set(id.value.canonicalUri, {root: root.value, segments});
   }
   const previous = new Map<string, RetainedRecallSourceRow>();
-  const nonAsciiRoots = new Set<string>();
+  const ambiguousTargets = new Set<string>();
+  const targets = [...selected];
+  for (let i = 0; i < targets.length; i++)
+    for (let j = i + 1; j < targets.length; j++) {
+      const [leftUri, left] = targets[i];
+      const [rightUri, right] = targets[j];
+      if (left.root.uri === right.root.uri && recallSourcePathsMayAlias(left.segments, right.segments)) {
+        ambiguousTargets.add(leftUri);
+        ambiguousTargets.add(rightUri);
+      }
+    }
   let cursor: string | undefined;
   for (;;) {
     const rows = yield* sql.unsafe<RetainedRecallSourceRow>(
@@ -321,8 +331,16 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
       if (alias !== undefined && alias !== row.uri) return undefined;
       const root = EffectArray.findFirst(roots, root => EffectString.startsWith(root.uri + '/')(row.uri));
       if (Option.isNone(root)) return undefined;
-      if (/[\u0080-\uFFFF]|%[c-f][\da-f]/iu.test(EffectString.slice(root.value.uri.length)(row.uri)))
-        nonAsciiRoots.add(root.value.uri);
+      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
+      if (Option.isNone(id)) return undefined;
+      const segments = id.value.segments.slice(root.value.id.segments.length);
+      for (const [uri, target] of targets)
+        if (
+          row.uri !== uri &&
+          target.root.uri === root.value.uri &&
+          recallSourcePathsMayAlias(segments, target.segments)
+        )
+          ambiguousTargets.add(uri);
       if (selected.has(row.uri)) previous.set(row.uri, row);
       else
         retained.push({
@@ -344,7 +362,7 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
   for (const [uri, target] of selected)
     if (
       !previous.has(uri) &&
-      (nonAsciiRoots.has(target.root.uri) || EffectArray.some(target.segments, segment => /\P{ASCII}/u.test(segment)))
+      (ambiguousTargets.has(uri) || EffectArray.some(target.segments, segment => /\P{ASCII}/u.test(segment)))
     )
       return undefined;
   const access = EffectArray.some([...selected.keys()], isExternalResourceUri)
@@ -449,6 +467,19 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
   yield* indexRecallSourceLocators(sql);
   return {scannedSourceCount, skippedOversizedDocumentCount, omittedSourceInputs};
 });
+
+/** Only a differing ASCII branch proves that two filesystem paths cannot alias. */
+function recallSourcePathsMayAlias(left: readonly string[], right: readonly string[]): boolean {
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] === right[i]) continue;
+    return (
+      /\P{ASCII}/u.test(left[i]) ||
+      /\P{ASCII}/u.test(right[i]) ||
+      EffectString.toLowerCase(left[i]) === EffectString.toLowerCase(right[i])
+    );
+  }
+  return true;
+}
 
 export function countRecallSourceChanges(sql: SqlClient.SqlClient, forceRefresh: boolean) {
   return sql

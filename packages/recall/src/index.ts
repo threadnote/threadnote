@@ -292,10 +292,13 @@ const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(fu
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const fixedDatabasePath = recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive);
   if (!options.readyOnly)
-    yield* fs.makeDirectory(pathService.dirname(fixedDatabasePath), {recursive: true, mode: 0o700});
+    yield* fs.makeDirectory(
+      pathService.dirname(recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive)),
+      {recursive: true, mode: 0o700},
+    );
   config = {...config, agentContextHome: yield* fs.realPath(config.agentContextHome)};
+  const fixedDatabasePath = recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive);
   const databasePath = yield* resolveActiveRecallDatabasePath(
     fs,
     pathService,
@@ -833,7 +836,9 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
           reason: 'canonical documents changed; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
-      const rows = yield* sql<{readonly document_count: number}>`SELECT COUNT(*) AS document_count FROM documents`;
+      const rows = yield* sql<{
+        readonly document_count: number;
+      }>`SELECT COUNT(*) AS document_count FROM documents`;
       const documentCount = Number(rows[0]?.document_count ?? 0);
       if (!Number.isSafeInteger(documentCount) || documentCount < 0) {
         return {
