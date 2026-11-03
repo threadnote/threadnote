@@ -319,7 +319,7 @@ function registerTools(
   if (capabilities.graphLocal) registerCodeGraphTool(server, config, {allowWorkset: capabilities.graphWorkset});
   if (capabilities.graphLocal) {
     registerSemanticTool(server);
-    registerSemanticQueryTool(server, config);
+    registerSemanticQueryTool(server, config, capabilities.memoryRead);
   }
   if (capabilities.contextBrief) registerContextBriefTool(server, config);
 

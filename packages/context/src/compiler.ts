@@ -1,4 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+export {retrieveSemanticContextSourceEvidence} from './semantic_evidence.js';
 import {DateTime, Effect, Schema} from 'effect';
 import {
   makeReadDeadline,

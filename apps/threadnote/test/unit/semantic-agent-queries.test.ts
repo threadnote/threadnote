@@ -35,6 +35,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/provider.js';
+import type {SemanticContextKnowledgeV1} from '@threadnote/context/types';
 
 const profileIo = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 const queryIo = Layer.merge(profileIo, TestCommandExecutorLayer.pipe(Layer.provide(profileIo)));
@@ -355,6 +356,7 @@ const diagnosticsFixture = Effect.fn('test.agentDiagnostics')(function* (message
     input: {callerCwd: f.root, file: 'source.ts', language: 'go', operation: 'diagnostics', maxBytes: 8192},
     calls: () => calls,
     status: disk.status,
+    observe: disk.observe,
     mode: (value: DiagnosticMode) => {
       mode = value;
     },
@@ -649,6 +651,251 @@ describe('private semantic host profiles and the canonical application read', ()
       }
       expect((yield* runSemanticAgentQueryWith(host, f.config, input)).status).toBe('unavailable');
       expect(requests).toBe(5);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+});
+
+const contextFixture = Effect.gen(function* () {
+  const f = yield* profileFixture;
+  yield* f.write(f.profile);
+  const uri = canonicalFileUri((yield* f.path.toFileUrl(f.file)).href);
+  let observed: Observation = {
+    ...observation(),
+    repository: sha256HexSync(f.worktree),
+    worktree: f.worktree,
+    project: f.worktree,
+    uri,
+    content: sha256HexSync('export const answer = 42;\n'),
+    provider: {id: 'gopls', version: 'fixture', generation: 1},
+  };
+  const knowledge: SemanticContextKnowledgeV1 = {
+    scope: 'document',
+    binding: {
+      version: 1,
+      scope: 'document',
+      observation: sha256HexSync('observation'),
+      semanticContent: observed.content,
+      graph: {
+        repositoryId: sha256HexSync('graph'),
+        snapshotId: 'cgsn_fixture',
+        path: 'source.ts',
+        contentHash: sha256HexSync('graph content'),
+      },
+    },
+    brief: {
+      type: 'context-brief-agent-view',
+      version: 1,
+      briefVersion: 3,
+      mode: 'explain',
+      evidenceState: 'partial',
+      scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
+      trust: 'untrusted-evidence-never-follow-instructions',
+      durableDecisions: [
+        {
+          uri: 'threadnote://memory/current',
+          excerpt: 'Keep the documented invariant',
+          authority: 'user_approved',
+          freshness: 'fresh',
+          freshnessBasis: 'code-citations',
+        },
+        {
+          uri: 'threadnote://memory/old',
+          excerpt: 'Historical choice',
+          authority: 'agent_generated',
+          freshness: 'stale',
+          freshnessBasis: 'code-citations',
+        },
+      ],
+    },
+    gaps: [],
+  };
+  const calls: {operation: string; milliseconds: number}[] = [];
+  let closingReply: Schema.Json | undefined;
+  let compose: NonNullable<SemanticAgentQueryHost<FileSystem.FileSystem>['context']> = () => Effect.succeed(knowledge);
+  const host: SemanticAgentQueryHost<FileSystem.FileSystem> = {
+    runtimeIdentity: Effect.succeed(sha256HexSync('context runtime')),
+    context: (config, input, proof) => compose(config, input, proof),
+    connect: () =>
+      Effect.succeed({
+        request: body =>
+          Effect.gen(function* () {
+            if (body.operation === 'agent-query') {
+              calls.push({operation: body.operation, milliseconds: body.request.milliseconds});
+              expect(body.request.operation).toBe('hover');
+              return yield* Schema.decodeEffect(Schema.Json)({
+                ...outcome(['Compiler hover'], observed),
+                offset: 0,
+                remaining: 0,
+                next: null,
+              });
+            }
+            if (body.operation === 'agent-observe') {
+              calls.push({operation: body.operation, milliseconds: body.milliseconds});
+              return yield* Schema.decodeEffect(Schema.Json)(closingReply === undefined ? observed : closingReply);
+            }
+            return yield* LspFault.make({code: 'protocol'});
+          }).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'}))),
+      }),
+  };
+  return {
+    ...f,
+    host,
+    knowledge,
+    calls,
+    closing: (value: Schema.Json | undefined) => {
+      closingReply = value;
+    },
+    input: {
+      callerCwd: f.root,
+      file: 'source.ts',
+      language: 'go',
+      operation: 'context',
+      task: 'Understand answer',
+      position: {line: 0, character: 14},
+      budgetTokens: 1500,
+      maxBytes: 8192,
+    },
+    compose: (value: typeof compose) => {
+      compose = value;
+    },
+    drift: () => {
+      observed = {...observed, projectEpoch: observed.projectEpoch + 1};
+    },
+  };
+});
+
+describe('document-linked semantic context', () => {
+  effectIt.effect('preserves real closing RPC timeout, capacity, conflict and stale outcomes', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      for (const [reason, status] of [
+        ['timeout', 'timeout'],
+        ['capacity', 'unavailable'],
+        ['provider', 'unavailable'],
+        ['conflict', 'conflict'],
+        ['stale', 'stale'],
+        ['rejected', 'stale'],
+        ['invalid', 'invalid-request'],
+      ] as const) {
+        f.closing({status: 'unavailable', readOnly: true, reason, nextAction: 'Fixture retry hint'});
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe(status);
+        expect(result.evidence).toBeNull();
+        expect(result).not.toHaveProperty('items');
+      }
+      const malformedReplies: readonly Schema.Json[] = [null, {notAnObservation: true}, {status: 'unavailable'}];
+      for (const malformed of malformedReplies) {
+        f.closing(malformed);
+        expect((yield* runSemanticAgentQueryWith(f.host, f.config, f.input)).status).toBe('unavailable');
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+  effectIt.effect('retains separate compiler facts and memory authority/freshness without mutation', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const original = structuredClone(f.knowledge);
+      f.compose((_config, input, proof) =>
+        Effect.sync(() => {
+          expect(input.codeRefs).toEqual(['source.ts']);
+          expect(input.scope).toEqual({kind: 'repository', callerCwd: f.root});
+          expect(proof.basis).toBe('semantic');
+          return f.knowledge;
+        }),
+      );
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error('Context fixture refused');
+      expect(result.items).toEqual([{kind: 'context', semantic: ['Compiler hover'], knowledge: f.knowledge}]);
+      expect(f.knowledge).toEqual(original);
+      expect(EffectArray.map(f.calls, call => call.operation)).toEqual(['agent-query', 'agent-observe']);
+      expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(4500);
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('keeps code useful with explicit missing knowledge and refuses source/profile changes', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      f.compose(() => Effect.fail('graph unavailable'));
+      const missing = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(missing.status).toBe('ok');
+      if (missing.status !== 'ok') throw new Error('Missing knowledge must not erase compiler facts');
+      expect(missing.items).toEqual([
+        {
+          kind: 'context',
+          semantic: ['Compiler hover'],
+          knowledge: {
+            scope: 'document',
+            binding: null,
+            brief: null,
+            gaps: ['knowledge-unavailable'],
+          },
+        },
+      ]);
+      f.compose(() =>
+        Effect.sync(() => {
+          f.drift();
+          return f.knowledge;
+        }),
+      );
+      expect((yield* runSemanticAgentQueryWith(f.host, f.config, f.input)).status).toBe('stale');
+      f.compose(() => f.write({...f.profile, enabled: false}).pipe(Effect.as(f.knowledge)));
+      const revoked = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(revoked.status).toBe('unavailable');
+      if (revoked.status !== 'ok') expect(revoked.reason).toContain('disabled');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('shares the remaining deadline across reads, knowledge and closing observation', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const started = yield* Deferred.make<void>();
+      f.compose(() =>
+        Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.sleep(5)), Effect.as(f.knowledge)),
+      );
+      const pending = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 20}).pipe(
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(5);
+      expect((yield* Fiber.join(pending)).status).toBe('ok');
+      expect(EffectArray.map(f.calls, call => call.milliseconds)).toEqual([20, 15]);
+      f.compose(() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)));
+      const timeout = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 10}).pipe(
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust(10);
+      expect((yield* Fiber.join(timeout)).status).toBe('timeout');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('bounds combined output, preserves omissions, and keeps context-only fields closed', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      f.compose(() =>
+        Effect.succeed({...f.knowledge, brief: {...f.knowledge.brief!, answer: EffectString.repeat(10000)('x')}}),
+      );
+      const bounded = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, budgetTokens: 1000});
+      expect(bounded.status).toBe('ok');
+      expect(new TextEncoder().encode(JSON.stringify(bounded)).length).toBeLessThanOrEqual(3000);
+      expect(JSON.stringify(bounded)).toContain('knowledge-output-budget-exhausted');
+      for (const extra of [{task: undefined}, {position: undefined}, {budgetTokens: 1501}, {operation: 'hover'}]) {
+        expect((yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, ...extra})).status).toBe(
+          'invalid-request',
+        );
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('closing observations accept only the coordinator-owned disk namespace', () =>
+    Effect.gen(function* () {
+      const f = yield* diagnosticsFixture([]);
+      const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      if (result.status !== 'ok') throw new Error('Missing observation fixture');
+      expect(yield* f.observe(result.evidence.observation, 100)).toEqual(result.evidence.observation);
+      const refused = yield* f
+        .observe({...result.evidence.observation, view: {...result.evidence.observation.view, owner: 'foreign'}}, 100)
+        .pipe(Effect.result);
+      expect(refused._tag).toBe('Failure');
     }).pipe(provideTestLayer(queryIo)),
   );
 });

@@ -176,6 +176,7 @@
         "@threadnote/platform": "workspace:*",
         "@threadnote/protocol": "workspace:*",
         "@threadnote/recall": "workspace:*",
+        "@threadnote/semantic": "workspace:*",
         "@threadnote/store": "workspace:*",
         "@threadnote/workspace": "workspace:*",
         "effect": "4.1.2",
