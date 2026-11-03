@@ -1,5 +1,6 @@
 import {expect, test as base} from '@playwright/test';
 import {ManagerRuntime} from './runtime.js';
+import {configureModel} from './model.js';
 import {configureProviders} from './providers.js';
 import {Array as EffectArray, pipe} from 'effect';
 import * as EffectString from 'effect/String';
@@ -11,7 +12,7 @@ import {spawnSync} from '@threadnote/testing/node-child-process';
 interface ManagerFixtures {
   readonly manager: ManagerRuntime;
   readonly managerMode: 'compiled' | 'source';
-  readonly managerScenario: 'empty' | 'populated' | 'providers';
+  readonly managerScenario: 'empty' | 'populated' | 'providers' | 'remote-model';
 }
 
 export const test = base.extend<ManagerFixtures>({
@@ -55,6 +56,7 @@ export const test = base.extend<ManagerFixtures>({
   manager: async ({managerMode, managerScenario}, use, testInfo) => {
     const manager = await ManagerRuntime.create();
     try {
+      if (managerScenario === 'remote-model') await configureModel(manager);
       await manager.start(managerMode);
       if (managerScenario === 'populated')
         await manager.remember(
@@ -106,16 +108,20 @@ export const test = base.extend<ManagerFixtures>({
             item => item.path === url.pathname && item.status === response.status(),
           );
           if (expected.length) {
-            const body = await response.text().catch(async () => {
+            let body = await response.text().catch(() => {
               if (response.request().method() !== 'GET')
                 throw new Error('Could not verify intentional mutation error response.');
-              // Navigation may cancel the browser's body read after headers arrived.
+              return '';
+            });
+            if (!body && response.request().method() === 'GET') {
+              // WebKit may return an empty body when navigation cancels the read after headers.
               const current = await fetch(response.url(), {
                 headers: {authorization: `Bearer ${manager.token}`},
                 signal: AbortSignal.timeout(5_000),
               });
-              return current.text();
-            });
+              expect(current.status).toBe(response.status());
+              body = await current.text();
+            }
             if (
               EffectArray.some(
                 expected,
@@ -149,7 +155,7 @@ export const test = base.extend<ManagerFixtures>({
       }
       if (
         pipe(request.url(), EffectString.startsWith(manager.origin)) &&
-        !/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|cancelled)$/u.test(error)
+        !/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|cancelled|Load request cancelled)$/u.test(error)
       )
         failures.push(`First-party request failed: ${new URL(request.url()).pathname}: ${error}`);
     });

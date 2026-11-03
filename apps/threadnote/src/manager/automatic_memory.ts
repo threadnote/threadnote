@@ -324,10 +324,17 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
             ? 'read-only'
             : 'personal-review'),
       canGenerate:
-        assessment?.capabilities.draft === true &&
+        // This is a foreground request hint. Unreviewed roles may be proposed privately;
+        // the draft controller re-reads exact bounds and sources before admitting any proposal.
+        assessment?.capabilities.assess === true &&
+        assessment.capabilities.reviewRoute !== 'read-only' &&
+        !assessment.capabilities.reasons.includes('unsupported-schema') &&
+        !!assessment.target.memoryId &&
+        assessment.target.paragraphCount !== null &&
+        assessment.target.paragraphCount === assessment.paragraphs.length &&
+        EffectArray.some(assessment.evidence, evidence => evidence.availability === 'available') &&
         !prior &&
         !cp?.decision &&
-        cp?.state !== 'failed' &&
         !background.allMaintenancePaused,
       legacyUncited:
         !record.metadata.reviewedSupport &&

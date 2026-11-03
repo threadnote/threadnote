@@ -75,7 +75,7 @@ test('S01 failed OS spawn and registered non-Bun descendants are cleaned up', as
     await new Promise<void>(resolve => missing.once('error', () => resolve()));
     const child = manager.launch(findExecutable('bun'), [
       '--eval',
-      `const child = Bun.spawn(['/bin/sleep', '30'], {detached:true, stdout:'inherit', stderr:'inherit', env:process.env}); child.unref(); console.log(child.pid); await Bun.sleep(60_000);`,
+      `const child = Bun.spawn(['/bin/sleep', '30'], {detached:true, stdout:'inherit', stderr:'inherit', env:process.env}); child.unref(); process.stdout.write(String(child.pid)); await Bun.sleep(60_000);`,
     ]);
     descendantPid = await new Promise<number>((resolve, reject) => {
       child.stdout?.once('data', chunk => resolve(Number(String(chunk))));

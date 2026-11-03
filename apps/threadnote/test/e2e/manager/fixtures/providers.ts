@@ -6,7 +6,7 @@ import * as EffectString from 'effect/String';
 import {releaseRoutes} from './releases.js';
 
 export const providerNames = ['obsidian', 'github', 'linear', 'pocket', 'superhuman'] as const;
-const uuid = (n: number) => `00000000-0000-0000-0000-${pipe(String(n), EffectString.padStart(12, '0'))}`;
+const uuid = (n: number) => `00000000-0000-4000-8000-${pipe(String(n), EffectString.padStart(12, '0'))}`;
 const timestamp = '2026-10-08T12:00:00.000Z';
 const githubIssue = {
   id: 11,
@@ -98,6 +98,12 @@ export function providerRoutes(version: string): readonly NetworkRoute[] {
     linear('LinearIssue(', {issue: linearIssue}),
     linear('LinearComments', {
       issue: {id: uuid(4), comments: {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}}},
+    }),
+    superhuman('/apis/v1/docs/doc_e2e', {
+      id: 'doc_e2e',
+      type: 'doc',
+      name: 'Fixture document',
+      browserLink: 'https://docs.superhuman.com/d/_ddoc_e2e',
     }),
     superhuman('/apis/v1/docs/doc_e2e/pages', {items: [superhumanPage]}),
     superhuman('/apis/v1/docs/doc_e2e/pages/page_e2e', superhumanPage),

@@ -127,7 +127,7 @@ export function ObsidianConnectionForm({
             Connection name
             <input
               required
-              pattern="[a-z0-9][a-z0-9._-]*"
+              pattern="[a-z0-9](?:[a-z0-9._]|-)*"
               value={id}
               disabled={!!existing}
               onChange={event => setId(event.target.value)}

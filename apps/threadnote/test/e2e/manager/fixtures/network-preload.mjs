@@ -1,6 +1,6 @@
 // Test-only Bun preload: substitute external I/O while the compiled application remains intact.
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Compiled-runtime preloads cannot resolve workspace test aliases; this is the fixture's native filesystem boundary.
-import {appendFileSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- The independently bundled preload needs the native path boundary.
 import {join} from 'node:path';
 import {Array as EffectArray, pipe} from 'effect';
@@ -82,6 +82,15 @@ globalThis.fetch = async (input, init) => {
     }) + '\n',
   );
   if (route) {
+    if (route.gate) {
+      if (!/^[a-z][a-z0-9.-]{0,63}$/u.test(route.gate)) throw new Error('Invalid fixture response gate.');
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(join(root, route.gate))) {
+        init?.signal?.throwIfAborted();
+        if (Date.now() > deadline) throw new Error('Fixture response gate timed out.');
+        await Bun.sleep(10);
+      }
+    }
     const headers = {'content-type': 'application/json', ...route.headers};
     return new Response(JSON.stringify(route.body), {status: route.status ?? 200, headers});
   }

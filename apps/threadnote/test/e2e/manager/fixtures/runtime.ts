@@ -25,6 +25,7 @@ export interface NetworkRoute {
   readonly status?: number;
   readonly headers?: Readonly<Record<string, string>>;
   readonly body: unknown;
+  readonly gate?: string;
 }
 
 export function redactManagerLog(text: string): string {
@@ -192,9 +193,14 @@ export class ManagerRuntime {
     });
   }
 
-  async remember(text: string, topic = 'fixture-memory', project = 'manager-e2e'): Promise<string> {
+  async remember(
+    text: string,
+    topic = 'fixture-memory',
+    project = 'manager-e2e',
+    kind: 'handoff' | 'durable' = 'handoff',
+  ): Promise<string> {
     const output = await this.cli(
-      ['remember', '--kind', 'handoff', '--project', project, '--topic', topic, '--stdin'],
+      ['remember', '--kind', kind, '--project', project, '--topic', topic, '--stdin'],
       text,
     );
     const uri = /Stored memory: (threadnote:\/\/\S+)/u.exec(output)?.[1];
