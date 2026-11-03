@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Console, Crypto, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
+import {Console, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {
   buildCandidateReview,
@@ -278,9 +279,9 @@ const readInboxState = Effect.fn('obsidian.readInboxState')(function* (path: str
 const writeInboxState = Effect.fn('obsidian.writeInboxState')(function* (path: string, state: ObsidianInboxState) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {mode: INBOX_FILE_MODE});
   yield* fs
     .rename(temporaryPath, path)

@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     "./background/admission": "./src/background/admission.ts",
+    "./background/worker-control": "./src/background/worker-control.ts",
     "./engine/embedding": "./src/engine/embedding.ts",
     "./engine/errors": "./src/engine/errors.ts",
     "./engine/llama-cpp-engine": "./src/engine/llama-cpp-engine.ts",
@@ -22,13 +23,13 @@
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",
-    "effect": "4.0.7",
+    "effect": "4.1.2",
     "node-llama-cpp": "3.22.1"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.7",
+    "@effect/platform-bun": "4.1.2",
     "@threadnote/testing": "workspace:*",
-    "@effect/vitest": "4.0.7",
+    "@effect/vitest": "4.1.2",
     "vitest": "5.0.5",
     "fast-check": "4.10.2"
   },

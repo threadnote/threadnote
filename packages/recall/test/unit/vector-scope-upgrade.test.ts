@@ -1,5 +1,6 @@
 import {stepRecallVectorPreparation} from '../../src/background/vector-step.js';
 import {readRecallEmbeddingDemand} from '../../src/background/demand.js';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
@@ -36,6 +37,8 @@ import {TestError} from '@threadnote/testing/test-error';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const manifest = Option.getOrUndefined(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
 )!;
@@ -60,7 +63,7 @@ const modelStore = Layer.succeed(
     verify: home => Effect.succeed(installation(home)),
   } satisfies LocalModelStoreShape),
 );
-const base = Layer.mergeAll(BunServices.layer, systemLayer, LocalModelCatalog.layer([manifest]), modelStore);
+const base = Layer.mergeAll(platformServicesLayer, systemLayer, LocalModelCatalog.layer([manifest]), modelStore);
 
 function installation(home: string) {
   return {

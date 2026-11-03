@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   type ModelArtifactFileIdentity as ModelSetupFileIdentity,
   validModelArtifactFileIdentity as validFileIdentity,
@@ -363,7 +364,7 @@ export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const directory = path.join(home, 'models');
   const initializes =
     (options.expectedEpoch === undefined || options.expectedEpoch === 0) &&
@@ -411,7 +412,7 @@ export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
         return yield* ModelSetupStateInvalid.make({message: 'Invalid model setup transition.'});
       }
       if (current.status === 'valid' && next === state) return mutationResult(state);
-      const temporary = path.join(directory, `.setup.${yield* crypto.randomUUIDv4()}.tmp`);
+      const temporary = path.join(directory, `.setup.${yield* crypto.uuidV4()}.tmp`);
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(temporary, raw, {mode: 0o600});
         yield* syncWritableFile(fs, temporary);

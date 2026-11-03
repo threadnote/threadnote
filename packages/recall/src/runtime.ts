@@ -1,3 +1,4 @@
+import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
@@ -759,7 +760,12 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
   const corpusGeneration = lexicalStatus.generation;
-  const vectorReadiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, corpusGeneration);
+  const vectorReadiness = yield* vectorIndexGenerationReadiness(
+    config.agentContextHome,
+    manifest,
+    corpusGeneration,
+    yield* loadRecallVectorAuthorizationKey(config),
+  );
   if (vectorReadiness === 'corrupt') {
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
@@ -773,7 +779,11 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
     eligibility,
     limit,
   }).pipe(
-    Effect.map(scores => ({corpusGeneration, scores, state: 'available' as const})),
+    Effect.map(scores =>
+      scores === undefined
+        ? {manifest, state: 'refreshable' as const}
+        : {corpusGeneration, scores, state: 'available' as const},
+    ),
     Effect.catchCauseIf(
       cause =>
         cause.reasons.length > 0 &&
@@ -878,7 +888,14 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     query: '',
   });
   const corpusGeneration = snapshot.generation;
-  if (!(yield* vectorIndexMatchesGeneration(config.agentContextHome, manifest, corpusGeneration))) {
+  if (
+    !(yield* vectorIndexMatchesGeneration(
+      config.agentContextHome,
+      manifest,
+      corpusGeneration,
+      yield* loadRecallVectorAuthorizationKey(config),
+    ))
+  ) {
     yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
     return {corpusGeneration, scores: undefined};
   }
@@ -888,7 +905,10 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
     currentCorpusGeneration: fence,
     eligibility,
     limit,
-  }).pipe(Effect.map(scores => ({corpusGeneration, scores})));
+  }).pipe(
+    Effect.tap(scores => (scores === undefined ? scheduleMcpRecallBackgroundRefresh(config, manifest) : Effect.void)),
+    Effect.map(scores => ({corpusGeneration, scores})),
+  );
 });
 
 export const loadRecallSemanticScores = Effect.fn('recall.loadSemanticScores')(function* (

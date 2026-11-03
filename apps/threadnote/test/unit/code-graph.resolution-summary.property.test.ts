@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -22,9 +23,11 @@ import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixt
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const ResolutionSummaryTestLayer = CodeGraphStore.layer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 const lookupKeys = ['typescript:name:alpha', 'typescript:name:beta', 'typescript:name:gamma'] as const;

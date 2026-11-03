@@ -57,6 +57,7 @@ import {Console, Effect, Layer} from 'effect';
 import {BunServices, BunRuntime} from '@effect/platform-bun';
 import {FileSystem} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {HttpService} from '@threadnote/platform/http';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -85,7 +86,7 @@ const customSystem = Layer.effect(SystemInfo, Effect.gen(function*(){
  const system=yield* SystemInfo;
  return {...system,developmentEntrypoint:${JSON.stringify(entry)}};
 })).pipe(Layer.provide(systemLayer));
-const base = Layer.mergeAll(BunServices.layer,customSystem,commandLayer.pipe(Layer.provide(BunServices.layer)),catalog);
+const base = Layer.mergeAll(BunServices.layer,cryptoLayer,customSystem,commandLayer.pipe(Layer.provide(BunServices.layer)),catalog);
 const store = LocalModelStore.layer.pipe(Layer.provide(Layer.merge(base,http.pipe(Layer.provide(base)))));
 const layers=Layer.merge(base,store);
 const args=process.argv.slice(2);
@@ -104,6 +105,7 @@ async function prepareHarness(f: Awaited<ReturnType<typeof fixture>>) {
     'effect',
     '@effect/platform-bun',
     '@threadnote/platform/system',
+    '@threadnote/platform/crypto',
     '@threadnote/platform/http',
     '@threadnote/platform/command',
     '@threadnote/platform/digest',

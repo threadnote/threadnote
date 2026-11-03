@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Schema} from 'effect';
-import {Crypto, DateTime, Effect, FileSystem, Option, Path} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {makeCodeGraphCitationRepositoryRouteObservation} from '@threadnote/graph/citation/recovery';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -732,9 +733,9 @@ const readProjection = Effect.fn('contextMaintenance.readEvidenceProjection')(fu
 const atomicWrite = Effect.fn('contextMaintenance.writeEvidenceProjection')(function* (file: string, text: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
-  const temporary = `${file}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const temporary = `${file}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs
     .writeFileString(temporary, text, {mode: 0o600})
     .pipe(
@@ -1270,7 +1271,7 @@ const enqueueEvidenceRequest = Effect.fn('contextMaintenance.enqueueEvidenceRequ
         for (const uri of request.uris) pending.delete(uri);
       }
       if (pending.size === 0) return;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       let nextPage = 0;
       while (pending.size > 0) {
         const page = nextPage++;
@@ -1299,7 +1300,7 @@ const enqueueEvidenceRequest = Effect.fn('contextMaintenance.enqueueEvidenceRequ
           pending.delete(uri);
         }
         if (combined.length === (previous?.uris.length ?? 0)) continue;
-        yield* writeEvidenceRequestPage(pageFile, {...candidate(), revision: yield* crypto.randomUUIDv4()});
+        yield* writeEvidenceRequestPage(pageFile, {...candidate(), revision: yield* crypto.uuidV4()});
       }
     }),
   ).pipe(Effect.mapError(() => requestPersistenceError()));

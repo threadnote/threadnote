@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Schema, Sink, Stdio, Stream} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
+import * as CommandLine from 'effect/process/CommandLine';
 import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
 import {redactSensitiveText} from '@threadnote/platform/scrubber';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
@@ -214,7 +215,7 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
   const environment = system.environment();
   const maxOutputBytes = options.maxOutputBytes ?? commandMaxOutputBytes(environment);
   const timeoutMs = options.timeoutMs ?? commandTimeoutMs(environment);
-  const command = formatShellCommand(executable, args);
+  const command = formatCommandDisplay(executable, args);
   const safeArgs = redactCommandArgs(args);
   const safeExecutable = redactSensitiveText(executable);
   const spawnFailed = (cause: unknown) => commandSpawnFailure(command, safeExecutable, safeArgs, cause);
@@ -305,7 +306,7 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
   const environment = system.environment();
   const maxOutputBytes = options.maxOutputBytes ?? commandMaxOutputBytes(environment);
   const timeoutMs = options.timeoutMs ?? commandTimeoutMs(environment);
-  const command = formatShellCommand(executable, args);
+  const command = formatCommandDisplay(executable, args);
   const safeArgs = redactCommandArgs(args);
   const safeExecutable = redactSensitiveText(executable);
   const spawnFailed = (cause: unknown) => commandSpawnFailure(command, safeExecutable, safeArgs, cause);
@@ -391,7 +392,7 @@ const executeStreamingCommand = Effect.fn('CommandExecutor.executeStreaming')(fu
 ) {
   const environment = system.environment();
   const maxOutputChars = options.maxOutputChars ?? 64_000;
-  const command = formatShellCommand(executable, args);
+  const command = formatCommandDisplay(executable, args);
   const safeArgs = redactCommandArgs(args);
   const safeExecutable = redactSensitiveText(executable);
   const spawnFailed = (cause: unknown) => commandSpawnFailure(command, safeExecutable, safeArgs, cause);
@@ -670,6 +671,18 @@ export function commandEnvironment(
 export function formatShellCommand(executable: string, args: readonly string[]): string {
   const values = isGitExecutable(executable) ? formatGitCommandValues(executable, args) : [executable, ...args];
   return redactSensitiveText(EffectArray.join(EffectArray.map(values, shellQuote), ' '));
+}
+
+/** Reading-only diagnostics; executable setup and login snippets use formatShellCommand. */
+export function formatCommandDisplay(executable: string, args: readonly string[]): string {
+  const values = isGitExecutable(executable) ? formatGitCommandValues(executable, args) : [executable, ...args];
+  const redactedValues = EffectArray.map(values, redactSensitiveText);
+  // Hide arguments when credential recognition spans words; quoting can otherwise obscure that boundary.
+  const words =
+    redactSensitiveText(EffectArray.join(values, ' ')) === EffectArray.join(redactedValues, ' ')
+      ? redactedValues
+      : [redactedValues[0], '[REDACTED]'];
+  return redactSensitiveText(CommandLine.display(words));
 }
 
 const GIT_PATH_ARGUMENT_ROLES = new Map<string, 'gitdir' | 'worktree'>([

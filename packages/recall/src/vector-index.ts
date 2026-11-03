@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -28,6 +29,13 @@ import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/ve
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  loadRecallVectorAuthorizationKey,
+  recallVectorAuthorizationKey,
+  recallVectorPreparationIdentity,
+  recallVectorPreparationMatches,
+} from './vector/preparation-identity.js';
+export {loadRecallVectorAuthorizationKey};
 
 class VectorIndexOperationError extends Schema.TaggedError<
   VectorIndexOperationError,
@@ -269,8 +277,9 @@ export const vectorIndexMatchesGeneration = Effect.fn('vectorIndex.matchesGenera
   home: string,
   manifest: LocalModelManifest,
   corpusGeneration: string,
+  authorizationKey?: string,
 ) {
-  return (yield* vectorIndexGenerationReadiness(home, manifest, corpusGeneration)) === 'current';
+  return (yield* vectorIndexGenerationReadiness(home, manifest, corpusGeneration, authorizationKey)) === 'current';
 });
 
 /**
@@ -283,11 +292,17 @@ export const vectorIndexGenerationReadiness = Effect.fn('vectorIndex.generationR
   home: string,
   manifest: LocalModelManifest,
   corpusGeneration: string,
+  authorizationKey?: string,
 ) {
   const active = yield* readActiveVectorGeneration(home, manifest).pipe(Effect.result);
   if (Result.isFailure(active)) return 'corrupt' as const;
   if (!active.success) return 'missing' as const;
-  return generationMatchesCorpus(active.success, manifest, corpusGeneration)
+  return generationMatchesCorpus(active.success, manifest, corpusGeneration) &&
+    (authorizationKey === undefined ||
+      recallVectorPreparationMatches(
+        active.success.job_id,
+        recallVectorPreparationIdentity(corpusGeneration, authorizationKey, manifest.id, embeddingRecipe(manifest)),
+      ))
     ? ('current' as const)
     : ('stale' as const);
 });
@@ -340,7 +355,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   const dimensions = manifest.dimensions;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const runtime = yield* LocalModelRuntime;
   const store = yield* LocalModelStore;
   const installed = yield* store.verify(config.agentContextHome, manifest);
@@ -381,7 +396,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         building = undefined;
       }
       if (!building) {
-        const generation = `${yield* Clock.currentTimeMillis}-${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.slice(0, 8))}`;
+        const generation = `${yield* Clock.currentTimeMillis}-${Effect2.pipe(yield* crypto.uuidV4(), EffectString.slice(0, 8))}`;
         yield* sql`
           INSERT INTO vector_generations (
             generation,
@@ -544,8 +559,26 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
   const status = yield* store.status(config.agentContextHome, manifest);
   if (!status.installed) return undefined;
 
+  const externalLocation =
+    config.account !== undefined && config.user !== undefined
+      ? {home: config.agentContextHome, account: config.account, user: config.user}
+      : undefined;
+  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
+  const authorizationKey = recallVectorAuthorizationKey(externalResources);
+  const matchesAuthorization = (active: VectorGenerationRow) =>
+    recallVectorPreparationMatches(
+      active.job_id,
+      recallVectorPreparationIdentity(
+        options.corpusGeneration ?? active.corpus_generation ?? '',
+        authorizationKey,
+        manifest.id,
+        embeddingRecipe(manifest),
+      ),
+    );
+
   const activeBeforeInference = yield* readActiveVectorGeneration(config.agentContextHome, manifest);
   if (!activeBeforeInference) return undefined;
+  if (!matchesAuthorization(activeBeforeInference)) return undefined;
   yield* verifySelectedCorpusGeneration(activeBeforeInference, manifest, options);
   const normalizedQuery =
     activeBeforeInference.chunk_count === 0
@@ -560,11 +593,6 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
           ),
         );
 
-  const externalLocation =
-    config.account !== undefined && config.user !== undefined
-      ? {home: config.agentContextHome, account: config.account, user: config.user}
-      : undefined;
-  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
   const eligibility: RecallEligibilityPolicy = {
     ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
     externalResources,
@@ -578,6 +606,7 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
           yield* validateVectorDatabase(sql);
           const active = yield* selectActiveGeneration(sql);
           if (!active || !generationIsCompatible(active, manifest)) return undefined;
+          if (!matchesAuthorization(active)) return undefined;
           yield* verifySelectedCorpusGeneration(active, manifest, options);
           if (active.chunk_count === 0) return new Map<string, number>();
           if (Option.isNone(normalizedQuery)) {
@@ -657,6 +686,11 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
         scores.delete(uri);
     }
   }
+  if (
+    externalLocation !== undefined &&
+    recallVectorAuthorizationKey(yield* loadExternalResourceAccess(externalLocation)) !== authorizationKey
+  )
+    return undefined;
   return scores;
 });
 
@@ -784,7 +818,7 @@ const validateVectorGenerationRows = Effect.fn('vectorIndex.validateGenerationRo
         const rows = yield* sql.unsafe<VectorRow>(
           `SELECT chunk.chunk_id, chunk.uri, chunk.fingerprint, value.vector
            FROM vector_chunks AS chunk
-           JOIN vector_values AS value ON value.id = chunk.vector_id
+           LEFT JOIN vector_values AS value ON value.id = chunk.vector_id
            WHERE chunk.generation = ? AND chunk.chunk_id > ?
            ORDER BY chunk.chunk_id
            LIMIT ?`,
@@ -1593,7 +1627,7 @@ function assertVectorGeneration(generation: VectorGenerationRow): void {
   if (
     !generation.generation ||
     !/^[0-9]+-[a-f0-9-]+$/.test(generation.generation) ||
-    !/^[0-9a-f]{64}$/.test(generation.job_id) ||
+    !/^(?:idle-recall-v2:)?[0-9a-f]{64}$/.test(generation.job_id) ||
     !generation.model_id ||
     !/^[0-9a-f]{64}$/.test(generation.model_sha256) ||
     !/^[0-9a-f]{64}$/.test(generation.embedding_recipe) ||
@@ -1707,6 +1741,7 @@ export const recallVectorStorage = {
   use: useVectorDatabase,
   read: useVectorDatabaseReadOnly,
   validateVector: validateEncodedVector,
+  validateGenerationRows: validateVectorGenerationRows,
   databasePath: vectorDatabasePath,
   recipe: embeddingRecipe,
   chunkMappings: vectorChunkMappings,

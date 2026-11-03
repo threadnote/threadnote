@@ -1,7 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
-import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema, Stream} from 'effect';
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
+import {Clock, Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
@@ -30,7 +32,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const bytes = new TextEncoder().encode('independent tiny model fixture');
-const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer);
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, cryptoLayer);
 function provideTestLayer<A, E, R>(layer: Layer.Layer<A, E, R>) {
   return <B, E2, R2>(effect: Effect.Effect<B, E2, R2>) =>
     Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
@@ -141,7 +143,7 @@ const fixture = (options: FixtureOptions = {}) =>
       getStatus: () => Effect.die('No status requests'),
       getText: () => Effect.die('No text requests'),
     });
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     let rewritten = false;
     const storeFileSystem = options.rewriteDuringHash
       ? {
@@ -158,7 +160,7 @@ const fixture = (options: FixtureOptions = {}) =>
       : fs;
     const context = Context.add(systemContext, FileSystem.FileSystem, storeFileSystem).pipe(
       Context.add(Path.Path, path),
-      Context.add(Crypto.Crypto, crypto),
+      Context.add(SecureRandom.SecureRandom, crypto),
       Context.add(HttpService, http),
     );
     const catalogContext = yield* Layer.build(LocalModelCatalog.layer([manifest])).pipe(Effect.provide(context));

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Crypto, Effect, Exit, FileSystem, Path, Ref, Result, Semaphore, Schema} from 'effect';
+import {Cause, Clock, Effect, Exit, FileSystem, Path, Ref, Result, Semaphore, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -627,7 +628,7 @@ function prepareConfiguredSnapshot(
       | CodeGraphLanguagePackRegistry
       | CodeGraphStore
       | CommandExecutor
-      | Crypto.Crypto
+      | SecureRandom.SecureRandom
       | FileSystem.FileSystem
       | Path.Path
       | SystemInfo;

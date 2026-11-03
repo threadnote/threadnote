@@ -1,7 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import * as Array from 'effect/Array';
 import * as Clock from 'effect/Clock';
-import * as Crypto from 'effect/Crypto';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
 import * as FileSystem from 'effect/FileSystem';
@@ -44,6 +44,7 @@ import {
   maintainNativeWatchSubscription,
 } from '../../src/workflow_automation/watch_notification.js';
 import {
+  matchesTerminalNativeWatchArrival,
   nativeWatchNotice,
   nativeWatchWakeupSchema,
   stageNativeWatchNotification,
@@ -346,7 +347,7 @@ effectIt.effect('refuses a skipped-probe binding that changed concurrently befor
   Effect.gen(function* () {
     const f = yield* fixture();
     const fs = yield* FileSystem.FileSystem;
-    const context = yield* Effect.context<Crypto.Crypto | Path.Path>();
+    const context = yield* Effect.context<SecureRandom.SecureRandom | Path.Path>();
     const stored = yield* f.read();
     const changed = {
       ...stored.envelope,
@@ -857,83 +858,220 @@ effectIt.effect.prop(
   {arbitrary: {runs: 20}},
 );
 
-effectIt.effect('late arrival after ordinary terminal ACK and stop refuses expired ownership without mutation', () =>
+effectIt.effect(
+  'late mismatched arrival after ordinary terminal ACK and stop refuses expired ownership without mutation',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(1);
+      const system = yield* SystemInfo;
+      yield* Effect.gen(function* () {
+        let queueCalls = 0;
+        yield* f.dispatch().pipe(
+          commandLayer((executable, args) => {
+            expect(executable).toBe(target.executable);
+            expect(args.slice(0, 4)).toEqual(['queue', '--thread', target.threadId, '--message']);
+            queueCalls++;
+            return Effect.succeed(success);
+          }),
+        );
+        const queued = yield* f.read();
+        const head = EffectString.repeat(40)('a');
+        const state = reconcileNativeWatch(queued.envelope.state, {
+          head,
+          startedHead: head,
+          state: 'merged',
+          at: 0,
+          sources: [],
+          ci: {head, complete: false, count: 0, pending: 0, failed: 0, version: EffectString.repeat(64)('a')},
+        });
+        yield* writeNativeWatch(
+          f.config,
+          {...queued.envelope, state, collector: {...queued.envelope.collector!, status: 'terminal', reason: 'merged'}},
+          queued.revision,
+        );
+        const control = (command: string, fields: Record<string, unknown> = {}) =>
+          runNativeWatch(f.config, {
+            protocolVersion: 1,
+            executorVersion: 1,
+            action: 'watch',
+            command,
+            watchId: 'watch-1',
+            consumerId: 'consumer',
+            wakeupId: 'wakeup',
+            ...fields,
+          });
+        // Ordinary work delivery deliberately omits the queued notice's key and attempt.
+        yield* control('relay');
+        const delivered = (yield* f.read()).envelope.state;
+        const deliveryId = delivered.delivery!.id;
+        yield* control('disposition', {
+          deliveryId,
+          dispositions: Array.map(delivered.events, event => ({
+            eventId: event.id,
+            status: 'resolved',
+            reason: 'terminal work verified',
+            evidence: 'private mocked fixture',
+          })),
+        });
+        expect(Array.every((yield* f.read()).envelope.state.work, item => item.status === 'resolved')).toBe(true);
+        yield* control('ack', {deliveryId});
+        yield* control('stop');
+        yield* TestClock.adjust(state.consumer!.leaseUntil + 1);
+        expect(yield* control('inspect')).toMatchObject({
+          prState: 'merged',
+          stopRequested: true,
+          consumer: {live: false},
+          collector: {alive: false, status: 'terminal'},
+          monitoring: 'interrupted',
+          pending: 0,
+          deliveryId: null,
+          work: {open: 0, blocked: 0, terminal: delivered.events.length},
+          notification: {status: 'queued', receipt, consumedThrough: 0},
+        });
+        const before = yield* f.read();
+        const fs = yield* FileSystem.FileSystem;
+        const statePath = f.config.agentContextHome + '/workflow-automations/native-watch-v1/watch-1.json';
+        const bytes = yield* fs.readFileString(statePath);
+        expect(yield* arrive(f, {attemptId: token}).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'invalid-watch'},
+        });
+        expect(yield* f.read()).toEqual(before);
+        expect(yield* fs.readFileString(statePath)).toBe(bytes);
+        expect(queueCalls).toBe(1);
+      }).pipe(Effect.provideService(SystemInfo, {...system, homeDirectory: f.userHome, isProcessRunning: () => false}));
+    }).pipe(provide),
+);
+
+effectIt.effect.prop(
+  'terminal arrival guard preserves all state and rejects unsettled or mismatched routes',
+  {
+    fault: Schema.Literals([
+      'none',
+      'open-pr',
+      'unacked',
+      'events',
+      'work',
+      'consumer',
+      'wakeup',
+      'key',
+      'attempt',
+      'receipt',
+      'sending',
+      'duplicate',
+    ]),
+  },
+  ({fault}) =>
+    Effect.gen(function* () {
+      const f = yield* fixture(1);
+      yield* f.dispatch().pipe(commandLayer(() => Effect.succeed(success)));
+      const queued = yield* f.read();
+      const pending = queued.envelope.notification!.outbox!;
+      const relay = relayNativeWatch(queued.envelope.state, 'consumer', 0);
+      const settled = acknowledgeNativeWatch(
+        recordNativeWatchDispositions(
+          relay.state,
+          'consumer',
+          relay.delivery!.id,
+          Array.map(relay.delivery!.events, event => ({
+            eventId: event.id,
+            status: 'resolved' as const,
+            reason: 'verified',
+            evidence: 'fixture',
+          })),
+          0,
+        ),
+        'consumer',
+        relay.delivery!.id,
+        0,
+      );
+      const state = {
+        ...settled,
+        prState: fault === 'open-pr' ? ('open' as const) : ('merged' as const),
+        ...(fault === 'unacked' ? {acknowledged: 0} : {}),
+        ...(fault === 'events' ? {events: queued.envelope.state.events} : {}),
+        ...(fault === 'work' ? {work: Array.map(settled.work, item => ({...item, status: 'open' as const}))} : {}),
+      };
+      const notification = {
+        ...queued.envelope.notification!,
+        outbox: {
+          ...pending,
+          ...(fault === 'receipt' ? {receipt: undefined} : {}),
+          ...(fault === 'sending' ? {status: 'sending' as const} : {}),
+          ...(fault === 'duplicate' ? {consumedThrough: state.nextSequence - 1} : {}),
+        },
+      };
+      const route = {
+        consumerId: fault === 'consumer' ? 'wrong' : 'consumer',
+        wakeupId: fault === 'wakeup' ? 'wrong' : 'wakeup',
+        eventKey: fault === 'key' ? 'watch-1:999:999' : pending.key,
+        attemptId: fault === 'attempt' ? token : pending.attemptId,
+      };
+      const before = JSON.stringify({state, notification, route});
+      expect(matchesTerminalNativeWatchArrival(notification, state, route)).toBe(
+        fault === 'none' || fault === 'duplicate',
+      );
+      expect(JSON.stringify({state, notification, route})).toBe(before);
+    }).pipe(provide),
+  {arbitrary: {runs: 24}},
+);
+
+effectIt.effect('settled terminal notice claims late arrival without renewing expired authority', () =>
   Effect.gen(function* () {
     const f = yield* fixture(1);
-    const system = yield* SystemInfo;
-    yield* Effect.gen(function* () {
-      let queueCalls = 0;
-      yield* f.dispatch().pipe(
-        commandLayer((executable, args) => {
-          expect(executable).toBe(target.executable);
-          expect(args.slice(0, 4)).toEqual(['queue', '--thread', target.threadId, '--message']);
-          queueCalls++;
-          return Effect.succeed(success);
-        }),
-      );
-      const queued = yield* f.read();
-      const head = EffectString.repeat(40)('a');
-      const state = reconcileNativeWatch(queued.envelope.state, {
-        head,
-        startedHead: head,
-        state: 'merged',
-        at: 0,
-        sources: [],
-        ci: {head, complete: false, count: 0, pending: 0, failed: 0, version: EffectString.repeat(64)('a')},
-      });
-      yield* writeNativeWatch(
-        f.config,
-        {...queued.envelope, state, collector: {...queued.envelope.collector!, status: 'terminal', reason: 'merged'}},
-        queued.revision,
-      );
-      const control = (command: string, fields: Record<string, unknown> = {}) =>
-        runNativeWatch(f.config, {
-          protocolVersion: 1,
-          executorVersion: 1,
-          action: 'watch',
-          command,
-          watchId: 'watch-1',
-          consumerId: 'consumer',
-          wakeupId: 'wakeup',
-          ...fields,
-        });
-      // Ordinary work delivery deliberately omits the queued notice's key and attempt.
-      yield* control('relay');
-      const delivered = (yield* f.read()).envelope.state;
-      const deliveryId = delivered.delivery!.id;
-      yield* control('disposition', {
-        deliveryId,
-        dispositions: Array.map(delivered.events, event => ({
+    yield* f.dispatch().pipe(commandLayer(() => Effect.succeed(success)));
+    const queued = yield* f.read();
+    const head = EffectString.repeat(40)('a');
+    const terminal = reconcileNativeWatch(queued.envelope.state, {
+      head,
+      startedHead: head,
+      state: 'merged',
+      at: 0,
+      sources: [],
+      ci: {head, complete: false, count: 0, pending: 0, failed: 0, version: EffectString.repeat(64)('a')},
+    });
+    const relay = relayNativeWatch(terminal, 'consumer', 0);
+    const state = acknowledgeNativeWatch(
+      recordNativeWatchDispositions(
+        relay.state,
+        'consumer',
+        relay.delivery!.id,
+        Array.map(relay.delivery!.events, event => ({
           eventId: event.id,
-          status: 'resolved',
-          reason: 'terminal work verified',
-          evidence: 'private mocked fixture',
+          status: 'resolved' as const,
+          reason: 'verified terminal result',
+          evidence: 'fixture',
         })),
-      });
-      expect(Array.every((yield* f.read()).envelope.state.work, item => item.status === 'resolved')).toBe(true);
-      yield* control('ack', {deliveryId});
-      yield* control('stop');
-      yield* TestClock.adjust(state.consumer!.leaseUntil + 1);
-      expect(yield* control('inspect')).toMatchObject({
-        prState: 'merged',
+        0,
+      ),
+      'consumer',
+      relay.delivery!.id,
+      0,
+    );
+    yield* writeNativeWatch(
+      f.config,
+      {
+        ...queued.envelope,
+        state,
+        collector: {...queued.envelope.collector!, status: 'stopped', reason: 'merged'},
         stopRequested: true,
-        consumer: {live: false},
-        collector: {alive: false, status: 'terminal'},
-        monitoring: 'interrupted',
-        pending: 0,
-        deliveryId: null,
-        work: {open: 0, blocked: 0, terminal: delivered.events.length},
-        notification: {status: 'queued', receipt, consumedThrough: 0},
-      });
-      const before = yield* f.read();
-      const fs = yield* FileSystem.FileSystem;
-      const statePath = f.config.agentContextHome + '/workflow-automations/native-watch-v1/watch-1.json';
-      const bytes = yield* fs.readFileString(statePath);
-      expect(yield* arrive(f).pipe(Effect.result)).toMatchObject({failure: {code: 'invalid-watch'}});
-      expect(yield* f.read()).toEqual(before);
-      expect(yield* fs.readFileString(statePath)).toBe(bytes);
-      expect(queueCalls).toBe(1);
-    }).pipe(Effect.provideService(SystemInfo, {...system, homeDirectory: f.userHome, isProcessRunning: () => false}));
+      },
+      queued.revision,
+    );
+    yield* TestClock.adjust(state.consumer!.leaseUntil + 1);
+    const before = yield* f.read();
+    for (const fields of [{attemptId: token}, {eventKey: 'watch-1:999:999'}, {wakeupId: 'different'}]) {
+      expect((yield* arrive(f, fields).pipe(Effect.result))._tag).toBe('Failure');
+      expect((yield* f.read()).revision).toBe(before.revision);
+    }
+    expect(yield* arrive(f)).toMatchObject({delivery: null});
+    const after = yield* f.read();
+    expect(after.envelope.state).toEqual(before.envelope.state);
+    expect(after.envelope.metrics).toEqual(before.envelope.metrics);
+    expect(after.envelope.collector).toEqual(before.envelope.collector);
+    expect(after.envelope.notification!.lastConsumerAt).toBe(before.envelope.notification!.lastConsumerAt);
+    expect(after.envelope.notification!.outbox!.consumedThrough).toBe(state.nextSequence - 1);
+    yield* arrive(f);
+    expect((yield* f.read()).revision).toBe(after.revision);
   }).pipe(provide),
 );
 

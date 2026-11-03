@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {degradedParserCacheIdentity, groupFilesByCacheIdentity} from './materialization_batch.js';
 export {cachedFactsMetadata} from './materialization_batch.js';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -141,7 +142,7 @@ export function codeGraphDirectPersistentCapacityProtector(
           },
           transaction,
         ).pipe(
-          Effect.provideService(Crypto.Crypto, input.capacityProtection.crypto),
+          Effect.provideService(SecureRandom.SecureRandom, input.capacityProtection.crypto),
           Effect.provideService(FileSystem.FileSystem, input.fs),
           Effect.provideService(Path.Path, input.capacityProtection.path),
           Effect.provideService(SystemInfo, input.capacityProtection.system),

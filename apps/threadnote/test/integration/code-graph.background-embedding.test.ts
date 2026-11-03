@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
@@ -36,6 +37,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fixtureLayer, manifest} from '../fixtures/code-graph-embedding-worker-child.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 /** Real registered route, real discovery/index/query/storage; only model and process boundaries are held in-process. */
 for (const scoped of [false, true])
@@ -86,7 +89,6 @@ for (const scoped of [false, true])
       ).pipe(Layer.provide(fixtureLayer));
       const base = Layer.mergeAll(
         fixtureLayer,
-        BunServices.layer,
         BunHttpClient.layer,
         runtime,
         command,
@@ -97,7 +99,7 @@ for (const scoped of [false, true])
             return wake(home);
           },
         }),
-      );
+      ).pipe(Layer.provideMerge(platformServicesLayer));
       const graphBase = Layer.mergeAll(
         CodeGraphEmbeddingIndex.layer,
         CodeGraphParserPool.layer,
@@ -520,7 +522,7 @@ for (const scoped of [false, true])
         // Close graph watchers and child processes before removing their repository.
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'registered-graph-embedding-'});
         return yield* run(home).pipe(provideTestLayer(graph));
-      }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive);
+      }).pipe(provideTestLayer(platformServicesLayer), TestClock.withLive);
     },
     60000,
   );

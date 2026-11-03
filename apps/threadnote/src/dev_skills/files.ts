@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Crypto, Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
+import {Effect, FileSystem, Path, PlatformError, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {DevSkillsError} from './contract.js';
 import * as EffectRecord from 'effect/Record';
@@ -91,7 +92,7 @@ export const compareWrite = Effect.fn('devSkills.compareWrite')(function* (
   }
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
   yield* assertSafePath(file);
-  const token = yield* (yield* Crypto.Crypto).randomUUIDv4();
+  const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
   const temp = `${file}.threadnote-${token}`;
   yield* fs.writeFileString(temp, after, {flag: 'wx', mode: 0o600});
   yield* Effect.gen(function* () {

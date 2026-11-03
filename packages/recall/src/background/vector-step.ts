@@ -1,7 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Array as EffectArray} from 'effect';
 import {recallCandidateIsValid} from '../candidate_validation.js';
-import {Effect, Exit, Path} from 'effect';
+import {Clock, Effect, Exit, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -11,9 +11,10 @@ import {normalizeVector} from '@threadnote/inference/vector-search';
 import {openRecallVectorPreparationSource} from '../index/vector-preparation-source.js';
 export {RecallVectorSourceChanged} from '../index/vector-preparation-source.js';
 import type {RecallCandidate} from '../rank.js';
-import {recallVectorStorage, vectorIndexGenerationReadiness} from '../vector-index.js';
+import {recallVectorStorage, VectorIndexCorrupt} from '../vector-index.js';
+import {recallVectorPreparationIdentity, recallVectorPreparationJobId} from '../vector/preparation-identity.js';
 import {preparationChanged, withRecallVectorWrite} from '../vector/storage.js';
-import type {RecallEmbeddingScope} from './demand.js';
+import type {RecallEmbeddingObservation, RecallEmbeddingScope} from './demand.js';
 import {
   assertRecallVectorTarget,
   hydrateRecallVectorDocuments,
@@ -179,7 +180,12 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
           yield* sql`UPDATE idle_recall_targets SET source_after = ${chunks[chunks.length - 1].chunk_id} WHERE generation = ${target.generation}`;
         }),
       );
-      return {state: 'pending' as const, phase: target.phase, inferred: inferred !== undefined};
+      return {
+        state: 'pending' as const,
+        phase: target.phase,
+        inferred: inferred !== undefined,
+        generation: target.generation,
+      };
     }
     // Live external authorization is distinct from canonical corpus freshness.
     for (let offset = 0; ; offset += 100) {
@@ -214,7 +220,12 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
       () =>
         verify.pipe(
           Effect.andThen(source.fence),
-          Effect.as({state: 'pending' as const, phase: 'retire' as const, inferred: false}),
+          Effect.as({
+            state: 'pending' as const,
+            phase: 'retire' as const,
+            inferred: false,
+            generation: target.generation,
+          }),
         ),
       (previousPointer, exit) =>
         Exit.isSuccess(exit)
@@ -241,21 +252,145 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   } else if (target.phase === 'retire') {
     yield* verify;
     yield* source.fence;
-    const complete = yield* retireRecallVectorPreparation(config, manifest, target);
-    return {state: complete ? ('current' as const) : ('pending' as const), phase: target.phase, inferred: false};
+    const complete = yield* retireRecallVectorPreparation(config, manifest, target, source.generation);
+    return {
+      state: 'pending' as const,
+      phase: complete ? ('ready' as const) : target.phase,
+      inferred: false,
+      generation: target.generation,
+    };
   } else {
     yield* verify;
     yield* source.fence;
-    if ((yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, source.generation)) !== 'current')
-      return yield* preparationChanged();
     for (let offset = 0; ; offset += 100) {
       const page = yield* documents(offset);
       yield* source.authorize(page);
       if (page.length < 100) break;
     }
-    return {state: 'current' as const, phase: target.phase, inferred: false};
+    const pointer = yield* recallVectorStorage.read(
+      filename,
+      Effect.gen(function* () {
+        return yield* (yield* SqlClient.SqlClient)<{
+          readonly generation: string;
+        }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
+      }),
+    );
+    if (pointer[0]?.generation !== target.generation)
+      yield* recallVectorStorage
+        .validateGenerationRows(config.agentContextHome, manifest, target.generation, manifest.dimensions)
+        .pipe(
+          Effect.mapError(() =>
+            VectorIndexCorrupt.make({
+              modelId: manifest.id,
+              message: 'Retained recall vectors require explicit repair.',
+            }),
+          ),
+        );
+    // A different authorization scope may have activated since this target retired.
+    // Reuse its immutable ready vectors only after fresh authorization and exact fences.
+    return yield* Effect.acquireUseRelease(
+      withRecallVectorWrite(
+        config,
+        manifest,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* assertRecallVectorTarget(target);
+          const job = recallVectorPreparationJobId(
+            recallVectorPreparationIdentity(
+              source.generation,
+              source.authorizationKey,
+              manifest.id,
+              recallVectorStorage.recipe(manifest),
+            ),
+          );
+          const ready = yield* sql`SELECT 1 FROM vector_generations g
+          WHERE g.generation = ${target.generation} AND g.state = 'ready'
+          AND g.job_id = ${job} AND g.corpus_generation = ${source.generation}
+          AND g.chunk_count = (SELECT COUNT(*) FROM vector_chunks c WHERE c.generation = g.generation)`;
+          if (ready.length !== 1) return yield* preparationChanged();
+          const previous = yield* sql<{
+            readonly generation: string;
+          }>`SELECT generation FROM vector_pointer WHERE singleton = 1`;
+          yield* verify;
+          yield* source.fence;
+          yield* sql`INSERT INTO vector_pointer (singleton,generation) VALUES (1,${target.generation})
+          ON CONFLICT(singleton) DO UPDATE SET generation = excluded.generation`;
+          return previous[0]?.generation;
+        }),
+      ),
+      () =>
+        verify.pipe(
+          Effect.andThen(source.fence),
+          Effect.as({state: 'current' as const, phase: target.phase, inferred: false, generation: target.generation}),
+        ),
+      (previous, exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : withRecallVectorWrite(
+              config,
+              manifest,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                const restored =
+                  previous === undefined
+                    ? []
+                    : yield* sql`UPDATE vector_pointer SET generation = ${previous}
+          WHERE generation = ${target.generation}
+          AND EXISTS (SELECT 1 FROM vector_generations WHERE generation = ${previous} AND state = 'ready') RETURNING generation`;
+                if (!restored.length) yield* sql`DELETE FROM vector_pointer WHERE generation = ${target.generation}`;
+                // Ready targets retain immutable preparation and must never be demoted.
+              }),
+            ),
+    );
   }
-  return {state: 'pending' as const, phase: target.phase, inferred: false};
+  return {state: 'pending' as const, phase: target.phase, inferred: false, generation: target.generation};
+});
+
+/** Amortize admission over short preparation steps; every native request still ends the batch. */
+export const runRecallVectorPreparationBatch = Effect.fn('recall.prepareVectorBatch')(function* <R>(
+  config: RecallEmbeddingScope,
+  manifest: LocalModelManifest,
+  stillDesired: Effect.Effect<boolean, unknown, R>,
+) {
+  const started = yield* Clock.monotonicTimeNanos;
+  let result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+  for (
+    let step = 1;
+    step < 32 && result.state !== 'current' && ['metadata', 'resolve', 'hydrate', 'retire'].includes(result.phase);
+    step++
+  ) {
+    if ((yield* Clock.monotonicTimeNanos) - started >= 250_000_000n) break;
+    result = yield* stepRecallVectorPreparation(config, manifest, stillDesired);
+  }
+  const path = yield* Path.Path;
+  const progress = yield* recallVectorStorage.read(
+    recallVectorStorage.databasePath(path, config.agentContextHome, manifest.id),
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        readonly phase: NonNullable<RecallEmbeddingObservation['progress']>['phase'];
+        readonly cursor: number;
+        readonly documents: number;
+        readonly chunks: number;
+        readonly embedded: number;
+        readonly reused: number;
+      }>`SELECT t.phase,t.cursor,
+        (SELECT COUNT(*) FROM idle_recall_documents WHERE generation=t.generation) AS documents,
+        (SELECT COUNT(*) FROM idle_recall_chunks WHERE generation=t.generation) AS chunks,
+        (SELECT COUNT(*) FROM vector_chunks WHERE generation=t.generation) AS embedded,
+        (SELECT COUNT(*) FROM idle_recall_document_preparations WHERE generation=t.generation AND reused=1) AS reused
+        FROM idle_recall_targets t WHERE t.generation=${result.generation}`;
+      const row = rows[0];
+      if (!row) return undefined;
+      return {
+        phase: row.phase,
+        completed: row.phase === 'embed' || row.phase === 'retire' || row.phase === 'ready' ? row.embedded : row.cursor,
+        total: row.phase === 'hydrate' ? row.documents : row.phase === 'embed' ? row.chunks : 0,
+        reusedDocuments: row.reused,
+      };
+    }),
+  );
+  return {...result, progress};
 });
 
 function decodePreparedCandidate(text: string, expectedHash: string) {

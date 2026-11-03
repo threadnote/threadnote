@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
-import {Cause, Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -52,7 +53,7 @@ describe('publisher contribution evidence with an independent clean control', ()
               const eligibleFiles = scenario === 'abi-transition' ? 4 : 3;
               const fs = yield* FileSystem.FileSystem;
               const path = yield* Path.Path;
-              const crypto = yield* Crypto.Crypto;
+              const crypto = yield* SecureRandom.SecureRandom;
               const indexer = yield* CodeGraphIndexer;
               const store = yield* CodeGraphStore;
               const repo = path.join(root, 'publisher-repo');
@@ -278,7 +279,7 @@ describe('publisher contribution evidence with an independent clean control', ()
                           }).pipe(
                             Effect.provideService(FileSystem.FileSystem, fs),
                             Effect.provideService(Path.Path, path),
-                            Effect.provideService(Crypto.Crypto, crypto),
+                            Effect.provideService(SecureRandom.SecureRandom, crypto),
                             Effect.orDie,
                           ),
                   }),

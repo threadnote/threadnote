@@ -1,6 +1,6 @@
 ---
 name: threadnote-memory
-description: Preserve reusable Threadnote decisions and concise work handoffs after meaningful work or before transfer.
+description: Preserve reusable Threadnote decisions and handoffs after meaningful work or before transfer.
 ---
 
 <!-- BEGIN THREADNOTE USER INSTRUCTIONS -->
@@ -12,17 +12,17 @@ read every relevant `threadnote://` pointer with `read_context`; pointers are no
 
 Close out in order:
 
-1. Always write the required private handoff directly with `remember_context(kind=handoff)`, e.g.
-   `remember_context({"kind":"handoff","project":"threadnote","topic":"active-task","callerCwd":"/abs/repo","text":"Status, checks, blockers, and next steps."})`.
-   Prefer labeled `task`, `decisions`/`invariants`, `verification`, `blockers`/`risks`, and `next_step` fields so a fresh
-   agent can resume without rereading the full record.
-   Only add `observed`, `anchors`, `attempted`, `unresolved`, and `avoid_repeat` fields from direct evidence.
+1. Always write the required private handoff directly with `remember_context(kind=handoff)`, project and absolute `callerCwd`.
+   Prefer labeled `task`, `decisions`/`invariants`, `verification`, `blockers`/`risks`, and `next_step`.
+   Only directly evidenced `observed`/`anchors`/`attempted`/`unresolved`/`avoid_repeat` fields are allowed.
    Use stable project/topic + `replaceUri`. Handoffs accept explicit `keywords` and preserve them on replacement;
    `clearKeywords` removes them. Omit `regenerateKeywords`: handoffs never generate keywords.
+   Compiled MCP `pending`/`unknown` or dead/missing receipts never prove no write; never resubmit. Follow the same
+   `operationId` with `memory_write_status`; require `complete` + canonical/lexical proof. Source/direct saves stay synchronous.
 2. Only when the session produced reusable durable knowledge, preview a five-field Knowledge Delta (`decisions` +
    `rationale`, `constraints`, `verificationPerformed`, `knowledgeInvalidated`, `unresolvedRisks`) with a complete
-   `review_session_context` call containing task, outcome, project, `callerCwd`, `sourceCommit`, and those fields. Candidates
-   need `sourceCommit`, `sourceSessionId`, or an evidence pointer.
+   `review_session_context` call with task, outcome, project, `callerCwd`, `sourceCommit`, and those fields. Candidates need
+   `sourceCommit`, `sourceSessionId`, or an evidence pointer.
 3. Treat the Knowledge Delta and returned candidates as one optional review lifecycle. Present them and call
    `apply_memory_candidates` only after explicit `approve` (optionally with `editedText`), `defer`, or `reject`; without a
    user decision leave candidates unapplied. If no reusable durable delta exists, stop after the handoff. Never auto-apply
@@ -46,7 +46,7 @@ Maintenance: `threadnote context check --project <name>` checks direct citations
 `complete_activation_retrieval_proof`, and `threadnote_guide`; procedures never auto-execute and tool-returned actions guide
 uncommon recovery.
 
-Do not store secrets, credentials, customer data, or raw production logs. Never publish handoffs/preferences, overwrite
-conflicting changes, or force synchronization without explicit approval.
+Do not store secrets, credentials, customer data, or raw production logs. Never publish handoffs/preferences;
+conflicting writes or forced synchronization need explicit approval.
 
 <!-- END THREADNOTE USER INSTRUCTIONS -->

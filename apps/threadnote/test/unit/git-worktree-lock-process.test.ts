@@ -19,6 +19,7 @@ describe('Git worktree lock process boundary', () => {
       import {Effect, Layer} from 'effect';
       import * as BunServices from '@effect/platform-bun/BunServices';
       import * as BunRuntime from '@effect/platform-bun/BunRuntime';
+      import {cryptoLayer} from '@threadnote/platform/crypto';
       import {makeGitWorktreeLock} from ${JSON.stringify(moduleUrl)};
       import {TestSystemInfoLayer} from ${JSON.stringify(systemLayerUrl)};
       BunRuntime.runMain(Effect.scoped(Effect.gen(function* () {
@@ -27,7 +28,7 @@ describe('Git worktree lock process boundary', () => {
           process.stdout.write('locked');
           return new Promise(() => {});
         }));
-      })).pipe(Effect.provide(Layer.merge(TestSystemInfoLayer, BunServices.layer))));
+      })).pipe(Effect.provide(Layer.mergeAll(TestSystemInfoLayer, BunServices.layer, cryptoLayer))));
     `;
     const child = Bun.spawn({cmd: [process.execPath, '--eval', script], stdout: 'pipe', stderr: 'pipe'});
     const stderr = new Response(child.stderr).text();

@@ -1,10 +1,11 @@
+import {SecureRandom} from 'effect/crypto';
 import {parseThreadnotePack, canonicalPackRoot, packTargetForCurrentUser} from './pack.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
-import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Console, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   expandWeakRecallQueryEffect,
   limitRecallRewritesForConfidence,
@@ -252,9 +253,9 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
   const codeCitations = citationCapture.citations;
   const citationSourceCommit = commonMemoryCodeCitationCommit(codeCitations);
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const memoryId =
-    replacement?.memoryId ?? `tn_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+    replacement?.memoryId ?? `tn_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
   const sharedTeam = replaceUri ? sharedTeamNameForUri(config, replaceUri) : undefined;
   const relationScope = sharedTeam
     ? `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(sharedTeam)}`
@@ -1876,7 +1877,7 @@ const memoryWriteMode = Effect.fn('memory.memoryWriteMode')(function* (
 
 const buildHandoff = Effect.fn('memory.buildHandoff')(function* (options: HandoffOptions, existingMemoryId?: string) {
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const repoRoot = (yield* gitValue(['rev-parse', '--show-toplevel'])) ?? (yield* getInvocationCwd());
   const branch = (yield* gitValue(['branch', '--show-current'], repoRoot)) ?? 'unknown';
   const commit = (yield* gitValue(['rev-parse', 'HEAD'], repoRoot)) ?? 'unknown';
@@ -1888,7 +1889,7 @@ const buildHandoff = Effect.fn('memory.buildHandoff')(function* (options: Handof
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
   const metadata: MemoryMetadata = {
     kind: 'handoff',
-    memoryId: existingMemoryId ?? `tn_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`,
+    memoryId: existingMemoryId ?? `tn_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`,
     project: normalizeOptionalMetadata(options.project) ?? repoName,
     references: normalizeReferenceUris(options.references),
     sourceAgentClient: options.sourceAgentClient ?? 'codex',

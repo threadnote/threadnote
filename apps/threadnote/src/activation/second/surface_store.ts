@@ -1,4 +1,5 @@
-import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {constantTimeHexEqual, hmacSha256Hex} from '../../crypto/hmac.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -86,7 +87,7 @@ export const issueSecondSurfaceProofChallengeV1 = Effect.fn('activation.proof.is
         }
         return existing;
       }
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const challenge: SecondSurfaceProofChallengeV1 = {
         challengeId,
         context,
@@ -254,7 +255,7 @@ const readOrCreateAttestationKey = Effect.fn('activation.proof.key')(function* (
   const path = yield* Path.Path;
   const target = yield* attestationKeyPath(config);
   if (yield* fs.exists(target)) return yield* readAttestationKey(config);
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const key = sha256HexSync(yield* crypto.randomBytes(32));
   yield* fs.makeDirectory(path.dirname(target), {recursive: true, mode: 0o700});
   yield* fs

@@ -1,8 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {refreshContextMaintenanceCase} from '../memory/context/maintenance_refresh.js';
 import {ContextMaintenanceBusy, contextMaintenanceBusyResult} from '../memory/context/maintenance_contracts.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isManagerProjectName} from './project/name.js';
-import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
+import {Cause, Clock, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {errorMessage} from '@threadnote/platform/errors';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -602,9 +603,9 @@ function startBackgroundCitationRepair(
     registry.starting = true;
     return yield* Effect.gen(function* () {
       trimCitationRepairJobs(registry);
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const createdAt = managerTimestamp(yield* Clock.currentTimeMillis);
-      const id = `mcrj_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
+      const id = `mcrj_${Effect2.pipe(yield* crypto.uuidV4(), EffectString.replaceAll('-', ''))}`;
       const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerCitationRepairJob = {
         onChange: hints.publish({topic: 'citation-repair-jobs', project}),

@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, PlatformError, Ref, Schema, Semaphore} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Ref, Schema, Semaphore} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readExclusiveFileLockOwner, type FileLockOwner} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -140,12 +141,12 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
   request?: {readonly key: string},
   historyPruneOptions: CodeGraphBuildHistoryPruneOptions = {},
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const buildId = Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.toLowerCase);
-  const pathHashSalt = Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.toLowerCase);
+  const buildId = Effect2.pipe(yield* crypto.uuidV4(), EffectString.toLowerCase);
+  const pathHashSalt = Effect2.pipe(yield* crypto.uuidV4(), EffectString.toLowerCase);
   const startedAtMilliseconds = yield* Clock.currentTimeMillis;
   const startedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMilliseconds));
   const processStartIdentity = yield* system.processStartIdentity(system.processId);

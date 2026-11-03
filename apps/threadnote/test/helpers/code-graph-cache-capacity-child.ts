@@ -1,8 +1,9 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from './system-layer.js';
 import {provideTestLayer} from './effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Crypto, Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path} from 'effect';
 import {codeGraphPersistentCapacityDemand} from '@threadnote/graph/disk/capacity';
 import {withCodeGraphDiskReservation} from '@threadnote/graph/disk/reservation';
 import {CodeGraphStore, type CodeGraphDirectPersistentCapacityProtector} from '@threadnote/graph/store';
@@ -81,7 +82,7 @@ const writeMarker = (target: string, value: string) =>
   });
 
 const program = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -132,7 +133,7 @@ const program = Effect.gen(function* () {
       Effect.mapError(cause =>
         isCodeGraphStoreError(cause) ? cause : CodeGraphStoreError.of('Cache child reservation coordination failed.'),
       ),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
       Effect.provideService(SystemInfo, system),

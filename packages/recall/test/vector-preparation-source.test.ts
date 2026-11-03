@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as EffectString from 'effect/String';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -31,7 +32,7 @@ import {loadRecallIndexData, recallIndexStatus, expireRecallIndexValidation} fro
 import {openRecallVectorPreparationSource} from '../src/index/vector-preparation-source.js';
 import type {RecallCandidate} from '../src/rank.js';
 const platform = Layer.mergeAll(
-  BunServices.layer,
+  Layer.merge(BunServices.layer, cryptoLayer),
   SystemInfo.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -286,7 +287,9 @@ describe('lexical vector preparation source', () => {
           );
           yield* fs.writeFileString(filename, content + 'changed');
         }
-        expect(yield* source.hydrate(logical)).toEqual([]);
+        const hydrated = yield* source.hydrate(logical).pipe(Effect.result);
+        if (change === 'bytes') expect(hydrated).toMatchObject({_tag: 'Success', success: []});
+        else expect(hydrated).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallVectorSourceChanged'}});
         expect((yield* source.authorize(logical).pipe(Effect.result))._tag).toBe('Failure');
         expect(
           (yield* (yield* openRecallVectorPreparationSource(config)).readMetadataPage(undefined)).candidates,

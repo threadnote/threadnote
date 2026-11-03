@@ -1,7 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {appendFileSync, existsSync, readFileSync} from '@threadnote/testing/node-fs';
-import {Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -20,10 +22,23 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {ModelNotInstalled} from '@threadnote/inference/engine/errors';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
+import {
+  BackgroundInferenceAdmission,
+  makeBackgroundInferenceAdmission,
+  BACKGROUND_INFERENCE_ENV,
+} from '@threadnote/inference/background/admission';
+import {makeBackgroundWorkerLifecycle} from '@threadnote/inference/background/worker-control';
+import {codeGraphEmbeddingWorkerReceiptPath, codeGraphEmbeddingWorkerLockPath} from '@threadnote/graph/layout';
+import {Clock} from 'effect';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {SystemInfo} from '@threadnote/platform/system';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
-import {wakeCodeGraphEmbeddingWorker} from '../../src/code_graph/embedding_worker.js';
+import {
+  wakeCodeGraphEmbeddingWorker,
+  codeGraphEmbeddingWorkerInvocation,
+} from '../../src/code_graph/embedding_worker.js';
+import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
+import {CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION} from '../../src/worker_protocol.js';
 import {
   isolatedLocalModelRuntimeLayer,
   localModelWorkerServer,
@@ -88,8 +103,13 @@ export const fixtureLayer = Layer.mergeAll(
   CodeGraphStore.layer,
   LocalModelCatalog.layer([manifest, alternateManifest]),
   modelStore,
+  Layer.succeed(BackgroundInferenceAdmission, {
+    withForeground: (_home, program) => program,
+    withExecution: (_authority, program) => program,
+    runBatch: (_home, _domain, program) => program.pipe(Effect.map(value => ({state: 'completed' as const, value}))),
+  }),
   TestCommandExecutorLayer,
-).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(BunServices.layer));
+).pipe(Layer.provideMerge(TestSystemInfoLayer), Layer.provideMerge(Layer.merge(BunServices.layer, cryptoLayer)));
 export const seed = (home: string, count = 65, catalogId = checkoutId, viewId = worktreeId) =>
   Effect.gen(function* () {
     const checkoutId = catalogId;
@@ -183,13 +203,13 @@ export const lanes = (home: string) =>
       {readOnly: true},
     );
   });
-function spawnModel(home: string): LocalModelWorkerProcess {
+export function spawnModel(home: string): LocalModelWorkerProcess {
   const child = Bun.spawn({
     cmd: [process.execPath, import.meta.filename, '--model', '--home', home],
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
-    env: {...process.env},
+    env: {...process.env, [BACKGROUND_INFERENCE_ENV]: '1'},
   });
   record(home, {event: 'model-spawn', childPid: child.pid});
   return {
@@ -207,11 +227,11 @@ function spawnModel(home: string): LocalModelWorkerProcess {
   };
 }
 const argument = (name: string) => process.argv[process.argv.indexOf(name) + 1];
-const main = Effect.gen(function* () {
+const fixtureMain = Effect.gen(function* () {
   const home = argument('--home');
   const system = yield* SystemInfo;
   if (process.argv.includes('--model')) {
-    const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | Crypto.Crypto>();
+    const context = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom>();
     const runtime = LocalModelRuntime.of({
       diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 2}),
       embedMany: ({inputs, embeddingContextPoolSize, manifest: requestedManifest}) =>
@@ -243,19 +263,56 @@ const main = Effect.gen(function* () {
     const result = yield* wakeCodeGraphEmbeddingWorker(home).pipe(
       Effect.provideService(SystemInfo, {...system, developmentEntrypoint: import.meta.filename}),
     );
-    process.stdout.write(`${JSON.stringify({ready: result})}\n`);
+    process.stdout.write(`${JSON.stringify({accepted: result})}\n`);
     return;
   }
+  if (argument('--protocol') !== String(CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION)) return;
+  const nonce = argument('--launch-nonce');
+  if (!/^[a-f0-9-]{36}$/u.test(nonce)) return;
+  const path = yield* Path.Path;
+  const version = yield* getThreadnoteVersion();
+  const command = yield* CommandExecutor;
+  const lifecycle = yield* makeBackgroundWorkerLifecycle(
+    {
+      home,
+      receiptPath: codeGraphEmbeddingWorkerReceiptPath(path, home),
+      lockPath: codeGraphEmbeddingWorkerLockPath(path, home),
+      version,
+      protocol: CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
+      launch: next => {
+        const invocation = codeGraphEmbeddingWorkerInvocation(
+          system.executablePath,
+          import.meta.filename,
+          home,
+          version,
+          next,
+        );
+        return runDetachedCommandEffect(invocation.executable, invocation.arguments, {env: {...process.env}}).pipe(
+          Effect.provideService(CommandExecutor, command),
+        );
+      },
+    },
+    nonce,
+  );
   const store = yield* CodeGraphStore;
   const instrumented = {
     ...store,
+    countEmbeddingSymbols: (...args: Parameters<typeof store.countEmbeddingSymbols>) =>
+      store
+        .countEmbeddingSymbols(...args)
+        .pipe(Effect.tap(() => Effect.sync(() => record(home, {event: 'symbol-count'})))),
     loadEmbeddingSymbolPage: (...args: Parameters<typeof store.loadEmbeddingSymbolPage>) =>
-      Effect.sync(() => record(home, {event: 'symbol-page', limit: args[3]})).pipe(
-        Effect.andThen(store.loadEmbeddingSymbolPage(...args)),
-      ),
+      store
+        .loadEmbeddingSymbolPage(...args)
+        .pipe(
+          Effect.tap(rows =>
+            Effect.sync(() => record(home, {event: 'symbol-page', limit: args[3], rows: rows.length})),
+          ),
+        ),
   };
   const program = runCodeGraphEmbeddingWorker(home, {
     version: argument('--version') || (yield* getThreadnoteVersion()),
+    lifecycle,
     catalogPage: () =>
       Effect.succeed({
         checkoutIds: existsSync(`${home}/catalog.json`)
@@ -297,6 +354,7 @@ const main = Effect.gen(function* () {
   const runtimeContext = yield* Layer.build(
     isolatedLocalModelRuntimeLayer({
       spawnWorker: () => spawnModel(home),
+      background: true,
       requestDeadlineMs: 1500,
       maximumRequestAttempts: 1,
       idleTimeoutMs: 0,
@@ -311,6 +369,25 @@ const main = Effect.gen(function* () {
     Effect.provide(runtimeContext),
   );
 });
+const main = Effect.gen(function* () {
+  const actual = yield* SystemInfo;
+  const system = SystemInfo.of({
+    ...actual,
+    cpuTimes: Clock.currentTimeMillis.pipe(
+      Effect.map(now => ({
+        logicalCpus: 4,
+        totalMilliseconds: now * 4,
+        idleMilliseconds: now * 4,
+      })),
+    ),
+  });
+  const admission = yield* makeBackgroundInferenceAdmission.pipe(Effect.provideService(SystemInfo, system));
+  return yield* fixtureMain.pipe(
+    Effect.provideService(SystemInfo, system),
+    Effect.provideService(BackgroundInferenceAdmission, admission),
+  );
+});
+
 if (import.meta.main) {
   await Effect.runPromise(main.pipe(provideTestLayer(fixtureLayer)));
 }

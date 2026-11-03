@@ -1,7 +1,8 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Option, Path} from 'effect';
-import * as Crypto from 'effect/Crypto';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -20,6 +21,8 @@ import {useDatabaseDirect} from '@threadnote/graph/store/session';
 import {CodeGraphStoreError, type CodeGraphSnapshot, type RepositoryIdentity} from '@threadnote/graph/types';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
 
 const RETIRED_ID = 'retired-fixture';
 const STOPPED = CodeGraphStoreError.of('stop at new snapshot boundary');
@@ -56,7 +59,7 @@ const testSystem = SystemInfo.of({
   userName: 'fixture',
 });
 const TestLayer = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   Layer.succeed(
     CommandExecutor,
     CommandExecutor.of({
@@ -163,7 +166,7 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
     ':memory:',
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ready-reclaim-'});

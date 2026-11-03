@@ -1,7 +1,8 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import * as BunCrypto from '@effect/platform-bun/BunCrypto';
-import {Crypto, Effect} from 'effect';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -233,8 +234,8 @@ describe('memory-connections one-hop scale contract', () => {
   effectIt.effect('bounds retained artifact reads before JSON parsing', () =>
     Effect.acquireUseRelease(
       Effect.gen(function* () {
-        const crypto = yield* Crypto.Crypto;
-        const path = `${Bun.env.TMPDIR ?? '/tmp'}/memory-connections-scale-${yield* crypto.randomUUIDv4()}.json`;
+        const crypto = yield* SecureRandom.SecureRandom;
+        const path = `${Bun.env.TMPDIR ?? '/tmp'}/memory-connections-scale-${yield* crypto.uuidV4()}.json`;
         yield* Effect.tryPromise(() =>
           Bun.write(path, new Uint8Array(MAX_MEMORY_CONNECTIONS_SCALE_ARTIFACT_BYTES + 1)),
         );
@@ -246,7 +247,7 @@ describe('memory-connections one-hop scale contract', () => {
           expect(error.message).toMatch(/exceeds/u);
         }),
       path => Effect.tryPromise(() => Bun.file(path).delete()).pipe(Effect.ignore),
-    ).pipe(provideTestLayer(BunCrypto.layer)),
+    ).pipe(provideTestLayer(cryptoLayer)),
   );
 
   it('round-trips every valid bounded lookup latency without changing its verdict', () => {

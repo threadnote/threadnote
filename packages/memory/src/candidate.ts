@@ -1,10 +1,11 @@
+import {SecureRandom} from 'effect/crypto';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {
   validateTopicDependencyExpansionJournal,
   type TopicDependencyExpansionJournal,
 } from './topic-maintenance-expansion.js';
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {topicMaintenanceObsidianCitationId} from './topic-maintenance.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -993,7 +994,7 @@ export function withCandidateReviewLock<A, E, R>(
   agentContextHome: string,
   reviewId: string,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | unknown, Crypto.Crypto | R | FileSystem.FileSystem | Path.Path | SystemInfo> {
+): Effect.Effect<A, E | unknown, SecureRandom.SecureRandom | R | FileSystem.FileSystem | Path.Path | SystemInfo> {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
@@ -1350,12 +1351,12 @@ export function writePrivateFileAtomically(
   fs: FileSystem.FileSystem,
   path: string,
   content: string,
-): Effect.Effect<void, unknown, Crypto.Crypto | Path.Path> {
+): Effect.Effect<void, unknown, SecureRandom.SecureRandom | Path.Path> {
   return Effect.gen(function* () {
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-    const crypto = yield* Crypto.Crypto;
-    const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
+    const crypto = yield* SecureRandom.SecureRandom;
+    const temporaryPath = `${path}.${yield* crypto.uuidV4()}.tmp`;
     yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
     yield* fs
       .rename(temporaryPath, path)

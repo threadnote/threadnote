@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
@@ -49,6 +50,8 @@ import {TestError} from '@threadnote/testing/test-error';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const TicketResponseSchema = Schema.StructWithRest(Schema.Struct({ticket: Schema.String}), [
   Schema.Record(Schema.String, Schema.Unknown),
 ]);
@@ -66,7 +69,7 @@ const systemLayer = SystemInfo.layer.pipe(
   ),
 );
 const testLayer = Layer.mergeAll(
-  BunServices.layer,
+  platformServicesLayer,
   systemLayer,
   BunHttpClient.layer,
   BunSocket.layerWebSocketConstructor,

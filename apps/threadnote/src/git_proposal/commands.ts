@@ -1,5 +1,6 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -583,8 +584,8 @@ const writeProposalArtifact = Effect.fn('gitProposal.writeArtifact')(function* (
     return yield* operationError('Git proposal output already exists with different content.');
   }
   yield* fs.makeDirectory(path.dirname(output), {recursive: true});
-  const crypto = yield* Crypto.Crypto;
-  const temporary = `${output}.${yield* crypto.randomUUIDv4()}.tmp`;
+  const crypto = yield* SecureRandom.SecureRandom;
+  const temporary = `${output}.${yield* crypto.uuidV4()}.tmp`;
   yield* fs.writeFileString(temporary, built.artifact, {mode: 0o600});
   yield* fs.rename(temporary, output).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });

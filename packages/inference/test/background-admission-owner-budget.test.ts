@@ -1,8 +1,9 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
-  Crypto,
   Deferred,
   Effect,
   Exit,
@@ -30,7 +31,10 @@ const policy = Layer.mergeAll(
     sanitizeExternal: environment => environment,
   }),
 );
-const platform = Layer.mergeAll(BunServices.layer, SystemInfo.layer.pipe(Layer.provide(policy)));
+const platform = Layer.mergeAll(
+  Layer.merge(BunServices.layer, cryptoLayer),
+  SystemInfo.layer.pipe(Layer.provide(policy)),
+);
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -126,20 +130,20 @@ describe('bounded process-local inference owners', () => {
     it.effect('reserves capacity before concurrent owner token generation starts', () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         const atCapacity = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
         let tokens = 0;
         const admission = yield* makeBackgroundInferenceAdmission.pipe(
           Effect.provideService(SystemInfo, f.system),
-          Effect.provideService(Crypto.Crypto, {
+          Effect.provideService(SecureRandom.SecureRandom, {
             ...crypto,
-            randomUUIDv4: () =>
+            uuidV4: () =>
               Effect.gen(function* () {
                 tokens++;
                 if (tokens === 128) yield* Deferred.succeed(atCapacity, undefined);
                 yield* Deferred.await(release);
-                return yield* crypto.randomUUIDv4();
+                return yield* crypto.uuidV4();
               }),
           }),
           Effect.provideService(FileSystem.FileSystem, {
@@ -182,14 +186,13 @@ describe('bounded process-local inference owners', () => {
     it.effect('releases a reservation when UUID generation fails before publication', () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const crypto = yield* Crypto.Crypto;
+        const crypto = yield* SecureRandom.SecureRandom;
         let failing = true;
         const admission = yield* makeBackgroundInferenceAdmission.pipe(
           Effect.provideService(SystemInfo, f.system),
-          Effect.provideService(Crypto.Crypto, {
+          Effect.provideService(SecureRandom.SecureRandom, {
             ...crypto,
-            randomUUIDv4: () =>
-              Effect.suspend(() => (failing ? Effect.die('synthetic UUID failure') : crypto.randomUUIDv4())),
+            uuidV4: () => Effect.suspend(() => (failing ? Effect.die('synthetic UUID failure') : crypto.uuidV4())),
           }),
         );
         for (let index = 0; index < 132; index++)

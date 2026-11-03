@@ -4,6 +4,7 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {BUN_STANDALONE_TARGETS} from './release-targets.js';
+import {assertRuntimeSourceIdentity, runtimeSourceIdentity} from './runtime-source-identity.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -51,6 +52,7 @@ const compileTargets = Effect.gen(function* () {
   for (const target of targets) {
     const targetRoot = path.join(outputRoot, target);
     yield* fs.makeDirectory(targetRoot, {recursive: true});
+    const sourceIdentity = yield* runtimeSourceIdentity(root, target);
     const result = yield* Effect.tryPromise({
       try: () =>
         Bun.build({
@@ -70,6 +72,7 @@ const compileTargets = Effect.gen(function* () {
             'process.env.MSGPACKR_NATIVE_ACCELERATION_DISABLED': JSON.stringify('true'),
             THREADNOTE_STANDALONE: 'true',
             THREADNOTE_VERSION: JSON.stringify(manifest.version),
+            THREADNOTE_RUNTIME_SOURCE_IDENTITY: JSON.stringify(sourceIdentity ?? null),
           },
           entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'standalone.ts')],
           format: 'esm',
@@ -79,6 +82,7 @@ const compileTargets = Effect.gen(function* () {
         }),
       catch: cause => ScriptError.make({message: `Bun could not compile ${target}.`, cause}),
     });
+    yield* assertRuntimeSourceIdentity(root, target, sourceIdentity);
     if (!result.success) {
       return yield* ScriptError.make({
         message: `${target}: ${EffectArray.join(

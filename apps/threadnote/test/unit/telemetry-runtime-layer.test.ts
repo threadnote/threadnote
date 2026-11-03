@@ -1,6 +1,7 @@
+import {SecureRandom} from 'effect/crypto';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {StandaloneBrokerLayer, telemetryLayerForHomeForTest} from '@threadnote/threadnote/effect/runtime';
@@ -93,7 +94,7 @@ describe('telemetry runtime layer', () => {
 
   effectIt.effect('bounds a stalled disabled broker configuration read and prepares no child session', () =>
     Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const baseSystem = yield* SystemInfo;
@@ -110,7 +111,7 @@ describe('telemetry runtime layer', () => {
       };
       const testSystem = SystemInfo.of({...baseSystem, environment: () => environment});
       const dependencies = Layer.mergeAll(
-        Layer.succeed(Crypto.Crypto, crypto),
+        Layer.succeed(SecureRandom.SecureRandom, crypto),
         Layer.succeed(FileSystem.FileSystem, stalledFileSystem),
         Layer.succeed(Path.Path, path),
         Layer.succeed(SystemInfo, testSystem),
@@ -130,7 +131,7 @@ describe('telemetry runtime layer', () => {
 
   effectIt.effect('fails open when enabled broker session entropy defects', () =>
     Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const baseSystem = yield* SystemInfo;
@@ -145,12 +146,12 @@ describe('telemetry runtime layer', () => {
         [TELEMETRY_PROVIDER_SESSION_TOKEN_ENVIRONMENT_VARIABLE]: 'private-conversation-token',
       };
       const testSystem = SystemInfo.of({...baseSystem, environment: () => environment});
-      const defectiveCrypto = Crypto.Crypto.of({
+      const defectiveCrypto = SecureRandom.SecureRandom.of({
         ...crypto,
         randomBytes: () => Effect.die(new Error('telemetry entropy defect')),
       });
       const dependencies = Layer.mergeAll(
-        Layer.succeed(Crypto.Crypto, defectiveCrypto),
+        Layer.succeed(SecureRandom.SecureRandom, defectiveCrypto),
         Layer.succeed(FileSystem.FileSystem, fs),
         Layer.succeed(Path.Path, path),
         Layer.succeed(SystemInfo, testSystem),

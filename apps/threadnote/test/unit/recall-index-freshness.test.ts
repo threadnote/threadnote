@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -13,7 +14,9 @@ import {
   recallIndexForegroundRefreshRequired,
 } from '@threadnote/recall/index/freshness';
 
-const RecallIndexTestLayer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
+const RecallIndexTestLayer = Layer.merge(platformServicesLayer, TestSystemInfoLayer);
 
 describe('recall index foreground freshness', () => {
   fcEffectProp(

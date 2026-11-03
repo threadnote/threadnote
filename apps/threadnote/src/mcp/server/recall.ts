@@ -1457,6 +1457,7 @@ export function registerReadTool(
   server.registerTool(
     name,
     {
+      nativeFree: true,
       annotations: {readOnlyHint: true, destructiveHint: false},
       description: `${description} Max ${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes. Default agent; text=canonical; dual=structured. Oversize: mode=outline or section, or offsetBytes=0.`,
       inputSchema: {

@@ -1,6 +1,4 @@
-import * as EffectRecord from 'effect/Record';
 import {Array as EffectArray} from 'effect';
-import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Cause, Effect, Layer, Schema} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -15,6 +13,7 @@ import {deduplicateLogicalRecallCandidates, type RecallCandidate} from '../rank.
 import type {RecallEmbeddingScope} from '../background/demand.js';
 import {recallIndexCandidateIsEligible} from './candidate.js';
 import {stripRecallAnchor} from './lexical.js';
+import {recallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import {createRecallIdentityConflictLoader, markRecallIdentityConflicts} from './identity.js';
 
 export class RecallVectorSourceChanged extends Schema.TaggedError<
@@ -49,7 +48,10 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
     projects: {mode: 'unrestricted' as const},
     externalResources,
   };
+  const authorizationKey = recallVectorAuthorizationKey(externalResources);
   const fence = Effect.gen(function* () {
+    if (recallVectorAuthorizationKey(yield* loadExternalResourceAccess(location)) !== authorizationKey)
+      return yield* changed();
     const current = yield* recallIndexStatus(config, false);
     if (current.reason === 'canonical documents changed; run `threadnote repair`') return yield* changed();
     if (!current.ready) return yield* corrupt();
@@ -117,11 +119,7 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
   return {
     generation,
     databasePath,
-    authorizationKey: sha256HexSync(
-      JSON.stringify(
-        EffectRecord.toEntries(externalResources).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-      ),
-    ),
+    authorizationKey,
     fence,
     readMetadataPage: (after: string | undefined) =>
       read(

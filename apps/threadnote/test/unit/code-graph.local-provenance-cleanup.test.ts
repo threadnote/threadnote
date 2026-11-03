@@ -1,10 +1,12 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {SecureRandom} from 'effect/crypto';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Clock, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {
   captureCodeGraphLocalProvenanceCleanupEvidence,
@@ -20,13 +22,15 @@ import {SystemInfo} from '@threadnote/platform/system';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
 const NEIGHBOR_WORKTREE_ID = Effect2.pipe('2', EffectString.repeat(64));
 const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
 const ProvenanceCleanupTestLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
-  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(platformServicesLayer),
 );
 
 describe('code graph local provenance cleanup', () => {
@@ -206,7 +210,7 @@ describe('code graph local provenance cleanup', () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fixture = yield* provenanceCleanupFixture;
-          const crypto = yield* Crypto.Crypto;
+          const crypto = yield* SecureRandom.SecureRandom;
           const system = yield* SystemInfo;
           const writerStarted = yield* Deferred.make<void>();
           const writerFiber = yield* Deferred.make<Fiber.Fiber<void, unknown>>();
@@ -238,7 +242,7 @@ describe('code graph local provenance cleanup', () => {
                   yield* Effect.yieldNow;
                   expect(JSON.parse(yield* fixture.fs.readFileString(fixture.sidecar))).toEqual(fixture.record);
                 }).pipe(
-                  Effect.provideService(Crypto.Crypto, crypto),
+                  Effect.provideService(SecureRandom.SecureRandom, crypto),
                   Effect.provideService(FileSystem.FileSystem, fixture.fs),
                   Effect.provideService(Path.Path, fixture.path),
                   Effect.provideService(SystemInfo, system),

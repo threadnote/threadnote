@@ -7,6 +7,7 @@ import {
 import {integrationStaticFiles} from '@threadnote/threadnote/manager/static-files';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {runBunBuild} from './effect/bun-build.js';
+import {assertRuntimeSourceIdentity, runtimeSourceIdentity} from './runtime-source-identity.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
@@ -107,6 +108,7 @@ const build = Effect.gen(function* () {
     yield* fs.copyFile(path.join(root, file), path.join(outputRoot, file));
   }
 
+  const sourceIdentity = yield* runtimeSourceIdentity(root, target);
   yield* runBunBuild({
     compile: {
       autoloadBunfig: false,
@@ -120,6 +122,7 @@ const build = Effect.gen(function* () {
       'process.env.MSGPACKR_NATIVE_ACCELERATION_DISABLED': JSON.stringify('true'),
       THREADNOTE_STANDALONE: 'true',
       THREADNOTE_VERSION: JSON.stringify(version),
+      THREADNOTE_RUNTIME_SOURCE_IDENTITY: JSON.stringify(sourceIdentity ?? null),
     },
     bytecode: true,
     entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'standalone.ts')],
@@ -128,6 +131,9 @@ const build = Effect.gen(function* () {
     sourcemap: 'linked',
     target: 'bun',
   });
+  yield* assertRuntimeSourceIdentity(root, target, sourceIdentity).pipe(
+    Effect.onError(() => fs.remove(executablePath, {force: true}).pipe(Effect.ignore)),
+  );
   if (!Effect2.pipe(target, EffectString.includes('windows'))) {
     yield* fs.chmod(executablePath, 0o755);
   }

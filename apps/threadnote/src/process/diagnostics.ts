@@ -2,8 +2,9 @@ import {
   BackgroundInferenceAdmission,
   type BackgroundInferenceAdmissionUnavailable,
 } from '@threadnote/inference/background/admission';
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, Console, Crypto, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
+import {Clock, Console, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
@@ -219,7 +220,7 @@ export function withThreadnoteProcessRegistration<A, E, R>(
 ): Effect.Effect<
   A,
   E | BackgroundInferenceAdmissionUnavailable,
-  R | SystemInfo | FileSystem.FileSystem | Path.Path | Crypto.Crypto
+  R | SystemInfo | FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom
 > {
   return Effect.acquireUseRelease(
     registerThreadnoteProcess(home, baseRole, baseOperation),
@@ -612,7 +613,7 @@ function registerThreadnoteProcess(home: string, baseRole: RegisteredThreadnoteP
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* SecureRandom.SecureRandom;
     const writeSemaphore = yield* Semaphore.make(1);
     const directory = processDiagnosticsDirectory(path, home);
     const active: ActiveProcessRegistration = {
@@ -630,7 +631,7 @@ function registerThreadnoteProcess(home: string, baseRole: RegisteredThreadnoteP
       repairFailureReported: false,
       path,
       startedAt: DateTime.formatIso(yield* DateTime.now),
-      token: yield* crypto.randomUUIDv4(),
+      token: yield* crypto.uuidV4(),
       writeSemaphore,
     };
     registration = Option.some(active);

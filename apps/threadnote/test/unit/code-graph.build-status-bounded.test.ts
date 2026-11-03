@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -35,7 +36,9 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {Option as EffectOption} from 'effect';
 
-const BuildStatusTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
+const BuildStatusTestLayer = Layer.mergeAll(platformServicesLayer, TestSystemInfoLayer);
 const EXPECTED_BUILD_HISTORY_STATUS_LIMIT = 10_000;
 const EXPECTED_BUILD_HISTORY_DIRECTORY_ENTRY_LIMIT = 20_002;
 

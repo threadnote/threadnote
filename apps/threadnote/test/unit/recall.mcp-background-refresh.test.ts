@@ -1,6 +1,10 @@
 import {EffectMcpServerRegistry} from '@threadnote/threadnote/effect/ai/mcp';
 import {registerStoreTool} from '@threadnote/threadnote/mcp/server/store';
-import {completeRecallEmbeddingDemand, readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import {
+  completeRecallEmbeddingDemand,
+  readRecallEmbeddingDemand,
+  requestRecallEmbeddings,
+} from '@threadnote/recall/background/demand';
 import {stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -57,6 +61,47 @@ const manifest = Option.getOrUndefined(
 )!;
 
 describe('MCP recall background vector refresh', () => {
+  effectIt.effect('retains a new event when canonical invalidation makes the closing lexical status stale', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-closing-stale-event-'});
+      const config = {account: 'local', agentContextHome: home, user: 'tester'};
+      const uri = 'threadnote://resources/repos/threadnote/document.md';
+      const resource = path.join(home, 'data/local/resources/repos/threadnote/document.md');
+      yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+      yield* fs.writeFileString(resource, 'Initial closing-status document.');
+      yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+      const initial = yield* loadRecallIndexData(config, {includeInactive: false});
+      yield* requestRecallEmbeddings(config, true);
+      const observed = (yield* readRecallEmbeddingDemand(config))!.desired!;
+      const installed = installedModelStore(home);
+      const context = yield* Effect.context<Effect.Services<ReturnType<typeof expireRecallIndexValidation>>>();
+      let invalidated = false;
+      const modelStore = LocalModelStore.of({
+        ...installed,
+        status: (...args) =>
+          Effect.gen(function* () {
+            if (!invalidated) {
+              invalidated = true;
+              yield* fs.writeFileString(resource, 'Concurrent canonical mutation after lexical refresh.');
+              yield* expireRecallIndexValidation(home, false, [uri]);
+            }
+            return yield* installed.status(...args);
+          }).pipe(Effect.provide(context), Effect.orDie),
+      });
+      yield* refreshRecallDerivedIndexesFromSelection(config, []).pipe(
+        Effect.provideService(LocalModelStore, modelStore),
+      );
+      expect(invalidated).toBe(true);
+      expect(yield* recallIndexStatus(config, false)).toMatchObject({ready: false, generation: initial.generation});
+      const latest = (yield* readRecallEmbeddingDemand(config))!.desired!;
+      expect(latest.token).toBe(observed.token);
+      expect(latest.revision).not.toBe(observed.revision);
+      expect(yield* completeRecallEmbeddingDemand(config, observed.token, observed.revision)).toBe(false);
+      expect((yield* readRecallEmbeddingDemand(config))!.desired).toEqual(latest);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect(
     'the actual citation-free MCP handoff handler commits canonical and lexical state without invoking a held embedding runtime',
     () =>
@@ -927,7 +972,7 @@ const finishQueuedRecall = Effect.fn('test.finishQueuedRecall')(function* (confi
     const demand = yield* readRecallEmbeddingDemand(config);
     const outcome = yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true)).pipe(Effect.result);
     if (outcome._tag === 'Success' && outcome.success.state === 'current') {
-      if (demand?.desired) yield* completeRecallEmbeddingDemand(config, demand.desired.token);
+      if (demand?.desired) yield* completeRecallEmbeddingDemand(config, demand.desired.token, demand.desired.revision);
       return recallGeneration(yield* recallIndexStatus(config));
     }
   }

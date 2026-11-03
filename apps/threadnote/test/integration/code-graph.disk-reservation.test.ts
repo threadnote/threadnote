@@ -1,3 +1,4 @@
+import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -6,7 +7,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path, Ref, Schema} from 'effect';
+import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path, Ref, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -173,7 +174,7 @@ describe('code graph disk reservation ledger', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* SecureRandom.SecureRandom;
       const system = yield* SystemInfo;
       const threadnoteHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-capacity-observation-home-'});
       const sqliteTemporaryDirectory = yield* fs.makeTempDirectoryScoped({

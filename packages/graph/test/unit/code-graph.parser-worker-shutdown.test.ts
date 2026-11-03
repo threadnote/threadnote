@@ -1,3 +1,4 @@
+import {cryptoLayer} from '@threadnote/platform/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Context, Effect, FileSystem, Layer, Schema} from 'effect';
@@ -8,8 +9,10 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {CodeGraphParserPool, codeGraphParserPoolLayer, type ParserWorkerProcess} from '../../src/parser_worker.js';
 
+const platformServicesLayer = Layer.merge(BunServices.layer, cryptoLayer);
+
 const TestLayer = Layer.merge(
-  BunServices.layer,
+  platformServicesLayer,
   Layer.succeed(
     SystemInfo,
     SystemInfo.of({

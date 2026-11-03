@@ -8,6 +8,8 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import {SystemInfo} from '@threadnote/platform/system';
 
 export interface ManagerProcessApiResponse {
   readonly body: unknown;
@@ -50,7 +52,33 @@ export const handleManagerProcessRequest = Effect.fn('managerProcesses.handleReq
 function routeManagerProcessRequest(request: ManagerProcessApiRequest) {
   return Effect.gen(function* () {
     if (request.method === 'GET' && request.url.pathname === '/api/processes') {
-      return response(200, yield* readManageableThreadnoteProcessDiagnostics(request.config));
+      const diagnostics = yield* readManageableThreadnoteProcessDiagnostics(request.config);
+      const demand = yield* readRecallEmbeddingDemand(request.config).pipe(Effect.orElseSucceed(() => undefined));
+      const observation = demand?.observation;
+      const owner = observation?.owner;
+      if (!demand?.desired || !observation || !owner || observation.revision !== demand.desired.revision)
+        return response(200, diagnostics);
+      const system = yield* SystemInfo;
+      const identity = yield* system.processStartIdentity(owner.processId).pipe(
+        Effect.timeoutOption('100 millis'),
+        Effect.orElseSucceed(() => undefined),
+      );
+      const verified =
+        identity !== undefined && identity._tag === 'Some' && identity.value === owner.processStartIdentity;
+      return response(200, {
+        ...diagnostics,
+        processes: EffectArray.map(diagnostics.processes, process =>
+          verified &&
+          process.processRef &&
+          process.processId === owner.processId &&
+          process.currentOperation === 'recall-embedding'
+            ? {
+                ...process,
+                embeddingProgress: {state: observation.state, reason: observation.reason, ...observation.progress},
+              }
+            : process,
+        ),
+      });
     }
     if (request.method !== 'POST' || request.url.pathname !== '/api/processes/terminate') {
       return response(404, {error: 'Not found'});

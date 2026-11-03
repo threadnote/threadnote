@@ -11,6 +11,11 @@ import {
   MCP_RESOURCE_ERROR_DATA,
 } from '@threadnote/threadnote/effect/ai/mcp';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {BackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {it as effectIt} from '@effect/vitest';
+import {FileSystem} from 'effect';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const HTTP_CONTEXT_TOOL = 'request_context_fixture';
@@ -32,12 +37,21 @@ interface McpHttpFixture {
   readonly handler: (request: Request) => Promise<Response>;
 }
 
-function makeFixture(allowedOrigins?: ReadonlyArray<string>): McpHttpFixture {
-  const server = new EffectMcpServerAdapter('threadnote-memory-fixture', '1.0.0', 'Remote fixture instructions.');
+function makeFixture(
+  allowedOrigins?: ReadonlyArray<string>,
+  capacity?: {home: string; nativeFree: boolean; observed: boolean[]},
+): McpHttpFixture {
+  const server = new EffectMcpServerAdapter(
+    'threadnote-memory-fixture',
+    '1.0.0',
+    'Remote fixture instructions.',
+    capacity?.home,
+  );
   server.registerTool(
     HTTP_CONTEXT_TOOL,
     {
       annotations: {readOnlyHint: true},
+      ...(capacity?.nativeFree ? {nativeFree: true as const} : {}),
       description: 'Return bounded request-context fixture data.',
       inputSchema: {},
     },
@@ -84,7 +98,23 @@ function makeFixture(allowedOrigins?: ReadonlyArray<string>): McpHttpFixture {
         });
       },
     })
-    .pipe(Layer.provide(ApplicationLayer));
+    .pipe(
+      Layer.provide(
+        capacity
+          ? Layer.merge(
+              ApplicationLayer,
+              Layer.succeed(BackgroundInferenceAdmission, {
+                withForeground: (_home, program, options) =>
+                  Effect.sync(() => {
+                    capacity.observed.push(options?.nativeFree === true);
+                  }).pipe(Effect.andThen(program)),
+                withExecution: () => Effect.die('HTTP fixture must not infer'),
+                runBatch: () => Effect.die('HTTP fixture must not infer'),
+              }),
+            )
+          : ApplicationLayer,
+      ),
+    );
   return HttpRouter.toWebHandler(httpLayer, {disableLogger: true});
 }
 
@@ -190,6 +220,50 @@ async function callContextTool(
 }
 
 describe('Effect MCP Streamable HTTP transport', () => {
+  effectIt.effect(
+    'requires explicit native-free capability rather than inferring safety from readOnlyHint, and keeps it off the public schema',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-capacity-capability-'});
+        for (const nativeFree of [false, true]) {
+          const observed: boolean[] = [];
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => makeFixture(undefined, {home, nativeFree, observed})),
+            fixture =>
+              Effect.gen(function* () {
+                const sessionId = yield* Effect.promise(() => initialize(fixture));
+                const called = yield* Effect.promise(() =>
+                  rpcRequest(
+                    fixture,
+                    {id: 2, method: 'tools/call', params: {arguments: {}, name: HTTP_CONTEXT_TOOL}},
+                    {sessionId},
+                  ),
+                );
+                expect(called.status).toBe(200);
+                yield* Effect.promise(() => called.text());
+                expect(observed).toEqual([nativeFree]);
+                const response = yield* Effect.promise(() =>
+                  rpcRequest(fixture, {id: 3, method: 'tools/list', params: {}}, {sessionId}),
+                );
+                const schema = yield* Effect.promise(() => response.json());
+                expect(JSON.stringify(schema)).not.toContain('nativeFree');
+                const resource = yield* Effect.promise(() =>
+                  rpcRequest(
+                    fixture,
+                    {id: 4, method: 'resources/read', params: {uri: 'threadnote://invalid'}},
+                    {sessionId},
+                  ),
+                );
+                yield* Effect.promise(() => resource.text());
+                expect(observed).toEqual([nativeFree, false]);
+              }),
+            fixture => Effect.promise(() => fixture.dispose()),
+          );
+        }
+      }).pipe(provideTestLayer(BunServices.layer)),
+  );
+
   it('negotiates the MCP protocol and exposes only registered tools', async () => {
     const fixture = makeFixture();
     try {

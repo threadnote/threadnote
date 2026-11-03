@@ -9,14 +9,14 @@
     "./site-prepared-metadata": "./tools/site-prepared-metadata.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.7",
+    "@effect/platform-bun": "4.1.2",
     "@threadnote/evidence": "workspace:*",
     "@threadnote/integrations": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@fontsource-variable/jetbrains-mono": "5.3.0",
     "@fontsource-variable/spline-sans": "5.3.0",
     "dompurify": "3.4.17",
-    "effect": "4.0.7",
+    "effect": "4.1.2",
     "fflate": "0.8.3",
     "mermaid": "12.2.0",
     "react": "^19.3.1",
