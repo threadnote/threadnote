@@ -1,6 +1,7 @@
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
+import type {SecureRandom} from 'effect/crypto';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -111,10 +112,15 @@ const fixture = Effect.gen(function* () {
     status: () => Effect.succeed(installation),
     verify: () => Effect.succeed(installation),
   });
-  const runtimeContext = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo>();
+  const runtimeContext = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+  >();
   const embeddingRuntime = (
-    beforeEmbedding: () => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo> = () =>
-      Effect.void,
+    beforeEmbedding: () => Effect.Effect<
+      void,
+      unknown,
+      FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+    > = () => Effect.void,
   ): LocalModelRuntimeShape =>
     LocalModelRuntime.of({
       diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
