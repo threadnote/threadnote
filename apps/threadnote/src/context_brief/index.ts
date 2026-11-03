@@ -2,6 +2,7 @@ import {Array as EffectArray} from 'effect';
 import {
   compileContextBriefWith,
   retrieveSemanticContextSourceEvidence,
+  projectSemanticContextKnowledge,
   type ContextBriefCompilerDependencies,
 } from '@threadnote/context/compiler';
 import type {Evidence} from '@threadnote/semantic/contracts';
@@ -34,7 +35,7 @@ import {
 } from '@threadnote/context/memory-evidence';
 import {retrieveContextBriefCodeLinkedMemoryEvidence, retrieveContextBriefMemoryEvidence} from './memory_evidence.js';
 import {planContextBrief} from '@threadnote/context/planner';
-import {projectContextBrief, parseContextBriefJsonText} from '@threadnote/context/projector';
+import {projectContextBrief} from '@threadnote/context/projector';
 import type {
   ContextBriefGraphEvidenceV1,
   ContextBriefLogicalResultV1,
@@ -341,8 +342,7 @@ export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticK
         ),
     },
   );
-  if (binding === null) return {scope: 'document', binding: null, brief: null, gaps: ['semantic-graph-source-unbound']};
-  return {scope: 'document', binding, brief: parseContextBriefJsonText(projected.text), gaps: []};
+  return projectSemanticContextKnowledge(projected, binding);
 });
 
 /** Cloud callers supply their validated share roots; unscoped procedure discovery stays disabled. */

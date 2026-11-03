@@ -3,7 +3,18 @@ import {canonicalFileUri, observationKey, type Evidence} from '@threadnote/seman
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
 import {retrieveContextBriefSourceEvidence, type ContextBriefSourceEvidenceRequest} from './graph/source_evidence.js';
-import type {SemanticContextSourceBindingV1} from './types.js';
+import {projectContextBriefAgentView} from './projector.js';
+import type {ProjectedContextBriefV1, SemanticContextKnowledgeV1, SemanticContextSourceBindingV1} from './types.js';
+
+/** Human-readable text is a presentation channel; compose from the validated structured evidence. */
+export function projectSemanticContextKnowledge(
+  projected: ProjectedContextBriefV1,
+  binding: SemanticContextSourceBindingV1 | null,
+): SemanticContextKnowledgeV1 {
+  return binding === null
+    ? {scope: 'document', binding: null, brief: null, gaps: ['semantic-graph-source-unbound']}
+    : {scope: 'document', binding, brief: projectContextBriefAgentView(projected.structuredContent, true), gaps: []};
+}
 
 /** Bind a document, without treating graph edges or memory as compiler facts. No commit fallback is permitted. */
 export const retrieveSemanticContextSourceEvidence = Effect.fn('context.semanticSourceEvidence')(function* (

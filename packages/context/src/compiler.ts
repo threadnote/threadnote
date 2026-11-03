@@ -1,5 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-export {retrieveSemanticContextSourceEvidence} from './semantic_evidence.js';
+export {retrieveSemanticContextSourceEvidence, projectSemanticContextKnowledge} from './semantic_evidence.js';
 import {DateTime, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import type {ContextBriefGraphReadBudget} from './graph/evidence.js';
