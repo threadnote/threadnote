@@ -54,21 +54,27 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
   maximumFiles: number,
   token: string,
   maximumObservations: number,
+  onObservationAdmission?: (observations: number) => void,
 ) {
   const paths = new Set<string>();
   let associations = 0;
   let bytes = 0;
   let observations = 0;
+  let admittedObservations = 0;
   let bitTests = 0;
-  const result = (exceeded?: CandidatePageWork['exceeded'], requiredAtDecision?: number): CandidatePageWork => ({
-    paths: [...paths],
-    associations,
-    bytes,
-    observations,
-    bitTests,
-    ...(exceeded ? {exceeded} : {}),
-    ...(requiredAtDecision === undefined ? {} : {requiredAtDecision}),
-  });
+  const result = (exceeded?: CandidatePageWork['exceeded'], requiredAtDecision?: number): CandidatePageWork => {
+    // Private admission remains cumulative across sources/waves even when exact predicates short-circuit.
+    onObservationAdmission?.(admittedObservations);
+    return {
+      paths: [...paths],
+      associations,
+      bytes,
+      observations,
+      bitTests,
+      ...(exceeded ? {exceeded} : {}),
+      ...(requiredAtDecision === undefined ? {} : {requiredAtDecision}),
+    };
+  };
   if (keys.length === 0) return result();
   if (maximumAssociations <= 0) {
     return result('rows', 1);
@@ -90,15 +96,15 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
     if (associations >= maximumAssociations) {
       return result('rows', associations + 1);
     }
-    if (observations + keys.length > maximumObservations) {
-      return result('observations', observations + keys.length);
+    if (admittedObservations + keys.length > maximumObservations) {
+      return result('observations', admittedObservations + keys.length);
     }
     // Remaining-bounded scalar/filter stream. The indexed primary cursor precedes all masks.
     const limit = Math.min(
       1000,
       maximumAssociations - associations,
       Math.floor((maximumBytes - bytes - 128) / 416),
-      Math.floor((maximumObservations - observations) / keys.length),
+      Math.floor((maximumObservations - admittedObservations) / keys.length),
     );
     if (limit <= 0) {
       return result('bytes', bytes + 128 + 416);
@@ -153,6 +159,7 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
         return undefined;
       after = [row.file_key, row.ordinal];
       observations += keys.length;
+      admittedObservations += keys.length;
       reservedObservations -= keys.length;
       bitTests += keys.length * 8;
       let possible = false;
@@ -167,7 +174,7 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
       if (associations + row.entry_count > maximumAssociations) {
         return result('rows', associations + row.entry_count);
       }
-      const requiredObservations = observations + reservedObservations + row.entry_count * keys.length;
+      const requiredObservations = admittedObservations + reservedObservations + row.entry_count * keys.length;
       if (requiredObservations > maximumObservations) {
         return result('observations', requiredObservations);
       }
@@ -177,7 +184,7 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
         return result('bytes', bytes + cost);
       }
       associations += row.entry_count;
-      observations += row.entry_count * keys.length;
+      admittedObservations += row.entry_count * keys.length;
       bytes += cost;
       const payloads = yield* sql<{
         readonly payload: Uint8Array | null;
@@ -234,7 +241,10 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
       if (!candidateSynopsisMatches(row.synopsis, pairs)) return undefined;
       if (
         EffectArray.some(pairs, pair =>
-          EffectArray.some(keys, key => pair[0] === key.resolutionDomain && pair[1] === key.key),
+          EffectArray.some(keys, key => {
+            observations++;
+            return pair[0] === key.resolutionDomain && pair[1] === key.key;
+          }),
         )
       )
         paths.add(payload.path);

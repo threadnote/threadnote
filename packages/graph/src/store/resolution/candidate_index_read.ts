@@ -166,6 +166,7 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
   const reexports: ProjectResolutionReexportKeys[] = [];
   let associationsRead = 0;
   let observations = 0;
+  let admittedObservations = 0;
   let bitTests = 0;
   let bytesRead = 0;
   let keysQueried = 0;
@@ -222,7 +223,7 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
         PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
       );
     for (const snapshotId of sources) {
-      const before = {associations: associationsRead, observations, bytes: bytesRead};
+      const before = {associations: associationsRead, admittedObservations, bytes: bytesRead};
       const selected = yield* readCandidateKeyWavePages(
         sql,
         snapshotId,
@@ -232,7 +233,10 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
         PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES - bytesRead,
         input.maximumSelectedFiles,
         authorityToken,
-        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS - observations,
+        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS - admittedObservations,
+        admitted => {
+          admittedObservations += admitted;
+        },
       );
       if (!selected) return undefined;
       associationsRead += selected.associations;
@@ -251,7 +255,9 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
           'candidate-projection-observations',
           observations,
           PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS,
-          selected.requiredAtDecision === undefined ? undefined : before.observations + selected.requiredAtDecision,
+          selected.requiredAtDecision === undefined
+            ? undefined
+            : before.admittedObservations + selected.requiredAtDecision,
         );
       if (selected.exceeded === 'bytes')
         return bound(

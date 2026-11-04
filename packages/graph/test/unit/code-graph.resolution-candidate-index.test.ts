@@ -1648,6 +1648,156 @@ describe('complete reverse resolution candidate evidence', () => {
   );
 
   effectIt.effect(
+    'counts only executed exact predicates while preserving full positive-page admission and later refusal',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        const originalDecode = CandidatePages.decodeCandidatePage;
+        const decode = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePages, 'decodeCandidatePage')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        for (const count of [2, 3]) {
+          decode.mockImplementation(originalDecode);
+          const values = EffectArray.take(['aa', 'bb', 'cc'], count);
+          const id = `exact-${count}`;
+          const paths = ['a.ts', 'b.ts'];
+          yield* createSnapshot(sql, id, paths);
+          yield* stage(
+            sql,
+            id,
+            paths,
+            EffectArray.flatMap(paths, path =>
+              EffectArray.map(values, key => ({...reference(path, key), lookupTiers: [[key]]})),
+            ),
+          );
+          expect(yield* finishResolutionCandidateIndex(sql, {...identity, snapshotId: id}, write)).toBe(true);
+          const token = yield* resolutionCandidateAuthorityToken(sql);
+          for (let pair = 0; pair < count; pair++) {
+            for (let key = 0; key < count; key++) {
+              let decoded = 0;
+              const predicates: number[] = [];
+              const keys = EffectArray.makeBy(count, index => ({
+                get resolutionDomain() {
+                  // Hints read the domain before decoding; each later read is one actual exact predicate.
+                  if (decoded > 0) predicates.push(index);
+                  return 'typescript';
+                },
+                key: index === key ? values[pair] : `missing-${index}`,
+              }));
+              decode.mockImplementation((payload, page) => {
+                const result = originalDecode(payload, page);
+                expect(result).toEqual(EffectArray.map(values, value => ['typescript', value]));
+                decoded++;
+                return result;
+              });
+              let admitted = -1;
+              const selected = yield* readCandidateKeyWavePages(
+                sql,
+                id,
+                undefined,
+                keys,
+                1000,
+                1048576,
+                128,
+                token,
+                2 * count + count * count,
+                value => {
+                  admitted = value;
+                },
+              );
+              expect(admitted).toBe(2 * count + count * count);
+              const expectedPredicates: number[] = [];
+              for (let precedingPair = 0; precedingPair < pair; precedingPair++)
+                for (let precedingKey = 0; precedingKey < count; precedingKey++) expectedPredicates.push(precedingKey);
+              for (let matchingKey = 0; matchingKey <= key; matchingKey++) expectedPredicates.push(matchingKey);
+              expect(predicates).toEqual(expectedPredicates);
+              expect(decoded).toBe(1); // The second positive page is refused before payload/decode.
+              expect(selected).toMatchObject({
+                paths: ['a.ts'],
+                observations: 2 * count + expectedPredicates.length,
+                bitTests: 2 * count * 8,
+                exceeded: 'observations',
+                requiredAtDecision: 2 * count + 2 * count * count,
+              });
+              if (count === 2 && pair === 0 && key === 0) {
+                expect(selected?.observations).toBe(5);
+                expect(selected?.bitTests).toBe(32);
+                expect(selected?.requiredAtDecision).toBe(12);
+              }
+            }
+          }
+        }
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'keeps private positive-page admission cumulative across real sources and newly discovered key waves',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['a.ts']);
+        yield* stage(
+          sql,
+          'base',
+          ['a.ts'],
+          [
+            {...reference('a.ts', 'aa', ['cc']), lookupTiers: [['aa']]},
+            {...reference('a.ts', 'bb'), lookupTiers: [['bb']]},
+          ],
+        );
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        yield* createSnapshot(sql, 'delta', ['b.ts'], 'base');
+        yield* sql`UPDATE snapshots SET file_count=2 WHERE id='delta'`;
+        yield* stage(
+          sql,
+          'delta',
+          ['b.ts'],
+          [
+            {...reference('b.ts', 'aa'), lookupTiers: [['aa']]},
+            {...reference('b.ts', 'bb'), lookupTiers: [['bb']]},
+          ],
+        );
+        expect(yield* finishResolutionCandidateIndex(sql, {...identity, snapshotId: 'delta'}, write)).toBe(true);
+        const originalRead = CandidatePageRead.readCandidateKeyWavePages;
+        const reader = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePageRead, 'readCandidateKeyWavePages')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const trace: {snapshot: string; keys: string[]; maximum: number; admitted: number; actual: number}[] = [];
+        reader.mockImplementation((sql, snapshot, mask, keys, rows, bytes, files, token, maximum, onAdmission) => {
+          const entry = {snapshot, keys: EffectArray.map(keys, key => key.key), maximum, admitted: -1, actual: -1};
+          trace.push(entry);
+          return originalRead(sql, snapshot, mask, keys, rows, bytes, files, token, maximum, admitted => {
+            entry.admitted = admitted;
+            onAdmission?.(admitted);
+          }).pipe(
+            Effect.tap(work =>
+              Effect.sync(() => {
+                entry.actual = work?.observations ?? -1;
+              }),
+            ),
+          );
+        });
+        const selected = yield* selectResolutionCandidateIndexClosure(sql, {
+          ...query('aa', 'delta'),
+          initialLookupKeys: [
+            {resolutionDomain: 'typescript', key: 'aa'},
+            {resolutionDomain: 'typescript', key: 'missing'},
+          ],
+        });
+        expect(selected).toMatchObject({mode: 'eligible', paths: ['a.ts', 'b.ts']});
+        expect(trace).toEqual([
+          {snapshot: 'base', keys: ['aa', 'missing'], maximum: 2000000, admitted: 6, actual: 3},
+          {snapshot: 'delta', keys: ['aa', 'missing'], maximum: 1999994, admitted: 6, actual: 3},
+          {snapshot: 'base', keys: ['cc'], maximum: 1999988, admitted: 1, actual: 1},
+          {snapshot: 'delta', keys: ['cc'], maximum: 1999987, admitted: 1, actual: 1},
+        ]);
+        if (selected?.mode === 'eligible') expect(selected.candidateIndex?.observations).toBe(8);
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
     'aggregates required observation demand from the pre-read total without recounting local spent work',
     () =>
       Effect.gen(function* () {
@@ -1664,8 +1814,11 @@ describe('complete reverse resolution candidate evidence', () => {
           Effect.sync(() => vi.spyOn(CandidatePageRead, 'readCandidateKeyWavePages')),
           spy => Effect.sync(() => spy.mockRestore()),
         );
-        reader.mockImplementationOnce(() =>
-          Effect.succeed({paths: [], associations: 0, bytes: 0, observations: 1999997, bitTests: 0}),
+        reader.mockImplementationOnce((...args) =>
+          Effect.sync(() => {
+            args[9]?.(1999997); // Prior admitted but short-circuited work is never recycled.
+            return {paths: [], associations: 0, bytes: 0, observations: 1999994, bitTests: 0};
+          }),
         );
         reader.mockImplementationOnce(() =>
           Effect.succeed({
@@ -1682,7 +1835,7 @@ describe('complete reverse resolution candidate evidence', () => {
           mode: 'fallback',
           reason: 'project-closure-unbounded',
           detail: 'candidate-projection-observations',
-          observed: 1999998,
+          observed: 1999995,
           requiredAtDecision: 2000002,
           limit: 2000000,
         });
