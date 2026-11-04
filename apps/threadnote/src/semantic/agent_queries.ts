@@ -7,6 +7,7 @@ import type {
   SemanticContextDefinitionGap,
   ContextBriefRequestV1,
 } from '@threadnote/context/types';
+import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
 import {compileSemanticContextKnowledge} from '../context_brief/index.js';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -402,8 +403,16 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       remaining: 0,
       next: null,
     });
+    if (new TextEncoder().encode(JSON.stringify(page())).length > limit)
+      knowledge = compactSemanticContextKnowledge(knowledge);
+    if (new TextEncoder().encode(JSON.stringify(page())).length > limit)
+      knowledge = compactSemanticContextKnowledge(knowledge, {omitFollowUps: true});
     if (new TextEncoder().encode(JSON.stringify(page())).length > limit) {
-      knowledge = {...knowledge, brief: null, gaps: [...knowledge.gaps, 'knowledge-output-budget-exhausted']};
+      knowledge = {
+        ...knowledge,
+        brief: null,
+        gaps: [...new Set([...knowledge.gaps, 'knowledge-output-budget-exhausted'])],
+      };
     }
     result = yield* Schema.decodeUnknownEffect(SemanticAgentQueryResult)(page());
     if (new TextEncoder().encode(JSON.stringify(result)).length > limit)

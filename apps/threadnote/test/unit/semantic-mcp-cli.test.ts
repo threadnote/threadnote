@@ -3,6 +3,8 @@ import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
   Effect,
+  FileSystem,
+  Path,
   Option,
   Stdio,
   Stream,
@@ -24,6 +26,324 @@ import {captureConsole} from '../../src/effect/console.js';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {registerSemanticTool, registerSemanticQueryTool} from '../../src/mcp/server/semantic.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {TestClock} from 'effect/testing';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
+import {canonicalFileUri, type Observation} from '@threadnote/semantic/contracts';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {runCommandEffect} from '@threadnote/platform/command';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
+import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
+import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
+import {LspFault} from '../../src/semantic/lsp_transport.js';
+import type {SemanticContextKnowledgeV1} from '@threadnote/context/types';
+
+const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
+  Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
+
+/** Actual graph, canonical memory reads and citation validation; only the provider RPC is a stable fixture. */
+const memoryContextFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-semantic-memory-'}));
+  const home = path.join(root, 'home');
+  const repository = path.join(root, 'repository');
+  yield* fs.makeDirectory(repository);
+  yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+  const file = path.join(repository, 'main.ts');
+  const source = (value: number) => `export class Alpha {\n  run() { return ${value}; }\n  other() { return 7; }\n}\n`;
+  yield* fs.writeFileString(file, source(42));
+  const manifestPath = path.join(home, 'manifest.json');
+  yield* fs.writeFileString(manifestPath, JSON.stringify({version: 1, projects: []}));
+  const config: RuntimeConfig = {
+    account: 'local',
+    user: 'tester',
+    agentId: 'semantic-test',
+    agentContextHome: home,
+    manifestPath,
+    manifestSource: 'bundled-example',
+  };
+  const worktree = canonicalFileUri((yield* path.toFileUrl(repository)).href);
+  const uri = canonicalFileUri((yield* path.toFileUrl(file)).href);
+  yield* fs.writeFileString(
+    path.join(home, 'semantic', 'profiles', semanticHostProfileName(config, worktree)),
+    JSON.stringify({
+      version: 1,
+      enabled: true,
+      worktree,
+      catalog: {
+        candidate: {
+          runtime: '/fixture/node',
+          runtimeDigest: sha256HexSync('node'),
+          runtimeVersion: '24.19.0',
+          sdkDirectory: '/fixture/typescript',
+          sdkTreeDigest: sha256HexSync('typescript'),
+          serverDirectory: '/fixture/server',
+          serverTreeDigest: sha256HexSync('server'),
+        },
+      },
+    }),
+    {mode: 0o600},
+  );
+  const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+  yield* git(['init', '--quiet']);
+  const commit = Effect.gen(function* () {
+    yield* git(['add', '.']);
+    yield* git([
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-qm',
+      'fixture',
+    ]);
+  });
+  yield* commit;
+  const indexer = yield* CodeGraphIndexer;
+  const query = yield* CodeGraphQueryService;
+  const publish = indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: home});
+  yield* publish;
+  const nodes = yield* query.inspect({
+    threadnoteHome: home,
+    cwd: repository,
+    operation: 'query',
+    query: 'main.ts',
+    nodeLimit: 40,
+    edgeLimit: 1,
+    refresh: false,
+    requestMaintenance: false,
+  });
+  const method = (name: string) => {
+    const matches = EffectArray.filter(nodes.nodes, node => node.name === name && node.kind === 'method');
+    expect(matches).toHaveLength(1);
+    return matches[0];
+  };
+  const run = method('run');
+  const other = method('other');
+  const resources = yield* ResourceStore;
+  const location = {account: config.account, home, user: config.user};
+  const stored = new Map<string, string>();
+  const remember = (name: string, nodeId: string, body: string, inferred = false) =>
+    Effect.gen(function* () {
+      const citations = yield* captureMemoryCodeCitations(config, {callerCwd: repository, refs: [nodeId]});
+      expect(citations).toHaveLength(1);
+      const memoryUri = `threadnote://user/tester/memories/durable/projects/repository/${name}.md`;
+      const metadata: MemoryMetadata = {
+        kind: 'durable',
+        memoryId: `tn_${name}`,
+        topic: name,
+        project: 'repository',
+        status: 'active',
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        sourceAgentClient: 'test',
+        timestamp: '2026-11-04T00:00:00.000Z',
+        codeCitations: citations,
+        authority: inferred ? 'agent_generated' : 'user_approved',
+        trust: inferred ? 'inferred' : 'approved',
+      };
+      const content = formatMemoryDocument('MEMORY', metadata, body);
+      yield* resources.write(location, memoryUri, content, {mode: 'create'});
+      stored.set(memoryUri, content);
+      return memoryUri;
+    });
+  let compilerCalls = 0;
+  let lastKnowledge: SemanticContextKnowledgeV1 | undefined;
+  const context: NonNullable<
+    SemanticAgentQueryHost<Effect.Services<ReturnType<typeof compileSemanticContextKnowledge>>>['context']
+  > = (currentConfig, input, evidence, target) =>
+    compileSemanticContextKnowledge(currentConfig, input, evidence, target).pipe(
+      Effect.tap(knowledge =>
+        Effect.sync(() => {
+          compilerCalls++;
+          lastKnowledge = knowledge;
+          expect(knowledge.binding?.scope).toBe('document');
+          expect(knowledge.memorySelection?.scope).toBe('symbol-and-file');
+          expect(knowledge.memorySelection?.nodeId).toBe(run.id);
+        }),
+      ),
+    );
+  const host: SemanticAgentQueryHost<Effect.Services<ReturnType<typeof compileSemanticContextKnowledge>>> = {
+    runtimeIdentity: Effect.succeed(sha256HexSync('stable-provider-runtime')),
+    context,
+    connect: () =>
+      Effect.succeed({
+        request: body =>
+          Effect.gen(function* () {
+            const observed: Observation = {
+              version: 1,
+              repository: sha256HexSync(worktree),
+              worktree,
+              project: worktree,
+              uri,
+              content: sha256HexSync(yield* fs.readFile(file)),
+              configuration: sha256HexSync('configuration'),
+              toolchain: sha256HexSync('toolchain'),
+              provider: {id: 'typescript-language-server', version: 'fixture', generation: 1},
+              view: {kind: 'disk', id: 'fixture', owner: 'fixture', epoch: 0},
+              documentVersion: null,
+              projectEpoch: 1,
+            };
+            if (body.operation === 'agent-observe') return yield* Schema.decodeEffect(Schema.Json)(observed);
+            if (body.operation !== 'agent-query') return yield* LspFault.make({code: 'protocol'});
+            const range = {
+              start: {line: run.span.line - 1, character: run.span.column - 1},
+              end: {line: run.span.endLine - 1, character: run.span.endColumn - 1},
+            };
+            return yield* Schema.decodeEffect(Schema.Json)({
+              version: 1,
+              status: 'ok',
+              evidence: {
+                basis: 'semantic',
+                observation: observed,
+                scope: 'document',
+                completeness: 'partial',
+                limitations: ['Stable provider fixture; graph and canonical memory are real'],
+              },
+              items: body.request.operation === 'definition' ? [{uri, range}] : ['Alpha.run(): number'],
+              offset: 0,
+              remaining: 0,
+              next: null,
+            });
+          }).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'}))),
+      }),
+  };
+  const request = {
+    callerCwd: repository,
+    file: 'main.ts',
+    language: 'typescript',
+    operation: 'context',
+    task: 'Understand Alpha.run and its invariant',
+    position: {line: 1, character: 3},
+    budgetTokens: 1500,
+    maxBytes: 8192,
+    maxItems: 20,
+    milliseconds: 30000,
+  };
+  const ask = Effect.gen(function* () {
+    const result = yield* runSemanticAgentQueryWith(host, config, request);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('Real context composition failed');
+    expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(4500);
+    expect(result.items).toHaveLength(1);
+    const item = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        kind: Schema.Literal('context'),
+        semantic: Schema.Array(Schema.String),
+        knowledge: Schema.Unknown,
+      }),
+    )(result.items[0]);
+    expect(item.semantic).toEqual(['Alpha.run(): number']);
+    if (lastKnowledge === undefined) throw new Error('Semantic handler did not invoke the actual context compiler');
+    const publicKnowledge = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        scope: Schema.Literal('document'),
+        memorySelection: Schema.Struct({scope: Schema.Literal('symbol-and-file'), nodeId: Schema.String}),
+        brief: Schema.Struct({
+          durableDecisions: Schema.optionalKey(
+            Schema.Array(
+              Schema.Struct({
+                uri: Schema.String,
+                excerpt: Schema.String,
+                actionCard: Schema.optionalKey(Schema.Unknown),
+                authority: Schema.optionalKey(Schema.String),
+                memoryTrust: Schema.optionalKey(Schema.String),
+                freshness: Schema.String,
+                freshnessBasis: Schema.String,
+              }),
+            ),
+          ),
+          output: Schema.optionalKey(
+            Schema.Struct({truncated: Schema.Boolean, omissions: Schema.Record(Schema.String, Schema.Finite)}),
+          ),
+        }),
+      }),
+    )(item.knowledge);
+    expect(publicKnowledge.memorySelection.nodeId).toBe(run.id);
+    return {result, knowledge: lastKnowledge, publicKnowledge};
+  });
+  const unchanged = Effect.gen(function* () {
+    for (const [memoryUri, content] of stored) expect(yield* resources.read(location, memoryUri)).toBe(content);
+    expect(yield* fs.readFileString(file)).toBe(source(43));
+    expect(compilerCalls).toBeGreaterThan(0);
+  });
+  const update = Effect.gen(function* () {
+    yield* fs.writeFileString(file, source(43));
+    yield* commit;
+    yield* publish;
+  });
+  return {remember, ask, run, other, update, unchanged};
+});
+
+describe('semantic context with canonical citation-backed memory', () => {
+  effectIt.effect('selects the exact current constraint, labels stale decisions and excludes another method', () =>
+    Effect.gen(function* () {
+      const f = yield* memoryContextFixture;
+      const stale = yield* f.remember('stale', f.run.id, 'Applies to: Alpha.run\nInvariant: OLD_DECISION_42.');
+      yield* f.update;
+      const current = yield* f.remember('current', f.run.id, 'Applies to: Alpha.run\nInvariant: KEEP_CURRENT_43.');
+      yield* f.remember('unrelated', f.other.id, 'Applies to: Alpha.other\nInvariant: NEVER_FOR_RUN.');
+      const {knowledge, publicKnowledge} = yield* f.ask;
+      expect(knowledge.binding?.scope).toBe('document');
+      expect(knowledge.memorySelection?.nodeId).toBe(f.run.id);
+      const cards = knowledge.brief?.durableDecisions ?? [];
+      expect(memoryByUri(cards, 'threadnote://memory/tn_current')).toMatchObject({
+        freshness: 'fresh',
+        authority: 'user_approved',
+        memoryTrust: 'approved',
+        freshnessBasis: 'code-citations',
+      });
+      expect(JSON.stringify(publicKnowledge)).toContain('KEEP_CURRENT_43');
+      expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
+      expect(memoryByUri(cards, 'threadnote://memory/tn_stale')).toMatchObject({freshness: 'stale'});
+      const visible = publicKnowledge.brief.durableDecisions ?? [];
+      expect(memoryByUri(visible, 'threadnote://memory/tn_current')).toMatchObject({
+        freshness: 'fresh',
+        authority: 'user_approved',
+        memoryTrust: 'approved',
+        freshnessBasis: 'code-citations',
+      });
+      const historical = memoryByUri(visible, 'threadnote://memory/tn_stale');
+      expect(historical).toMatchObject({freshness: 'stale', freshnessBasis: 'code-citations'});
+      expect(publicKnowledge.brief.output?.truncated).toBe(true);
+      expect(
+        EffectArray.some(EffectRecord.values(publicKnowledge.brief.output?.omissions ?? {}), count => count > 0),
+      ).toBe(true);
+      expect(JSON.stringify(knowledge.brief)).not.toContain('NEVER_FOR_RUN');
+      expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+      expect(current).not.toBe(stale);
+      yield* f.unchanged;
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('keeps code useful without memory and never promotes inferred guidance to approved', () =>
+    Effect.gen(function* () {
+      const f = yield* memoryContextFixture;
+      yield* f.update;
+      const empty = yield* f.ask;
+      expect(empty.knowledge.brief?.durableDecisions ?? []).toEqual([]);
+      expect(JSON.stringify(empty.publicKnowledge)).not.toContain('Invariant:');
+      yield* f.remember('inferred', f.run.id, 'Applies to: Alpha.run\nInvariant: PROPOSED_ONLY.', true);
+      const {knowledge, publicKnowledge} = yield* f.ask;
+      const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
+      expect(proposal).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
+      expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
+      expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');
+      expect(JSON.stringify(publicKnowledge)).toContain('inferred');
+      expect(
+        memoryByUri(publicKnowledge.brief.durableDecisions ?? [], 'threadnote://memory/tn_inferred'),
+      ).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
+      yield* f.unchanged;
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+});
 
 describe('semantic capability discovery', () => {
   it('reports only selected candidates without inferring installed or qualified support', () => {

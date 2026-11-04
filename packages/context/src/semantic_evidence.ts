@@ -29,6 +29,58 @@ export function projectSemanticContextKnowledge(
     : {scope: 'document', binding, brief: projectContextBriefAgentView(projected.structuredContent, true), gaps: []};
 }
 
+/** Preserve complete validated guidance before optional graph detail or follow-up actions. */
+export function compactSemanticContextKnowledge(
+  knowledge: SemanticContextKnowledgeV1,
+  options: {readonly omitFollowUps?: boolean} = {},
+): SemanticContextKnowledgeV1 {
+  const brief = knowledge.brief;
+  const graph = brief?.graph;
+  const omitGraph =
+    graph !== undefined &&
+    ((graph.cards?.length ?? 0) > 0 ||
+      (graph.contracts?.length ?? 0) > 0 ||
+      (graph.sources?.length ?? 0) > 0 ||
+      graph.continuation !== undefined);
+  const followUps = options.omitFollowUps ? brief?.recommendedFollowUps : undefined;
+  const omitFollowUps = (followUps?.length ?? 0) > 0;
+  if (
+    !brief ||
+    ((brief.activeHandoffs?.length ?? 0) === 0 && (brief.durableDecisions?.length ?? 0) === 0) ||
+    (!omitGraph && !omitFollowUps)
+  )
+    return knowledge;
+  const {answer: _answer, ...withoutDerivedAnswer} = brief;
+  const omissions = brief.output?.omissions;
+  return {
+    ...knowledge,
+    brief: {
+      ...withoutDerivedAnswer,
+      // These omitted optional bundles are counted below, not reported as absent evidence.
+      ...(omitGraph ? {graph: {}} : {}),
+      ...(omitFollowUps ? {recommendedFollowUps: []} : {}),
+      evidenceState: brief.evidenceState === 'sufficient' ? 'partial' : brief.evidenceState,
+      output: {
+        truncated: true,
+        omissions: {
+          ...omissions,
+          ...(omitGraph
+            ? {
+                graphCards: (omissions?.graphCards ?? 0) + (graph?.cards?.length ?? 0),
+                graphContracts: (omissions?.graphContracts ?? 0) + (graph?.contracts?.length ?? 0),
+                sourceExcerpts: (omissions?.sourceExcerpts ?? 0) + (graph?.sources?.length ?? 0),
+              }
+            : {}),
+          ...(omitFollowUps
+            ? {recommendedFollowUps: (omissions?.recommendedFollowUps ?? 0) + (followUps?.length ?? 0)}
+            : {}),
+        },
+      },
+    },
+    gaps: [...new Set([...knowledge.gaps, 'knowledge-output-budget-exhausted'])],
+  };
+}
+
 /** Bind a document, without treating graph edges or memory as compiler facts. No commit fallback is permitted. */
 export const retrieveSemanticContextSourceEvidence = Effect.fn('context.semanticSourceEvidence')(function* (
   request: ContextBriefSourceEvidenceRequest,
