@@ -5,6 +5,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isExternalResourceMetadata} from '@threadnote/store/external-resource';
 import {recallCandidateIsValid} from './candidate_validation.js';
 import {readRecallExactMatches, RecallReadyReadUnavailable} from './index.js';
+import {withReadyRecallMaintenanceScope} from './index/maintenance.js';
 import {
   isConnectionResult,
   readRecallMemoryConnections,
@@ -264,7 +265,7 @@ export const serveRecallSections = Effect.fn('recall.serveSections')(function* (
     semantic: semanticToWire(completedSemantic),
     exactMatches,
   });
-});
+}, withReadyRecallMaintenanceScope);
 
 export type ReadyRecallSectionsInput = Omit<
   PrepareRecallSectionsInput<never>,

@@ -327,8 +327,10 @@ const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(fu
   if (options.readyOnly) {
     const maintenance = makeReadyRecallMaintenance({...config, includeInactive: options.includeInactive});
     return yield* Effect.gen(function* () {
-      if (!(yield* fs.exists(databasePath)))
+      if (!(yield* fs.exists(databasePath))) {
+        yield* maintenance.missing(databasePath, RECALL_INDEX_DATABASE_VERSION);
         return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+      }
       return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options, undefined, maintenance);
     }).pipe(
       Effect.onError(maintenance.onError),
@@ -473,27 +475,25 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
         ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
         : 'memorySeeds' in effectiveOptions
           ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
-          : Effect.gen(function* () {
-              const metadata = yield* loadRecallMetadata(sql);
-              const generation = metadata.get('content_generation') ?? '';
-              const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
-              const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
-              const selectData = (selection: LoadRecallIndexOptions) =>
-                selectRecallIndexData(
-                  sql,
-                  corpusStatistics,
-                  generation,
-                  selection,
-                  loadIdentityConflicts,
-                  metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
-                );
-              return 'terms' in effectiveOptions
-                ? yield* selectRecallExactMatches(
+          : 'terms' in effectiveOptions
+            ? selectRecallExactMatches(sql, effectiveOptions, options.readyOnly ? exactWindows : undefined).pipe(
+                Effect.flatMap(filterUriMatches),
+              )
+            : Effect.gen(function* () {
+                const metadata = yield* loadRecallMetadata(sql);
+                const generation = metadata.get('content_generation') ?? '';
+                const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
+                const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
+                const selectData = (selection: LoadRecallIndexOptions) =>
+                  selectRecallIndexData(
                     sql,
-                    effectiveOptions,
-                    options.readyOnly ? exactWindows : undefined,
-                  ).pipe(Effect.flatMap(filterUriMatches))
-                : 'selections' in effectiveOptions
+                    corpusStatistics,
+                    generation,
+                    selection,
+                    loadIdentityConflicts,
+                    metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
+                  );
+                return 'selections' in effectiveOptions
                   ? yield* Effect.forEach(
                       effectiveOptions.selections,
                       selection =>
@@ -503,7 +503,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
                       {concurrency: 1},
                     )
                   : yield* selectData(effectiveOptions).pipe(Effect.flatMap(filterData));
-            });
+              });
       if (options.readyOnly) {
         const validated = yield* validateRecallReadyResult(
           sql,

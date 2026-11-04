@@ -530,12 +530,15 @@ describe('production recall admission budget', () => {
       {timeout: 15000},
     );
     effectIt.effect(
-      `${surface} preserves completed reranker scores in model-free final proof`,
+      `${surface} composition preserves completed reranker scores in model-free final proof`,
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(false);
+          const command = yield* selectorCompositionCommands(f.system);
           const before = yield* invoke(surface, f).pipe(
             Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, command),
+            Effect.provideService(LocalModelStore, f.store),
           );
           yield* selectLocalModel(
             f.config.agentContextHome,
@@ -544,20 +547,31 @@ describe('production recall admission budget', () => {
             'jina-reranker-v1-turbo-en-f16',
           );
           let reranks = 0;
+          let completedRerankerScores: readonly number[] | undefined;
           const runtime = LocalModelRuntime.of({
             ...fastRuntime,
             rerank: ({documents}) =>
               Effect.sync(() => {
                 reranks++;
                 return EffectArray.map(documents, () => 1);
-              }),
+              }).pipe(
+                Effect.tap(scores =>
+                  Effect.sync(() => {
+                    completedRerankerScores = scores;
+                  }),
+                ),
+              ),
           });
           const result = yield* invoke(surface, f).pipe(
             Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, command),
             Effect.provideService(LocalModelRuntime, runtime),
             Effect.provideService(LocalModelStore, f.store),
           );
           expect(reranks).toBe(1);
+          expect(completedRerankerScores).toBeDefined();
+          expect(completedRerankerScores?.length).toBeGreaterThan(0);
+          expect(EffectArray.every(completedRerankerScores ?? [], score => score === 1)).toBe(true);
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
           expect(result.confidenceScore).toBeGreaterThan(before.confidenceScore ?? 1);

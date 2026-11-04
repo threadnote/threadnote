@@ -13,6 +13,7 @@ import {
   String as EffectString,
 } from 'effect';
 import {TestClock} from 'effect/testing';
+import {CurrentTransformer} from 'effect/sql/Statement';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -100,6 +101,38 @@ const eligibility = {
   authority: 'any',
   projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
 } as const;
+
+effectIt.effect('exact ready lookup reads only its required metadata and skips ranking statistics', () =>
+  Effect.gen(function* () {
+    const {config, uri} = yield* fixture;
+    const queries: string[] = [];
+    const observe = CurrentTransformer.of(statement =>
+      Effect.sync(() => {
+        queries.push(statement.compile()[0]);
+        return statement;
+      }),
+    );
+    const exact = yield* readRecallExactMatches(config, {
+      includeInactive: false,
+      terms: ['alpha'],
+      uriScopes: ['threadnote://user/me/memories'],
+      eligibility,
+    }).pipe(Effect.provideService(CurrentTransformer, observe));
+    expect(exact).toEqual([{uri, terms: ['alpha']}]);
+    expect(EffectArray.filter(queries, query => /SELECT key, value FROM metadata/u.test(query))).toHaveLength(1);
+    expect(EffectArray.some(queries, query => /term_statistics/u.test(query))).toBe(false);
+
+    queries.length = 0;
+    const ranked = yield* readRecallIndexData(config, {
+      includeInactive: false,
+      query: 'alpha',
+      eligibility,
+    }).pipe(Effect.provideService(CurrentTransformer, observe));
+    expect(EffectArray.map(ranked.candidates, candidate => candidate.uri)).toEqual([uri]);
+    expect(EffectArray.some(queries, query => /term_statistics/u.test(query))).toBe(true);
+    expect(ranked.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+  }).pipe(provide),
+);
 
 const staleSelectorFixture = Effect.gen(function* () {
   const f = yield* fixture;
