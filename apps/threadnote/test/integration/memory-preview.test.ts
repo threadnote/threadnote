@@ -45,7 +45,7 @@ describe('fixed-target memory preview HTTP handler', () => {
         return {content, node};
       },
     });
-    const request = () => new Request(`${origin}/${token}`);
+    const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
     const first = await handler(request());
     expect(first.status).toBe(200);
     expect(await first.text()).toContain('Original');
@@ -86,6 +86,107 @@ describe('fixed-target memory preview HTTP handler', () => {
     }
     expect(reads).toBe(0);
   });
+
+  it('bootstraps from a fragment, clears it, and reloads with a private session', async () => {
+    let content = '# First';
+    const handler = createMemoryPreviewHandler({
+      token,
+      port: () => 41377,
+      read: async () => ({content, node}),
+    });
+    const bootstrap = await handler(new Request(`${origin}/`));
+    const markup = await bootstrap.text();
+    expect(markup).toContain('history.replaceState');
+    expect(markup).toContain("fetch('/session'");
+    expect(markup).not.toContain(token);
+    const post = (secret: string, originHeader = origin) =>
+      handler(
+        new Request(`${origin}/session`, {
+          method: 'POST',
+          headers: {
+            origin: originHeader,
+            'sec-fetch-site': 'same-origin',
+            'content-type': 'text/plain',
+            'content-length': String(token.length),
+          },
+          body: secret,
+        }),
+      );
+    expect((await post(token, 'https://evil.example')).status).toBe(404);
+    expect((await post('wrong-test-token!')).status).toBe(404);
+    const established = await post(token);
+    expect(established.status).toBe(204);
+    const cookie = established.headers.get('set-cookie') ?? '';
+    expect(cookie).toContain('HttpOnly; SameSite=Strict');
+    const request = () => new Request(`${origin}/`, {headers: {cookie: EffectString.split(';')(cookie)[0]}});
+    expect(await (await handler(request())).text()).toContain('First');
+    content = '# Updated';
+    expect(await (await handler(request())).text()).toContain('Updated');
+  });
+
+  it('limits concurrent authorized reads', async () => {
+    let finish!: (value: {content: string; node: typeof node}) => void;
+    const handler = createMemoryPreviewHandler({
+      token,
+      port: () => 41377,
+      read: () =>
+        new Promise(resolve => {
+          finish = resolve;
+        }),
+    });
+    const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
+    const pending = handler(request());
+    const busy = await handler(request());
+    expect(busy.status).toBe(503);
+    expect(busy.headers.get('retry-after')).toBe('1');
+    expect(await busy.text()).toContain('reload this page');
+    finish({content: '# First', node});
+    expect((await pending).status).toBe(200);
+  });
+});
+
+it('rejects raw preview flags before parsing the selector or configuration', async () => {
+  const secret = 'secret-example';
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      'apps/threadnote/src/standalone.ts',
+      'memory-preview',
+      `threadnote://open/v1#${secret}`,
+      '--manifest',
+      '/tmp/threadnote-preview-nonexistent-manifest.yaml',
+      '--home',
+      '/tmp/threadnote-preview-nonexistent-home',
+    ],
+    {stdout: 'pipe', stderr: 'pipe'},
+  );
+  const [output, error, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).not.toBe(0);
+  expect(error).toContain('Invalid memory preview invocation');
+  expect(output + error).not.toContain(secret);
+  expect(output + error).not.toContain('nonexistent');
+  const valid = memoryLaunchUri({kind: 'id', ref: 'tn_test'});
+  for (const args of [
+    ['memory-preview', valid, '--home', '/tmp/threadnote-preview-nonexistent-home'],
+    ['--home', '/tmp/threadnote-preview-nonexistent-home', 'memory-preview', valid],
+  ]) {
+    const process = Bun.spawn([globalThis.process.execPath, 'apps/threadnote/src/standalone.ts', ...args], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [stdout, stderr, status] = await Promise.all([
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      process.exited,
+    ]);
+    expect(status).not.toBe(0);
+    expect(stdout + stderr).toContain('Invalid memory preview invocation');
+    expect(stdout + stderr).not.toContain(valid);
+  }
 });
 
 const launchUri = memoryLaunchUri({kind: 'id', ref: 'tn_startup_test'});
@@ -189,6 +290,26 @@ it.effect('excludes oversized and packed files without hiding eligible memories'
     expect(
       Exit.isFailure(yield* Effect.exit(readManagedMemory(config, 'threadnote://memory/tn_packed', {preview: true}))),
     ).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect('fails closed when the eligible corpus exceeds the aggregate scan budget', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-budget-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    const body = EffectString.repeat(512 * 1024 - 100)('x');
+    for (let index = 0; index < 33; index++)
+      yield* fs.writeFileString(
+        path.join(root, `${index}.md`),
+        `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_${index === 0 ? 'target' : `other_${index}`}\n\n${body}`,
+      );
+    const result = yield* Effect.exit(
+      readManagedMemory({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {preview: true}),
+    );
+    expect(Exit.isFailure(result)).toBe(true);
   }).pipe(provide),
 );
 

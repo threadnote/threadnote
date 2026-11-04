@@ -1,4 +1,4 @@
-import {Array as EffectArray, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
@@ -8,6 +8,30 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
+export const MAX_PREVIEW_IDENTITY_SCAN_BYTES = 16 * 1024 * 1024;
+const readBoundedIdentityFile = (fs: FileSystem.FileSystem, file: string, expectedSize: number) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const handle = yield* fs.open(file, {flag: 'r'});
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      while (length <= expectedSize) {
+        const chunk = yield* handle.readAlloc(Math.min(64 * 1024, expectedSize + 1 - length));
+        if (Option.isNone(chunk)) break;
+        length += chunk.value.length;
+        if (length > expectedSize) return undefined;
+        chunks.push(chunk.value);
+      }
+      if (length !== expectedSize) return undefined;
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return new TextDecoder().decode(bytes);
+    }),
+  );
 class PreviewMemoryPathError extends Schema.TaggedError<PreviewMemoryPathError, {readonly brand: unique symbol}>()(
   'PreviewMemoryPathError',
   {message: Schema.String},
@@ -53,6 +77,7 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   const pending = [root];
   const candidates: {uri: string; memoryId: string; status: string}[] = [];
   let count = 0;
+  let scannedBytes = 0;
   while (pending.length > 0) {
     const directory = pending.pop()!;
     for (const name of yield* fs.readDirectory(directory)) {
@@ -80,12 +105,26 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
         !/^\.(?:abstract|overview)\.md$/u.test(name)
       ) {
         if (Number(stat.size) > MAX_PREVIEW_IDENTITY_FILE_BYTES) continue;
+        scannedBytes += Number(stat.size);
+        if (scannedBytes > MAX_PREVIEW_IDENTITY_SCAN_BYTES)
+          return yield* MemoryIdentityResolutionError.make({
+            memoryId,
+            reason: 'ambiguous',
+            message: 'Local memory identity scan exceeded its byte limit.',
+          });
         const segments = EffectArray.map(
           EffectString.split(path.sep)(path.relative(root, file)),
           EffectString.normalize('NFC'),
         );
         const candidateUri = canonicalResourceUri('user', [config.user, 'memories', ...segments]);
-        const record = parseMemoryDocument(candidateUri, yield* fs.readFileString(file));
+        const content = yield* readBoundedIdentityFile(fs, file, Number(stat.size));
+        if (content === undefined)
+          return yield* MemoryIdentityResolutionError.make({
+            memoryId,
+            reason: 'ambiguous',
+            message: 'Local memory identity scan changed during reading.',
+          });
+        const record = parseMemoryDocument(candidateUri, content);
         if (record?.metadata.memoryId === memoryId)
           candidates.push({uri: candidateUri, memoryId, status: record.metadata.status});
       }

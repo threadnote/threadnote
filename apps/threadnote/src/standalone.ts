@@ -641,6 +641,14 @@ async function integrationSyncWorkerProgram(arguments_: readonly string[]) {
 }
 
 async function applicationProgram(arguments_: readonly string[], isMcpServer: boolean, isMcpBroker: boolean) {
+  if (arguments_[0] === 'memory-preview') {
+    const {validMemoryPreviewArguments} = await import('./preview/dispatch.js');
+    if (!validMemoryPreviewArguments(arguments_))
+      return Effect.sync(() => {
+        process.stderr.write('Invalid memory preview invocation.\n');
+        process.exitCode = 1;
+      });
+  }
   if ((isMcpServer || isMcpBroker) && mcpServerInvocation.help) {
     return Effect.sync(() => {
       process.stdout.write(mcpServerHelp);
@@ -726,6 +734,11 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       .pipe(Effect.provide(runtime.ApplicationLayer));
   }
   const cliOperation = invocation.operation;
+  if (cliOperation === 'memory-preview' && arguments_[0] !== 'memory-preview')
+    return Effect.sync(() => {
+      process.stderr.write('Invalid memory preview invocation.\n');
+      process.exitCode = 1;
+    });
   const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';
   const previewMemory = cliOperation === 'memory-preview' ? await import('./manager/server.js') : undefined;
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';

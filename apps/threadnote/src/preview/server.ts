@@ -1,4 +1,4 @@
-import {Console, Context, Effect, Option, Schema} from 'effect';
+import {Array as EffectArray, Console, Context, Effect, Option, Schema, String as EffectString} from 'effect';
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as SecureRandom from 'effect/crypto/SecureRandom';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -11,6 +11,14 @@ import type {ApplicationServices} from '../effect/runtime.js';
 const IDLE_MS = 10 * 60 * 1000;
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const BOOTSTRAP_POLICY =
+  "default-src 'none'; script-src 'nonce-preview-bootstrap'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const BOOTSTRAP_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Private memory preview</title></head><body><p>Opening private memory…</p><script nonce="preview-bootstrap">
+const secret = location.hash.slice(1);
+history.replaceState(null, '', location.pathname);
+if (secret) fetch('/session', {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: secret, credentials: 'same-origin'}).then(response => { if (response.ok) location.replace('/'); else document.body.textContent = 'Private preview unavailable.'; }).catch(() => { document.body.textContent = 'Private preview unavailable.'; });
+else document.body.textContent = 'Private preview unavailable.';
+</script></body></html>`;
 
 export class MemoryPreviewStartupError extends Schema.TaggedError<
   MemoryPreviewStartupError,
@@ -47,6 +55,7 @@ export function createMemoryPreviewHandler(options: {
   readonly read: () => Promise<PreviewReadResult>;
   readonly touched?: () => void;
 }): (request: Request) => Promise<Response> {
+  let reading = false;
   return async request => {
     const headers = {
       'Cache-Control': 'no-store, max-age=0',
@@ -58,14 +67,49 @@ export function createMemoryPreviewHandler(options: {
     const url = new URL(request.url);
     const origin = `http://127.0.0.1:${options.port()}`;
     if (
-      request.method !== 'GET' ||
       url.origin !== origin ||
-      url.pathname !== `/${options.token}` ||
       url.search !== '' ||
       (request.headers.get('origin') && request.headers.get('origin') !== origin) ||
       request.headers.get('sec-fetch-site') === 'cross-site'
     )
       return new Response('Not found', {status: 404, headers});
+    const cookieName = `threadnote_preview_${options.port()}`;
+    if (request.method === 'POST' && url.pathname === '/session') {
+      if (
+        request.headers.get('origin') !== origin ||
+        request.headers.get('content-type') !== 'text/plain' ||
+        request.headers.get('sec-fetch-site') !== 'same-origin' ||
+        request.headers.get('content-length') !== String(options.token.length)
+      )
+        return new Response('Not found', {status: 404, headers});
+      if ((await request.text()) !== options.token) return new Response('Not found', {status: 404, headers});
+      options.touched?.();
+      return new Response(null, {
+        status: 204,
+        headers: {...headers, 'Set-Cookie': `${cookieName}=${options.token}; HttpOnly; SameSite=Strict; Path=/`},
+      });
+    }
+    if (request.method !== 'GET' || url.pathname !== '/') return new Response('Not found', {status: 404, headers});
+    const cookie = request.headers.get('cookie') ?? '';
+    if (
+      !EffectArray.some(
+        EffectString.split(';')(cookie),
+        part => EffectString.trim(part) === `${cookieName}=${options.token}`,
+      )
+    )
+      return new Response(BOOTSTRAP_PAGE, {
+        status: 200,
+        headers: {...headers, 'Content-Security-Policy': BOOTSTRAP_POLICY, 'Content-Type': 'text/html; charset=utf-8'},
+      });
+    if (reading)
+      return new Response(
+        '<!doctype html><title>Preview busy</title><h1>Preview busy</h1><p>A previous read is still running. Wait a moment, then reload this page.</p>',
+        {
+          status: 503,
+          headers: {...headers, 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '1'},
+        },
+      );
+    reading = true;
     options.touched?.();
     try {
       const document = await options.read();
@@ -78,6 +122,8 @@ export function createMemoryPreviewHandler(options: {
         status: 404,
         headers: {...headers, 'Content-Type': 'text/html; charset=utf-8'},
       });
+    } finally {
+      reading = false;
     }
   };
 }
@@ -121,7 +167,7 @@ export function runMemoryPreview(
         }),
         listener => Effect.sync(() => listener.stop(true)),
       ).pipe(Effect.catchCause(previewStartupFailure));
-      const localUrl = `http://127.0.0.1:${server.port}/${token}`;
+      const localUrl = `http://127.0.0.1:${server.port}/#${token}`;
       if (options.open !== false)
         yield* (options.openUrl ?? openLoopbackUrl)(localUrl).pipe(Effect.catchCause(previewStartupFailure));
       else yield* Console.log(localUrl);
