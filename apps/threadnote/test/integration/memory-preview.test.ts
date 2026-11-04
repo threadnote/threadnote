@@ -1,11 +1,13 @@
 import {describe, expect, it} from '@effect/vitest';
-import {Cause, Effect, Exit, Layer} from 'effect';
+import {Cause, Effect, Exit, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryLaunchUri} from '@threadnote/memory/navigation-link';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {createMemoryPreviewHandler, MemoryPreviewRead, runMemoryPreview} from '../../src/preview/server.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {readManagedMemory} from '../../src/manager/server.js';
+import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
 
 const origin = 'http://127.0.0.1:41377';
 const token = 'private-test-token';
@@ -91,6 +93,64 @@ const provide = provideTestLayer(
       },
     }),
   ),
+);
+
+it.effect('redacts malformed decoded selectors from the formatted CLI cause', () =>
+  Effect.gen(function* () {
+    const payload = Buffer.from(JSON.stringify({kind: 'uri', ref: 'secret-example'})).toString('base64url');
+    const exit = yield* runMemoryPreview(unusedConfig, `threadnote://open/v1#v1.${payload}`).pipe(Effect.exit);
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).not.toContain('secret-example');
+  }).pipe(provide),
+);
+
+it.effect('reads live stable identities without creating a recall index and fails closed on conflicts', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-identity-'});
+    const config = {...unusedConfig, agentContextHome: home};
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    const source = path.join(root, 'first.md');
+    const shared = path.join(root, 'shared', 'team');
+    yield* fs.makeDirectory(shared, {recursive: true});
+    const moved = path.join(shared, 'moved.md');
+    const content = (body: string) =>
+      `MEMORY\nkind: durable\nstatus: active\nvisibility: personal\nproject: test\ntopic: test\nmemory_id: tn_preview_test\n\n${body}\n`;
+    yield* fs.writeFileString(source, content('Original'));
+    const alias = 'threadnote://memory/tn_preview_test';
+    let scheduled = 0;
+    const read = () =>
+      readManagedMemory(config, alias, {preview: true}).pipe(
+        Effect.provideService(DeferredCodeAnchorRefreshScheduler, {
+          schedule: () =>
+            Effect.sync(() => {
+              scheduled++;
+            }),
+        }),
+      );
+    const before = yield* fs.readFileString(source);
+    const first = yield* read();
+    expect(first.node.uri).toBe('threadnote://user/tester/memories/first.md');
+    expect(first.content).toContain('Original');
+    expect(yield* fs.readFileString(source)).toBe(before);
+    expect(yield* fs.readDirectory(home)).toEqual(['data']);
+    yield* fs.rename(source, moved);
+    yield* fs.writeFileString(moved, content('Changed'));
+    const second = yield* read();
+    expect(second.node.uri).toBe('threadnote://user/tester/memories/shared/team/moved.md');
+    expect(second.node.isShared).toBe(true);
+    expect(second.content).toContain('Changed');
+    yield* fs.writeFileString(source, content('Conflict'));
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    yield* fs.remove(source);
+    yield* fs.remove(moved);
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    expect(yield* fs.readDirectory(home)).toEqual(['data']);
+    expect(yield* fs.readDirectory(root)).toEqual(['shared']);
+    expect(scheduled).toBe(0);
+  }).pipe(provide),
 );
 
 it.effect('reports a bounded bind error without exposing its cause in the user message', () =>

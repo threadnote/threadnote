@@ -102,7 +102,12 @@ function checkedTarget(target: MemoryNavigationTarget): MemoryNavigationTarget {
   if (target.kind !== 'uri') throw new Error('Invalid memory link target kind.');
   if (encoder.encode(target.ref).byteLength > MAX_MEMORY_LINK_TARGET_BYTES)
     throw new Error('Memory link target is too large.');
-  const parsed = parseResourceId(target.ref);
+  let parsed: ReturnType<typeof parseResourceId>;
+  try {
+    parsed = parseResourceId(target.ref);
+  } catch {
+    throw new Error('Memory link requires a canonical local memory URI.');
+  }
   if (
     parsed.inputScheme !== 'threadnote' ||
     parsed.anchor !== undefined ||

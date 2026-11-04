@@ -745,24 +745,26 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
             return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
               Effect.provideService(MemoryPreviewRead, {
                 read: (config, uri) =>
-                  Effect.runPromiseWith(context)(previewMemory.readManagedMemory(config, uri)).then(document => {
-                    const source = document.record?.metadata;
-                    const metadata = source
-                      ? {
-                          kind: source.kind,
-                          project: source.project,
-                          sourceAgentClient: source.sourceAgentClient,
-                          status: source.status,
-                          timestamp: source.timestamp,
-                          topic: source.topic,
-                        }
-                      : undefined;
-                    return {
-                      content: document.content,
-                      node: {...document.node, metadata},
-                      memoryId: source?.memoryId,
-                    };
-                  }),
+                  Effect.runPromiseWith(context)(previewMemory.readManagedMemory(config, uri, {preview: true})).then(
+                    document => {
+                      const source = document.record?.metadata;
+                      const metadata = source
+                        ? {
+                            kind: source.kind,
+                            project: source.project,
+                            sourceAgentClient: source.sourceAgentClient,
+                            status: source.status,
+                            timestamp: source.timestamp,
+                            topic: source.topic,
+                          }
+                        : undefined;
+                      return {
+                        content: document.content,
+                        node: {...document.node, metadata},
+                        memoryId: source?.memoryId,
+                      };
+                    },
+                  ),
               }),
             );
           })
