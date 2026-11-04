@@ -1,5 +1,6 @@
-import {Cause, Console, Context, Crypto, Effect, Option, Schema} from 'effect';
+import {Cause, Console, Context, Effect, Option, Schema} from 'effect';
 import * as Base64Url from 'effect/encoding/Base64Url';
+import * as SecureRandom from 'effect/crypto/SecureRandom';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {decodeMemoryLaunchUri} from '@threadnote/memory/navigation-link';
 import {renderMemoryPreview, renderMemoryPreviewError} from '@threadnote/manager/preview';
@@ -96,8 +97,8 @@ export function runMemoryPreview(
         return yield* MemoryPreviewStartupError.make({
           message: 'Private memory reader is unavailable. Run threadnote doctor.',
         });
-      const crypto = yield* Crypto.Crypto;
-      const token = Base64Url.encode(yield* crypto.randomBytes(24));
+      const random = yield* SecureRandom.SecureRandom;
+      const token = Base64Url.encode(yield* random.randomBytes(24));
       let port = 0;
       let touched = () => {};
       const server = yield* Effect.acquireRelease(
