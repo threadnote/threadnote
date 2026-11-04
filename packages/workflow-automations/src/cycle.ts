@@ -724,7 +724,12 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    if (!before || nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)) seeds.push(p.id);
+    if (
+      !before ||
+      before.baseBranch !== p.baseBranch ||
+      nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)
+    )
+      seeds.push(p.id);
   }
   const affected = descendants([old, plan], seeds);
   for (const k of affected) if (s.phases[k]?.status === 'merged') err('Merged history cannot be rewritten.');

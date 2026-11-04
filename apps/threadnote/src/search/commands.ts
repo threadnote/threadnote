@@ -2,8 +2,15 @@ import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
-import {currentRecallCorpusGeneration, loadRecallIndexData} from '@threadnote/recall/index';
-import {purgeVectorIndex, rebuildVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {currentRecallCorpusGeneration, loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
+import {
+  loadRecallVectorAuthorizationKey,
+  purgeVectorIndex,
+  rebuildVectorIndex,
+  vectorIndexGenerationReadiness,
+  vectorIndexStatus,
+} from '@threadnote/recall/vector-index';
+import {verifyRecallIndexMaintenanceReadiness} from '../lifecycle.js';
 
 class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
   'SearchCommandError',
@@ -29,15 +36,39 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
   if (manifest.role !== 'embedding') {
     return yield* SearchCommandError.make({message: `Model ${modelId} is not an embedding model.`});
   }
+  const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+  const verifyInputs = Effect.gen(function* () {
+    if (
+      (options.model === undefined &&
+        (yield* readModelSelection(config.agentContextHome)).roles.embedding !== modelId) ||
+      (yield* loadRecallVectorAuthorizationKey(config)) !== authorizationKey
+    ) {
+      return yield* SearchCommandError.make({
+        message: 'Recall inputs changed during preparation. Run `threadnote index rebuild` again.',
+      });
+    }
+  });
+  yield* Console.log('Preparing lexical recall from canonical documents.');
   const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+  yield* verifyInputs;
+  yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
   yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
   const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
     corpusGeneration: index.generation,
-    currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
+    currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
   });
+  yield* verifyRecallIndexMaintenanceReadiness({
+    manifestId: manifest.id,
+    readLexicalStatus: () => recallIndexStatus(config, false),
+    readVectorReadiness: () =>
+      vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
+    requestedGeneration: index.generation,
+  });
+  yield* verifyInputs;
   yield* Console.log(
     `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
   );
+  yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
 });
 
 export const runIndexStatus = Effect.fn('index.command.status')(function* (config: RuntimeConfig) {
