@@ -1,5 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {recallLexicalScopeIsValid} from './background/lexical-demand.js';
 import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {
@@ -104,7 +105,11 @@ import {
 } from './index/refresh_cut.js';
 export {RecallIndexSourceChanged} from './index/refresh_cut.js';
 import {validateRecallReadyResult} from './index/ready_result.js';
-import {makeReadyRecallMaintenance, retainReadyRecallMaintenance} from './index/maintenance.js';
+import {
+  makeReadyRecallMaintenance,
+  retainReadyRecallMaintenance,
+  withReadyRecallMaintenanceScope,
+} from './index/maintenance.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -765,6 +770,44 @@ export const readRecallIndexData = (
     loadRecallIndexData(config, {...options, readyOnly: true}),
     readyBoundaryData,
   );
+
+/** An absent lexical directory cannot contain either a fixed or a published ready snapshot. */
+export const requestMissingRecallReadyDirectory = Effect.fn('recall.requestMissingReadyDirectory')(
+  function* (config: RecallIndexConfig, includeInactive: boolean) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const scope = {...config, includeInactive};
+    if (!path.isAbsolute(config.agentContextHome) || !recallLexicalScopeIsValid(path, scope)) return false;
+    const home = yield* fs.realPath(config.agentContextHome).pipe(Effect.option);
+    if (Option.isNone(home) || (yield* fs.stat(home.value)).type !== 'Directory') return false;
+    const directory = recallIndexRoot(path, home.value);
+    const absent = yield* fs.stat(directory).pipe(
+      Effect.as(false),
+      Effect.catchTag('PlatformError', error =>
+        error.reason._tag !== 'NotFound'
+          ? Effect.succeed(false)
+          : fs.lstat(directory).pipe(
+              // stat follows a dangling symlink. Only a missing entry qualifies;
+              // every existing entry and unknown observation uses the native reader.
+              Effect.as(false),
+              Effect.catchTag('PlatformError', entryError => Effect.succeed(entryError.reason._tag === 'NotFound')),
+            ),
+      ),
+    );
+    if (!absent) return false;
+    yield* makeReadyRecallMaintenance({...scope, agentContextHome: home.value}).missing(
+      recallIndexDatabasePath(path, home.value, includeInactive),
+      RECALL_INDEX_DATABASE_VERSION,
+    );
+    return true;
+  },
+  effect =>
+    effect.pipe(
+      withReadyRecallMaintenanceScope,
+      Effect.catchCause(cause => (Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(false))),
+    ),
+);
+
 export const readRecallIndexDataBatch = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallIndexBatchOptions, 'forceRefresh' | 'readyOnly'>,

@@ -13,6 +13,7 @@ import {
   Layer,
   Option,
   Path,
+  PlatformError,
   Result,
   Schema,
 } from 'effect';
@@ -88,7 +89,138 @@ const waitForPid = Effect.fn('test.waitForReadyReadPid')(function* (filename: st
   return yield* TestError.make({message: 'Owned read fixture did not report its PID.'});
 });
 
+const coldFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'ready-cold-preflight-'}));
+  const request: RecallReadyReadRequest = {
+    operation: 'sections',
+    config: {account: 'local', user: 'test', agentContextHome: home},
+    options: {
+      mode: 'baseline',
+      query: 'cold topical',
+      feedbackQuery: 'cold topical',
+      allowExactRescue: true,
+      includeInactive: false,
+      limit: 4,
+    },
+  };
+  const command = yield* CommandExecutor;
+  const starts: number[] = [];
+  const observed = CommandExecutor.of({
+    ...command,
+    execute: (executable, args, options) =>
+      Effect.suspend(() => {
+        starts.push(options?.timeoutMs ?? 0);
+        return Effect.fail(
+          CommandTimedOut.make({
+            executable,
+            args: [...args],
+            timeoutMs: options?.timeoutMs ?? 0,
+            message: 'Observed native route.',
+          }),
+        );
+      }),
+  });
+  return {fs, path, home, request, observed, starts};
+});
+
 describe('owned native ready-read boundary', () => {
+  effectIt.effect('eight genuinely cold calls retain typed unavailability without native starts', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      let wakes = 0;
+      const responses = yield* Effect.all(
+        Array.from({length: 8}, () =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+            return yield* boundary.read(f.request);
+          }).pipe(
+            Effect.provideService(CommandExecutor, f.observed),
+            Effect.provideService(RecallEmbeddingWakePort, () =>
+              Effect.sync(() => {
+                wakes++;
+              }),
+            ),
+          ),
+        ),
+        {concurrency: 'unbounded'},
+      );
+      expect(f.starts).toEqual([]);
+      for (const response of responses) {
+        expect(response.outcome).toBe('unavailable');
+        expect(response.binding).toBe(readyRecallReadRequestBinding(f.request));
+        expect(response.value).toBeUndefined();
+      }
+      expect(EffectArray.some(responses, response => response.maintenanceRequested === true)).toBe(true);
+      expect(wakes).toBe(EffectArray.filter(responses, response => response.maintenanceRequested === true).length);
+      expect((yield* readRecallLexicalDemand({...f.request.config, includeInactive: false}))?.revision).toBeDefined();
+      expect(yield* f.fs.exists(f.path.join(f.home, 'indexes', 'lexical'))).toBe(false);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('existing or uncertain storage and invalid logical scope still use the native boundary', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      const root = f.path.join(f.home, 'indexes', 'lexical');
+      for (const reason of ['PermissionDenied', 'Unknown'] as const) {
+        const observed = FileSystem.FileSystem.of({
+          ...f.fs,
+          stat: filename =>
+            filename === root
+              ? Effect.fail(PlatformError.systemError({_tag: reason, module: 'FileSystem', method: 'stat'}))
+              : f.fs.stat(filename),
+        });
+        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(FileSystem.FileSystem, observed),
+          Effect.provideService(CommandExecutor, f.observed),
+        );
+        expect(yield* boundary.read(f.request).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {reason: 'budget-exhausted'},
+        });
+      }
+      const invalid = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        Effect.provideService(CommandExecutor, f.observed),
+      );
+      yield* invalid.read({...f.request, config: {...f.request.config, user: '../other'}}).pipe(Effect.result);
+      yield* f.fs.makeDirectory(root, {recursive: true});
+      const present = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        Effect.provideService(CommandExecutor, f.observed),
+      );
+      yield* present.read(f.request).pipe(Effect.result);
+      expect(f.starts).toHaveLength(4);
+      expect(yield* readRecallLexicalDemand({...f.request.config, includeInactive: false})).toBeUndefined();
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('the cold observation shares the original compute deadline and interruption cannot enqueue', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      const entered = yield* Deferred.make<void>();
+      const root = f.path.join(f.home, 'indexes', 'lexical');
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        stat: filename =>
+          filename === root
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+            : f.fs.stat(filename),
+      });
+      const deadline = yield* makeReadDeadline(2000);
+      const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
+        Effect.provideService(FileSystem.FileSystem, observed),
+        Effect.provideService(CommandExecutor, f.observed),
+      );
+      const reader = yield* boundary.read(f.request).pipe(Effect.result, Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(900);
+      expect(yield* Fiber.join(reader)).toMatchObject({_tag: 'Failure', failure: {reason: 'budget-exhausted'}});
+      expect(yield* readDeadlineRemaining(deadline)).toBe(1100);
+      expect(f.starts).toEqual([]);
+      expect(yield* readRecallLexicalDemand({...f.request.config, includeInactive: false})).toBeUndefined();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it('preserves compiled and explicitly injected source worker routing', () => {
     expect(readyReadWorkerInvocation('/runtime/threadnote', '/source/standalone.ts')).toEqual({
       executable: '/runtime/threadnote',

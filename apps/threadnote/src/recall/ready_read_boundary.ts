@@ -1,5 +1,6 @@
 import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as EffectString from 'effect/String';
+import {SecureRandom} from 'effect/crypto';
 import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
 import {
   makeReadDeadline,
@@ -12,10 +13,12 @@ import {
 } from '@threadnote/platform/read_deadline';
 import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
 import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
+import {requestMissingRecallReadyDirectory} from '@threadnote/recall/index';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   RecallReadyReadBoundary,
   RecallReadyReadBoundaryError,
+  recallReadyReadRequestSchema,
   recallReadyReadResponseSchema,
   type RecallReadyReadRequest,
 } from '@threadnote/recall/read_boundary';
@@ -63,7 +66,9 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
   const command = yield* CommandExecutor;
   const system = yield* SystemInfo;
   const wake = yield* RecallEmbeddingWakePort;
-  const maintenanceContext = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
+  const maintenanceContext = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | SystemInfo
+  >();
   const invocation = readyReadWorkerInvocation(system.executablePath, system.developmentEntrypoint);
   const wakeQueuedMaintenance = (request: RecallReadyReadRequest, requested?: boolean) => {
     if (
@@ -110,6 +115,54 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
         });
         if (input.byteLength > RECALL_READY_READ_INPUT_BYTES)
           return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+        if (
+          request.operation === 'sections' &&
+          request.options.mode === 'baseline' &&
+          request.options.query.length > 0 &&
+          !request.options.memoryRefs?.length
+        ) {
+          // Cold topical reads have no useful native work when the whole ready
+          // directory is positively absent. Unknown or existing storage still
+          // takes the owned worker path; no readiness observation is cached.
+          const checked = yield* Schema.decodeEffect(Schema.fromJsonString(recallReadyReadRequestSchema), {
+            onExcessProperty: 'error',
+          })(new TextDecoder().decode(input)).pipe(
+            Effect.mapError(() => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'})),
+          );
+          if (checked.operation !== 'sections')
+            return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+          const allowance = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
+          if (allowance <= 0) return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
+          let maintenanceRequested = false;
+          const absent = yield* requestMissingRecallReadyDirectory(
+            checked.config,
+            checked.options.includeInactive,
+          ).pipe(
+            Effect.provideService(RecallEmbeddingWakePort, () =>
+              Effect.sync(() => {
+                maintenanceRequested = true;
+              }),
+            ),
+            Effect.provide(maintenanceContext),
+            Effect.timeoutOrElse({
+              duration: allowance,
+              orElse: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'})),
+            }),
+          );
+          if (absent) {
+            yield* wakeQueuedMaintenance(request, maintenanceRequested);
+            if ((yield* readDeadlineRemaining(deadline)) <= 0)
+              return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
+            return {
+              protocol: 1 as const,
+              binding: recallReadyReadBinding(checked),
+              operation: 'sections' as const,
+              observations: [],
+              maintenanceRequested,
+              outcome: 'unavailable' as const,
+            };
+          }
+        }
         const timeoutMs = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
         if (timeoutMs <= 0) return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
         const result = yield* command

@@ -88,7 +88,7 @@ const readFile = (filename: string) =>
     Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(demandSchema))),
     Effect.mapError(unavailable),
   );
-const validScope = (path: Path.Path, scope: Omit<RecallLexicalScope, 'agentContextHome'>) =>
+export const recallLexicalScopeIsValid = (path: Path.Path, scope: Omit<RecallLexicalScope, 'agentContextHome'>) =>
   EffectArray.every(
     [scope.account, scope.user],
     value => value.length > 0 && value !== '.' && value !== '..' && !/[\\/\0]/u.test(value),
@@ -99,7 +99,7 @@ const validScope = (path: Path.Path, scope: Omit<RecallLexicalScope, 'agentConte
 export const readRecallLexicalDemand = Effect.fn('recall.readLexicalDemand')(function* (scope: RecallLexicalScope) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
-  if (!validScope(path, scope)) return yield* unavailable();
+  if (!recallLexicalScopeIsValid(path, scope)) return yield* unavailable();
   const file = location(path, scope).state;
   if (!(yield* fs.exists(file))) return undefined;
   const state = yield* readFile(file);
@@ -110,7 +110,8 @@ export const readRecallLexicalScope = Effect.fn('recall.readLexicalScope')(funct
   if (!/^[a-f0-9]{64}\.json$/u.test(filename)) return undefined;
   const path = yield* Path.Path;
   const state = yield* readFile(path.join(home, 'recall', RECALL_LEXICAL_DEMAND_DIRECTORY, filename));
-  if (!validScope(path, state) || filename !== recallLexicalDemandKey(state) + '.json') return yield* unavailable();
+  if (!recallLexicalScopeIsValid(path, state) || filename !== recallLexicalDemandKey(state) + '.json')
+    return yield* unavailable();
   return state.revision && state.failures < 8 ? {...state, agentContextHome: home} : undefined;
 });
 const update = <A>(
@@ -121,7 +122,7 @@ const update = <A>(
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const crypto = yield* SecureRandom.SecureRandom;
-    if (!validScope(path, scope) || (yield* fs.stat(scope.agentContextHome)).type !== 'Directory')
+    if (!recallLexicalScopeIsValid(path, scope) || (yield* fs.stat(scope.agentContextHome)).type !== 'Directory')
       return yield* unavailable();
     const files = location(path, scope);
     // Never recreate a deleted/uninstalled home.

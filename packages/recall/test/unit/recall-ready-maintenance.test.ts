@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect, vi} from 'vitest';
 import fc from 'fast-check';
@@ -12,7 +12,7 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import * as Demand from '../../src/background/lexical-demand.js';
 import * as Mutation from '@threadnote/store/resource/mutation_generation';
 import {makeReadyRecallMaintenance, withReadyRecallMaintenanceScope} from '../../src/index/maintenance.js';
-import {readRecallExactMatches, readRecallIndexDataBatch} from '../../src/index.js';
+import {readRecallExactMatches, readRecallIndexDataBatch, requestMissingRecallReadyDirectory} from '../../src/index.js';
 
 const platform = Layer.mergeAll(
   BunServices.layer,
@@ -102,6 +102,111 @@ const fixture = Effect.gen(function* () {
   const reconcile = () => makeReadyRecallMaintenance(scope).request(true);
   return {scope, database, controls, requests, missing, reconcile};
 });
+
+effectIt.effect('only positive whole-directory absence requests cold maintenance', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = path.join(yield* fs.realPath(f.scope.agentContextHome), 'indexes', 'lexical');
+    for (const reason of ['PermissionDenied', 'Unknown', 'Busy'] as const) {
+      const observed = FileSystem.FileSystem.of({
+        ...fs,
+        stat: filename =>
+          filename === directory
+            ? Effect.fail(PlatformError.systemError({_tag: reason, module: 'FileSystem', method: 'stat'}))
+            : fs.stat(filename),
+      });
+      expect(
+        yield* requestMissingRecallReadyDirectory(f.scope, false).pipe(
+          Effect.provideService(FileSystem.FileSystem, observed),
+        ),
+      ).toBe(false);
+    }
+    expect(yield* requestMissingRecallReadyDirectory({...f.scope, account: '../other'}, false)).toBe(false);
+    expect(yield* requestMissingRecallReadyDirectory({...f.scope, manifestPath: 'relative.yaml'}, false)).toBe(false);
+    for (const reason of ['PermissionDenied', 'Unknown', 'Busy'] as const) {
+      const observed = FileSystem.FileSystem.of({
+        ...fs,
+        lstat: filename =>
+          filename === directory
+            ? Effect.fail(PlatformError.systemError({_tag: reason, module: 'FileSystem', method: 'lstat'}))
+            : fs.lstat(filename),
+      });
+      expect(
+        yield* requestMissingRecallReadyDirectory(f.scope, false).pipe(
+          Effect.provideService(FileSystem.FileSystem, observed),
+        ),
+      ).toBe(false);
+    }
+    expect(f.requests).toEqual([]);
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(true);
+    expect(f.requests).toEqual([false]);
+    expect(yield* fs.exists(directory)).toBe(false);
+    yield* fs.makeDirectory(directory, {recursive: true});
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(false);
+    yield* fs.remove(directory, {recursive: true});
+    yield* fs.writeFileString(directory, 'not a directory');
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(false);
+    expect(f.requests).toEqual([false]);
+  }).pipe(provide),
+);
+
+effectIt.effect('rechecks absence across calls and never treats a created directory as cold', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(true);
+    const first = f.controls.pending?.revision;
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(true);
+    expect(f.controls.pending?.revision).not.toBe(first);
+    yield* fs.makeDirectory(path.dirname(f.database), {recursive: true});
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(false);
+    expect(f.requests).toEqual([false, false]);
+  }).pipe(provide),
+);
+
+effectIt.effect('a dangling lexical directory link delegates to the native reader without requesting maintenance', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = path.join(yield* fs.realPath(f.scope.agentContextHome), 'indexes', 'lexical');
+    yield* fs.makeDirectory(path.dirname(directory), {recursive: true});
+    yield* fs.symlink(path.join(f.scope.agentContextHome, 'missing-target'), directory);
+    expect(yield* fs.exists(directory)).toBe(false);
+    expect((yield* fs.lstat(directory)).type).toBe('SymbolicLink');
+    expect(yield* requestMissingRecallReadyDirectory(f.scope, false)).toBe(false);
+    expect(f.requests).toEqual([]);
+    expect(f.controls.pending).toBeUndefined();
+  }).pipe(provide),
+);
+
+effectIt.effect('cancellation during an absence observation never enqueues maintenance', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const entered = yield* Deferred.make<void>();
+    const directory = path.join(yield* fs.realPath(f.scope.agentContextHome), 'indexes', 'lexical');
+    const observed = FileSystem.FileSystem.of({
+      ...fs,
+      stat: filename =>
+        filename === directory
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+          : fs.stat(filename),
+    });
+    const reader = yield* requestMissingRecallReadyDirectory(f.scope, false).pipe(
+      Effect.provideService(FileSystem.FileSystem, observed),
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(reader);
+    expect(f.requests).toEqual([]);
+    expect(f.controls.pending).toBeUndefined();
+  }).pipe(provide),
+);
 
 effectIt.effect('reuses a real durable pending revision and persists stronger reconciliation', () =>
   Effect.gen(function* () {

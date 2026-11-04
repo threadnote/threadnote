@@ -169,7 +169,23 @@ Database.prototype.query = function(sql) {
     writeFileSync(${JSON.stringify(timeoutFile)}, JSON.stringify(original.call(this, 'PRAGMA busy_timeout').get()));
   return original.call(this, sql);
 };
-await import(${JSON.stringify(system.developmentEntrypoint)});
+// Invoke the same narrow main as the ordinary source read worker. Importing
+// standalone here would also initialize unrelated CLI dispatch dependencies.
+const {Effect, Layer, Runtime} = await import(${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('effect')))});
+const {makeReadyRecallReadWorkerProgram, readyRecallReadWorkerLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/recall/ready_read_main.ts', import.meta.url)))});
+const {withCliDiagnostics} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/effect/cli/output.ts', import.meta.url)))});
+const {runtimeEntrypointLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/effect/runtime-entrypoint.ts', import.meta.url)))});
+const {signalTransparentTeardown} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/process/signal_transparent_main.ts', import.meta.url)))});
+const {telemetryChildEnvironmentPolicyLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/telemetry/session.ts', import.meta.url)))});
+Runtime.makeRunMain(signalTransparentTeardown)(
+  makeReadyRecallReadWorkerProgram(process.argv.slice(2), process.env).pipe(
+    Effect.provide(readyRecallReadWorkerLayer.pipe(
+      Layer.provideMerge(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
+    )),
+    withCliDiagnostics,
+  ),
+  {disableErrorReporting: true},
+);
 `,
     );
     return {system: {...system, developmentEntrypoint: script}, entered, timeoutFile};
