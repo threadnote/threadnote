@@ -813,8 +813,14 @@ describe('project-closure incremental indexing', () => {
               stagedFiles: 6,
             });
             expect(incremental.materialization?.stagedFiles).toBeLessThan(incremental.materialization?.totalFiles ?? 0);
-            expect(incremental.incrementalWork).toMatchObject({baseFactsLoaded: 6, changedFiles: 6});
-            expect(incremental.incrementalWork?.attributionContextFiles).toBe(base.materialization?.totalFiles ?? 0);
+            expect(incremental.incrementalWork).toMatchObject({
+              attributionContextFiles: 0,
+              baseFactsLoaded: 6,
+              changedFiles: 6,
+            });
+            expect(incremental.incrementalWork?.candidateIndex?.keysQueried).toBeGreaterThan(0);
+            expect(incremental.incrementalWork?.candidateIndex?.associationsRead).toBeGreaterThan(0);
+            expect(incremental.incrementalWork?.candidateIndex?.bytesRead).toBeGreaterThan(0);
             expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
             expect(documentEdge(incrementalGraph, 'docs/consumer-retiring.md', 'Retiring')?.targetId).toBeUndefined();
             expect(documentEdge(incrementalGraph, 'docs/consumer-added.md', 'Added')?.targetId).toBeDefined();

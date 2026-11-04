@@ -5810,6 +5810,7 @@ describe('native code graph lifecycle', () => {
       updateManySourceRepository(root, 130, 'updated');
 
       const probes = new Map<string, number>();
+      let committedFactBatches = 0;
       const probesPerObservation = statSync(root).dev === statSync(tmpdir()).dev ? 1 : 2;
       const failure = yield* indexer
         .index({
@@ -5818,11 +5819,16 @@ describe('native code graph lifecycle', () => {
             Effect.sync(() => {
               const count = (probes.get(boundary.operation) ?? 0) + 1;
               probes.set(boundary.operation, count);
-              return boundary.operation !== 'stage persistent code graph facts' || count <= probesPerObservation
+              return boundary.operation !== 'stage persistent code graph facts' || committedFactBatches === 0
                 ? Number.MAX_SAFE_INTEGER
                 : 0;
             }),
           incrementalOverlay: false,
+          onProgress: update =>
+            Effect.sync(() => {
+              if (update.phase === 'materializing' && update.metrics?.mode === 'full')
+                committedFactBatches = update.metrics.batchesCompleted;
+            }),
           persistentMaterializationTransactionBatchLimit: 1,
           threadnoteHome: home,
         })
@@ -5830,17 +5836,20 @@ describe('native code graph lifecycle', () => {
       expect(failure).toBeInstanceOf(CodeGraphDiskCapacityPressureError);
       expect(isCodeGraphStoreNoSpaceError(failure)).toBe(true);
       expect(failure).toMatchObject({code: 'no-space', recovery: 'free-space'});
+      expect(committedFactBatches).toBe(1);
       // The parser cache coalesces the 128-row/2-row inventory callbacks into
       // one protected 130-row write before staging.
       // Inventory and workspace each observe once. The two deterministic source
       // batches each protect both their v4 shard write and owner-verified
-      // association write. Facts allow one transaction, then observe pressure
-      // and the one bounded cleanup retry. Shared storage never spawns duplicate
-      // df or PowerShell probes at a boundary.
+      // association write. Candidate evidence uses the same facts reservation
+      // label, so arm pressure from committed graph progress, not a probe count.
+      // The first batch protects two candidate writes and its fact transaction;
+      // the next candidate write observes pressure and one bounded cleanup retry.
+      // Shared storage never spawns duplicate df or PowerShell probes at a boundary.
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 3,
+        'stage persistent code graph facts': probesPerObservation * 5,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });
@@ -6061,6 +6070,7 @@ describe('native code graph lifecycle', () => {
       updateManySourceRepository(root, 130, 'unknownCapacity');
 
       const probes = new Map<string, number>();
+      let committedFactBatches = 0;
       const probesPerObservation = statSync(root).dev === statSync(tmpdir()).dev ? 1 : 2;
       const failure = yield* indexer
         .index({
@@ -6069,11 +6079,16 @@ describe('native code graph lifecycle', () => {
             Effect.sync(() => {
               const count = (probes.get(boundary.operation) ?? 0) + 1;
               probes.set(boundary.operation, count);
-              return boundary.operation !== 'stage persistent code graph facts' || count <= probesPerObservation
+              return boundary.operation !== 'stage persistent code graph facts' || committedFactBatches === 0
                 ? Number.MAX_SAFE_INTEGER
                 : undefined;
             }),
           incrementalOverlay: false,
+          onProgress: update =>
+            Effect.sync(() => {
+              if (update.phase === 'materializing' && update.metrics?.mode === 'full')
+                committedFactBatches = update.metrics.batchesCompleted;
+            }),
           persistentMaterializationTransactionBatchLimit: 1,
           threadnoteHome: home,
         })
@@ -6085,16 +6100,18 @@ describe('native code graph lifecycle', () => {
         recovery: 'retry-read-only',
         retryable: true,
       });
+      expect(committedFactBatches).toBe(1);
       // The parser cache coalesces the 128-row/2-row inventory callbacks into
       // one protected 130-row write before staging.
       // The two deterministic source batches each protect both their v4 shard
-      // write and owner-verified association write. The second fact boundary
-      // fails closed after one observation; unlike positive pressure it does
-      // not perform cleanup or a fresh re-observation.
+      // write and owner-verified association write. Candidate evidence shares
+      // the facts reservation label, so wait for one committed graph batch.
+      // Its two candidate writes and fact transaction succeed; the next candidate
+      // write fails closed once, without cleanup or a fresh re-observation.
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 2,
+        'stage persistent code graph facts': probesPerObservation * 4,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });
