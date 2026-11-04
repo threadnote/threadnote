@@ -630,6 +630,42 @@ describe('built self-contained distribution', () => {
     expect(files).toEqual(expect.arrayContaining([expect.stringMatching(/vectors-v2\.sqlite$/)]));
     expect(files).not.toEqual(expect.arrayContaining([expect.stringMatching(/vectors\.bin$/)]));
 
+    const snapshotId = semantic.snapshot?.id;
+    const worktreeId = semantic.snapshot?.worktreeId;
+    if (typeof snapshotId !== 'string' || typeof worktreeId !== 'string') {
+      throw TestError.make({message: 'Expected the semantic graph snapshot and worktree IDs.'});
+    }
+    const candidateDatabase = new Database(join(repositoryIndexes, repositories[0], 'graph-v3.sqlite'), {
+      readonly: true,
+    });
+    try {
+      expect(
+        candidateDatabase
+          .query<{readonly complete: number}, SQLQueryBindings[]>(
+            `SELECT 1 AS complete
+             FROM snapshot_candidate_receipts AS receipt
+             JOIN snapshot_candidate_synopsis_snapshots AS candidate
+               ON candidate.snapshot_id = receipt.snapshot_id AND candidate.format_version = 4
+             JOIN snapshot_candidate_synopsis_receipts AS proof
+               ON proof.snapshot_key = candidate.snapshot_key AND proof.format_version = 4
+               AND proof.protocol_sha = candidate.protocol_sha
+               AND proof.authority_token = candidate.authority_token
+             JOIN snapshot_candidate_authority AS authority
+               ON authority.singleton = 1 AND authority.state = 'ready'
+               AND authority.token = candidate.authority_token
+             WHERE receipt.snapshot_id = ?1
+               AND EXISTS (
+                 SELECT 1 FROM active_snapshots AS active
+                 WHERE active.snapshot_id = receipt.snapshot_id AND active.worktree_id = ?2
+               )
+             LIMIT 1`,
+          )
+          .get(snapshotId, worktreeId)?.complete,
+      ).toBe(1);
+    } finally {
+      candidateDatabase.close();
+    }
+
     const exportPath = join(temporaryRoot, 'native-code-graph.json');
     expect(
       await runCli(['graph', 'export', '--cwd', graphRepository, '--format', 'json', '--output', exportPath]),
