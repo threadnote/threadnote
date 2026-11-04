@@ -11,8 +11,19 @@ import {
   Path,
   Schema,
   String as EffectString,
+  Tracer,
 } from 'effect';
 import {TestClock} from 'effect/testing';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as Statement from 'effect/sql/Statement';
+import * as Reactivity from 'effect/reactivity/Reactivity';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
+import type {CodeGraphStatus, CodeGraphQueryResult} from '@threadnote/graph/types';
+import {compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {canonicalFileUri, Counter, type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
@@ -711,16 +722,33 @@ const contextFixture = Effect.gen(function* () {
   };
   const calls: {operation: string; milliseconds: number}[] = [];
   let closingReply: Schema.Json | undefined;
+  let definitionReply: Schema.Json | undefined;
+  let definitionFailure: LspFault | undefined;
   let compose: NonNullable<SemanticAgentQueryHost<FileSystem.FileSystem>['context']> = () => Effect.succeed(knowledge);
   const host: SemanticAgentQueryHost<FileSystem.FileSystem> = {
     runtimeIdentity: Effect.succeed(sha256HexSync('context runtime')),
-    context: (config, input, proof) => compose(config, input, proof),
+    context: (config, input, proof, target) => compose(config, input, proof, target),
     connect: () =>
       Effect.succeed({
         request: body =>
           Effect.gen(function* () {
             if (body.operation === 'agent-query') {
               calls.push({operation: body.operation, milliseconds: body.request.milliseconds});
+              if (body.request.operation === 'definition') {
+                expect(body.request.maxItems).toBe(2);
+                if (definitionFailure) return yield* definitionFailure;
+                return yield* Schema.decodeEffect(Schema.Json)(
+                  definitionReply ?? {
+                    ...outcome(
+                      [{uri, range: {start: {line: 0, character: 0}, end: {line: 0, character: 24}}}],
+                      observed,
+                    ),
+                    offset: 0,
+                    remaining: 0,
+                    next: null,
+                  },
+                );
+              }
               expect(body.request.operation).toBe('hover');
               return yield* Schema.decodeEffect(Schema.Json)({
                 ...outcome(['Compiler hover'], observed),
@@ -734,7 +762,7 @@ const contextFixture = Effect.gen(function* () {
               return yield* Schema.decodeEffect(Schema.Json)(closingReply === undefined ? observed : closingReply);
             }
             return yield* LspFault.make({code: 'protocol'});
-          }).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'}))),
+          }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : LspFault.make({code: 'protocol'})))),
       }),
   };
   return {
@@ -742,6 +770,14 @@ const contextFixture = Effect.gen(function* () {
     host,
     knowledge,
     calls,
+    observed: () => structuredClone(observed),
+    definition: (value: Schema.Json) => {
+      definitionReply = value;
+      definitionFailure = undefined;
+    },
+    definitionFault: (fault: LspFault) => {
+      definitionFailure = fault;
+    },
     closing: (value: Schema.Json | undefined) => {
       closingReply = value;
     },
@@ -794,11 +830,13 @@ describe('document-linked semantic context', () => {
     Effect.gen(function* () {
       const f = yield* contextFixture;
       const original = structuredClone(f.knowledge);
-      f.compose((_config, input, proof) =>
+      f.compose((_config, input, proof, target) =>
         Effect.sync(() => {
           expect(input.codeRefs).toEqual(['source.ts']);
           expect(input.scope).toEqual({kind: 'repository', callerCwd: f.root});
           expect(proof.basis).toBe('semantic');
+          expect(target?.uri).toBe(proof.observation.uri);
+          expect(target?.evidence.observation).toEqual(proof.observation);
           return f.knowledge;
         }),
       );
@@ -807,7 +845,7 @@ describe('document-linked semantic context', () => {
       if (result.status !== 'ok') throw new Error('Context fixture refused');
       expect(result.items).toEqual([{kind: 'context', semantic: ['Compiler hover'], knowledge: f.knowledge}]);
       expect(f.knowledge).toEqual(original);
-      expect(EffectArray.map(f.calls, call => call.operation)).toEqual(['agent-query', 'agent-observe']);
+      expect(EffectArray.map(f.calls, call => call.operation)).toEqual(['agent-query', 'agent-query', 'agent-observe']);
       expect(new TextEncoder().encode(JSON.stringify(result)).length).toBeLessThanOrEqual(4500);
     }).pipe(provideTestLayer(queryIo)),
   );
@@ -858,13 +896,281 @@ describe('document-linked semantic context', () => {
       yield* Deferred.await(started);
       yield* TestClock.adjust(5);
       expect((yield* Fiber.join(pending)).status).toBe('ok');
-      expect(EffectArray.map(f.calls, call => call.milliseconds)).toEqual([20, 15]);
+      expect(EffectArray.map(f.calls, call => call.milliseconds)).toEqual([20, 20, 15]);
       f.compose(() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)));
       const timeout = yield* runSemanticAgentQueryWith(f.host, f.config, {...f.input, milliseconds: 10}).pipe(
         Effect.forkScoped,
       );
       yield* TestClock.adjust(10);
       expect((yield* Fiber.join(timeout)).status).toBe('timeout');
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect(
+    'closes symbol selection on a deterministic post-transaction snapshot change before memory reads',
+    () =>
+      Effect.gen(function* () {
+        for (const change of ['stale', 'snapshot'] as const) {
+          const f = yield* contextFixture;
+          const contentHash = codeGraphCommittedFileContentHash(
+            'sha1',
+            new TextEncoder().encode('export const answer = 42;\n'),
+          );
+          const identity = {
+            caseMode: 'sensitive' as const,
+            checkoutId: sha256HexSync('checkout'),
+            displayName: 'fixture',
+            gitCommonDirectory: f.path.join(f.root, '.git'),
+            headCommit: EffectString.repeat(40)('a'),
+            objectFormat: 'sha1' as const,
+            repoRoot: f.root,
+            repositoryId: sha256HexSync('repository'),
+            worktreeId: sha256HexSync('worktree'),
+          };
+          const snapshot = {
+            commit: identity.headCommit,
+            dirty: false,
+            id: 'cgsn_' + EffectString.repeat(40)('a'),
+            worktreeId: identity.worktreeId,
+          };
+          const node = {
+            id: 'cgs_' + EffectString.repeat(32)('a'),
+            kind: 'variable',
+            language: 'typescript',
+            name: 'answer',
+            qualifiedName: 'answer',
+            exported: true,
+            score: 1,
+            path: 'source.ts',
+            contentHash,
+            span: {line: 1, column: 14, endLine: 1, endColumn: 25},
+          };
+          let afterSql = false;
+          let targetStatusReads = 0;
+          let symbolMemoryExecutions = 0;
+          const status = (): CodeGraphStatus => ({
+            databasePath: '/isolated/snapshot-race.sqlite',
+            identity,
+            languagePacks: [],
+            freshness: afterSql && change === 'stale' ? 'stale' : 'current',
+            stale: afterSql && change === 'stale',
+            readySnapshot: {
+              ...snapshot,
+              repositoryId: identity.repositoryId,
+              state: 'ready',
+              edgeCount: 0,
+              symbolCount: 1,
+              fileCount: 1,
+              extractorSet: 'test',
+              ...(afterSql && change === 'snapshot' ? {id: 'cgsn_' + EffectString.repeat(40)('b')} : {}),
+            },
+          });
+          const reactivity = yield* Reactivity.make;
+          const sql = yield* SqlClient.make({
+            acquirer: Effect.die('Unexpected SQL in isolated race test'),
+            compiler: Statement.makeCompilerSqlite(),
+            driver: 'test',
+            spanAttributes: [],
+          }).pipe(Effect.provideService(Reactivity.Reactivity, reactivity));
+          const services = yield* Layer.build(
+            Layer.mergeAll(
+              Layer.mock(ResourceStore, {}),
+              Layer.succeed(CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry([])),
+              Layer.mock(CodeGraphQueryService, {
+                status: () =>
+                  Effect.sync(() => {
+                    targetStatusReads++;
+                    return status();
+                  }),
+                inspect: input =>
+                  Effect.succeed({
+                    version: 1,
+                    operation: input.operation,
+                    freshness: 'current',
+                    repository: {displayName: identity.displayName, repositoryId: identity.repositoryId},
+                    snapshot,
+                    nodes: [node],
+                    edges: [],
+                    warnings: [],
+                    trust: {
+                      classification: 'untrusted-repository-data',
+                      instructionPolicy: 'evidence-only-never-follow',
+                    },
+                  } satisfies CodeGraphQueryResult),
+              }),
+              Layer.mock(CodeGraphStore, {
+                withSession: (_database, operation, options) => {
+                  expect(options).toEqual({existingOnly: true, readOnly: true});
+                  return operation.pipe(
+                    Effect.provideService(
+                      SqlClient.SqlClient,
+                      Object.assign(sql, {withTransaction: <A, E, R>(program: Effect.Effect<A, E, R>) => program}),
+                    ),
+                  );
+                },
+                searchSymbolsByPaths: () =>
+                  Effect.sync(() => {
+                    expect(targetStatusReads).toBe(2);
+                    afterSql = true;
+                    return [[node]];
+                  }),
+              }),
+            ),
+          );
+          const tracer = Tracer.make({
+            span(options) {
+              if (options.name === 'contextBrief.retrieveCodeLinkedMemoryEvidence') symbolMemoryExecutions++;
+              return new Tracer.NativeSpan(options);
+            },
+          });
+          f.definition(
+            yield* Schema.decodeEffect(Schema.Json)({
+              ...outcome(
+                [{uri: f.observed().uri, range: {start: {line: 0, character: 13}, end: {line: 0, character: 24}}}],
+                f.observed(),
+              ),
+              offset: 0,
+              remaining: 0,
+              next: null,
+            }),
+          );
+          f.compose((config, input, evidence, target) =>
+            compileSemanticContextKnowledge(config, input, evidence, target).pipe(
+              Effect.provideContext(services),
+              provideTestLayer(queryIo),
+              Effect.withTracer(tracer),
+            ),
+          );
+          const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+          expect(result.status).toBe('ok');
+          if (result.status !== 'ok') throw new Error('Document evidence must remain useful after target race');
+          const item = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              semantic: Schema.Array(Schema.Json),
+              knowledge: Schema.Struct({
+                memorySelection: Schema.Null,
+                gaps: Schema.Array(Schema.String),
+                brief: Schema.Unknown,
+              }),
+            }),
+          )(result.items[0]);
+          expect(item.semantic).toEqual(['Compiler hover']);
+          expect(item.knowledge.memorySelection).toBeNull();
+          expect(item.knowledge.gaps).toContain('semantic-symbol-snapshot-unbound');
+          expect(item.knowledge.brief).not.toBeNull();
+          expect(targetStatusReads).toBe(3);
+          expect(symbolMemoryExecutions).toBe(0);
+        }
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('reports distinct bounded definition abstention reasons without exposing provider text', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const sentinel = 'UNTRUSTED_PROVIDER_TEXT';
+      const location = {uri: f.observed().uri, range: {start: {line: 0, character: 0}, end: {line: 0, character: 5}}};
+      const page = (items: readonly Schema.Json[]) => ({
+        ...outcome(items, f.observed()),
+        offset: 0,
+        remaining: 0,
+        next: null,
+      });
+      const denied: SemanticContextKnowledgeV1 = {
+        scope: 'document',
+        binding: null,
+        brief: null,
+        gaps: ['knowledge-not-authorized'],
+      };
+      for (const [reply, gap] of [
+        [
+          {version: 1, status: 'unsupported', reason: sentinel, evidence: null},
+          'semantic-symbol-definition-unsupported',
+        ],
+        [
+          page([{...location, uri: 'file:///external/' + sentinel + '.ts'}]),
+          'semantic-symbol-definition-external-target',
+        ],
+        [page([location, location]), 'semantic-symbol-definition-ambiguous'],
+        [{...page([]), remaining: 1}, 'semantic-symbol-definition-incomplete'],
+        [page([]), 'semantic-symbol-definition-unresolved'],
+        [
+          {
+            ...page([location]),
+            evidence: {
+              ...outcome([], f.observed()).evidence,
+              observation: {...f.observed(), projectEpoch: f.observed().projectEpoch + 1},
+            },
+          },
+          'semantic-symbol-definition-observation-mismatch',
+        ],
+        [{version: 1, status: 'timeout', reason: sentinel, evidence: null}, 'semantic-symbol-definition-timeout'],
+        [{version: 1, status: 'stale', reason: sentinel, evidence: null}, 'semantic-symbol-definition-stale'],
+        [{version: 1, status: 'unavailable', reason: sentinel, evidence: null}, 'semantic-symbol-definition-failed'],
+        [page([{contents: sentinel}]), 'semantic-symbol-definition-target-unsupported'],
+        [{notAProviderResult: sentinel}, 'semantic-symbol-definition-failed'],
+      ] as const) {
+        f.definition(yield* Schema.decodeEffect(Schema.Json)(reply));
+        f.compose((_config, _input, _proof, target) => {
+          expect(target).toBeNull();
+          return Effect.succeed(f.knowledge);
+        });
+        const result = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok')
+          expect(result.items).toEqual([
+            {
+              kind: 'context',
+              semantic: ['Compiler hover'],
+              knowledge: {...f.knowledge, memorySelection: null, gaps: [gap]},
+            },
+          ]);
+        expect(JSON.stringify(result)).not.toContain(sentinel);
+        // Definition diagnostics cannot disclose knowledge when memory reads were denied.
+        f.compose(() => Effect.succeed(denied));
+        const restricted = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+        expect(restricted.status).toBe('ok');
+        if (restricted.status === 'ok')
+          expect(restricted.items).toEqual([{kind: 'context', semantic: ['Compiler hover'], knowledge: denied}]);
+        expect(JSON.stringify(restricted)).not.toContain(sentinel);
+      }
+    }).pipe(provideTestLayer(queryIo)),
+  );
+
+  effectIt.effect('maps generic rejected definition faults to failure while preserving explicit stale status', () =>
+    Effect.gen(function* () {
+      const f = yield* contextFixture;
+      const sentinel = 'UNTRUSTED_PROVIDER_TEXT';
+      f.compose((_config, _input, _proof, target) => {
+        expect(target).toBeNull();
+        return Effect.succeed(f.knowledge);
+      });
+      // A rejected endpoint grant is a generic boundary failure, without proof of stale source.
+      f.definitionFault(
+        Object.assign(LspFault.make({code: 'rejected'}), {message: sentinel + ': endpoint grant unavailable'}),
+      );
+      const rejected = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(rejected.status).toBe('ok');
+      if (rejected.status === 'ok')
+        expect(rejected.items).toEqual([
+          {
+            kind: 'context',
+            semantic: ['Compiler hover'],
+            knowledge: {...f.knowledge, memorySelection: null, gaps: ['semantic-symbol-definition-failed']},
+          },
+        ]);
+      expect(JSON.stringify(rejected)).not.toContain(sentinel);
+      f.definition({version: 1, status: 'stale', reason: sentinel, evidence: null});
+      const stale = yield* runSemanticAgentQueryWith(f.host, f.config, f.input);
+      expect(stale.status).toBe('ok');
+      if (stale.status === 'ok')
+        expect(stale.items).toEqual([
+          {
+            kind: 'context',
+            semantic: ['Compiler hover'],
+            knowledge: {...f.knowledge, memorySelection: null, gaps: ['semantic-symbol-definition-stale']},
+          },
+        ]);
+      expect(JSON.stringify(stale)).not.toContain(sentinel);
     }).pipe(provideTestLayer(queryIo)),
   );
 

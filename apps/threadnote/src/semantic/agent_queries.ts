@@ -1,7 +1,12 @@
 import {Array as EffectArray, Clock, Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
 import {canonicalFileUri, Observation, observationKey, type Evidence} from '@threadnote/semantic/contracts';
 import {AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN} from '@threadnote/protocol/agent-response';
-import type {SemanticContextKnowledgeV1, ContextBriefRequestV1} from '@threadnote/context/types';
+import type {
+  SemanticContextKnowledgeV1,
+  SemanticContextSymbolTarget,
+  SemanticContextDefinitionGap,
+  ContextBriefRequestV1,
+} from '@threadnote/context/types';
 import {compileSemanticContextKnowledge} from '../context_brief/index.js';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -76,6 +81,7 @@ export interface SemanticAgentQueryHost<ContextR = never> {
     config: RuntimeConfig,
     input: ContextBriefRequestV1,
     evidence: Evidence,
+    target: SemanticContextSymbolTarget | null,
   ) => Effect.Effect<SemanticContextKnowledgeV1, unknown, ContextR>;
 }
 const host = {
@@ -254,6 +260,90 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
   if (contextQuery && result.status === 'ok') {
     if (result.next !== null || !services.context)
       return fail('unavailable', 'Complete document evidence and context composition are required');
+    // A second, bounded compiler query identifies the actual reference target. Never use
+    // the hover payload or lexical caret container as symbol identity.
+    const definitionRequest = {
+      worktree,
+      project,
+      uri,
+      language,
+      operation: 'definition' as const,
+      ...(request.position ? {position: request.position} : {}),
+      ...(request.environment ? {environment: request.environment} : {}),
+    };
+    const definition = yield* endpoint
+      .request({
+        operation: 'agent-query',
+        request: {
+          ...definitionRequest,
+          profile: selected.digest,
+          query: semanticAgentQueryKey(runtimeIdentity, selected.digest, definitionRequest),
+          maxItems: 2,
+          maxBytes: limit,
+          milliseconds: yield* remaining,
+        },
+      })
+      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentQueryResult)), Effect.result);
+    let target: SemanticContextSymbolTarget | null = null;
+    let definitionGap: SemanticContextDefinitionGap | undefined;
+    if (definition._tag === 'Failure') {
+      definitionGap =
+        Schema.is(LspFault)(definition.failure) && definition.failure.code === 'timeout'
+          ? 'semantic-symbol-definition-timeout'
+          : 'semantic-symbol-definition-failed';
+    } else {
+      const value = definition.success;
+      if (value.status !== 'ok') {
+        definitionGap =
+          value.status === 'unsupported'
+            ? 'semantic-symbol-definition-unsupported'
+            : value.status === 'timeout'
+              ? 'semantic-symbol-definition-timeout'
+              : value.status === 'stale'
+                ? 'semantic-symbol-definition-stale'
+                : 'semantic-symbol-definition-failed';
+      } else if (
+        value.offset !== 0 ||
+        value.next !== null ||
+        value.remaining !== 0 ||
+        value.items.length > 2 ||
+        new TextEncoder().encode(JSON.stringify(value)).length > limit
+      ) {
+        definitionGap = 'semantic-symbol-definition-incomplete';
+      } else if (
+        value.evidence.basis !== 'semantic' ||
+        observationKey(value.evidence.observation) !== observationKey(result.evidence.observation)
+      ) {
+        definitionGap = 'semantic-symbol-definition-observation-mismatch';
+      } else if (value.items.length === 0) {
+        definitionGap = 'semantic-symbol-definition-unresolved';
+      } else if (value.items.length > 1) {
+        definitionGap = 'semantic-symbol-definition-ambiguous';
+      } else {
+        const item = value.items[0];
+        // Navigation ranges are checked against independently re-read observed bytes in
+        // the graph/source boundary, including providers that only schema-decode them.
+        const range = Schema.Struct({
+          start: Schema.Struct({line: Schema.Int, character: Schema.Int}),
+          end: Schema.Struct({line: Schema.Int, character: Schema.Int}),
+        });
+        const link = Schema.Struct({targetUri: Schema.String, targetRange: range, targetSelectionRange: range});
+        const location = Schema.Struct({uri: Schema.String, range});
+        if (Schema.is(link)(item)) {
+          if (item.targetUri === uri)
+            target = {
+              evidence: value.evidence,
+              uri,
+              range: item.targetRange,
+              selectionRange: item.targetSelectionRange,
+            };
+          else definitionGap = 'semantic-symbol-definition-external-target';
+        } else if (Schema.is(location)(item)) {
+          if (item.uri === uri) target = {evidence: value.evidence, uri, range: item.range};
+          else definitionGap = 'semantic-symbol-definition-external-target';
+        } else definitionGap = 'semantic-symbol-definition-target-unsupported';
+      }
+    }
     const budgetTokens = Math.max(
       800,
       Math.min(
@@ -275,6 +365,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
           budgetTokens,
         },
         result.evidence,
+        target,
       )
       .pipe(
         Effect.orElseSucceed((): SemanticContextKnowledgeV1 => ({
@@ -284,6 +375,9 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
           gaps: ['knowledge-unavailable'],
         })),
       );
+    if (definitionGap && !knowledge.gaps.includes('knowledge-not-authorized')) {
+      knowledge = {...knowledge, memorySelection: null, gaps: [...new Set([...knowledge.gaps, definitionGap])]};
+    }
     const closing = yield* endpoint
       .request({
         operation: 'agent-observe',

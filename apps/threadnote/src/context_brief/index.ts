@@ -2,6 +2,8 @@ import {Array as EffectArray} from 'effect';
 import {
   compileContextBriefWith,
   retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  filterSemanticContextMemory,
   projectSemanticContextKnowledge,
   type ContextBriefCompilerDependencies,
 } from '@threadnote/context/compiler';
@@ -51,6 +53,7 @@ import type {
   ProjectedContextBriefV1,
   SemanticContextKnowledgeV1,
   SemanticContextSourceBindingV1,
+  SemanticContextSymbolTarget,
 } from '@threadnote/context/types';
 
 export interface ContextBriefRuntimeCompilerSources<
@@ -62,6 +65,7 @@ export interface ContextBriefRuntimeCompilerSources<
   readonly citationValidation: NonNullable<
     ContextBriefCompilerDependencies<never, never, CitationR>['citationValidation']
   >;
+  readonly codeLinkedMemoryAfterGraph?: boolean;
   readonly graphEvidence: ContextBriefCompilerDependencies<GraphR>['graphEvidence'];
   readonly codeLinkedMemoryEvidence?: ContextBriefCompilerDependencies<never, MemoryR>['codeLinkedMemoryEvidence'];
   readonly memoryEvidence: ContextBriefCompilerDependencies<never, MemoryR>['memoryEvidence'];
@@ -76,10 +80,17 @@ interface ContextBriefCompilerOptions {
   ) => Effect.Effect<
     Effect.Success<ReturnType<typeof retrieveContextBriefSourceEvidence>>,
     unknown,
-    Effect.Services<ReturnType<typeof retrieveContextBriefSourceEvidence>>
+    | Effect.Services<ReturnType<typeof retrieveContextBriefSourceEvidence>>
+    | Effect.Services<ReturnType<typeof retrieveSemanticContextSymbol>>
   >;
   readonly allowedMemoryUriScopes?: readonly string[];
   readonly codeLinkedMemoryOnly?: boolean;
+  readonly semanticMemoryTarget?: () => {
+    readonly nodeId: string | null;
+    readonly binding: SemanticContextSourceBindingV1 | null;
+    readonly repositoryIdentityKind: 'local' | 'remote' | null;
+    readonly gap?: string;
+  };
   readonly includeProcedureEvidence?: boolean;
   readonly projection?: (
     logical: ContextBriefLogicalResultV1,
@@ -104,6 +115,7 @@ export function instrumentContextBriefCompilerDependencies<
   requestedRepositories: number,
 ): ContextBriefCompilerDependencies<GraphR, MemoryR, CitationR, ProjectR> {
   return {
+    codeLinkedMemoryAfterGraph: sources.codeLinkedMemoryAfterGraph,
     citationValidation: (scope, candidates, fence, deadline) =>
       reporter
         .citationValidation(
@@ -289,10 +301,30 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
                 options.sourceEvidence ?? retrieveContextBriefSourceEvidence,
                 readBudget,
               ),
-            codeLinkedMemoryEvidence: codePlan =>
-              retrieveContextBriefCodeLinkedMemoryEvidence(config, codePlan, {
-                allowedUriScopes: options.allowedMemoryUriScopes,
-              }),
+            codeLinkedMemoryAfterGraph: options.semanticMemoryTarget !== undefined,
+            codeLinkedMemoryEvidence: codePlan => {
+              const target = options.semanticMemoryTarget?.();
+              if (target && (!target.nodeId || !target.binding || !target.repositoryIdentityKind))
+                return Effect.succeed(
+                  unavailableContextBriefCodeLinkedMemoryEvidence(1, target.gap ?? 'semantic-symbol-target-unavailable'),
+                );
+              return retrieveContextBriefCodeLinkedMemoryEvidence(
+                config,
+                target?.nodeId ? {...codePlan, codeRefs: [target.nodeId]} : codePlan,
+                {allowedUriScopes: options.allowedMemoryUriScopes},
+              ).pipe(
+                Effect.map(memory =>
+                  target?.nodeId && target.binding && target.repositoryIdentityKind
+                    ? filterSemanticContextMemory(
+                        memory,
+                        target.nodeId,
+                        target.binding.graph,
+                        target.repositoryIdentityKind,
+                      )
+                    : memory,
+                ),
+              );
+            },
             memoryEvidence: memoryPlan =>
               options.codeLinkedMemoryOnly
                 ? Effect.succeed({
@@ -374,33 +406,77 @@ export const compileContextBrief = Effect.fn('contextBrief.compile')(function* (
   return yield* compileContextBriefRuntime(config, input);
 });
 
-/** Only exact document links enter semantic context; ordinary Context Brief behavior is unchanged. */
+/** Document code evidence remains useful when exact symbol memory selection must abstain. */
 export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticKnowledge')(function* (
   config: RuntimeConfig,
   input: ContextBriefRequestV1,
   evidence: Evidence,
+  target: SemanticContextSymbolTarget | null = null,
 ): Effect.fn.Return<
   SemanticContextKnowledgeV1,
   unknown,
   Effect.Services<ReturnType<typeof compileContextBriefRuntime>>
 > {
-  let binding: SemanticContextSourceBindingV1 | null = null;
+  const state: {
+    binding: SemanticContextSourceBindingV1 | null;
+    repositoryIdentityKind: 'local' | 'remote' | null;
+    selection: {readonly nodeId: string | null; readonly gap?: string};
+  } = {
+    binding: null,
+    repositoryIdentityKind: null,
+    selection: {nodeId: null, gap: 'semantic-symbol-target-unavailable'},
+  };
   const projected = yield* compileContextBriefRuntime(
     config,
     {...input, detail: 'source', responseFormat: 'agent'},
     {
       codeLinkedMemoryOnly: true,
       includeProcedureEvidence: false,
+      semanticMemoryTarget: () => ({
+        ...state.selection,
+        binding: state.binding,
+        repositoryIdentityKind: state.repositoryIdentityKind,
+      }),
       sourceEvidence: (request: ContextBriefSourceEvidenceRequest) =>
         retrieveSemanticContextSourceEvidence(request, evidence).pipe(
-          Effect.map(result => {
-            binding = result.binding;
-            return result.source;
-          }),
+          Effect.flatMap(result =>
+            Effect.gen(function* () {
+              state.binding = result.binding;
+              state.repositoryIdentityKind = request.identity.remoteIdentity ? 'remote' : 'local';
+              state.selection = yield* retrieveSemanticContextSymbol(
+                config,
+                request,
+                evidence,
+                target,
+                state.binding,
+              ).pipe(Effect.orElseSucceed(() => ({nodeId: null, gap: 'semantic-symbol-lookup-unavailable'})));
+              return result.source;
+            }),
+          ),
         ),
     },
   );
-  return projectSemanticContextKnowledge(projected, binding);
+  const knowledge = projectSemanticContextKnowledge(projected, state.binding);
+  return {
+    ...knowledge,
+    memorySelection:
+      state.selection.nodeId && state.binding && target
+        ? {
+            version: 1 as const,
+            scope: 'symbol-and-file' as const,
+            nodeId: state.selection.nodeId,
+            observation: state.binding.observation,
+            graph: state.binding.graph,
+            definitionRange: target.range,
+          }
+        : null,
+    gaps: [
+      ...new Set([
+        ...knowledge.gaps,
+        ...(state.selection.gap ? [state.selection.gap] : ['semantic-symbol-memory-coverage-incomplete']),
+      ]),
+    ],
+  };
 });
 
 /** Cloud callers supply their validated share roots; unscoped procedure discovery stays disabled. */

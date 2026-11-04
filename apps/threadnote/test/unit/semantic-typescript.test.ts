@@ -15,7 +15,9 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {Observation, Position} from '@threadnote/semantic/contracts';
+import {extractRepositoryFileFacts} from '@threadnote/graph/extractor';
+import {selectSemanticContextSymbol} from '@threadnote/context/compiler';
+import {Observation, Position, observationKey} from '@threadnote/semantic/contracts';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {
   makeTypeScriptRuntime,
@@ -110,6 +112,73 @@ const tsDiagnostic = {
   code: 2322,
 };
 describe('TypeScript observation fences', () => {
+  effectIt.effect('negotiates definition links and validates same-observation target/selection ranges', () =>
+    Effect.gen(function* () {
+      const text = '// 🚀\r\nlet answer = 42;';
+      const basis = observation(text);
+      const range = {start: {line: 1, character: 4}, end: {line: 1, character: 15}};
+      let reply: Schema.Json = [
+        {
+          targetUri: basis.uri,
+          targetRange: range,
+          targetSelectionRange: {start: range.start, end: {line: 1, character: 10}},
+        },
+      ];
+      const base = fakeClient(() => Effect.succeed(reply));
+      const session = yield* makeTypeScriptSession(
+        {
+          ...base,
+          request: (method, params, milliseconds) => {
+            if (method === 'initialize')
+              expect(params).toMatchObject({capabilities: {textDocument: {definition: {linkSupport: true}}}});
+            return base.request(method, params, milliseconds);
+          },
+        },
+        options(basis),
+      );
+      const current = yield* session.upsert(basis, text, 'typescript', 1000);
+      const result = yield* session.query('definition', current, {line: 1, character: 6}, 1000);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') expect(result.items).toEqual(reply);
+      for (const selection of [
+        {start: {line: 0, character: 4}, end: {line: 1, character: 10}}, // split surrogate
+        {start: {line: 1, character: 0}, end: {line: 1, character: 10}}, // outside full range
+        {start: {line: 1, character: 4}, end: {line: 1, character: 99}},
+      ]) {
+        reply = [{targetUri: basis.uri, targetRange: range, targetSelectionRange: selection}];
+        expect(
+          (yield* session.query('definition', current, {line: 1, character: 6}, 1000).pipe(Effect.exit))._tag,
+        ).toBe('Failure');
+      }
+    }),
+  );
+
+  effectIt.effect.prop(
+    'same-document definition links obey independent UTF16 interval bounds',
+    [
+      Schema.Int.check(Schema.isBetween({minimum: -2, maximum: 8})),
+      Schema.Int.check(Schema.isBetween({minimum: -2, maximum: 8})),
+    ],
+    ([start, end]) =>
+      Effect.gen(function* () {
+        const text = '// 🚀\r\nlet answer = 42;';
+        const basis = observation(text);
+        const range = {start: {line: 0, character: start}, end: {line: 0, character: end}};
+        const reply = [{targetUri: basis.uri, targetRange: range, targetSelectionRange: range}];
+        const before = JSON.stringify(reply);
+        const session = yield* makeTypeScriptSession(
+          fakeClient(() => Effect.succeed(reply)),
+          options(basis),
+        );
+        const current = yield* session.upsert(basis, text, 'typescript', 1000);
+        const result = yield* session.query('definition', current, {line: 1, character: 5}, 1000).pipe(Effect.exit);
+        const coordinate = (value: number) => value >= 0 && value <= 5 && value !== 4;
+        expect(result._tag === 'Success').toBe(coordinate(start) && coordinate(end) && start <= end);
+        expect(JSON.stringify(reply)).toBe(before);
+      }),
+    {arbitrary: {runs: 32}},
+  );
+
   effectIt.effect('keeps disk observations versionless while using monotonic wire versions', () =>
     Effect.gen(function* () {
       const notifications: Schema.Json[] = [];
@@ -985,7 +1054,90 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         const definition = yield* session.query('definition', basis, position, 5000);
         expect(definition.status).toBe('ok');
         if (definition.status === 'ok')
-          expect(definition.items).toMatchObject([{uri: fileUri, range: {start: {line: 0}}}]);
+          expect(definition.items).toMatchObject([
+            {targetUri: fileUri, targetRange: {start: {line: 0}}, targetSelectionRange: {start: {line: 0}}},
+          ]);
+        const aliasDefinition = yield* session.query('definition', basis, {line: 3, character: 1}, 5000);
+        expect(aliasDefinition.status).toBe('ok');
+        if (aliasDefinition.status === 'ok')
+          expect(aliasDefinition.items).toMatchObject([
+            {
+              targetUri: fileUri,
+              targetRange: {start: {line: 2, character: 0}, end: {line: 2, character: 26}},
+              targetSelectionRange: {start: {line: 2, character: 6}, end: {line: 2, character: 11}},
+            },
+          ]);
+        if (definition.status !== 'ok' || aliasDefinition.status !== 'ok')
+          throw new Error('Pinned definition unavailable');
+        const rangeSchema = Schema.Struct({start: Position, end: Position});
+        const linkSchema = Schema.Struct({
+          targetUri: Schema.String,
+          targetRange: rangeSchema,
+          targetSelectionRange: rangeSchema,
+        });
+        const bytes = new TextEncoder().encode(source);
+        const hash = sha256HexSync(bytes);
+        const nodes = EffectArray.flatMap(
+          extractRepositoryFileFacts([
+            {
+              blobId: '',
+              content: source,
+              contentHash: hash,
+              language: 'typescript',
+              mode: '100644',
+              path: 'main.ts',
+              size: bytes.byteLength,
+              source: 'worktree',
+            },
+          ]),
+          facts => EffectArray.map(facts.symbols, node => ({...node, score: 1})),
+        );
+        const binding = {
+          version: 1 as const,
+          scope: 'document' as const,
+          observation: sha256HexSync(observationKey(definition.evidence.observation)),
+          semanticContent: hash,
+          graph: {
+            repositoryId: sha256HexSync('fixture repository'),
+            snapshotId: 'fixture',
+            path: 'main.ts',
+            contentHash: hash,
+          },
+        };
+        const methodLink = yield* Schema.decodeUnknownEffect(linkSchema)(definition.items[0]);
+        const method = selectSemanticContextSymbol(
+          bytes,
+          definition.evidence,
+          {
+            evidence: definition.evidence,
+            uri: methodLink.targetUri,
+            range: methodLink.targetRange,
+            selectionRange: methodLink.targetSelectionRange,
+          },
+          nodes,
+          binding,
+        );
+        expect(method.nodeId).not.toBeNull();
+        expect(EffectArray.findFirst(nodes, node => node.id === method.nodeId)).toMatchObject({
+          value: {name: 'run', span: {line: 1}},
+        });
+        const aliasLink = yield* Schema.decodeUnknownEffect(linkSchema)(aliasDefinition.items[0]);
+        // TLS returns the whole variable statement; graph stores its declarator.
+        // The strict join must abstain rather than trim keywords or punctuation.
+        expect(
+          selectSemanticContextSymbol(
+            bytes,
+            aliasDefinition.evidence,
+            {
+              evidence: aliasDefinition.evidence,
+              uri: aliasLink.targetUri,
+              range: aliasLink.targetRange,
+              selectionRange: aliasLink.targetSelectionRange,
+            },
+            nodes,
+            binding,
+          ).nodeId,
+        ).toBeNull();
         const references = yield* session.query('references', basis, position, 5000);
         expect(references.status).toBe('ok');
         if (references.status === 'ok') {

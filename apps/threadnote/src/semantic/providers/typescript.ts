@@ -17,6 +17,7 @@ import {
   SemanticSessionFault,
   SemanticRange as Range,
   validTextPosition,
+  validRange,
   wellFormed,
   type SemanticDiagnostic,
   type DiagnosticSnapshot,
@@ -101,7 +102,7 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       capabilities: {
         general: {positionEncodings: ['utf-16']},
         workspace: {configuration: true, workspaceEdit: {documentChanges: false}},
-        textDocument: {publishDiagnostics: {versionSupport: false}},
+        textDocument: {publishDiagnostics: {versionSupport: false}, definition: {linkSupport: true}},
       },
       initializationOptions: {
         disableAutomaticTypingAcquisition: true,
@@ -347,6 +348,23 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       if (operation === 'definition' || operation === 'references') {
         const locations = yield* decode(Navigation, response);
         items = locations === null ? [] : Schema.is(Location)(locations) ? [locations] : [...locations];
+        for (const item of items) {
+          // Same-document links are bound to this exact retained observation.
+          // Foreign locations retain their navigation meaning; context cannot
+          // use them as same-document symbol identity.
+          if (Schema.is(LocationLink)(item) && item.targetUri === fixed.uri) {
+            const compare = (a: Position, b: Position) => a.line - b.line || a.character - b.character;
+            if (
+              !validRange(document.text, item.targetRange) ||
+              !validRange(document.text, item.targetSelectionRange) ||
+              compare(item.targetRange.start, item.targetSelectionRange.start) > 0 ||
+              compare(item.targetSelectionRange.end, item.targetRange.end) > 0 ||
+              (item.originSelectionRange && !validRange(document.text, item.originSelectionRange))
+            )
+              return yield* SemanticSessionFault.make({reason: 'provider'});
+          } else if (Schema.is(Location)(item) && item.uri === fixed.uri && !validRange(document.text, item.range))
+            return yield* SemanticSessionFault.make({reason: 'provider'});
+        }
       } else if (operation === 'symbols') {
         items = [...((yield* decode(Schema.NullOr(Schema.Array(Schema.Json)), response)) ?? [])];
       } else {
