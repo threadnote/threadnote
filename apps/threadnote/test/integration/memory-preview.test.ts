@@ -1,5 +1,15 @@
 import {describe, expect, it} from '@effect/vitest';
-import {Cause, Effect, Exit, FileSystem, Layer, Path} from 'effect';
+import {
+  Array as EffectArray,
+  Cause,
+  Effect,
+  Exit,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryLaunchUri} from '@threadnote/memory/navigation-link';
@@ -8,6 +18,8 @@ import {createMemoryPreviewHandler, MemoryPreviewRead, runMemoryPreview} from '.
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readManagedMemory} from '../../src/manager/server.js';
 import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
+import {recordMemoryRelocation} from '@threadnote/memory/relocation';
+import {sha256Hex} from '@threadnote/platform/digest';
 
 const origin = 'http://127.0.0.1:41377';
 const token = 'private-test-token';
@@ -150,6 +162,126 @@ it.effect('reads live stable identities without creating a recall index and fail
     expect(yield* fs.readDirectory(home)).toEqual(['data']);
     expect(yield* fs.readDirectory(root)).toEqual(['shared']);
     expect(scheduled).toBe(0);
+  }).pipe(provide),
+);
+
+it.effect('excludes oversized and packed files without hiding eligible memories', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-eligibility-'});
+    const config = {...unusedConfig, agentContextHome: home};
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    const packs = path.join(root, 'agent-artifacts', 'packs', 'example');
+    yield* fs.makeDirectory(packs, {recursive: true});
+    const document = (id: string, body = 'content') =>
+      `MEMORY\nkind: durable\nstatus: active\nmemory_id: ${id}\n\n${body}\n`;
+    yield* fs.writeFileString(path.join(root, 'active.md'), document('tn_live'));
+    yield* fs.writeFileString(path.join(root, 'large.md'), document('tn_large', EffectString.repeat(512 * 1024)('x')));
+    yield* fs.writeFileString(path.join(packs, 'duplicate.md'), document('tn_live'));
+    yield* fs.writeFileString(path.join(packs, 'only.md'), document('tn_packed'));
+    expect((yield* readManagedMemory(config, 'threadnote://memory/tn_live', {preview: true})).content).toContain(
+      'tn_live',
+    );
+    expect(
+      Exit.isFailure(yield* Effect.exit(readManagedMemory(config, 'threadnote://memory/tn_large', {preview: true}))),
+    ).toBe(true);
+    expect(
+      Exit.isFailure(yield* Effect.exit(readManagedMemory(config, 'threadnote://memory/tn_packed', {preview: true}))),
+    ).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect.prop(
+  'stable identity succeeds exactly when one eligible file claims it',
+  {claims: Schema.Array(Schema.Boolean).check(Schema.isMinLength(1), Schema.isMaxLength(6))},
+  ({claims}) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-property-'});
+      const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+      yield* fs.makeDirectory(root, {recursive: true});
+      for (const [index, claim] of claims.entries()) {
+        const id = claim ? 'tn_target' : `tn_other_${index}`;
+        yield* fs.writeFileString(
+          path.join(root, `${index}.md`),
+          `MEMORY\nkind: durable\nstatus: active\nmemory_id: ${id}\n\nBody ${index}\n`,
+        );
+      }
+      const result = yield* Effect.exit(
+        readManagedMemory({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {preview: true}),
+      );
+      expect(Exit.isSuccess(result)).toBe(EffectArray.filter(claims, Boolean).length === 1);
+    }).pipe(provide),
+  {arbitrary: {runs: 20}},
+);
+
+it.effect('rejects symlinked path ancestors while allowing ordinary private and shared paths', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-symlink-'});
+    const outside = yield* fs.makeTempDirectoryScoped({prefix: 'preview-outside-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(path.join(root, 'shared', 'team'), {recursive: true});
+    yield* fs.writeFileString(path.join(outside, 'secret.md'), 'outside secret');
+    yield* fs.symlink(outside, path.join(root, 'escape'));
+    yield* fs.writeFileString(path.join(root, 'private.md'), 'private');
+    yield* fs.writeFileString(path.join(root, 'shared', 'team', 'shared.md'), 'shared');
+    const config = {...unusedConfig, agentContextHome: home};
+    const read = (relative: string) =>
+      readManagedMemory(config, `threadnote://user/tester/memories/${relative}`, {preview: true});
+    expect(Exit.isFailure(yield* Effect.exit(read('escape/secret.md')))).toBe(true);
+    expect((yield* read('private.md')).content).toBe('private');
+    expect((yield* read('shared/team/shared.md')).content).toBe('shared');
+  }).pipe(provide),
+);
+
+it.effect('follows a real relocation receipt without changing the corpus on reads and unavailable reloads', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-receipt-'});
+    const config = {...unusedConfig, agentContextHome: home};
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(path.join(root, 'shared', 'team'), {recursive: true});
+    const fromUri = 'threadnote://user/tester/memories/durable/old.md';
+    const toUri = 'threadnote://user/tester/memories/shared/team/moved.md';
+    const withId = 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_receipt\n\nOriginal\n';
+    const withoutId = 'MEMORY\nkind: durable\nstatus: active\n\nShared live bytes\n';
+    yield* recordMemoryRelocation(config, {fromUri, toUri, fromContent: withId, toContent: withId});
+    const destination = path.join(root, 'shared', 'team', 'moved.md');
+    yield* fs.writeFileString(destination, withoutId);
+    yield* fs.writeFileString(path.join(root, 'other.md'), 'independent content');
+    const snapshot = Effect.fn(function* () {
+      const files: string[] = [];
+      const visit = (dir: string): Effect.Effect<void, unknown> =>
+        Effect.gen(function* () {
+          for (const name of (yield* fs.readDirectory(dir)).sort()) {
+            const entry = path.join(dir, name);
+            const stat = yield* fs.lstat(entry);
+            if (stat.type === 'Directory') yield* visit(entry);
+            else if (stat.type === 'File')
+              files.push(`${path.relative(home, entry)}:${yield* sha256Hex(yield* fs.readFile(entry))}`);
+          }
+        });
+      yield* visit(home);
+      return files;
+    });
+    const before = yield* snapshot();
+    const read = () => readManagedMemory(config, 'threadnote://memory/tn_receipt', {preview: true});
+    expect((yield* read()).content).toBe(withoutId);
+    expect((yield* read()).node.uri).toBe(toUri);
+    expect(yield* snapshot()).toEqual(before);
+    yield* fs.writeFileString(destination, `${withoutId}${EffectString.repeat(512 * 1024)('x')}`);
+    const oversized = yield* snapshot();
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    expect(yield* snapshot()).toEqual(oversized);
+    yield* fs.remove(destination);
+    const unavailable = yield* snapshot();
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    expect(yield* snapshot()).toEqual(unavailable);
   }).pipe(provide),
 );
 

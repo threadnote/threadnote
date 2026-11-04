@@ -102,7 +102,11 @@ import {discardDeferredCodeAnchorIntent} from '../memory/deferred/code_anchor.js
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
 import {verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {resolveManagerMemoryIdentity} from './memory/identity.js';
-import {resolvePreviewMemoryIdentity} from './memory/read.js';
+import {
+  MAX_PREVIEW_IDENTITY_FILE_BYTES,
+  resolvePreviewMemoryIdentity,
+  validatePreviewMemoryPath,
+} from './memory/read.js';
 import {
   ensureSharedDirectoryChain,
   assertSharedWorktreeFileReady,
@@ -467,9 +471,12 @@ export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function
   const canonicalUri = resolved.canonicalUri;
   const path = yield* localPathForMemoryUri(config, canonicalUri);
   if (!path) return yield* ManagerOperationError.make({message: `Memory is outside this Library: ${canonicalUri}`});
+  if (options.preview) yield* validatePreviewMemoryPath(yield* localMemoriesRoot(config), path);
   const pathStat = yield* lstat(path);
   if (!pathStat.isFile())
     return yield* ManagerOperationError.make({message: `Manager requires regular memory files: ${canonicalUri}`});
+  if (options.preview && resolved.expectedMemoryId && pathStat.size > MAX_PREVIEW_IDENTITY_FILE_BYTES)
+    return yield* ManagerOperationError.make({message: 'Memory preview target is unavailable.'});
   const content = yield* readFile(path, 'utf8');
   yield* verifyResolvedMemoryIdentity(resolved, canonicalUri, content);
   const relativePath = EffectArray.join(
