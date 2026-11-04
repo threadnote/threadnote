@@ -741,6 +741,7 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     });
   const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';
   const previewMemory = cliOperation === 'memory-preview' ? await import('./manager/server.js') : undefined;
+  const previewResolver = cliOperation === 'memory-preview' ? await import('./manager/memory/read.js') : undefined;
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';
   const processOperation = isWatchCollector
     ? 'workflow-watch-collector'
@@ -757,9 +758,17 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
             const context = yield* Effect.context<ApplicationServices>();
             return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
               Effect.provideService(MemoryPreviewRead, {
-                read: (config, uri) =>
-                  Effect.runPromiseWith(context)(previewMemory.readManagedMemory(config, uri, {preview: true})).then(
-                    document => {
+                prepare: async (config, uri, signal) => {
+                  if (!previewResolver) throw new Error('Private memory resolver is unavailable.');
+                  const resolved = await Effect.runPromiseWith(context)(
+                    previewResolver.resolvePreviewMemoryIdentity(config, uri),
+                    {signal},
+                  );
+                  return () =>
+                    Effect.runPromiseWith(context)(
+                      previewMemory.readManagedMemory(config, uri, {preview: true, resolved}),
+                      {signal},
+                    ).then(document => {
                       const source = document.record?.metadata;
                       const metadata = source
                         ? {
@@ -776,8 +785,8 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
                         node: {...document.node, metadata},
                         memoryId: source?.memoryId,
                       };
-                    },
-                  ),
+                    });
+                },
               }),
             );
           })

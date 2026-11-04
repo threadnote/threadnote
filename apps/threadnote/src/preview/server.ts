@@ -46,16 +46,27 @@ export interface PreviewReadResult {
 
 export class MemoryPreviewRead extends Context.Service<
   MemoryPreviewRead,
-  {readonly read: (config: RuntimeConfig, uri: string) => Promise<PreviewReadResult>}
+  {
+    readonly prepare: (
+      config: RuntimeConfig,
+      uri: string,
+      signal: AbortSignal,
+    ) => Promise<() => Promise<PreviewReadResult>>;
+  }
 >()('@threadnote/threadnote/preview/server/MemoryPreviewRead') {}
 
 export function createMemoryPreviewHandler(options: {
   readonly token: string;
   readonly port: () => number;
-  readonly read: () => Promise<PreviewReadResult>;
+  readonly read?: () => Promise<PreviewReadResult>;
+  readonly prepare?: (signal: AbortSignal) => Promise<() => Promise<PreviewReadResult>>;
+  readonly signal?: AbortSignal;
   readonly touched?: () => void;
 }): (request: Request) => Promise<Response> {
   let reading = false;
+  let job:
+    {state: 'pending'} | {state: 'ready'; read: () => Promise<PreviewReadResult>} | {state: 'failed'} | undefined;
+  const signal = options.signal ?? new AbortController().signal;
   return async request => {
     const headers = {
       'Cache-Control': 'no-store, max-age=0',
@@ -109,10 +120,37 @@ export function createMemoryPreviewHandler(options: {
           headers: {...headers, 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '1'},
         },
       );
-    reading = true;
     options.touched?.();
+    if (!job) {
+      job = {state: 'pending'};
+      const prepare = options.prepare ?? (() => Promise.resolve(options.read!));
+      void Promise.resolve()
+        .then(() => prepare(signal))
+        .then(
+          read => {
+            job = {state: 'ready', read};
+          },
+          () => {
+            job = {state: 'failed'};
+          },
+        );
+    }
+    if (job.state === 'pending')
+      return new Response(
+        '<!doctype html><meta http-equiv="refresh" content="1"><title>Opening memory</title><h1>Opening memory</h1><p>Checking local memory identities. This page will retry automatically.</p>',
+        {status: 202, headers: {...headers, 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '1'}},
+      );
+    if (job.state === 'failed') {
+      job = undefined;
+      return new Response(renderMemoryPreviewError(), {
+        status: 404,
+        headers: {...headers, 'Content-Type': 'text/html; charset=utf-8'},
+      });
+    }
+    const ready = job;
+    reading = true;
     try {
-      const document = await options.read();
+      const document = await ready.read();
       return new Response(renderMemoryPreview(document), {
         status: 200,
         headers: {...headers, 'Content-Type': 'text/html; charset=utf-8'},
@@ -123,6 +161,7 @@ export function createMemoryPreviewHandler(options: {
         headers: {...headers, 'Content-Type': 'text/html; charset=utf-8'},
       });
     } finally {
+      job = undefined;
       reading = false;
     }
   };
@@ -147,12 +186,15 @@ export function runMemoryPreview(
       const token = Base64Url.encode(yield* random.randomBytes(24));
       let port = 0;
       let touched = () => {};
+      // oxlint-disable-next-line effecttsgo/abort-controller-in-effect -- The listener owns a Promise-backed job that must also be aborted on normal scope release.
+      const controller = new AbortController();
       const server = yield* Effect.acquireRelease(
         Effect.sync(() => {
           const handler = createMemoryPreviewHandler({
             token,
             port: () => port,
-            read: () => reader.value.read(config, uri),
+            prepare: signal => reader.value.prepare(config, uri, signal),
+            signal: controller.signal,
             touched: () => touched(),
           });
           const listener = options.listen
@@ -165,7 +207,11 @@ export function runMemoryPreview(
           port = listener.port ?? 0;
           return listener;
         }),
-        listener => Effect.sync(() => listener.stop(true)),
+        listener =>
+          Effect.sync(() => {
+            controller.abort();
+            listener.stop(true);
+          }),
       ).pipe(Effect.catchCause(previewStartupFailure));
       const localUrl = `http://127.0.0.1:${server.port}/#${token}`;
       if (options.open !== false)

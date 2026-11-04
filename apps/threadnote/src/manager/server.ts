@@ -100,7 +100,7 @@ import {
 } from '@threadnote/memory/code/citation-policy';
 import {discardDeferredCodeAnchorIntent} from '../memory/deferred/code_anchor.js';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
-import {verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {verifyResolvedMemoryIdentity, type ResolvedMemoryIdentityAlias} from '@threadnote/recall/memory/identity';
 import {resolveManagerMemoryIdentity} from './memory/identity.js';
 import {
   MAX_PREVIEW_IDENTITY_FILE_BYTES,
@@ -463,11 +463,11 @@ export const resourcesTree = Effect.fn('manager.resourcesTree')(function* (confi
 export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function* (
   config: RuntimeConfig,
   uri: string,
-  options: {readonly preview?: boolean} = {},
+  options: {readonly preview?: boolean; readonly resolved?: ResolvedMemoryIdentityAlias} = {},
 ) {
-  const resolved = yield* options.preview
-    ? resolvePreviewMemoryIdentity(config, uri)
-    : resolveManagerMemoryIdentity(config, uri);
+  const resolved =
+    options.resolved ??
+    (yield* options.preview ? resolvePreviewMemoryIdentity(config, uri) : resolveManagerMemoryIdentity(config, uri));
   const canonicalUri = resolved.canonicalUri;
   const path = yield* localPathForMemoryUri(config, canonicalUri);
   if (!path) return yield* ManagerOperationError.make({message: `Memory is outside this Library: ${canonicalUri}`});

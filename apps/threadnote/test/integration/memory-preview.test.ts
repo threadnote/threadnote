@@ -2,8 +2,10 @@ import {describe, expect, it} from '@effect/vitest';
 import {
   Array as EffectArray,
   Cause,
+  Deferred,
   Effect,
   Exit,
+  Fiber,
   FileSystem,
   Layer,
   Path,
@@ -21,6 +23,7 @@ import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {resolvePreviewMemoryIdentity} from '../../src/manager/memory/read.js';
 
 const origin = 'http://127.0.0.1:41377';
 const token = 'private-test-token';
@@ -47,16 +50,21 @@ describe('fixed-target memory preview HTTP handler', () => {
       },
     });
     const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
-    const first = await handler(request());
+    const read = async () => {
+      expect((await handler(request())).status).toBe(202);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return handler(request());
+    };
+    const first = await read();
     expect(first.status).toBe(200);
     expect(await first.text()).toContain('Original');
     content = '# Changed';
-    const second = await handler(request());
+    const second = await read();
     expect(await second.text()).toContain('Changed');
     expect(second.headers.get('Cache-Control')).toContain('no-store');
     expect(second.headers.get('Content-Security-Policy')).toContain("default-src 'none'");
     content = '';
-    const third = await handler(request());
+    const third = await read();
     expect(third.status).toBe(404);
     expect(await third.text()).not.toContain('Changed');
     expect(reads).toBe(3);
@@ -120,8 +128,12 @@ describe('fixed-target memory preview HTTP handler', () => {
     const cookie = established.headers.get('set-cookie') ?? '';
     expect(cookie).toContain('HttpOnly; SameSite=Strict');
     const request = () => new Request(`${origin}/`, {headers: {cookie: EffectString.split(';')(cookie)[0]}});
+    expect((await handler(request())).status).toBe(202);
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(await (await handler(request())).text()).toContain('First');
     content = '# Updated';
+    expect((await handler(request())).status).toBe(202);
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(await (await handler(request())).text()).toContain('Updated');
   });
 
@@ -136,6 +148,8 @@ describe('fixed-target memory preview HTTP handler', () => {
         }),
     });
     const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
+    expect((await handler(request())).status).toBe(202);
+    await new Promise(resolve => setTimeout(resolve, 0));
     const pending = handler(request());
     const busy = await handler(request());
     expect(busy.status).toBe(503);
@@ -143,6 +157,38 @@ describe('fixed-target memory preview HTTP handler', () => {
     expect(await busy.text()).toContain('reload this page');
     finish({content: '# First', node});
     expect((await pending).status).toBe(200);
+  });
+
+  it('polls one scan without returning content before it completes', async () => {
+    let finish!: (read: () => Promise<{content: string; node: typeof node}>) => void;
+    let starts = 0;
+    let touches = 0;
+    const handler = createMemoryPreviewHandler({
+      token,
+      port: () => 41377,
+      touched: () => {
+        touches++;
+      },
+      prepare: () => {
+        starts++;
+        return new Promise(resolve => {
+          finish = resolve;
+        });
+      },
+    });
+    const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
+    const first = await handler(request());
+    expect(first.status).toBe(202);
+    expect(first.headers.get('cache-control')).toContain('no-store');
+    expect(await first.text()).toContain('retry automatically');
+    await Promise.resolve();
+    expect((await handler(request())).status).toBe(202);
+    expect(starts).toBe(1);
+    expect(touches).toBe(2);
+    finish(async () => ({content: '# Ready', node}));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await (await handler(request())).text()).toContain('Ready');
+    expect((await handler(request())).status).toBe(202);
   });
 });
 
@@ -202,7 +248,7 @@ const provide = provideTestLayer(
   Layer.merge(
     ApplicationLayer,
     Layer.succeed(MemoryPreviewRead, {
-      read: async () => {
+      prepare: async () => {
         throw new Error('unused');
       },
     }),
@@ -312,11 +358,38 @@ it.effect('resolves a small identity and detects conflicts beyond 16 MiB of unre
     yield* fs.writeFileString(target, 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_target\n\nTiny target\n');
     const read = () => readManagedMemory(config, 'threadnote://memory/tn_target', {preview: true});
     expect((yield* read()).content).toContain('Tiny target');
+    let slices = 0;
+    const resolved = yield* resolvePreviewMemoryIdentity(config, 'threadnote://memory/tn_target', {
+      entriesPerSlice: 2,
+      bytesPerSlice: 16384,
+      yieldNow: () =>
+        Effect.sync(() => {
+          slices++;
+        }),
+    });
+    expect(resolved.canonicalUri).toContain('target.md');
+    expect(slices).toBeGreaterThan(2);
     yield* fs.writeFileString(
       path.join(root, '32.md'),
       'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_target\n\nConflict\n',
     );
     expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    let visited = 0;
+    const lateConflict = yield* Effect.exit(
+      resolvePreviewMemoryIdentity(config, 'threadnote://memory/tn_target', {
+        directoryNames: async function* () {
+          yield 'target.md';
+          for (let index = 0; index < 34; index++) {
+            if (index === 32) continue;
+            visited++;
+            yield `${index}.md`;
+          }
+          yield '32.md';
+        },
+      }),
+    );
+    expect(Exit.isFailure(lateConflict)).toBe(true);
+    expect(visited).toBe(33);
   }).pipe(provide),
 );
 
@@ -339,6 +412,80 @@ it.effect('finds long CRLF headers and ignores identity-like body text', () =>
       preview: true,
     });
     expect(result.node.name).toBe('target.md');
+  }).pipe(provide),
+);
+
+it.effect('closes an active streamed directory when the scan is interrupted', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-scan-cancel-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(path.join(root, 'file.md'), 'MEMORY\nkind: durable\nmemory_id: tn_other\n\nBody');
+    const entered = yield* Deferred.make<void>();
+    let closed = false;
+    const fiber = yield* resolvePreviewMemoryIdentity(
+      {...unusedConfig, agentContextHome: home},
+      'threadnote://memory/tn_target',
+      {
+        entriesPerSlice: 2,
+        yieldNow: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        directoryNames: async function* () {
+          try {
+            yield 'file.md';
+            yield 'other.md';
+          } finally {
+            closed = true;
+          }
+        },
+      },
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(fiber);
+    expect(closed).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect('fails closed when a scanned directory changes between batches', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-scan-change-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(path.join(root, 'file.md'), 'MEMORY\nkind: durable\nmemory_id: tn_target\n\nBody');
+    yield* fs.utimes(root, 0, 0);
+    let changed = false;
+    const result = yield* Effect.exit(
+      resolvePreviewMemoryIdentity({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {
+        entriesPerSlice: 2,
+        yieldNow: () => {
+          if (changed) return Effect.void;
+          changed = true;
+          return fs.writeFileString(path.join(root, 'new.md'), 'unrelated').pipe(Effect.orDie);
+        },
+      }),
+    );
+    expect(Exit.isFailure(result)).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect('revalidates the chosen identity when reading after a completed scan', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-final-read-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    const file = path.join(root, 'file.md');
+    const content = (id: string) => `MEMORY\nkind: durable\nstatus: active\nmemory_id: ${id}\n\nBody`;
+    yield* fs.writeFileString(file, content('tn_target'));
+    const config = {...unusedConfig, agentContextHome: home};
+    const alias = 'threadnote://memory/tn_target';
+    const resolved = yield* resolvePreviewMemoryIdentity(config, alias);
+    yield* fs.writeFileString(file, content('tn_other'));
+    expect(Exit.isFailure(yield* Effect.exit(readManagedMemory(config, alias, {preview: true, resolved})))).toBe(true);
   }).pipe(provide),
 );
 
@@ -527,5 +674,42 @@ it.effect('stops the preview listener at its idle deadline', () =>
       idleMs: 5,
     });
     expect(stopped).toBe(true);
+  }).pipe(TestClock.withLive, provide),
+);
+
+it.effect('cancels an abandoned scan when the listener expires', () =>
+  Effect.gen(function* () {
+    let handler: ((request: Request) => Promise<Response>) | undefined;
+    let aborted = false;
+    yield* runMemoryPreview(unusedConfig, launchUri, {
+      listen: fetch => {
+        handler = fetch;
+        return {port: 43120, stop: () => {}};
+      },
+      openUrl: url =>
+        Effect.promise(async () => {
+          const token = EffectString.slice(1)(new URL(url).hash);
+          const response = await handler!(
+            new Request('http://127.0.0.1:43120/', {headers: {cookie: `threadnote_preview_43120=${token}`}}),
+          );
+          expect(response.status).toBe(202);
+        }),
+      idleMs: 10,
+    }).pipe(
+      Effect.provideService(MemoryPreviewRead, {
+        prepare: async (_config, _uri, signal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                reject(new Error('cancelled'));
+              },
+              {once: true},
+            );
+          }),
+      }),
+    );
+    expect(aborted).toBe(true);
   }).pipe(TestClock.withLive, provide),
 );

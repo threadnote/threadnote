@@ -6,10 +6,16 @@ import {classifyMemoryIdentityCandidates, MemoryIdentityResolutionError} from '@
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
+import {runtimeTextDirectoryNames} from '@threadnote/platform/system';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
 /** A header may span the entire allowed file. Never truncate it to infer absence. */
-const readIdentityHeader = (fs: FileSystem.FileSystem, file: string, expectedSize: number) =>
+const readIdentityHeader = (
+  fs: FileSystem.FileSystem,
+  file: string,
+  expectedSize: number,
+  checkpoint: (bytes: number) => Effect.Effect<void>,
+) =>
   Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(file, {flag: 'r'});
@@ -27,6 +33,7 @@ const readIdentityHeader = (fs: FileSystem.FileSystem, file: string, expectedSiz
           break;
         }
         length += chunk.value.length;
+        yield* checkpoint(chunk.value.length);
         if (length > expectedSize) return undefined;
         text += decoder.decode(chunk.value, {stream: true});
         const normalized = EffectString.replace(/\r\n?/gu, '\n')(EffectString.trimStart(text));
@@ -102,6 +109,12 @@ export const validatePreviewMemoryPath = Effect.fn('preview.validateMemoryPath')
 export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIdentity')(function* (
   config: RuntimeConfig,
   uri: string,
+  options: {
+    readonly entriesPerSlice?: number;
+    readonly bytesPerSlice?: number;
+    readonly yieldNow?: () => Effect.Effect<void>;
+    readonly directoryNames?: (path: string) => AsyncIterable<string>;
+  } = {},
 ) {
   const memoryId = memoryIdFromIdentityAlias(uri);
   if (memoryId === undefined) return {canonicalUri: uri, requestedUri: uri};
@@ -110,61 +123,108 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   const user = uriSegment(config.user);
   const scope = `threadnote://user/${user}/memories`;
   const root = path.join(config.agentContextHome, 'data', config.account, 'user', user, 'memories');
-  const pending = [root];
   const candidates: {uri: string; memoryId: string; status: string}[] = [];
-  while (pending.length > 0) {
-    const directory = pending.pop()!;
-    for (const name of yield* fs.readDirectory(directory)) {
-      const file = path.join(directory, name);
-      const stat = yield* fs.lstat(file);
-      if (stat.type === 'Directory') {
-        const segments = EffectString.split(path.sep)(path.relative(root, file));
-        if (
-          !['archived', 'expired', 'superseded'].includes(name) &&
-          !EffectArray.some(
-            segments,
-            (segment, index) => segment === 'packs' && segments[index - 1] === 'agent-artifacts',
-          )
-        )
-          pending.push(file);
-      } else if (
-        stat.type === 'File' &&
-        /\.(?:json|md|mdx|txt|yaml|yml)$/iu.test(name) &&
-        !/^\.(?:abstract|overview)\.md$/u.test(name)
+  let sliceEntries = 0;
+  let sliceBytes = 0;
+  let sliceStarted = performance.now();
+  const checkpoint = (bytes = 0) =>
+    Effect.gen(function* () {
+      sliceBytes += bytes;
+      if (bytes === 0) sliceEntries++;
+      if (
+        sliceEntries >= (options.entriesPerSlice ?? 16) ||
+        sliceBytes >= (options.bytesPerSlice ?? 128 * 1024) ||
+        performance.now() - sliceStarted >= 8
       ) {
-        if (Number(stat.size) > MAX_PREVIEW_IDENTITY_FILE_BYTES) continue;
-        const header = yield* readIdentityHeader(fs, file, Number(stat.size));
-        if (header === undefined)
-          return yield* MemoryIdentityResolutionError.make({
-            memoryId,
-            reason: 'ambiguous',
-            message: 'Local memory identity scan changed during reading.',
+        sliceEntries = 0;
+        sliceBytes = 0;
+        yield* options.yieldNow?.() ??
+          Effect.callback<void>(resume => {
+            // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Yield to the host event loop even under a virtual test clock.
+            const timer = setTimeout(() => resume(Effect.void), 0);
+            return Effect.sync(() => clearTimeout(timer));
           });
-        if (memoryHeaderValue(header, 'memory_id') !== memoryId) continue;
-        const segments = EffectArray.map(
-          EffectString.split(path.sep)(path.relative(root, file)),
-          EffectString.normalize('NFC'),
-        );
-        const candidateUri = canonicalResourceUri('user', [config.user, 'memories', ...segments]);
-        const content = yield* readBoundedIdentityFile(fs, file, Number(stat.size));
-        if (content === undefined)
-          return yield* MemoryIdentityResolutionError.make({
-            memoryId,
-            reason: 'ambiguous',
-            message: 'Local memory identity scan changed during reading.',
-          });
-        const record = parseMemoryDocument(candidateUri, content);
-        if (record?.metadata.memoryId === memoryId)
-          candidates.push({uri: candidateUri, memoryId, status: record.metadata.status});
+        sliceStarted = performance.now();
       }
-    }
-  }
-  if (candidates.length > 1)
-    return yield* MemoryIdentityResolutionError.make({
-      memoryId,
-      reason: 'ambiguous',
-      message: 'Stable memory identity is ambiguous.',
     });
+  const scanDirectory = (directory: string): Effect.Effect<void, unknown> =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const before = yield* fs.lstat(directory);
+        if (before.type !== 'Directory')
+          return yield* PreviewMemoryPathError.make({message: 'Local memory directory changed.'});
+        const iterator = (options.directoryNames ?? runtimeTextDirectoryNames)(directory)[Symbol.asyncIterator]();
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(async () => {
+            await iterator.return?.();
+          }).pipe(Effect.ignoreCause),
+        );
+        while (true) {
+          yield* checkpoint();
+          const next = yield* Effect.tryPromise({
+            try: () => iterator.next(),
+            catch: () => PreviewMemoryPathError.make({message: 'Local memory directory is unavailable.'}),
+          });
+          if (next.done) break;
+          const name = next.value;
+          const file = path.join(directory, name);
+          const stat = yield* fs.lstat(file);
+          if (stat.type === 'Directory') {
+            const segments = EffectString.split(path.sep)(path.relative(root, file));
+            if (
+              !['archived', 'expired', 'superseded'].includes(name) &&
+              !EffectArray.some(
+                segments,
+                (segment, index) => segment === 'packs' && segments[index - 1] === 'agent-artifacts',
+              )
+            )
+              yield* scanDirectory(file);
+          } else if (
+            stat.type === 'File' &&
+            /\.(?:json|md|mdx|txt|yaml|yml)$/iu.test(name) &&
+            !/^\.(?:abstract|overview)\.md$/u.test(name)
+          ) {
+            if (Number(stat.size) > MAX_PREVIEW_IDENTITY_FILE_BYTES) continue;
+            const header = yield* readIdentityHeader(fs, file, Number(stat.size), checkpoint);
+            if (header === undefined)
+              return yield* MemoryIdentityResolutionError.make({
+                memoryId,
+                reason: 'ambiguous',
+                message: 'Local memory identity scan changed during reading.',
+              });
+            if (memoryHeaderValue(header, 'memory_id') !== memoryId) continue;
+            const segments = EffectArray.map(
+              EffectString.split(path.sep)(path.relative(root, file)),
+              EffectString.normalize('NFC'),
+            );
+            const candidateUri = canonicalResourceUri('user', [config.user, 'memories', ...segments]);
+            const content = yield* readBoundedIdentityFile(fs, file, Number(stat.size));
+            if (content === undefined)
+              return yield* MemoryIdentityResolutionError.make({
+                memoryId,
+                reason: 'ambiguous',
+                message: 'Local memory identity scan changed during reading.',
+              });
+            const record = parseMemoryDocument(candidateUri, content);
+            if (record?.metadata.memoryId === memoryId)
+              candidates.push({uri: candidateUri, memoryId, status: record.metadata.status});
+            if (candidates.length > 1)
+              return yield* MemoryIdentityResolutionError.make({
+                memoryId,
+                reason: 'ambiguous',
+                message: 'Stable memory identity is ambiguous.',
+              });
+          }
+        }
+        const after = yield* fs.lstat(directory);
+        if (
+          after.type !== 'Directory' ||
+          Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(before.mtime)?.getTime()
+        )
+          return yield* PreviewMemoryPathError.make({message: 'Local memory directory changed.'});
+      }),
+    );
+  yield* scanDirectory(root);
   const found = classifyMemoryIdentityCandidates(candidates, memoryId, [scope]);
   if (found.state === 'resolved') return {canonicalUri: found.uri, expectedMemoryId: memoryId, requestedUri: uri};
   if (found.state === 'not-found') {
