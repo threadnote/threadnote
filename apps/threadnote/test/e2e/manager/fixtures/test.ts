@@ -2,6 +2,7 @@ import {expect, test as base} from '@playwright/test';
 import {ManagerRuntime} from './runtime.js';
 import {configureModel} from './model.js';
 import {configureProviders} from './providers.js';
+import {createRepository, indexRepository} from './repositories.js';
 import {Array as EffectArray, pipe} from 'effect';
 import * as EffectString from 'effect/String';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
@@ -12,7 +13,7 @@ import {spawnSync} from '@threadnote/testing/node-child-process';
 interface ManagerFixtures {
   readonly manager: ManagerRuntime;
   readonly managerMode: 'compiled' | 'source';
-  readonly managerScenario: 'empty' | 'populated' | 'providers' | 'remote-model' | 'model-setup';
+  readonly managerScenario: 'empty' | 'populated' | 'providers' | 'remote-model' | 'model-setup' | 'graph-pair';
 }
 
 export const test = base.extend<ManagerFixtures>({
@@ -52,8 +53,13 @@ export const test = base.extend<ManagerFixtures>({
   managerMode: ['compiled', {option: true}],
   managerScenario: ['empty', {option: true}],
   manager: async ({managerMode, managerScenario}, use, testInfo) => {
+    if (managerScenario === 'graph-pair') testInfo.setTimeout(60_000);
     const manager = await ManagerRuntime.create();
     try {
+      if (managerScenario === 'graph-pair') {
+        // Finish manifest mutations before live authority starts issuing tickets.
+        for (const name of ['alpha', 'beta']) await indexRepository(manager, await createRepository(manager, name));
+      }
       if (managerScenario === 'remote-model') await configureModel(manager);
       if (managerScenario === 'model-setup') {
         const {configureSetup} = await import('./setup.js');

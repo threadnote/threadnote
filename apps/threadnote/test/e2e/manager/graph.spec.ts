@@ -73,12 +73,12 @@ test('S09 graph view removal uses an exact preview, cancellation preserves it an
   expect(await readFile(join(repository.root, 'src/entry.ts'), 'utf8')).toBe(repository.source);
 });
 
-test('S09 a delayed query from the old repository cannot replace the selected repository', async ({page, manager}) => {
+const graphPairTest = test.extend({managerScenario: 'graph-pair'});
+
+graphPairTest('S09 a delayed query from the old repository cannot replace the selected repository', async ({page}) => {
   test.setTimeout(60_000);
-  const alpha = await createRepository(manager);
-  const beta = await createRepository(manager, 'beta');
-  await indexRepository(manager, alpha);
-  await indexRepository(manager, beta);
+  const alpha = {symbol: 'alphaGreeting'};
+  const beta = {symbol: 'betaGreeting'};
   await page.getByRole('button', {name: 'Refresh manager', exact: true}).click();
   await page
     .getByRole('navigation', {name: 'Manager sections'})
