@@ -37,7 +37,6 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {MemoryPreviewRead} from './preview/server.js';
-import type {ApplicationServices} from './effect/runtime.js';
 
 const executableName = Effect2.pipe(
   Effect2.pipe(process.execPath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
@@ -759,7 +758,7 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     Effect.flatMap(home => {
       const cliCommand = previewMemory
         ? Effect.gen(function* () {
-            const context = yield* Effect.context<ApplicationServices>();
+            const context = yield* Effect.context<import('./effect/runtime.js').ApplicationServices>();
             return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
               Effect.provideService(MemoryPreviewRead, {
                 prepare: async (config, uri, signal, grant) => {

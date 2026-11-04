@@ -8,6 +8,7 @@ import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store'
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {runtimeTextDirectoryNames} from '@threadnote/platform/system';
+import {fromPromise, fromPromiseInterruptible} from '@threadnote/platform/errors';
 import type {PreviewScanGrant} from '../../preview/server.js';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
@@ -141,10 +142,10 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   const checkpoint = (bytes = 0, entries = 0) =>
     Effect.gen(function* () {
       if (options.grant)
-        yield* Effect.tryPromise({
-          try: () => options.grant!.take(bytes, entries),
-          catch: () => PreviewMemoryPathError.make({message: 'Memory preview scan was cancelled.'}),
-        });
+        yield* fromPromiseInterruptible(
+          () => options.grant!.take(bytes, entries),
+          () => PreviewMemoryPathError.make({message: 'Memory preview scan was cancelled.'}),
+        );
       sliceBytes += bytes;
       sliceEntries += entries;
       if (
@@ -171,16 +172,16 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
           return yield* PreviewMemoryPathError.make({message: 'Local memory directory changed.'});
         const iterator = (options.directoryNames ?? runtimeTextDirectoryNames)(directory)[Symbol.asyncIterator]();
         yield* Effect.addFinalizer(() =>
-          Effect.promise(async () => {
-            await iterator.return?.();
-          }).pipe(Effect.ignoreCause),
+          fromPromise('preview.closeMemoryDirectory', () => Promise.resolve(iterator.return?.())).pipe(
+            Effect.ignoreCause,
+          ),
         );
         while (true) {
           yield* checkpoint();
-          const next = yield* Effect.tryPromise({
-            try: () => iterator.next(),
-            catch: () => PreviewMemoryPathError.make({message: 'Local memory directory is unavailable.'}),
-          });
+          const next = yield* fromPromiseInterruptible(
+            () => iterator.next(),
+            () => PreviewMemoryPathError.make({message: 'Local memory directory is unavailable.'}),
+          );
           if (next.done) break;
           yield* checkpoint(0, 1);
           const name = next.value;

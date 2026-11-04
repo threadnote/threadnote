@@ -1,5 +1,6 @@
 import {Effect} from 'effect';
 import {runCommandEffect} from './command.js';
+import {runtimePlatform} from './system.js';
 
 export function openUrlCommand(platform: NodeJS.Platform, url: string): {executable: string; args: readonly string[]} {
   const parsed = new URL(url);
@@ -12,6 +13,6 @@ export function openUrlCommand(platform: NodeJS.Platform, url: string): {executa
 }
 
 export const openLoopbackUrl = Effect.fn('openLoopbackUrl')(function* (url: string) {
-  const command = openUrlCommand(process.platform, url);
+  const command = openUrlCommand(runtimePlatform, url);
   yield* runCommandEffect(command.executable, command.args, {timeoutMs: 10_000});
 });
