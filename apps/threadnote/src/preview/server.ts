@@ -19,6 +19,64 @@ history.replaceState(null, '', location.pathname);
 if (secret) fetch('/session', {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: secret, credentials: 'same-origin'}).then(response => { if (response.ok) location.replace('/'); else document.body.textContent = 'Private preview unavailable.'; }).catch(() => { document.body.textContent = 'Private preview unavailable.'; });
 else document.body.textContent = 'Private preview unavailable.';
 </script></body></html>`;
+const CONTINUE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Continue scanning</title><style>body{background:#171717;color:#eee;font:16px system-ui;margin:3rem;max-width:42rem}button{background:#ddd;color:#111;border:0;border-radius:.3rem;padding:.8rem 1rem;font:inherit;cursor:pointer}</style></head><body><main><h1>Continue scanning</h1><p>This library needs more time to check. Continue scanning, or reopen the memory link later to start again.</p><form method="post" action="/continue"><button type="submit">Continue scanning</button></form></main></body></html>`;
+
+export interface PreviewScanGrant {
+  readonly take: (bytes: number, entries: number) => Promise<void>;
+}
+
+export function createPreviewScanGrant(
+  signal: AbortSignal,
+  limits: {readonly bytes: number; readonly entries: number; readonly milliseconds: number} = {
+    bytes: 64 * 1024 * 1024,
+    entries: 4096,
+    milliseconds: 5000,
+  },
+  now = () => performance.now(),
+) {
+  let bytes = limits.bytes;
+  let entries = limits.entries;
+  let deadline = now() + limits.milliseconds;
+  let resume: (() => void) | undefined;
+  let paused = false;
+  return {
+    get paused() {
+      return paused;
+    },
+    async take(requestedBytes: number, requestedEntries: number) {
+      while (bytes <= 0 || entries <= 0 || requestedBytes > bytes || requestedEntries > entries || now() >= deadline) {
+        if (signal.aborted) throw new Error('Scan cancelled.');
+        paused = true;
+        // oxlint-disable-next-line effecttsgo/new-promise -- This HTTP-facing grant waits for a later request or listener abort.
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => {
+            resume = undefined;
+            reject(new Error('Scan cancelled.'));
+          };
+          resume = () => {
+            signal.removeEventListener('abort', abort);
+            resolve();
+          };
+          signal.addEventListener('abort', abort, {once: true});
+        });
+      }
+      if (signal.aborted) throw new Error('Scan cancelled.');
+      bytes -= requestedBytes;
+      entries -= requestedEntries;
+    },
+    continue() {
+      if (!paused || !resume || signal.aborted) return false;
+      bytes = limits.bytes;
+      entries = limits.entries;
+      deadline = now() + limits.milliseconds;
+      paused = false;
+      const wake = resume;
+      resume = undefined;
+      wake();
+      return true;
+    },
+  };
+}
 
 export class MemoryPreviewStartupError extends Schema.TaggedError<
   MemoryPreviewStartupError,
@@ -51,6 +109,7 @@ export class MemoryPreviewRead extends Context.Service<
       config: RuntimeConfig,
       uri: string,
       signal: AbortSignal,
+      grant: PreviewScanGrant,
     ) => Promise<() => Promise<PreviewReadResult>>;
   }
 >()('@threadnote/threadnote/preview/server/MemoryPreviewRead') {}
@@ -59,14 +118,17 @@ export function createMemoryPreviewHandler(options: {
   readonly token: string;
   readonly port: () => number;
   readonly read?: () => Promise<PreviewReadResult>;
-  readonly prepare?: (signal: AbortSignal) => Promise<() => Promise<PreviewReadResult>>;
+  readonly prepare?: (signal: AbortSignal, grant: PreviewScanGrant) => Promise<() => Promise<PreviewReadResult>>;
   readonly signal?: AbortSignal;
   readonly touched?: () => void;
+  readonly grantLimits?: {readonly bytes: number; readonly entries: number; readonly milliseconds: number};
+  readonly now?: () => number;
 }): (request: Request) => Promise<Response> {
   let reading = false;
   let job:
     {state: 'pending'} | {state: 'ready'; read: () => Promise<PreviewReadResult>} | {state: 'failed'} | undefined;
   const signal = options.signal ?? new AbortController().signal;
+  let grant: ReturnType<typeof createPreviewScanGrant> | undefined;
   return async request => {
     const headers = {
       'Cache-Control': 'no-store, max-age=0',
@@ -94,20 +156,31 @@ export function createMemoryPreviewHandler(options: {
       )
         return new Response('Not found', {status: 404, headers});
       if ((await request.text()) !== options.token) return new Response('Not found', {status: 404, headers});
-      options.touched?.();
+      if (!grant?.paused) options.touched?.();
       return new Response(null, {
         status: 204,
         headers: {...headers, 'Set-Cookie': `${cookieName}=${options.token}; HttpOnly; SameSite=Strict; Path=/`},
       });
     }
-    if (request.method !== 'GET' || url.pathname !== '/') return new Response('Not found', {status: 404, headers});
     const cookie = request.headers.get('cookie') ?? '';
-    if (
-      !EffectArray.some(
-        EffectString.split(';')(cookie),
-        part => EffectString.trim(part) === `${cookieName}=${options.token}`,
+    const authorized = EffectArray.some(
+      EffectString.split(';')(cookie),
+      part => EffectString.trim(part) === `${cookieName}=${options.token}`,
+    );
+    if (request.method === 'POST' && url.pathname === '/continue') {
+      if (
+        !authorized ||
+        request.headers.get('origin') !== origin ||
+        request.headers.get('sec-fetch-site') !== 'same-origin' ||
+        job?.state !== 'pending' ||
+        !grant?.continue()
       )
-    )
+        return new Response('Not found', {status: 404, headers});
+      options.touched?.();
+      return new Response(null, {status: 303, headers: {...headers, Location: '/'}});
+    }
+    if (request.method !== 'GET' || url.pathname !== '/') return new Response('Not found', {status: 404, headers});
+    if (!authorized)
       return new Response(BOOTSTRAP_PAGE, {
         status: 200,
         headers: {...headers, 'Content-Security-Policy': BOOTSTRAP_POLICY, 'Content-Type': 'text/html; charset=utf-8'},
@@ -120,12 +193,12 @@ export function createMemoryPreviewHandler(options: {
           headers: {...headers, 'Content-Type': 'text/html; charset=utf-8', 'Retry-After': '1'},
         },
       );
-    options.touched?.();
     if (!job) {
       job = {state: 'pending'};
+      grant = createPreviewScanGrant(signal, options.grantLimits, options.now);
       const prepare = options.prepare ?? (() => Promise.resolve(options.read!));
       void Promise.resolve()
-        .then(() => prepare(signal))
+        .then(() => prepare(signal, grant!))
         .then(
           read => {
             job = {state: 'ready', read};
@@ -135,6 +208,18 @@ export function createMemoryPreviewHandler(options: {
           },
         );
     }
+    if (job.state === 'pending' && grant?.paused)
+      return new Response(CONTINUE_PAGE, {
+        status: 200,
+        headers: {
+          ...headers,
+          'Content-Security-Policy':
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+          'Content-Type': 'text/html; charset=utf-8',
+          'Referrer-Policy': 'same-origin',
+        },
+      });
+    options.touched?.();
     if (job.state === 'pending')
       return new Response(
         '<!doctype html><meta http-equiv="refresh" content="1"><title>Opening memory</title><h1>Opening memory</h1><p>Checking local memory identities. This page will retry automatically.</p>',
@@ -162,6 +247,7 @@ export function createMemoryPreviewHandler(options: {
       });
     } finally {
       job = undefined;
+      grant = undefined;
       reading = false;
     }
   };
@@ -193,7 +279,7 @@ export function runMemoryPreview(
           const handler = createMemoryPreviewHandler({
             token,
             port: () => port,
-            prepare: signal => reader.value.prepare(config, uri, signal),
+            prepare: (signal, grant) => reader.value.prepare(config, uri, signal, grant),
             signal: controller.signal,
             touched: () => touched(),
           });

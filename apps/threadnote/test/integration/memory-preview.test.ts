@@ -16,7 +16,12 @@ import {TestClock} from 'effect/testing';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryLaunchUri} from '@threadnote/memory/navigation-link';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
-import {createMemoryPreviewHandler, MemoryPreviewRead, runMemoryPreview} from '../../src/preview/server.js';
+import {
+  createMemoryPreviewHandler,
+  createPreviewScanGrant,
+  MemoryPreviewRead,
+  runMemoryPreview,
+} from '../../src/preview/server.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readManagedMemory} from '../../src/manager/server.js';
 import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
@@ -189,6 +194,91 @@ describe('fixed-target memory preview HTTP handler', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(await (await handler(request())).text()).toContain('Ready');
     expect((await handler(request())).status).toBe(202);
+  });
+
+  it('pauses without polling work and resumes only on an authenticated same-origin gesture', async () => {
+    let visited = 0;
+    let touches = 0;
+    const handler = createMemoryPreviewHandler({
+      token,
+      port: () => 41377,
+      touched: () => {
+        touches++;
+      },
+      grantLimits: {bytes: 1024, entries: 2, milliseconds: 60000},
+      prepare: async (_signal, grant) => {
+        for (let index = 0; index < 5; index++) {
+          await grant.take(10, 1);
+          visited++;
+        }
+        return async () => ({content: '# Complete', node});
+      },
+    });
+    const cookie = `threadnote_preview_41377=${token}`;
+    const get = () => handler(new Request(`${origin}/`, {headers: {cookie}}));
+    const post = (originHeader = origin) =>
+      handler(
+        new Request(`${origin}/continue`, {
+          method: 'POST',
+          headers: {cookie, origin: originHeader, 'sec-fetch-site': 'same-origin'},
+        }),
+      );
+    expect((await get()).status).toBe(202);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(visited).toBe(2);
+    const beforeTouches = touches;
+    for (let index = 0; index < 3; index++) {
+      const response = await get();
+      expect(response.status).toBe(200);
+      expect(response.headers.get('referrer-policy')).toBe('same-origin');
+      const text = await response.text();
+      expect(text).toContain('Continue scanning');
+      expect(text).toContain('method="post"');
+      expect(text).not.toContain('http-equiv="refresh"');
+      expect(text).not.toContain(token);
+    }
+    expect(visited).toBe(2);
+    expect(touches).toBe(beforeTouches);
+    const sessionReplay = await handler(
+      new Request(`${origin}/session`, {
+        method: 'POST',
+        headers: {
+          origin,
+          'sec-fetch-site': 'same-origin',
+          'content-type': 'text/plain',
+          'content-length': String(token.length),
+        },
+        body: token,
+      }),
+    );
+    expect(sessionReplay.status).toBe(204);
+    expect(touches).toBe(beforeTouches);
+    expect((await post('https://evil.example')).status).toBe(404);
+    expect((await post()).status).toBe(303);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(visited).toBe(4);
+    expect((await get()).status).toBe(200);
+    expect((await post()).status).toBe(303);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(visited).toBe(5);
+    expect(await (await get()).text()).toContain('Complete');
+  });
+
+  it('pauses on byte and elapsed-time exhaustion and rejects an expired waiter', async () => {
+    const controller = new AbortController();
+    let now = 0;
+    const grant = createPreviewScanGrant(controller.signal, {bytes: 32, entries: 10, milliseconds: 5}, () => now);
+    await grant.take(20, 1);
+    const byteWait = grant.take(16, 1);
+    expect(grant.paused).toBe(true);
+    expect(grant.continue()).toBe(true);
+    await byteWait;
+    now = 6;
+    const timeWait = grant.take(1, 1);
+    expect(grant.paused).toBe(true);
+    controller.abort();
+    await expect(timeWait).rejects.toThrow('cancelled');
+    expect(grant.continue()).toBe(false);
   });
 });
 
@@ -452,6 +542,162 @@ it.effect('closes an active streamed directory when the scan is interrupted', ()
   }).pipe(provide),
 );
 
+it.effect.prop(
+  'continuations preserve scan progress and detect a late duplicate',
+  {duplicate: Schema.Boolean, count: Schema.Literals([4, 5, 6])},
+  ({duplicate, count}) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-grant-property-'});
+      const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+      yield* fs.makeDirectory(root, {recursive: true});
+      for (let index = 0; index < count; index++) {
+        const id = index === 0 || (duplicate && index === count - 1) ? 'tn_target' : `tn_other_${index}`;
+        yield* fs.writeFileString(path.join(root, `${index}.md`), `MEMORY\nkind: durable\nmemory_id: ${id}\n\nBody`);
+      }
+      const signal = yield* Effect.abortSignal;
+      const grant = createPreviewScanGrant(signal, {bytes: 1024 * 1024, entries: 2, milliseconds: 60000});
+      let visited = 0;
+      const done = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+      yield* resolvePreviewMemoryIdentity({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {
+        grant,
+        directoryNames: async function* () {
+          for (let index = 0; index < count; index++) {
+            visited++;
+            yield `${index}.md`;
+          }
+        },
+      }).pipe(
+        Effect.exit,
+        Effect.flatMap(result => Deferred.succeed(done, result)),
+        Effect.forkChild,
+      );
+      let prior = 0;
+      let grants = 0;
+      while (!(yield* Deferred.isDone(done))) {
+        if (grant.paused) {
+          expect(visited).toBeGreaterThanOrEqual(prior);
+          expect(visited).toBeLessThanOrEqual(count);
+          prior = visited;
+          grants++;
+          expect(grant.continue()).toBe(true);
+        }
+        yield* Effect.callback<void>(resume => {
+          // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Exercise the real asynchronous directory boundary.
+          const timer = setTimeout(() => resume(Effect.void), 0);
+          return Effect.sync(() => clearTimeout(timer));
+        });
+      }
+      const result = yield* Deferred.await(done);
+      expect(grants).toBeGreaterThanOrEqual(1);
+      expect(Exit.isSuccess(result)).toBe(!duplicate);
+      expect(visited).toBe(count);
+    }).pipe(provide),
+  {arbitrary: {runs: 16}},
+);
+
+it.effect('accounts metadata entries and both matching header and full-file reads', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-grant-accounting-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    const content = `MEMORY\nkind: durable\nmemory_id: tn_target\n\n${EffectString.repeat(100000)('x')}`;
+    yield* fs.writeFileString(path.join(root, 'target.md'), content);
+    yield* fs.writeFileString(path.join(root, 'ignored.bin'), 'ignored');
+    let bytes = 0;
+    let entries = 0;
+    yield* resolvePreviewMemoryIdentity({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {
+      grant: {
+        take: async (readBytes, readEntries) => {
+          bytes += readBytes;
+          entries += readEntries;
+        },
+      },
+    });
+    expect(entries).toBe(2);
+    expect(bytes).toBeGreaterThan(content.length);
+  }).pipe(provide),
+);
+
+it.effect('resumes a matching-file read across byte grants', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-byte-grant-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(
+      path.join(root, 'target.md'),
+      `MEMORY\nkind: durable\nmemory_id: tn_target\n\n${EffectString.repeat(100000)('x')}`,
+    );
+    const grant = createPreviewScanGrant(yield* Effect.abortSignal, {bytes: 65536, entries: 20, milliseconds: 60000});
+    const done = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+    yield* resolvePreviewMemoryIdentity({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {
+      grant,
+    }).pipe(
+      Effect.exit,
+      Effect.flatMap(result => Deferred.succeed(done, result)),
+      Effect.forkChild,
+    );
+    let continuations = 0;
+    while (!(yield* Deferred.isDone(done))) {
+      if (grant.paused) {
+        continuations++;
+        expect(grant.continue()).toBe(true);
+      }
+      yield* Effect.callback<void>(resume => {
+        // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Exercise the real asynchronous file boundary.
+        const timer = setTimeout(() => resume(Effect.void), 0);
+        return Effect.sync(() => clearTimeout(timer));
+      });
+    }
+    expect(continuations).toBeGreaterThanOrEqual(2);
+    expect(Exit.isSuccess(yield* Deferred.await(done))).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect('closes a paused scan iterator when its grant expires', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-grant-expire-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(path.join(root, 'file.md'), 'MEMORY\nkind: durable\nmemory_id: tn_target\n\nBody');
+    // oxlint-disable-next-line effecttsgo/abort-controller-in-effect -- Simulate the listener explicitly expiring its owned scan.
+    const controller = new AbortController();
+    const grant = createPreviewScanGrant(controller.signal, {bytes: 1024 * 1024, entries: 1, milliseconds: 60000});
+    let closed = false;
+    const fiber = yield* resolvePreviewMemoryIdentity(
+      {...unusedConfig, agentContextHome: home},
+      'threadnote://memory/tn_target',
+      {
+        grant,
+        directoryNames: async function* () {
+          try {
+            yield 'file.md';
+          } finally {
+            closed = true;
+          }
+        },
+      },
+    ).pipe(Effect.exit, Effect.forkChild);
+    while (!grant.paused) {
+      yield* Effect.callback<void>(resume => {
+        // oxlint-disable-next-line effecttsgo/global-timers-in-effect -- Exercise the real asynchronous directory boundary.
+        const timer = setTimeout(() => resume(Effect.void), 0);
+        return Effect.sync(() => clearTimeout(timer));
+      });
+    }
+    controller.abort();
+    expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true);
+    expect(closed).toBe(true);
+  }).pipe(provide),
+);
+
 it.effect('fails closed when a scanned directory changes between batches', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -464,7 +710,7 @@ it.effect('fails closed when a scanned directory changes between batches', () =>
     let changed = false;
     const result = yield* Effect.exit(
       resolvePreviewMemoryIdentity({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {
-        entriesPerSlice: 2,
+        entriesPerSlice: 1,
         yieldNow: () => {
           if (changed) return Effect.void;
           changed = true;

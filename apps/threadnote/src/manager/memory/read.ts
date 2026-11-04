@@ -7,6 +7,7 @@ import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {runtimeTextDirectoryNames} from '@threadnote/platform/system';
+import type {PreviewScanGrant} from '../../preview/server.js';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
 /** A header may span the entire allowed file. Never truncate it to infer absence. */
@@ -14,7 +15,7 @@ const readIdentityHeader = (
   fs: FileSystem.FileSystem,
   file: string,
   expectedSize: number,
-  checkpoint: (bytes: number) => Effect.Effect<void>,
+  checkpoint: (bytes: number, entries: number) => Effect.Effect<void, unknown>,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -26,14 +27,15 @@ const readIdentityHeader = (
       let length = 0;
       let header: string | undefined;
       while (length <= expectedSize) {
-        const chunk = yield* handle.readAlloc(Math.min(16 * 1024, expectedSize + 1 - length));
+        const size = Math.min(16 * 1024, expectedSize + 1 - length);
+        yield* checkpoint(size, 0);
+        const chunk = yield* handle.readAlloc(size);
         if (Option.isNone(chunk)) {
           if (length !== expectedSize) return undefined;
           text += decoder.decode();
           break;
         }
         length += chunk.value.length;
-        yield* checkpoint(chunk.value.length);
         if (length > expectedSize) return undefined;
         text += decoder.decode(chunk.value, {stream: true});
         const normalized = EffectString.replace(/\r\n?/gu, '\n')(EffectString.trimStart(text));
@@ -52,14 +54,21 @@ const readIdentityHeader = (
       return header ?? EffectString.replace(/\r\n?/gu, '\n')(EffectString.trim(text));
     }),
   );
-const readBoundedIdentityFile = (fs: FileSystem.FileSystem, file: string, expectedSize: number) =>
+const readBoundedIdentityFile = (
+  fs: FileSystem.FileSystem,
+  file: string,
+  expectedSize: number,
+  checkpoint: (bytes: number, entries: number) => Effect.Effect<void, unknown>,
+) =>
   Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(file, {flag: 'r'});
       const chunks: Uint8Array[] = [];
       let length = 0;
       while (length <= expectedSize) {
-        const chunk = yield* handle.readAlloc(Math.min(64 * 1024, expectedSize + 1 - length));
+        const size = Math.min(64 * 1024, expectedSize + 1 - length);
+        yield* checkpoint(size, 0);
+        const chunk = yield* handle.readAlloc(size);
         if (Option.isNone(chunk)) break;
         length += chunk.value.length;
         if (length > expectedSize) return undefined;
@@ -114,6 +123,7 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
     readonly bytesPerSlice?: number;
     readonly yieldNow?: () => Effect.Effect<void>;
     readonly directoryNames?: (path: string) => AsyncIterable<string>;
+    readonly grant?: PreviewScanGrant;
   } = {},
 ) {
   const memoryId = memoryIdFromIdentityAlias(uri);
@@ -127,10 +137,15 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   let sliceEntries = 0;
   let sliceBytes = 0;
   let sliceStarted = performance.now();
-  const checkpoint = (bytes = 0) =>
+  const checkpoint = (bytes = 0, entries = 0) =>
     Effect.gen(function* () {
+      if (options.grant)
+        yield* Effect.tryPromise({
+          try: () => options.grant!.take(bytes, entries),
+          catch: () => PreviewMemoryPathError.make({message: 'Memory preview scan was cancelled.'}),
+        });
       sliceBytes += bytes;
-      if (bytes === 0) sliceEntries++;
+      sliceEntries += entries;
       if (
         sliceEntries >= (options.entriesPerSlice ?? 16) ||
         sliceBytes >= (options.bytesPerSlice ?? 128 * 1024) ||
@@ -166,6 +181,7 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
             catch: () => PreviewMemoryPathError.make({message: 'Local memory directory is unavailable.'}),
           });
           if (next.done) break;
+          yield* checkpoint(0, 1);
           const name = next.value;
           const file = path.join(directory, name);
           const stat = yield* fs.lstat(file);
@@ -198,7 +214,7 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
               EffectString.normalize('NFC'),
             );
             const candidateUri = canonicalResourceUri('user', [config.user, 'memories', ...segments]);
-            const content = yield* readBoundedIdentityFile(fs, file, Number(stat.size));
+            const content = yield* readBoundedIdentityFile(fs, file, Number(stat.size), checkpoint);
             if (content === undefined)
               return yield* MemoryIdentityResolutionError.make({
                 memoryId,

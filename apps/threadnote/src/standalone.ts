@@ -762,10 +762,10 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
             const context = yield* Effect.context<ApplicationServices>();
             return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
               Effect.provideService(MemoryPreviewRead, {
-                prepare: async (config, uri, signal) => {
+                prepare: async (config, uri, signal, grant) => {
                   if (!previewResolver) throw new Error('Private memory resolver is unavailable.');
                   const resolved = await Effect.runPromiseWith(context)(
-                    previewResolver.resolvePreviewMemoryIdentity(config, uri),
+                    previewResolver.resolvePreviewMemoryIdentity(config, uri, {grant}),
                     {signal},
                   );
                   return () =>
