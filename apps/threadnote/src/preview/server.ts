@@ -1,4 +1,4 @@
-import {Cause, Console, Context, Effect, Option, Schema} from 'effect';
+import {Console, Context, Effect, Option, Schema} from 'effect';
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as SecureRandom from 'effect/crypto/SecureRandom';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -15,7 +15,7 @@ const CONTENT_SECURITY_POLICY =
 export class MemoryPreviewStartupError extends Schema.TaggedError<
   MemoryPreviewStartupError,
   {readonly brand: unique symbol}
->()('MemoryPreviewStartupError', {message: Schema.String, cause: Schema.optionalKey(Schema.Defect())}) {}
+>()('MemoryPreviewStartupError', {message: Schema.String}) {}
 
 interface PreviewListener {
   readonly port?: number;
@@ -138,11 +138,10 @@ export function runMemoryPreview(
   );
 }
 
-function previewStartupFailure(cause: Cause.Cause<unknown>) {
+function previewStartupFailure() {
   return Effect.fail(
     MemoryPreviewStartupError.make({
       message: 'Could not start the private memory preview. Retry, then run threadnote doctor if it persists.',
-      cause: Cause.squash(cause),
     }),
   );
 }

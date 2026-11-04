@@ -1,5 +1,5 @@
 import {describe, expect, it} from '@effect/vitest';
-import {Effect, Layer} from 'effect';
+import {Cause, Effect, Exit, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryLaunchUri} from '@threadnote/memory/navigation-link';
@@ -104,26 +104,33 @@ it.effect('reports a bounded bind error without exposing its cause in the user m
     if (!(error instanceof Error)) return;
     expect(error.message).toContain('Retry');
     expect(error.message).not.toContain('sensitive bind detail');
-    expect(error.cause).toBeInstanceOf(Error);
+    expect(error.cause).toBeUndefined();
   }).pipe(provide),
 );
 
 it.effect('closes a bound listener when the OS opener fails', () =>
   Effect.gen(function* () {
     let stopped = false;
-    const error = yield* runMemoryPreview(unusedConfig, launchUri, {
+    let openedUrl = '';
+    const exit = yield* runMemoryPreview(unusedConfig, launchUri, {
       listen: () => ({
         port: 43118,
         stop: () => {
           stopped = true;
         },
       }),
-      openUrl: () => Effect.die(new Error('sensitive opener detail')),
-    }).pipe(Effect.flip);
-    expect(error).toBeInstanceOf(Error);
-    if (!(error instanceof Error)) return;
-    expect(error.message).toContain('threadnote doctor');
-    expect(error.message).not.toContain('sensitive opener detail');
+      openUrl: url => {
+        openedUrl = url;
+        return Effect.die(new Error(`sensitive opener detail: ${url}`));
+      },
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (!Exit.isFailure(exit)) return;
+    expect(openedUrl).toMatch(/^http:\/\/127\.0\.0\.1:/u);
+    const formatted = Cause.pretty(exit.cause);
+    expect(formatted).toContain('threadnote doctor');
+    expect(formatted).not.toContain('sensitive opener detail');
+    expect(formatted).not.toContain(openedUrl);
     expect(stopped).toBe(true);
   }).pipe(provide),
 );
