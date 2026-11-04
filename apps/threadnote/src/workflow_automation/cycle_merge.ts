@@ -1,5 +1,5 @@
 import {Array as EffectArray, String as EffectString} from 'effect';
-import {Effect, Record as EffectRecord} from 'effect';
+import {Effect, Exit, Record as EffectRecord} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -11,6 +11,12 @@ import {
   type NativeCycleSnapshot,
 } from '@threadnote/workflow-automations/cycle-review';
 import type {NativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {
+  readNativeWorkflowState,
+  writePreparedNativeWorkflowState,
+  type PreparedNativeWorkflowStateWrite,
+} from './store.js';
 import {captureNativeCycleSource, nativeCycleIsAncestor, readNativeCycleTreeEntries} from './cycle_git.js';
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'invalid-ordinary-merge', message});
@@ -167,6 +173,7 @@ export const retainNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycl
     [snapshot.pinnedRef, snapshot.tree],
   ];
   const operations: string[] = [];
+  const created: {readonly ref: string; readonly object: string}[] = [];
   for (const [ref, object] of refs) {
     const existing = yield* runCommandEffect(
       'git',
@@ -177,8 +184,10 @@ export const retainNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycl
       if (EffectString.trim(existing.stdout) !== object)
         return yield* fail('An immutable merge pin already names another object.');
       operations.push(`verify ${ref} ${object}`);
-    } else if (existing.exitCode === 1 || existing.exitCode === 128) operations.push(`create ${ref} ${object}`);
-    else return yield* fail('A merge pin could not be inspected.');
+    } else if (existing.exitCode === 1 || existing.exitCode === 128) {
+      operations.push(`create ${ref} ${object}`);
+      created.push({ref, object});
+    } else return yield* fail('A merge pin could not be inspected.');
   }
   const baseRef = yield* git(repo, [
     'rev-parse',
@@ -215,6 +224,67 @@ export const retainNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycl
     timeoutMs: 30_000,
     maxOutputBytes: 4096,
   });
+  return created;
+});
+
+const recoveryRequired = (message: string) =>
+  WorkflowAutomationError.make({
+    code: 'ordinary-merge-recovery-required',
+    message,
+  });
+
+/** A failed write is not proof of non-admission: rename can have committed before its caller observes failure. */
+export const persistNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycle.persistOrdinaryMerge')(function* (
+  config: RuntimeConfig,
+  repo: string,
+  snapshot: NativeCycleSnapshot,
+  prior: NativeCycleSnapshot,
+  baseline: NativeCycleRuntime['baselines'][string],
+  phase: NativeCyclePlan['phases'][number],
+  prepared: PreparedNativeWorkflowStateWrite,
+  expectedRevision: string,
+) {
+  return yield* Effect.uninterruptible(
+    Effect.gen(function* () {
+      // Settle filesystem operations before readback/cleanup; interruption must not leave a late rename racing rollback.
+      const created = yield* retainNativeCycleOrdinaryMerge(repo, snapshot, prior, baseline, phase);
+      const written = yield* Effect.exit(writePreparedNativeWorkflowState(config, prepared, expectedRevision));
+      if (Exit.isSuccess(written)) return written.value;
+      const observed = yield* Effect.exit(readNativeWorkflowState(config, prepared.state.runId));
+      if (Exit.isSuccess(observed) && observed.value?.revision === prepared.revision) return observed.value;
+      if (Exit.isFailure(observed) || observed.value?.revision !== expectedRevision)
+        return yield* recoveryRequired(
+          'Native snapshot admission could not be established after a failed write. Retention pins were kept; inspect this run and snapshot before retrying.',
+        );
+      if (created.length) {
+        // Never delete pre-existing refs or follow a symbolic ref to another target. Expected objects fence replacements.
+        const cleanup = yield* Effect.exit(
+          runCommandEffect('git', ['--no-optional-locks', '-C', repo, 'update-ref', '--stdin'], {
+            input: new TextEncoder().encode(
+              EffectArray.join(
+                [
+                  'start',
+                  'option no-deref',
+                  ...EffectArray.map(created, item => `delete ${item.ref} ${item.object}`),
+                  'prepare',
+                  'commit',
+                  '',
+                ],
+                '\n',
+              ),
+            ),
+            timeoutMs: 30_000,
+            maxOutputBytes: 4096,
+          }),
+        );
+        if (Exit.isFailure(cleanup))
+          return yield* recoveryRequired(
+            'Native snapshot was not admitted, but conditional retention-pin cleanup could not be verified. Inspect this run and snapshot refs before retrying.',
+          );
+      }
+      return yield* Effect.failCause(written.cause);
+    }),
+  );
 });
 
 export function hasNativeCycleMergePlanBinding(

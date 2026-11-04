@@ -1,10 +1,21 @@
 import {Array as EffectArray, String as EffectString} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Result, Schema} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, PlatformError, Result, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {NativeCycleSnapshotSchema, type NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
+import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  prepareNativeWorkflowStateWrite,
+  readNativeWorkflowState,
+  withNativeWorkflowLock,
+  writeNativeWorkflowState,
+} from '../../src/workflow_automation/store.js';
+import {stableJson} from '../../src/workflow_memory/protocol.js';
+import {workflowJournalLimits} from '../../src/workflow_memory/journal_codec.js';
+import {pinNativeCycleTree} from '../../src/workflow_automation/cycle_git.js';
 import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
 
 const report = (snapshot: NativeCycleSnapshot, mode: 'full' | 'incremental' = 'full') => ({
@@ -24,6 +35,49 @@ const refused = <A, E>(result: Result.Result<A, E>, code?: string) => {
   expect(Result.isFailure(result)).toBe(true);
   if (code && Result.isFailure(result)) expect(result.failure).toMatchObject({code});
 };
+const syntheticIo = (path: string) =>
+  PlatformError.systemError({
+    _tag: 'Unknown',
+    module: 'FileSystem',
+    method: 'rename',
+    description: 'Private merge receipt write fault',
+    pathOrDescriptor: path,
+  });
+const retentionRefs = (f: Effect.Success<ReturnType<typeof mergeFixture>>) =>
+  f
+    .git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])
+    .pipe(Effect.map(result => result.stdout));
+const capacityAttempt = (index: number, report: string) => ({
+  id: `capacity-${index}`,
+  snapshotId: 'prior',
+  digest: sha256HexSync(report),
+  status: 'invalid' as const,
+  message: '',
+  report,
+});
+
+/** A real valid compressed state one byte below the fixed logical ceiling, not a lowered test limit. */
+function nearLogicalCapacity(state: NativeWorkflowState): NativeWorkflowState {
+  const cycle = state.cycle!;
+  const plan = {...cycle.plans[0], completion: EffectString.repeat(900_000)('x')};
+  const attempts = [...cycle.attempts];
+  const grown = {
+    ...state,
+    cycle: {...cycle, plans: [...cycle.plans, ...Array.from({length: 64 - cycle.plans.length}, () => plan)], attempts},
+  };
+  let remaining =
+    workflowJournalLimits.logicalBytes - 1 - new TextEncoder().encode(stableJson(grown) + '\n').byteLength;
+  for (let index = 0; remaining > 0; index++) {
+    const overhead = new TextEncoder().encode(stableJson(capacityAttempt(index, ''))).byteLength + 1;
+    expect(remaining).toBeGreaterThanOrEqual(overhead);
+    const length = Math.min(65_536, remaining - overhead);
+    attempts.push(capacityAttempt(index, EffectString.repeat(length)('x')));
+    remaining -= overhead + length;
+  }
+  expect(attempts.length).toBeLessThanOrEqual(512);
+  expect(new TextEncoder().encode(stableJson(grown) + '\n').byteLength).toBe(workflowJournalLimits.logicalBytes - 1);
+  return decodeNativeWorkflowState(grown);
+}
 const mergeFixture = (large = false) =>
   Effect.gen(function* () {
     const f = yield* fixture(['one', 'two'], 'local', false, false, false);
@@ -109,6 +163,252 @@ const mergeFixture = (large = false) =>
   });
 
 describe('ordinary merge native qualification', () => {
+  effectIt.effect(
+    'preflights the complete state at the real logical codec boundary before creating any pins',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const stored = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
+        const grown = nearLogicalCapacity(stored.state);
+        yield* withNativeWorkflowLock(
+          f.config,
+          'native-run',
+          false,
+          writeNativeWorkflowState(f.config, grown, stored.revision),
+        );
+        const before = yield* f.fs.readFileString(f.statePath());
+        const journal = yield* f.fs.readFileString(f.journalPath(stored.state.bindingId));
+        const refs = yield* retentionRefs(f);
+        refused(yield* f.capture().pipe(Effect.result), 'state-capacity');
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+        expect(yield* f.fs.readFileString(f.journalPath(stored.state.bindingId))).toBe(journal);
+        expect(yield* retentionRefs(f)).toBe(refs);
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
+    'uses the same whole-state preflight for the fixed stored-byte codec ceiling',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const stored = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
+        const before = yield* f.fs.readFileString(f.statePath());
+        const refs = yield* retentionRefs(f);
+        let seed = 123456789;
+        const attempts = [...stored.state.cycle!.attempts];
+        for (let index = 0; index < 320; index++) {
+          const words = new Uint32Array(12_288);
+          for (let word = 0; word < words.length; word++) {
+            seed ^= seed << 13;
+            seed ^= seed >>> 17;
+            seed ^= seed << 5;
+            words[word] = seed >>> 0;
+          }
+          attempts.push(capacityAttempt(index, new Uint8Array(words.buffer).toBase64()));
+        }
+        const candidate = {...stored.state, cycle: {...stored.state.cycle!, attempts}};
+        expect(new TextEncoder().encode(stableJson(candidate)).byteLength).toBeLessThan(
+          workflowJournalLimits.logicalBytes,
+        );
+        refused(yield* prepareNativeWorkflowStateWrite(candidate).pipe(Effect.result), 'state-capacity');
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+        expect(yield* retentionRefs(f)).toBe(refs);
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
+    'rolls back only newly created exact refs when failed I/O leaves the original durable state',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const stored = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
+        const tree = EffectString.trim((yield* f.git(['rev-parse', 'HEAD^{tree}'])).stdout);
+        const preexisting = yield* pinNativeCycleTree(f.repo, stored.state.bindingId, f.fields.snapshotId, tree);
+        const refs = yield* retentionRefs(f);
+        const before = yield* f.fs.readFileString(f.statePath());
+        const journal = yield* f.fs.readFileString(f.journalPath(stored.state.bindingId));
+        const fs = yield* FileSystem.FileSystem;
+        const stateFile = yield* fs.realPath(f.statePath());
+        for (const point of ['write', 'rename']) {
+          let injected = false;
+          const failed = FileSystem.FileSystem.of({
+            ...fs,
+            writeFileString: (path, data, options) =>
+              point === 'write' && EffectString.startsWith(stateFile + '.')(path) && EffectString.endsWith('.tmp')(path)
+                ? Effect.suspend(() => {
+                    injected = true;
+                    return Effect.fail(syntheticIo(path));
+                  })
+                : fs.writeFileString(path, data, options),
+            rename: (from, to) =>
+              point === 'rename' && to === stateFile
+                ? Effect.suspend(() => {
+                    injected = true;
+                    return Effect.fail(syntheticIo(to));
+                  })
+                : fs.rename(from, to),
+          });
+          refused(yield* f.capture().pipe(Effect.provideService(FileSystem.FileSystem, failed), Effect.result));
+          expect(injected).toBe(true);
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+          expect(yield* f.fs.readFileString(f.journalPath(stored.state.bindingId))).toBe(journal);
+          expect(yield* retentionRefs(f)).toBe(refs);
+          expect(EffectString.trim((yield* f.git(['rev-parse', preexisting])).stdout)).toBe(tree);
+        }
+        expect((yield* f.capture()).snapshotId).toBe(f.fields.snapshotId);
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
+    'keeps all pins and returns the admitted receipt when rename committed before reporting an I/O failure',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const fs = yield* FileSystem.FileSystem;
+        const stateFile = yield* fs.realPath(f.statePath());
+        let injected = false;
+        const failed = FileSystem.FileSystem.of({
+          ...fs,
+          rename: (from, to) =>
+            to === stateFile && !injected
+              ? Effect.gen(function* () {
+                  injected = true;
+                  yield* fs.rename(from, to);
+                  return yield* syntheticIo(to);
+                })
+              : fs.rename(from, to),
+        });
+        const snapshot = yield* f.capture().pipe(Effect.provideService(FileSystem.FileSystem, failed));
+        expect(injected).toBe(true);
+        expect(snapshot.snapshotId).toBe(f.fields.snapshotId);
+        for (const ref of [
+          snapshot.pinnedRef,
+          snapshot.ordinaryMergeQualificationV1!.priorHeadRef,
+          snapshot.ordinaryMergeQualificationV1!.currentHeadRef,
+          snapshot.ordinaryMergeQualificationV1!.priorBaseRef,
+          snapshot.ordinaryMergeQualificationV1!.currentBaseRef,
+        ])
+          expect(yield* retentionRefs(f)).toContain(ref);
+        expect((yield* f.read()).snapshots.at(-1)!.snapshot).toEqual(snapshot);
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
+    'settles an in-flight rename before cancellation can race retention cleanup',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const fs = yield* FileSystem.FileSystem;
+        const stateFile = yield* fs.realPath(f.statePath());
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const held = FileSystem.FileSystem.of({
+          ...fs,
+          rename: (from, to) =>
+            to === stateFile
+              ? Effect.gen(function* () {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  yield* fs.rename(from, to);
+                })
+              : fs.rename(from, to),
+        });
+        yield* Effect.acquireUseRelease(
+          f.capture().pipe(Effect.provideService(FileSystem.FileSystem, held), Effect.forkChild),
+          child =>
+            Effect.gen(function* () {
+              yield* Deferred.await(entered);
+              yield* Effect.sync(() => child.interruptUnsafe());
+              yield* Deferred.succeed(release, undefined);
+              const exit = yield* Fiber.await(child);
+              expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true);
+              const snapshot = (yield* f.read()).snapshots.at(-1)!.snapshot;
+              expect(snapshot.snapshotId).toBe(f.fields.snapshotId);
+              expect(yield* retentionRefs(f)).toContain(snapshot.pinnedRef);
+              expect(yield* retentionRefs(f)).toContain(snapshot.ordinaryMergeQualificationV1!.currentHeadRef);
+            }),
+          child => Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.interrupt(child))),
+        );
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
+    'retains uncertain evidence when readback is unavailable, changed, or conditional cleanup loses an exact ref',
+    () =>
+      Effect.gen(function* () {
+        for (const point of ['unreadable', 'changed-state', 'changed-ref']) {
+          const f = yield* mergeFixture();
+          const stored = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
+          const before = yield* f.fs.readFileString(f.statePath());
+          const journal = yield* f.fs.readFileString(f.journalPath(stored.state.bindingId));
+          const priorRefs = yield* retentionRefs(f);
+          const fs = yield* FileSystem.FileSystem;
+          const stateFile = yield* fs.realPath(f.statePath());
+          const executor = yield* CommandExecutor;
+          let injected = false;
+          const changedRef = `refs/threadnote/cycles/merge-head/${sha256HexSync(JSON.stringify([stored.state.bindingId, 'merge-head', f.fields.snapshotId]))}`;
+          const failed = FileSystem.FileSystem.of({
+            ...fs,
+            rename: (from, to) =>
+              to === stateFile && !injected
+                ? Effect.gen(function* () {
+                    injected = true;
+                    if (point === 'changed-state') {
+                      const cycle = stored.state.cycle!;
+                      const changed = {
+                        ...stored.state,
+                        cycle: {
+                          ...cycle,
+                          state: {
+                            ...cycle.state,
+                            phases: {
+                              ...cycle.state.phases,
+                              one: {
+                                ...cycle.state.phases.one,
+                                reason: 'A separate durable revision superseded the old image',
+                              },
+                            },
+                          },
+                        },
+                      };
+                      yield* fs.writeFileString(to, stableJson(decodeNativeWorkflowState(changed)) + '\n');
+                    }
+                    if (point === 'changed-ref')
+                      yield* f
+                        .git(['update-ref', changedRef, f.prior.head])
+                        .pipe(Effect.provideService(CommandExecutor, executor), Effect.orDie);
+                    return yield* syntheticIo(to);
+                  })
+                : fs.rename(from, to),
+            readFileString: (path, encoding) =>
+              point === 'unreadable' && injected && path === stateFile
+                ? Effect.fail(syntheticIo(path))
+                : fs.readFileString(path, encoding),
+          });
+          refused(
+            yield* f.capture().pipe(Effect.provideService(FileSystem.FileSystem, failed), Effect.result),
+            'ordinary-merge-recovery-required',
+          );
+          expect(injected).toBe(true);
+          expect(yield* f.fs.readFileString(f.journalPath(stored.state.bindingId))).toBe(journal);
+          const refs = yield* retentionRefs(f);
+          expect(EffectString.split(EffectString.trim(refs), '\n').length).toBe(
+            EffectString.split(EffectString.trim(priorRefs), '\n').length + 5,
+          );
+          if (point !== 'changed-state') expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+          expect((yield* f.read()).snapshots.at(-1)!.snapshot.snapshotId).toBe(f.prior.snapshotId);
+          if (point === 'changed-ref')
+            expect(EffectString.trim((yield* f.git(['rev-parse', changedRef])).stdout)).toBe(f.prior.head);
+        }
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
   effectIt.effect(
     'conserves 295=179+116 with a moved same-label base, immutable history and the exact current-base phase patch',
     () =>

@@ -39,7 +39,12 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
-import {readNativeWorkflowState, writeNativeWorkflowState, withNativeWorkflowLock} from './store.js';
+import {
+  readNativeWorkflowState,
+  writeNativeWorkflowState,
+  withNativeWorkflowLock,
+  prepareNativeWorkflowStateWrite,
+} from './store.js';
 import {
   captureNativeCycleSource,
   pinNativeCycleTree,
@@ -53,7 +58,7 @@ import {
 import {nativeWorkflowError} from './memory.js';
 import {
   prepareNativeCycleOrdinaryMerge,
-  retainNativeCycleOrdinaryMerge,
+  persistNativeCycleOrdinaryMerge,
   hasNativeCycleMergePlanBinding,
 } from './cycle_merge.js';
 import {bindNativeCycleDeliveryBase} from './cycle_delivery.js';
@@ -877,9 +882,17 @@ export const runNativeCycle = <R>(
           };
           if (merge) {
             // Validate everything before touching Git refs; the final fence is the last source read before persistence.
-            const canonical = yield* from(() => decodeNativeCycleRuntime(JSON.parse(stableJson(updated))));
-            yield* retainNativeCycleOrdinaryMerge(repo, snapshot, prior!, baseline, selected);
-            const saved = yield* writeNativeWorkflowState(config, {...stored.state, cycle: canonical}, stored.revision);
+            const prepared = yield* prepareNativeWorkflowStateWrite({...stored.state, cycle: updated});
+            const saved = yield* persistNativeCycleOrdinaryMerge(
+              config,
+              repo,
+              snapshot,
+              prior!,
+              baseline,
+              selected,
+              prepared,
+              stored.revision,
+            );
             return {status: 'ok', revision: saved.revision, snapshot: {snapshot, incoming: scope.incoming}};
           }
           return {status: 'ok', revision: yield* save(updated), snapshot: {snapshot, incoming: scope.incoming}};

@@ -38,11 +38,25 @@ remain immutable. The existing 256-path phase permission bounds and 128-file
 source-inspection bound remain unchanged. Qualified current-base changed sets
 are bounded at 256; the existing 8192-entry audit bound remains unchanged.
 
-Before writing, the runtime validates the complete candidate, then rechecks the
-current HEAD/tree, phase branch, selected base, prior/baseline pins, and witnessed
-objects. A failed fence writes no snapshot, journal, or new pin. Commit/tree
-retention uses immutable refs and one Git transaction that also verifies the
-source/base/prior refs. Native-state persistence retains the exact CAS check.
+Before writing, the runtime validates and serializes the complete prospective
+native workflow state with the writer's shared codec and fixed 64 MiB logical /
+16 MiB stored limits. It then rechecks the current HEAD/tree, phase branch,
+selected base, prior/baseline pins, and witnessed objects. A failed preflight or
+fence writes no snapshot, journal, or new pin. Commit/tree retention uses
+immutable refs and one Git transaction that also verifies the source/base/prior
+refs. Native-state persistence consumes those exact prepared bytes and retains
+the exact CAS check.
+
+Once retention starts, persistence and recovery settle before interruption can
+leave the critical section; a late rename must never race pin cleanup.
+If persistence reports failure, a fresh state read determines recovery. An exact
+candidate revision proves admission and returns its receipt. Only the exact
+original revision permits rollback: a conditional Git transaction deletes only
+refs created by this attempt, checks every expected object, and never follows
+symbolic refs. Pre-existing pins remain untouched. Unreadable or different state
+retains the pins and reports `ordinary-merge-recovery-required`; failed conditional
+cleanup reports the same code without claiming that cleanup completed. Inspect
+the original run and snapshot refs before retrying either uncertain outcome.
 
 ## Compatibility
 
