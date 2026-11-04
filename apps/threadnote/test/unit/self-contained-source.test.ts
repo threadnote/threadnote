@@ -17,12 +17,21 @@ const workflowSources = EffectArray.map(
   path => ({path, content: readFileSync(path, 'utf8')}),
 );
 
+const fixtureDrainSources = EffectArray.map(
+  ['apps/threadnote/src/recall/embedding_worker_process.ts', 'packages/inference/src/background/worker-control.ts'],
+  path => ({path, content: readFileSync(path, 'utf8')}),
+);
+
 describe('self-contained source Python boundary', () => {
   it.each(workflowSources)('accepts only retained workflow ownership metadata in $path', ({path, content}) => {
     expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
     expect(hasUndeclaredPythonRuntimeReference(path, Effect.pipe(content, EffectString.replaceAll('\n', '\r\n')))).toBe(
       false,
     );
+  });
+
+  it.each(fixtureDrainSources)('keeps fixture deadline documentation self-contained in $path', ({path, content}) => {
+    expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
   });
 
   it('rejects Python execution added to every workflow metadata source or another runtime file', () => {
@@ -37,6 +46,7 @@ describe('self-contained source Python boundary', () => {
         command => {
           for (const {path, content} of [
             ...workflowSources,
+            ...fixtureDrainSources,
             {path: 'apps/threadnote/src/threadnote.ts', content: ''},
           ]) {
             expect(hasUndeclaredPythonRuntimeReference(path, `${content}\nspawn('${command}', ['app.py']);`)).toBe(

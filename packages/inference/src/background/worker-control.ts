@@ -406,7 +406,7 @@ export const createBackgroundWorkerFixtureDrain = Effect.fn('backgroundWorker.cr
  * Close launches and await children using one original UNIX-epoch-millisecond deadline.
  * Capture it from the same Effect Clock, e.g. `(yield* Clock.currentTimeMillis) + budgetMilliseconds`,
  * at the original fixture lifetime boundary, including producer shutdown. Reuse it unchanged on retries.
- * Python monotonic seconds and native-read monotonic bigint deadlines cannot be passed directly.
+ * External monotonic-clock seconds and native-read monotonic bigint deadlines cannot be passed directly.
  */
 export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFixture')(function* (
   capability: BackgroundWorkerFixtureDrain,

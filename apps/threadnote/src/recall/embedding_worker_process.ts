@@ -134,7 +134,7 @@ export const createRecallEmbeddingWorkerFixtureDrain = Effect.fn('recall.createW
 /**
  * UNIX epoch milliseconds from the same Effect Clock.currentTimeMillis as the original fixture lifetime.
  * Capture once before the body/producer shutdown; retries reuse it without extending the caller budget.
- * Never pass Python monotonic seconds or a native-read monotonic bigint deadline directly.
+ * Never pass External monotonic-clock seconds or a native-read monotonic bigint deadline directly.
  */
 export const drainRecallEmbeddingWorkerFixture = drainBackgroundWorkerFixture;
 
