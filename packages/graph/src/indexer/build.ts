@@ -1000,6 +1000,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
           incrementalAssessment?.mode !== 'eligible'
         ? 'extractor-context-changed'
         : undefined;
+  let finalMaterializationProgress: (() => Effect.Effect<void, unknown>) | undefined;
   let incrementalApplied = false;
   let incrementalStorageTelemetry = input.incrementalMaterializationStorageTelemetry;
   if (incrementalAssessment?.mode === 'eligible') {
@@ -1038,22 +1039,48 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
         if (extractionDiagnostics.length >= 100) break;
         if (!extractionDiagnostics.includes(diagnostic)) extractionDiagnostics.push(diagnostic);
       }
-      yield* input.onProgress?.({
+      const graphMetrics =
+        incrementalStorageTelemetry === undefined
+          ? undefined
+          : incrementalMaterializationMetrics(
+              incrementalAssessment,
+              incrementalStorageTelemetry,
+              input.inventory.dirty,
+            );
+      const materializationProgress = {
         completed: materializedFiles,
-        ...(incrementalStorageTelemetry === undefined
-          ? {}
-          : {
-              metrics: incrementalMaterializationMetrics(
-                incrementalAssessment,
-                incrementalStorageTelemetry,
-                input.inventory.dirty,
-              ),
-            }),
+        ...(graphMetrics === undefined ? {} : {metrics: graphMetrics}),
         phase: 'materializing',
         reused: incrementalReusedFiles,
         total: incrementalAssessment.files.length,
         unit: 'files',
-      }) ?? Effect.void;
+      } satisfies Extract<CodeGraphProgress, {readonly phase: 'materializing'}>;
+      const completedSourceBytes = EffectArray.reduce(
+        incrementalAssessment.files,
+        0,
+        (total, file) => total + file.size,
+      );
+      finalMaterializationProgress = () =>
+        input.onProgress?.({
+          ...materializationProgress,
+          metrics: {
+            ...(graphMetrics ?? {
+              batchesCompleted: 1,
+              batchesTotal: 1,
+              mode: input.inventory.dirty ? 'incremental-overlay' : 'incremental-clean',
+              sourceBytesCompleted: completedSourceBytes,
+              sourceBytesTotal: completedSourceBytes,
+            }),
+            candidateIndex: {...candidateEvidence.progress},
+            stageMilliseconds: {
+              ...graphMetrics?.stageMilliseconds,
+              'writing-candidates':
+                (graphMetrics?.stageMilliseconds?.['writing-candidates'] ?? 0) +
+                candidateEvidence.progress.stagingMilliseconds,
+            },
+          },
+        }) ?? Effect.void;
+      yield* input.onProgress?.(materializationProgress) ?? Effect.void;
     } else {
       fallbackReason = 'staging-identity-mismatch';
     }
@@ -1686,14 +1713,16 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       );
       yield* refreshStorageFiles(true);
     }
-    yield* input.onProgress?.({
-      completed: materializedFiles,
-      metrics: metrics(factsBytesCompleted),
-      phase: 'materializing',
-      reused: reusedFiles,
-      total: totalFiles,
-      unit: 'files',
-    }) ?? Effect.void;
+    finalMaterializationProgress = () =>
+      input.onProgress?.({
+        completed: materializedFiles,
+        metrics: metrics(factsBytesCompleted),
+        phase: 'materializing',
+        reused: reusedFiles,
+        total: totalFiles,
+        unit: 'files',
+      }) ?? Effect.void;
+    yield* finalMaterializationProgress();
   }
   const reusableBaseReceipt =
     incrementalApplied && input.inventory.dirty
@@ -1767,24 +1796,30 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       }),
   );
   if (input.store.stageResolutionCandidateIndex && input.store.finishResolutionCandidateIndex) {
-    if (incrementalApplied && incrementalAssessment?.mode === 'eligible')
-      yield* candidateEvidence.stageIncremental(incrementalAssessment);
-    if (directPersistentMaterialization || incrementalApplied) {
-      const complete = yield* input.store.finishResolutionCandidateIndex(
-        input.layout.databasePath,
-        {
+    yield* Effect.gen(function* () {
+      if (incrementalApplied && incrementalAssessment?.mode === 'eligible')
+        yield* candidateEvidence.stageIncremental(incrementalAssessment);
+      if (directPersistentMaterialization || incrementalApplied) {
+        const complete = yield* candidateEvidence.finish({
           snapshotId: ready.id,
           workspaceFingerprint: workspace.fingerprint,
           fileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.files),
           inheritedSnapshotId: input.committedBase?.foldForward?.logicalSnapshotId,
-        },
-        persistentCapacityGuard,
-      );
-      if (!complete && extractionDiagnostics.length < 100)
-        extractionDiagnostics.push(
-          'Resolution candidate evidence is incomplete or incompatible; future updates retain the existing safe discovery fallback.',
-        );
-    }
+        });
+        if (!complete && extractionDiagnostics.length < 100)
+          extractionDiagnostics.push(
+            'Resolution candidate evidence is incomplete or incompatible; future updates retain the existing safe discovery fallback.',
+          );
+      }
+    }).pipe(
+      Effect.ensuring(
+        // Publish the final cumulative snapshot after the builder's own timing finalizer.
+        // Failure in this added telemetry must not replace the original store failure.
+        directPersistentMaterialization || incrementalApplied
+          ? Effect.suspend(() => finalMaterializationProgress?.() ?? Effect.void).pipe(Effect.ignoreCause)
+          : Effect.void,
+      ),
+    );
   }
   const activated = yield* input.store.currentLexicalReadySnapshotById(input.layout.databasePath, ready.id);
   if (!activated) {

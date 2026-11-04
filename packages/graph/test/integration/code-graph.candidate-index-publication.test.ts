@@ -1,10 +1,13 @@
 import {it as effectIt} from '@effect/vitest';
-import {Context, Effect, FileSystem, Layer, Path, pipe} from 'effect';
+import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, Path, pipe} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {describe, expect} from 'vitest';
 import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {makeResolutionCandidateEvidenceBuilder} from '@threadnote/graph/indexer/candidate_evidence';
+import {emptyMaterializationReplayMetrics} from '@threadnote/graph/indexer/materialization';
+import {CodeGraphStoreError} from '@threadnote/graph/types';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
@@ -19,6 +22,7 @@ import {Database} from 'bun:sqlite';
 import * as EffectString from 'effect/String';
 import {resolutionCandidateFileEvidence} from '@threadnote/graph/materialization/candidate_evidence';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import {IndexPhaseTimeline, indexPhaseMeasurements} from '../../../../scripts/benchmark-code-graph.js';
 
 const platform = Layer.effect(
   SystemInfo,
@@ -74,7 +78,12 @@ const completeIndex = (databasePath: string, snapshotId: string) =>
     try {
       return db
         .query<{readonly count: number}, [string]>(
-          'SELECT COUNT(*) AS count FROM snapshot_candidate_receipts WHERE snapshot_id = ?',
+          `SELECT COUNT(*) AS count FROM snapshot_candidate_receipts AS receipt
+             JOIN snapshot_candidate_page_snapshots AS candidate ON candidate.snapshot_id = receipt.snapshot_id AND candidate.format_version = 3
+             JOIN snapshot_candidate_page_receipts AS proof ON proof.snapshot_key = candidate.snapshot_key AND proof.format_version = 3
+               AND proof.protocol_sha = candidate.protocol_sha AND proof.authority_token = candidate.authority_token
+             JOIN snapshot_candidate_authority AS authority ON authority.singleton = 1 AND authority.state = 'ready'
+               AND authority.token = candidate.authority_token WHERE receipt.snapshot_id = ?`,
         )
         .get(snapshotId)?.count;
     } finally {
@@ -84,6 +93,220 @@ const completeIndex = (databasePath: string, snapshotId: string) =>
 
 describe('candidate evidence publication and repeated structural updates', () => {
   effectIt.layer(CodeGraphIndexer.layer.pipe(Layer.provideMerge(dependencies)))(it => {
+    it.effect('counts successful, incomplete and failed finish work in the same cumulative candidate stage', () =>
+      Effect.gen(function* () {
+        const store = yield* CodeGraphStore;
+        const path = yield* Path.Path;
+        const registry = yield* CodeGraphLanguagePackRegistry;
+        let outcome: 'complete' | 'incomplete' | 'failure' = 'complete';
+        const carried: (string | undefined)[] = [];
+        const builder = makeResolutionCandidateEvidenceBuilder(
+          {
+            store: CodeGraphStore.of({
+              ...store,
+              stageResolutionCandidateIndex: () => TestClock.adjust(11),
+              finishResolutionCandidateIndex: (_database, identity) =>
+                Effect.gen(function* () {
+                  carried.push(identity.inheritedSnapshotId);
+                  yield* TestClock.adjust(37);
+                  if (outcome === 'failure') return yield* CodeGraphStoreError.of('controlled finish failure');
+                  return outcome === 'complete';
+                }),
+            }),
+            layout: codeGraphLayout(
+              path,
+              '/unopened-candidate-clock-fixture',
+              EffectString.repeat(64)('a'),
+              EffectString.repeat(64)('b'),
+            ),
+            building: {
+              id: 'building',
+              repositoryId: 'repository',
+              worktreeId: 'worktree',
+              commit: 'commit',
+              state: 'building',
+              dirty: false,
+              edgeCount: 0,
+              fileCount: 0,
+              symbolCount: 0,
+              extractorSet: 'extractor',
+            },
+            languagePacks: registry,
+          },
+          effect => effect,
+        );
+        yield* builder.stageFull({files: [], facts: [], bounded: [], warm: false, attributeFacts: facts => facts});
+        expect(builder.progress.stagingMilliseconds).toBe(11);
+        const graph = {...emptyMaterializationReplayMetrics(), attributedFilesCompleted: 7};
+        const telemetry = {cpuSystemMicroseconds: 0, cpuUserMicroseconds: 0, peakRssBytes: 0, rssBytes: 0};
+        const timeline = new IndexPhaseTimeline(0n, telemetry);
+        const observe = () =>
+          timeline.observe(
+            {
+              phase: 'materializing',
+              completed: 1,
+              total: 1,
+              reused: 0,
+              unit: 'files',
+              metrics: {
+                batchesCompleted: 1,
+                batchesTotal: 1,
+                sourceBytesCompleted: 0,
+                sourceBytesTotal: 0,
+                ...builder.metrics(graph, {
+                  loadingMilliseconds: 3,
+                  attributionMilliseconds: 5,
+                  stageMilliseconds: {'writing-candidates': 2},
+                }),
+              },
+            },
+            0n,
+            telemetry,
+          );
+        observe();
+        expect(timeline.materializationStageMilliseconds('writing-candidates')).toBe(13);
+        const identity = {
+          snapshotId: 'building',
+          workspaceFingerprint: 'workspace',
+          fileSetFingerprint: 'files',
+          inheritedSnapshotId: 'logical-donor',
+        };
+        expect(yield* builder.finish(identity)).toBe(true);
+        expect(builder.progress.stagingMilliseconds).toBe(48);
+        outcome = 'incomplete';
+        expect(yield* builder.finish(identity)).toBe(false);
+        expect(builder.progress.stagingMilliseconds).toBe(85);
+        outcome = 'failure';
+        expect(yield* builder.finish(identity).pipe(Effect.flip)).toMatchObject({
+          _tag: 'CodeGraphStoreError',
+          message: 'controlled finish failure',
+        });
+        expect(builder.progress.stagingMilliseconds).toBe(122);
+        expect(carried).toEqual(['logical-donor', 'logical-donor', 'logical-donor']);
+        const metrics = builder.metrics(graph, {
+          loadingMilliseconds: 3,
+          attributionMilliseconds: 5,
+          stageMilliseconds: {'writing-candidates': 2},
+        });
+        expect(metrics.graphMaterialization).toEqual({...graph, loadingMilliseconds: 3, attributionMilliseconds: 5});
+        expect(metrics.attributedFilesCompleted).toBe(7);
+        expect(metrics.candidateIndex.stagingMilliseconds).toBe(122);
+        expect(metrics.stageMilliseconds['writing-candidates']).toBe(124);
+        observe();
+        observe(); // The real benchmark consumer keeps the cumulative maximum, never sums event snapshots.
+        expect(timeline.materializationStageMilliseconds('writing-candidates')).toBe(124);
+        const reported = EffectArray.findFirst(
+          indexPhaseMeasurements('cold', timeline, false),
+          value => value.name === 'cold-materialization-stage-writing-candidates-n1',
+        );
+        expect(reported).toMatchObject({value: {unit: 'milliseconds', samples: 1, p95: 124, maximum: 124}});
+      }),
+    );
+
+    for (const callback of ['typed-error', 'sync-throw', 'die'] as const) {
+      for (const outcome of ['success', 'store-failure', 'interrupted'] as const) {
+        it.effect(`preserves ${outcome} when added final telemetry has ${callback}`, () =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const store = yield* CodeGraphStore;
+            const root = yield* fs.makeTempDirectoryScoped({prefix: 'candidate-final-telemetry-exit-'});
+            const repository = path.join(root, 'repository');
+            const home = path.join(root, 'home');
+            yield* fs.makeDirectory(repository);
+            yield* fs.makeDirectory(home);
+            yield* fs.writeFileString(path.join(repository, 'file.ts'), 'export const value = 1;\n');
+            yield* runCommandEffect('git', ['-C', repository, 'init', '--quiet']);
+            yield* runCommandEffect('git', ['-C', repository, 'add', '.']);
+            yield* runCommandEffect('git', [
+              '-C',
+              repository,
+              '-c',
+              'user.name=Fixture',
+              '-c',
+              'user.email=fixture@example.invalid',
+              '-c',
+              'core.hooksPath=/dev/null',
+              '-c',
+              'commit.gpgsign=false',
+              'commit',
+              '-qm',
+              'candidate telemetry fixture',
+            ]);
+            const originalFailure = CodeGraphStoreError.of('controlled original finish failure');
+            const telemetryDefect = new Error('controlled optional final telemetry defect');
+            let finishAttempted = false;
+            let finalCallbacks = 0;
+            let attemptedMilliseconds: number | undefined;
+            let reportedCandidateStage: number | undefined;
+            const observedStore = CodeGraphStore.of({
+              ...store,
+              finishResolutionCandidateIndex: (...args) =>
+                Effect.gen(function* () {
+                  const complete = yield* store.finishResolutionCandidateIndex!(...args);
+                  finishAttempted = true;
+                  if (outcome === 'store-failure') return yield* originalFailure;
+                  if (outcome === 'interrupted') return yield* Effect.failCause(Cause.interrupt(123));
+                  return complete;
+                }),
+            });
+            const indexer = Context.get(
+              yield* Layer.build(
+                Layer.fresh(CodeGraphIndexer.layer).pipe(Layer.provide(Layer.succeed(CodeGraphStore, observedStore))),
+              ),
+              CodeGraphIndexer,
+            );
+            const exit = yield* indexer
+              .index({
+                cwd: repository,
+                threadnoteHome: home,
+                sourceOnly: true,
+                vectorPolicy: 'off',
+                onProgress: current => {
+                  if (
+                    finishAttempted &&
+                    finalCallbacks === 0 &&
+                    current.phase === 'materializing' &&
+                    current.metrics?.candidateIndex
+                  ) {
+                    finalCallbacks += 1;
+                    attemptedMilliseconds = current.metrics.candidateIndex.stagingMilliseconds;
+                    reportedCandidateStage = current.metrics.stageMilliseconds?.['writing-candidates'];
+                    if (callback === 'sync-throw') throw telemetryDefect;
+                    if (callback === 'die') return Effect.die(telemetryDefect);
+                    return Effect.fail('controlled typed final telemetry failure');
+                  }
+                  return Effect.void;
+                },
+              })
+              .pipe(Effect.exit);
+            expect(finishAttempted).toBe(true);
+            expect(finalCallbacks).toBe(1);
+            expect(attemptedMilliseconds).toBeGreaterThanOrEqual(0);
+            expect(reportedCandidateStage).toBeGreaterThanOrEqual(attemptedMilliseconds ?? -1);
+            if (outcome === 'success') {
+              expect(Exit.isSuccess(exit)).toBe(true);
+              if (Exit.isSuccess(exit)) expect(exit.value.snapshot.state).toBe('ready');
+            } else {
+              expect(Exit.isFailure(exit)).toBe(true);
+              if (Exit.isFailure(exit)) {
+                expect(exit.cause.reasons).toHaveLength(1);
+                const reason = exit.cause.reasons[0];
+                if (outcome === 'store-failure') {
+                  expect(Cause.isFailReason(reason)).toBe(true);
+                  if (Cause.isFailReason(reason)) expect(reason.error).toBe(originalFailure);
+                } else {
+                  expect(Cause.isInterruptReason(reason)).toBe(true);
+                  if (Cause.isInterruptReason(reason)) expect(reason.fiberId).toBe(123);
+                }
+                expect(Cause.hasDies(exit.cause)).toBe(false);
+              }
+            }
+          }).pipe(TestClock.withLive),
+        );
+      }
+    }
+
     it.effect(
       'publishes ordinary graph facts when a valid wide reference cannot fit the optional normalized index',
       () =>
@@ -160,9 +383,27 @@ describe('candidate evidence publication and repeated structural updates', () =>
                 : original;
             },
           });
+          let finishReturned = false;
+          let terminalCandidateMetricsAfterFinish = false;
+          const observedStore = CodeGraphStore.of({
+            ...store,
+            finishResolutionCandidateIndex: (...args) =>
+              store.finishResolutionCandidateIndex!(...args).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    finishReturned = true;
+                  }),
+                ),
+              ),
+          });
           const context = yield* Layer.build(
             Layer.fresh(CodeGraphIndexer.layer).pipe(
-              Layer.provide(Layer.succeed(CodeGraphLanguagePackRegistry, fixtureRegistry)),
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(CodeGraphLanguagePackRegistry, fixtureRegistry),
+                  Layer.succeed(CodeGraphStore, observedStore),
+                ),
+              ),
             ),
           );
           const indexer = Context.get(context, CodeGraphIndexer);
@@ -187,7 +428,14 @@ describe('candidate evidence publication and repeated structural updates', () =>
             threadnoteHome: home,
             sourceOnly: true,
             vectorPolicy: 'off',
+            onProgress: current =>
+              Effect.sync(() => {
+                if (finishReturned && current.phase === 'materializing' && current.metrics?.candidateIndex)
+                  terminalCandidateMetricsAfterFinish = true;
+              }),
           });
+          expect(finishReturned).toBe(true);
+          expect(terminalCandidateMetricsAfterFinish).toBe(true);
           expect(built.snapshot.state).toBe('ready');
           expect(built.candidateIndexBuild).toEqual({rawFilesLoaded: 0, rawFactBytesLoaded: 0, unsupportedFiles: 1});
           const layout = codeGraphLayout(path, home, built.identity.checkoutId, built.identity.worktreeId);
@@ -247,7 +495,27 @@ describe('candidate evidence publication and repeated structural updates', () =>
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const store = yield* CodeGraphStore;
-        const indexer = yield* CodeGraphIndexer;
+        let finishSerial = 0;
+        const observedStore = (source: typeof store) =>
+          CodeGraphStore.of({
+            ...source,
+            finishResolutionCandidateIndex: (...args) =>
+              source.finishResolutionCandidateIndex!(...args).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    finishSerial += 1;
+                  }),
+                ),
+              ),
+          });
+        const indexer = Context.get(
+          yield* Layer.build(
+            Layer.fresh(CodeGraphIndexer.layer).pipe(
+              Layer.provide(Layer.succeed(CodeGraphStore, observedStore(store))),
+            ),
+          ),
+          CodeGraphIndexer,
+        );
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'graph-candidate-publication-'});
         const repository = path.join(root, 'repository');
         const home = path.join(root, 'home');
@@ -272,7 +540,32 @@ describe('candidate evidence publication and repeated structural updates', () =>
             ]);
           });
         const index = (extra: {readonly force?: boolean; readonly incrementalOverlay?: boolean} = {}) =>
-          indexer.index({cwd: repository, threadnoteHome: home, sourceOnly: true, vectorPolicy: 'off', ...extra});
+          Effect.gen(function* () {
+            const before = finishSerial;
+            let finalMetricsAfterFinish = false;
+            let reportedCandidateStage: number | undefined;
+            let candidateMilliseconds: number | undefined;
+            const result = yield* indexer.index({
+              cwd: repository,
+              threadnoteHome: home,
+              sourceOnly: true,
+              vectorPolicy: 'off',
+              ...extra,
+              onProgress: current =>
+                Effect.sync(() => {
+                  if (finishSerial > before && current.phase === 'materializing' && current.metrics?.candidateIndex) {
+                    finalMetricsAfterFinish = true;
+                    reportedCandidateStage = current.metrics.stageMilliseconds?.['writing-candidates'];
+                    candidateMilliseconds = current.metrics.candidateIndex.stagingMilliseconds;
+                  }
+                }),
+            });
+            expect(finishSerial).toBeGreaterThan(before);
+            expect(finalMetricsAfterFinish).toBe(true);
+            expect(candidateMilliseconds).toBeGreaterThanOrEqual(0);
+            expect(reportedCandidateStage).toBeGreaterThanOrEqual(candidateMilliseconds ?? -1);
+            return result;
+          });
         const database = (summary: CodeGraphIndexSummary) =>
           codeGraphLayout(path, home, summary.identity.checkoutId, summary.identity.worktreeId).databasePath;
         const graph = (summary: CodeGraphIndexSummary, selectedHome = home) =>
@@ -318,15 +611,26 @@ describe('candidate evidence publication and repeated structural updates', () =>
             const freshStoreContext = yield* Layer.build(Layer.fresh(CodeGraphStore.layer));
             const reopened = Context.get(freshStoreContext, CodeGraphStore);
             const freshIndexerContext = yield* Layer.build(
-              Layer.fresh(CodeGraphIndexer.layer).pipe(Layer.provide(Layer.succeed(CodeGraphStore, reopened))),
+              Layer.fresh(CodeGraphIndexer.layer).pipe(
+                Layer.provide(Layer.succeed(CodeGraphStore, observedStore(reopened))),
+              ),
             );
-            return yield* Context.get(freshIndexerContext, CodeGraphIndexer).index({
+            const before = finishSerial;
+            let afterFinish = false;
+            const result = yield* Context.get(freshIndexerContext, CodeGraphIndexer).index({
               cwd: repository,
               threadnoteHome: home,
               sourceOnly: true,
               vectorPolicy: 'off',
               force: true,
+              onProgress: current =>
+                Effect.sync(() => {
+                  if (finishSerial > before && current.phase === 'materializing' && current.metrics?.candidateIndex)
+                    afterFinish = true;
+                }),
             });
+            expect(afterFinish).toBe(true);
+            return result;
           }),
         );
         expect(warm.diagnostics).toContain('Reused content-addressed materialized shards for 133 file(s).');
@@ -366,15 +670,16 @@ describe('candidate evidence publication and repeated structural updates', () =>
         expect(dirty.materialization).toMatchObject({mode: 'incremental-overlay'});
         expect(yield* graph(dirty)).toEqual(yield* oracle());
         expect(yield* completeIndex(database(dirty), dirty.snapshot.id)).toBe(1);
-        // A lost populated path index cannot trigger a repository-wide CREATE INDEX during ordinary publication.
+        // A lost populated v3 hint index cannot trigger a repository-wide CREATE INDEX during ordinary publication.
         yield* Effect.sync(() => {
           const db = new Database(database(dirty));
           try {
             expect(
-              db.query<{readonly count: number}, []>('SELECT COUNT(*) AS count FROM snapshot_candidate_lookup').get()
-                ?.count,
+              db
+                .query<{readonly count: number}, []>('SELECT COUNT(*) AS count FROM snapshot_candidate_page_routes')
+                .get()?.count,
             ).toBeGreaterThan(0);
-            db.exec('DROP INDEX snapshot_candidate_lookup_path');
+            db.exec('DROP INDEX snapshot_candidate_page_routes_hint');
           } finally {
             db.close();
           }
@@ -403,9 +708,9 @@ describe('candidate evidence publication and repeated structural updates', () =>
         yield* Effect.sync(() => {
           const db = new Database(database(fallback), {readonly: true});
           try {
-            expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_lookup_path'").all()).toEqual(
-              [],
-            );
+            expect(
+              db.query("SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_page_routes_hint'").all(),
+            ).toEqual([]);
             expect(db.query('SELECT state FROM snapshot_candidate_authority').all()).toEqual([{state: 'blocked'}]);
           } finally {
             db.close();

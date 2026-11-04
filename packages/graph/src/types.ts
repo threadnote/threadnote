@@ -264,6 +264,7 @@ export interface CodeGraphMaterializationMetrics {
     readonly attributedFilesCompleted: number;
     readonly loadingMilliseconds: number;
     readonly attributionMilliseconds: number;
+    /** Inclusive candidate preparation/staging and finish/carry/proof work, including attempted failures. */
     readonly stagingMilliseconds: number;
   };
   readonly batchesCompleted: number;

@@ -17,9 +17,36 @@ import {compareCodeUnits} from '@threadnote/graph/ordering';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import type {CodeGraphRoutineMaintenanceResult} from '@threadnote/graph/store/models';
 import {CodeGraphStore, type CodeGraphVisualizationCatalog, type StoredCodeGraph} from '@threadnote/graph/store';
 import type {CodeGraphMaterializationMetrics, CodeGraphQueryResult} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+
+/** The finite foreground allowance observes completion separately from maintenance progress. */
+function boundedRetiredCleanup<E, R>(
+  observe: () => string | undefined,
+  maintenance: Effect.Effect<CodeGraphRoutineMaintenanceResult, E, R>,
+  assertProtected: () => void,
+) {
+  return Effect.gen(function* () {
+    assertProtected();
+    for (let unit = 0; unit < 16; unit += 1) {
+      const before = observe();
+      if (before === undefined) break;
+      expect(before).toBe('retired');
+      const page = yield* maintenance;
+      const after = observe();
+      assertProtected();
+      if (page.state !== 'completed') expect(page).toEqual({reason: 'writer-busy', state: 'deferred'});
+      if (after === undefined) break;
+      expect(after).toBe('retired');
+      if (page.state === 'completed')
+        expect(page.rowsDeleted + page.expiredLeases + page.retiredSnapshots).toBeGreaterThan(0);
+    }
+    assertProtected();
+    expect(observe()).toBeUndefined();
+  });
+}
 
 interface DifferentialScenario {
   readonly baseTargets: readonly number[];
@@ -566,6 +593,55 @@ describe('code graph incremental-overlay differential properties', () => {
     }
   });
 
+  for (const scenario of [
+    'already-complete',
+    'concurrent-completion',
+    'busy-then-complete',
+    'stalled',
+    'busy-through-limit',
+  ] as const) {
+    it.effect(`keeps the16-unit cleanup contract under controlled ${scenario}`, () =>
+      Effect.gen(function* () {
+        let target: string | undefined = scenario === 'already-complete' ? undefined : 'retired';
+        let calls = 0;
+        let protectionChecks = 0;
+        const maintenance = Effect.sync((): CodeGraphRoutineMaintenanceResult => {
+          calls += 1;
+          if (scenario === 'busy-through-limit' || (scenario === 'busy-then-complete' && calls === 1))
+            return {reason: 'writer-busy', state: 'deferred'};
+          if (scenario !== 'stalled') target = undefined;
+          return {
+            cleanup: 'retired-snapshot',
+            expiredLeases: 0,
+            remaining: false,
+            retiredSnapshots: 0,
+            rowsDeleted: scenario === 'busy-then-complete' ? 1 : 0,
+            state: 'completed',
+          };
+        });
+        const exit = yield* boundedRetiredCleanup(
+          () => target,
+          maintenance,
+          () => {
+            protectionChecks += 1;
+          },
+        ).pipe(Effect.exit);
+        expect(exit._tag).toBe(scenario === 'stalled' || scenario === 'busy-through-limit' ? 'Failure' : 'Success');
+        expect(calls).toBe(
+          scenario === 'already-complete'
+            ? 0
+            : scenario === 'busy-then-complete'
+              ? 2
+              : scenario === 'busy-through-limit'
+                ? 16
+                : 1,
+        );
+        expect(protectionChecks).toBeGreaterThanOrEqual(calls + 1);
+        expect(target).toBe(scenario === 'stalled' || scenario === 'busy-through-limit' ? 'retired' : undefined);
+      }),
+    );
+  }
+
   it.effect('reuses the ready logical snapshot while bounded cleanup discards an interrupted direct sibling', () => {
     const scenario = {
       baseTargets: [1, 0, 1],
@@ -582,6 +658,7 @@ describe('code graph incremental-overlay differential properties', () => {
       ({home, root}) =>
         Effect.gen(function* () {
           const indexer = yield* CodeGraphIndexer;
+          const store = yield* CodeGraphStore;
           yield* indexer.index({cwd: root, threadnoteHome: home});
           yield* Effect.sync(() => applyDirtyScenario(root, scenario));
           const path = yield* Path.Path;
@@ -613,6 +690,17 @@ describe('code graph incremental-overlay differential properties', () => {
 
           expect(reused.snapshot.id).toBe(interrupted.logical.snapshot.id);
           expect(reused.materialization?.mode).toBe('reused-snapshot');
+          // The collector can complete before the foreground observation or while its writer tick waits.
+          yield* boundedRetiredCleanup(
+            () => persistedSnapshotState(interrupted.databasePath, direct.id),
+            store.runRoutineMaintenance(interrupted.databasePath, {writerLockPath: layout.databaseWriteLockPath}),
+            () => {
+              for (const snapshotId of [logical.snapshot.id, logical.snapshot.baseSnapshotId]) {
+                if (snapshotId !== undefined)
+                  expect(persistedSnapshotState(interrupted.databasePath, snapshotId)).toBe('ready');
+              }
+            },
+          );
           expect(persistedSnapshotState(interrupted.databasePath, direct.id)).toBeUndefined();
           expect(persistedSnapshotRowCount(interrupted.databasePath, direct.id, 'symbols')).toBe(0);
           expect(

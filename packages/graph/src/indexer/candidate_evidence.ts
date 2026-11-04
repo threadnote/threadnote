@@ -13,6 +13,7 @@ import {
   type CodeGraphMaterializationReplayMetrics,
 } from './materialization.js';
 import {measureCodeGraphAttribution} from './build_coordination.js';
+import type {ResolutionCandidateIndexFinish} from '../store/resolution/candidate_index.js';
 
 /** Optional evidence construction accounts for its additional warm-shard work separately and in aggregate. */
 export function makeResolutionCandidateEvidenceBuilder(
@@ -29,26 +30,50 @@ export function makeResolutionCandidateEvidenceBuilder(
     attributionMilliseconds: 0,
     stagingMilliseconds: 0,
   };
+  const timedCandidateWrite = <A, E, R>(work: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const started = yield* Clock.currentTimeMillis;
+      return yield* work.pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            progress.stagingMilliseconds += (yield* Clock.currentTimeMillis) - started;
+          }),
+        ),
+      );
+    });
   const stage = Effect.fn('codeGraph.stageOptionalCandidateEvidence')(function* (
     files: readonly CodeGraphInventoryFile[],
     source: readonly CodeGraphFileFacts[],
     bounded: readonly CodeGraphFileFacts[],
   ) {
     if (!input.store.stageResolutionCandidateIndex) return;
-    const started = yield* Clock.currentTimeMillis;
-    const evidence = resolutionCandidateFileEvidence(files, source, bounded, input.building.id);
-    unsupportedFiles += files.length - evidence.files.length;
-    yield* input.store.stageResolutionCandidateIndex(
-      input.layout.databasePath,
-      {snapshotId: input.building.id, ...evidence},
-      protector,
+    const stageIndex = input.store.stageResolutionCandidateIndex;
+    yield* timedCandidateWrite(
+      Effect.gen(function* () {
+        const evidence = yield* runPreparation(
+          Effect.sync(() => resolutionCandidateFileEvidence(files, source, bounded, input.building.id)),
+        );
+        unsupportedFiles += files.length - evidence.files.length;
+        yield* stageIndex(
+          input.layout.databasePath,
+          {snapshotId: input.building.id, ...evidence, preparationGate: runPreparation},
+          protector,
+        );
+      }),
     );
-    progress.stagingMilliseconds += (yield* Clock.currentTimeMillis) - started;
   });
   return {
     enabled: input.store.stageResolutionCandidateIndex !== undefined,
     progress,
     summary: () => ({rawFilesLoaded, rawFactBytesLoaded: progress.rawFactReplayBytesCompleted, unsupportedFiles}),
+    // Finish includes full-file carry, canonical/schema/CAS checks and receipt writes.
+    // Attempted failure/interruption work is charged by the same existing stage.
+    finish: (identity: ResolutionCandidateIndexFinish) => {
+      const finishIndex = input.store.finishResolutionCandidateIndex;
+      return finishIndex
+        ? timedCandidateWrite(finishIndex(input.layout.databasePath, identity, protector))
+        : Effect.succeed(false);
+    },
     stageFull: Effect.fn('codeGraph.stageFullCandidateEvidence')(function* (batch: {
       readonly files: readonly CodeGraphInventoryFile[];
       readonly facts: readonly CodeGraphFileFacts[];

@@ -60,6 +60,8 @@ import {
   worktreeOverlayState,
 } from '@threadnote/graph/inventory';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
+import {CANDIDATE_PAGE_CLEANUP_TABLES} from '@threadnote/graph/store/resolution/candidate_page_schema';
+import {RESOLUTION_CANDIDATE_INDEX_TABLES} from '@threadnote/graph/store/resolution/candidate_index';
 import {codeGraphDoctorCheck, purgeAllCodeGraphIndexes, repairCodeGraphIndexes} from '@threadnote/graph/maintenance';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {compactCodeGraphStorage} from '@threadnote/graph/storage';
@@ -399,6 +401,49 @@ describe('native code graph lifecycle', () => {
                     const database = new Database(databasePath);
                     try {
                       database.exec('PRAGMA foreign_keys = ON');
+                      // The destructive reader fixture must remove non-cascading candidate children first.
+                      // One indexed page per table bounds this small fixture; a remaining child fails the test.
+                      const pageSnapshots = database
+                        .query<{readonly snapshot_key: number}, [string]>(
+                          'SELECT snapshot_key FROM snapshot_candidate_page_snapshots WHERE snapshot_id = ? LIMIT 2',
+                        )
+                        .all(indexed.snapshot.id);
+                      expect(pageSnapshots).toHaveLength(1);
+                      for (const table of CANDIDATE_PAGE_CLEANUP_TABLES) {
+                        const keys = EffectArray.join(table.keyColumns, ',');
+                        database
+                          .query(
+                            `DELETE FROM ${table.name} WHERE (${keys}) IN (SELECT ${keys} FROM ${table.name}
+                          WHERE snapshot_key = ? ORDER BY ${keys} LIMIT ?)`,
+                          )
+                          .run(pageSnapshots[0].snapshot_key, 1000);
+                        expect(
+                          database
+                            .query<{readonly count: number}, [number]>(
+                              `SELECT COUNT(*) AS count FROM ${table.name}
+                          WHERE snapshot_key = ?`,
+                            )
+                            .get(pageSnapshots[0].snapshot_key)?.count,
+                        ).toBe(0);
+                      }
+                      for (const table of RESOLUTION_CANDIDATE_INDEX_TABLES) {
+                        const keys = EffectArray.join(table.keyColumns, ', ');
+                        database
+                          .query(
+                            `DELETE FROM ${table.name} WHERE (${keys}) IN (
+                              SELECT ${keys} FROM ${table.name}
+                              WHERE snapshot_id = ? ORDER BY ${keys} LIMIT ?
+                            )`,
+                          )
+                          .run(indexed.snapshot.id, 1_000);
+                        expect(
+                          database
+                            .query<{readonly count: number}, [string]>(
+                              `SELECT COUNT(*) AS count FROM ${table.name} WHERE snapshot_id = ?`,
+                            )
+                            .get(indexed.snapshot.id)?.count,
+                        ).toBe(0);
+                      }
                       return database.query('DELETE FROM snapshots WHERE id = ?').run(indexed.snapshot.id).changes;
                     } finally {
                       database.close();
@@ -1986,6 +2031,8 @@ describe('native code graph lifecycle', () => {
         'prepare temporary incremental code graph activation': probesPerObservation,
         'promote ready code graph snapshot': probesPerObservation,
         'publish temporary code graph snapshot': probesPerObservation,
+        // Source-allocation admission, format identity, bounded file batch and receipt each own fresh protection.
+        'stage persistent code graph facts': 4 * probesPerObservation,
       });
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -5843,13 +5890,13 @@ describe('native code graph lifecycle', () => {
       // batches each protect both their v4 shard write and owner-verified
       // association write. Candidate evidence uses the same facts reservation
       // label, so arm pressure from committed graph progress, not a probe count.
-      // The first batch protects two candidate writes and its fact transaction;
-      // the next candidate write observes pressure and one bounded cleanup retry.
+      // The first batch protects source-allocation admission, format identity, a bounded candidate batch and its fact transaction;
+      // the next source-allocation admission observes pressure and one bounded cleanup retry.
       // Shared storage never spawns duplicate df or PowerShell probes at a boundary.
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 5,
+        'stage persistent code graph facts': probesPerObservation * 6,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });
@@ -6111,7 +6158,7 @@ describe('native code graph lifecycle', () => {
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 4,
+        'stage persistent code graph facts': probesPerObservation * 5,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });

@@ -2,6 +2,8 @@ import {Array as EffectArray, Effect, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {ProjectResolutionLookupKey} from '../../incremental/closure.js';
 import {chunk} from '../utilities.js';
+import {CANDIDATE_PAGE_PROTOCOL_SHA} from './candidate_pages.js';
+import {readCandidateKeyPages} from './candidate_page_read.js';
 import {PROJECT_INCREMENTAL_CLOSURE_MAX_FILES} from '../../incremental/closure.js';
 import {CODE_GRAPH_RESOLUTION_SURFACE_VERSION, CODE_GRAPH_REUSABLE_BASE_RECEIPT_VERSION} from '../models.js';
 import {
@@ -50,6 +52,12 @@ const matchingReceipt = Effect.fn('codeGraph.matchingCandidateReceipt')(function
       AND generation.kind = 'receipt' AND generation.path = ''
     JOIN snapshot_candidate_authority AS authority ON authority.singleton = 1 AND authority.state = 'ready'
       AND authority.token = generation.authority_token AND authority.token = ${authorityToken}
+    JOIN snapshot_candidate_page_snapshots AS page_snapshot ON page_snapshot.snapshot_id = receipt.snapshot_id
+      AND page_snapshot.authority_token = ${authorityToken} AND page_snapshot.protocol_sha = ${CANDIDATE_PAGE_PROTOCOL_SHA}
+      AND page_snapshot.format_version = 3
+    JOIN snapshot_candidate_page_receipts AS page_receipt ON page_receipt.snapshot_key = page_snapshot.snapshot_key
+      AND page_receipt.authority_token = ${authorityToken} AND page_receipt.protocol_sha = ${CANDIDATE_PAGE_PROTOCOL_SHA}
+      AND page_receipt.format_version = 3 AND page_receipt.file_count = receipt.file_count
     WHERE receipt.snapshot_id = ${input.snapshotId}
       AND receipt.workspace_fingerprint = ${input.workspaceFingerprint}
       AND receipt.file_set_fingerprint = ${input.fileSetFingerprint} LIMIT 1`;
@@ -197,25 +205,38 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
         );
       for (const snapshotId of sources) {
         const mask = masked(snapshotId);
-        const rows = yield* sql<{readonly evidence_path: string}>`
-          SELECT evidence_path FROM snapshot_candidate_lookup AS candidate
-          WHERE snapshot_id = ${snapshotId} AND resolution_domain = ${key.resolutionDomain} AND lookup_key = ${key.key}
-            AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement
-              WHERE replacement.snapshot_id = ${mask ?? null} AND replacement.path = candidate.evidence_path)
-          ORDER BY evidence_path LIMIT ${input.maximumSelectedFiles + 1}`;
-        associationsRead += rows.length;
-        if (associationsRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS)
+        const selected = yield* readCandidateKeyPages(
+          sql,
+          snapshotId,
+          mask,
+          key,
+          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS - associationsRead,
+          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES - bytesRead,
+          input.maximumSelectedFiles,
+          authorityToken,
+        );
+        if (selected === undefined) return undefined;
+        associationsRead += selected.associations;
+        bytesRead += selected.bytes;
+        if (selected.exceeded === 'rows')
           return bound(
             'candidate-projection-associations',
             associationsRead,
             PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS,
           );
-        for (const row of rows) {
-          paths.add(row.evidence_path);
-          bytesRead += Buffer.byteLength(row.evidence_path);
-        }
-        if (paths.size > input.maximumSelectedFiles)
-          return bound('candidate-selected-files', paths.size, input.maximumSelectedFiles);
+        if (selected.exceeded === 'bytes')
+          return bound(
+            'candidate-projection-observed-key-bytes',
+            bytesRead,
+            PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
+          );
+        for (const path of selected.paths) paths.add(path);
+        if (selected.exceeded === 'files' || paths.size > input.maximumSelectedFiles)
+          return bound(
+            'candidate-selected-files',
+            Math.max(paths.size, input.maximumSelectedFiles + 1),
+            input.maximumSelectedFiles,
+          );
       }
       if (bytesRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES)
         return bound(
@@ -241,12 +262,14 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
           WHERE snapshot_id = ? AND evidence_path = ? ${afterEdge === undefined ? '' : 'AND edge_id > ?'}
             AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement
               WHERE replacement.snapshot_id = ? AND replacement.path = candidate.evidence_path)
+            AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.path = candidate.evidence_path)
           ORDER BY edge_id LIMIT 1`,
             [
               RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
               snapshotId,
               path,
               ...(afterEdge === undefined ? [] : [afterEdge]),
+              mask ?? null,
               mask ?? null,
             ],
           );
@@ -292,7 +315,8 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
           SELECT 1 FROM snapshot_symbol_lookup AS lookup
           WHERE snapshot_id = ${snapshotId} AND lookup_key = ${key.key} AND resolution_domain = ${key.resolutionDomain}
             AND provenance = 'symbol' AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement
-              WHERE replacement.snapshot_id = ${mask ?? null} AND replacement.path = lookup.evidence_path) LIMIT 1`;
+              WHERE replacement.snapshot_id = ${mask ?? null} AND replacement.path = lookup.evidence_path)
+            AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ${mask ?? null} AND deletion.path = lookup.evidence_path) LIMIT 1`;
         if (rows.length > 0) conflicts.add(identity(key));
       }
       bytesRead += Buffer.byteLength(identity(key));

@@ -43,6 +43,7 @@ import {
   COMPACT_LEXICAL_CLEANUP_SPECS,
   compactLexicalCleanupPageStatement,
   RETIRED_SNAPSHOT_CLEANUP_SPECS,
+  reclaimCandidatePageRows,
 } from './cleanup_core.js';
 import {lastStatementChangeCount, nextPersistentActivationBatchRows} from './activation/core.js';
 import {
@@ -188,6 +189,8 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
     const metadataDeleted = formatsDeleted + snapshotsDeleted;
     if (metadataDeleted > 0) return {complete: false, rowsDeleted: metadataDeleted};
   }
+  const candidatePage = yield* reclaimCandidatePageRows(sql, target.id);
+  if (candidatePage) return candidatePage;
   for (const spec of RETIRED_SNAPSHOT_CLEANUP_SPECS) {
     if (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE && !(yield* tableExists(sql, spec.table))) continue;
     const batchRows = batchRowsByTable.get(spec.table) ?? spec.batchRows;

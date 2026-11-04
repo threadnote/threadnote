@@ -6,7 +6,17 @@ import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {useDatabaseDirect} from '@threadnote/graph/store/session';
+import {pruneRetiredSnapshotRows} from '@threadnote/graph/store/retirement';
+import {pruneRetiredSnapshotRowsPage} from '@threadnote/graph/store/view_cleanup';
 import {makeRetiredSnapshotReclamationPage} from '@threadnote/graph/store/staging_core';
+import {
+  candidateCanonicalSha,
+  candidateFilePages,
+  CANDIDATE_PAGE_PROTOCOL_SHA,
+} from '@threadnote/graph/store/resolution/candidate_pages';
+import {resolutionCandidateAuthorityToken} from '@threadnote/graph/store/resolution/candidate_index';
+import {CANDIDATE_PAGE_TABLES} from '@threadnote/graph/store/resolution/candidate_page_schema';
+import {RESOLUTION_CANDIDATE_INDEX_TABLES} from '@threadnote/graph/store/resolution/candidate_index';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -21,11 +31,26 @@ describe('required snapshot reclamation pages', () => {
           if (id !== TARGET) yield* cloneSnapshot(sql, id);
           yield* insertCandidates(sql, id, 30_001);
         }
+        for (const table of [...RESOLUTION_CANDIDATE_INDEX_TABLES, ...CANDIDATE_PAGE_TABLES]) {
+          expect(yield* sql.unsafe(`SELECT COUNT(*) AS count FROM ${table.name}`)).toEqual([{count: 0}]);
+        }
         const {observedSql, statements} = observeCandidateDeletes(sql);
         const reclaim = makeRetiredSnapshotReclamationPage(observedSql, targets);
         expect((yield* reclaim).rowsDeleted).toBe(5_000);
         yield* assertIndexedPages(sql, statements);
-        expect(statements).toHaveLength(1);
+        // Empty optional-table probes precede exactly one payload page, not one total SQL statement.
+        expect(
+          EffectArray.map(statements, statement => ({
+            operation: Effect2.pipe(statement.text, EffectString.split('\n'))[0],
+            parameters: statement.parameters,
+          })),
+        ).toEqual([
+          ...EffectArray.map(RESOLUTION_CANDIDATE_INDEX_TABLES, table => ({
+            operation: `DELETE FROM ${table.name}`,
+            parameters: ['earlier-a', 1_000],
+          })),
+          {operation: 'DELETE FROM building_reference_candidates', parameters: ['earlier-a', 5_000]},
+        ]);
       }),
     ),
   );
@@ -42,6 +67,131 @@ describe('required snapshot reclamation pages', () => {
       }),
     ),
   );
+
+  effectIt.effect('cleans both retained families child first while preserving a newly leased owner', () =>
+    withRows(0, sql =>
+      Effect.gen(function* () {
+        const token = yield* resolutionCandidateAuthorityToken(sql);
+        const page = [...candidateFilePages([['typescript', 'key']])][0];
+        yield* sql`INSERT INTO snapshot_candidate_files VALUES (${TARGET},'a.ts','hash',1,0,1)`;
+        yield* sql`INSERT INTO snapshot_candidate_lookup VALUES (${TARGET},'typescript','legacy','a.ts')`;
+        yield* sql`INSERT INTO snapshot_candidate_page_snapshots VALUES (1,${TARGET},${token},${CANDIDATE_PAGE_PROTOCOL_SHA},3)`;
+        yield* sql`INSERT INTO snapshot_candidate_page_files VALUES (1,1,'a.ts','hash',1,0,1,100,${page.rawSha},0)`;
+        yield* sql`INSERT INTO snapshot_candidate_pages VALUES (1,1,0,1,${page.rawBytes},${page.storedBytes},100,
+      ${page.rawSha},${page.storedSha},${page.codec},${page.payload!},NULL,NULL)`;
+        yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (1,1,0,0,${page.hints[0]})`;
+        yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 1 WHERE file_key = 1`;
+        yield* sql`INSERT INTO snapshot_candidate_page_receipts VALUES (1,3,${CANDIDATE_PAGE_PROTOCOL_SHA},${token},1)`;
+        yield* sql`INSERT INTO snapshot_leases (token,snapshot_id,expires_at) VALUES ('new-reader',${TARGET},60000)`;
+        const {observedSql, statements} = observeCandidateDeletes(sql);
+        expect(yield* makeRetiredSnapshotReclamationPage(observedSql, [TARGET])).toEqual({
+          complete: true,
+          rowsDeleted: 0,
+        });
+        expect(statements).toEqual([]);
+        expect(yield* sql`SELECT COUNT(*) AS count FROM snapshot_candidate_page_routes`).toEqual([{count: 1}]);
+        yield* sql`DELETE FROM snapshot_leases WHERE token = 'new-reader'`;
+        let deleted = 0;
+        const completedPageTables: string[] = [];
+        for (let unit = 0; unit < 16; unit += 1) {
+          const result = yield* makeRetiredSnapshotReclamationPage(observedSql, [TARGET]);
+          deleted += result.rowsDeleted;
+          if (result.rowsDeleted > 0 && completedPageTables.length < 5)
+            completedPageTables.push(Effect2.pipe(statements[statements.length - 1].text, EffectString.split(' '))[2]);
+          if (result.complete) break;
+        }
+        expect(deleted).toBe(8);
+        expect(completedPageTables).toEqual([
+          'snapshot_candidate_page_receipts',
+          'snapshot_candidate_page_routes',
+          'snapshot_candidate_pages',
+          'snapshot_candidate_page_files',
+          'snapshot_candidate_page_snapshots',
+        ]);
+        yield* assertIndexedPages(sql, statements);
+        for (const table of [...CANDIDATE_PAGE_TABLES, ...RESOLUTION_CANDIDATE_INDEX_TABLES])
+          expect(yield* sql.unsafe(`SELECT COUNT(*) AS count FROM ${table.name}`)).toEqual([{count: 0}]);
+        expect(yield* sql`SELECT id FROM snapshots`).toEqual([]);
+        expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
+      }),
+    ),
+  );
+
+  effectIt.effect('refuses a rounded adjacent snapshot key before touching a protected owner family', () =>
+    withRows(0, sql =>
+      Effect.gen(function* () {
+        const protectedId = 'protected-ready-owner';
+        yield* cloneSnapshot(sql, protectedId);
+        yield* sql`UPDATE snapshots SET state = 'ready' WHERE id = ${protectedId}`;
+        yield* sql`INSERT INTO snapshot_leases (token,snapshot_id,expires_at) VALUES ('protected-reader',${protectedId},60000)`;
+        const token = yield* resolutionCandidateAuthorityToken(sql);
+        const pairs = [['typescript', 'key']] as const;
+        const page = [...candidateFilePages(pairs)][0];
+        for (const [snapshotId, key, fileKey] of [
+          [protectedId, '9007199254740992', 1],
+          [TARGET, '9007199254740993', 2],
+        ] as const) {
+          // Bind decimal text and convert inside SQLite so the fixture itself never rounds the original64-bit key.
+          yield* sql`INSERT INTO snapshot_candidate_page_snapshots VALUES (CAST(${key} AS INTEGER),${snapshotId},${token},${CANDIDATE_PAGE_PROTOCOL_SHA},3)`;
+          yield* sql`INSERT INTO snapshot_candidate_page_files VALUES (${fileKey},CAST(${key} AS INTEGER),'a.ts','hash',1,0,1,100,${candidateCanonicalSha(pairs)},0)`;
+          yield* sql`INSERT INTO snapshot_candidate_pages VALUES (CAST(${key} AS INTEGER),${fileKey},0,1,${page.rawBytes},${page.storedBytes},100,
+            ${page.rawSha},${page.storedSha},${page.codec},${page.payload!},NULL,NULL)`;
+          yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (CAST(${key} AS INTEGER),${fileKey},0,0,${page.hints[0]})`;
+          yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 1 WHERE file_key = ${fileKey}`;
+          yield* sql`INSERT INTO snapshot_candidate_page_receipts VALUES (CAST(${key} AS INTEGER),3,${CANDIDATE_PAGE_PROTOCOL_SHA},${token},1)`;
+        }
+        const observed = (yield* sql<{readonly exact_key: string; readonly snapshot_key: number}>`
+          SELECT CAST(snapshot_key AS TEXT) AS exact_key, snapshot_key FROM snapshot_candidate_page_snapshots
+          WHERE snapshot_id = ${TARGET}`)[0];
+        expect(observed.exact_key).toBe('9007199254740993');
+        expect(observed.snapshot_key).toBe(2 ** 53);
+        expect(Number.isSafeInteger(observed.snapshot_key)).toBe(false);
+        const before = yield* Effect.forEach(CANDIDATE_PAGE_TABLES, table =>
+          sql.unsafe(
+            `SELECT CAST(snapshot_key AS TEXT) AS exact_snapshot_key,* FROM ${table.name} ORDER BY snapshot_key`,
+          ),
+        );
+        const leases = yield* sql`SELECT * FROM snapshot_leases ORDER BY token`;
+        const {observedSql, statements} = observeCandidateDeletes(sql);
+        const exit = yield* makeRetiredSnapshotReclamationPage(observedSql, [TARGET]).pipe(Effect.exit);
+        const after = yield* Effect.forEach(CANDIDATE_PAGE_TABLES, table =>
+          sql.unsafe(
+            `SELECT CAST(snapshot_key AS TEXT) AS exact_snapshot_key,* FROM ${table.name} ORDER BY snapshot_key`,
+          ),
+        );
+        expect(after).toEqual(before);
+        expect(statements).toEqual([]);
+        expect(exit._tag).toBe('Failure');
+        expect(yield* sql`SELECT * FROM snapshot_leases ORDER BY token`).toEqual(leases);
+        expect(yield* sql`SELECT state FROM snapshots WHERE id = ${protectedId}`).toEqual([{state: 'ready'}]);
+        expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
+      }),
+    ),
+  );
+
+  for (const mode of ['routine', 'deep'] as const) {
+    effectIt.effect(`advances bounded legacy-only owner pages before optional-family ${mode} cleanup`, () =>
+      withRows(0, sql =>
+        Effect.gen(function* () {
+          for (let i = 0; i < 101; i += 1) yield* cloneSnapshot(sql, `earlier-${i}`);
+          const token = yield* resolutionCandidateAuthorityToken(sql);
+          yield* sql`INSERT INTO snapshot_candidate_page_snapshots VALUES (1,${TARGET},${token},${CANDIDATE_PAGE_PROTOCOL_SHA},3)`;
+          yield* sql`INSERT INTO snapshot_candidate_page_files VALUES (1,1,'a.ts','hash',0,0,0,0,${EffectString.repeat(64)('a')},0)`;
+          if (mode === 'deep') yield* pruneRetiredSnapshotRows();
+          else
+            for (let unit = 0; unit < 16; unit += 1) {
+              const page = yield* pruneRetiredSnapshotRowsPage(sql);
+              if (!page.remaining) break;
+              expect(page.deleted).toBeGreaterThan(0);
+            }
+          for (const table of CANDIDATE_PAGE_TABLES)
+            expect(yield* sql.unsafe(`SELECT COUNT(*) AS count FROM ${table.name}`)).toEqual([{count: 0}]);
+          expect(yield* sql`SELECT id FROM snapshots`).toEqual([]);
+          expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
+        }),
+      ),
+    );
+  }
 
   fcEffectProp(
     effectIt,
@@ -241,7 +391,10 @@ function assertIndexedPages(sql: SqlClient.SqlClient, statements: readonly Obser
           plan,
           row =>
             Effect2.pipe(row.detail, EffectString.startsWith('SEARCH candidate ')) &&
-            Effect2.pipe(row.detail, EffectString.includes('(snapshot_id=?)')),
+            (Effect2.pipe(row.detail, EffectString.includes('(snapshot_id=?)')) ||
+              Effect2.pipe(row.detail, EffectString.includes('(snapshot_key=?)')) ||
+              (Effect2.pipe(statement.text, EffectString.startsWith('DELETE FROM snapshot_candidate_page_snapshots')) &&
+                Effect2.pipe(row.detail, EffectString.includes('(rowid=?)')))),
         ),
         statement.text,
       ).toBe(true);

@@ -7,7 +7,11 @@ import {CodeGraphStoreError} from '../types.js';
 import {type CodeGraphWriterGate} from './build/core.js';
 import {initializeSchema} from './schema/initialization.js';
 import {drainCompletedPersistentBuildRows} from './activation/persistent.js';
-import {pruneRetiredCompactLexicalRows, RETIRED_SNAPSHOT_CLEANUP_SPECS} from './cleanup_core.js';
+import {
+  pruneRetiredCompactLexicalRows,
+  reclaimRetiredCandidatePageRows,
+  RETIRED_SNAPSHOT_CLEANUP_SPECS,
+} from './cleanup_core.js';
 import {nextPersistentActivationBatchRows} from './activation/core.js';
 
 /** @internal Bounded keyset page retained for admission query-plan and load regressions. */
@@ -40,6 +44,11 @@ const pruneRetiredSnapshotRows = Effect.fn('codeGraph.pruneRetiredSnapshotRows')
   yield* runWrite(initializeSchema(sql));
   yield* drainCompletedPersistentBuildRows(sql, snapshotId, runWrite);
   yield* pruneRetiredCompactLexicalRows(sql, runWrite, snapshotId);
+  for (;;) {
+    const page = yield* runWrite(sql.withTransaction(reclaimRetiredCandidatePageRows(sql, snapshotId)));
+    if (!page) break;
+    yield* Effect.yieldNow;
+  }
   for (const spec of RETIRED_SNAPSHOT_CLEANUP_SPECS) {
     if (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE && !(yield* tableExists(sql, spec.table))) continue;
     let batchRows: number = spec.batchRows;
@@ -88,6 +97,10 @@ const pruneRetiredSnapshotRows = Effect.fn('codeGraph.pruneRetiredSnapshotRows')
     const removed = yield* runWrite(
       sql.withTransaction(
         Effect.gen(function* () {
+          // The first100 retired owners can advance after earlier legacy-only owners disappear.
+          // Recheck their optional child page before every canonical snapshot batch; never scan all retained dictionaries.
+          const candidatePage = yield* reclaimRetiredCandidatePageRows(sql, snapshotId);
+          if (candidatePage) return candidatePage.rowsDeleted;
           // The bounded table collector above should already have exhausted
           // these rows. Keep the postings-first invariant local to the direct
           // snapshot DELETE as a lifecycle backstop.

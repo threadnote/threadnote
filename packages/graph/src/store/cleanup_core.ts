@@ -1,3 +1,4 @@
+import {CANDIDATE_PAGE_CLEANUP_TABLES} from './resolution/candidate_page_schema.js';
 import {RESOLUTION_CANDIDATE_INDEX_TABLES} from './resolution/candidate_index.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Option, pipe} from 'effect';
@@ -761,6 +762,57 @@ const RETIRED_SNAPSHOT_CLEANUP_SPECS = [
   },
 ] as const satisfies readonly RetiredSnapshotCleanupSpec[];
 
+/** One child-first indexed page from one retained format/generation, with no payload hydration. */
+export const reclaimCandidatePageRows = Effect.fn('codeGraph.reclaimCandidatePageRows')(function* (
+  sql: SqlClient.SqlClient,
+  snapshotId: string,
+) {
+  if (!(yield* tableExists(sql, 'snapshot_candidate_page_snapshots'))) return undefined;
+  const targets = yield* sql<{
+    readonly snapshot_key: unknown;
+  }>`SELECT snapshot_key FROM snapshot_candidate_page_snapshots
+    WHERE snapshot_id = ${snapshotId} LIMIT 1`;
+  const snapshotKey = targets[0]?.snapshot_key;
+  if (snapshotKey === undefined) return undefined;
+  // Default SQLite numeric decoding can round a64-bit key into a different owner.
+  // Refuse unsupported identities before the first destructive family statement.
+  if (typeof snapshotKey !== 'number' || !Number.isSafeInteger(snapshotKey) || snapshotKey <= 0)
+    return yield* CodeGraphStoreError.of('Candidate page cleanup snapshot identity is not losslessly representable.');
+  for (const spec of CANDIDATE_PAGE_CLEANUP_TABLES) {
+    const key = `(${EffectArray.join(spec.keyColumns, ',')})`;
+    yield* sql.unsafe(
+      `DELETE FROM ${spec.name} WHERE ${key} IN (
+      SELECT ${EffectArray.join(
+        EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+        ',',
+      )} FROM ${spec.name} AS candidate WHERE candidate.snapshot_key = ?
+      ORDER BY ${EffectArray.join(
+        EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+        ',',
+      )} LIMIT ?)`,
+      [snapshotKey, 1000],
+    );
+    const deleted = yield* lastStatementChangeCount(sql);
+    if (deleted > 0)
+      return {complete: false, rowsDeleted: deleted, table: spec.name, batchRows: 1000, maximumBatchRows: 1000};
+  }
+  return undefined;
+});
+
+/** Retired-state policy is shared with the existing ordinary/deep collectors; choose one indexed owner, then one page. */
+export const reclaimRetiredCandidatePageRows = Effect.fn('codeGraph.reclaimRetiredCandidatePageRows')(function* (
+  sql: SqlClient.SqlClient,
+  snapshotId?: string,
+) {
+  if (!(yield* tableExists(sql, 'snapshot_candidate_page_snapshots'))) return undefined;
+  const targets = yield* sql<{readonly snapshot_id: string}>`SELECT candidate.snapshot_id
+    FROM snapshot_candidate_page_snapshots AS candidate
+    WHERE candidate.snapshot_id IN (SELECT id FROM snapshots WHERE state = 'retired'
+      AND (${snapshotId ?? null} IS NULL OR id = ${snapshotId ?? null}) ORDER BY id LIMIT 100)
+    ORDER BY candidate.snapshot_id LIMIT 1`;
+  return targets[0] ? yield* reclaimCandidatePageRows(sql, targets[0].snapshot_id) : undefined;
+});
+
 const clearSnapshotOwnedRows = Effect.fn('codeGraph.clearSnapshotOwnedRows')(function* (
   sql: SqlClient.SqlClient,
   snapshotId: string,
@@ -769,6 +821,18 @@ const clearSnapshotOwnedRows = Effect.fn('codeGraph.clearSnapshotOwnedRows')(fun
 ) {
   const runWrite: CodeGraphWriterGate = writerGate ?? (effect => effect);
   yield* clearCompactLexicalSnapshotRows(sql, snapshotId, runWrite, ownerToken);
+  for (;;) {
+    const page = yield* runWrite(
+      sql.withTransaction(
+        Effect.gen(function* () {
+          if (ownerToken !== undefined) yield* assertPersistentBuildOwner(sql, snapshotId, ownerToken);
+          return yield* reclaimCandidatePageRows(sql, snapshotId);
+        }),
+      ),
+    );
+    if (!page) break;
+    yield* Effect.yieldNow;
+  }
   for (const spec of RETIRED_SNAPSHOT_CLEANUP_SPECS) {
     if (
       (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE ||

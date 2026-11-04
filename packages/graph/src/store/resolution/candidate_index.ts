@@ -6,6 +6,9 @@ import type {CodeGraphInventoryFile, CodeGraphReference} from '../../types.js';
 import {CodeGraphStoreError} from '../../types.js';
 import {normalizeSchemaDefinition} from '../schema/normalization.js';
 import {lookupDomain} from '../utilities.js';
+import {CANDIDATE_PAGE_OBJECTS, CANDIDATE_PAGE_INDEXES, CANDIDATE_PAGE_TABLES} from './candidate_page_schema.js';
+import {isCodeGraphReferenceWithinCandidateBudget} from '../../fact/budget.js';
+import {candidateTextRepresentable} from './candidate_pages.js';
 
 export const RESOLUTION_CANDIDATE_INDEX_VERSION = 1;
 export const RESOLUTION_CANDIDATE_INDEX_PAGE_ROWS = 1_000;
@@ -18,6 +21,8 @@ export interface ResolutionCandidateIndexIdentity {
 }
 
 export interface ResolutionCandidateIndexStage {
+  /** In-process builder ownership; released before waiting for durable writer transactions. */
+  readonly preparationGate?: import('../models.js').CodeGraphPreparationGate;
   readonly snapshotId: string;
   readonly files: readonly Pick<CodeGraphInventoryFile, 'path' | 'contentHash'>[];
   readonly references: readonly CodeGraphReference[];
@@ -142,6 +147,7 @@ const indexObjects = [
     [
       ...EffectArray.take(RESOLUTION_CANDIDATE_INDEX_TABLES, 3),
       {name: 'snapshot_files'},
+      {name: 'snapshot_file_deletions'},
       {name: 'snapshot_symbol_lookup'},
       {name: 'snapshot_candidate_generations'},
     ],
@@ -172,7 +178,7 @@ const indexObjects = [
   },
 ];
 
-const objects = [candidateAuthority, ...RESOLUTION_CANDIDATE_INDEX_TABLES, ...indexObjects];
+const objects = [candidateAuthority, ...RESOLUTION_CANDIDATE_INDEX_TABLES, ...indexObjects, ...CANDIDATE_PAGE_OBJECTS];
 export const RESOLUTION_CANDIDATE_SNAPSHOT_TRIGGER = indexObjects[indexObjects.length - 1];
 const snapshotFileTriggers = EffectArray.filter(
   indexObjects,
@@ -234,7 +240,7 @@ export const resolutionCandidateSnapshotTriggerCompatible = Effect.fn('codeGraph
 /** Checking the small schema contract also proves the mutation invalidation triggers still exist. */
 const candidateIndexDefinitionsReady = Effect.fn('codeGraph.candidateIndexDefinitionsReady')(function* (
   sql: SqlClient.SqlClient,
-  allowMissingPathIndex = false,
+  missingIndexes: ReadonlySet<string> = new Set(),
 ) {
   const rows = yield* sql.unsafe<{readonly name: string; readonly sql: string | null}>(
     `SELECT name, CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
@@ -246,8 +252,7 @@ const candidateIndexDefinitionsReady = Effect.fn('codeGraph.candidateIndexDefini
   );
   const found = new Map(EffectArray.map(rows, row => [row.name, row.sql] as const));
   return EffectArray.every(objects, object => {
-    if (allowMissingPathIndex && object.name === 'snapshot_candidate_lookup_path' && !found.has(object.name))
-      return true;
+    if (missingIndexes.has(object.name) && !found.has(object.name)) return true;
     const actual = found.get(object.name);
     return typeof actual === 'string' && normalizeSchemaDefinition(actual) === normalizeSchemaDefinition(object.sql);
   });
@@ -268,22 +273,23 @@ export const ensureResolutionCandidateIndexSchema = Effect.fn('codeGraph.ensureC
     Effect.gen(function* () {
       if (yield* resolutionCandidateIndexSchemaReady(sql)) return false;
       const lookup = RESOLUTION_CANDIDATE_INDEX_TABLES[1];
-      const priorLookup = yield* sql<{
-        readonly type: string;
-        readonly name: string;
-        readonly sql: string | null;
-      }>`SELECT type, name,
-        CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
-        FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${lookup.name} COLLATE NOCASE LIMIT 1`;
-      // Reject unknown retained table definitions before any DDL or lookup read, especially a populated index rebuild.
-      if (
-        priorLookup.length > 0 &&
-        (priorLookup[0]?.type !== 'table' ||
-          priorLookup[0].name !== lookup.name ||
-          typeof priorLookup[0].sql !== 'string' ||
-          normalizeSchemaDefinition(priorLookup[0].sql) !== normalizeSchemaDefinition(lookup.sql))
-      )
-        return yield* CodeGraphStoreError.of('Resolution candidate index schema is incompatible.');
+      const priorTables = new Set<string>();
+      // Unknown populated layouts are never interpreted, migrated or rebuilt.
+      for (const table of [...RESOLUTION_CANDIDATE_INDEX_TABLES, ...CANDIDATE_PAGE_TABLES]) {
+        const prior = yield* sql<{readonly type: string; readonly name: string; readonly sql: string | null}>`
+          SELECT type, name, CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192
+            THEN sql ELSE NULL END AS sql FROM sqlite_master
+          WHERE type IN ('table', 'view') AND name = ${table.name} COLLATE NOCASE LIMIT 1`;
+        if (prior.length === 0) continue;
+        if (
+          prior[0]?.type !== 'table' ||
+          prior[0].name !== table.name ||
+          typeof prior[0].sql !== 'string' ||
+          normalizeSchemaDefinition(prior[0].sql) !== normalizeSchemaDefinition(table.sql)
+        )
+          return yield* CodeGraphStoreError.of('Resolution candidate index schema is incompatible.');
+        priorTables.add(table.name);
+      }
       // Fence the exact unpublished pre-generation prototype without scanning/rebuilding any table or index.
       const predecessor = yield* sql<{readonly sql: string | null}>`SELECT
         CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 8192 THEN sql ELSE NULL END AS sql
@@ -295,25 +301,30 @@ export const ensureResolutionCandidateIndexSchema = Effect.fn('codeGraph.ensureC
         yield* sql.unsafe('DROP TRIGGER snapshots_candidate_invalidate_update');
       // Creating a missing secondary index over retained rows is unbounded foreground recovery.
       // Refuse only optional evidence until canonical schema restoration; first creation on an empty table is safe.
-      const pathIndex = yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'index'
-        AND name = 'snapshot_candidate_lookup_path' COLLATE NOCASE LIMIT 1`;
-      const blocked =
-        pathIndex.length === 0 &&
-        priorLookup.length > 0 &&
-        (yield* sql`SELECT 1 FROM snapshot_candidate_lookup LIMIT 1`).length > 0;
-      const alreadyBlocked =
+      const missing = new Set<string>();
+      for (const index of [{name: 'snapshot_candidate_lookup_path', table: lookup.name}, ...CANDIDATE_PAGE_INDEXES]) {
+        const present =
+          yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ${index.name} COLLATE NOCASE LIMIT 1`;
+        if (
+          present.length === 0 &&
+          priorTables.has(index.table) &&
+          (yield* sql.unsafe(`SELECT 1 FROM ${index.table} LIMIT 1`)).length > 0
+        )
+          missing.add(index.name);
+      }
+      const blocked = missing.size > 0;
+      if (
         blocked &&
-        (yield* candidateIndexDefinitionsReady(sql, true)) &&
+        (yield* candidateIndexDefinitionsReady(sql, missing)) &&
         (yield* sql`SELECT 1 FROM snapshot_candidate_authority WHERE singleton = 1 AND state = 'blocked' LIMIT 1`)
-          .length === 1;
-      if (alreadyBlocked) return false;
+          .length === 1
+      )
+        return false;
       for (const object of objects) {
-        if (blocked && object.name === 'snapshot_candidate_lookup_path') continue;
-        yield* sql.unsafe(object.sql);
+        if (!missing.has(object.name)) yield* sql.unsafe(object.sql);
       }
-      if (!(yield* candidateIndexDefinitionsReady(sql, blocked))) {
+      if (!(yield* candidateIndexDefinitionsReady(sql, missing)))
         return yield* CodeGraphStoreError.of('Resolution candidate index schema is incompatible.');
-      }
       // Constant-size atomic revocation: all prior bindings become stale without touching retained snapshot/file rows.
       // Compatible pre-generation rows need canonical restaging; missing authority never gets a reusable default token.
       yield* sql`INSERT INTO snapshot_candidate_authority (singleton, token, state)
@@ -364,14 +375,21 @@ export function resolutionCandidateFileRepresentable(
     RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES
   )
     return false;
+  if (!candidateTextRepresentable(file.path) || !candidateTextRepresentable(file.contentHash)) return false;
   return EffectArray.every(references, reference => {
+    if (
+      !candidateTextRepresentable(reference.resolutionDomain) ||
+      !isCodeGraphReferenceWithinCandidateBudget(reference)
+    )
+      return false;
     if (
       !EffectArray.every(reference.lookupTiers, tier =>
         EffectArray.every(
           tier,
           key =>
+            candidateTextRepresentable(key) &&
             Buffer.byteLength(JSON.stringify([snapshotId, reference.resolutionDomain, key, reference.evidencePath])) <=
-            RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
+              RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
         ),
       )
     )

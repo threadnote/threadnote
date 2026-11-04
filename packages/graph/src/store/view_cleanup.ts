@@ -13,6 +13,7 @@ import {
   compactLexicalCleanupPageStatement,
   observeSnapshotPurge,
   RETIRED_SNAPSHOT_CLEANUP_SPECS,
+  reclaimRetiredCandidatePageRows,
   type RetiredSnapshotCleanupPage,
   retireReadySnapshotsIfUnused,
 } from './cleanup_core.js';
@@ -283,6 +284,10 @@ const pruneRetiredSnapshotRowsPage = Effect.fn('codeGraph.pruneRetiredSnapshotRo
   if (Number(pending[0]?.present ?? 0) === 0) {
     return {deleted: 0, remaining: false} satisfies RetiredSnapshotCleanupPage;
   }
+
+  // A non-cascading optional family owns one child-first page before legacy rows or snapshot deletion.
+  const candidatePage = yield* sql.withTransaction(reclaimRetiredCandidatePageRows(sql, snapshotId));
+  if (candidatePage) return {deleted: candidatePage.rowsDeleted, remaining: true} satisfies RetiredSnapshotCleanupPage;
 
   const compactSchemaAvailable =
     (yield* tableExists(sql, 'lexical_compact_snapshots')) && (yield* tableExists(sql, 'lexical_storage_formats'));
