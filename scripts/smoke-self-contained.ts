@@ -8,7 +8,12 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {getDefaultEnvironment} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {commandEnvironment} from '@threadnote/platform/command';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
-import {FixtureProcesses, FixtureStdioTransport, runFixtureCommand} from './fixture-owned-process.js';
+import {
+  FixtureProcesses,
+  FixtureStdioTransport,
+  runFixtureCommand,
+  type FixtureCommandStage,
+} from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
 import {
   createRecallEmbeddingWorkerFixtureDrain,
@@ -107,10 +112,11 @@ const smokeSelfContained = Effect.scoped(
         USER: 'standalone-smoke',
         USERPROFILE: userHome,
       };
-      const run = (arguments_: readonly string[]) =>
+      const run = (stage: FixtureCommandStage, arguments_: readonly string[]) =>
         Effect.tryPromise({
           try: () =>
             runFixtureCommand(processes, candidate, arguments_, {
+              stage,
               cwd: invocationDirectory,
               env: environment,
               maxOutputBytes: 512 * 1024,
@@ -119,21 +125,21 @@ const smokeSelfContained = Effect.scoped(
           catch: cause => scriptError(cause, 'Standalone command failed.'),
         }).pipe(Effect.map(result => `${result.stdout}\n${result.stderr}`));
 
-      const version = yield* run(['--version']);
+      const version = yield* run('version', ['--version']);
       if (!Effect2.pipe(version, EffectString.includes(`threadnote v${packageManifest.version}`))) {
         return yield* ScriptError.make({message: `Standalone release reported an unexpected version:\n${version}`});
       }
 
-      yield* run(['install', '--dry-run', '--no-start']);
+      yield* run('install-dry-run', ['install', '--dry-run', '--no-start']);
 
-      const runtime = yield* run(['models', 'runtime']);
+      const runtime = yield* run('models-runtime', ['models', 'runtime']);
       if (!/node-llama-cpp:\s+prebuilt/i.test(runtime)) {
         return yield* ScriptError.make({
           message: `Native runtime was not loaded from the release payload:\n${runtime}`,
         });
       }
 
-      yield* run([
+      yield* run('remember', [
         'remember',
         '--kind',
         'durable',
@@ -144,7 +150,7 @@ const smokeSelfContained = Effect.scoped(
         '--text',
         `${SMOKE_MARKER} stores and recalls without Node or an external Bun installation.`,
       ]);
-      const recall = yield* run(['recall', '--query', `${SMOKE_MARKER} standalone recall`]);
+      const recall = yield* run('recall', ['recall', '--query', `${SMOKE_MARKER} standalone recall`]);
       if (!Effect2.pipe(recall, EffectString.includes('standalone-bun-smoke.md'))) {
         return yield* ScriptError.make({message: `Standalone lexical recall missed the stored memory:\n${recall}`});
       }
@@ -189,28 +195,28 @@ const smokeSelfContained = Effect.scoped(
 
       // The large-output fixture bypasses canonical writes and changes the indexed
       // body. Prepare its derived state explicitly before later indexed retrieval.
-      yield* run(['repair', '--core-only', '--no-post-update']);
+      yield* run('repair', ['repair', '--core-only', '--no-post-update']);
       const lexicalDatabase = path.join(threadnoteHome, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
       const lexicalInfo = yield* fs.stat(lexicalDatabase);
       if (lexicalInfo.type !== 'File' || lexicalInfo.size <= 0) {
         return yield* ScriptError.make({message: 'Standalone recall did not create a populated Bun SQLite index.'});
       }
 
-      const doctor = yield* run(['doctor', '--dry-run']);
+      const doctor = yield* run('doctor', ['doctor', '--dry-run']);
       if (!/bun runtime:\s+v1\.4\.4;\s+embedded/i.test(doctor) || /Node runtime/i.test(doctor)) {
         return yield* ScriptError.make({message: `Doctor did not report the embedded Bun runtime:\n${doctor}`});
       }
 
-      const indexed = yield* run(['graph', 'index']);
+      const indexed = yield* run('graph-index', ['graph', 'index']);
       if (!/14 symbols|symbols/i.test(indexed)) {
         return yield* ScriptError.make({message: `Standalone graph index did not complete:\n${indexed}`});
       }
       const graphOperations = yield* Effect.all(
         [
-          run(['graph', 'query', '--query', 'Greeter', '--json']),
-          run(['graph', 'explain', '--symbol', 'KotlinApp', '--json']),
-          run(['graph', 'path', '--from', 'typescriptBoot', '--to', 'typescriptHelper', '--json']),
-          run(['graph', 'impact', '--query', 'makeService', '--json']),
+          run('graph-query', ['graph', 'query', '--query', 'Greeter', '--json']),
+          run('graph-explain', ['graph', 'explain', '--symbol', 'KotlinApp', '--json']),
+          run('graph-path', ['graph', 'path', '--from', 'typescriptBoot', '--to', 'typescriptHelper', '--json']),
+          run('graph-impact', ['graph', 'impact', '--query', 'makeService', '--json']),
         ],
         {concurrency: 1},
       );
@@ -315,6 +321,7 @@ const readLargeOutputThroughPlatformPipe = Effect.fn('smokeSelfContained.readLar
     const result = yield* Effect.tryPromise({
       try: () =>
         runFixtureCommand(options.processes, shell, shellArguments, {
+          stage: 'large-output-pipeline',
           cwd: options.cwd,
           env: options.environment,
           maxOutputBytes: 128 * 1024,
@@ -397,10 +404,11 @@ const writePolyglotRepository = Effect.fn('smokeSelfContained.writePolyglotRepos
     yield* fs.makeDirectory(path.dirname(target), {recursive: true});
     yield* fs.writeFileString(target, content);
   }
-  const git = (arguments_: readonly string[]) =>
+  const git = (stage: FixtureCommandStage, arguments_: readonly string[]) =>
     Effect.tryPromise({
       try: () =>
         runFixtureCommand(processes, gitExecutable, arguments_, {
+          stage,
           cwd: root,
           env: gitEnvironment,
           maxOutputBytes: 128 * 1024,
@@ -408,12 +416,12 @@ const writePolyglotRepository = Effect.fn('smokeSelfContained.writePolyglotRepos
         }),
       catch: cause => scriptError(cause, 'Fixture git command failed.'),
     });
-  yield* git(['init', '-q']);
-  yield* git(['remote', 'add', 'origin', 'https://github.com/threadnote/threadnote.git']);
-  yield* git(['config', 'user.email', 'threadnote@example.test']);
-  yield* git(['config', 'user.name', 'Threadnote Test']);
-  yield* git(['add', '.']);
-  yield* git(['commit', '-qm', 'polyglot standalone fixture']);
+  yield* git('git-init', ['init', '-q']);
+  yield* git('git-remote', ['remote', 'add', 'origin', 'https://github.com/threadnote/threadnote.git']);
+  yield* git('git-email', ['config', 'user.email', 'threadnote@example.test']);
+  yield* git('git-name', ['config', 'user.name', 'Threadnote Test']);
+  yield* git('git-add', ['add', '.']);
+  yield* git('git-commit', ['commit', '-qm', 'polyglot standalone fixture']);
 });
 
 const verifyMcp = Effect.fn('smokeSelfContained.verifyMcp')(function* (

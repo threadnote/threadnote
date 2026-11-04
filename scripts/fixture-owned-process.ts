@@ -108,11 +108,56 @@ export function fixtureDeadline(remaining: () => number, operation: Promise<void
     });
 }
 
+const FIXTURE_COMMAND_STAGES = [
+  'unspecified',
+  'version',
+  'install-dry-run',
+  'models-runtime',
+  'remember',
+  'recall',
+  'repair',
+  'doctor',
+  'graph-index',
+  'graph-query',
+  'graph-explain',
+  'graph-path',
+  'graph-impact',
+  'large-output-pipeline',
+  'git-init',
+  'git-remote',
+  'git-email',
+  'git-name',
+  'git-add',
+  'git-commit',
+] as const;
+export type FixtureCommandStage = (typeof FIXTURE_COMMAND_STAGES)[number];
+const FIXTURE_DIAGNOSTIC_SIGNALS: readonly string[] = [
+  'SIGINT',
+  'SIGTERM',
+  'SIGKILL',
+  'SIGABRT',
+  'SIGSEGV',
+  'SIGPIPE',
+  'SIGHUP',
+  'SIGQUIT',
+  'SIGILL',
+  'SIGBUS',
+  'SIGFPE',
+  'SIGTRAP',
+  'SIGSYS',
+  'SIGXCPU',
+  'SIGXFSZ',
+  'SIGALRM',
+  'SIGUSR1',
+  'SIGUSR2',
+  'SIGBREAK',
+];
+
 export async function runFixtureCommand(
   processes: FixtureProcesses,
   command: string,
   args: readonly string[],
-  options: {cwd: string; env: NodeJS.ProcessEnv; deadline: number; maxOutputBytes: number},
+  options: {cwd: string; env: NodeJS.ProcessEnv; deadline: number; maxOutputBytes: number; stage?: FixtureCommandStage},
 ) {
   if (processes.remaining(options.deadline) <= 0) throw new Error('Fixture body deadline expired');
   const child = processes.spawn(command, args, options);
@@ -120,9 +165,14 @@ export async function runFixtureCommand(
   let stdout = '';
   let stderr = '';
   let size = 0;
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
   let overflow = false;
   const collect = (isOut: boolean) => (chunk: Buffer) => {
-    size += chunk.length;
+    // Saturation retains the original overflow decision without unbounded counters.
+    size = Math.min(options.maxOutputBytes + 1, size + chunk.length);
+    if (isOut) stdoutBytes = Math.min(options.maxOutputBytes + 1, stdoutBytes + chunk.length);
+    else stderrBytes = Math.min(options.maxOutputBytes + 1, stderrBytes + chunk.length);
     if (size > options.maxOutputBytes) {
       overflow = true;
       return;
@@ -135,19 +185,53 @@ export async function runFixtureCommand(
   let code: number | null = null;
   let signal: NodeJS.Signals | null = null;
   let failed = false;
+  let spawned = false;
+  let exited = false;
   const complete = new Promise<void>(resolve => {
+    child.once('spawn', () => {
+      spawned = true;
+    });
     child.once('error', () => {
       failed = true;
     });
     child.once('exit', (value, signalled) => {
+      exited = true;
       code = value;
       signal = signalled;
     });
     child.once('close', () => resolve());
   });
   await processes.wait(options.deadline, complete);
-  if (failed || code !== 0 || signal !== null || overflow)
-    throw new Error('Fixture command failed or output exceeded limit');
+  if (failed || code !== 0 || signal !== null || overflow) {
+    // Emit only after this owned child's close, never from timeout/unknown cleanup.
+    // Do not include the command, arguments, output, environment or child error.
+    const stage = options.stage ?? 'unspecified';
+    throw new Error(
+      `Fixture command failed or output exceeded limit: ${JSON.stringify({
+        stage: EffectArray.contains(FIXTURE_COMMAND_STAGES, stage) ? stage : 'unspecified',
+        observed: 'owned-close',
+        reason: failed
+          ? 'child-error'
+          : overflow
+            ? 'output-overflow'
+            : signal !== null
+              ? 'signal'
+              : code === null
+                ? 'missing-exit-code'
+                : 'nonzero-exit',
+        spawned,
+        exited,
+        childError: failed,
+        exitCode: Number.isSafeInteger(code) ? code : null,
+        signal: signal === null ? null : EffectArray.contains(FIXTURE_DIAGNOSTIC_SIGNALS, signal) ? signal : 'other',
+        stdoutBytes,
+        stderrBytes,
+        totalBytes: size,
+        maxOutputBytes: options.maxOutputBytes,
+        overflow,
+      })}`,
+    );
+  }
   return {stdout, stderr};
 }
 

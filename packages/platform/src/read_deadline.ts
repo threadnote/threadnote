@@ -28,7 +28,9 @@ export class ReadDeadlineContext extends Context.Service<ReadDeadlineContext, Re
 export class ReadDeadlineExceeded extends Schema.TaggedError<ReadDeadlineExceeded, {readonly brand: unique symbol}>()(
   'ReadDeadlineExceeded',
   {},
-) {}
+) {
+  override readonly message = 'The read time budget was exhausted. Retry the read shortly.';
+}
 
 export const makeReadDeadline = (milliseconds: number): Effect.Effect<ReadDeadline> =>
   Clock.monotonicTimeNanos.pipe(

@@ -170,6 +170,60 @@ describe('Cursor Cloud integration', () => {
     await expect(draining).rejects.toThrow('Deferred lexical synchronization timed out.');
   });
 
+  it('waits for downstream publication after synchronization completes', async () => {
+    let finishSync!: () => void;
+    let finishPublication!: () => void;
+    let publicationObserved!: () => void;
+    const sync = new Promise<void>(resolve => {
+      finishSync = resolve;
+    });
+    const publication = new Promise<void>(resolve => {
+      finishPublication = resolve;
+    });
+    const observingPublication = new Promise<void>(resolve => {
+      publicationObserved = resolve;
+    });
+    const failure = new Promise<never>(() => {});
+    let settled = false;
+    const settlement = settleLexicalSyncAndPublication(
+      {failure, settleCurrent: () => sync},
+      {
+        failure,
+        settleCurrent: () => {
+          publicationObserved();
+          return publication;
+        },
+      },
+    ).then(() => {
+      settled = true;
+    });
+
+    finishSync();
+    await observingPublication;
+    expect(settled).toBe(false);
+    finishPublication();
+    await settlement;
+    expect(settled).toBe(true);
+  });
+
+  it.each(['synchronization', 'publication'] as const)(
+    'propagates %s failure while the other scope is pending',
+    async failedScope => {
+      let rejectFailure!: (error: Error) => void;
+      const failure = new Promise<never>((_resolve, reject) => {
+        rejectFailure = reject;
+      });
+      const never = new Promise<never>(() => {});
+      const original = new Error('Controlled lexical scope failure.');
+      const settlement = settleLexicalSyncAndPublication(
+        {failure: failedScope === 'synchronization' ? failure : never, settleCurrent: () => never},
+        {failure: failedScope === 'publication' ? failure : never, settleCurrent: () => never},
+      );
+      rejectFailure(original);
+      await expect(settlement).rejects.toBe(original);
+    },
+  );
+
   it('prints deterministic Dashboard configuration and idempotently bootstraps a writable share', async () => {
     const fixture = await cloudFixture();
     try {
@@ -1374,12 +1428,33 @@ async function prepareCloudReadyFixture(fixture: CloudFixture): Promise<void> {
 }
 
 async function settlePendingLexicalSync(scope: RecallLexicalScope): Promise<void> {
-  const completionFence = await armLexicalSyncCompletionFence(scope);
+  const deadline = performance.now() + 20_000;
+  const completionFence = await armLexicalSyncCompletionFence(scope, deadline);
   try {
-    await completionFence.settleCurrent();
+    // Synchronization enqueues this separately keyed publisher before completing.
+    // Observe it before waiting, then read its current state after synchronization.
+    const publicationFence = await armLexicalSyncCompletionFence(
+      {...scope, work: undefined},
+      deadline,
+      completionFence.failure,
+    );
+    try {
+      await settleLexicalSyncAndPublication(completionFence, publicationFence);
+    } finally {
+      publicationFence.close();
+    }
   } finally {
     completionFence.close();
   }
+}
+
+async function settleLexicalSyncAndPublication(
+  synchronization: {readonly failure: Promise<never>; settleCurrent(): Promise<void>},
+  publication: {readonly failure: Promise<never>; settleCurrent(): Promise<void>},
+): Promise<void> {
+  const failure = Promise.race([synchronization.failure, publication.failure]);
+  await raceLexicalFenceFailure(synchronization.settleCurrent(), failure);
+  await raceLexicalFenceFailure(publication.settleCurrent(), failure);
 }
 
 function classifyLexicalSyncSettlement(
@@ -1423,8 +1498,13 @@ function raceLexicalFenceFailure<A>(operation: Promise<A>, failure: Promise<neve
   return Promise.race([operation, failure]);
 }
 
-async function armLexicalSyncCompletionFence(scope: RecallLexicalScope): Promise<{
+async function armLexicalSyncCompletionFence(
+  scope: RecallLexicalScope,
+  deadline = performance.now() + 20_000,
+  precedingFailure?: Promise<never>,
+): Promise<{
   readonly wait: Promise<void>;
+  readonly failure: Promise<never>;
   check(): void;
   settleCurrent(): Promise<void>;
   close(): void;
@@ -1487,12 +1567,13 @@ async function armLexicalSyncCompletionFence(scope: RecallLexicalScope): Promise
   const timer = setTimeout(
     () =>
       fail(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
-    20_000,
+    Math.max(0, deadline - performance.now()),
   );
   void wait.catch(() => undefined);
   void settlement.catch(() => undefined);
   void terminalFailure.catch(() => undefined);
-  const awaitForeground = <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, terminalFailure);
+  const failure = precedingFailure ? Promise.race([terminalFailure, precedingFailure]) : terminalFailure;
+  const awaitForeground = <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, failure);
   try {
     before = await awaitForeground(readScopedDemand());
     lastObserved = `before=${before?.completedAt ?? 'absent'}`;
@@ -1597,7 +1678,7 @@ async function armLexicalSyncCompletionFence(scope: RecallLexicalScope): Promise
       awaitForeground,
     );
   };
-  return {wait, check: inspect, settleCurrent, close};
+  return {wait, failure, check: inspect, settleCurrent, close};
 }
 
 async function withCloudMcp<T>(
