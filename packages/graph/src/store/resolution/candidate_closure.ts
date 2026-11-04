@@ -107,6 +107,7 @@ export type ProjectResolutionCandidateClosure =
       readonly limit: number;
       readonly mode: 'fallback';
       readonly observed: number;
+      readonly requiredAtDecision?: number;
       readonly reason: 'project-closure-unbounded';
     };
 

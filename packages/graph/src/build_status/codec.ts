@@ -674,12 +674,17 @@ function parseOverlayFallbackAssessment(
 function parseOverlayFallbackBoundary(value: unknown): CodeGraphMaterializationMetrics['fallbackBoundary'] | undefined {
   if (!isRecord(value)) return undefined;
   const pair = parseOverlayFallbackBoundaryPair(value.stage, value.metric);
+  const required = value.requiredAtDecision;
   if (
     pair === undefined ||
     !isNonNegativeSafeInteger(value.changedFiles) ||
     !isNonNegativeSafeInteger(value.limit) ||
     !isNonNegativeSafeInteger(value.observedAtDecision) ||
-    Number(value.observedAtDecision) <= Number(value.limit)
+    (required === undefined
+      ? Number(value.observedAtDecision) <= Number(value.limit)
+      : !isNonNegativeSafeInteger(required) ||
+        Number(required) <= Number(value.limit) ||
+        Number(required) < Number(value.observedAtDecision))
   ) {
     return undefined;
   }
@@ -687,6 +692,7 @@ function parseOverlayFallbackBoundary(value: unknown): CodeGraphMaterializationM
     changedFiles: Number(value.changedFiles),
     limit: Number(value.limit),
     observedAtDecision: Number(value.observedAtDecision),
+    ...(required === undefined ? {} : {requiredAtDecision: Number(required)}),
     ...pair,
   };
 }

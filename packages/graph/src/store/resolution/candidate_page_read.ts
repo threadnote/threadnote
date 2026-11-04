@@ -22,6 +22,8 @@ export interface CandidatePageWork {
   readonly observations: number;
   readonly bitTests: number;
   readonly exceeded?: 'rows' | 'bytes' | 'files' | 'observations';
+  /** Total needed for the refused atomic admission, including unspent batch reservations. */
+  readonly requiredAtDecision?: number;
 }
 interface PageMetadata {
   readonly eligible: number;
@@ -58,26 +60,24 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
   let bytes = 0;
   let observations = 0;
   let bitTests = 0;
-  const result = (exceeded?: CandidatePageWork['exceeded']): CandidatePageWork => ({
+  const result = (exceeded?: CandidatePageWork['exceeded'], requiredAtDecision?: number): CandidatePageWork => ({
     paths: [...paths],
     associations,
     bytes,
     observations,
     bitTests,
     ...(exceeded ? {exceeded} : {}),
+    ...(requiredAtDecision === undefined ? {} : {requiredAtDecision}),
   });
   if (keys.length === 0) return result();
   if (maximumAssociations <= 0) {
-    associations = 1;
-    return result('rows');
+    return result('rows', 1);
   }
-  if (maximumBytes <= 0) {
-    bytes = 1;
-    return result('bytes');
+  if (maximumBytes < 128) {
+    return result('bytes', 128);
   }
   if (maximumObservations < keys.length) {
-    observations = keys.length;
-    return result('observations');
+    return result('observations', keys.length);
   }
   const snapshotKey = yield* candidateSnapshotKey(sql, snapshotId, token);
   if (snapshotKey === undefined) return undefined;
@@ -85,29 +85,25 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
   let after: readonly [number, number] = [-1, -1];
   for (;;) {
     if (bytes + 128 > maximumBytes) {
-      bytes += 128;
-      return result('bytes');
+      return result('bytes', bytes + 128);
     }
     if (associations >= maximumAssociations) {
-      associations += 1;
-      return result('rows');
+      return result('rows', associations + 1);
     }
     if (observations + keys.length > maximumObservations) {
-      observations += keys.length;
-      return result('observations');
+      return result('observations', observations + keys.length);
     }
-    bytes += 128;
     // Remaining-bounded scalar/filter stream. The indexed primary cursor precedes all masks.
     const limit = Math.min(
       1000,
       maximumAssociations - associations,
-      Math.floor((maximumBytes - bytes) / 416),
+      Math.floor((maximumBytes - bytes - 128) / 416),
       Math.floor((maximumObservations - observations) / keys.length),
     );
     if (limit <= 0) {
-      bytes += 416;
-      return result('bytes');
+      return result('bytes', bytes + 128 + 416);
     }
+    bytes += 128; // Issued query/sentinel work, not an unperformed prospective query.
     const metadata = yield* sql<PageMetadata>`SELECT page.file_key,page.ordinal,
       page.entry_count,page.raw_bytes,page.stored_bytes,page.original_tuple_bytes,page.codec,page.raw_sha,page.stored_sha,
       CASE WHEN typeof(page.synopsis) = 'blob' AND length(page.synopsis) = 128 THEN page.synopsis ELSE NULL END AS synopsis,
@@ -127,7 +123,7 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
     bytes += metadata.length * 416;
     // Reserve the ENTIRE fetched batch before any positive page can spend decoded-pair work.
     // Later negatives/masks still own their probes; hydration cannot consume their allowance.
-    observations += metadata.length * keys.length;
+    let reservedObservations = metadata.length * keys.length;
     for (const row of metadata) {
       if (
         !Number.isSafeInteger(row.file_key) ||
@@ -156,6 +152,8 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
       )
         return undefined;
       after = [row.file_key, row.ordinal];
+      observations += keys.length;
+      reservedObservations -= keys.length;
       bitTests += keys.length * 8;
       let possible = false;
       for (const hint of hints) if (candidateSynopsisMayContain(row.synopsis, hint)) possible = true;
@@ -167,18 +165,16 @@ export const readCandidateKeyWavePages = Effect.fn('codeGraph.readCandidateKeyWa
       )
         return undefined;
       if (associations + row.entry_count > maximumAssociations) {
-        associations += row.entry_count;
-        return result('rows');
+        return result('rows', associations + row.entry_count);
       }
-      if (observations + row.entry_count * keys.length > maximumObservations) {
-        observations += row.entry_count * keys.length;
-        return result('observations');
+      const requiredObservations = observations + reservedObservations + row.entry_count * keys.length;
+      if (requiredObservations > maximumObservations) {
+        return result('observations', requiredObservations);
       }
       const cost = row.raw_bytes + row.stored_bytes + row.original_tuple_bytes + row.path_bytes;
-      if (!Number.isSafeInteger(cost)) return undefined;
+      if (!Number.isSafeInteger(cost) || !Number.isSafeInteger(bytes + cost)) return undefined;
       if (bytes + cost > maximumBytes) {
-        bytes += cost;
-        return result('bytes');
+        return result('bytes', bytes + cost);
       }
       associations += row.entry_count;
       observations += row.entry_count * keys.length;

@@ -32,6 +32,8 @@ import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {isJsonObject} from '@threadnote/platform/json';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {renderFallbackBoundary} from '../../src/code_graph/materialization_output.js';
+import {isCodeGraphLocalDiagnosticsReport} from '@threadnote/manager/api/response-guards';
 
 import {
   CODE_GRAPH_EXTRACTOR_SET_VERSION,
@@ -132,7 +134,8 @@ describe('code graph cross-process build status', () => {
         unit: 'files',
       });
 
-      expect((yield* readCodeGraphBuildStatuses(layout))[0]).toMatchObject({
+      const legacyStatus = (yield* readCodeGraphBuildStatuses(layout))[0];
+      expect(legacyStatus).toMatchObject({
         materialization: {
           metrics: {
             fallbackBoundary: {
@@ -159,6 +162,113 @@ describe('code graph cross-process build status', () => {
       const materialization = object(status.materialization);
       const metrics = object(materialization.metrics);
       const fallbackBoundary = object(metrics.fallbackBoundary);
+      expect(EffectRecord.has(fallbackBoundary, 'requiredAtDecision')).toBe(false);
+      expect(renderFallbackBoundary(legacyStatus.materialization?.metrics?.fallbackBoundary)).toBe(
+        'boundary: affected files 1,404 > 128 (3 changed)',
+      );
+      const saveBoundary = (boundary: unknown) =>
+        fs.writeFileString(
+          statusPath,
+          JSON.stringify({
+            ...status,
+            materialization: {...materialization, metrics: {...metrics, fallbackBoundary: boundary}},
+          }) + '\n',
+        );
+      const managerReport = (boundary: unknown) => ({
+        type: 'code-graph-diagnostics',
+        version: 2,
+        generatedAt: '2026-11-04T00:00:00.000Z',
+        mode: {analyze: false, deep: false},
+        summary: {
+          activeBuildCount: 1,
+          analysisCompleteCount: 0,
+          analysisPartialCount: 0,
+          databaseCount: 1,
+          deferredDatabaseCount: 1,
+          healthyDatabaseCount: 0,
+          migrationPendingDatabaseCount: 0,
+          readySnapshotCount: 0,
+          totalStorageBytes: 0,
+          unhealthyDatabaseCount: 0,
+          unreadableDatabaseCount: 0,
+          viewCount: 0,
+          waiterCount: 0,
+        },
+        obsoleteStores: {bytes: 0, checkouts: [], fileCount: 0, unsafeEntryCount: 0},
+        databases: [
+          {
+            views: [],
+            builds: [
+              {
+                ...status,
+                observation: {heartbeatAgeMilliseconds: 0, liveness: 'active'},
+                materialization: {...materialization, metrics: {...metrics, fallbackBoundary: boundary}},
+              },
+            ],
+            waiters: [],
+            checkoutId: identity.checkoutId,
+            healthState: 'deferred',
+            issues: [],
+            lifecycle: [],
+            storage: {state: 'missing', checkoutId: identity.checkoutId},
+          },
+        ],
+      });
+      for (const [stage, metric] of [
+        ['project-closure-selection', 'affected-files'],
+        ['resolution-candidate-scan', 'candidate-projection-observations'],
+        ['resolution-candidate-rewrite', 'cached-fact-bytes'],
+      ] as const) {
+        const early = {...fallbackBoundary, stage, metric, observedAtDecision: 0, requiredAtDecision: 2, limit: 1};
+        yield* saveBoundary(early);
+        const roundTrip = (yield* readCodeGraphBuildStatuses(layout))[0];
+        expect(roundTrip.materialization?.metrics).toEqual({
+          ...legacyStatus.materialization?.metrics,
+          fallbackBoundary: early,
+        });
+        expect(renderFallbackBoundary(roundTrip.materialization?.metrics?.fallbackBoundary)).toBe(
+          `boundary: ${EffectString.replaceAll('-', ' ')(metric)} 0 observed, 2 required > 1 limit (3 changed)`,
+        );
+        expect(isCodeGraphLocalDiagnosticsReport(managerReport(early))).toBe(true);
+        expect(isCodeGraphLocalDiagnosticsReport(managerReport({...early, requiredAtDecision: '2'}))).toBe(false);
+        expect(isCodeGraphLocalDiagnosticsReport(managerReport({...early, requiredAtDecision: Number.NaN}))).toBe(
+          false,
+        );
+      }
+      const earlyBase = {
+        ...fallbackBoundary,
+        stage: 'resolution-candidate-scan',
+        metric: 'candidate-projection-observations',
+        observedAtDecision: 1,
+        limit: 3,
+      };
+      const early = {...earlyBase, requiredAtDecision: 5};
+      yield* saveBoundary(early);
+      expect((yield* readCodeGraphBuildStatuses(layout))[0].materialization?.metrics?.fallbackBoundary).toEqual(early);
+      for (const requiredAtDecision of [
+        undefined,
+        null,
+        '5',
+        -1,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        3,
+        0,
+      ]) {
+        yield* saveBoundary({...earlyBase, ...(requiredAtDecision === undefined ? {} : {requiredAtDecision})});
+        expect(yield* readCodeGraphBuildStatuses(layout)).toEqual([]);
+      }
+      yield* saveBoundary({...early, observedAtDecision: 6, requiredAtDecision: 5});
+      expect(yield* readCodeGraphBuildStatuses(layout)).toEqual([]);
+      yield* saveBoundary(fallbackBoundary);
+      const unchanged = (yield* readCodeGraphBuildStatuses(layout))[0];
+      expect(unchanged.materialization?.metrics).toEqual(legacyStatus.materialization?.metrics);
+      expect(EffectRecord.has(object(unchanged.materialization?.metrics?.fallbackBoundary), 'requiredAtDecision')).toBe(
+        false,
+      );
+      expect(isCodeGraphLocalDiagnosticsReport(managerReport(fallbackBoundary))).toBe(true);
       yield* fs.writeFileString(
         statusPath,
         `${JSON.stringify({

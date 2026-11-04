@@ -576,6 +576,9 @@ function resolutionCandidateScanFallback(
     {metric: fallback.detail, stage: 'resolution-candidate-scan'},
     fallback.observed,
     fallback.limit,
+    'requiredAtDecision' in fallback && typeof fallback.requiredAtDecision === 'number'
+      ? fallback.requiredAtDecision
+      : undefined,
   );
 }
 
@@ -590,9 +593,16 @@ function projectClosureBoundFallback(
   boundary: FallbackBoundaryKind,
   observedAtDecision: number,
   limit: number,
+  requiredAtDecision?: number,
 ): Extract<IncrementalOverlayPreassessment, {readonly mode: 'fallback'}> {
   return {
-    fallbackBoundary: {changedFiles, limit, observedAtDecision, ...boundary},
+    fallbackBoundary: {
+      changedFiles,
+      limit,
+      observedAtDecision,
+      ...boundary,
+      ...(requiredAtDecision === undefined ? {} : {requiredAtDecision}),
+    },
     mode: 'fallback',
     reason: 'project-closure-unbounded',
   };

@@ -634,8 +634,10 @@ export interface CodeGraphOverlayFallbackAssessment {
 interface CodeGraphOverlayFallbackBoundaryBase {
   readonly changedFiles: number;
   readonly limit: number;
-  /** Counter value at the exact point the closed limit was exceeded; not an estimated final total. */
+  /** Actual governed work at refusal, which can be within the limit when the next bounded admission is refused. */
   readonly observedAtDecision: number;
+  /** Total needed for that refused admission, including unspent mandatory reservations; not actual work or final closure size. */
+  readonly requiredAtDecision?: number;
 }
 
 export type CodeGraphOverlayFallbackBoundary = CodeGraphOverlayFallbackBoundaryBase &

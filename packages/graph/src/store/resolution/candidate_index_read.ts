@@ -128,8 +128,20 @@ const ReexportSchema = Schema.Struct({
   sourcePath: Schema.String,
 });
 const identity = (key: ProjectResolutionLookupKey) => projectResolutionLookupKeyIdentity(key.resolutionDomain, key.key);
-const bound = (detail: ProjectResolutionCandidateScanFallbackDetail, observed: number, limit: number) =>
-  ({mode: 'fallback', reason: 'project-closure-unbounded', detail, observed, limit}) as const;
+const bound = (
+  detail: ProjectResolutionCandidateScanFallbackDetail,
+  observed: number,
+  limit: number,
+  requiredAtDecision?: number,
+) =>
+  ({
+    mode: 'fallback',
+    reason: 'project-closure-unbounded',
+    detail,
+    observed,
+    limit,
+    ...(requiredAtDecision === undefined ? {} : {requiredAtDecision}),
+  }) as const;
 
 /** No full-fact metadata/decode is needed to find complete affected reference paths. */
 export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.selectCandidateIndexClosure')(function* (
@@ -210,6 +222,7 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
         PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
       );
     for (const snapshotId of sources) {
+      const before = {associations: associationsRead, observations, bytes: bytesRead};
       const selected = yield* readCandidateKeyWavePages(
         sql,
         snapshotId,
@@ -231,18 +244,21 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
           'candidate-projection-associations',
           associationsRead,
           PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS,
+          selected.requiredAtDecision === undefined ? undefined : before.associations + selected.requiredAtDecision,
         );
       if (selected.exceeded === 'observations')
         return bound(
           'candidate-projection-observations',
           observations,
           PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS,
+          selected.requiredAtDecision === undefined ? undefined : before.observations + selected.requiredAtDecision,
         );
       if (selected.exceeded === 'bytes')
         return bound(
           'candidate-projection-observed-key-bytes',
           bytesRead,
           PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
+          selected.requiredAtDecision === undefined ? undefined : before.bytes + selected.requiredAtDecision,
         );
       for (const path of selected.paths) paths.add(path);
       if (selected.exceeded === 'files' || paths.size > input.maximumSelectedFiles)
@@ -260,6 +276,7 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
         // Complete cursor AND payload UTF8 are admitted against the remaining shared budget in SQL.
         let afterEdge: string | undefined;
         for (;;) {
+          const before = bytesRead;
           const selected = yield* readCandidateReexportRow(
             sql,
             snapshotId,
@@ -275,6 +292,7 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
               'candidate-projection-observed-key-bytes',
               bytesRead,
               PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
+              before + selected.requiredAtDecision,
             );
           const row = selected.row;
           if (!row) break;
@@ -349,7 +367,7 @@ export const readCandidateReexportRow = Effect.fn('codeGraph.readCandidateReexpo
 ) {
   // 128 query/sentinel + 64 for the two scalar lengths and row status, before driver materialization.
   const metadataBytes = 192;
-  if (maximumBytes < metadataBytes) return {bytes: metadataBytes, exceeded: true as const};
+  if (maximumBytes < metadataBytes) return {bytes: 0, exceeded: true as const, requiredAtDecision: metadataBytes};
   const available = maximumBytes - metadataBytes;
   const rows = yield* sql.unsafe<{
     readonly edge_bytes: number;
@@ -394,7 +412,7 @@ export const readCandidateReexportRow = Effect.fn('codeGraph.readCandidateReexpo
     return undefined;
   const bytes = metadataBytes + row.edge_bytes + row.payload_bytes;
   if (!Number.isSafeInteger(bytes)) return undefined;
-  if (bytes > maximumBytes) return {bytes, exceeded: true as const};
+  if (bytes > maximumBytes) return {bytes: metadataBytes, exceeded: true as const, requiredAtDecision: bytes};
   if (
     row.edge_id === null ||
     row.payload_json === null ||

@@ -552,6 +552,7 @@ const ApiSchema10873 = Schema.Struct({
   changedFiles: Schema.Finite,
   limit: Schema.Finite,
   observedAtDecision: Schema.Finite,
+  requiredAtDecision: Schema.optionalKey(Schema.Finite),
   metric: ApiSchema10880,
   stage: Schema.Literal('project-closure-selection'),
 });
@@ -572,6 +573,7 @@ const ApiSchema10874 = Schema.Struct({
   changedFiles: Schema.Finite,
   limit: Schema.Finite,
   observedAtDecision: Schema.Finite,
+  requiredAtDecision: Schema.optionalKey(Schema.Finite),
   metric: ApiSchema10905,
   stage: Schema.Literal('resolution-candidate-scan'),
 });
@@ -584,6 +586,7 @@ const ApiSchema10875 = Schema.Struct({
   changedFiles: Schema.Finite,
   limit: Schema.Finite,
   observedAtDecision: Schema.Finite,
+  requiredAtDecision: Schema.optionalKey(Schema.Finite),
   metric: ApiSchema10908,
   stage: Schema.Literal('resolution-candidate-rewrite'),
 });

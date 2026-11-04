@@ -19,7 +19,9 @@ export function renderFallbackBoundary(boundary: CodeGraphOverlayFallbackBoundar
   if (boundary === undefined) return undefined;
   return (
     `boundary: ${Effect2.pipe(boundary.metric, EffectString.replaceAll('-', ' '))} ` +
-    `${boundary.observedAtDecision.toLocaleString()} > ${boundary.limit.toLocaleString()} ` +
+    (boundary.requiredAtDecision === undefined
+      ? `${boundary.observedAtDecision.toLocaleString()} > ${boundary.limit.toLocaleString()} `
+      : `${boundary.observedAtDecision.toLocaleString()} observed, ${boundary.requiredAtDecision.toLocaleString()} required > ${boundary.limit.toLocaleString()} limit `) +
     `(${boundary.changedFiles.toLocaleString()} changed)`
   );
 }

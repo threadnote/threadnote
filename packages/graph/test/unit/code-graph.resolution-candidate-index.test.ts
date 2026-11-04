@@ -7,6 +7,8 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {vi} from 'vitest';
 import * as CandidatePages from '@threadnote/graph/store/resolution/candidate_pages';
+import * as CandidateSynopsis from '@threadnote/graph/store/resolution/candidate_synopsis';
+import * as CandidatePageRead from '@threadnote/graph/store/resolution/candidate_page_read';
 import {Array as EffectArray, Effect, Layer, Logger, References, pipe} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as Console from 'effect/Console';
@@ -255,8 +257,9 @@ describe('complete reverse resolution candidate evidence', () => {
           const after = n === 0 ? undefined : originals[n - 1].edge_id;
           hydrated = 0;
           expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, after, bytes - 1)).toEqual({
-            bytes,
+            bytes: 192,
             exceeded: true,
+            requiredAtDecision: bytes,
           });
           expect(hydrated).toBe(0); // SQL CASE returned neither the complete cursor nor the payload.
           expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, after, bytes)).toEqual({
@@ -268,16 +271,18 @@ describe('complete reverse resolution candidate evidence', () => {
         expect(Buffer.byteLength(originals[1].edge_id)).toBe(6);
         const before = queries;
         expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, undefined, 191)).toEqual({
-          bytes: 192,
+          bytes: 0,
           exceeded: true,
+          requiredAtDecision: 192,
         });
         expect(queries).toBe(before);
         const huge = EffectString.repeat(8 * 1048576)('x');
         yield* sql`UPDATE snapshot_candidate_reexports SET payload_json = ${huge} WHERE edge_id = 'a'`;
         hydrated = 0;
         expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, undefined, 193)).toEqual({
-          bytes: 192 + 1 + 8 * 1048576,
+          bytes: 192,
           exceeded: true,
+          requiredAtDecision: 192 + 1 + 8 * 1048576,
         });
         expect(hydrated).toBe(0);
       }).pipe(provideDatabase),
@@ -1053,10 +1058,20 @@ describe('complete reverse resolution candidate evidence', () => {
       expect(total).toBeGreaterThan(256 * 1_048_576);
       const metadataPaths: string[] = [];
       const decodedPaths: string[] = [];
+      let refusedBeforeWork = false;
       const storeContext = yield* Layer.build(
         Layer.mock(CodeGraphStore, {
           resolutionCandidateIndexClosure: (_database, input) =>
-            selectResolutionCandidateIndexClosure(sql, input).pipe(Effect.orDie),
+            refusedBeforeWork
+              ? Effect.succeed({
+                  mode: 'fallback' as const,
+                  reason: 'project-closure-unbounded' as const,
+                  detail: 'candidate-projection-observations' as const,
+                  observed: 0,
+                  requiredAtDecision: 2,
+                  limit: 1,
+                })
+              : selectResolutionCandidateIndexClosure(sql, input).pipe(Effect.orDie),
           loadCachedFacts: (_database, selected, _extractor, options) =>
             Effect.gen(function* () {
               const facts = new Map<string, CodeGraphFileFacts>();
@@ -1127,6 +1142,22 @@ describe('complete reverse resolution candidate evidence', () => {
       });
       expect(metadataPaths).toEqual(['changed.ts', 'consumer.ts']);
       expect(decodedPaths).toEqual(['changed.ts', 'consumer.ts']);
+      refusedBeforeWork = true;
+      expect(yield* assess()).toEqual({
+        mode: 'fallback',
+        reason: 'project-closure-unbounded',
+        fallbackBoundary: {
+          metric: 'candidate-projection-observations',
+          stage: 'resolution-candidate-scan',
+          changedFiles: 1,
+          observedAtDecision: 0,
+          requiredAtDecision: 2,
+          limit: 1,
+        },
+      });
+      expect(metadataPaths).toEqual(['changed.ts', 'consumer.ts']);
+      expect(decodedPaths).toEqual(['changed.ts', 'consumer.ts']);
+      refusedBeforeWork = false;
       yield* sql`DELETE FROM snapshot_candidate_receipts WHERE snapshot_id = 'base'`;
       expect(yield* assess()).toMatchObject({
         mode: 'fallback',
@@ -1420,6 +1451,14 @@ describe('complete reverse resolution candidate evidence', () => {
           {key: 'first', resolutionDomain: 'typescript'},
           {key: 'second', resolutionDomain: 'typescript'},
         ];
+        const hint = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePages, 'candidatePairHint')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const probe = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidateSynopsis, 'candidateSynopsisMayContain')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
         let folds = 0,
           payloads = 0,
           calls = 0;
@@ -1461,6 +1500,8 @@ describe('complete reverse resolution candidate evidence', () => {
           yield* readCandidateKeyWavePages(observed, 'base', undefined, [], 1000, 1048576, 128, token, 2000000),
         ).toEqual({paths: [], associations: 0, bytes: 0, observations: 0, bitTests: 0});
         expect(calls).toBe(0);
+        hint.mockClear();
+        probe.mockClear();
         const exhausted = yield* readCandidateKeyWavePages(
           observed,
           'base',
@@ -1472,9 +1513,19 @@ describe('complete reverse resolution candidate evidence', () => {
           token,
           1,
         );
-        expect(exhausted).toMatchObject({paths: [], observations: 2, exceeded: 'observations'});
+        expect(exhausted).toEqual({
+          paths: [],
+          associations: 0,
+          bytes: 0,
+          observations: 0,
+          bitTests: 0,
+          exceeded: 'observations',
+          requiredAtDecision: 2,
+        });
         expect(calls).toBe(0);
         expect(payloads).toBe(0);
+        expect(hint).not.toHaveBeenCalled();
+        expect(probe).not.toHaveBeenCalled();
       }).pipe(provideDatabase),
   );
 
@@ -1484,6 +1535,14 @@ describe('complete reverse resolution candidate evidence', () => {
       Effect.gen(function* () {
         const sql = yield* setup;
         const paths = ['a.ts', 'b.ts', 'c.ts'];
+        const probe = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidateSynopsis, 'candidateSynopsisMayContain')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const decode = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePages, 'decodeCandidatePage')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
         for (let positive = 0; positive < 3; positive++) {
           const id = `mix-${positive}`;
           yield* createSnapshot(sql, id, paths);
@@ -1494,6 +1553,8 @@ describe('complete reverse resolution candidate evidence', () => {
             EffectArray.map(paths, (path, n) => reference(path, n === positive ? 'needle' : `negative-${n}`)),
           );
           expect(yield* finishResolutionCandidateIndex(sql, {...identity, snapshotId: id}, write)).toBe(true);
+          const mask = `masked-${positive}`;
+          yield* createSnapshot(sql, mask, [paths[(positive + 1) % paths.length]], id);
           const token = yield* resolutionCandidateAuthorityToken(sql);
           let payloads = 0,
             folds = 0;
@@ -1511,22 +1572,204 @@ describe('complete reverse resolution candidate evidence', () => {
               return Reflect.apply(target, thisArg, args);
             },
           });
-          const priorWaveObservations = 1999997;
-          const selected = yield* readCandidateKeyWavePages(
-            observed,
-            id,
-            undefined,
-            [{resolutionDomain: 'typescript', key: 'needle'}],
-            1000,
-            1048576,
-            128,
-            token,
-            2000000 - priorWaveObservations,
+          const stored = (yield* sql<{
+            readonly stored_bytes: number;
+            readonly raw_bytes: number;
+            readonly original_tuple_bytes: number;
+          }>`
+            SELECT page.stored_bytes,page.raw_bytes,page.original_tuple_bytes FROM snapshot_candidate_synopsis_pages AS page
+            JOIN snapshot_candidate_synopsis_files AS file ON file.file_key=page.file_key
+            JOIN snapshot_candidate_synopsis_snapshots AS snapshot ON snapshot.snapshot_key=file.snapshot_key
+            WHERE snapshot.snapshot_id=${id} AND file.path=${paths[positive]}`)[0];
+          expect(stored.raw_bytes).toBe(69); //8B frame + (8+10+6) + (8+10+19), independent full pairs.
+          expect(stored.original_tuple_bytes).toBe(63); //2*(snapshot5+path4+domain10)+needle6+fallback19.
+          for (const maskId of [undefined, mask]) {
+            const priorWaveObservations = 1999997;
+            probe.mockClear();
+            decode.mockClear();
+            payloads = 0;
+            folds = 0;
+            const selected = yield* readCandidateKeyWavePages(
+              observed,
+              id,
+              maskId,
+              [{resolutionDomain: 'typescript', key: 'needle'}],
+              1000,
+              1048576,
+              128,
+              token,
+              2000000 - priorWaveObservations,
+            );
+            expect(selected).toMatchObject({
+              paths: [],
+              associations: 3,
+              observations: positive + 1,
+              exceeded: 'observations',
+              requiredAtDecision: 5,
+            });
+            expect(selected?.bitTests).toBe((positive + 1) * 8);
+            expect(probe).toHaveBeenCalledTimes(positive + 1);
+            expect(decode).not.toHaveBeenCalled();
+            expect(priorWaveObservations + (selected?.observations ?? 0)).toBe(1999998 + positive);
+            expect(priorWaveObservations + (selected?.requiredAtDecision ?? 0)).toBe(2000002);
+            expect(payloads).toBe(0);
+            expect(folds).toBe(1);
+            probe.mockClear();
+            decode.mockClear();
+            payloads = 0;
+            folds = 0;
+            const byteRefusal = yield* readCandidateKeyWavePages(
+              observed,
+              id,
+              maskId,
+              [{resolutionDomain: 'typescript', key: 'needle'}],
+              1000,
+              1376,
+              128,
+              token,
+              2000000,
+            );
+            expect(byteRefusal).toEqual({
+              paths: [],
+              associations: 3,
+              bytes: 1376,
+              observations: positive + 1,
+              bitTests: (positive + 1) * 8,
+              exceeded: 'bytes',
+              requiredAtDecision: 1376 + 136 + stored.stored_bytes,
+            });
+            expect(probe).toHaveBeenCalledTimes(positive + 1);
+            expect(decode).not.toHaveBeenCalled();
+            expect(payloads).toBe(0);
+            expect(folds).toBe(1);
+          }
+        }
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'aggregates required observation demand from the pre-read total without recounting local spent work',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['a.ts']);
+        yield* stage(sql, 'base', ['a.ts'], []);
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        yield* createSnapshot(sql, 'delta', [], 'base');
+        yield* sql`UPDATE snapshots SET file_count=1 WHERE id='delta'`;
+        expect(yield* finishResolutionCandidateIndex(sql, {...identity, snapshotId: 'delta'}, write)).toBe(true);
+        // Inject ONLY the reader's already-spent work report; actual loops/budget-before-probe behavior
+        // are independently covered above. This is not a2M-operation runtime/performance measurement.
+        const reader = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePageRead, 'readCandidateKeyWavePages')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        reader.mockImplementationOnce(() =>
+          Effect.succeed({paths: [], associations: 0, bytes: 0, observations: 1999997, bitTests: 0}),
+        );
+        reader.mockImplementationOnce(() =>
+          Effect.succeed({
+            paths: [],
+            associations: 3,
+            bytes: 1376,
+            observations: 1,
+            bitTests: 8,
+            exceeded: 'observations' as const,
+            requiredAtDecision: 5,
+          }),
+        );
+        expect(yield* selectResolutionCandidateIndexClosure(sql, query('needle', 'delta'))).toEqual({
+          mode: 'fallback',
+          reason: 'project-closure-unbounded',
+          detail: 'candidate-projection-observations',
+          observed: 1999998,
+          requiredAtDecision: 2000002,
+          limit: 2000000,
+        });
+        expect(reader).toHaveBeenCalledTimes(2);
+        expect(reader.mock.calls[1][8]).toBe(3);
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'keeps shared reexport scalar costs actual and refuses first or later full rows before hydration',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['barrel.ts']);
+        yield* stage(
+          sql,
+          'base',
+          ['barrel.ts'],
+          [
+            {...reference('barrel.ts', 'key', ['alias']), edgeId: 'a'},
+            {...reference('barrel.ts', 'key', ['alias']), edgeId: 'é😀'},
+          ],
+        );
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        const originals = yield* sql<{readonly edge_id: string; readonly payload_json: string}>`
+        SELECT edge_id,payload_json FROM snapshot_candidate_reexports ORDER BY edge_id`;
+        const full = EffectArray.map(
+          originals,
+          row => 192 + Buffer.byteLength(row.edge_id) + Buffer.byteLength(row.payload_json),
+        );
+        const reader = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(CandidatePageRead, 'readCandidateKeyWavePages')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        const parse = yield* Effect.acquireRelease(
+          Effect.sync(() => vi.spyOn(JSON, 'parse')),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        let queries = 0,
+          hydrated = 0;
+        const observed = new Proxy(sql, {
+          get(target, key, receiver) {
+            if (key === 'unsafe')
+              return (...args: Parameters<typeof sql.unsafe>) =>
+                target.unsafe(...args).pipe(
+                  Effect.tap(rows =>
+                    Effect.sync(() => {
+                      if (EffectString.includes('FROM snapshot_candidate_reexports AS candidate')(args[0])) {
+                        queries++;
+                        for (const row of rows) if ('payload_json' in row && row.payload_json !== null) hydrated++;
+                      }
+                    }),
+                  ),
+                );
+            return Reflect.get(target, key, receiver);
+          },
+        });
+        const cap = 256 * 1048576,
+          keyBytes = Buffer.byteLength('10:typescript3:key');
+        for (const step of ['before-query', 'first-row', 'later-row'] as const) {
+          const allowance = step === 'before-query' ? 191 : step === 'first-row' ? full[0] - 1 : full[0] + full[1] - 1;
+          reader.mockImplementationOnce(() =>
+            Effect.succeed({
+              paths: ['barrel.ts'],
+              associations: 1,
+              bytes: cap - keyBytes - allowance,
+              observations: 1,
+              bitTests: 8,
+            }),
           );
-          expect(selected).toMatchObject({paths: [], associations: 3, observations: 5, exceeded: 'observations'});
-          expect(selected?.bitTests).toBe((positive + 1) * 8); // only reserved metadata rows are probed
-          expect(payloads).toBe(0);
-          expect(folds).toBe(1);
+          queries = 0;
+          hydrated = 0;
+          parse.mockClear();
+          const actualScalar = step === 'before-query' ? 0 : step === 'first-row' ? 192 : full[0] + 192;
+          expect(yield* selectResolutionCandidateIndexClosure(observed, query('key'))).toEqual({
+            mode: 'fallback',
+            reason: 'project-closure-unbounded',
+            detail: 'candidate-projection-observed-key-bytes',
+            observed: cap - allowance + actualScalar,
+            requiredAtDecision: cap + 1,
+            limit: cap,
+          });
+          expect(queries).toBe(step === 'before-query' ? 0 : step === 'first-row' ? 1 : 2);
+          expect(hydrated).toBe(step === 'later-row' ? 1 : 0);
+          expect(EffectArray.filter(parse.mock.calls, args => args[0] === originals[0].payload_json)).toHaveLength(
+            step === 'later-row' ? 1 : 0,
+          );
         }
       }).pipe(provideDatabase),
   );
@@ -1577,7 +1820,7 @@ describe('complete reverse resolution candidate evidence', () => {
           128,
           token,
         );
-        expect(bounded).toMatchObject({paths: [], associations: 2, exceeded: 'rows'});
+        expect(bounded).toMatchObject({paths: [], associations: 1, exceeded: 'rows', requiredAtDecision: 2});
         const complete = yield* readCandidateKeyPages(
           metadataOnly,
           'base',
