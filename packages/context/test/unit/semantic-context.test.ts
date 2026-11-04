@@ -1,6 +1,16 @@
 import {it as effectIt} from '@effect/vitest';
 import {expect} from 'vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Context,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  Stream,
+  String as EffectString,
+} from 'effect';
 import {canonicalFileUri, type Evidence} from '@threadnote/semantic/contracts';
 import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
 import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/types';
@@ -21,9 +31,24 @@ import * as Statement from 'effect/sql/Statement';
 import * as Reactivity from 'effect/reactivity/Reactivity';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {withCodeGraphDeferredTransaction} from '@threadnote/graph/store/session';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
-import {fromRepositoryQuery} from '../../src/graph/evidence.js';
+import {fromRepositoryQuery, retrieveContextBriefGraphEvidence} from '../../src/graph/evidence.js';
+import * as SqlError from 'effect/sql/SqlError';
+import {TestClock} from 'effect/testing';
+import {CodeGraphIndexer, extractorSetIdentityFromPackProvenance} from '@threadnote/graph/indexer';
+import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
+import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
+import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {codeGraphLayout} from '@threadnote/graph/layout';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {
+  observeCodeGraphAdmissionEnvironment,
+  recordCodeGraphSnapshotAdmission,
+} from '@threadnote/graph/admission_freshness';
+import {runCommandEffect} from '@threadnote/platform/command';
+import type {CodeGraphSnapshot} from '@threadnote/graph/types';
 
 const fixture = Effect.fn('test.semanticContextSource')(function* (text: string, format: 'sha1' | 'sha256' = 'sha1') {
   const fs = yield* FileSystem.FileSystem;
@@ -533,7 +558,18 @@ effectIt.layer(citationPlatformLayer)(test => {
       });
       const reactivity = yield* Reactivity.make;
       const sql = yield* SqlClient.make({
-        acquirer: Effect.die('Unexpected SQL in mocked path lookup'),
+        acquirer: Effect.succeed({
+          execute: () => Effect.die('Unexpected statement in mocked graph read'),
+          executeRaw: () => Effect.die('Unexpected raw statement in mocked graph read'),
+          executeValues: () => Effect.die('Unexpected values statement in mocked graph read'),
+          executeValuesUnprepared: () => Effect.die('Unexpected unprepared values statement in mocked graph read'),
+          executeStream: () => Stream.die('Unexpected stream in mocked graph read'),
+          executeUnprepared: (statement: string) =>
+            Effect.sync(() => {
+              expect(['BEGIN', 'COMMIT', 'ROLLBACK']).toContain(statement);
+              return [];
+            }),
+        }),
         compiler: Statement.makeCompilerSqlite(),
         driver: 'test',
         spanAttributes: [],
@@ -548,12 +584,7 @@ effectIt.layer(citationPlatformLayer)(test => {
         Layer.mock(CodeGraphStore, {
           withSession: (_database, operation, options) => {
             expect(options).toEqual({existingOnly: true, readOnly: true});
-            return operation.pipe(
-              Effect.provideService(
-                SqlClient.SqlClient,
-                Object.assign(sql, {withTransaction: <A, E, R>(program: Effect.Effect<A, E, R>) => program}),
-              ),
-            );
+            return operation.pipe(Effect.provideService(SqlClient.SqlClient, sql));
           },
           searchSymbolsByPaths: (database, snapshot, paths, limit) =>
             Effect.sync(() => {
@@ -590,5 +621,251 @@ effectIt.layer(citationPlatformLayer)(test => {
       yield* f.fs.writeFileString(f.file, 'later source');
       expect((yield* run()).nodeId).toBeNull();
     }),
+  );
+});
+
+const noGraphMaintenance = () => Effect.die('Semantic saved-disk reads must not index or request maintenance');
+const realGraphPacks = createCodeGraphLanguagePackRegistry([]);
+const realGraphPorts = Layer.mergeAll(
+  citationPlatformLayer,
+  Layer.succeed(CodeGraphLanguagePackRegistry, realGraphPacks),
+  Layer.succeed(CodeGraphIndexer, {index: noGraphMaintenance, ensureCommit: noGraphMaintenance}),
+  Layer.succeed(CodeGraphMaintenanceCoordinator, {
+    request: noGraphMaintenance,
+    tick: noGraphMaintenance,
+    kickOrdinary: noGraphMaintenance,
+    kickReconciliation: noGraphMaintenance,
+    kickResidual: noGraphMaintenance,
+  }),
+  Layer.succeed(CodeGraphEmbeddingIndex, {
+    check: () => Effect.succeed({state: 'unavailable', reason: 'fixture'}),
+    ensure: noGraphMaintenance,
+    search: noGraphMaintenance,
+  }),
+);
+const realGraphDependencies = CodeGraphStore.layer.pipe(Layer.provideMerge(realGraphPorts));
+
+effectIt.layer(realGraphDependencies)(test => {
+  test.effect('binds a semantic symbol through real current graph/store read-only SQL composition', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture('export const answer = 42;\n');
+      const store = yield* CodeGraphStore;
+      const paths = yield* Path.Path;
+      const home = yield* f.fs.realPath(yield* f.fs.makeTempDirectoryScoped({prefix: 'tn-semantic-real-graph-home-'}));
+      const repo = f.request.identity.repoRoot;
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+      yield* git(['init', '--quiet']);
+      yield* git(['add', 'source.ts']);
+      yield* git([
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-qm',
+        'fixture',
+      ]);
+      const identity = yield* resolveRepositoryIdentity(repo);
+      const layout = codeGraphLayout(paths, home, identity.checkoutId, identity.worktreeId);
+      const snapshot: CodeGraphSnapshot = {
+        id: 'cgsn_' + EffectString.repeat(40)('1'),
+        commit: identity.headCommit,
+        repositoryId: identity.repositoryId,
+        worktreeId: identity.worktreeId,
+        extractorSet: extractorSetIdentityFromPackProvenance([]),
+        dirty: false,
+        edgeCount: 0,
+        fileCount: 1,
+        symbolCount: 1,
+        state: 'ready',
+        completedAt: '2026-11-04T00:00:00.000Z',
+      };
+      const node = {...f.request.result.nodes[0], span: {line: 1, column: 14, endLine: 1, endColumn: 25}};
+      yield* store.activate(
+        layout.databasePath,
+        identity,
+        snapshot,
+        [
+          {
+            blobId: EffectString.trim((yield* git(['rev-parse', 'HEAD:source.ts'])).stdout),
+            contentHash: f.graphHash,
+            path: 'source.ts',
+            language: 'typescript',
+            mode: '100644',
+            size: f.bytes.length,
+            source: 'commit',
+          },
+        ],
+        [node],
+        [],
+        [],
+      );
+      yield* store.promote(layout.databasePath, identity, snapshot.id);
+      yield* recordCodeGraphSnapshotAdmission(
+        layout,
+        snapshot,
+        yield* observeCodeGraphAdmissionEnvironment(identity),
+        realGraphPacks,
+        false,
+      );
+      const beforeSymbols = yield* store.searchSymbolsByPaths(layout.databasePath, snapshot.id, ['source.ts'], 500);
+      const queryContext = yield* Layer.build(CodeGraphQueryService.layer);
+      const query = Context.get(queryContext, CodeGraphQueryService);
+      const config = runtimeConfigForTest({agentContextHome: home, manifestSource: 'bundled-example'});
+      const request = {
+        ...f.request,
+        identity,
+        result: {
+          ...f.request.result,
+          snapshot,
+          repository: {displayName: identity.displayName, repositoryId: identity.repositoryId},
+          nodes: [node],
+        },
+      };
+      const source = yield* retrieveSemanticContextSourceEvidence(request, f.evidence);
+      expect(source.binding).not.toBeNull();
+      const target = {
+        evidence: f.evidence,
+        uri: f.evidence.observation.uri,
+        range: {start: {line: 0, character: 13}, end: {line: 0, character: 24}},
+      };
+      const safeFailures: {tag: string; reason: string; sqliteReadonly: boolean}[] = [];
+      let queryOnly = false;
+      let pathReadStarted = 0;
+      const observedStore = CodeGraphStore.of({
+        ...store,
+        searchSymbolsByPaths: (...args) =>
+          Effect.gen(function* () {
+            pathReadStarted++;
+            const currentSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+            if (currentSql._tag === 'None') return yield* Effect.die('Expected the real graph session SQL service');
+            expect((yield* Effect.serviceOption(currentSql.value.transactionService))._tag).toBe('Some');
+            return yield* store.searchSymbolsByPaths(...args);
+          }),
+        withSession: (database, program, options) =>
+          store.withSession(
+            database,
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              const mode = yield* sql<{readonly query_only: number}>`PRAGMA query_only`.pipe(Effect.orDie);
+              queryOnly = mode[0]?.query_only === 1;
+              return yield* program;
+            }).pipe(
+              Effect.tapError(error =>
+                Effect.sync(() => {
+                  if (Schema.is(SqlError.SqlError)(error))
+                    safeFailures.push({
+                      tag: error._tag,
+                      reason: error.reason._tag,
+                      sqliteReadonly: Schema.is(Schema.Struct({code: Schema.Literal('SQLITE_READONLY')}))(
+                        error.reason.cause,
+                      ),
+                    });
+                }),
+              ),
+            ),
+            options,
+          ),
+      });
+      const result = yield* retrieveSemanticContextSymbol(config, request, f.evidence, target, source.binding).pipe(
+        Effect.provideService(CodeGraphQueryService, query),
+        Effect.provideService(CodeGraphStore, observedStore),
+        Effect.result,
+      );
+      expect(result._tag, JSON.stringify({safeFailures, queryOnly, pathReadStarted})).toBe('Success');
+      if (result._tag !== 'Success') return;
+      expect(result.success).toEqual({nodeId: node.id});
+      expect(queryOnly).toBe(true);
+      expect(pathReadStarted).toBe(1);
+      expect(safeFailures).toEqual([]);
+      let selected: string | null = null;
+      let linkedReads = 0;
+      const emptyMemory: ContextBriefMemoryRetrievalV1 = {
+        candidates: [],
+        consideredCandidates: 0,
+        gaps: [],
+        trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+      };
+      const projected = yield* compileContextBriefWith(
+        {
+          codeLinkedMemoryAfterGraph: true,
+          graphEvidence: plan =>
+            retrieveContextBriefGraphEvidence(config, plan, input =>
+              retrieveSemanticContextSourceEvidence(input, f.evidence).pipe(
+                Effect.flatMap(bound =>
+                  retrieveSemanticContextSymbol(config, input, f.evidence, target, bound.binding).pipe(
+                    Effect.map(selection => {
+                      selected = selection.nodeId;
+                      return bound.source;
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          memoryEvidence: () => Effect.succeed(emptyMemory),
+          codeLinkedMemoryEvidence: () => {
+            expect(selected).toBe(node.id);
+            linkedReads++;
+            return Effect.succeed(emptyMemory);
+          },
+        },
+        {
+          task: 'Understand answer',
+          scope: {kind: 'repository', callerCwd: repo},
+          codeRefs: ['source.ts'],
+          mode: 'explain',
+          detail: 'source',
+        },
+      ).pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, observedStore));
+      expect(projected.structuredContent.graph.sources?.length ?? 0).toBeGreaterThan(0);
+      expect(linkedReads).toBe(1);
+      // A caller-owned read transaction remains live across the consumer's nested session.
+      const nested = yield* store.withSession(
+        layout.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* withCodeGraphDeferredTransaction(
+            sql,
+            Effect.gen(function* () {
+              expect((yield* Effect.serviceOption(sql.transactionService))._tag).toBe('Some');
+              const selected = yield* retrieveSemanticContextSymbol(
+                config,
+                request,
+                f.evidence,
+                target,
+                source.binding,
+              ).pipe(
+                Effect.provideService(CodeGraphQueryService, query),
+                Effect.provideService(CodeGraphStore, observedStore),
+              );
+              expect((yield* Effect.serviceOption(sql.transactionService))._tag).toBe('Some');
+              expect(yield* sql<{readonly id: string}>`SELECT id FROM snapshots WHERE id=${snapshot.id}`).toEqual([
+                {id: snapshot.id},
+              ]);
+              return selected;
+            }),
+          );
+        }),
+        {existingOnly: true, readOnly: true},
+      );
+      expect(nested).toEqual({nodeId: node.id});
+      const deniedWrite = yield* store
+        .withSession(
+          layout.databasePath,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`UPDATE snapshots SET state='retired' WHERE id=${snapshot.id}`;
+          }),
+          {existingOnly: true, readOnly: true},
+        )
+        .pipe(Effect.result);
+      expect(deniedWrite._tag).toBe('Failure');
+      expect((yield* store.readySnapshot(layout.databasePath, identity.worktreeId))?.id).toBe(snapshot.id);
+      expect(yield* store.searchSymbolsByPaths(layout.databasePath, snapshot.id, ['source.ts'], 500)).toEqual(
+        beforeSymbols,
+      );
+    }).pipe(TestClock.withLive),
   );
 });

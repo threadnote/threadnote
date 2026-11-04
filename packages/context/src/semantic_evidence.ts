@@ -3,6 +3,7 @@ import {canonicalFileUri, observationKey, type Evidence} from '@threadnote/seman
 import * as SqlClient from 'effect/sql/SqlClient';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {withCodeGraphDeferredTransaction} from '@threadnote/graph/store/session';
 import {createCodeGraphSourceSpanCanonicalizer} from '@threadnote/graph/citation/primitives';
 import type {CodeGraphQueryNode} from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -205,8 +206,11 @@ export const retrieveSemanticContextSymbol = Effect.fn('context.semanticSymbol')
     status.databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      // Base identity and effective rows must share one SQLite read view.
-      return yield* sql.withTransaction(
+      // Existing-only sessions use a writable client fenced by query_only. Its
+      // default BEGIN IMMEDIATE would request a forbidden write transaction.
+      // Keep base identity and effective rows in one deferred read view.
+      return yield* withCodeGraphDeferredTransaction(
+        sql,
         store.searchSymbolsByPaths(status.databasePath, binding.graph.snapshotId, [binding.graph.path], 500),
       );
     }),

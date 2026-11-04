@@ -10,6 +10,7 @@ import {
   Layer,
   Path,
   Schema,
+  Stream,
   String as EffectString,
   Tracer,
 } from 'effect';
@@ -967,7 +968,18 @@ describe('document-linked semantic context', () => {
           });
           const reactivity = yield* Reactivity.make;
           const sql = yield* SqlClient.make({
-            acquirer: Effect.die('Unexpected SQL in isolated race test'),
+            acquirer: Effect.succeed({
+              execute: () => Effect.die('Unexpected statement in mocked graph read'),
+              executeRaw: () => Effect.die('Unexpected raw statement in mocked graph read'),
+              executeValues: () => Effect.die('Unexpected values statement in mocked graph read'),
+              executeValuesUnprepared: () => Effect.die('Unexpected unprepared values statement in mocked graph read'),
+              executeStream: () => Stream.die('Unexpected stream in mocked graph read'),
+              executeUnprepared: (statement: string) =>
+                Effect.sync(() => {
+                  expect(['BEGIN', 'COMMIT', 'ROLLBACK']).toContain(statement);
+                  return [];
+                }),
+            }),
             compiler: Statement.makeCompilerSqlite(),
             driver: 'test',
             spanAttributes: [],
@@ -1001,12 +1013,7 @@ describe('document-linked semantic context', () => {
               Layer.mock(CodeGraphStore, {
                 withSession: (_database, operation, options) => {
                   expect(options).toEqual({existingOnly: true, readOnly: true});
-                  return operation.pipe(
-                    Effect.provideService(
-                      SqlClient.SqlClient,
-                      Object.assign(sql, {withTransaction: <A, E, R>(program: Effect.Effect<A, E, R>) => program}),
-                    ),
-                  );
+                  return operation.pipe(Effect.provideService(SqlClient.SqlClient, sql));
                 },
                 searchSymbolsByPaths: () =>
                   Effect.sync(() => {
