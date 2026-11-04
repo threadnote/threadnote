@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
-import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Duration, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {formatMemoryDocument} from '@threadnote/memory/document';
@@ -23,8 +23,10 @@ import {
 } from '@threadnote/recall/read_boundary';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
+import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
-import {makeReadyRecallReadBoundary} from '../../src/recall/ready_read_boundary.js';
+import {makeReadyRecallReadBoundary, readyReadWorkerInvocation} from '../../src/recall/ready_read_boundary.js';
+import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
@@ -117,6 +119,53 @@ const fixture = Effect.gen(function* () {
   const scope = deriveRecallEligibilityPolicy({explicitProject: 'alpha', originalQuery: 'private vector'});
   return {fs, path, home, config, uris, files, database, scope, lexical, runtime, store};
 });
+
+// Bundle the actual entry once before this example's read deadline. The setup
+// command owns Bun.build's lifetime because its Promise has no cancellation API.
+const bundledReadyWorker = (f: Effect.Success<typeof fixture>) =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
+    const entrypoint = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url));
+    const directory = f.path.join(f.home, 'ready-worker-bundle');
+    const bundled = f.path.join(directory, 'ready-worker.js');
+    const [duration] = yield* command
+      .execute(
+        system.executablePath,
+        [
+          '--eval',
+          `const result = await Bun.build(${JSON.stringify({
+            entrypoints: [entrypoint],
+            outdir: directory,
+            naming: 'ready-worker.js',
+            target: 'bun',
+            format: 'esm',
+            minify: true,
+          })});
+if (!result.success || result.outputs.length !== 1) throw new Error('Ready worker bundle failed.');`,
+        ],
+        {
+          env: {...system.environment(), THREADNOTE_HOME: f.home},
+          timeoutMs: 5000,
+          maxOutputBytes: 16 * 1024,
+          forceKillAfterMilliseconds: 0,
+          verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+        },
+      )
+      .pipe(Effect.timed);
+    const content = yield* f.fs.readFileString(bundled);
+    const selected = {...system, developmentEntrypoint: bundled};
+    expect(readyReadWorkerInvocation(selected.executablePath, selected.developmentEntrypoint)).toEqual({
+      executable: system.executablePath,
+      arguments: [bundled, RECALL_READY_READ_WORKER_ARGUMENT],
+    });
+    return {
+      system: selected,
+      setupMilliseconds: Duration.toMillis(duration),
+      bundleBytes: new TextEncoder().encode(content).byteLength,
+      bundleSha256: sha256HexSync(content),
+    };
+  });
 
 const installSynchronousScoringStall = (database: string, stall = true) =>
   Effect.sync(() => {
@@ -337,8 +386,20 @@ describe('model-free native vector reads', () => {
           Effect.provideService(LocalModelRuntime, f.runtime),
           Effect.provideService(LocalModelStore, f.store),
         );
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        const bundled = yield* bundledReadyWorker(f);
+        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        );
+        const readMilliseconds: number[] = [];
+        const read = (request: RecallReadyReadRequest) =>
+          boundary.read(request).pipe(
+            Effect.timed,
+            Effect.map(([duration, response]) => {
+              readMilliseconds.push(Duration.toMillis(duration));
+              return response;
+            }),
+          );
+        const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing authorized opening proof');
         const request: RecallReadyReadRequest = {
@@ -346,18 +407,25 @@ describe('model-free native vector reads', () => {
           config: f.config,
           options: {model, state: proof.state, queryVector: vector, allowedUriScopes: [uri]},
         };
-        expect((yield* boundary.read(request)).value).toEqual([[uri, 1]]);
+        expect((yield* read(request)).value).toEqual([[uri, 1]]);
         yield* writeSourceConfiguration(f.config, {
           version: 2,
           sources: [{...source, enabled: false}],
           projections: [],
         });
         expect(yield* loadRecallVectorAuthorizationKey(f.config)).not.toBe(proof.state.authorizationKey);
-        const revoked = yield* boundary.read(request);
+        const revoked = yield* read(request);
         expect(revoked.outcome).toBe('success');
         expect(revoked.value).toBeUndefined();
         expect(JSON.stringify(revoked)).not.toContain(uri);
         expect(JSON.stringify(revoked)).not.toContain('PRIVATE_EXTERNAL_VECTOR_CONTENT');
+        expect(readMilliseconds).toHaveLength(3);
+        yield* Effect.logInfo('Vector revocation fixture measurements', {
+          setupMilliseconds: bundled.setupMilliseconds,
+          bundleBytes: bundled.bundleBytes,
+          bundleSha256: bundled.bundleSha256,
+          readMilliseconds,
+        });
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 15000},
   );
