@@ -29,6 +29,7 @@ import {
 } from '@threadnote/workflow-automations/cycle-review';
 import {
   decodeNativeCycleRuntime,
+  nativeCyclePhaseReviewUsage,
   nativeCycleHasBasePlanTransition,
   type NativeCycleRuntime,
 } from '@threadnote/workflow-automations/cycle-runtime';
@@ -941,15 +942,7 @@ export const runNativeCycle = <R>(
               attempt: repeated,
             };
           }
-          if (
-            EffectArray.filter(
-              runtime.reviews,
-              item =>
-                EffectOption.getOrUndefined(
-                  EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === item.snapshotId),
-                )?.snapshot.phaseId === snapshot.phaseId,
-            ).length >= (runtime.reviewLimits[snapshot.phaseId] ?? 5)
-          )
+          if (nativeCyclePhaseReviewUsage(runtime, snapshot.phaseId).exhausted)
             return yield* fail(
               'review-budget',
               'The continuous phase review limit is reached. Record explicit human expansion before another review.',

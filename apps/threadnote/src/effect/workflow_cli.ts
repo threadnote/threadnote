@@ -57,6 +57,26 @@ export function makeCompactCommand<E, R>(
   ).pipe(Command.withDescription('Plan or apply scoped memory hygiene for active personal memories'));
 }
 
+export function makeNativeTaskViewCommand<E, R>(
+  handler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly role?: string;
+    readonly cursor?: string;
+  }) => Effect.Effect<void, E, R>,
+) {
+  return Command.make(
+    'task-view',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task context'),
+      role: optionalChoice('role', ['implementation', 'review', 'delivery'], 'Optional task role'),
+      cursor: optionalString('cursor', 'Opaque continuation returned by the previous task-view page'),
+    },
+    handler,
+  ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
+}
+
 export function makeRecallFeedbackCommand<E, R>(
   handler: (options: Parameters<typeof runRecallFeedback>[1]) => Effect.Effect<void, E, R>,
 ) {

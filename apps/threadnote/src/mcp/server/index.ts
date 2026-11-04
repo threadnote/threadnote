@@ -85,6 +85,7 @@ import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
 import {registerKnowledgeDeltaGitProposalTool, registerTopicMaintenanceGitProposalTool} from './git_proposal.js';
 import {registerProcedurePublicationTools} from './procedure.js';
 import {registerActivationProofTool} from './activation.js';
+import {registerWorkflowTaskTool} from './workflow.js';
 import {resolveMemoryScope, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {
   runInstallSharedSkillTool,
@@ -421,6 +422,8 @@ function registerTools(
         );
       },
     );
+
+  if (toolset === 'core' || toolset === 'full') registerWorkflowTaskTool(server, config);
 
   if (capabilities.lifecycle) {
     registerContextHealthTool(server, config);

@@ -1,0 +1,385 @@
+import {
+  Array as EffectArray,
+  Option as EffectOption,
+  Record as EffectRecord,
+  String as EffectString,
+  pipe as EffectPipe,
+} from 'effect';
+import {nextNativeCycle as cycleNext} from './cycle.js';
+import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {NativeWorkflowState} from './native.js';
+
+export type NativeTaskRole = 'implementation' | 'review' | 'delivery';
+
+export interface NativeTaskView {
+  readonly status: 'ready' | 'blocked' | 'complete' | 'uninitialized';
+  readonly runId: string;
+  readonly generation: string;
+  readonly revision: string;
+  readonly featureId: string;
+  readonly objective: string;
+  readonly next: {
+    readonly action: string;
+    readonly phaseId?: string;
+    readonly snapshotId?: string;
+    readonly reason?: string;
+  };
+  readonly role?: NativeTaskRole;
+  readonly phase?: {
+    readonly id: string;
+    readonly title: string;
+    readonly status: string;
+    readonly scope: readonly string[];
+    readonly acceptance: readonly string[];
+    readonly acceptanceRefs: readonly string[];
+    readonly snapshot?: {
+      readonly snapshotId: string;
+      readonly head: string;
+      readonly tree: string;
+      readonly baseTree: string;
+      readonly scopeBase: string;
+      readonly declaredBaseHead: string;
+      readonly files: readonly string[];
+      readonly scopeFiles: readonly string[];
+      readonly requiredReviewLanes: readonly string[];
+      readonly previousAttempt?: {readonly status: 'invalid'; readonly message: string};
+    };
+  };
+  readonly page: {
+    readonly offset: number;
+    readonly limit: 16;
+    readonly nextOffset?: number;
+    readonly nextCursor?: string;
+  };
+  readonly counts: {
+    readonly scope: number;
+    readonly acceptance: number;
+    readonly acceptanceRefs: number;
+    readonly snapshotFiles: number;
+    readonly snapshotScopeFiles: number;
+  };
+  readonly missingInputs: readonly string[];
+}
+
+export interface NativeTaskProjectionOptions {
+  readonly role?: NativeTaskRole;
+  readonly offset?: number;
+  readonly planDrift?: string;
+}
+
+export interface NativeTaskCursor {
+  readonly version: 1;
+  readonly runId: string;
+  readonly generationHash: string;
+  readonly revision: string;
+  readonly action: string;
+  readonly phaseId: string | null;
+  readonly snapshotId: string | null;
+  readonly role: NativeTaskRole | null;
+  readonly offset: number;
+}
+
+const encodeCursor = (cursor: NativeTaskCursor): string => {
+  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
+  const binary = EffectArray.join(
+    EffectArray.map(Array.from(bytes), byte => String.fromCharCode(byte)),
+    '',
+  );
+  return `task-v1.${EffectPipe(btoa(binary), EffectString.replaceAll('+', '-'), EffectString.replaceAll('/', '_'), EffectString.replace(/=+$/u, ''))}`;
+};
+
+export function decodeNativeTaskCursor(value: string): NativeTaskCursor | undefined {
+  if (!EffectString.startsWith('task-v1.')(value)) return undefined;
+  try {
+    const encoded = EffectPipe(
+      EffectString.slice('task-v1.'.length)(value),
+      EffectString.replaceAll('-', '+'),
+      EffectString.replaceAll('_', '/'),
+    );
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, character =>
+      EffectOption.getOrElse(EffectPipe(character, EffectString.charCodeAt(0)), () => 0),
+    );
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('version' in parsed) ||
+      parsed.version !== 1 ||
+      !('runId' in parsed) ||
+      typeof parsed.runId !== 'string' ||
+      !('generationHash' in parsed) ||
+      typeof parsed.generationHash !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(parsed.generationHash) ||
+      !('revision' in parsed) ||
+      typeof parsed.revision !== 'string' ||
+      !('action' in parsed) ||
+      typeof parsed.action !== 'string' ||
+      !('phaseId' in parsed) ||
+      (parsed.phaseId !== null && typeof parsed.phaseId !== 'string') ||
+      !('snapshotId' in parsed) ||
+      (parsed.snapshotId !== null && typeof parsed.snapshotId !== 'string') ||
+      !('role' in parsed) ||
+      (parsed.role !== null &&
+        parsed.role !== 'implementation' &&
+        parsed.role !== 'review' &&
+        parsed.role !== 'delivery') ||
+      !('offset' in parsed) ||
+      typeof parsed.offset !== 'number' ||
+      !Number.isInteger(parsed.offset) ||
+      parsed.offset < pageSize ||
+      parsed.offset > 8192 ||
+      parsed.offset % pageSize !== 0
+    )
+      return undefined;
+    return {
+      version: 1,
+      runId: parsed.runId,
+      generationHash: parsed.generationHash,
+      revision: parsed.revision,
+      action: parsed.action,
+      phaseId: parsed.phaseId,
+      snapshotId: parsed.snapshotId,
+      role: parsed.role,
+      offset: parsed.offset,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function nativeTaskCursorMatches(cursor: NativeTaskCursor, view: NativeTaskView): boolean {
+  return (
+    cursor.runId === view.runId &&
+    cursor.generationHash === sha256HexSync(view.generation) &&
+    cursor.revision === view.revision &&
+    cursor.action === view.next.action &&
+    cursor.phaseId === (view.next.phaseId ?? null) &&
+    cursor.snapshotId === (view.next.snapshotId ?? null) &&
+    cursor.role === (view.role ?? null)
+  );
+}
+
+const taskCursor = (
+  view: Pick<NativeTaskView, 'runId' | 'generation' | 'revision' | 'next' | 'role'>,
+  offset: number,
+): string =>
+  encodeCursor({
+    version: 1,
+    runId: view.runId,
+    generationHash: sha256HexSync(view.generation),
+    revision: view.revision,
+    action: view.next.action,
+    phaseId: view.next.phaseId ?? null,
+    snapshotId: view.next.snapshotId ?? null,
+    role: view.role ?? null,
+    offset,
+  });
+
+const pageSize = 16 as const;
+const page = (items: readonly string[], offset: number) => items.slice(offset, offset + pageSize);
+
+/** Project a bounded continuation page from canonical native state without returning its stored image. */
+export function projectNativeTaskView(
+  state: NativeWorkflowState,
+  revision: string,
+  options: NativeTaskProjectionOptions = {},
+): NativeTaskView {
+  const offset = Math.min(8192, Math.max(0, Math.floor(options.offset ?? 0)));
+  const cycle = state.cycle?.state;
+  if (options.planDrift) {
+    return {
+      status: 'blocked',
+      runId: state.runId,
+      generation: state.generation,
+      revision,
+      featureId: state.featureId,
+      objective: 'Reconcile this cycle to its current approved plan.',
+      next: {action: 'reconcile-plan', reason: options.planDrift},
+      ...(options.role ? {role: options.role} : {}),
+      page: {offset, limit: pageSize},
+      counts: {scope: 0, acceptance: 0, acceptanceRefs: 0, snapshotFiles: 0, snapshotScopeFiles: 0},
+      missingInputs: [
+        'A fresh verified export of the current approved plan',
+        'Cycle reconciliation against that export',
+      ],
+    };
+  }
+  if (!cycle)
+    return {
+      status: 'uninitialized',
+      runId: state.runId,
+      generation: state.generation,
+      revision,
+      featureId: state.featureId,
+      objective: state.title ?? `Continue workflow ${state.featureId}`,
+      next: {action: 'initialize-cycle', reason: 'This run has no initialized implementation cycle.'},
+      ...(options.role ? {role: options.role} : {}),
+      page: {offset, limit: pageSize},
+      counts: {scope: 0, acceptance: 0, acceptanceRefs: 0, snapshotFiles: 0, snapshotScopeFiles: 0},
+      missingInputs: ['A verified native cycle plan'],
+    };
+
+  const runtime = state.cycle;
+  const canonicalNext = cycleNext(cycle);
+  const openReview = EffectOption.getOrUndefined(
+    EffectArray.findFirst(cycle.plan.phases, candidate => {
+      if (canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
+      const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
+      const latest = phaseSnapshots.at(-1)?.snapshot;
+      return Boolean(
+        latest &&
+        latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
+        !EffectArray.some(runtime.reviews, item => item.snapshotId === latest.snapshotId),
+      );
+    }),
+  );
+  const reviewSnapshot = openReview
+    ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === openReview.id).at(-1)
+    : undefined;
+  const reviewWork = openReview && reviewSnapshot ? {phase: openReview, snapshot: reviewSnapshot} : undefined;
+  const latestInvalidAttempt = reviewWork
+    ? EffectArray.filter(
+        runtime.attempts,
+        attempt => attempt.snapshotId === reviewWork.snapshot.snapshot.snapshotId && attempt.status === 'invalid',
+      ).at(-1)
+    : undefined;
+  const reviewBlocked = Boolean(
+    reviewWork &&
+    EffectArray.filter(
+      runtime.attempts,
+      attempt => attempt.snapshotId === reviewWork.snapshot.snapshot.snapshotId && attempt.status === 'invalid',
+    ).length >= 2,
+  );
+  const reviewBudget = reviewWork ? nativeCyclePhaseReviewUsage(runtime, reviewWork.phase.id) : undefined;
+  const reviewBudgetBlocked = reviewBudget?.exhausted ?? false;
+  const next = reviewWork
+    ? {
+        action: reviewBlocked ? 'resolve-review-failure' : reviewBudgetBlocked ? 'expand-review-budget' : 'review',
+        phaseId: reviewWork.phase.id,
+        snapshotId: reviewWork.snapshot.snapshot.snapshotId,
+        ...(latestInvalidAttempt ? {reason: latestInvalidAttempt.message} : {}),
+      }
+    : cycleNext(cycle);
+  const phase = next.phaseId
+    ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
+    : undefined;
+  const scope = phase?.allowedPaths ?? [];
+  const acceptance = phase?.acceptanceCriteria ?? [];
+  const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
+  const snapshot = reviewWork?.snapshot.snapshot;
+  const snapshotFiles = snapshot?.files ?? [];
+  const snapshotScopeFiles = snapshot?.scopeFiles ?? [];
+  const counts = {
+    scope: scope.length,
+    acceptance: acceptance.length,
+    acceptanceRefs: acceptanceRefs.length,
+    snapshotFiles: snapshotFiles.length,
+    snapshotScopeFiles: snapshotScopeFiles.length,
+  };
+  const nextOffset = offset + pageSize;
+  const more = EffectArray.some(EffectRecord.values(counts), count => count > nextOffset);
+  const missingInputs = reviewWork
+    ? reviewBlocked
+      ? ['Explicit human authority to resolve repeated invalid review attempts']
+      : reviewBudgetBlocked
+        ? [`Explicit human authorization to expand this phase review budget (current limit: ${reviewBudget?.limit})`]
+        : [
+            `A complete independent review for snapshot ${reviewWork.snapshot.snapshot.snapshotId}`,
+            'Correctness and simplicity review lanes with complete reports',
+          ]
+    : phase
+      ? [...(scope.length ? [] : ['Implementation scope paths']), ...(acceptance.length ? [] : ['Acceptance criteria'])]
+      : next.action === 'complete'
+        ? []
+        : ['An eligible phase'];
+  const view: NativeTaskView = {
+    status:
+      next.action === 'complete'
+        ? 'complete'
+        : next.action === 'blocked' || reviewBlocked || reviewBudgetBlocked
+          ? 'blocked'
+          : 'ready',
+    runId: state.runId,
+    generation: state.generation,
+    revision,
+    featureId: cycle.plan.featureId,
+    objective: cycle.plan.objective,
+    next: {
+      action: next.action,
+      ...(next.phaseId ? {phaseId: next.phaseId} : {}),
+      ...('snapshotId' in next ? {snapshotId: next.snapshotId} : {}),
+      ...('reason' in next ? {reason: next.reason} : {}),
+    },
+    ...(reviewWork
+      ? {role: 'review'}
+      : options.role
+        ? {role: options.role}
+        : next.action === 'deliver' || next.action === 'implement'
+          ? {role: next.action === 'deliver' ? 'delivery' : 'implementation'}
+          : {}),
+    ...(phase
+      ? {
+          phase: {
+            id: phase.id,
+            title: phase.title,
+            status: cycle.phases[phase.id].status,
+            scope: page(scope, offset),
+            acceptance: page(acceptance, offset),
+            acceptanceRefs: page(acceptanceRefs, offset),
+            ...(snapshot
+              ? {
+                  snapshot: {
+                    snapshotId: snapshot.snapshotId,
+                    head: snapshot.head,
+                    tree: snapshot.tree,
+                    baseTree: snapshot.baseTree,
+                    scopeBase: snapshot.scopeBase,
+                    declaredBaseHead: snapshot.declaredBaseHead,
+                    files: page(snapshotFiles, offset),
+                    scopeFiles: page(snapshotScopeFiles, offset),
+                    requiredReviewLanes: ['correctness', 'simplicity'],
+                    ...(latestInvalidAttempt
+                      ? {previousAttempt: {status: 'invalid' as const, message: latestInvalidAttempt.message}}
+                      : {}),
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
+    page: {
+      offset,
+      limit: pageSize,
+      ...(more
+        ? {
+            nextOffset,
+            nextCursor: taskCursor(
+              {
+                runId: state.runId,
+                generation: state.generation,
+                revision,
+                next: {
+                  action: next.action,
+                  ...(next.phaseId ? {phaseId: next.phaseId} : {}),
+                  ...('snapshotId' in next ? {snapshotId: next.snapshotId} : {}),
+                },
+                ...(reviewWork
+                  ? {role: 'review' as const}
+                  : options.role
+                    ? {role: options.role}
+                    : next.action === 'deliver' || next.action === 'implement'
+                      ? {role: next.action === 'deliver' ? ('delivery' as const) : ('implementation' as const)}
+                      : undefined),
+              },
+              nextOffset,
+            ),
+          }
+        : {}),
+    },
+    counts,
+    missingInputs,
+  };
+  return view;
+}

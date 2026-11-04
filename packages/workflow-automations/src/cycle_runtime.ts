@@ -1,4 +1,4 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {
   NativeCyclePlanSchema,
@@ -74,6 +74,19 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
   ).check(Schema.isMaxLength(512)),
 });
 export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
+
+/** Counts accepted reports continuously across every snapshot for the phase. */
+export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
+  const count = EffectArray.filter(
+    runtime.reviews,
+    item =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === item.snapshotId),
+      )?.snapshot.phaseId === phaseId,
+  ).length;
+  const limit = runtime.reviewLimits[phaseId] ?? 5;
+  return {count, limit, exhausted: count >= limit};
+}
 
 export function nativeCycleHasBasePlanTransition(
   plans: NativeCycleRuntime['plans'],

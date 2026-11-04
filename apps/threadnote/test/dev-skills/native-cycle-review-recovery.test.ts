@@ -5,6 +5,7 @@ import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
+import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 
 import * as Effect2 from 'effect';
 import {completeLocalPhase, fixture, object, reviewed, run} from './native-cycle-lifecycle-fixture.js';
@@ -522,6 +523,12 @@ describe('native cycle lifecycle', () => {
           },
         };
         if (iteration === 6) {
+          expect(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).toMatchObject({
+            status: 'blocked',
+            role: 'review',
+            next: {action: 'expand-review-budget', phaseId: 'one', snapshotId: id},
+            missingInputs: ['Explicit human authorization to expand this phase review budget (current limit: 5)'],
+          });
           const before = yield* f.fs.readFileString(f.statePath());
           expect(yield* f.mutate('validate-review', fields).pipe(Effect.result)).toMatchObject({
             failure: {code: 'review-budget'},
@@ -534,6 +541,11 @@ describe('native cycle lifecycle', () => {
             phaseId: 'one',
             reviewLimit: 6,
             userAuthority: 'Human authorized six reviews for this private fixture.',
+          });
+          expect(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).toMatchObject({
+            status: 'ready',
+            role: 'review',
+            next: {action: 'review', snapshotId: id},
           });
         }
         yield* f.mutate('validate-review', fields);
