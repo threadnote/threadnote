@@ -293,8 +293,14 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        // These are independent requests separated by explicit fixture writes.
+        // Each keeps the production allowance; fixture publication is not read work.
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+            return yield* boundary.read(request);
+          });
+        const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing opening proof');
         yield* Effect.sync(() => {
@@ -315,18 +321,17 @@ describe('model-free native vector reads', () => {
           config: f.config,
           options: {model, state: proof.state, queryVector: vector},
         };
-        const staleVector = yield* boundary.read(request);
+        const staleVector = yield* read(request);
         expect(staleVector.outcome).toBe('success');
         expect(staleVector.value).toBeUndefined();
-        const second = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
-        const reopened = yield* second.read({operation: 'vector-state', config: f.config, options: {model}});
+        const reopened = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const current = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reopened.value);
         if (current.readiness !== 'current') return yield* Effect.die('Missing replacement proof');
         yield* advanceCanonicalMutationGeneration(f.fs, f.path, f.home, 'local');
         const published = yield* loadRecallIndexData(f.config, {includeInactive: false, validateNow: true});
         expect(published.generation).not.toBe(current.corpusGeneration);
         // Omission of corpusGeneration must still bind to the opening state's corpus.
-        const staleCorpus = yield* second.read({...request, options: {...request.options, state: current.state}});
+        const staleCorpus = yield* read({...request, options: {...request.options, state: current.state}});
         expect(staleCorpus.outcome).toBe('failed');
         expect(staleCorpus.value).toBeUndefined();
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),

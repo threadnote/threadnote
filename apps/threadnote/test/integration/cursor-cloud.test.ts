@@ -107,6 +107,36 @@ describe('Cursor Cloud integration', () => {
     expect(classifyLexicalSyncSettlement(active, completed)).toBe('complete');
   });
 
+  it.each(['synchronization', 'lexical-publication'] as const)(
+    'identifies a failed %s demand without exposing fixture configuration',
+    phase => {
+      const scope: RecallLexicalScope = {
+        account: 'private-account',
+        user: 'private-user',
+        agentContextHome: '/private/fixture-home',
+        manifestPath: '/private/fixture-manifest.yaml',
+        includeInactive: false,
+        ...(phase === 'synchronization'
+          ? {work: {kind: 'synchronize' as const, sources: false, teams: ['private-team']}}
+          : {}),
+      };
+      const failed: RecallLexicalDemand = {
+        version: 2,
+        account: scope.account,
+        user: scope.user,
+        includeInactive: false,
+        revision: '00000000-0000-4000-8000-000000000001',
+        failures: 1,
+      };
+      const error = lexicalSyncFenceFailure('Deferred lexical synchronization recorded a failure.', scope, failed);
+
+      expect(error.message).toContain('Deferred lexical synchronization recorded a failure.');
+      expect(error.message).toContain(JSON.stringify({phase, revisionPresent: true, failures: 1, completed: false}));
+      expect(error.message).not.toContain('private-');
+      expect(error.message).not.toContain(failed.revision);
+    },
+  );
+
   it('propagates a latched fence error after a complete terminal observation', () => {
     const completed: RecallLexicalDemand = {
       version: 2,
@@ -620,17 +650,8 @@ describe('Cursor Cloud integration', () => {
             },
           });
           expectColdUnavailableWarnings(deferred.structuredContent);
-          await runEffect(
-            runShareSync(
-              {
-                account: 'local',
-                user: 'cloud-user',
-                agentId: 'cloud-agent',
-                agentContextHome: fixture.home,
-              },
-              {team: 'docs'},
-            ),
-          );
+          // The recall already admitted background synchronization. Let that
+          // writer and its publisher settle before explicit fixture preparation.
           await settlePendingLexicalSync({
             account: 'local',
             user: 'cloud-user',
@@ -1498,6 +1519,18 @@ function raceLexicalFenceFailure<A>(operation: Promise<A>, failure: Promise<neve
   return Promise.race([operation, failure]);
 }
 
+function lexicalSyncFenceFailure(message: string, scope: RecallLexicalScope, demand: RecallLexicalDemand): Error {
+  const phase = scope.work?.kind === 'synchronize' ? 'synchronization' : (scope.work?.kind ?? 'lexical-publication');
+  return new Error(
+    `${message} Demand observation: ${JSON.stringify({
+      phase,
+      revisionPresent: demand.revision !== undefined,
+      failures: demand.failures,
+      completed: demand.completedAt !== undefined,
+    })}`,
+  );
+}
+
 async function armLexicalSyncCompletionFence(
   scope: RecallLexicalScope,
   deadline = performance.now() + 20_000,
@@ -1609,11 +1642,17 @@ async function armLexicalSyncCompletionFence(
             continue;
           }
           if (current.failures > (before?.failures ?? 0)) {
-            fail(new Error('Deferred lexical synchronization recorded a failure.'));
+            fail(lexicalSyncFenceFailure('Deferred lexical synchronization recorded a failure.', scope, current));
             return;
           }
           if (current.failures > 0) {
-            fail(new Error('Deferred lexical synchronization has a failed terminal outcome.'));
+            fail(
+              lexicalSyncFenceFailure(
+                'Deferred lexical synchronization has a failed terminal outcome.',
+                scope,
+                current,
+              ),
+            );
             return;
           }
           if (current.revision !== undefined) {
