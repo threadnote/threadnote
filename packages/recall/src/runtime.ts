@@ -1,3 +1,5 @@
+import {RecallReadyReadBoundary} from './read_boundary.js';
+import {hasReadCleanupUnconfirmed, isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
@@ -8,6 +10,7 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import type {MemoryRecord, MemoryRelationType} from '@threadnote/memory/document';
 import {
   buildRecallSections,
+  exactRecallTerms,
   memoryUriProjectSegment,
   recallIndexPreselectionLimit,
   type ExactMatch,
@@ -23,6 +26,7 @@ import {
   currentRecallCorpusGeneration,
   readRecallIndexData,
   readRecallIndexDataBatch,
+  readRecallExactMatches,
   recallIndexStatus,
   recallUriMatchesScopes,
 } from './index.js';
@@ -41,6 +45,7 @@ import {
 import {recallLexicalTerms, recallTokens} from './tokenize.js';
 import {normalizeRecallRerankerScore} from './reranker-score.js';
 import {
+  lexicalReadFailureWarning,
   lexicalIndexUnavailableWarning,
   recallReadStateWarnings,
   mergeRecallOperationalWarnings,
@@ -48,7 +53,9 @@ import {
 } from './warning.js';
 import {
   selectedSemanticScores,
+  selectedSemanticScoreSnapshot,
   VectorCorpusGenerationChanged,
+  VectorIndexCorrupt,
   vectorIndexGenerationReadiness,
   vectorIndexMatchesGeneration,
 } from './vector-index.js';
@@ -70,9 +77,13 @@ interface RecallRuntimeConfig {
 
 interface PrepareRecallSectionsInput<R> {
   readonly allowExactRescue: boolean;
+  /** Deterministic baseline retrieval precedes optional model refinement. */
+  readonly allowReranker?: boolean;
   readonly allowSemanticRescue?: boolean;
   readonly allowedUriScopes?: readonly string[];
   readonly candidateUris?: readonly string[];
+  /** Closing a completed result needs current proof of only its shown URI window. */
+  readonly closingCandidateUris?: readonly string[];
   readonly exactMatches: readonly ExactMatch[];
   readonly eligibility?: RecallEligibilityPolicy;
   readonly feedbackQuery: string;
@@ -288,7 +299,8 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         ),
       ),
       ...EffectArray.map(input.exactMatches, match => Effect2.pipe(match.uri, EffectString.replace(/#.*$/, ''))),
-      ...(!navigationOnly ? (semanticScores?.keys() ?? []) : []),
+      ...(input.closingCandidateUris ?? []),
+      ...(!navigationOnly && input.closingCandidateUris === undefined ? (semanticScores?.keys() ?? []) : []),
       ...Option.getOrElse(
         Option.map(Option.fromNullishOr(memoryConnections?.candidates), candidates =>
           EffectArray.map(candidates, candidate => candidate.uri),
@@ -300,14 +312,17 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const records = yield* input.readRecords(rankingUris);
   const now = yield* DateTime.nowAsDate;
   const queryVariants = recallQueryVariants(input.query, input.queryVariants);
-  const indexQueries = navigationOnly ? [] : [input.query, ...queryVariants];
-  const scopeSets: ReadonlyArray<readonly string[] | undefined> = input.allowedUriScopes?.length
+  const closingRead = input.closingCandidateUris !== undefined;
+  const indexQueries = navigationOnly ? [] : closingRead ? [''] : [input.query, ...queryVariants];
+  const scopeSets: ReadonlyArray<readonly string[] | undefined> = closingRead
     ? [input.allowedUriScopes]
-    : input.preferredUriScopes?.length
-      ? [input.preferredUriScopes, undefined]
-      : [undefined];
-  const indexCandidateLimit = recallIndexPreselectionLimit(input.limit);
-  const recencyIntent = originalQueryRequestsRecency(input.query);
+    : input.allowedUriScopes?.length
+      ? [input.allowedUriScopes]
+      : input.preferredUriScopes?.length
+        ? [input.preferredUriScopes, undefined]
+        : [undefined];
+  const indexCandidateLimit = closingRead ? 0 : recallIndexPreselectionLimit(input.limit);
+  const recencyIntent = !closingRead && originalQueryRequestsRecency(input.query);
   const laneBudgets = recallCrossScopeLaneBudgets(input.limit);
   const topicalIndexSelections = EffectArray.flatMap(indexQueries, (indexQuery, __effectArrayIndex) =>
     __effectArrayIndex in indexQueries
@@ -326,31 +341,38 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     : Effect2.pipe(input.workspaceScope, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
       );
-  const workspaceIndexSelections = workspaceScope
-    ? EffectArray.map(scopeSets, allowedUriScopes => ({
-        allowedUriScopes,
-        eligibility: input.eligibility,
-        limit: indexCandidateLimit,
-        query: input.query,
-        requiredUris: rankingUris,
-        workspaceScope,
-      }))
-    : [];
+  const workspaceIndexSelections =
+    workspaceScope && !closingRead
+      ? EffectArray.map(scopeSets, allowedUriScopes => ({
+          allowedUriScopes,
+          eligibility: input.eligibility,
+          limit: indexCandidateLimit,
+          query: input.query,
+          requiredUris: rankingUris,
+          workspaceScope,
+        }))
+      : [];
   const workspaceBranch = navigationOnly
     ? undefined
     : Effect2.pipe(input.workspaceBranch, effectOptionalString =>
         effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
       );
-  const branchIndexSelections = workspaceBranch
-    ? EffectArray.map(scopeSets, allowedUriScopes => ({
-        allowedUriScopes,
-        eligibility: input.eligibility,
-        limit: indexCandidateLimit,
-        query: `${input.query} ${workspaceBranch}`,
-        requiredUris: rankingUris,
-      }))
-    : [];
-  const [feedbackByUri, recallIndexResult] = yield* Effect.all(
+  const branchIndexSelections =
+    workspaceBranch && !closingRead
+      ? EffectArray.map(scopeSets, allowedUriScopes => ({
+          allowedUriScopes,
+          eligibility: input.eligibility,
+          limit: indexCandidateLimit,
+          query: `${input.query} ${workspaceBranch}`,
+          requiredUris: rankingUris,
+        }))
+      : [];
+  const closingExactTerms = closingRead ? exactRecallTerms(input.query) : [];
+  const closingExactUris = EffectArray.map(
+    EffectArray.filter(input.closingCandidateUris ?? [], uri => recallUriMatchesScopes(uri, input.allowedUriScopes)),
+    stripFragment,
+  );
+  const [feedbackByUri, recallIndexResult, exactResult] = yield* Effect.all(
     [
       loadRecallFeedback(config.agentContextHome, {
         now,
@@ -361,17 +383,31 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         includeInactive: input.includeInactive,
         selections: [...topicalIndexSelections, ...workspaceIndexSelections, ...branchIndexSelections],
       }).pipe(Effect.result),
+      closingExactTerms.length > 0 && closingExactUris.length > 0
+        ? readRecallExactMatches(config, {
+            eligibility: input.eligibility,
+            includeInactive: input.includeInactive,
+            limitPerTerm: 25,
+            terms: closingExactTerms,
+            uriScopes: closingExactUris,
+          }).pipe(Effect.result)
+        : Effect.succeed(closingRead ? [] : input.exactMatches).pipe(Effect.result),
     ],
-    {concurrency: 2},
+    {concurrency: 3},
   );
+  if (Result.isFailure(recallIndexResult) && isReadCleanupUnconfirmed(recallIndexResult.failure))
+    return yield* Effect.fail(recallIndexResult.failure);
+  if (Result.isFailure(exactResult) && isReadCleanupUnconfirmed(exactResult.failure))
+    return yield* Effect.fail(exactResult.failure);
   const recallIndexes = Result.isSuccess(recallIndexResult) ? recallIndexResult.success : [];
   const operationalWarnings = Result.isFailure(recallIndexResult)
-    ? [lexicalIndexUnavailableWarning()]
+    ? [lexicalReadFailureWarning(recallIndexResult.failure)]
     : [
         ...mergeRecallOperationalWarnings(
           ...EffectArray.map(recallIndexes, index => recallReadStateWarnings(index.readState)),
         ),
       ];
+  if (Result.isFailure(exactResult)) operationalWarnings.push(lexicalReadFailureWarning(exactResult.failure));
   const flattenedRecallIndexes = recallIndexes;
   const generations = [
     ...new Set(
@@ -462,6 +498,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       )
     : [];
   const shouldLoadCrossScopeFallback =
+    !closingRead &&
     Result.isSuccess(recallIndexResult) &&
     workspaceScope !== undefined &&
     // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain behavior for the optional project scope.
@@ -527,28 +564,30 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     [memoryConnections?.candidates ?? [], prioritizedBranchCandidates, prioritizedWorkspaceCandidates],
     [prioritizedCrossScopeCandidates],
     {
-      admissionLimit: indexCandidateLimit,
+      admissionLimit: input.closingCandidateUris?.length ?? indexCandidateLimit,
       crossScopeReserve: laneBudgets.crossScopeReserve,
       protectedReserve: Math.max(laneBudgets.protectedReserve, memoryConnections?.candidates.length ?? 0),
       recencyCandidateSets: [prioritizedRecentCandidates],
       recencyReserve: RECALL_RECENCY_CANDIDATE_RESERVE,
     },
   );
-  const indexedCandidates = navigationOnly
-    ? semanticCandidates
-    : yield* applySelectedNativeReranker(
-        config.agentContextHome,
-        input.query,
-        semanticCandidates,
-        input.rerankerCache,
-      ).pipe(
-        Effect.catch(() =>
-          Effect.sync(() => {
-            if (input.rerankerCache) input.rerankerCache.unavailable = true;
-            return applyCachedRerankerScores(semanticCandidates, input.rerankerCache);
-          }),
-        ),
-      );
+  const indexedCandidates = closingRead
+    ? applyCachedRerankerScores(semanticCandidates, input.rerankerCache)
+    : input.allowReranker === false || navigationOnly
+      ? semanticCandidates
+      : yield* applySelectedNativeReranker(
+          config.agentContextHome,
+          input.query,
+          semanticCandidates,
+          input.rerankerCache,
+        ).pipe(
+          Effect.catch(() =>
+            Effect.sync(() => {
+              if (input.rerankerCache) input.rerankerCache.unavailable = true;
+              return applyCachedRerankerScores(semanticCandidates, input.rerankerCache);
+            }),
+          ),
+        );
   const unreadIndexedMemoryUris = unreadIndexedMemoryRecordUris(indexedCandidates, records);
   const extraRecords = unreadIndexedMemoryUris.length > 0 ? yield* input.readRecords(unreadIndexedMemoryUris) : [];
   const liveRecords = extraRecords.length > 0 ? [...records, ...extraRecords] : records;
@@ -566,32 +605,37 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
           __effectArrayIndex2 in __effectArrayValues && recallRuntimeCandidateIsEligible(candidate, input.eligibility),
       ),
   );
-  const sections = buildRecallSections(input.passes, input.exactMatches, input.limit, {
-    absentMemoryUris,
-    allowExactRescue: input.allowExactRescue,
-    allowSemanticRescue: input.allowSemanticRescue,
-    allowedUriScopes: input.allowedUriScopes,
-    candidateUris: input.candidateUris,
-    corpusStatistics: workspaceScope ? undefined : recallIndex?.corpusStatistics,
-    eligibility: input.eligibility,
-    feedbackByUri,
-    includeInactive: input.includeInactive,
-    indexedCandidates,
-    minimumScore: input.minimumScore,
-    now,
-    project: input.project,
-    query: input.query,
-    queryVariants,
-    records: liveRecords,
-    protectedUris: Option.getOrUndefined(
-      Option.map(Option.fromNullishOr(memoryConnections?.candidates), candidates =>
-        EffectArray.map(candidates, candidate => candidate.uri),
+  const sections = buildRecallSections(
+    input.passes,
+    Result.isSuccess(exactResult) ? exactResult.success : [],
+    input.limit,
+    {
+      absentMemoryUris,
+      allowExactRescue: input.allowExactRescue,
+      allowSemanticRescue: input.allowSemanticRescue,
+      allowedUriScopes: input.allowedUriScopes,
+      candidateUris: input.candidateUris,
+      corpusStatistics: workspaceScope ? undefined : recallIndex?.corpusStatistics,
+      eligibility: input.eligibility,
+      feedbackByUri,
+      includeInactive: input.includeInactive,
+      indexedCandidates,
+      minimumScore: input.minimumScore,
+      now,
+      project: input.project,
+      query: input.query,
+      queryVariants,
+      records: liveRecords,
+      protectedUris: Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(memoryConnections?.candidates), candidates =>
+          EffectArray.map(candidates, candidate => candidate.uri),
+        ),
       ),
-    ),
-    seedUris: input.seedUris,
-    workspaceBranch: input.workspaceBranch,
-    workspaceScope,
-  });
+      seedUris: input.seedUris,
+      workspaceBranch: input.workspaceBranch,
+      workspaceScope,
+    },
+  );
   return {
     generations,
     operationalWarnings,
@@ -643,7 +687,7 @@ export function boundedRecallSemanticRetrieval<A, E, R>(
   return retrieval.pipe(
     Effect.map(value => ({status: 'completed' as const, value})),
     Effect.catchCauseIf(
-      cause => !Cause.hasInterrupts(cause),
+      cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
       cause => Effect.succeed({cause: cause, status: 'failed' as const}),
     ),
     Effect.catchCause(cause => Effect.failCause(cause)),
@@ -754,6 +798,19 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   const store = yield* LocalModelStore;
   const installed = yield* store.status(config.agentContextHome, manifest);
   if (!installed.installed) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
+  if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) {
+    const snapshot = yield* selectedSemanticScoreSnapshot(config, query, {allowedUriScopes, eligibility, limit});
+    if (snapshot === undefined) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
+    if (snapshot.readiness === 'missing' || snapshot.readiness === 'stale')
+      return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
+    if (snapshot.readiness !== 'current' || snapshot.corpusGeneration === undefined)
+      return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
+    return {
+      state: 'available',
+      corpusGeneration: snapshot.corpusGeneration,
+      scores: snapshot.scores,
+    } satisfies McpReadOnlySemanticScoresAttempt;
+  }
   const lexicalStatus = yield* recallIndexStatus(config, false);
   const lexicalDisposition = lexicalRefreshDisposition(lexicalStatus);
   if (lexicalDisposition === 'refreshable') {
@@ -768,6 +825,7 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
     manifest,
     corpusGeneration,
     yield* loadRecallVectorAuthorizationKey(config),
+    config,
   );
   if (vectorReadiness === 'corrupt') {
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
@@ -844,7 +902,7 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
           } satisfies RecallSemanticScoresResult),
     ),
     Effect.catchCauseIf(
-      cause => !Cause.hasInterruptsOnly(cause),
+      cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
       cause => Effect.succeed(emptyRecallSemanticScoresResult(Option.some(semanticRecallFailureWarning(cause)))),
     ),
   );
@@ -884,6 +942,19 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
   eligibility?: RecallEligibilityPolicy,
   allowedUriScopes?: readonly string[],
 ) {
+  if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) {
+    const snapshot = yield* selectedSemanticScoreSnapshot(config, query, {allowedUriScopes, eligibility, limit});
+    if (snapshot?.readiness === 'corrupt')
+      return yield* VectorIndexCorrupt.make({
+        modelId: manifest.id,
+        message: 'Semantic ready storage failed read-only validation.',
+      });
+    if (snapshot?.readiness === 'missing' || snapshot?.readiness === 'stale')
+      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
+    return snapshot?.corpusGeneration === undefined
+      ? undefined
+      : {corpusGeneration: snapshot.corpusGeneration, scores: snapshot.scores};
+  }
   const fence = () => currentRecallCorpusGeneration(config);
   const snapshot = yield* readRecallIndexData(config, {
     includeInactive: false,
@@ -897,6 +968,7 @@ const loadSemanticScoresAttempt = Effect.fn('recall.loadSemanticScoresAttempt')(
       manifest,
       corpusGeneration,
       yield* loadRecallVectorAuthorizationKey(config),
+      config,
     ))
   ) {
     yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
@@ -987,6 +1059,24 @@ function semanticRecallFailureType(error: unknown): string {
     ? error._tag
     : 'SemanticRecallUnavailable';
 }
+
+/** Reuse the existing cache from the completed authorized baseline before closing reads. */
+export const warmRecallReranker = Effect.fn('recall.warmReranker')(function* (
+  home: string,
+  query: string,
+  candidates: readonly RecallCandidate[],
+  cache: RecallRerankerCache,
+) {
+  yield* applySelectedNativeReranker(home, query, candidates, cache).pipe(
+    Effect.catchIf(
+      error => !isReadCleanupUnconfirmed(error),
+      () =>
+        Effect.sync(() => {
+          cache.unavailable = true;
+        }),
+    ),
+  );
+});
 
 const applySelectedNativeReranker = Effect.fn('recall.applySelectedNativeReranker')(function* (
   home: string,

@@ -30,7 +30,8 @@ import {
 } from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {isDeferredCodeAnchorIntentFilename} from '@threadnote/threadnote/memory/deferred/code_anchor';
-import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {runEffect} from '../helpers/effect-runtime.js';
+import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {
   parseContextBriefJsonText,
   parseContextBriefV1,
@@ -195,11 +196,9 @@ async function listDeferredCodeAnchorIntentRelativePaths(root: string): Promise<
 }
 
 const RECALL_PROGRESS_PHASES = [
-  'recall.shared-sync',
-  'recall.obsidian-sync',
   'recall.workspace-context',
-  'recall.semantic-retrieval',
   'recall.lexical-ranking',
+  'recall.semantic-retrieval',
 ] as const;
 
 const COLD_BUILD_TOOL_TIMEOUT_MILLISECONDS = 10_000;
@@ -291,6 +290,18 @@ interface McpClientOptions {
   readonly environment?: Readonly<Record<string, string>>;
   readonly maxBufferSize?: number;
   readonly toolset?: 'core' | 'full' | null;
+}
+
+// Explicit producer preparation after the test has completed its canonical seeds.
+async function prepareReadyFixture(fixture: McpFixture): Promise<void> {
+  const config = {
+    account: 'local',
+    user: 'test-user',
+    agentContextHome: fixture.home,
+    manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+  };
+  await runEffect(loadRecallIndexData(config, {includeInactive: false}));
+  await runEffect(loadRecallIndexData(config, {includeInactive: true}));
 }
 
 async function withMcpClient<T>(
@@ -1056,6 +1067,7 @@ describe('Threadnote MCP toolsets', () => {
           'structured-recall.md',
           canonicalMemoryContent('structured-recall', 'Structured recall ranking anchor qz-structured-7788.'),
         );
+        await prepareReadyFixture(fixture);
         const defaultResult = await client.callTool(
           {
             arguments: {project: 'threadnote', query: 'qz-structured-7788', threshold: 0},
@@ -1185,6 +1197,7 @@ describe('Threadnote MCP toolsets', () => {
           memory('mcp-connection-target', 'tn_mcp_connection_target', 'Direct neighbor is also lexically unrelated.'),
         );
 
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {
             arguments: {
@@ -1275,6 +1288,7 @@ describe('Threadnote MCP toolsets', () => {
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, memory('identity-conflict-alias', 'A divergent body.'), 'utf8');
 
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {
             arguments: {
@@ -1315,6 +1329,7 @@ describe('Threadnote MCP toolsets', () => {
           canonicalMemoryContent('environment-threshold', 'Environment threshold anchor qz-environment-8811.'),
         );
 
+        await prepareReadyFixture(fixture);
         const configured = await client.callTool(
           {
             arguments: {project: 'threadnote', query: 'qz-environment-8811', responseFormat: 'dual'},
@@ -1361,7 +1376,7 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
-  it('records one-time recall pre-sync and read-only retrieval phases without private inputs', async () => {
+  it('records deferred synchronization and read-only retrieval phases without private inputs', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const privateQuery = 'private-phase-timing-query-7788';
@@ -1377,6 +1392,7 @@ describe('Threadnote MCP toolsets', () => {
           canonicalMemoryContent('phase-timing', `Lexical anchor ${privateQuery}.`),
         );
 
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {arguments: {project: 'threadnote', query: privateQuery}, name: 'recall_context'},
           undefined,
@@ -1411,7 +1427,7 @@ describe('Threadnote MCP toolsets', () => {
               ),
             ),
           ),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
         expect(
           EffectOption.getOrUndefined(
             EffectOption.map(EffectOption.fromNullishOr(phaseTimings), __phaseTimingArray =>
@@ -1422,7 +1438,7 @@ describe('Threadnote MCP toolsets', () => {
               ),
             ),
           ),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
         expect(
           EffectOption.getOrUndefined(
             EffectOption.map(EffectOption.fromNullishOr(phaseTimings), __phaseTimingArray =>
@@ -1499,8 +1515,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(structured.warnings).toEqual([
           expect.objectContaining({
             code: 'lexical_index_unavailable',
-            message: expect.stringContaining('could not be read or recovered'),
-            remediation: expect.stringContaining('threadnote doctor --dry-run'),
+            message: expect.stringContaining('has no readable ready snapshot'),
+            remediation: expect.stringContaining('threadnote repair'),
           }),
         ]);
         const text = contentText(result.content);
@@ -1609,7 +1625,7 @@ describe('Threadnote MCP toolsets', () => {
             message: expect.stringContaining('AbortError'),
           });
           expect(controller.signal.aborted).toBe(true);
-          expect(recallProgressPhases(cancelledUpdates)).toEqual(['recall.shared-sync']);
+          expect(recallProgressPhases(cancelledUpdates)).toEqual(['recall.workspace-context']);
           await new Promise(resolve => setTimeout(resolve, 400));
           expect(protocolErrors).toEqual([]);
 
@@ -1625,7 +1641,7 @@ describe('Threadnote MCP toolsets', () => {
         environment: {
           NODE_ENV: 'test',
           THREADNOTE_TEST_MCP_PROGRESS_HEARTBEAT_MILLISECONDS: '100',
-          THREADNOTE_TEST_MCP_PROGRESS_SHARED_SYNC_DELAY_MILLISECONDS: '300',
+          THREADNOTE_TEST_MCP_PROGRESS_WORKSPACE_DELAY_MILLISECONDS: '300',
         },
         toolset: 'core',
       },
@@ -1886,6 +1902,7 @@ describe('Threadnote MCP toolsets', () => {
           {mode: 0o600},
         );
 
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: requestedUri}, name: 'read_context'},
           undefined,
@@ -1942,6 +1959,7 @@ describe('Threadnote MCP toolsets', () => {
           EffectString.replace('source_agent_client:', `memory_id: ${memoryId}\nsource_agent_client:`),
         );
         await writeCanonicalMemory(fixture.home, 'identity-alias.md', content);
+        await prepareReadyFixture(fixture);
         const recalled = await client.callTool(
           {arguments: {project: 'threadnote', query: 'qz-alias-4411'}, name: 'recall_context'},
           undefined,
@@ -2061,6 +2079,7 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, content, 'utf8');
+        await prepareReadyFixture(fixture);
         const result = await client.callTool({arguments: {uri: requestedUri}, name: 'read_context'}, undefined, {
           timeout: 30_000,
         });
@@ -2694,6 +2713,7 @@ describe('Threadnote MCP toolsets', () => {
           'utf8',
         );
 
+        await prepareReadyFixture(fixture);
         const recalled = await client.callTool(
           {
             arguments: {

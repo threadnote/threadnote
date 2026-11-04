@@ -11,6 +11,7 @@ export type ManagerProcessRole =
   | 'graph-diagnostics-worker'
   | 'graph-parser-worker'
   | 'graph-query-worker'
+  | 'recall-read-worker'
   | 'graph-waiter'
   | 'integration-sync-worker'
   | 'legacy'

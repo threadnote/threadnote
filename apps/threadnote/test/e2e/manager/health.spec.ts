@@ -4,6 +4,7 @@ import {test, expect} from './fixtures/test.js';
 import {createRepository, indexRepository, rememberCited} from './fixtures/repositories.js';
 import {readFile, writeFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
+import {expectPendingConnections, withReadyConnections} from './fixtures/connections.js';
 
 test('S12 Context Health exposes current evidence and maintenance controls without hidden memory edits', async ({
   page,
@@ -71,6 +72,7 @@ test('S12 Context Health exposes current evidence and maintenance controls witho
 
 test('S12 unresolved relations require a reviewed edit and preserve authored content', async ({page, manager}) => {
   test.setTimeout(60_000);
+  expectPendingConnections(manager);
   const repository = await createRepository(manager);
   await indexRepository(manager, repository);
   const target = await manager.remember('A temporary relation target.', 'retired-target', 'alpha', 'durable');
@@ -120,9 +122,11 @@ test('S12 unresolved relations require a reviewed edit and preserve authored con
   await page.getByRole('button', {name: 'Recall context', exact: true}).click();
   await page.locator('.context-recall-card').filter({hasText: 'relation-owner'}).getByRole('button').first().click();
   const reader = page.getByRole('complementary', {name: 'Canonical context reader'});
-  await reader.getByRole('tab', {name: 'Connections', exact: true}).click();
+  await withReadyConnections(page, manager, () => reader.getByRole('tab', {name: 'Connections', exact: true}).click());
   await reader.locator('.context-relation-editor').getByRole('button', {name: 'Remove', exact: true}).click();
-  await reader.getByRole('button', {name: 'Save relations', exact: true}).click();
+  await withReadyConnections(page, manager, () =>
+    reader.getByRole('button', {name: 'Save relations', exact: true}).click(),
+  );
   await expect.poll(() => manager.cli(['read', uri])).not.toContain('relation: related_to');
   const after = await manager.cli(['read', uri]);
   expect(after).toContain('Keep this authored body exactly.');

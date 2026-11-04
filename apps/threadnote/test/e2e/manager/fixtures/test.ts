@@ -132,6 +132,9 @@ export const test = base.extend<ManagerFixtures>({
                   JSON.stringify({
                     ...('code' in item && item.code !== undefined ? {code: item.code} : {}),
                     error: item.error,
+                    ...('retryAfterMilliseconds' in item && item.retryAfterMilliseconds !== undefined
+                      ? {retryAfterMilliseconds: item.retryAfterMilliseconds}
+                      : {}),
                   }),
               )
             ) {

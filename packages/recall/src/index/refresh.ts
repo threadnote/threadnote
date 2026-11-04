@@ -861,6 +861,25 @@ function recallIndexRoots(config: RecallRefreshConfig, path: Path.Path) {
   ];
 }
 
+/** The caller supplies canonical paths; a URI alone cannot prove physical account membership. */
+export function recallSourceIsWithinIndexRoots(
+  config: RecallRefreshConfig,
+  path: Path.Path,
+  uri: string,
+  filename: string,
+): boolean {
+  return EffectArray.some(recallIndexRoots(config, path), root => {
+    const relative = path.relative(root.path, filename);
+    return (
+      EffectString.startsWith(root.uri + '/')(uri) &&
+      relative !== '' &&
+      relative !== '..' &&
+      !EffectString.startsWith('..' + path.sep)(relative) &&
+      !path.isAbsolute(relative)
+    );
+  });
+}
+
 export function recallSourceIsIntentionallyExcluded(
   config: RecallRefreshConfig,
   path: Path.Path,

@@ -1,3 +1,6 @@
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {runEffect} from '../helpers/effect-runtime.js';
+import {runShareSync} from '@threadnote/threadnote/effect/share';
 import {Array as EffectArray, Schema} from 'effect';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -224,12 +227,25 @@ describe('Cursor Cloud integration', () => {
       await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
         const tools = await client.listTools();
         expect(EffectArray.map(tools.tools, tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
-        const recallError = await callError(client, 'recall_context', {
-          callerCwd: process.cwd(),
-          query: 'bootstrap race sentinel',
+        const recall = await client.callTool({
+          name: 'recall_context',
+          arguments: {
+            callerCwd: process.cwd(),
+            query: 'bootstrap race sentinel',
+            responseFormat: 'dual',
+          },
         });
-        expect(recallError).toContain('is not configured yet');
-        expect(recallError).toContain('MCP discovery remains available');
+        expect(recall.isError).not.toBe(true);
+        expect(recall.structuredContent).toMatchObject({
+          results: [],
+          warnings: [expect.objectContaining({code: 'lexical_index_unavailable'})],
+        });
+        expect(JSON.stringify(recall)).toContain('Automatic synchronization is queued in the background');
+        await expect(
+          client.readResource({
+            uri: 'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/bootstrap.md',
+          }),
+        ).rejects.toThrow('Threadnote resource was not found.');
       });
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
@@ -412,6 +428,30 @@ describe('Cursor Cloud integration', () => {
             'durable/projects/threadnote/remote-all-shares.md',
             memoryDocument('remote-all-shares', 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'),
           );
+          const deferred = await client.callTool({
+            name: 'recall_context',
+            arguments: {
+              callerCwd: process.cwd(),
+              query: 'REMOTE_ALL_SHARES_REFRESH_SENTINEL',
+              responseFormat: 'dual',
+            },
+          });
+          expect(deferred.structuredContent).toMatchObject({
+            results: [],
+            warnings: [expect.objectContaining({code: 'lexical_index_unavailable'})],
+          });
+          await runEffect(
+            runShareSync(
+              {
+                account: 'local',
+                user: 'cloud-user',
+                agentId: 'cloud-agent',
+                agentContextHome: fixture.home,
+              },
+              {team: 'docs'},
+            ),
+          );
+          await prepareCloudReadyFixture(fixture);
           const refreshedAllShares = await client.callTool({
             arguments: {callerCwd: process.cwd(), query: 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'},
             name: 'recall_context',
@@ -1100,6 +1140,20 @@ function runCli(args: readonly string[], environment: Readonly<Record<string, st
       cwd: process.cwd(),
       env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
     },
+  );
+}
+
+async function prepareCloudReadyFixture(fixture: CloudFixture): Promise<void> {
+  await runEffect(
+    loadRecallIndexData(
+      {
+        account: 'local',
+        user: 'cloud-user',
+        agentContextHome: fixture.home,
+        manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+      },
+      {includeInactive: false, validateNow: true},
+    ),
   );
 }
 

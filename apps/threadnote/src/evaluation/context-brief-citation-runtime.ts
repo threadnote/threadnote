@@ -23,6 +23,7 @@ import {
 } from '../context_brief/index.js';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {loadRecallIndexData} from '@threadnote/recall/index';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -42,8 +43,8 @@ const LEGACY_TOPIC = 'runtime-evaluation-legacy-v1-continuity';
 /**
  * Execute reviewed scenarios through real citation capture, validation, memory
  * retrieval, Context Brief assembly, and projection. The injected graph is a
- * deterministic already-ready snapshot boundary; no indexing or network work
- * is permitted by this release gate.
+ * deterministic already-ready snapshot boundary; no graph indexing or network
+ * work is permitted. Legacy lexical fixture preparation stays inside its timed sample.
  */
 export const evaluateContextBriefCitationRuntime = Effect.fn('evaluation.contextBriefCitationRuntime')(function* (
   fixtureInput: ContextBriefCitationRuntimeFixtureV1 | unknown,
@@ -179,6 +180,8 @@ const evaluateLegacyScenario = Effect.fn('evaluation.contextBriefCitationRuntime
   yield* fs.writeFileString(path.join(memoryRoot, `${LEGACY_TOPIC}.md`), legacyMemory());
   const config = runtimeConfig(home, home);
   const briefStarted = monotonicMilliseconds();
+  // Keep the former implicit lexical initialization cost inside the first legacy sample.
+  yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
   const brief = yield* compileContextBriefWith(
     {
       graphEvidence: () => Effect.succeed(graphEvidence(fixture, scenario)),

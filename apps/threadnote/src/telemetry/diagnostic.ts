@@ -68,6 +68,10 @@ const SAFE_TELEMETRY_ERROR_TYPES = new Set([
   'CommandOutputLimitExceeded',
   'CommandSpawnFailed',
   'CommandTimedOut',
+  'CommandCleanupUnconfirmed',
+  'ReadDeadlineExceeded',
+  'ContextBriefNativeReadFailed',
+  'RecallReadyReadBoundaryError',
   'CursorAttestationError',
   'CursorCloudOperationError',
   'CursorPluginError',
@@ -186,7 +190,7 @@ export interface AnonymousTelemetryDiagnostic {
   readonly domain?: 'code-graph-storage' | 'model-worker';
   readonly errorType: string;
   readonly operation?: string;
-  readonly reason?: 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
+  readonly reason?: 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write' | 'cleanup-unconfirmed';
   readonly recovery?: CodeGraphStoreRecovery;
   readonly retryable?: boolean;
 }
@@ -222,7 +226,7 @@ const CODE_GRAPH_STORE_RECOVERIES = new Set<CodeGraphStoreRecovery>([
   'retry-read-only',
 ]);
 const MODEL_WORKER_OPERATIONS = new Set(['diagnostics', 'embed-many', 'generate', 'rerank']);
-const MODEL_WORKER_REASONS = new Set(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write']);
+const MODEL_WORKER_REASONS = new Set(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write', 'cleanup-unconfirmed']);
 
 // These labels are authored in Threadnote source. A grammar alone is not a
 // privacy boundary: a malformed carrier could otherwise smuggle an arbitrary

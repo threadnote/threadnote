@@ -43,6 +43,7 @@ import {EffectMcpServerRegistry, McpInput} from '../../effect/ai/mcp.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
+import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {syncSharedReposBeforeAgentRead} from '../../effect/share.js';
 import {withSharedRepositoryLock} from '../../effect/share/lock.js';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
@@ -666,6 +667,16 @@ export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDura
 function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableMemoryParams) {
   const write = Effect.gen(function* () {
     const prepared = params.prepared ?? (yield* preparePersonalMemoryWrite(config, params));
+    if (
+      EffectArray.some(
+        params.expectedSourceContent ?? [],
+        source => source.memoryId !== undefined && (source.allowedUriScopes?.length ?? 0) > 0,
+      )
+    )
+      // Prepare the snapshot before locks; exact source bytes and identities are rechecked below.
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+        withRecallIdentityPreparation,
+      );
     const fs = yield* FileSystem.FileSystem;
     const uris = [
       params.replaceUri,
@@ -1044,8 +1055,36 @@ export function writeCursorCloudSharedMemory(
     }),
   );
   return write.pipe(
+    Effect.flatMap(result =>
+      Effect.gen(function* () {
+        if (result.isError === true || params.deferRecallIndexRefresh) return result;
+        const memoryUri = memoryUriFromWriteResult(result);
+        if (memoryUri === undefined) return result;
+        // Complete recall after publication releases repository, URI, and account locks.
+        const refresh = yield* refreshRecallDerivedIndexesAfterCanonicalMutation(
+          config,
+          EffectArray.filter([memoryUri, params.replaceUri], (uri): uri is string => uri !== undefined),
+        );
+        if (refresh.state !== 'blocked') return result;
+        return {
+          ...result,
+          isError: true,
+          content: [
+            ...result.content,
+            {
+              type: 'text' as const,
+              text: `Canonical memory committed at ${memoryUri}; lexical recall is pending. Run threadnote repair. Read the existing record instead of creating it again.`,
+            },
+          ],
+          structuredContent: {
+            ...result.structuredContent,
+            mutationOutcome: 'canonical-committed',
+            recallReadiness: 'lexical-pending',
+          },
+        } satisfies CallToolResult;
+      }),
+    ),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
-    Effect.map(result => result),
   );
 }
 

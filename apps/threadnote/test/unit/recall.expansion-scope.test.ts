@@ -114,7 +114,6 @@ effectIt.effect(
       const registry = new EffectMcpServerRegistry();
       registerSearchTool(registry, config, 'recall_context', 'Recall', {
         heartbeatMilliseconds: 10_000,
-        sharedSyncDelayMilliseconds: 0,
       });
       for (const uri of [undefined, records[1].uri]) {
         for (const surface of ['cli', 'mcp'] as const) {

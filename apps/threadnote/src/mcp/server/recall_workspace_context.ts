@@ -1,3 +1,4 @@
+import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray} from 'effect';
 import {Effect, Result} from 'effect';
 import {resolveRecallScope} from '../../memory/recall_scope.js';
@@ -16,7 +17,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {readRecallExactMatches} from '@threadnote/recall/index';
 import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
-  lexicalIndexUnavailableWarning,
+  lexicalReadFailureWarning,
   recallReadStateWarnings,
   type RecallOperationalWarning,
 } from '@threadnote/recall/warning';
@@ -40,8 +41,20 @@ export interface RecallWorkspaceContextParams {
   readonly workset: string | undefined;
 }
 
+const MCP_PROGRESS_TEST_WORKSPACE_DELAY_ENV = 'THREADNOTE_TEST_MCP_PROGRESS_WORKSPACE_DELAY_MILLISECONDS';
+const MCP_PROGRESS_TEST_WORKSPACE_DELAY_MAX_MILLISECONDS = 1_000;
+function mcpProgressTestWorkspaceDelayMilliseconds(environment: NodeJS.ProcessEnv): number {
+  if (environment.NODE_ENV !== 'test') return 0;
+  const configured = Number(environment[MCP_PROGRESS_TEST_WORKSPACE_DELAY_ENV]);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, MCP_PROGRESS_TEST_WORKSPACE_DELAY_MAX_MILLISECONDS)
+    : 0;
+}
+
 export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: RecallWorkspaceContextParams) {
   return Effect.gen(function* () {
+    const delay = mcpProgressTestWorkspaceDelayMilliseconds((yield* SystemInfo).environment());
+    if (delay > 0) yield* Effect.sleep(delay);
     const query = params.query;
     const navigationOnly = query.length === 0;
     const workspaceComponent =
@@ -162,7 +175,11 @@ const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatche
     terms,
     uriScopes: scopes,
   }).pipe(Effect.result);
+  if (Result.isFailure(result) && isReadCleanupUnconfirmed(result.failure)) return yield* Effect.fail(result.failure);
   return Result.isSuccess(result)
     ? {matches: result.success, operationalWarnings: recallReadStateWarnings(readState)}
-    : {matches: [], operationalWarnings: [lexicalIndexUnavailableWarning()]};
+    : {
+        matches: [],
+        operationalWarnings: [lexicalReadFailureWarning(result.failure)],
+      };
 });

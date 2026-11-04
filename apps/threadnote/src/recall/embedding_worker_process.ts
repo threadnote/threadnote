@@ -2,9 +2,12 @@ import {SecureRandom} from 'effect/crypto';
 import {Clock, Effect, Exit, FileSystem, Layer, Path, Schema, type Result} from 'effect';
 import {
   inspectBackgroundWorkerControl,
+  createBackgroundWorkerFixtureDrain,
+  drainBackgroundWorkerFixture,
   BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
   makeBackgroundWorkerLifecycle,
   wakeBackgroundWorker,
+  type BackgroundWorkerFixtureDrain,
 } from '@threadnote/inference/background/worker-control';
 import {CommandExecutor, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {fromPromise} from '@threadnote/platform/errors';
@@ -99,6 +102,42 @@ export const recallEmbeddingWorkerControlState = Effect.fn('recall.workerControl
   });
 });
 
+export type RecallEmbeddingWorkerFixtureDrain = BackgroundWorkerFixtureDrain;
+export interface RecallEmbeddingWorkerFixtureRuntime {
+  readonly executablePath: string;
+  readonly developmentEntrypoint?: string;
+  readonly version: string;
+}
+
+/** Private fixture setup before any producer; external harnesses pin their candidate runtime explicitly. */
+export const createRecallEmbeddingWorkerFixtureDrain = Effect.fn('recall.createWorkerFixtureDrain')(function* (
+  home: string,
+  fixtureRoot: string,
+  expectedRuntime?: RecallEmbeddingWorkerFixtureRuntime,
+) {
+  const system = yield* SystemInfo;
+  const runtime = expectedRuntime ?? {
+    executablePath: system.executablePath,
+    version: yield* getThreadnoteVersion(),
+    ...(/(?:^|[\\/])bun(?:\.exe)?$/iu.test(system.executablePath)
+      ? {developmentEntrypoint: system.developmentEntrypoint}
+      : {}),
+  };
+  const canonical = yield* (yield* FileSystem.FileSystem).realPath(home);
+  return yield* createBackgroundWorkerFixtureDrain(yield* controlOptions(canonical, runtime.version), {
+    fixtureRoot,
+    expectedExecutablePath: runtime.executablePath,
+    ...(runtime.developmentEntrypoint === undefined ? {} : {expectedEntrypoint: runtime.developmentEntrypoint}),
+  });
+});
+
+/**
+ * UNIX epoch milliseconds from the same Effect Clock.currentTimeMillis as the original fixture lifetime.
+ * Capture once before the body/producer shutdown; retries reuse it without extending the caller budget.
+ * Never pass Python monotonic seconds or a native-read monotonic bigint deadline directly.
+ */
+export const drainRecallEmbeddingWorkerFixture = drainBackgroundWorkerFixture;
+
 /** A physical page is at most64 names, including malformed/completed entries. */
 const openCatalog = Effect.fn('recall.openEmbeddingCatalog')(function* (
   home: string,
@@ -137,7 +176,6 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
   const canonical = yield* fs.realPath(home);
   const control = yield* controlOptions(canonical, yield* getThreadnoteVersion());
   const lifecycle = yield* makeBackgroundWorkerLifecycle(control, nonce);
-  const unit = yield* makeRecallEmbeddingWorker();
   const identity = yield* system.processStartIdentity(system.processId);
   if (!identity) return;
   const owner = {
@@ -145,6 +183,8 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
     processId: system.processId,
     processStartIdentity: identity,
   };
+  if (!(yield* lifecycle.register(owner))) return;
+  const unit = yield* makeRecallEmbeddingWorker();
   return yield* withExclusiveFileLock(
     fs,
     control.lockPath,
@@ -163,6 +203,7 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
       );
       let idleSince = yield* Clock.currentTimeMillis;
       for (;;) {
+        if (yield* lifecycle.shouldDrain) return;
         yield* lifecycle.beforeScan;
         let pending = false;
         let progressed = false;
@@ -175,6 +216,7 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
                 for (;;) {
                   const page = yield* fromPromise('recall.readEmbeddingCatalogPage', () => directory.readPage(64));
                   for (const filename of page.names) {
+                    if (yield* lifecycle.shouldDrain) return;
                     const entry = yield* readCatalogEntry(canonical, filename, kind);
                     if (!entry) continue;
                     const scope = entry.scope;
@@ -202,6 +244,7 @@ export const recallEmbeddingWorkerHomeProgram = Effect.fn('recall.embeddingWorke
                 ? fromPromise('recall.closeEmbeddingCatalog', () => directory.close()).pipe(Effect.ignore)
                 : Effect.void,
           );
+          if (yield* lifecycle.shouldDrain) return;
         }
         const now = yield* Clock.currentTimeMillis;
         if (pending) idleSince = now;

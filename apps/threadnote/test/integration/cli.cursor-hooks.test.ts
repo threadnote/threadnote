@@ -1,3 +1,5 @@
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {runEffect} from '../helpers/effect-runtime.js';
 import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -72,6 +74,12 @@ it('runs the actual Cursor CLI protocol from a user-hook cwd, recalls the payloa
         );
         child.stdin!.end(JSON.stringify(payload));
       });
+    await runEffect(
+      loadRecallIndexData(
+        {account: 'local', user: 'local', agentContextHome: home, manifestPath: join(home, 'seed-manifest.yaml')},
+        {includeInactive: false},
+      ),
+    );
     const session = await run(['cursor-hook', 'sessionStart']);
     const response = JSON.parse(session.stdout);
     expect(response.additional_context).toContain('unread context queue for cursor-hook-workspace');

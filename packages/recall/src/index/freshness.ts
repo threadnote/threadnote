@@ -82,9 +82,11 @@ export function recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh(
   input: RecallIndexCanonicalMutationContinuity,
 ): boolean {
   return (
-    input.persistedGeneration === input.observedGeneration ||
-    (input.markerPreviousGeneration === input.persistedGeneration &&
-      input.markerCurrentGeneration === input.observedGeneration)
+    input.persistedGeneration.length > 0 &&
+    input.observedGeneration.length > 0 &&
+    (input.persistedGeneration === input.observedGeneration ||
+      (input.markerPreviousGeneration === input.persistedGeneration &&
+        input.markerCurrentGeneration === input.observedGeneration))
   );
 }
 

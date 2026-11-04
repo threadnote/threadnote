@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Context, Effect, Layer, Schema, Sink, Stdio, Stream} from 'effect';
+import {Cause, Context, Effect, Exit, Layer, Schema, Sink, Stdio, Stream} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
 import * as CommandLine from 'effect/process/CommandLine';
 import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
@@ -19,6 +19,14 @@ export interface CommandOptions {
   /** Set to zero to collect output without a byte ceiling. */
   readonly maxOutputBytes?: number;
   readonly timeoutMs?: number;
+  /** @internal Request-owned native reads reserve this termination grace inside their deadline. */
+  readonly forceKillAfterMilliseconds?: number;
+  /** @internal A native-read worker's children inherit its owned process group. */
+  readonly detached?: boolean;
+  /** @internal Private stdin/stdout protocols must not copy response payloads into failure diagnostics. */
+  readonly sensitiveOutput?: boolean;
+  /** @internal Refuse native-read results until scoped cleanup has observed actual owned exit. */
+  readonly verifyOwnedProcessExit?: 'leader' | 'group';
 }
 
 export interface BinaryCommandResult {
@@ -103,7 +111,13 @@ export class CommandSpawnFailed extends Schema.TaggedError<CommandSpawnFailed, {
   },
 ) {}
 
-export type CommandExecutionError = CommandFailed | CommandOutputLimitExceeded | CommandSpawnFailed | CommandTimedOut;
+export class CommandCleanupUnconfirmed extends Schema.TaggedError<
+  CommandCleanupUnconfirmed,
+  {readonly brand: unique symbol}
+>()('CommandCleanupUnconfirmed', CommandFields) {}
+
+export type CommandExecutionError =
+  CommandFailed | CommandOutputLimitExceeded | CommandSpawnFailed | CommandTimedOut | CommandCleanupUnconfirmed;
 
 export class CommandExecutor extends Context.Service<
   CommandExecutor,
@@ -225,6 +239,7 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
     maxOutputBytes,
     message: `${command} exceeded output limit of ${maxOutputBytes} bytes`,
   });
+  let ownedProcessId: number | undefined;
   const run = Effect.scoped(
     Effect.gen(function* () {
       const invocation = yield* Effect.try({
@@ -246,10 +261,12 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
           childEnvironmentPolicy,
           options.trustedGitIndexFile,
         ),
-        forceKillAfter: 1000,
+        forceKillAfter: options.forceKillAfterMilliseconds ?? 1000,
+        detached: options.detached,
         shell: invocation.shell,
         stdin: options.input ? Stream.make(options.input) : 'ignore',
       }).pipe(Effect.mapError(spawnFailed));
+      ownedProcessId = Number(handle.pid);
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
           collectCommandOutput(handle.stdout, maxOutputBytes, outputExceeded).pipe(
@@ -270,9 +287,11 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
         args: safeArgs,
         executable: safeExecutable,
         exitCode,
-        message: redactSensitiveText(`${command} failed: ${stderr || stdout}`),
-        stderr: redactSensitiveText(stderr),
-        stdout: redactSensitiveText(stdout),
+        message: options.sensitiveOutput
+          ? `${command} failed.`
+          : redactSensitiveText(`${command} failed: ${stderr || stdout}`),
+        stderr: options.sensitiveOutput ? '' : redactSensitiveText(stderr),
+        stdout: options.sensitiveOutput ? '' : redactSensitiveText(stdout),
       });
     }),
   );
@@ -282,7 +301,7 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
     message: `${command} timed out after ${timeoutMs}ms`,
     timeoutMs,
   });
-  const bounded =
+  const bounded = verifyOwnedCommandExit(
     timeoutMs <= 0
       ? run
       : run.pipe(
@@ -290,7 +309,12 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
             duration: timeoutMs,
             orElse: () => Effect.fail(timedOut),
           }),
-        );
+        ),
+    () => ownedProcessId,
+    options,
+    system,
+    {args: safeArgs, executable: safeExecutable, message: `${command} cleanup could not confirm owned process exit.`},
+  );
   return yield* options.allowFailure === true
     ? bounded.pipe(Effect.catch(error => Effect.succeed(commandErrorResult(error))))
     : bounded;
@@ -316,6 +340,7 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
     maxOutputBytes,
     message: `${command} exceeded output limit of ${maxOutputBytes} bytes`,
   });
+  let ownedProcessId: number | undefined;
   const run = Effect.scoped(
     Effect.gen(function* () {
       const invocation = yield* Effect.try({
@@ -337,10 +362,12 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
           childEnvironmentPolicy,
           options.trustedGitIndexFile,
         ),
-        forceKillAfter: 1000,
+        forceKillAfter: options.forceKillAfterMilliseconds ?? 1000,
+        detached: options.detached,
         shell: invocation.shell,
         stdin: options.input ? Stream.make(options.input) : 'ignore',
       }).pipe(Effect.mapError(spawnFailed));
+      ownedProcessId = Number(handle.pid);
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
           collectCommandBytes(handle.stdout, maxOutputBytes, outputExceeded).pipe(
@@ -361,9 +388,11 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
         args: safeArgs,
         executable: safeExecutable,
         exitCode,
-        message: redactSensitiveText(`${command} failed: ${stderr || decoded}`),
-        stderr: redactSensitiveText(stderr),
-        stdout: redactSensitiveText(decoded),
+        message: options.sensitiveOutput
+          ? `${command} failed.`
+          : redactSensitiveText(`${command} failed: ${stderr || decoded}`),
+        stderr: options.sensitiveOutput ? '' : redactSensitiveText(stderr),
+        stdout: options.sensitiveOutput ? '' : redactSensitiveText(decoded),
       });
     }),
   );
@@ -373,15 +402,49 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
     message: `${command} timed out after ${timeoutMs}ms`,
     timeoutMs,
   });
-  return yield* timeoutMs <= 0
-    ? run
-    : run.pipe(
-        Effect.timeoutOrElse({
-          duration: timeoutMs,
-          orElse: () => Effect.fail(timedOut),
-        }),
-      );
+  return yield* verifyOwnedCommandExit(
+    timeoutMs <= 0
+      ? run
+      : run.pipe(
+          Effect.timeoutOrElse({
+            duration: timeoutMs,
+            orElse: () => Effect.fail(timedOut),
+          }),
+        ),
+    () => ownedProcessId,
+    options,
+    system,
+    {args: safeArgs, executable: safeExecutable, message: `${command} cleanup could not confirm owned process exit.`},
+  );
 });
+
+function verifyOwnedCommandExit<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  processId: () => number | undefined,
+  options: CommandOptions,
+  system: SystemInfoShape,
+  failure: {readonly args: readonly string[]; readonly executable: string; readonly message: string},
+) {
+  if (options.verifyOwnedProcessExit === undefined) return effect;
+  return Effect.uninterruptibleMask(restore =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(restore(effect));
+      const owned = processId();
+      const confirmed =
+        owned === undefined ||
+        (!system.isProcessRunning(owned) &&
+          (options.verifyOwnedProcessExit !== 'group' ||
+            (options.detached !== false && system.isProcessGroupRunning?.(owned) === false)));
+      if (!confirmed) {
+        const error = CommandCleanupUnconfirmed.make({...failure, args: [...failure.args]});
+        if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause))
+          return yield* Effect.failCause(Cause.combine(exit.cause, Cause.fail(error)));
+        return yield* error;
+      }
+      return Exit.isFailure(exit) ? yield* Effect.failCause(exit.cause) : exit.value;
+    }),
+  );
+}
 
 const executeStreamingCommand = Effect.fn('CommandExecutor.executeStreaming')(function* (
   executable: string,
@@ -569,6 +632,7 @@ function commandErrorResult(error: CommandExecutionError): CommandResult {
     case 'CommandFailed':
       return {exitCode: error.exitCode, stderr: error.stderr, stdout: error.stdout};
     case 'CommandOutputLimitExceeded':
+    case 'CommandCleanupUnconfirmed':
     case 'CommandTimedOut':
       return {exitCode: 124, stderr: error.message, stdout: ''};
     case 'CommandSpawnFailed':

@@ -1,11 +1,16 @@
 import {it} from '@effect/vitest';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
+import {Database} from 'bun:sqlite';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
+import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {loadRecallIndexData, readRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
+import * as recallRefresh from '@threadnote/recall/mcp/refresh';
 import {
   prepareCursorCloudSharedMemory,
   resourceStoreLocation,
@@ -21,6 +26,7 @@ import {
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ShareOperationError} from '../../src/share/core.js';
+import {runShareInit} from '../../src/share/admin.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -84,6 +90,96 @@ const fixture = Effect.fn('test.workflowPublicationFixture')(function* (prefix =
 });
 
 describe('personal workflow publication', () => {
+  it.effect('completes lexical readback after releasing shared publication and canonical locks', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const docsRemote = f.path.join(f.home, 'docs.git');
+      yield* f.git(f.home, ['clone', '--bare', f.remote, docsRemote]);
+      const original = recallRefresh.refreshRecallDerivedIndexesAfterCanonicalMutation;
+      let completions = 0;
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(recallRefresh, 'refreshRecallDerivedIndexesAfterCanonicalMutation').mockImplementation((...args) =>
+            Effect.gen(function* () {
+              completions++;
+              expect(yield* f.fs.exists(f.path.join(f.home, 'threadnote', 'shared-repository.lock'))).toBe(false);
+              expect(yield* f.fs.readDirectory(f.path.join(f.home, 'threadnote', 'memory-locks'))).toEqual([]);
+              expect(yield* f.fs.exists(resourceAccountMutationLockPath(f.path, f.home, f.config.account))).toBe(false);
+              return yield* original(...args);
+            }).pipe(Effect.orDie),
+          ),
+        ),
+        () =>
+          Effect.gen(function* () {
+            const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, f.params);
+            expect(result.isError).not.toBe(true);
+            expect(result.structuredContent).toMatchObject({persistence: 'shared-git-pushed'});
+            expect(completions).toBe(1);
+            const ready = yield* readRecallIndexData(f.config, {includeInactive: false, query: 'architecture'});
+            expect(ready.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+            expect(EffectArray.map(ready.candidates, candidate => candidate.uri)).toEqual([
+              'threadnote://user/tester/memories/shared/default/durable/projects/fixture/architecture.md',
+            ]);
+            const canonical = yield* (yield* ResourceStore).read(
+              resourceStoreLocation(f.config),
+              ready.candidates[0].uri,
+            );
+            expect((yield* f.git(f.remote, ['show', 'main:durable/projects/fixture/architecture.md'])).stdout).toBe(
+              canonical,
+            );
+            const generation = yield* readCanonicalMutationGeneration(f.fs, f.path, f.home, f.config.account);
+            const status = yield* recallIndexStatus(f.config, false);
+            yield* runShareInit(f.config, docsRemote, {team: 'docs', push: false});
+            expect(yield* readCanonicalMutationGeneration(f.fs, f.path, f.home, f.config.account)).toBe(generation);
+            expect(yield* recallIndexStatus(f.config, false)).toEqual(status);
+            const afterRegistration = yield* readRecallIndexData(f.config, {
+              includeInactive: false,
+              query: 'architecture',
+            });
+            expect(afterRegistration.candidates).toEqual(ready.candidates);
+            expect(afterRegistration.readState).toEqual({freshness: 'current', maintenance: 'unneeded'});
+            expect(completions).toBe(1);
+          }),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it.effect('retains successful shared Git persistence when required lexical completion is blocked', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* loadRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
+      const status = yield* recallIndexStatus(f.config, false);
+      yield* Effect.sync(() => {
+        const database = new Database(status.databasePath);
+        try {
+          database.exec("UPDATE metadata SET value = '999' WHERE key = 'schema_version'");
+        } finally {
+          database.close();
+        }
+      });
+      const result = yield* writeCursorCloudSharedMemory(f.config, f.scope, f.params);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        memoryUri: 'threadnote://user/tester/memories/shared/default/durable/projects/fixture/architecture.md',
+        persistence: 'shared-git-pushed',
+        mutationOutcome: 'canonical-committed',
+        recallReadiness: 'lexical-pending',
+      });
+      const canonical = yield* (yield* ResourceStore).read(
+        resourceStoreLocation(f.config),
+        'threadnote://user/tester/memories/shared/default/durable/projects/fixture/architecture.md',
+      );
+      expect(canonical).toContain(f.params.bodyText);
+      expect((yield* f.git(f.remote, ['show', 'main:durable/projects/fixture/architecture.md'])).stdout).toBe(
+        canonical,
+      );
+      expect(result.content).toContainEqual(
+        expect.objectContaining({text: expect.stringContaining('instead of creating it again')}),
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   it.effect('recovers a fixed native and worktree postimage before its first commit', () =>
     Effect.gen(function* () {
       const f = yield* fixture();

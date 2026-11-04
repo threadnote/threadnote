@@ -177,7 +177,14 @@ describe('runRecall native index', () => {
   );
   effectIt.effect('accepts bounded seeded one-hop controls and prints premise evidence', () =>
     Effect.gen(function* () {
-      const {output} = yield* captureRecall(runtime, {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-seeded-format-'});
+      const config = {...runtime, agentContextHome: home, manifestPath: path.join(home, 'seed-manifest.yaml')};
+      yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      yield* loadRecallIndex(config, {includeInactive: false, memoryIds: []});
+      yield* loadRecallIndex(config, {includeInactive: true, memoryIds: []});
+      const {output} = yield* captureRecall(config, {
         dryRun: true,
         memoryRefs: ['tn_cli_seed'],
         query: 'connection navigation',
@@ -186,11 +193,18 @@ describe('runRecall native index', () => {
       expect(output).toContain('Memory connections (one hop');
       expect(output).toContain('threadnote://memory/tn_cli_seed [unresolved]');
       expect(output).toContain('Relations are navigation evidence, not entailment.');
-    }),
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('supports seed-only navigation without entering the topical query lane', () =>
     Effect.gen(function* () {
-      const {output, value} = yield* captureRecall(runtime, {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-seed-only-'});
+      const config = {...runtime, agentContextHome: home, manifestPath: path.join(home, 'seed-manifest.yaml')};
+      yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      yield* loadRecallIndex(config, {includeInactive: false, memoryIds: []});
+      yield* loadRecallIndex(config, {includeInactive: true, memoryIds: []});
+      const {output, value} = yield* captureRecall(config, {
         dryRun: true,
         memoryRefs: ['tn_cli_seed_only'],
         relationTypes: ['references'],
@@ -202,7 +216,7 @@ describe('runRecall native index', () => {
       expect(output).not.toContain('explicit-memory-connection');
       expect(output).not.toContain('Next: threadnote read');
       expect(value.queryExpansions).toEqual([]);
-    }),
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('rejects recall without either a topical query or a memory premise', () =>
     Effect.gen(function* () {

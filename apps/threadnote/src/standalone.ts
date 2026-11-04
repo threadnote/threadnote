@@ -21,6 +21,8 @@ import {
   CODE_GRAPH_EMBEDDING_WORKER_PROTOCOL_VERSION,
   RECALL_EMBEDDING_WORKER_ARGUMENT,
   RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
+  RECALL_READY_READ_WORKER_ARGUMENT,
+  CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT,
   CODE_GRAPH_ANALYSIS_WORKER_ARGUMENT,
   CODE_GRAPH_COMPACTION_WORKER_ARGUMENT,
   CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT,
@@ -47,6 +49,8 @@ const isHandoffSaveWorker = arguments_[0] === HANDOFF_SAVE_WORKER_ARGUMENT;
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
 const isCodeGraphEmbeddingWorker = arguments_[0] === CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT;
 const isRecallEmbeddingWorker = arguments_[0] === RECALL_EMBEDDING_WORKER_ARGUMENT;
+const isRecallReadyReadWorker = arguments_[0] === RECALL_READY_READ_WORKER_ARGUMENT;
+const isContextBriefNativeReadWorker = arguments_[0] === CONTEXT_BRIEF_NATIVE_READ_WORKER_ARGUMENT;
 const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
 const isCodeGraphCompactionWorker = arguments_[0] === CODE_GRAPH_COMPACTION_WORKER_ARGUMENT;
@@ -92,21 +96,27 @@ if (
   isCodeGraphCompactionWorker ||
   isCodeGraphImpactQueryWorker ||
   isCodeGraphAnalysisWorker ||
-  isWindowsDiskCapacityWorker
+  isWindowsDiskCapacityWorker ||
+  isRecallReadyReadWorker ||
+  isContextBriefNativeReadWorker
 ) {
   // These operations perform synchronous native work. Keep the OS default
   // signal behavior so their lock-owning or deadline-owning parents can stop
   // them without waiting for the native call to return.
   const selectedNativeWorkerProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> =
-    isWindowsDiskCapacityWorker
-      ? await windowsDiskCapacityWorkerProgram()
-      : isCodeGraphCompactionWorker
-        ? await codeGraphAutomaticCompactionWorkerProgram()
-        : isCodeGraphAnalysisWorker
-          ? await codeGraphAnalysisWorkerProgram()
-          : isCodeGraphImpactQueryWorker
-            ? await codeGraphImpactQueryWorkerProgram()
-            : await codeGraphDeepDiagnosticsWorkerProgram();
+    isContextBriefNativeReadWorker
+      ? await contextBriefNativeReadWorkerProgram()
+      : isRecallReadyReadWorker
+        ? await recallReadyReadWorkerProgram()
+        : isWindowsDiskCapacityWorker
+          ? await windowsDiskCapacityWorkerProgram()
+          : isCodeGraphCompactionWorker
+            ? await codeGraphAutomaticCompactionWorkerProgram()
+            : isCodeGraphAnalysisWorker
+              ? await codeGraphAnalysisWorkerProgram()
+              : isCodeGraphImpactQueryWorker
+                ? await codeGraphImpactQueryWorkerProgram()
+                : await codeGraphDeepDiagnosticsWorkerProgram();
   const nativeWorkerProgram: Effect.Effect<void, unknown, never> = selectedNativeWorkerProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
     withCliDiagnostics,
@@ -482,6 +492,65 @@ async function codeGraphImpactQueryWorkerProgram() {
       ),
     ),
     Effect.provide(runtime.ApplicationLayer),
+  );
+}
+
+async function contextBriefNativeReadWorkerProgram() {
+  const [worker, processDiagnostics, processLease, system] = await Promise.all([
+    import('./context_brief/native_read_worker.js'),
+    import('./process/diagnostics.js'),
+    import('./process/standalone_lease.js'),
+    import('@threadnote/platform/system'),
+  ]);
+  return normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess).pipe(
+    Effect.flatMap(home =>
+      processLease.withStandaloneProcessLease(
+        processDiagnostics.withSignalTransparentThreadnoteWorkerRegistration(
+          home,
+          'graph-query-worker',
+          'context-read',
+          worker.contextBriefNativeReadWorkerProgram,
+        ),
+      ),
+    ),
+    Effect.provide(Layer.mergeAll(BunServices.layer, cryptoLayer, system.SystemInfo.layer)),
+  );
+}
+
+async function recallReadyReadWorkerProgram() {
+  const [worker, processDiagnostics, processLease, command] = await Promise.all([
+    import('./recall/ready_read_worker.js'),
+    import('./process/diagnostics.js'),
+    import('./process/standalone_lease.js'),
+    import('@threadnote/platform/command'),
+  ]);
+  const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
+  const noChildren = command.CommandExecutor.of({
+    execute: () =>
+      Effect.fail(
+        command.CommandSpawnFailed.make({
+          args: [],
+          executable: '<ready-read>',
+          message: 'Ready lexical workers do not launch commands.',
+          cause: undefined,
+        }),
+      ),
+    executeStreaming: () => Effect.die('Ready lexical workers do not launch commands.'),
+    spawnDetached: () => Effect.succeed(false),
+  });
+  return processHome.pipe(
+    Effect.flatMap(home =>
+      processLease.withStandaloneProcessLease(
+        processDiagnostics.withSignalTransparentThreadnoteWorkerRegistration(
+          home,
+          'recall-read-worker',
+          'ready-recall',
+          worker.recallReadyReadWorkerProgram,
+        ),
+      ),
+    ),
+    Effect.provideService(command.CommandExecutor, noChildren),
+    Effect.provide(worker.readyRecallReadWorkerLayer),
   );
 }
 

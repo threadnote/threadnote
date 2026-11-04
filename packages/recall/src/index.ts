@@ -1,4 +1,5 @@
 import {pipe as EffectArrayPipe} from 'effect';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {
@@ -108,6 +109,14 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {recallResourcePolicyInputProof} from './index/canonical_resource.js';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {
+  RecallReadyReadBoundary,
+  recallReadyReadRequestSchema,
+  recallIndexStatusReadSchema,
+  type RecallReadyReadRequest,
+  type RecallReadyReadResponse,
+} from './read_boundary.js';
 
 export {recallUriMatchesScopes} from './index/scope.js';
 
@@ -115,6 +124,7 @@ class RecallIndexOperationError extends Schema.TaggedError<
   RecallIndexOperationError,
   {readonly brand: unique symbol}
 >()('RecallIndexOperationError', {
+  reason: Schema.optionalKey(Schema.Literals(['invalid-protocol', 'worker-failed', 'cleanup-unconfirmed'])),
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -124,6 +134,7 @@ export class RecallReadyReadUnavailable extends Schema.TaggedError<
   RecallReadyReadUnavailable,
   {readonly brand: unique symbol}
 >()('RecallReadyReadUnavailable', {
+  reason: Schema.optionalKey(Schema.Literal('budget-exhausted')),
   message: Schema.String,
 }) {}
 
@@ -324,11 +335,12 @@ const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(fu
       Effect.catchCauseIf(
         cause => !Cause.hasInterrupts(cause),
         cause => {
+          if (hasReadCleanupUnconfirmed(cause)) return Effect.failCause(cause);
           const error = Cause.squash(cause);
           return Effect.fail(
             Schema.is(RecallReadyReadUnavailable)(error) ||
               Schema.is(RecallReadyReadIncomplete)(error) ||
-              Schema.is(RecallIndexCorrupt)(error)
+              isRecoverableRecallIndexCause(cause)
               ? RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'})
               : RecallIndexOperationError.make({
                   cause,
@@ -745,23 +757,58 @@ export const loadRecallMemoryLinks = Effect.fn('recall.loadMemoryLinks')(functio
 export const readRecallIndexData = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallIndexOptions, 'forceRefresh' | 'readyOnly'>,
-) => loadRecallIndexData(config, {...options, readyOnly: true});
+) =>
+  throughReadyReadBoundary(
+    'data',
+    config,
+    options,
+    loadRecallIndexData(config, {...options, readyOnly: true}),
+    readyBoundaryData,
+  );
 export const readRecallIndexDataBatch = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallIndexBatchOptions, 'forceRefresh' | 'readyOnly'>,
-) => loadRecallIndexDataBatch(config, {...options, readyOnly: true});
+) =>
+  throughReadyReadBoundary(
+    'batch',
+    config,
+    options,
+    loadRecallIndexDataBatch(config, {...options, readyOnly: true}),
+    value => EffectArray.map(recallIndexDataBatchResult(value), readyBoundaryData),
+  );
 export const readRecallExactMatches = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallExactMatchesOptions, 'forceRefresh' | 'readyOnly'>,
-) => loadRecallExactMatches(config, {...options, readyOnly: true});
+) =>
+  throughReadyReadBoundary(
+    'exact',
+    config,
+    options,
+    loadRecallExactMatches(config, {...options, readyOnly: true}),
+    recallExactMatchesResult,
+  );
 export const readRecallCodeLinks = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallCodeLinksOptions, 'forceRefresh' | 'readyOnly'>,
-) => loadRecallCodeLinks(config, {...options, readyOnly: true});
+) =>
+  throughReadyReadBoundary(
+    'code-links',
+    config,
+    options,
+    loadRecallCodeLinks(config, {...options, readyOnly: true}),
+    recallCodeLinkMatchesResult,
+  );
 export const readRecallMemoryLinks = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallMemoryLinksOptions, 'forceRefresh' | 'readyOnly'>,
-) => loadRecallMemoryLinks(config, {...options, readyOnly: true});
+) =>
+  throughReadyReadBoundary(
+    'memory-links',
+    config,
+    options,
+    loadRecallMemoryLinks(config, {...options, readyOnly: true}),
+    recallMemoryLinkMatchesResult,
+  );
 export const readRecallMemoryIdentities = (
   config: RecallIndexConfig,
   options: Parameters<typeof loadRecallMemoryIdentities>[1],
@@ -778,7 +825,140 @@ export const readRecallMemoryIdentities = (
     ),
   );
 
-export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
+function readyBoundaryData(value: unknown): RecallIndexData {
+  const data = recallIndexDataResult(value);
+  if (
+    data.readState === undefined ||
+    !['current', 'stale'].includes(data.readState.freshness) ||
+    !['unneeded', 'queued', 'unavailable'].includes(data.readState.maintenance) ||
+    !EffectArray.every([...data.candidates, ...(data.recentCandidates ?? [])], recallCandidateIsValid) ||
+    !EffectArray.every(
+      [
+        data.corpusStatistics.averageDocumentLength,
+        data.corpusStatistics.documentCount,
+        data.corpusStatistics.totalDocumentLength,
+      ],
+      value => typeof value === 'number' && Number.isFinite(value) && value >= 0,
+    ) ||
+    !Predicate.isObject(data.corpusStatistics.documentFrequency) ||
+    !EffectArray.every(
+      EffectRecord.values(data.corpusStatistics.documentFrequency),
+      value => typeof value === 'number' && Number.isFinite(value) && value >= 0,
+    )
+  )
+    throw RecallIndexOperationError.make({message: 'Ready lexical worker returned an invalid data result.'});
+  return data;
+}
+
+/** A worker returns only fully authorized ready results, then the original callback boundary is replayed. */
+function throughReadyReadBoundary<A, E, R>(
+  operation: RecallReadyReadRequest['operation'],
+  config: RecallIndexConfig,
+  options: RecallIndexReadQuery,
+  direct: Effect.Effect<A, E, R>,
+  decode: (value: unknown) => A,
+) {
+  return Effect.gen(function* () {
+    const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+    if (Option.isNone(boundary)) return yield* direct;
+    const invalid = () =>
+      RecallIndexOperationError.make({
+        reason: 'invalid-protocol',
+        message: 'Ready lexical worker protocol is invalid.',
+      });
+    const wireValue = yield* Effect.try({
+      try: () =>
+        JSON.parse(
+          JSON.stringify({
+            operation,
+            config: {
+              account: config.account,
+              agentContextHome: config.agentContextHome,
+              manifestPath: config.manifestPath,
+              user: config.user,
+            },
+            options,
+          }),
+        ),
+      catch: invalid,
+    });
+    const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})(
+      wireValue,
+    ).pipe(Effect.mapError(invalid));
+    const response = yield* boundary.value.read(request).pipe(
+      Effect.mapError(error =>
+        error.reason === 'budget-exhausted'
+          ? RecallReadyReadUnavailable.make({
+              reason: 'budget-exhausted',
+              message: 'The lexical read budget is exhausted.',
+            })
+          : RecallIndexOperationError.make({reason: error.reason, message: 'The ready lexical worker failed.'}),
+      ),
+    );
+    if (response.operation !== operation) return yield* invalid();
+    yield* replayReadyReadObservations(response, options);
+    if (response.outcome === 'unavailable')
+      return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+    if (response.outcome !== 'success')
+      return yield* RecallIndexOperationError.make({
+        reason: 'worker-failed',
+        message: 'The ready lexical worker read failed.',
+      });
+    return yield* Effect.try({try: () => decode(response.value), catch: invalid});
+  });
+}
+
+const replayReadyReadObservations = Effect.fn('recall.replayReadyReadObservations')(function* (
+  response: RecallReadyReadResponse,
+  options: RecallIndexReadQuery,
+) {
+  for (const observation of response.observations) {
+    switch (observation.kind) {
+      case 'state':
+        options.onReadState?.(observation.value);
+        break;
+      case 'query': {
+        const selected =
+          'selections' in options && observation.selectionOrdinal !== undefined
+            ? options.selections[observation.selectionOrdinal]
+            : options;
+        if (selected && 'onQueryDiagnostics' in selected && selected.onQueryDiagnostics)
+          yield* selected.onQueryDiagnostics(observation.value);
+        break;
+      }
+      case 'mismatch':
+        if ('onCanonicalMismatch' in options) options.onCanonicalMismatch?.(observation.value);
+        break;
+      case 'code-truncated':
+        if ('anchors' in options) options.onSearchTruncated?.(observation.value);
+        break;
+      case 'memory-truncated':
+        if ('memorySeeds' in options) options.onSearchTruncated?.(observation.value);
+        break;
+      case 'reread':
+        if ('memorySeeds' in options) options.onCanonicalReread?.(observation.value);
+        break;
+      case 'rows':
+        if ('memorySeeds' in options) options.onRawRows?.(observation.value);
+        break;
+      case 'records':
+        if ('memorySeeds' in options && options.onCanonicalRecords) {
+          const records = EffectArray.map(observation.value, value => {
+            const record = parseMemoryDocument(value.uri, value.content);
+            if (!record)
+              throw RecallIndexOperationError.make({
+                message: 'Ready lexical worker returned an invalid canonical record.',
+              });
+            return record;
+          });
+          options.onCanonicalRecords(records);
+        }
+        break;
+    }
+  }
+});
+
+const directRecallIndexStatus = Effect.fn('recall.indexStatus')(function* (
   config: RecallIndexConfig,
   includeInactive = false,
 ) {
@@ -912,12 +1092,31 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
   );
 });
 
-export const currentRecallCorpusGeneration = Effect.fn('recall.currentCorpusGeneration')(function* (
+/** Ordinary read admission also owns metadata/status SQLite work used by optional query inference. */
+export const recallIndexStatus = (config: RecallIndexConfig, includeInactive = false) =>
+  throughReadyReadBoundary(
+    'status',
+    config,
+    {includeInactive},
+    directRecallIndexStatus(config, includeInactive),
+    value => Schema.decodeUnknownSync(recallIndexStatusReadSchema)(value),
+  );
+
+const directCurrentRecallCorpusGeneration = Effect.fn('recall.currentCorpusGeneration')(function* (
   config: RecallIndexConfig,
 ) {
   const status = yield* recallIndexStatus(config, false);
   return status.ready ? Option.fromUndefinedOr(status.generation) : Option.none<string>();
 });
+
+export const currentRecallCorpusGeneration = (config: RecallIndexConfig) =>
+  throughReadyReadBoundary(
+    'generation',
+    config,
+    {includeInactive: false},
+    directCurrentRecallCorpusGeneration(config),
+    value => Option.fromNullishOr(Schema.decodeUnknownSync(Schema.NullOr(Schema.String))(value)),
+  );
 
 export const clearRecallIndexMemoryCache = Effect.fn('recall.clearMemoryCache')(function* () {
   // SQLite owns its page cache and every operation uses a scoped connection.

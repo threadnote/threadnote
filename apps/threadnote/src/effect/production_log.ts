@@ -15,6 +15,8 @@ import {
   Result,
   Semaphore,
 } from 'effect';
+import {ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
+import {Schema} from 'effect';
 import {credentialScrubberBlocker} from '@threadnote/platform/scrubber';
 import {LEGACY_THREADNOTE_STORAGE_LAYOUT_VERSION, THREADNOTE_STORAGE_LAYOUT_VERSION} from '@threadnote/store/layout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -64,6 +66,12 @@ const PRODUCTION_LOG_LOCK_OPTIONS = {
 const processProductionLogGates = new Map<string, {readonly semaphore: Semaphore.Semaphore; users: number}>();
 
 export const PRODUCTION_LOG_PHASES = [
+  'context.brief.graph',
+  'context.brief.memory',
+  'context.brief.code-linked-memory',
+  'context.brief.citation-validation',
+  'context.brief.procedures',
+  'context.brief.projection',
   'recall.shared-sync',
   'recall.obsidian-sync',
   'recall.workspace-context',
@@ -761,7 +769,7 @@ function phaseTimingFromExit<A, E>(
   return {
     durationMilliseconds,
     errorType: Result.isSuccess(diagnostic) ? diagnostic.success : PRODUCTION_LOG_UNKNOWN_ERROR_TYPE,
-    outcome: 'failure',
+    outcome: Schema.is(ReadDeadlineExceeded)(Cause.squash(exit.cause)) ? 'timed-out' : 'failure',
     phase,
   };
 }

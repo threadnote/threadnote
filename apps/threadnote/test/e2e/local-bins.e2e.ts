@@ -27,6 +27,7 @@ import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {recallLexicalDemandKey, RECALL_LEXICAL_DEMAND_DIRECTORY} from '@threadnote/recall/background/lexical-demand';
 import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -121,6 +122,19 @@ const SemanticResultSchema = withRest(
 const MissingGraphResultSchema = withRest(
   Schema.Struct({nodes: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array))}),
 );
+const SynchronizationDemandSchema = withRest(
+  Schema.Struct({
+    version: Schema.Literals([2]),
+    account: Schema.String,
+    user: Schema.String,
+    includeInactive: Schema.Boolean,
+    manifestPath: Schema.String,
+    work: withRest(Schema.Struct({kind: Schema.Literals(['synchronize']), sources: Schema.Boolean})),
+    revision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u))),
+    completedAt: Schema.optionalKey(Schema.Finite),
+    failures: Schema.Int,
+  }),
+);
 
 const root = process.cwd();
 const cli = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
@@ -160,6 +174,7 @@ beforeAll(async () => {
   graphRepository = join(temporaryRoot, 'code-graph-repository');
   await mkdir(join(home, 'cache'), {recursive: true});
   await mkdir(userHome, {recursive: true});
+  await writeFile(join(home, 'seed-manifest.yaml'), 'version: 1\nprojects: []\n');
   await cp(
     join(root, 'apps', 'threadnote', 'test', 'evaluation', 'fixtures', 'code-graph-v1', 'repository'),
     graphRepository,
@@ -1247,10 +1262,14 @@ describe('built self-contained distribution', () => {
     ]);
     expect(await runCli(['source', 'inventory', sourceId])).toContain('ADD       Engineering/Release bridge.md');
     const externalUri = 'threadnote://resources/external/obsidian/e2e-obsidian-source/Engineering/Release%20bridge.md';
-    const requested = await runCli(['recall', '--query', 'ZOBSIDIAN-74291']);
+    const manifestPath = join(home, 'seed-manifest.yaml');
+    const requestedAt = Date.now();
+    const requested = await runCli(['--manifest', manifestPath, 'recall', '--query', 'ZOBSIDIAN-74291']);
     expect(requested).not.toContain('Auto-synced sources:');
-    expectSourceRefreshRequested(sourceId);
+    expect(requested).not.toContain('Automatic synchronization enqueue was not confirmed');
+    await expectAutomaticSourceSynchronizationRequested(manifestPath, requestedAt);
     expect(await runCli(['source', 'sync', sourceId, '--apply'])).toMatch(/Obsidian source sync (progress|complete):/);
+    expectSourceRefreshRequested(sourceId);
     await expect
       .poll(() => runCli(['read', externalUri]).catch(() => ''), {interval: 100, timeout: 30_000})
       .toContain('ZOBSIDIAN-74291');
@@ -1313,6 +1332,7 @@ describe('built self-contained distribution', () => {
 
   it('serves native core and full MCP toolsets over stdio', async () => {
     const vault = join(home, 'MCP Obsidian Vault');
+    const manifestPath = join(home, 'seed-manifest.yaml');
     const projectionId = 'mcp-selected-memory';
     const sourceId = 'mcp-recall-source';
     const memoryUri = 'threadnote://user/e2e-user/memories/durable/projects/threadnote/native-e2e.md';
@@ -1334,6 +1354,7 @@ describe('built self-contained distribution', () => {
         ...process.env,
         HOME: userHome,
         THREADNOTE_HOME: home,
+        THREADNOTE_MANIFEST: manifestPath,
         THREADNOTE_MCP_TOOLSET: 'full',
         THREADNOTE_USER: 'e2e-user',
         USERPROFILE: userHome,
@@ -1394,16 +1415,19 @@ describe('built self-contained distribution', () => {
         )
         .toEqual({health: true, invalidRecall: true});
       expect(productionLog).not.toContain(privatePayloadMarker);
+      const requestedAt = Date.now();
       const requested = await client.callTool({
         arguments: {query: 'MCP-OBSIDIAN-881'},
         name: 'recall_context',
       });
       expect(requested.isError).not.toBe(true);
       expect(JSON.stringify(requested.content)).not.toContain('Auto-synced sources:');
-      expectSourceRefreshRequested(sourceId);
+      expect(JSON.stringify(requested)).not.toContain('Automatic synchronization enqueue was not confirmed');
+      await expectAutomaticSourceSynchronizationRequested(manifestPath, requestedAt);
       expect(await runCli(['source', 'sync', sourceId, '--apply'])).toMatch(
         /Obsidian source sync (progress|complete):/,
       );
+      expectSourceRefreshRequested(sourceId);
       const externalUri = 'threadnote://resources/external/obsidian/mcp-recall-source/Knowledge/Agent%20recall.md';
       await expect
         .poll(() => runCli(['read', externalUri]).catch(() => ''), {interval: 100, timeout: 30_000})
@@ -1616,6 +1640,32 @@ describe('built self-contained distribution', () => {
     expect(remoteContent).toContain('QZ9 separate canonical and Git worktree');
   });
 });
+
+async function expectAutomaticSourceSynchronizationRequested(manifestPath: string, requestedAt: number): Promise<void> {
+  const scope = {
+    account: 'local',
+    user: 'e2e-user',
+    includeInactive: false,
+    manifestPath,
+    work: {kind: 'synchronize', sources: true},
+  } as const;
+  const demand = Schema.decodeUnknownSync(SynchronizationDemandSchema)(
+    JSON.parse(
+      await readFile(
+        join(home, 'recall', RECALL_LEXICAL_DEMAND_DIRECTORY, `${recallLexicalDemandKey(scope)}.json`),
+        'utf8',
+      ),
+    ),
+  );
+  expect(demand).toMatchObject(scope);
+  expect(demand.work).toEqual(scope.work);
+  expect(demand.failures).toBeLessThan(8);
+  if (demand.revision === undefined) {
+    // A worker may already have completed this request, or the reader may coalesce recent completed work.
+    expect(demand.completedAt).toBeGreaterThanOrEqual(requestedAt - 60_000);
+    expect(demand.completedAt).toBeLessThanOrEqual(Date.now());
+  }
+}
 
 function expectSourceRefreshRequested(sourceId: string): void {
   const database = new Database(join(home, 'threadnote', 'integration-coordinator', 'jobs.sqlite'), {readonly: true});

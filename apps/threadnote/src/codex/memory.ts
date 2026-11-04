@@ -26,14 +26,7 @@ export const runCodexCloudMemory = Effect.fn('codexCloud.memory')(function* (
     operation === 'read' || operation === 'list',
   );
   const registry = new EffectMcpServerRegistry();
-  registerSearchTool(
-    registry,
-    config,
-    'recall',
-    'Recall Codex Cloud memories',
-    {heartbeatMilliseconds: 10_000, sharedSyncDelayMilliseconds: 0},
-    scope,
-  );
+  registerSearchTool(registry, config, 'recall', 'Recall Codex Cloud memories', {heartbeatMilliseconds: 10_000}, scope);
   registerReadTool(registry, config, 'read', 'Read Codex Cloud memories', scope);
   registerListTool(registry, config, 'list', 'List Codex Cloud memories', scope);
   registerStoreTool(registry, config, 'remember', 'Remember Codex Cloud context', scope);

@@ -4,6 +4,8 @@
   "type": "module",
   "exports": {
     "./fast-check-property": "./src/fast-check-property.ts",
+    "./fixture-pipeline-receipt": "./src/fixture-pipeline-receipt.ts",
+    "./fixture-producers": "./src/fixture-producers.ts",
     "./fixture-temp-directory": "./src/fixture-temp-directory.ts",
     "./git-share-worktree": "./src/git-share-worktree.ts",
     "./http-fetch": "./src/http-fetch.ts",

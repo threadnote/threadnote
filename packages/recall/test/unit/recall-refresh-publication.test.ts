@@ -108,6 +108,19 @@ const fixture = Effect.fn('test.recallPublicationFixture')(function* (count: num
     );
   const refresh = (onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>) =>
     loadRecallIndexData(config, {includeInactive: false, memoryIds: [], onProgress});
+  // Tracked-publication examples need a managed baseline; no-clock legacy fallback is covered separately.
+  yield* store.mutateChecked(
+    location,
+    [
+      {
+        type: 'write',
+        uri: 'threadnote://resources/repo/unrelated.md',
+        content: 'seeded alpha evidence',
+        options: {mode: 'upsert'},
+      },
+    ],
+    Effect.void,
+  );
   let publicationStarted: number | undefined;
   let publicationMilliseconds = 0;
   yield* refresh(progress =>

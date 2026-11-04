@@ -17,6 +17,7 @@
     "./optional": "./src/optional.ts",
     "./paths": "./src/paths.ts",
     "./readonly-array": "./src/readonly-array.ts",
+    "./read_deadline": "./src/read_deadline.ts",
     "./safe_scan": "./src/safe_scan.ts",
     "./scrubber": "./src/scrubber.ts",
     "./sha256": "./src/sha256.ts",

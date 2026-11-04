@@ -601,6 +601,8 @@ export interface SystemInfoShape {
   readonly homeDirectory: string;
   readonly hardwareInfo: Effect.Effect<SystemHardwareInfo, Error>;
   readonly isProcessRunning: (processId: number) => boolean;
+  /** Read-only POSIX process-group probe. Undefined preserves unknown ownership/permission state. */
+  readonly isProcessGroupRunning?: (processGroupId: number) => boolean | undefined;
   readonly memoryUsage: () => {
     readonly external: number;
     readonly heapUsed: number;
@@ -778,6 +780,18 @@ export class SystemInfo extends Context.Service<SystemInfo, SystemInfoShape>()(
             return true;
           } catch (cause: unknown) {
             return !(typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ESRCH');
+          }
+        },
+        isProcessGroupRunning: processGroupId => {
+          if (runtimePlatform === 'win32' || !Number.isSafeInteger(processGroupId) || processGroupId <= 0)
+            return undefined;
+          try {
+            process.kill(-processGroupId, 0);
+            return true;
+          } catch (cause: unknown) {
+            return typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ESRCH'
+              ? false
+              : undefined;
           }
         },
         memoryUsage: () => {

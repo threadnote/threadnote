@@ -42,6 +42,7 @@ import {
   scanRecallSources,
   tryStageTouchedRecallSources,
   recallSourceIsIntentionallyExcluded,
+  recallSourceIsWithinIndexRoots,
   type IndexedRecallSource,
 } from './refresh.js';
 
@@ -228,6 +229,10 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
       : yield* hashRecallRefreshGeneration(sql, previousContentGeneration);
   const previousValidatedAt = numericMetadata(previousMetadata, 'validated_at');
   const now = yield* Clock.currentTimeMillis;
+  const rebindingScope =
+    sourceScan.mode === 'full' &&
+    previousMetadata.has('logical_scope') &&
+    previousMetadata.get('logical_scope') !== recallLogicalScope(config, includeInactive);
   let removedCursor: string | undefined;
   for (;;) {
     const removed = yield* sql.unsafe<{readonly uri: string; readonly source_path: string}>(
@@ -244,11 +249,19 @@ export const prepareRecallDatabase = Effect.fn('recall.prepareDatabase')(functio
         Effect.gen(function* () {
           if (sourceInputs.has(row.source_path)) return;
           const input = yield* captureRecallSourceInput(row.source_path);
-          if (
-            input.info?.isFile() &&
-            !recallSourceIsIntentionallyExcluded(config, path, includeInactive, row.uri, row.source_path)
-          )
-            return yield* recallRefreshSuperseded();
+          if (input.info?.isFile()) {
+            const physical = rebindingScope ? yield* fs.realPath(row.source_path).pipe(Effect.option) : undefined;
+            const outsideReboundScope =
+              physical !== undefined &&
+              physical._tag === 'Some' &&
+              physical.value === path.normalize(row.source_path) &&
+              !recallSourceIsWithinIndexRoots(config, path, row.uri, physical.value);
+            if (
+              !outsideReboundScope &&
+              !recallSourceIsIntentionallyExcluded(config, path, includeInactive, row.uri, row.source_path)
+            )
+              return yield* recallRefreshSuperseded();
+          }
           sourceInputs.set(row.source_path, input.key);
         }),
       {concurrency: 16, discard: true},

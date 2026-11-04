@@ -94,7 +94,6 @@ effectIt.effect(
       const registry = new EffectMcpServerRegistry();
       registerSearchTool(registry, config, 'recall_context', 'Recall', {
         heartbeatMilliseconds: 10_000,
-        sharedSyncDelayMilliseconds: 0,
       });
       const base = {callerCwd: component, query: 'orbital gearbox calibration', nodeLimit: '3'};
       for (const query of [

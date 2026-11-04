@@ -30,6 +30,7 @@
     "./memory/identity": "./src/memory/identity.ts",
     "./memory/links": "./src/memory/links.ts",
     "./rank": "./src/rank.ts",
+    "./read_boundary": "./src/read_boundary.ts",
     "./reranker-score": "./src/reranker-score.ts",
     "./resource-invalidation": "./src/resource-invalidation.ts",
     "./results": "./src/results.ts",
