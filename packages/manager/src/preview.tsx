@@ -92,6 +92,7 @@ export function renderMemoryPreviewError(): string {
         <div className="preview-error">
           <h1>Memory unavailable</h1>
           <p>This memory could not be opened on this device. It may have moved, expired, or been removed.</p>
+          <p>Try opening the memory link again. If it still fails, run threadnote doctor.</p>
         </div>
       </PreviewFrame>,
     )

@@ -645,7 +645,9 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     const {validMemoryPreviewArguments} = await import('./preview/dispatch.js');
     if (!validMemoryPreviewArguments(arguments_))
       return Effect.sync(() => {
-        process.stderr.write('Invalid memory preview invocation.\n');
+        process.stderr.write(
+          'Invalid memory preview invocation. Retry the memory link, or run threadnote memory-preview <launch-uri> with exactly one launch URI.\n',
+        );
         process.exitCode = 1;
       });
   }
@@ -736,7 +738,9 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
   const cliOperation = invocation.operation;
   if (cliOperation === 'memory-preview' && arguments_[0] !== 'memory-preview')
     return Effect.sync(() => {
-      process.stderr.write('Invalid memory preview invocation.\n');
+      process.stderr.write(
+        'Invalid memory preview invocation. Retry the memory link, or run threadnote memory-preview <launch-uri> with exactly one launch URI.\n',
+      );
       process.exitCode = 1;
     });
   const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';

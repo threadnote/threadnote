@@ -46,7 +46,12 @@ describe('private memory preview document', () => {
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('<img src=x');
     expect(html).toContain('&lt;img');
-    expect(renderMemoryPreviewError()).toContain('Memory unavailable');
+    const unavailable = renderMemoryPreviewError();
+    expect(unavailable).toContain('Memory unavailable');
+    expect(unavailable).toContain('Try opening the memory link again');
+    expect(unavailable).toContain('threadnote doctor');
+    expect(unavailable).not.toContain('preview-contract.md');
+    expect(unavailable).not.toContain('tn_saved');
   });
 
   it('shows Mermaid source without an active iframe or server-side document access', () => {

@@ -214,6 +214,9 @@ it('rejects raw preview flags before parsing the selector or configuration', asy
   ]);
   expect(exit).not.toBe(0);
   expect(error).toContain('Invalid memory preview invocation');
+  expect(error).toContain('Retry the memory link');
+  expect(error).toContain('threadnote memory-preview <launch-uri>');
+  expect(error).toContain('exactly one launch URI');
   expect(output + error).not.toContain(secret);
   expect(output + error).not.toContain('nonexistent');
   const valid = memoryLaunchUri({kind: 'id', ref: 'tn_test'});
@@ -232,6 +235,8 @@ it('rejects raw preview flags before parsing the selector or configuration', asy
     ]);
     expect(status).not.toBe(0);
     expect(stdout + stderr).toContain('Invalid memory preview invocation');
+    expect(stderr).toContain('Retry the memory link');
+    expect(stderr).toContain('exactly one launch URI');
     expect(stdout + stderr).not.toContain(valid);
   }
 });
