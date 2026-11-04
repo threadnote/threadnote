@@ -10,6 +10,7 @@ import type {
 } from './shape.js';
 import {CODE_GRAPH_SCHEMA_VERSION, CodeGraphStoreError, type CodeGraphStoreFailure} from '../types.js';
 import {classifyCodeGraphStoreFailure} from './failure.js';
+import * as EffectString from 'effect/String';
 
 export interface CodeGraphDatabaseSessionShape extends CodeGraphDatabaseSessionOptions {
   readonly databasePath: string;
@@ -32,6 +33,34 @@ class DeferredTransactions extends Context.Service<
   DeferredTransactions,
   ReadonlyMap<SqlClient.SqlClient, SqlClient.SqlClient['withTransaction']>
 >()('@threadnote/graph/store/session/DeferredTransactions') {}
+
+// Origin/lifetime only, not an attestation of arbitrary SQLite process globals.
+// No injected same-path session or copied descriptor can register a client.
+const defaultCandidateClients = new WeakMap<SqlClient.SqlClient, string>();
+export const isDefaultCandidateSqliteClient = (sql: SqlClient.SqlClient | undefined, databasePath: string) =>
+  sql !== undefined && defaultCandidateClients.get(sql) === databasePath;
+
+function withDefaultCandidateClient<A, E, R>(databasePath: string, readOnly: boolean, effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    if (
+      readOnly ||
+      !databasePath ||
+      databasePath === ':memory:' ||
+      /^file:/i.test(databasePath) ||
+      EffectString.includes('\0')(databasePath)
+    )
+      return yield* effect;
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => defaultCandidateClients.set(sql, databasePath)),
+      () => effect,
+      () =>
+        Effect.sync(() => {
+          defaultCandidateClients.delete(sql);
+        }),
+    );
+  });
+}
 
 /** Only reads and connection-private TEMP writes may defer acquiring the main writer. */
 export function withCodeGraphDeferredTransaction<A, E, R>(sql: SqlClient.SqlClient, program: Effect.Effect<A, E, R>) {
@@ -172,7 +201,7 @@ export function useExistingDatabase<A, E, R>(
         cause => !Cause.hasInterruptsOnly(cause),
         () => Effect.fail(CodeGraphStoreError.of('Existing code graph database could not be opened.')),
       ),
-      Effect.flatMap(context => effect.pipe(Effect.provide(context))),
+      Effect.flatMap(context => withDefaultCandidateClient(databasePath, false, effect).pipe(Effect.provide(context))),
     ),
   );
 }
@@ -192,7 +221,11 @@ export function useDatabaseDirect<A, E, R>(
       })
     : SqliteClient.layer({disableWAL: true, filename: databasePath});
   return Effect.scoped(
-    Layer.build(layer.pipe(Layer.orDie)).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
+    Layer.build(layer.pipe(Layer.orDie)).pipe(
+      Effect.flatMap(context =>
+        withDefaultCandidateClient(databasePath, readOnly, effect).pipe(Effect.provide(context)),
+      ),
+    ),
   );
 }
 

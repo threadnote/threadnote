@@ -32,7 +32,7 @@ import type {
   RepositoryIdentityExpectation,
 } from '../types.js';
 
-export type CodeGraphIndexResourceGate = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | unknown, R>;
+export type CodeGraphIndexResourceGate = import('../store/models.js').CodeGraphPreparationGate;
 
 export type CodeGraphPreparedSpoolBudgetGate = <A, E, R>(
   bytes: number,

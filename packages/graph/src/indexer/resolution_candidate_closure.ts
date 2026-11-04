@@ -1,3 +1,4 @@
+import {projectResolutionLookupKeyIdentity} from '../incremental/closure.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
@@ -164,7 +165,10 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
         ),
         ...input.candidateReexports,
       ],
-      reexport => EffectArray.map(reexport.aliases, alias => `${alias.resolutionDomain}\0${alias.key}`),
+      reexport =>
+        EffectArray.map(reexport.aliases, alias =>
+          projectResolutionLookupKeyIdentity(alias.resolutionDomain, alias.key),
+        ),
     ),
   );
   if (
@@ -375,12 +379,12 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
                 for (const key of symbol.lookupKeys ?? []) {
                   const value = {key, resolutionDomain: lookupKeyDomain(key, symbol.resolutionDomain)};
                   if (lookupKeys.size <= PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS)
-                    lookupKeys.set(`${value.resolutionDomain}\0${key}`, value);
+                    lookupKeys.set(projectResolutionLookupKeyIdentity(value.resolutionDomain, key), value);
                 }
               for (const reference of side.references ?? [])
                 for (const key of reference.aliasLookupKeys ?? []) {
                   if (lookupKeys.size <= PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS)
-                    lookupKeys.set(`${reference.resolutionDomain}\0${key}`, {
+                    lookupKeys.set(projectResolutionLookupKeyIdentity(reference.resolutionDomain, key), {
                       key,
                       resolutionDomain: reference.resolutionDomain,
                     });
@@ -630,7 +634,7 @@ function enrichResolutionCandidateFacts(
   const currentReexports = EffectArray.map(currentReferences, reexportKeysFromReference);
   const stagedAliasLookupIdentities = new Set(
     EffectArray.flatMap(currentReexports, reexport =>
-      EffectArray.map(reexport.aliases, alias => `${alias.resolutionDomain}\0${alias.key}`),
+      EffectArray.map(reexport.aliases, alias => projectResolutionLookupKeyIdentity(alias.resolutionDomain, alias.key)),
     ),
   );
   const safetyAliasIdentities = new Set([...affectedAliasLookupIdentities, ...stagedAliasLookupIdentities]);
@@ -638,7 +642,9 @@ function enrichResolutionCandidateFacts(
     EffectArray.some(facts, file =>
       EffectArray.some(file.symbols, symbol =>
         EffectArray.some(symbol.lookupKeys ?? [], key =>
-          safetyAliasIdentities.has(`${lookupKeyDomain(key, symbol.resolutionDomain)}\0${key}`),
+          safetyAliasIdentities.has(
+            projectResolutionLookupKeyIdentity(lookupKeyDomain(key, symbol.resolutionDomain), key),
+          ),
         ),
       ),
     )
@@ -727,7 +733,7 @@ export function assessResolutionCandidateReexportSafety(input: {
     const candidateTarget = candidateIdentities.size === 1 ? candidateIdentities.values().next().value : undefined;
     for (const {alias, value} of aliases) {
       const aliasIdentity = normalizedResolutionIdentity(alias.resolutionDomain, value.path, value.name);
-      const rawIdentity = `${alias.resolutionDomain}\0${alias.key}`;
+      const rawIdentity = projectResolutionLookupKeyIdentity(alias.resolutionDomain, alias.key);
       if (input.safetyAliasLookupIdentities.has(rawIdentity)) safetyAliases.add(aliasIdentity);
       if (input.stagedAliasLookupIdentities.has(rawIdentity)) stagedAliases.add(aliasIdentity);
       const rawIdentities = rawIdentitiesByAlias.get(aliasIdentity) ?? new Set<string>();

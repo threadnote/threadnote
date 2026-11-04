@@ -1,7 +1,10 @@
 import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../../fact/budget.js';
-import type {ProjectResolutionLookupKey} from '../../incremental/closure.js';
+import {
+  projectResolutionLookupKeyIdentity as resolutionLookupKeyIdentity,
+  type ProjectResolutionLookupKey,
+} from '../../incremental/closure.js';
 import {compareCodeUnits} from '../../ordering.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphReference} from '../../types.js';
 import * as EffectString from 'effect/String';
@@ -692,10 +695,6 @@ function uniqueResolutionLookupKeys(values: readonly ProjectResolutionLookupKey[
     (left, right) =>
       compareCodeUnits(left.resolutionDomain, right.resolutionDomain) || compareCodeUnits(left.key, right.key),
   );
-}
-
-function resolutionLookupKeyIdentity(resolutionDomain: string, key: string): string {
-  return `${resolutionDomain}\0${key}`;
 }
 
 function validFactLookupKeys(facts: CodeGraphFileFacts): boolean {

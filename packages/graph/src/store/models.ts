@@ -471,9 +471,11 @@ export interface CodeGraphPreparedMaterializationSpool {
   readonly surfaces: readonly {readonly name: string; readonly rowCount: number}[];
 }
 
-export type CodeGraphPreparationGate = <A, E, R>(
-  preparation: Effect.Effect<A, E, R>,
-) => Effect.Effect<A, E | unknown, R>;
+export type CodeGraphPreparationGate = {
+  <A, E, R>(preparation: Effect.Effect<A, E, R>): Effect.Effect<A, E | unknown, R>;
+  readonly candidateStage?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | unknown, R>;
+  readonly coveredPreparation?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | unknown, R>;
+};
 
 export interface CodeGraphMaterializationStorageObservation {
   readonly databaseBytes: number;
@@ -487,10 +489,23 @@ export interface CodeGraphMaterializationStorageObservation {
   readonly walBytes: number;
 }
 
-export type CodeGraphDirectPersistentCapacityProtector = <A, E, R>(
-  boundary: CodeGraphDirectPersistentCapacityBoundary,
-  transaction: Effect.Effect<A, E, R>,
-) => Effect.Effect<A, E | CodeGraphStoreFailure, R>;
+export type CodeGraphDirectPersistentCapacityProtector = {
+  <A, E, R>(
+    boundary: CodeGraphDirectPersistentCapacityBoundary,
+    transaction: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | CodeGraphStoreFailure, R>;
+  readonly candidateBootstrap?: <A, E, R>(
+    boundary: CodeGraphDirectPersistentCapacityBoundary,
+    gate: CodeGraphPreparationGate | undefined,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | unknown, R>;
+  readonly candidateWindow?: <A, E, R>(
+    plan: import('./resolution/candidate_capacity.js').CandidateCapacityPlan,
+    binding: import('./resolution/candidate_capacity.js').CandidateWindowBinding,
+    gate: CodeGraphPreparationGate | undefined,
+    use: (covered: CodeGraphDirectPersistentCapacityProtector) => Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | unknown, R>;
+};
 
 export type CodeGraphStagingBatchProgressCallback = (
   batchIndex: number,

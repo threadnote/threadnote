@@ -68,3 +68,43 @@ describe('code graph build resource coordinator', () => {
     }),
   );
 });
+
+effectIt.effect('retains one candidate stage resource through preparation and separately released writer work', () =>
+  Effect.gen(function* () {
+    const observed: string[] = [];
+    const resources = yield* makeCodeGraphBuildResourceCoordinator(resource =>
+      Effect.sync(() => {
+        if (resource) observed.push(resource);
+      }),
+    );
+    const entered = yield* Deferred.make<void>();
+    const fiber = yield* Effect.acquireUseRelease(
+      resources.acquireCandidateStage,
+      () =>
+        Effect.gen(function* () {
+          yield* Effect.acquireUseRelease(
+            resources.acquirePreparation,
+            () => Effect.void,
+            () => resources.releasePreparation,
+          );
+          yield* resources.assertWriterMayWait;
+          return yield* Effect.acquireUseRelease(
+            resources.acquireWriter,
+            () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+            () => resources.releaseWriter,
+          );
+        }),
+      () => resources.releaseCandidateStage,
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(fiber);
+    expect(yield* resources.current).toEqual(EMPTY_CODE_GRAPH_BUILD_RESOURCE_STATE);
+    expect(observed).toEqual([
+      'home-builder-slot',
+      'home-preparation-slot',
+      'home-builder-slot',
+      'checkout-writer',
+      'home-builder-slot',
+    ]);
+  }),
+);

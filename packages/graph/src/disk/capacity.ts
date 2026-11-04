@@ -97,6 +97,7 @@ export function isCodeGraphCapacityFailureOperation(value: unknown): value is Co
 
 export interface CodeGraphDirectPersistentCapacityBoundary {
   /** Exact UTF-8 bytes of the bounded logical payload when that evidence is available. */
+  readonly candidateWindow?: {readonly children: number; readonly rows: number; readonly bytes: number};
   readonly finalFactBytes: number;
   /** Spool only: raw payload plus a bound for the additional ordered term dictionary. */
   readonly mainSortPayloadBytes?: number;
@@ -255,6 +256,8 @@ export interface CodeGraphPersistentCapacityDemandInput extends Omit<
 export interface CodeGraphMeasuredDiskCapacityDemand {
   readonly calibrationIdentity: string;
   readonly mainFilesystem?: 'durable' | 'temporary';
+  /** Candidate window: separate actual VFS TEMP leg, with zero freelist credit. */
+  readonly sqliteTemporaryBytes?: number;
   readonly mainHighWaterBytes: number;
   /** Defaults to the transient filesystem; spool rollback journals remain beside the durable sidecar. */
   readonly recoveryFilesystem?: 'durable' | 'temporary';
@@ -344,6 +347,13 @@ export function codeGraphDirectPersistentCapacityDemand(
 export function codeGraphPersistentCapacityDemand(
   input: CodeGraphPersistentCapacityDemandInput,
 ): CodeGraphDiskCapacityDemand {
+  if (input.boundary.candidateWindow)
+    return codeGraphCandidateWindowDemand({
+      ...input.boundary.candidateWindow,
+      pageSize: input.pageSize,
+      walAutoCheckpointPages: input.walAutoCheckpointPages,
+      lexicalFormatVersion: input.lexicalFormatVersion,
+    });
   const calibration =
     input.boundary.operation === 'cache code graph file facts' ||
     input.boundary.operation === 'cache materialized code graph file shards'
@@ -516,6 +526,7 @@ export function codeGraphDiskCapacityReservationProjection(
   if (
     !nonNegativeSafeInteger(input.demand.mainHighWaterBytes) ||
     !nonNegativeSafeInteger(input.demand.recoveryFloorBytes) ||
+    !nonNegativeSafeInteger(input.demand.sqliteTemporaryBytes ?? 0) ||
     !nonNegativeSafeInteger(input.demand.transientHighWaterBytes)
   ) {
     return {calibrationIdentity, reason: 'calibration-input-unknown', state: 'unknown'};
@@ -526,16 +537,27 @@ export function codeGraphDiskCapacityReservationProjection(
 
   const mainHighWaterBytes = capacityBytes(input.demand.mainHighWaterBytes);
   const mainOnDurable = input.demand.mainFilesystem !== 'temporary';
-  const freelistBytes = mainOnDurable ? Math.min(mainHighWaterBytes, capacityBytes(input.freelistBytes)) : 0;
+  const freelistBytes =
+    input.demand.sqliteTemporaryBytes !== undefined
+      ? 0
+      : mainOnDurable
+        ? Math.min(mainHighWaterBytes, capacityBytes(input.freelistBytes))
+        : 0;
   const externalMainBytes = mainHighWaterBytes - freelistBytes;
   const transientHighWaterBytes = capacityBytes(input.demand.transientHighWaterBytes);
+  const sqliteTemporaryBytes = capacityBytes(input.demand.sqliteTemporaryBytes ?? 0);
   const recoveryFloorBytes = capacityBytes(input.demand.recoveryFloorBytes);
   if (input.durableFilesystemKey === input.temporaryFilesystemKey) {
     return {
       calibrationIdentity,
       filesystems: [
         {
-          bytes: saturatingCapacityAdd(externalMainBytes, transientHighWaterBytes, recoveryFloorBytes),
+          bytes: saturatingCapacityAdd(
+            externalMainBytes,
+            transientHighWaterBytes,
+            recoveryFloorBytes,
+            sqliteTemporaryBytes,
+          ),
           key: input.durableFilesystemKey,
         },
       ],
@@ -555,13 +577,14 @@ export function codeGraphDiskCapacityReservationProjection(
         ),
         key: input.durableFilesystemKey,
       },
-      ...(!mainOnDurable || !transientOnDurable || !recoveryOnDurable
+      ...(!mainOnDurable || !transientOnDurable || !recoveryOnDurable || sqliteTemporaryBytes > 0
         ? [
             {
               bytes: saturatingCapacityAdd(
                 mainOnDurable ? 0 : externalMainBytes,
                 transientOnDurable ? 0 : transientHighWaterBytes,
                 recoveryOnDurable ? 0 : recoveryFloorBytes,
+                sqliteTemporaryBytes,
               ),
               key: input.temporaryFilesystemKey,
             },
@@ -817,4 +840,45 @@ function minimumDefined(left: number | undefined, right: number | undefined): nu
   if (left === undefined) return right;
   if (right === undefined) return left;
   return Math.min(left, right);
+}
+
+/** Additive sum-dominating extension; never MAX over aggregated row/byte-heavy child inputs. */
+export function codeGraphCandidateWindowDemand(input: {
+  readonly children: number;
+  readonly rows: number;
+  readonly bytes: number;
+  readonly pageSize: number;
+  readonly walAutoCheckpointPages: number;
+  readonly lexicalFormatVersion: number;
+}): CodeGraphDiskCapacityDemand {
+  const calibrationIdentity = `candidate-stage-window-r1:direct-5-3-256:sqlite-temp-5-4:lexical-${input.lexicalFormatVersion}:page-${input.pageSize}:wal-${input.walAutoCheckpointPages}`;
+  const unknown = (): CodeGraphUnknownDiskCapacityDemand => ({
+    calibrationIdentity,
+    reason: 'calibration-input-unknown',
+    state: 'unknown',
+  });
+  if (
+    !EffectArray.every(
+      [input.children, input.pageSize, input.walAutoCheckpointPages, input.lexicalFormatVersion],
+      positiveSafeInteger,
+    ) ||
+    !EffectArray.every([input.rows, input.bytes], nonNegativeSafeInteger)
+  )
+    return unknown();
+  const floor = input.children * input.pageSize;
+  const main = floor + 5 * input.bytes + 256 * input.rows;
+  const transient = floor + 3 * input.bytes + 256 * input.rows;
+  const recovery = transient + input.children * sqliteWalCapacityBytes(input.pageSize, input.walAutoCheckpointPages);
+  const temp = floor + Math.ceil((5 * input.bytes) / 4) + 256 * input.rows;
+  if (!EffectArray.every([floor, main, transient, recovery, temp], nonNegativeSafeInteger)) return unknown();
+  return {
+    calibrationIdentity,
+    state: 'measured',
+    mainHighWaterBytes: main,
+    transientHighWaterBytes: transient,
+    recoveryFloorBytes: recovery,
+    transientFilesystem: 'durable',
+    recoveryFilesystem: 'durable',
+    sqliteTemporaryBytes: temp,
+  };
 }

@@ -1,6 +1,6 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
+import {Context, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {syncDirectoryBestEffort} from '@threadnote/platform/file/durability';
@@ -22,6 +22,8 @@ import {
 } from './capacity.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import type * as SqlClient from 'effect/sql/SqlClient';
+import {isDefaultCandidateSqliteClient} from '../store/session.js';
 
 export const CODE_GRAPH_DISK_RESERVATION_LIMITS = {
   classificationConcurrency: 16,
@@ -36,6 +38,52 @@ export const CODE_GRAPH_DISK_RESERVATION_LIMITS = {
   releaseRetryMilliseconds: 25,
 } as const;
 
+/** Qualified default Windows VFS intersection, not a general GetTempPath resolver. */
+export function codeGraphCandidateWindowsTemporaryDirectory(input: {
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly runtimeVersion: string;
+  readonly path: Pick<Path.Path, 'isAbsolute' | 'normalize'>;
+}): string | undefined {
+  if (input.runtimeVersion !== '1.4.4') return undefined;
+  const ordinary = (value: string | undefined) => {
+    if (!value) return undefined;
+    // Bound before normalization, splitting or character work. A terminator must also fit259 units.
+    if (
+      value.length > 259 ||
+      !/^[A-Za-z]:\\/.test(value) ||
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(value)
+    )
+      return undefined;
+    const canonical = value.length > 3 && EffectString.endsWith('\\')(value) ? EffectString.slice(0, -1)(value) : value;
+    if (
+      canonical.length + 1 > 259 ||
+      !input.path.isAbsolute(canonical) ||
+      input.path.normalize(canonical) !== canonical
+    )
+      return undefined;
+    const rest = EffectString.slice(3)(canonical);
+    if (/[<>:"/|?*]/.test(rest)) return undefined;
+    for (const unit of rest) if (unit < ' ') return undefined;
+    for (const component of rest ? EffectString.split('\\')(rest) : [])
+      if (
+        !component ||
+        component === '.' ||
+        component === '..' ||
+        /[. ]$/.test(component) ||
+        /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(component)
+      )
+        return undefined;
+    return canonical;
+  };
+  // Copy scalar values synchronously; never retain the mutable environment map as evidence.
+  const tmp = input.environment.TMP,
+    temp = input.environment.TEMP;
+  const a = ordinary(tmp),
+    b = ordinary(temp);
+  if ((tmp && a === undefined) || (temp && b === undefined) || (a && b && a !== b)) return undefined;
+  return a ?? b;
+}
+
 /** Follow SQLite's Unix VFS search order for sorter spill files only. */
 export function codeGraphCapacityTemporaryDirectory(
   input: {
@@ -43,11 +91,29 @@ export function codeGraphCapacityTemporaryDirectory(
     readonly environment: Readonly<Record<string, string | undefined>>;
     readonly platform: string;
     readonly temporaryDirectory: string;
+    readonly runtimeVersion?: string;
+    readonly path?: Pick<Path.Path, 'isAbsolute' | 'normalize'>;
   },
   usable: (directory: string) => Effect.Effect<boolean, never>,
 ): Effect.Effect<string | undefined> {
   if (
-    input.boundary.operation !== 'sort persistent code graph materialization spool' ||
+    input.platform === 'win32' &&
+    input.boundary.candidateWindow !== undefined &&
+    input.boundary.transientFilesystem === 'temporary'
+  ) {
+    const directory =
+      input.runtimeVersion !== undefined && input.path !== undefined
+        ? codeGraphCandidateWindowsTemporaryDirectory({
+            environment: input.environment,
+            runtimeVersion: input.runtimeVersion,
+            path: input.path,
+          })
+        : undefined;
+    return directory ? usable(directory).pipe(Effect.map(ok => (ok ? directory : undefined))) : succeedUndefined;
+  }
+  if (
+    (input.boundary.operation !== 'sort persistent code graph materialization spool' &&
+      input.boundary.candidateWindow === undefined) ||
     input.boundary.transientFilesystem !== 'temporary' ||
     input.platform === 'win32'
   ) {
@@ -154,6 +220,8 @@ export interface CodeGraphDiskReservationObservation {
   readonly freelistBytes: number;
   readonly temporaryAvailableBytes: number | undefined;
   readonly temporaryFilesystemKey: string;
+  /** Candidate-only actual Windows selection; in-process evidence, never serialized in receipt-v1. */
+  readonly candidateTemporaryDirectory?: string;
 }
 
 export interface CodeGraphDiskReservationOptions<R = never> {
@@ -162,6 +230,8 @@ export interface CodeGraphDiskReservationOptions<R = never> {
   /** @internal Deterministic release fault boundary for lifecycle tests. */
   readonly beforeReleaseAttempt?: Effect.Effect<void, unknown, R>;
   readonly boundary: CodeGraphDirectPersistentCapacityBoundary;
+  /** Exact stage authority selected BEFORE its actual claim; absent on scalar/bootstrap receipts. */
+  readonly candidateWindow?: CodeGraphCandidateReservationBinding;
   /** A worker tick gets one zero-wait claim and never sleeps or runs maintenance. */
   readonly claimMode?: 'nonblocking-one-attempt' | 'wait';
   readonly ledgerLockPath: string;
@@ -178,6 +248,28 @@ export interface CodeGraphDiskReservationLease {
   readonly receiptPath: string;
   readonly token: string;
 }
+
+export interface CodeGraphCandidateReservationBinding {
+  readonly sql?: SqlClient.SqlClient;
+  readonly databasePath: string;
+  readonly snapshotId: string;
+  readonly authority: string;
+  readonly sourceFingerprint: string;
+  readonly planCanonical: string;
+}
+interface IssuedReservation {
+  readonly fs: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly system: SystemInfoShape;
+  readonly boundary: CodeGraphDirectPersistentCapacityBoundary;
+  readonly candidateWindow: CodeGraphCandidateReservationBinding | undefined;
+  readonly candidateTemporaryDirectory: string | undefined;
+  active: boolean;
+  callbackFiber: number | undefined;
+  minted: boolean;
+}
+// Object identity is additional to the existing exact path/body recovery bookkeeping.
+const issuedReservations = new WeakMap<CodeGraphDiskReservationLease, IssuedReservation>();
 
 class CodeGraphDiskReservationLedgerError extends Schema.TaggedError<
   CodeGraphDiskReservationLedgerError,
@@ -367,6 +459,8 @@ export const releaseCodeGraphDiskReservation = Effect.fn('codeGraph.diskReservat
   options: Pick<CodeGraphDiskReservationOptions<R>, 'beforeReleaseAttempt' | 'ledgerLockPath' | 'ledgerRoot'>,
   lease: CodeGraphDiskReservationLease,
 ) {
+  const issued = issuedReservations.get(lease);
+  if (issued) issued.active = false;
   yield* options.beforeReleaseAttempt ?? Effect.void;
   const fs = yield* FileSystem.FileSystem;
   const result = yield* withLedgerLock(
@@ -405,6 +499,8 @@ export function withCodeGraphDiskReservation<A, E, R, R2>(
   transaction: Effect.Effect<A, E, R2>,
 ) {
   return Effect.gen(function* () {
+    if (EffectArray.some(yield* CurrentCandidateReservations, owned => owned.ledgerRoot === options.ledgerRoot))
+      return yield* unknownReservationFailure(options, 'nested-candidate-disk-reservation');
     const onTiming =
       options.boundary.operation === 'resolve persistent code graph references' ? options.onTiming : undefined;
     const system = yield* SystemInfo;
@@ -438,7 +534,12 @@ export function withCodeGraphDiskReservation<A, E, R, R2>(
             ),
           ),
         ),
-        () => withCodeGraphIndexTiming(onTiming, 'reference-reservation-use', transaction),
+        lease =>
+          withCodeGraphIndexTiming(
+            onTiming,
+            'reference-reservation-use',
+            observeScalarReservationScope(options.ledgerRoot, lease, transaction),
+          ),
         lease =>
           withCodeGraphIndexTiming(onTiming, 'reference-reservation-release', reservationFinalizer(options, lease)),
       ).pipe(
@@ -648,7 +749,22 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       );
       yield* syncDirectoryBestEffort(fs, options.ledgerRoot);
       activeReservationReceipts.set(receiptPath, canonicalReceipt);
-      return {lease: {canonicalReceipt, receiptPath, token}, state: 'claimed'} as const;
+      const lease = Object.freeze({canonicalReceipt, receiptPath, token});
+      issuedReservations.set(lease, {
+        fs,
+        path,
+        system,
+        boundary: {
+          ...options.boundary,
+          ...(options.boundary.candidateWindow ? {candidateWindow: {...options.boundary.candidateWindow}} : {}),
+        },
+        candidateWindow: options.candidateWindow ? {...options.candidateWindow} : undefined,
+        candidateTemporaryDirectory: observation.candidateTemporaryDirectory,
+        active: true,
+        callbackFiber: undefined,
+        minted: false,
+      });
+      return {lease, state: 'claimed'} as const;
     }),
     options.claimMode === 'nonblocking-one-attempt' ? 0 : CODE_GRAPH_DISK_RESERVATION_LIMITS.lockWaitMilliseconds,
   );
@@ -866,4 +982,184 @@ function validProcessStartIdentity(value: string | undefined): value is string {
       WINDOWS_PROCESS_START_IDENTITY.test(value) ||
       DARWIN_PROCESS_START_IDENTITY.test(value))
   );
+}
+
+const CurrentCandidateReservations = Context.Reference<
+  readonly {readonly ledgerRoot: string; readonly lease: CodeGraphDiskReservationLease}[]
+>('graph/CandidateReservations', {defaultValue: () => []});
+
+/** Exactly one claim while the stage slot is held. Acquisition pressure is distinct from protected-use failure. */
+export function tryWithCodeGraphDiskReservationLease<A, E, R, R2>(
+  options: CodeGraphDiskReservationOptions<R>,
+  use: (lease: CodeGraphDiskReservationLease) => Effect.Effect<A, E, R2>,
+) {
+  return Effect.gen(function* () {
+    if (
+      EffectArray.some(yield* CurrentCandidateReservations, owned => owned.ledgerRoot === options.ledgerRoot) ||
+      EffectArray.some(yield* CurrentScalarReservations, owned => owned.ledgerRoot === options.ledgerRoot)
+    )
+      return yield* unknownReservationFailure(options, 'nested-candidate-disk-reservation');
+    const system = yield* SystemInfo;
+    const identity = yield* canonicalProcessStartIdentity(system, system.processId);
+    if (!validProcessStartIdentity(identity))
+      return yield* unknownReservationFailure(options, 'disk-reservation-owner-identity-unavailable');
+    // Return the whole attempt from acquire; finalizer registration precedes invoking any successful use callback.
+    return yield* Effect.acquireUseRelease(
+      claimAttempt({...options, claimMode: 'nonblocking-one-attempt'}, identity),
+      attempt =>
+        Effect.gen(function* () {
+          if (attempt.state === 'claimed') {
+            const issued = issuedReservations.get(attempt.lease);
+            if (!issued || !issued.active)
+              return yield* unknownReservationFailure(options, 'candidate-lease-unavailable');
+            const ancestors = yield* CurrentCandidateReservations;
+            const fiber = yield* Effect.fiberId;
+            const value = yield* Effect.acquireUseRelease(
+              Effect.sync(() => {
+                issued.callbackFiber = fiber;
+              }),
+              () =>
+                Effect.scoped(use(attempt.lease)).pipe(
+                  Effect.provideService(CurrentCandidateReservations, [
+                    ...ancestors,
+                    {ledgerRoot: options.ledgerRoot, lease: attempt.lease},
+                  ]),
+                ),
+              () =>
+                Effect.sync(() => {
+                  issued.callbackFiber = undefined;
+                }),
+            );
+            return {state: 'completed' as const, value};
+          }
+          if (attempt.state === 'unknown')
+            return yield* unknownReservationFailure(options, 'disk-reservation-observation-unavailable');
+          return {state: attempt.state, decision: attempt.decision};
+        }),
+      attempt => (attempt.state === 'claimed' ? reservationFinalizer(options, attempt.lease) : Effect.void),
+    );
+  });
+}
+
+/** Current exact owned receipt, bounded before hydration; no ledger lock or second claim. */
+export const assertCodeGraphDiskReservationLease = Effect.fn('codeGraph.assertReservationLease')(function* (
+  lease: CodeGraphDiskReservationLease,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (
+    activeReservationReceipts.get(lease.receiptPath) !== lease.canonicalReceipt ||
+    (yield* isSymbolicLink(fs, lease.receiptPath))
+  )
+    return yield* CodeGraphDiskReservationLedgerError.make({message: 'Candidate reservation is no longer owned.'});
+  const valid = yield* Effect.scoped(
+    Effect.gen(function* () {
+      const file = yield* fs.open(lease.receiptPath, {flag: 'r'});
+      const info = yield* file.stat;
+      if (info.type !== 'File' || info.size > 4096n) return false;
+      const buffer = new Uint8Array(4097);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const n = Number(yield* file.read(buffer.subarray(offset)));
+        if (!Number.isSafeInteger(n) || n < 0 || n > buffer.length - offset) return false;
+        if (n === 0) break;
+        offset += n;
+      }
+      if (offset > 4096 || BigInt(offset) !== info.size) return false;
+      const body = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(buffer.subarray(0, offset));
+      return (
+        body === lease.canonicalReceipt &&
+        parseCodeGraphDiskReservationReceipt(`v1-${lease.token}.json`, body)?.token === lease.token &&
+        activeReservationReceipts.get(lease.receiptPath) === body
+      );
+    }),
+  );
+  if (!valid)
+    return yield* CodeGraphDiskReservationLedgerError.make({message: 'Candidate reservation receipt changed.'});
+});
+
+/** In-process mint authority; a copied receipt object cannot become an active registered lease. */
+export function codeGraphDiskReservationLeaseOwned(lease: CodeGraphDiskReservationLease): boolean {
+  return (
+    issuedReservations.get(lease)?.active === true &&
+    activeReservationReceipts.get(lease.receiptPath) === lease.canonicalReceipt &&
+    parseCodeGraphDiskReservationReceipt(`v1-${lease.token}.json`, lease.canonicalReceipt)?.token === lease.token
+  );
+}
+
+/** Single mint from the ORIGINAL issued candidate callback, never from a scalar/clone/copied plan. */
+export const mintCodeGraphCandidateReservation = Effect.fn('codeGraph.mintCandidateReservation')(function* (
+  lease: CodeGraphDiskReservationLease,
+  expected: CodeGraphCandidateReservationBinding,
+  boundary: {readonly children: number; readonly rows: number; readonly bytes: number},
+) {
+  // Source-owned, no filesystem/SQL/receipt work. Relevant async continuations call this
+  // same check; a changed TEMP selection never rebases the already issued reservation.
+  const refresh = Effect.gen(function* () {
+    const issued = issuedReservations.get(lease);
+    const fs = yield* Effect.serviceOption(FileSystem.FileSystem);
+    const path = yield* Effect.serviceOption(Path.Path);
+    const system = yield* Effect.serviceOption(SystemInfo);
+    if (
+      !issued ||
+      !codeGraphDiskReservationLeaseOwned(lease) ||
+      issued.callbackFiber !== (yield* Effect.fiberId) ||
+      Option.isNone(fs) ||
+      fs.value !== issued.fs ||
+      Option.isNone(path) ||
+      path.value !== issued.path ||
+      Option.isNone(system) ||
+      system.value !== issued.system ||
+      !EffectArray.some(yield* CurrentCandidateReservations, owned => owned.lease === lease) ||
+      issued.candidateWindow?.sql !== expected.sql ||
+      JSON.stringify(issued.candidateWindow) !== JSON.stringify(expected) ||
+      issued.boundary.operation !== 'stage persistent code graph facts' ||
+      issued.boundary.rowCount !== boundary.rows ||
+      issued.boundary.finalFactBytes !== boundary.bytes ||
+      JSON.stringify(issued.boundary.candidateWindow) !== JSON.stringify(boundary)
+    )
+      return yield* CodeGraphDiskReservationLedgerError.make({
+        message: 'Candidate lease is foreign, scalar, stale or outside its exact issued callback.',
+      });
+    if (
+      issued.system.platform === 'win32' &&
+      (!isDefaultCandidateSqliteClient(expected.sql, expected.databasePath) ||
+        issued.candidateTemporaryDirectory === undefined ||
+        codeGraphCandidateWindowsTemporaryDirectory({
+          environment: issued.system.environment(),
+          runtimeVersion: issued.system.runtimeVersion,
+          path: issued.path,
+        }) !== issued.candidateTemporaryDirectory)
+    )
+      return yield* CodeGraphDiskReservationLedgerError.make({
+        message: 'Candidate SQLite TEMP origin or selection changed.',
+      });
+  });
+  const validate = Effect.gen(function* () {
+    yield* refresh;
+    const issued = issuedReservations.get(lease)!;
+    yield* assertCodeGraphDiskReservationLease(lease).pipe(Effect.provideService(FileSystem.FileSystem, issued.fs));
+    yield* refresh;
+  });
+  yield* validate;
+  const issued = issuedReservations.get(lease)!;
+  if (issued.minted)
+    return yield* CodeGraphDiskReservationLedgerError.make({
+      message: 'Candidate lease has already minted its single window.',
+    });
+  issued.minted = true;
+  return {validate, refresh};
+});
+
+const CurrentScalarReservations = Context.Reference<
+  readonly {readonly ledgerRoot: string; readonly lease: CodeGraphDiskReservationLease}[]
+>('graph/ActualScalarReservations', {defaultValue: () => []});
+function observeScalarReservationScope<A, E, R>(
+  ledgerRoot: string,
+  lease: CodeGraphDiskReservationLease,
+  effect: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    const outer = yield* CurrentScalarReservations;
+    return yield* effect.pipe(Effect.provideService(CurrentScalarReservations, [...outer, {ledgerRoot, lease}]));
+  });
 }

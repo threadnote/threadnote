@@ -36,6 +36,7 @@ import {
 } from './materialization.js';
 import type {
   CodeGraphIndexOptions,
+  CodeGraphIndexResourceGate,
   CommittedBaseResult,
   DirectPersistentCapacityProtection,
   IncrementalOverlayPreassessment,
@@ -79,6 +80,7 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
   readonly beforePublication?: Effect.Effect<void, unknown>;
   readonly onInvalidBaseCache: Effect.Effect<void>;
   readonly options: CodeGraphIndexOptions;
+  readonly preparationGate?: CodeGraphIndexResourceGate;
   readonly requestedOverlay: {readonly dirty: boolean; readonly fingerprint?: string};
   readonly startedAt: number;
   readonly store: CodeGraphStoreShape;
@@ -384,6 +386,7 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
           layout: input.layout,
           onProgress: input.options.onProgress,
           persistentMaterializationTransactionBatchLimit: input.options.persistentMaterializationTransactionBatchLimit,
+          preparationGate: input.preparationGate,
           requestedOverlay: input.requestedOverlay,
           sparseProjection: {packProvenance, totalFiles: base.snapshot.fileCount},
           startedAt: input.startedAt,

@@ -405,7 +405,7 @@ describe('native code graph lifecycle', () => {
                       // One indexed page per table bounds this small fixture; a remaining child fails the test.
                       const pageSnapshots = database
                         .query<{readonly snapshot_key: number}, [string]>(
-                          'SELECT snapshot_key FROM snapshot_candidate_page_snapshots WHERE snapshot_id = ? LIMIT 2',
+                          'SELECT snapshot_key FROM snapshot_candidate_synopsis_snapshots WHERE snapshot_id = ? LIMIT 2',
                         )
                         .all(indexed.snapshot.id);
                       expect(pageSnapshots).toHaveLength(1);
@@ -5890,13 +5890,13 @@ describe('native code graph lifecycle', () => {
       // batches each protect both their v4 shard write and owner-verified
       // association write. Candidate evidence uses the same facts reservation
       // label, so arm pressure from committed graph progress, not a probe count.
-      // The first batch protects source-allocation admission, format identity, a bounded candidate batch and its fact transaction;
-      // the next source-allocation admission observes pressure and one bounded cleanup retry.
+      // One candidate window covers source preparation, namespace and bounded writes; its graph fact transaction is protected separately.
+      // The next candidate window observes pressure and one cleanup/re-observation after releasing its stage slot.
       // Shared storage never spawns duplicate df or PowerShell probes at a boundary.
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 6,
+        'stage persistent code graph facts': probesPerObservation * 4,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });
@@ -6153,12 +6153,12 @@ describe('native code graph lifecycle', () => {
       // The two deterministic source batches each protect both their v4 shard
       // write and owner-verified association write. Candidate evidence shares
       // the facts reservation label, so wait for one committed graph batch.
-      // Its two candidate writes and fact transaction succeed; the next candidate
-      // write fails closed once, without cleanup or a fresh re-observation.
+      // One candidate window and the graph fact transaction succeed; the next candidate
+      // window observation fails closed once, without cleanup or a fresh re-observation.
       expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
-        'stage persistent code graph facts': probesPerObservation * 5,
+        'stage persistent code graph facts': probesPerObservation * 3,
         'stage persistent code graph inventory': probesPerObservation,
         'stage persistent code graph workspace': probesPerObservation,
       });

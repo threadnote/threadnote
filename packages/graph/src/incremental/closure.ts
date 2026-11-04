@@ -616,12 +616,17 @@ function hasSameCandidateScannableDocumentationSurface(left: CodeGraphSymbol, ri
   );
 }
 
+// Length-framed exact strings: embedded NULs and separators never merge distinct pairs.
+export function projectResolutionLookupKeyIdentity(resolutionDomain: string, key: string): string {
+  return `${resolutionDomain.length}:${resolutionDomain}${key.length}:${key}`;
+}
+
 function addResolutionLookupKey(
   output: Map<string, ProjectResolutionLookupKey>,
   resolutionDomain: string,
   key: string,
 ): void {
-  output.set(`${resolutionDomain}\0${key}`, {key, resolutionDomain});
+  output.set(projectResolutionLookupKeyIdentity(resolutionDomain, key), {key, resolutionDomain});
 }
 
 function lookupKeyDomain(key: string, fallback: string | undefined): string {

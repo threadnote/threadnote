@@ -1,8 +1,13 @@
+import {
+  candidateSynopsis,
+  candidateSynopsisMayContain,
+  candidateSynopsisBinding,
+} from '@threadnote/graph/store/resolution/candidate_synopsis';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {vi} from 'vitest';
 import * as CandidatePages from '@threadnote/graph/store/resolution/candidate_pages';
-import {Array as EffectArray, Effect, Layer, Logger, Option, References, pipe} from 'effect';
+import {Array as EffectArray, Effect, Layer, Logger, References, pipe} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as Console from 'effect/Console';
 import * as FC from 'fast-check';
@@ -18,7 +23,10 @@ import {
   resolutionCandidateFileRepresentable,
   RESOLUTION_CANDIDATE_INDEX_TABLES,
 } from '@threadnote/graph/store/resolution/candidate_index';
-import {selectResolutionCandidateIndexClosure} from '@threadnote/graph/store/resolution/candidate_index_read';
+import {
+  readCandidateReexportRow,
+  selectResolutionCandidateIndexClosure,
+} from '@threadnote/graph/store/resolution/candidate_index_read';
 import {
   candidateIndexPages,
   finishResolutionCandidateIndex,
@@ -37,14 +45,11 @@ import {
 } from '@threadnote/graph/store';
 import {assessResolutionCandidateIncrementalClosure} from '@threadnote/graph/indexer/resolution_candidate_closure';
 import {candidatePairHint} from '@threadnote/graph/store/resolution/candidate_pages';
-import {
-  CANDIDATE_PAGE_TRIGGERS,
-  CANDIDATE_PAGE_INDEXES,
-  CANDIDATE_PAGE_TABLES,
-} from '@threadnote/graph/store/resolution/candidate_page_schema';
+import {CANDIDATE_PAGE_INDEXES, CANDIDATE_PAGE_TABLES} from '@threadnote/graph/store/resolution/candidate_page_schema';
 import {candidateSnapshotKey} from '@threadnote/graph/store/resolution/candidate_page_store';
 import {
   readCandidateKeyPages,
+  readCandidateKeyWavePages,
   readCandidateFileProjection,
 } from '@threadnote/graph/store/resolution/candidate_page_read';
 import {resolutionCandidateFileEvidence} from '@threadnote/graph/materialization/candidate_evidence';
@@ -134,11 +139,148 @@ describe('complete reverse resolution candidate evidence', () => {
         scannedFiles: 0,
       });
       if (result?.mode !== 'eligible') return;
-      expect(result.directAliasSymbolConflictIdentities).toEqual(new Set(['typescript\0alias']));
+      expect(result.directAliasSymbolConflictIdentities).toEqual(new Set(['10:typescript5:alias']));
       expect(result.candidateIndex?.associationsRead).toBeGreaterThan(0);
       const unresolved = yield* selectResolutionCandidateIndexClosure(sql, query('unresolved-fallback'));
       expect(unresolved).toMatchObject({mode: 'eligible', paths});
     }).pipe(provideDatabase),
+  );
+
+  effectIt.effect('keeps both exact NUL-framed consumers and matches the complete raw-closure oracle', () =>
+    Effect.gen(function* () {
+      const sql = yield* setup;
+      const paths = ['a.ts', 'b.ts'];
+      const pairs = [
+        {resolutionDomain: 'a\0b', key: 'c'},
+        {resolutionDomain: 'a', key: 'b\0c'},
+      ];
+      const refs = EffectArray.map(paths, (path, n) => ({
+        ...reference(path, pairs[n].key),
+        resolutionDomain: pairs[n].resolutionDomain,
+        lookupTiers: [[pairs[n].key]],
+      }));
+      yield* createSnapshot(sql, 'base', paths);
+      yield* stage(sql, 'base', paths, refs);
+      expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+      const files = EffectArray.map(paths, path => ({
+        path,
+        contentHash: path,
+        blobId: path,
+        mode: '100644',
+        size: 1,
+        language: 'typescript',
+        source: 'commit' as const,
+      }));
+      const facts = new Map(
+        EffectArray.map(paths, (path, n) => [
+          path,
+          {path, symbols: [], edges: [], references: [refs[n]], diagnostics: []},
+        ]),
+      );
+      const plan = planProjectResolutionCandidateScan({
+        files,
+        bytesByPath: new Map(EffectArray.map(paths, p => [p, 1])),
+      });
+      expect(plan.mode).toBe('eligible');
+      if (plan.mode !== 'eligible') return;
+      for (const keys of [pairs, [pairs[0]], [pairs[1]], [{resolutionDomain: 'a', key: 'c'}]]) {
+        const indexed = yield* selectResolutionCandidateIndexClosure(sql, {
+          ...query('unused'),
+          initialLookupKeys: keys,
+        });
+        const raw = yield* scanProjectResolutionCandidateClosure({
+          plan,
+          initialLookupKeys: keys,
+          maximumSelectedFiles: 128,
+          loadPage: () => Effect.succeed({facts, bytesByPath: new Map(EffectArray.map(paths, p => [p, 1]))}),
+        });
+        expect(indexed?.mode).toBe('eligible');
+        expect(raw.mode).toBe('eligible');
+        if (indexed?.mode === 'eligible' && raw.mode === 'eligible') {
+          const expected = EffectArray.filter(paths, (_, n) =>
+            EffectArray.some(keys, k => k.resolutionDomain === pairs[n].resolutionDomain && k.key === pairs[n].key),
+          );
+          expect(indexed.paths).toEqual(expected);
+          expect(indexed.paths).toEqual(raw.paths);
+          expect(indexed.affectedAliasLookupIdentities).toEqual(raw.affectedAliasLookupIdentities);
+        }
+      }
+    }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'admits complete UTF8 reexport cursor plus payload BEFORE hydration at the remaining shared-byte boundary',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['barrel.ts']);
+        yield* stage(
+          sql,
+          'base',
+          ['barrel.ts'],
+          [
+            {...reference('barrel.ts', 'key', ['alias']), edgeId: 'a'},
+            {...reference('barrel.ts', 'key', ['alias']), edgeId: 'é😀'},
+          ],
+        );
+        const originals = yield* sql<{
+          readonly edge_id: string;
+          readonly payload_json: string;
+        }>`SELECT edge_id,payload_json FROM snapshot_candidate_reexports ORDER BY edge_id`;
+        let hydrated = 0,
+          queries = 0;
+        const observed = new Proxy(sql, {
+          get(target, key, receiver) {
+            if (key === 'unsafe')
+              return (...args: Parameters<typeof sql.unsafe>) =>
+                target.unsafe(...args).pipe(
+                  Effect.tap(rows =>
+                    Effect.sync(() => {
+                      queries++;
+                      for (const row of rows)
+                        if (
+                          ('payload_json' in row && row.payload_json !== null) ||
+                          ('edge_id' in row && row.edge_id !== null)
+                        )
+                          hydrated++;
+                    }),
+                  ),
+                );
+            return Reflect.get(target, key, receiver);
+          },
+        });
+        for (let n = 0; n < originals.length; n++) {
+          const row = originals[n];
+          const bytes = 192 + Buffer.byteLength(row.edge_id) + Buffer.byteLength(row.payload_json);
+          const after = n === 0 ? undefined : originals[n - 1].edge_id;
+          hydrated = 0;
+          expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, after, bytes - 1)).toEqual({
+            bytes,
+            exceeded: true,
+          });
+          expect(hydrated).toBe(0); // SQL CASE returned neither the complete cursor nor the payload.
+          expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, after, bytes)).toEqual({
+            bytes,
+            row,
+          });
+          expect(hydrated).toBe(1);
+        }
+        expect(Buffer.byteLength(originals[1].edge_id)).toBe(6);
+        const before = queries;
+        expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, undefined, 191)).toEqual({
+          bytes: 192,
+          exceeded: true,
+        });
+        expect(queries).toBe(before);
+        const huge = EffectString.repeat(8 * 1048576)('x');
+        yield* sql`UPDATE snapshot_candidate_reexports SET payload_json = ${huge} WHERE edge_id = 'a'`;
+        hydrated = 0;
+        expect(yield* readCandidateReexportRow(observed, 'base', 'barrel.ts', undefined, undefined, 193)).toEqual({
+          bytes: 192 + 1 + 8 * 1048576,
+          exceeded: true,
+        });
+        expect(hydrated).toBe(0);
+      }).pipe(provideDatabase),
   );
 
   effectIt.effect('refuses partial pages, changed rows, stale versions and missing legacy evidence', () =>
@@ -150,8 +292,8 @@ describe('complete reverse resolution candidate evidence', () => {
       expect(yield* selectResolutionCandidateIndexClosure(sql, query('a'))).toBeUndefined();
       yield* stage(sql, 'base', ['b.ts'], [reference('b.ts', 'b')]);
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
-      yield* sql`DELETE FROM snapshot_candidate_page_routes WHERE file_key IN
-        (SELECT file_key FROM snapshot_candidate_page_files WHERE path = 'b.ts')`;
+      yield* sql`DELETE FROM snapshot_candidate_synopsis_pages WHERE file_key IN
+        (SELECT file_key FROM snapshot_candidate_synopsis_files WHERE path = 'b.ts')`;
       expect(yield* selectResolutionCandidateIndexClosure(sql, query('b'))).toBeUndefined();
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(false);
       yield* createSnapshot(sql, 'legacy', ['old.ts']);
@@ -215,8 +357,8 @@ describe('complete reverse resolution candidate evidence', () => {
         mode: 'eligible',
         paths: ['b.ts'],
       });
-      yield* sql`DELETE FROM snapshot_candidate_page_routes WHERE file_key IN
-        (SELECT file_key FROM snapshot_candidate_page_files WHERE path = 'b.ts')`;
+      yield* sql`DELETE FROM snapshot_candidate_synopsis_pages WHERE file_key IN
+        (SELECT file_key FROM snapshot_candidate_synopsis_files WHERE path = 'b.ts')`;
       expect(yield* selectResolutionCandidateIndexClosure(sql, query('new', 'second'))).toBeUndefined();
     }).pipe(provideDatabase),
   );
@@ -363,9 +505,9 @@ describe('complete reverse resolution candidate evidence', () => {
       yield* createSnapshot(sql, 'base', ['a.ts']);
       yield* stage(sql, 'base', ['a.ts'], [reference('a.ts', 'value')]);
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
-      yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 0 WHERE path = 'a.ts'`;
-      yield* sql`INSERT INTO snapshot_candidate_pages SELECT snapshot_key,file_key,ordinal + 1,entry_count,raw_bytes,stored_bytes,
-          original_tuple_bytes,raw_sha,stored_sha,codec,payload,literal_domain,literal_key FROM snapshot_candidate_pages`;
+      yield* sql`UPDATE snapshot_candidate_synopsis_files SET sealed = 0 WHERE path = 'a.ts'`;
+      yield* sql`INSERT INTO snapshot_candidate_synopsis_pages SELECT snapshot_key,file_key,ordinal + 1,entry_count,raw_bytes,stored_bytes,
+          original_tuple_bytes,raw_sha,stored_sha,codec,synopsis,synopsis_sha,payload,literal_domain,literal_key FROM snapshot_candidate_synopsis_pages`;
       const failure = yield* stage(sql, 'base', ['a.ts'], [reference('a.ts', 'value')]).pipe(Effect.flip);
       expect(failure).toMatchObject({_tag: 'CodeGraphStoreError'});
       expect(
@@ -1072,7 +1214,9 @@ describe('complete reverse resolution candidate evidence', () => {
   effectIt.effect('seals complete Bun pages and resumes the exact immutable prefix after bounded interruption', () =>
     Effect.gen(function* () {
       const sql = yield* setup;
-      const refs = Array.from({length: 2000}, (_, i) => reference('a.ts', `key-${i}`));
+      // One physical row/page: cross the unchanged1000-row transaction guard,
+      // while retaining every source association in logical work/capacity accounting.
+      const refs = Array.from({length: 64000}, (_, i) => reference('a.ts', `key-${i}`));
       yield* createSnapshot(sql, 'base', ['a.ts']);
       let transactions = 0;
       const stopped: CodeGraphDirectPersistentCapacityProtector = (_boundary, effect) => {
@@ -1082,15 +1226,15 @@ describe('complete reverse resolution candidate evidence', () => {
       const input = {snapshotId: 'base', files: [{path: 'a.ts', contentHash: 'a.ts'}], references: refs};
       expect((yield* stageResolutionCandidateIndex(sql, input, write, stopped).pipe(Effect.exit))._tag).toBe('Failure');
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(false);
-      const prefix = yield* sql`SELECT * FROM snapshot_candidate_pages ORDER BY snapshot_key,file_key,ordinal`;
+      const prefix = yield* sql`SELECT * FROM snapshot_candidate_synopsis_pages ORDER BY snapshot_key,file_key,ordinal`;
       expect(prefix.length).toBeGreaterThan(0);
-      expect(prefix.length).toBeLessThan(32);
+      expect(prefix.length).toBeLessThan(1001);
       const start = performance.now();
       yield* stageResolutionCandidateIndex(sql, input, write);
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
       const elapsed = performance.now() - start;
       expect(
-        yield* sql`SELECT * FROM snapshot_candidate_pages WHERE ordinal < ${prefix.length} ORDER BY snapshot_key,file_key,ordinal`,
+        yield* sql`SELECT * FROM snapshot_candidate_synopsis_pages WHERE ordinal < ${prefix.length} ORDER BY snapshot_key,file_key,ordinal`,
       ).toEqual(prefix);
       const token = yield* resolutionCandidateAuthorityToken(sql);
       expect(token).toBeDefined();
@@ -1103,7 +1247,7 @@ describe('complete reverse resolution candidate evidence', () => {
         readonly page_count: number;
         readonly canonical_sha: string;
       }>`
-      SELECT file_key,association_count,page_count,canonical_sha FROM snapshot_candidate_page_files WHERE snapshot_key = ${snapshotKey}`;
+      SELECT file_key,association_count,page_count,canonical_sha FROM snapshot_candidate_synopsis_files WHERE snapshot_key = ${snapshotKey}`;
       const file = files[0];
       const projection = yield* readCandidateFileProjection(
         sql,
@@ -1118,14 +1262,14 @@ describe('complete reverse resolution candidate evidence', () => {
         ...new Set(EffectArray.flatMap(refs, ref => EffectArray.flatMap(ref.lookupTiers, tier => tier))),
       ].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
       expect(projection?.pairs).toEqual(EffectArray.map(expected, key => ['typescript', key]));
-      expect(file.association_count).toBe(2001);
-      expect(file.page_count).toBe(32);
+      expect(file.association_count).toBe(64001);
+      expect(file.page_count).toBe(1001);
       expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
       const allocatedPages = yield* sql<{readonly page_count: number}>`PRAGMA page_count`;
       const pageSize = yield* sql<{readonly page_size: number}>`PRAGMA page_size`;
       yield* Effect.log(
         JSON.stringify({
-          fixture: 'candidate-pages-2001-exact-associations',
+          fixture: 'candidate-pages-64001-exact-associations',
           resumedConstructionMilliseconds: elapsed,
           associations: file.association_count,
           pages: file.page_count,
@@ -1140,131 +1284,251 @@ describe('complete reverse resolution candidate evidence', () => {
     }).pipe(provideDatabase),
   );
 
-  effectIt.effect('keeps selective SQL access, collision completeness and metadata-before-payload caps', () =>
-    Effect.gen(function* () {
-      const sql = yield* setup;
-      yield* createSnapshot(sql, 'base', ['a.ts', 'b.ts', 'c.ts']);
-      const refs = [
-        reference('a.ts', 'needle'),
-        reference('b.ts', 'needle'),
-        ...Array.from({length: 130}, (_, i) => reference('c.ts', `unrelated-${i}`)),
-      ];
-      yield* stage(sql, 'base', ['a.ts', 'b.ts', 'c.ts'], refs);
-      expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
-      const token = yield* resolutionCandidateAuthorityToken(sql);
-      const snapshotKey = yield* candidateSnapshotKey(sql, 'base', token);
-      const plan = yield* sql.unsafe<{readonly detail: string}>(
-        `EXPLAIN QUERY PLAN SELECT file_key,ordinal,slot
-      FROM snapshot_candidate_page_routes WHERE snapshot_key = ? AND hint = ? ORDER BY file_key,ordinal,slot LIMIT 1`,
-        [snapshotKey, candidatePairHint(['typescript', 'needle'])],
-      );
-      expect(
-        EffectArray.some(
-          plan,
-          row =>
-            pipe(row.detail, EffectString.includes('SEARCH')) &&
-            pipe(row.detail, EffectString.includes('snapshot_candidate_page_routes_hint')),
-        ),
-      ).toBe(true);
-      expect(
-        EffectArray.some(
-          plan,
-          row =>
-            pipe(row.detail, EffectString.includes('SCAN')) || pipe(row.detail, EffectString.includes('TEMP B-TREE')),
-        ),
-      ).toBe(false);
-      expect(yield* selectResolutionCandidateIndexClosure(sql, query('needle'))).toMatchObject({
-        mode: 'eligible',
-        paths: ['a.ts', 'b.ts'],
-      });
-      expect(yield* selectResolutionCandidateIndexClosure(sql, query('absent'))).toMatchObject({
-        mode: 'eligible',
-        paths: [],
-      });
-      // Deliberately force the accelerator collision in an isolated fixture. This bypasses placement sealing
-      // solely to test the inner exact-comparison reader; it grants no production completeness authority.
-      yield* sql.unsafe('DROP TRIGGER snapshot_candidate_page_routes_immutable');
-      yield* sql`UPDATE snapshot_candidate_page_routes SET hint = ${candidatePairHint(['typescript', 'needle'])}`;
-      yield* sql.unsafe(
-        Option.getOrThrow(
-          EffectArray.findFirst(
-            CANDIDATE_PAGE_TRIGGERS,
-            trigger => trigger.name === 'snapshot_candidate_page_routes_immutable',
+  effectIt.effect(
+    'keeps bounded indexed page folds, exact false-positive comparison and metadata-before-payload caps',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['a.ts', 'b.ts', 'c.ts']);
+        const unrelated = Array.from({length: 130}, (_, i) => reference('c.ts', `unrelated-${i}`));
+        const first = [
+          ...CandidatePages.candidateFilePages(
+            CandidatePages.canonicalCandidatePairs(
+              EffectArray.flatMap(unrelated, ref =>
+                EffectArray.flatMap(ref.lookupTiers, tier =>
+                  EffectArray.map(tier, key => [ref.resolutionDomain, key] as const),
+                ),
+              ),
+            ),
           ),
-        ).sql,
-      );
-      const collision = yield* readCandidateKeyPages(
-        sql,
-        'base',
-        undefined,
-        {key: 'needle', resolutionDomain: 'typescript'},
-        10000,
-        8 * 1048576,
-        128,
-        token,
-      );
-      expect(collision?.paths).toEqual(['a.ts', 'b.ts']);
-      expect(collision?.exceeded).toBeUndefined();
-      expect(collision!.associations).toBeGreaterThan(130); // All collision slots and complete unrelated pages are charged.
-      const limited = yield* readCandidateKeyPages(
-        sql,
-        'base',
-        undefined,
-        {key: 'needle', resolutionDomain: 'typescript'},
-        10000,
-        8 * 1048576,
-        1,
-        token,
-      );
-      expect(limited?.exceeded).toBe('files');
-      let payloadSelects = 0;
-      let queryCalls = 0;
-      const metadataOnly = new Proxy(sql, {
-        apply(target, thisArg, args) {
-          queryCalls += 1;
-          const first: unknown = args[0];
-          const text = EffectArray.isArray(first)
-            ? EffectArray.join(
-                EffectArray.filter(first, (x): x is string => typeof x === 'string'),
-                '?',
-              )
-            : '';
-          if (pipe(text, EffectString.includes('THEN page.payload'))) {
-            payloadSelects += 1;
-            throw new Error('Payload must not be hydrated.');
-          }
-          return Reflect.apply(target, thisArg, args);
-        },
-      });
-      const tiny = yield* readCandidateKeyPages(
-        metadataOnly,
-        'base',
-        undefined,
-        {key: 'needle', resolutionDomain: 'typescript'},
-        1,
-        10000,
-        128,
-        token,
-      );
-      expect(tiny?.exceeded).toBe('rows');
-      expect(payloadSelects).toBe(0);
-      expect(queryCalls).toBe(2);
-      queryCalls = 0;
-      expect(
-        (yield* readCandidateKeyPages(
+        ][0];
+        let needle: string | undefined;
+        for (let i = 0; i < 100000 && needle === undefined; i++) {
+          const key = `false-positive-${i}`;
+          if (candidateSynopsisMayContain(first.synopsis, candidatePairHint(['typescript', key]))) needle = key;
+        }
+        expect(needle).toBeDefined();
+        const refs = [reference('a.ts', needle!), reference('b.ts', needle!), ...unrelated];
+        yield* stage(sql, 'base', ['a.ts', 'b.ts', 'c.ts'], refs);
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        const token = yield* resolutionCandidateAuthorityToken(sql);
+        const snapshotKey = yield* candidateSnapshotKey(sql, 'base', token);
+        const plan = yield* sql.unsafe<{readonly detail: string}>(
+          `EXPLAIN QUERY PLAN SELECT file_key,ordinal
+        FROM snapshot_candidate_synopsis_pages WHERE snapshot_key = ? AND (file_key,ordinal) > (?,?) ORDER BY file_key,ordinal LIMIT 1`,
+          [snapshotKey, -1, -1],
+        );
+        expect(EffectArray.some(plan, row => EffectString.includes('SEARCH')(row.detail))).toBe(true);
+        expect(EffectArray.some(plan, row => EffectString.includes('TEMP B-TREE')(row.detail))).toBe(false);
+        expect(yield* selectResolutionCandidateIndexClosure(sql, query(needle!))).toMatchObject({
+          mode: 'eligible',
+          paths: ['a.ts', 'b.ts'],
+        });
+        expect(yield* selectResolutionCandidateIndexClosure(sql, query('absent'))).toMatchObject({
+          mode: 'eligible',
+          paths: [],
+        });
+        const collision = yield* readCandidateKeyPages(
+          sql,
+          'base',
+          undefined,
+          {key: needle!, resolutionDomain: 'typescript'},
+          10000,
+          8 * 1048576,
+          128,
+          token,
+        );
+        expect(collision?.paths).toEqual(['a.ts', 'b.ts']);
+        expect(collision?.exceeded).toBeUndefined();
+        expect(collision!.associations).toBeGreaterThan(64); // The natural false-positive page is fully decoded and charged.
+        const limited = yield* readCandidateKeyPages(
+          sql,
+          'base',
+          undefined,
+          {key: needle!, resolutionDomain: 'typescript'},
+          10000,
+          8 * 1048576,
+          1,
+          token,
+        );
+        expect(limited?.exceeded).toBe('files');
+        let payloadSelects = 0;
+        let queryCalls = 0;
+        const metadataOnly = new Proxy(sql, {
+          apply(target, thisArg, args) {
+            queryCalls += 1;
+            const first: unknown = args[0];
+            const text = EffectArray.isArray(first)
+              ? EffectArray.join(
+                  EffectArray.filter(first, (x): x is string => typeof x === 'string'),
+                  '?',
+                )
+              : '';
+            if (pipe(text, EffectString.includes('THEN page.payload'))) {
+              payloadSelects += 1;
+              throw new Error('Payload must not be hydrated.');
+            }
+            return Reflect.apply(target, thisArg, args);
+          },
+        });
+        const tiny = yield* readCandidateKeyPages(
           metadataOnly,
           'base',
           undefined,
-          {key: 'needle', resolutionDomain: 'typescript'},
-          0,
+          {key: needle!, resolutionDomain: 'typescript'},
+          1,
           10000,
           128,
           token,
-        ))?.exceeded,
-      ).toBe('rows');
-      expect(queryCalls).toBe(0);
-      expect(payloadSelects).toBe(0);
-    }).pipe(provideDatabase),
+        );
+        expect(tiny?.exceeded).toBe('rows');
+        expect(payloadSelects).toBe(0);
+        expect(queryCalls).toBe(2);
+        queryCalls = 0;
+        expect(
+          (yield* readCandidateKeyPages(
+            metadataOnly,
+            'base',
+            undefined,
+            {key: needle!, resolutionDomain: 'typescript'},
+            0,
+            10000,
+            128,
+            token,
+          ))?.exceeded,
+        ).toBe('rows');
+        expect(queryCalls).toBe(0);
+        expect(payloadSelects).toBe(0);
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'folds one new-key wave once and charges masked/negative metadata and observation exhaustion before hydration',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        yield* createSnapshot(sql, 'base', ['a.ts', 'b.ts', 'c.ts']);
+        yield* stage(
+          sql,
+          'base',
+          ['a.ts', 'b.ts', 'c.ts'],
+          [reference('a.ts', 'first'), reference('b.ts', 'second'), reference('c.ts', 'other')],
+        );
+        expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
+        const token = yield* resolutionCandidateAuthorityToken(sql);
+        const keys = [
+          {key: 'first', resolutionDomain: 'typescript'},
+          {key: 'second', resolutionDomain: 'typescript'},
+        ];
+        let folds = 0,
+          payloads = 0,
+          calls = 0;
+        const observed = new Proxy(sql, {
+          apply(target, thisArg, args) {
+            calls++;
+            const first: unknown = args[0];
+            const text = EffectArray.isArray(first)
+              ? EffectArray.join(
+                  EffectArray.filter(first, (s): s is string => typeof s === 'string'),
+                  '?',
+                )
+              : '';
+            if (EffectString.includes('THEN page.payload')(text)) payloads++;
+            else if (EffectString.includes('FROM snapshot_candidate_synopsis_pages AS page')(text)) folds++;
+            return Reflect.apply(target, thisArg, args);
+          },
+        });
+        const selected = yield* readCandidateKeyWavePages(
+          observed,
+          'base',
+          undefined,
+          keys,
+          1000,
+          1048576,
+          128,
+          token,
+          2000000,
+        );
+        expect(selected?.paths).toEqual(['a.ts', 'b.ts']);
+        expect(folds).toBe(2); // One bounded metadata batch and charged terminal sentinel, independent of two keys.
+        expect(selected?.bitTests).toBe(3 * 2 * 8);
+        expect(selected?.observations).toBeGreaterThanOrEqual(3 * 2);
+        expect(payloads).toBe(2);
+        calls = 0;
+        payloads = 0;
+        folds = 0;
+        expect(
+          yield* readCandidateKeyWavePages(observed, 'base', undefined, [], 1000, 1048576, 128, token, 2000000),
+        ).toEqual({paths: [], associations: 0, bytes: 0, observations: 0, bitTests: 0});
+        expect(calls).toBe(0);
+        const exhausted = yield* readCandidateKeyWavePages(
+          observed,
+          'base',
+          undefined,
+          keys,
+          1000,
+          1048576,
+          128,
+          token,
+          1,
+        );
+        expect(exhausted).toMatchObject({paths: [], observations: 2, exceeded: 'observations'});
+        expect(calls).toBe(0);
+        expect(payloads).toBe(0);
+      }).pipe(provideDatabase),
+  );
+
+  effectIt.effect(
+    'reserves the full mixed metadata batch before a positive can spend the last observation allowance',
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* setup;
+        const paths = ['a.ts', 'b.ts', 'c.ts'];
+        for (let positive = 0; positive < 3; positive++) {
+          const id = `mix-${positive}`;
+          yield* createSnapshot(sql, id, paths);
+          yield* stage(
+            sql,
+            id,
+            paths,
+            EffectArray.map(paths, (path, n) => reference(path, n === positive ? 'needle' : `negative-${n}`)),
+          );
+          expect(yield* finishResolutionCandidateIndex(sql, {...identity, snapshotId: id}, write)).toBe(true);
+          const token = yield* resolutionCandidateAuthorityToken(sql);
+          let payloads = 0,
+            folds = 0;
+          const observed = new Proxy(sql, {
+            apply(target, thisArg, args) {
+              const strings: unknown = args[0];
+              const text = EffectArray.isArray(strings)
+                ? EffectArray.join(
+                    EffectArray.filter(strings, (x): x is string => typeof x === 'string'),
+                    '?',
+                  )
+                : '';
+              if (EffectString.includes('THEN page.payload')(text)) payloads++;
+              if (EffectString.includes('AS path_bytes')(text)) folds++;
+              return Reflect.apply(target, thisArg, args);
+            },
+          });
+          const priorWaveObservations = 1999997;
+          const selected = yield* readCandidateKeyWavePages(
+            observed,
+            id,
+            undefined,
+            [{resolutionDomain: 'typescript', key: 'needle'}],
+            1000,
+            1048576,
+            128,
+            token,
+            2000000 - priorWaveObservations,
+          );
+          expect(selected).toMatchObject({paths: [], associations: 3, observations: 5, exceeded: 'observations'});
+          expect(selected?.bitTests).toBe((positive + 1) * 8); // only reserved metadata rows are probed
+          expect(payloads).toBe(0);
+          expect(folds).toBe(1);
+        }
+      }).pipe(provideDatabase),
   );
 
   effectIt.effect('charges masked indexed candidates before replacement or deletion eligibility', () =>
@@ -1324,7 +1588,7 @@ describe('complete reverse resolution candidate evidence', () => {
           128,
           token,
         );
-        expect(complete).toEqual({paths: [], associations: 2, bytes: 384});
+        expect(complete).toEqual({paths: [], associations: 2, bytes: 1088, observations: 2, bitTests: 16});
         expect(payloadReads).toBe(0);
         expect(yield* selectResolutionCandidateIndexClosure(sql, query('needle', kind))).toMatchObject({
           mode: 'eligible',
@@ -1349,7 +1613,7 @@ describe('complete reverse resolution candidate evidence', () => {
     }).pipe(provideDatabase),
   );
 
-  for (const variant of ['full-value', 'wrong-route', 'swapped-route'] as const) {
+  for (const variant of ['full-value', 'wrong-synopsis', 'missing-bit'] as const) {
     effectIt.effect(
       `refuses an unsealed same-cardinality ${variant} prefix without overwriting retained evidence`,
       () =>
@@ -1358,7 +1622,7 @@ describe('complete reverse resolution candidate evidence', () => {
           yield* createSnapshot(sql, 'base', ['a.ts']);
           const refs = [reference('a.ts', 'value')];
           yield* stage(sql, 'base', ['a.ts'], refs);
-          yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 0`;
+          yield* sql`UPDATE snapshot_candidate_synopsis_files SET sealed = 0`;
           const original = [
             ...CandidatePages.candidateFilePages(
               CandidatePages.canonicalCandidatePairs([
@@ -1367,9 +1631,13 @@ describe('complete reverse resolution candidate evidence', () => {
               ]),
             ),
           ][0];
-          yield* sql`DELETE FROM snapshot_candidate_page_routes`;
-          if (variant === 'full-value') {
-            const altered = [
+          const owner = (yield* sql<{
+            readonly snapshot_key: number;
+            readonly file_key: number;
+          }>`SELECT snapshot_key,file_key FROM snapshot_candidate_synopsis_files`)[0];
+          let altered = original;
+          if (variant === 'full-value')
+            altered = [
               ...CandidatePages.candidateFilePages(
                 CandidatePages.canonicalCandidatePairs([
                   ['typescript', 'other'],
@@ -1377,19 +1645,18 @@ describe('complete reverse resolution candidate evidence', () => {
                 ]),
               ),
             ][0];
-            yield* sql`DELETE FROM snapshot_candidate_pages`;
-            yield* sql`INSERT INTO snapshot_candidate_pages
+          const bits =
+            variant === 'wrong-synopsis'
+              ? candidateSynopsis([candidatePairHint(['typescript', 'other'])])
+              : variant === 'missing-bit'
+                ? new Uint8Array(128)
+                : altered.synopsis;
+          yield* sql`DELETE FROM snapshot_candidate_synopsis_pages`;
+          yield* sql`INSERT INTO snapshot_candidate_synopsis_pages
             SELECT snapshot_key,file_key,0,2,${altered.rawBytes},${altered.storedBytes},original_tuple_bytes,
-              ${altered.rawSha},${altered.storedSha},${altered.codec},${altered.payload!},NULL,NULL FROM snapshot_candidate_page_files`;
-          }
-          const hints =
-            variant === 'swapped-route'
-              ? [...original.hints].reverse()
-              : variant === 'wrong-route'
-                ? [candidatePairHint(['typescript', 'other']), original.hints[1]]
-                : original.hints;
-          for (const [slot, hint] of hints.entries())
-            yield* sql`INSERT INTO snapshot_candidate_page_routes SELECT snapshot_key,file_key,0,${slot},${hint} FROM snapshot_candidate_page_files`;
+              ${altered.rawSha},${altered.storedSha},${altered.codec},${bits},
+              ${candidateSynopsisBinding(owner.snapshot_key, owner.file_key, 0, altered.rawSha, altered.storedSha, bits)},${altered.payload!},NULL,NULL
+              FROM snapshot_candidate_synopsis_files`;
           const tables = [...CANDIDATE_PAGE_TABLES, ...RESOLUTION_CANDIDATE_INDEX_TABLES];
           const before = yield* Effect.forEach(tables, table =>
             sql.unsafe(`SELECT * FROM ${table.name} ORDER BY ${EffectArray.join(table.keyColumns, ',')}`),
@@ -1402,14 +1669,14 @@ describe('complete reverse resolution candidate evidence', () => {
           expect(yield* sql`SELECT complete FROM snapshot_candidate_files`).toEqual([{complete: 0}]);
           expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(false);
           expect(yield* sql`SELECT * FROM snapshot_candidate_receipts`).toEqual([]);
-          expect(yield* sql`SELECT * FROM snapshot_candidate_page_receipts`).toEqual([]);
+          expect(yield* sql`SELECT * FROM snapshot_candidate_synopsis_receipts`).toEqual([]);
           expect(yield* selectResolutionCandidateIndexClosure(sql, query('value'))).toBeUndefined();
           expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
         }).pipe(provideDatabase),
     );
   }
 
-  effectIt.effect('refuses populated v3 hint loss without rebuilding or altering retained family rows', () =>
+  effectIt.effect('refuses populated format4 index loss without rebuilding or altering retained family rows', () =>
     Effect.gen(function* () {
       const sql = yield* setup;
       yield* createSnapshot(sql, 'base', ['a.ts']);
@@ -1421,22 +1688,24 @@ describe('complete reverse resolution candidate evidence', () => {
           yield* sql.unsafe(`SELECT * FROM ${table.name} ORDER BY ${EffectArray.join(table.keyColumns, ',')}`),
         );
       const oldToken = yield* resolutionCandidateAuthorityToken(sql);
-      yield* sql.unsafe('DROP INDEX snapshot_candidate_page_routes_hint');
+      yield* sql.unsafe('DROP INDEX snapshot_candidate_synopsis_snapshots_path');
       expect(yield* ensureResolutionCandidateIndexSchema(sql)).toBe(true);
       expect(yield* resolutionCandidateAuthorityToken(sql)).toBeUndefined();
-      expect(yield* sql`SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_page_routes_hint'`).toEqual([]);
+      expect(yield* sql`SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_synopsis_snapshots_path'`).toEqual(
+        [],
+      );
       for (const [i, table] of CANDIDATE_PAGE_TABLES.entries())
         expect(
           yield* sql.unsafe(`SELECT * FROM ${table.name} ORDER BY ${EffectArray.join(table.keyColumns, ',')}`),
         ).toEqual(before[i]);
       expect(yield* selectResolutionCandidateIndexClosure(sql, query('key'))).toBeUndefined();
-      yield* sql.unsafe(CANDIDATE_PAGE_INDEXES[1].sql);
+      yield* sql.unsafe(CANDIDATE_PAGE_INDEXES[0].sql);
       expect(yield* ensureResolutionCandidateIndexSchema(sql)).toBe(true);
       expect(yield* resolutionCandidateAuthorityToken(sql)).not.toBe(oldToken);
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(false);
       yield* stage(sql, 'base', ['a.ts'], [reference('a.ts', 'key')]);
       expect(yield* finishResolutionCandidateIndex(sql, identity, write)).toBe(true);
-      expect(yield* sql`SELECT COUNT(*) AS count FROM snapshot_candidate_page_snapshots`).toEqual([{count: 2}]);
+      expect(yield* sql`SELECT COUNT(*) AS count FROM snapshot_candidate_synopsis_snapshots`).toEqual([{count: 2}]);
       expect(yield* selectResolutionCandidateIndexClosure(sql, query('key'))).toMatchObject({
         mode: 'eligible',
         paths: ['a.ts'],
@@ -1453,11 +1722,16 @@ describe('complete reverse resolution candidate evidence', () => {
         let preparation = false;
         let admitted = false;
         const ref = reference('a.ts', 'value', ['alias']);
+        const originalCanonical = CandidatePages.canonicalCandidatePairs;
+        const canonical = vi.spyOn(CandidatePages, 'canonicalCandidatePairs').mockImplementation(values => {
+          expect(admitted).toBe(true);
+          expect(preparation).toBe(true);
+          return originalCanonical(values);
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(() => canonical.mockRestore()));
         Object.defineProperty(ref, 'edgeId', {
           get: () => {
-            edgeReads += 1;
-            expect(admitted).toBe(true);
-            expect(preparation).toBe(true);
+            edgeReads++;
             return 'a.ts:value';
           },
         });
@@ -1488,9 +1762,10 @@ describe('complete reverse resolution candidate evidence', () => {
         expect((yield* stageResolutionCandidateIndex(sql, input, write, denied).pipe(Effect.exit))._tag).toBe(
           'Failure',
         );
-        expect(edgeReads).toBe(0);
+        expect(edgeReads).toBeGreaterThan(0); // Constant-space scalar/length prewalk precedes admission.
+        expect(canonical).not.toHaveBeenCalled();
         expect(preparation).toBe(false);
-        expect(yield* sql`SELECT COUNT(*) AS count FROM snapshot_candidate_page_snapshots`).toEqual([{count: 0}]);
+        expect(yield* sql`SELECT COUNT(*) AS count FROM snapshot_candidate_synopsis_snapshots`).toEqual([{count: 0}]);
         const boundaries: {rowCount: number; bytes: number}[] = [];
         const protector: CodeGraphDirectPersistentCapacityProtector = (boundary, effect) => {
           expect(preparation).toBe(false);
@@ -1520,9 +1795,9 @@ describe('complete reverse resolution candidate evidence', () => {
         mode: 'eligible',
         paths: ['a.ts'],
       });
-      expect(yield* sql`SELECT literal_key FROM snapshot_candidate_pages WHERE codec = 'literal-pair-v1'`).toEqual([
-        {literal_key: largeKey},
-      ]);
+      expect(
+        yield* sql`SELECT literal_key FROM snapshot_candidate_synopsis_pages WHERE codec = 'literal-pair-v1'`,
+      ).toEqual([{literal_key: largeKey}]);
       yield* createSnapshot(sql, 'deleted', ['b.ts'], 'base');
       yield* sql`INSERT INTO snapshot_file_deletions VALUES ('deleted','a.ts')`;
       yield* stage(sql, 'deleted', ['b.ts'], [reference('b.ts', 'other')]);
@@ -1654,19 +1929,19 @@ describe('complete reverse resolution candidate evidence', () => {
                 readonly raw_bytes: number;
                 readonly stored_bytes: number;
               }>`SELECT
-        (SELECT COUNT(*) FROM snapshot_candidate_page_files) AS files,
-        (SELECT SUM(association_count) FROM snapshot_candidate_page_files) AS associations,
-        (SELECT COUNT(*) FROM snapshot_candidate_pages) AS pages,
+        (SELECT COUNT(*) FROM snapshot_candidate_synopsis_files) AS files,
+        (SELECT SUM(association_count) FROM snapshot_candidate_synopsis_files) AS associations,
+        (SELECT COUNT(*) FROM snapshot_candidate_synopsis_pages) AS pages,
         (SELECT COUNT(*) FROM snapshot_candidate_page_routes) AS routes,
         (SELECT COUNT(*) FROM snapshot_candidate_reexports) AS reexports,
-        (SELECT SUM(original_tuple_bytes) FROM snapshot_candidate_page_files) AS original_bytes,
-        (SELECT SUM(raw_bytes) FROM snapshot_candidate_pages) AS raw_bytes,
-        (SELECT SUM(stored_bytes) FROM snapshot_candidate_pages) AS stored_bytes`)[0];
+        (SELECT SUM(original_tuple_bytes) FROM snapshot_candidate_synopsis_files) AS original_bytes,
+        (SELECT SUM(raw_bytes) FROM snapshot_candidate_synopsis_pages) AS raw_bytes,
+        (SELECT SUM(stored_bytes) FROM snapshot_candidate_synopsis_pages) AS stored_bytes`)[0];
               expect(totals).toMatchObject({
                 files: 3635,
                 associations: 136301,
                 pages: 3635,
-                routes: 136301,
+                routes: 0,
                 reexports: 915,
               });
               const token = yield* resolutionCandidateAuthorityToken(sql);
@@ -1684,7 +1959,7 @@ describe('complete reverse resolution candidate evidence', () => {
                   readonly page_count: number;
                   readonly canonical_sha: string;
                 }>`
-          SELECT file_key,path,association_count,page_count,canonical_sha FROM snapshot_candidate_page_files
+          SELECT file_key,path,association_count,page_count,canonical_sha FROM snapshot_candidate_synopsis_files
           WHERE snapshot_key=${snapshotKey} AND file_key > ${afterFile} ORDER BY file_key LIMIT 1000`;
                 if (files.length === 0) break;
                 for (const file of files) {
@@ -1868,7 +2143,7 @@ describe('complete reverse resolution candidate evidence', () => {
           readonly page_count: number;
           readonly canonical_sha: string;
         }>`
-      SELECT file_key,association_count,page_count,canonical_sha FROM snapshot_candidate_page_files WHERE snapshot_key=${snapshotKey}`)[0];
+      SELECT file_key,association_count,page_count,canonical_sha FROM snapshot_candidate_synopsis_files WHERE snapshot_key=${snapshotKey}`)[0];
         const projection = yield* readCandidateFileProjection(
           sql,
           snapshotKey,
@@ -1884,7 +2159,7 @@ describe('complete reverse resolution candidate evidence', () => {
           readonly stored_bytes: number;
           readonly literal_key: string;
         }>`
-      SELECT raw_bytes,stored_bytes,literal_key FROM snapshot_candidate_pages WHERE snapshot_key=${snapshotKey}`)[0];
+      SELECT raw_bytes,stored_bytes,literal_key FROM snapshot_candidate_synopsis_pages WHERE snapshot_key=${snapshotKey}`)[0];
         expect(literal.literal_key).toBe(key);
         expect(literal.raw_bytes).toBeLessThanOrEqual(maximum);
         expect(literal.stored_bytes + 16).toBeLessThanOrEqual(maximum);

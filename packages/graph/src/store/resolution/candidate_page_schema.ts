@@ -1,7 +1,8 @@
+import * as EffectString from 'effect/String';
 import {Array as EffectArray} from 'effect';
 
 /** Additive family. Retained v1 rows are neither migrated nor new-format proof. */
-export const CANDIDATE_PAGE_TABLES = [
+const LEGACY_CANDIDATE_PAGE_TABLES = [
   {
     name: 'snapshot_candidate_page_snapshots',
     keyColumns: ['snapshot_key'],
@@ -86,7 +87,7 @@ export const CANDIDATE_PAGE_TABLES = [
   },
 ] as const;
 
-export const CANDIDATE_PAGE_INDEXES = [
+const LEGACY_CANDIDATE_PAGE_INDEXES = [
   {
     name: 'snapshot_candidate_page_snapshots_path',
     table: 'snapshot_candidate_page_snapshots',
@@ -110,7 +111,7 @@ const invalidation = (reference: 'OLD' | 'NEW', fileColumn = 'file_key') => `
     JOIN snapshot_candidate_page_snapshots AS snapshot ON snapshot.snapshot_key = file.snapshot_key
     WHERE file.snapshot_key = ${reference}.snapshot_key AND file.file_key = ${reference}.${fileColumn});`;
 
-export const CANDIDATE_PAGE_TRIGGERS = [
+const LEGACY_CANDIDATE_PAGE_TRIGGERS = [
   {
     name: 'snapshot_candidate_page_snapshot_immutable',
     sql: `CREATE TRIGGER IF NOT EXISTS snapshot_candidate_page_snapshot_immutable
@@ -177,12 +178,72 @@ export const CANDIDATE_PAGE_TRIGGERS = [
 ] as const;
 
 /** Every DELETE owns one indexed, snapshot-key-prefixed page; retain v1 cleanup separately. */
-export const CANDIDATE_PAGE_CLEANUP_TABLES = [
-  CANDIDATE_PAGE_TABLES[4],
-  CANDIDATE_PAGE_TABLES[3],
-  CANDIDATE_PAGE_TABLES[2],
-  CANDIDATE_PAGE_TABLES[1],
-  CANDIDATE_PAGE_TABLES[0],
+const LEGACY_CANDIDATE_PAGE_CLEANUP_TABLES = [
+  LEGACY_CANDIDATE_PAGE_TABLES[4],
+  LEGACY_CANDIDATE_PAGE_TABLES[3],
+  LEGACY_CANDIDATE_PAGE_TABLES[2],
+  LEGACY_CANDIDATE_PAGE_TABLES[1],
+  LEGACY_CANDIDATE_PAGE_TABLES[0],
 ] as const;
 
-export const CANDIDATE_PAGE_OBJECTS = [...CANDIDATE_PAGE_TABLES, ...CANDIDATE_PAGE_INDEXES, ...CANDIDATE_PAGE_TRIGGERS];
+const LEGACY_CANDIDATE_PAGE_OBJECTS = [
+  ...LEGACY_CANDIDATE_PAGE_TABLES,
+  ...LEGACY_CANDIDATE_PAGE_INDEXES,
+  ...LEGACY_CANDIDATE_PAGE_TRIGGERS,
+];
+
+/** Format4 is additive: no old table, trigger, receipt or route is changed or reused. */
+const currentName = (value: string) => {
+  let result = value;
+  for (const [before, after] of [
+    ['snapshot_candidate_page_snapshots', 'snapshot_candidate_synopsis_snapshots'],
+    ['snapshot_candidate_page_files', 'snapshot_candidate_synopsis_files'],
+    ['snapshot_candidate_page_receipts', 'snapshot_candidate_synopsis_receipts'],
+    ['snapshot_candidate_pages', 'snapshot_candidate_synopsis_pages'],
+    ['snapshot_candidate_page_snapshot_', 'snapshot_candidate_synopsis_snapshot_'],
+    ['snapshot_candidate_page_file_', 'snapshot_candidate_synopsis_file_'],
+    ['snapshot_candidate_page_receipt_', 'snapshot_candidate_synopsis_receipt_'],
+  ])
+    result = EffectString.replaceAll(before, after)(result);
+  return result;
+};
+export const CANDIDATE_PAGE_TABLES = EffectArray.map(
+  EffectArray.filter(LEGACY_CANDIDATE_PAGE_TABLES, table => table.name !== 'snapshot_candidate_page_routes'),
+  table => ({
+    ...table,
+    name: currentName(table.name),
+    sql: EffectString.replace(
+      '      payload BLOB,',
+      `      synopsis BLOB NOT NULL CHECK(typeof(synopsis) = 'blob' AND length(synopsis) = 128),
+      synopsis_sha BLOB NOT NULL CHECK(typeof(synopsis_sha) = 'blob' AND length(synopsis_sha) = 32),
+      payload BLOB,`,
+    )(EffectString.replaceAll('format_version = 3', 'format_version = 4')(currentName(table.sql))),
+  }),
+);
+export const CANDIDATE_PAGE_INDEXES = EffectArray.map(
+  EffectArray.filter(LEGACY_CANDIDATE_PAGE_INDEXES, index => index.table !== 'snapshot_candidate_page_routes'),
+  index => ({...index, name: currentName(index.name), table: currentName(index.table), sql: currentName(index.sql)}),
+);
+export const CANDIDATE_PAGE_TRIGGERS = EffectArray.map(
+  EffectArray.filter(LEGACY_CANDIDATE_PAGE_TRIGGERS, trigger => !EffectString.includes('route')(trigger.name)),
+  trigger => ({...trigger, name: currentName(trigger.name), sql: currentName(trigger.sql)}),
+);
+export const CANDIDATE_PAGE_OBJECTS = [
+  ...LEGACY_CANDIDATE_PAGE_OBJECTS,
+  ...CANDIDATE_PAGE_TABLES,
+  ...CANDIDATE_PAGE_INDEXES,
+  ...CANDIDATE_PAGE_TRIGGERS,
+];
+export const CANDIDATE_PAGE_SCHEMA_TABLES = [...LEGACY_CANDIDATE_PAGE_TABLES, ...CANDIDATE_PAGE_TABLES];
+export const CANDIDATE_PAGE_SCHEMA_INDEXES = [...LEGACY_CANDIDATE_PAGE_INDEXES, ...CANDIDATE_PAGE_INDEXES];
+export const CANDIDATE_PAGE_CLEANUP_FAMILIES = [
+  {snapshots: CANDIDATE_PAGE_TABLES[0].name, tables: [...CANDIDATE_PAGE_TABLES].reverse()},
+  {snapshots: LEGACY_CANDIDATE_PAGE_TABLES[0].name, tables: LEGACY_CANDIDATE_PAGE_CLEANUP_TABLES},
+] as const;
+
+export const LEGACY_CANDIDATE_SCHEMA_OBJECTS = LEGACY_CANDIDATE_PAGE_OBJECTS;
+export const LEGACY_CANDIDATE_SCHEMA_TABLES = LEGACY_CANDIDATE_PAGE_TABLES;
+export const LEGACY_CANDIDATE_SCHEMA_INDEXES = LEGACY_CANDIDATE_PAGE_INDEXES;
+
+/** Current-format small fixture deletion order; production collectors enumerate every retained family. */
+export const CANDIDATE_PAGE_CLEANUP_TABLES = [...CANDIDATE_PAGE_TABLES].reverse();

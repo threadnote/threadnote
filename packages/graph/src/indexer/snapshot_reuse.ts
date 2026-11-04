@@ -1,3 +1,4 @@
+import type {CodeGraphIndexResourceGate} from './types.js';
 import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
@@ -35,6 +36,7 @@ export interface ReusableCleanSnapshotInput {
   readonly logicalSnapshotId: string;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
   readonly persistentMaterializationTransactionBatchLimit?: 1 | 4;
+  readonly preparationGate?: CodeGraphIndexResourceGate;
   readonly requestedOverlay?: {readonly dirty: boolean; readonly fingerprint?: string};
   readonly startedAt: number;
   readonly store: CodeGraphStoreShape;

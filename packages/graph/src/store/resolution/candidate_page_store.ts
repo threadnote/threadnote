@@ -1,8 +1,10 @@
+import {candidateSynopsisBinding} from './candidate_synopsis.js';
 import {Array as EffectArray, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {CodeGraphStoreError, type CodeGraphReference} from '../../types.js';
 import type {ResolutionCandidateIndexStage} from './candidate_index.js';
 import {resolutionCandidateFileRepresentable, resolutionCandidateReexportRow} from './candidate_index.js';
+import {assertCurrentCandidateCapacity} from './candidate_capacity.js';
 import {
   candidateCanonicalSha,
   candidateBytesEqual,
@@ -46,42 +48,16 @@ export const candidateSnapshotKey = Effect.fn('codeGraph.candidateSnapshotKey')(
   snapshotId: string,
   token: string,
 ) {
-  const rows = yield* sql<{readonly snapshot_key: number}>`SELECT snapshot_key FROM snapshot_candidate_page_snapshots
+  yield* assertCurrentCandidateCapacity(sql);
+  const rows = yield* sql<{
+    readonly snapshot_key: number;
+  }>`SELECT snapshot_key FROM snapshot_candidate_synopsis_snapshots
     WHERE snapshot_id = ${snapshotId} AND authority_token = ${token} AND protocol_sha = ${CANDIDATE_PAGE_PROTOCOL_SHA}
-      AND format_version = 3 LIMIT 1`;
+      AND format_version = 4 LIMIT 1`;
+  yield* assertCurrentCandidateCapacity(sql);
   const key = rows[0]?.snapshot_key;
   return typeof key === 'number' && Number.isSafeInteger(key) && key > 0 ? key : undefined;
 });
-
-/** No Map, Set, sort, encoding or serialized full-key copy precedes this original-source work estimate.
- * Duplicate occurrences remain charged, so this bounds canonical memberships and sort-vector ownership conservatively.
- * It is capacity evidence, never a new eligibility quota or a claim that disk bytes equal exact JS heap bytes.
- */
-export function candidatePreparationWork(input: ResolutionCandidateIndexStage) {
-  let rowCount = input.files.length;
-  let originalBytes = 0;
-  const snapshotBytes = Buffer.byteLength(input.snapshotId);
-  for (const file of input.files)
-    originalBytes += snapshotBytes + Buffer.byteLength(file.path) + Buffer.byteLength(file.contentHash);
-  for (const ref of input.references) {
-    rowCount += 1;
-    const pathBytes = Buffer.byteLength(ref.evidencePath);
-    const domainBytes = Buffer.byteLength(ref.resolutionDomain);
-    originalBytes += pathBytes + domainBytes;
-    for (const tier of ref.lookupTiers)
-      for (const key of tier) {
-        rowCount += 1;
-        originalBytes += snapshotBytes + pathBytes + domainBytes + Buffer.byteLength(key);
-      }
-    for (const alias of ref.aliasLookupKeys ?? []) {
-      rowCount += 1;
-      originalBytes += Buffer.byteLength(alias);
-    }
-  }
-  if (!Number.isSafeInteger(rowCount) || !Number.isSafeInteger(originalBytes))
-    throw new Error('Candidate source work estimate is not representable.');
-  return {rowCount, originalBytes};
-}
 
 export function prepareCandidateFiles(input: ResolutionCandidateIndexStage): readonly CandidatePreparedFile[] {
   const paths = new Set(EffectArray.map(input.files, file => file.path));
@@ -130,13 +106,26 @@ const persistPage = Effect.fn('codeGraph.persistCandidatePage')(function* (
   insert: boolean,
   originalBytes: number,
 ) {
+  yield* assertCurrentCandidateCapacity(sql);
+  const synopsis = page.synopsis;
+  const synopsisSha = candidateSynopsisBinding(
+    snapshotKey,
+    fileKey,
+    page.ordinal,
+    page.rawSha,
+    page.storedSha,
+    synopsis,
+  );
   if (insert)
-    yield* sql`INSERT OR IGNORE INTO snapshot_candidate_pages
-    (snapshot_key,file_key,ordinal,entry_count,raw_bytes,stored_bytes,original_tuple_bytes,raw_sha,stored_sha,codec,payload,literal_domain,literal_key)
+    yield* sql`INSERT OR IGNORE INTO snapshot_candidate_synopsis_pages
+    (snapshot_key,file_key,ordinal,entry_count,raw_bytes,stored_bytes,original_tuple_bytes,raw_sha,stored_sha,codec,synopsis,synopsis_sha,payload,literal_domain,literal_key)
     VALUES (${snapshotKey},${fileKey},${page.ordinal},${page.pairs.length},${page.rawBytes},${page.storedBytes},${originalBytes},
-      ${page.rawSha},${page.storedSha},${page.codec},${page.payload ?? null},
+      ${page.rawSha},${page.storedSha},${page.codec},${synopsis},${synopsisSha},${page.payload ?? null},
       ${page.codec === 'literal-pair-v1' ? page.pairs[0][0] : null},${page.codec === 'literal-pair-v1' ? page.pairs[0][1] : null})`;
+  yield* assertCurrentCandidateCapacity(sql);
   const rows = yield* sql<{
+    readonly synopsis: Uint8Array | null;
+    readonly synopsis_sha: Uint8Array | null;
     readonly entry_count: number;
     readonly raw_bytes: number;
     readonly stored_bytes: number;
@@ -149,12 +138,15 @@ const persistPage = Effect.fn('codeGraph.persistCandidatePage')(function* (
     readonly literal_key: string | null;
   }>`
     SELECT entry_count,raw_bytes,stored_bytes,original_tuple_bytes,raw_sha,stored_sha,codec,
+      CASE WHEN typeof(synopsis) = 'blob' AND length(synopsis) = 128 THEN synopsis ELSE NULL END AS synopsis,
+      CASE WHEN typeof(synopsis_sha) = 'blob' AND length(synopsis_sha) = 32 THEN synopsis_sha ELSE NULL END AS synopsis_sha,
       CASE WHEN typeof(payload) = 'blob' AND length(payload) = ${page.storedBytes} AND length(payload) <= 65536 THEN payload ELSE NULL END AS payload,
       CASE WHEN length(CAST(literal_domain AS BLOB)) + length(CAST(literal_key AS BLOB)) = ${page.storedBytes}
         AND stored_bytes <= 8388608 THEN literal_domain ELSE NULL END AS literal_domain,
       CASE WHEN length(CAST(literal_domain AS BLOB)) + length(CAST(literal_key AS BLOB)) = ${page.storedBytes}
         AND stored_bytes <= 8388608 THEN literal_key ELSE NULL END AS literal_key
-    FROM snapshot_candidate_pages WHERE snapshot_key = ${snapshotKey} AND file_key = ${fileKey} AND ordinal = ${page.ordinal} LIMIT 1`;
+    FROM snapshot_candidate_synopsis_pages WHERE snapshot_key = ${snapshotKey} AND file_key = ${fileKey} AND ordinal = ${page.ordinal} LIMIT 1`;
+  yield* assertCurrentCandidateCapacity(sql);
   const row = rows[0];
   if (
     !row ||
@@ -164,7 +156,9 @@ const persistPage = Effect.fn('codeGraph.persistCandidatePage')(function* (
     row.original_tuple_bytes !== originalBytes ||
     row.raw_sha !== page.rawSha ||
     row.stored_sha !== page.storedSha ||
-    row.codec !== page.codec
+    row.codec !== page.codec ||
+    !candidateBytesEqual(row.synopsis, synopsis) ||
+    !candidateBytesEqual(row.synopsis_sha, synopsisSha)
   )
     return yield* mismatch();
   if (page.codec === 'literal-pair-v1') {
@@ -185,28 +179,6 @@ const persistPage = Effect.fn('codeGraph.persistCandidatePage')(function* (
     if (!EffectArray.every(decoded, (pair, i) => pair[0] === page.pairs[i]?.[0] && pair[1] === page.pairs[i]?.[1]))
       return yield* mismatch();
   }
-  // Never use count-only alias proof: every exact producer slot/hint is compared.
-  if (insert)
-    yield* sql.unsafe(
-      `INSERT OR IGNORE INTO snapshot_candidate_page_routes (snapshot_key,file_key,ordinal,slot,hint)
-    VALUES ${EffectArray.join(
-      EffectArray.map(page.hints, () => '(?,?,?,?,?)'),
-      ',',
-    )}`,
-      EffectArray.flatMap(page.hints, (hint, slot) => [snapshotKey, fileKey, page.ordinal, slot, hint]),
-    );
-  const routes = yield* sql<{readonly slot: number; readonly hint: Uint8Array}>`SELECT slot,
-    CASE WHEN typeof(hint) = 'blob' AND length(hint) = 16 THEN hint ELSE NULL END AS hint
-    FROM snapshot_candidate_page_routes WHERE snapshot_key = ${snapshotKey} AND file_key = ${fileKey} AND ordinal = ${page.ordinal}
-    ORDER BY slot LIMIT 65`;
-  if (
-    routes.length !== page.hints.length ||
-    !EffectArray.every(
-      routes,
-      (route, i) => route.slot === i && route.hint !== null && candidateBytesEqual(route.hint, page.hints[i]),
-    )
-  )
-    return yield* mismatch();
 });
 
 /** The caller groups these operations under the existing bounded writer/capacity transaction. */
@@ -250,13 +222,16 @@ export function* candidateFileOperations(
       reservationBytes: identityBytes + 256,
       codecBytes: 0,
       effect: Effect.gen(function* () {
+        yield* assertCurrentCandidateCapacity(sql);
         const source = yield* sql<{readonly content_hash: string}>`SELECT file.content_hash FROM snapshot_files AS file
         JOIN snapshots AS snapshot ON snapshot.id = file.snapshot_id WHERE file.snapshot_id = ${snapshotId} AND file.path = ${file.path}
         AND snapshot.state IN ('building','ready') LIMIT 1`;
+        yield* assertCurrentCandidateCapacity(sql);
         if (source[0]?.content_hash !== file.contentHash) return yield* mismatch();
-        yield* sql`INSERT OR IGNORE INTO snapshot_candidate_page_files
+        yield* sql`INSERT OR IGNORE INTO snapshot_candidate_synopsis_files
         (snapshot_key,path,content_hash,association_count,reexport_count,page_count,original_tuple_bytes,canonical_sha,sealed)
         VALUES (${snapshotKey},${file.path},${file.contentHash},${file.pairs.length},${file.reexports.length},${pageCount},${originalBytes},${canonicalSha},0)`;
+        yield* assertCurrentCandidateCapacity(sql);
         const prior = yield* sql<{
           readonly file_key: number;
           readonly content_hash: string;
@@ -267,8 +242,9 @@ export function* candidateFileOperations(
           readonly canonical_sha: string;
           readonly sealed: number;
         }>`SELECT file_key,content_hash,association_count,reexport_count,page_count,
-          original_tuple_bytes,canonical_sha,sealed FROM snapshot_candidate_page_files
+          original_tuple_bytes,canonical_sha,sealed FROM snapshot_candidate_synopsis_files
         WHERE snapshot_key = ${snapshotKey} AND path = ${file.path} LIMIT 1`;
+        yield* assertCurrentCandidateCapacity(sql);
         const row = prior[0];
         if (
           !row ||
@@ -290,19 +266,21 @@ export function* candidateFileOperations(
         VALUES (${snapshotId},${file.path},${file.contentHash},${file.pairs.length},${file.reexports.length},0)
         ON CONFLICT(snapshot_id,path) DO UPDATE SET complete = 0, association_count = excluded.association_count,
           reexport_count = excluded.reexport_count`;
+        yield* assertCurrentCandidateCapacity(sql);
       }),
     };
     for (const page of candidateFilePages(file.pairs)) {
       const bytes =
         tuplePrefixBytes * page.pairs.length +
         EffectArray.reduce(page.pairs, 0, (n, pair) => n + Buffer.byteLength(pair[0]) + Buffer.byteLength(pair[1]));
-      const sqlPayloadBytes = page.storedBytes + page.hints.length * 16;
+      const sqlPayloadBytes = page.storedBytes + 160;
       yield {
-        rows: 1 + page.pairs.length,
+        rows: 1,
         bytes: sqlPayloadBytes,
-        reservationBytes: Math.max(bytes, sqlPayloadBytes) + 256 + page.hints.length * 32,
-        codecBytes: page.payload?.byteLength ?? 0,
+        reservationBytes: Math.max(bytes, page.storedBytes) + 416 + page.pairs.length * 32,
+        codecBytes: (page.payload?.byteLength ?? 0) + 128,
         effect: Effect.gen(function* () {
+          yield* assertCurrentCandidateCapacity(sql);
           if (fileKey === undefined) return yield* mismatch();
           yield* persistPage(sql, snapshotKey, fileKey, page, !alreadySealed, bytes);
         }),
@@ -324,13 +302,16 @@ export function* candidateFileOperations(
           128,
         codecBytes: 0,
         effect: Effect.gen(function* () {
+          yield* assertCurrentCandidateCapacity(sql);
           if (!alreadySealed)
             yield* sql`INSERT OR IGNORE INTO snapshot_candidate_reexports (snapshot_id,evidence_path,edge_id,payload_json)
             VALUES (${snapshotId},${file.path},${row.id},${row.json})`;
+          yield* assertCurrentCandidateCapacity(sql);
           const actual = yield* sql<{readonly payload_json: string | null}>`SELECT
             CASE WHEN typeof(payload_json) = 'text' AND length(CAST(payload_json AS BLOB)) <= ${Buffer.byteLength(row.json)}
               THEN payload_json ELSE NULL END AS payload_json FROM snapshot_candidate_reexports
             WHERE snapshot_id = ${snapshotId} AND evidence_path = ${file.path} AND edge_id = ${row.id} LIMIT 1`;
+          yield* assertCurrentCandidateCapacity(sql);
           if (actual[0]?.payload_json !== row.json) return yield* mismatch();
         }),
       };
@@ -366,6 +347,7 @@ export const completeCandidateFiles = Effect.fn('codeGraph.completeCandidateFile
   token: string,
   files: readonly CandidateFileCompletion[],
 ) {
+  yield* assertCurrentCandidateCapacity(sql);
   if (files.length === 0) return;
   const expected = EffectArray.flatMap(files, file => [
     file.fileKey,
@@ -386,7 +368,7 @@ export const completeCandidateFiles = Effect.fn('codeGraph.completeCandidateFile
       ',',
     )})
     SELECT expected.file_key FROM expected
-    CROSS JOIN snapshot_candidate_page_files AS file ON file.snapshot_key = ? AND file.file_key = expected.file_key
+    CROSS JOIN snapshot_candidate_synopsis_files AS file ON file.snapshot_key = ? AND file.file_key = expected.file_key
       AND file.path = expected.path AND file.content_hash = expected.content_hash
       AND file.association_count = expected.associations AND file.reexport_count = expected.reexports
       AND file.page_count = expected.pages AND file.original_tuple_bytes = expected.original_bytes AND file.canonical_sha = expected.canonical_sha
@@ -394,12 +376,12 @@ export const completeCandidateFiles = Effect.fn('codeGraph.completeCandidateFile
     CROSS JOIN snapshots AS owner ON owner.id = source.snapshot_id AND owner.state IN ('building','ready')
     CROSS JOIN snapshot_candidate_files AS legacy ON legacy.snapshot_id = source.snapshot_id AND legacy.path = source.path
       AND legacy.content_hash = source.content_hash AND legacy.association_count = expected.associations AND legacy.reexport_count = expected.reexports
-    WHERE (SELECT COUNT(*) FROM snapshot_candidate_pages WHERE snapshot_key = file.snapshot_key AND file_key = file.file_key) = expected.pages
-      AND (SELECT COALESCE(SUM(entry_count),0) FROM snapshot_candidate_pages WHERE snapshot_key = file.snapshot_key AND file_key = file.file_key) = expected.associations
-      AND (SELECT COUNT(*) FROM snapshot_candidate_page_routes WHERE snapshot_key = file.snapshot_key AND file_key = file.file_key) = expected.associations
+    WHERE (SELECT COUNT(*) FROM snapshot_candidate_synopsis_pages WHERE snapshot_key = file.snapshot_key AND file_key = file.file_key) = expected.pages
+      AND (SELECT COALESCE(SUM(entry_count),0) FROM snapshot_candidate_synopsis_pages WHERE snapshot_key = file.snapshot_key AND file_key = file.file_key) = expected.associations
       AND (SELECT COUNT(*) FROM snapshot_candidate_reexports WHERE snapshot_id = source.snapshot_id AND evidence_path = source.path) = expected.reexports`,
     [...expected, snapshotKey, snapshotId],
   );
+  yield* assertCurrentCandidateCapacity(sql);
   if (proof.length !== files.length) return yield* mismatch();
   // Current generation binding precedes both completeness bits. All statements share the guarded atomic transaction.
   yield* sql.unsafe(
@@ -411,14 +393,16 @@ export const completeCandidateFiles = Effect.fn('codeGraph.completeCandidateFile
     ON CONFLICT(snapshot_id,kind,path) DO UPDATE SET authority_token = excluded.authority_token`,
     EffectArray.flatMap(files, file => [snapshotId, file.path, token]),
   );
+  yield* assertCurrentCandidateCapacity(sql);
   yield* sql.unsafe(
-    `UPDATE snapshot_candidate_page_files SET sealed = 1 WHERE snapshot_key = ? AND file_key IN (
+    `UPDATE snapshot_candidate_synopsis_files SET sealed = 1 WHERE snapshot_key = ? AND file_key IN (
     ${EffectArray.join(
       EffectArray.map(files, () => '?'),
       ',',
     )})`,
     [snapshotKey, ...EffectArray.map(files, file => file.fileKey)],
   );
+  yield* assertCurrentCandidateCapacity(sql);
   yield* sql.unsafe(
     `UPDATE snapshot_candidate_files SET complete = 1 WHERE snapshot_id = ? AND path IN (
     ${EffectArray.join(
@@ -427,4 +411,5 @@ export const completeCandidateFiles = Effect.fn('codeGraph.completeCandidateFile
     )})`,
     [snapshotId, ...EffectArray.map(files, file => file.path)],
   );
+  yield* assertCurrentCandidateCapacity(sql);
 });

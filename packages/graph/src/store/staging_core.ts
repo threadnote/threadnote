@@ -106,7 +106,7 @@ export function makeRetiredSnapshotReclamationPage(sql: SqlClient.SqlClient, sna
     // Run inside the writer gate so lock contention cannot shrink the next page.
     const startedAt = yield* Clock.currentTimeMillis;
     const page = yield* sql.withTransaction(reclaimRetiredSnapshotPage(sql, snapshotIds, batchRowsByTable));
-    if (page.table !== undefined) {
+    if ('table' in page && page.table !== undefined) {
       batchRowsByTable.set(
         page.table,
         Math.min(

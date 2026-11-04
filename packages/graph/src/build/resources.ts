@@ -1,4 +1,4 @@
-import {Effect, Ref, Schema} from 'effect';
+import {Context, Effect, Ref, Schema} from 'effect';
 
 export const CODE_GRAPH_PREPARED_SPOOL_COUNT_LIMIT = 4;
 export const CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT = 32 * 1_024 * 1_024 * 1_024;
@@ -7,6 +7,7 @@ export type CodeGraphBuildResource =
   'checkout-writer' | 'home-builder-slot' | 'home-preparation-slot' | 'prepared-spool-budget';
 
 export interface CodeGraphBuildResourceState {
+  readonly candidateStage?: boolean;
   readonly legacyBuilder: boolean;
   readonly preparation: boolean;
   readonly preparedBytes: number;
@@ -15,6 +16,8 @@ export interface CodeGraphBuildResourceState {
 }
 
 export type CodeGraphBuildResourceEvent =
+  | {readonly type: 'acquire-candidate-stage'}
+  | {readonly type: 'release-candidate-stage'}
   | {readonly type: 'acquire-legacy-builder'}
   | {readonly type: 'release-legacy-builder'}
   | {readonly type: 'acquire-preparation'}
@@ -42,8 +45,15 @@ export function transitionCodeGraphBuildResourceState(
   event: CodeGraphBuildResourceEvent,
 ): CodeGraphBuildResourceState {
   switch (event.type) {
+    case 'acquire-candidate-stage':
+      if (state.candidateStage || state.legacyBuilder || state.preparation || state.writer) throw orderError('Candidate stage admission overlaps another owned resource.');
+      return {...state,candidateStage:true};
+    case 'release-candidate-stage': {
+      if (!state.candidateStage || state.preparation || state.writer) throw orderError('Candidate stage release precedes owned work closure.');
+      const next={...state}; delete next.candidateStage; return next;
+    }
     case 'acquire-legacy-builder':
-      if (state.legacyBuilder || state.preparation) {
+      if (state.candidateStage || state.legacyBuilder || state.preparation) {
         throw orderError('Legacy builder admission cannot overlap itself or scoped preparation.');
       }
       return {...state, legacyBuilder: true};
@@ -94,7 +104,7 @@ export function transitionCodeGraphBuildResourceState(
 export function codeGraphBuildResource(state: CodeGraphBuildResourceState): CodeGraphBuildResource | undefined {
   if (state.writer) return 'checkout-writer';
   if (state.preparation) return 'home-preparation-slot';
-  if (state.legacyBuilder) return 'home-builder-slot';
+  if (state.legacyBuilder || state.candidateStage) return 'home-builder-slot';
   if (state.preparedSpools > 0) return 'prepared-spool-budget';
   return undefined;
 }
@@ -109,6 +119,8 @@ export const makeCodeGraphBuildResourceCoordinator = Effect.fn('codeGraph.buildR
       return [next, next] as const;
     }).pipe(Effect.flatMap(next => observe(codeGraphBuildResource(next))));
   return {
+    acquireCandidateStage: transition({type:'acquire-candidate-stage'}),
+    releaseCandidateStage: transition({type:'release-candidate-stage'}),
     acquireLegacyBuilder: transition({type: 'acquire-legacy-builder'}),
     acquirePreparation: transition({type: 'acquire-preparation'}),
     acquirePreparedSpool: (bytes: number) => transition({bytes, type: 'acquire-prepared-spool'}),
@@ -139,3 +151,5 @@ function assertPreparedBytes(bytes: number): void {
 function orderError(message: string): CodeGraphBuildResourceOrderError {
   return CodeGraphBuildResourceOrderError.make({message});
 }
+
+export const CurrentCandidateStage = Context.Reference<boolean>('graph/CandidateStage', {defaultValue:()=>false});

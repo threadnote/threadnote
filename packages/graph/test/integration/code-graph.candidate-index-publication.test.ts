@@ -1,5 +1,18 @@
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, Path, pipe} from 'effect';
+import {
+  Array as EffectArray,
+  Cause,
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  pipe,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {describe, expect} from 'vitest';
@@ -9,11 +22,16 @@ import {makeResolutionCandidateEvidenceBuilder} from '@threadnote/graph/indexer/
 import {emptyMaterializationReplayMetrics} from '@threadnote/graph/indexer/materialization';
 import {CodeGraphStoreError} from '@threadnote/graph/types';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
-import {codeGraphLayout} from '@threadnote/graph/layout';
+import {
+  codeGraphLayout,
+  codeGraphBuilderAdmissionRoot,
+  codeGraphBuilderAdmissionSlotPath,
+  codeGraphDiskReservationRoot,
+} from '@threadnote/graph/layout';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
 import {CodeGraphObservability, CodeGraphProcessActivity} from '@threadnote/graph/runtime_ports';
-import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphStore, type CodeGraphDirectPersistentCapacityProtector} from '@threadnote/graph/store';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphIndexSummary, CodeGraphReference, CodeGraphEdge} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -79,8 +97,8 @@ const completeIndex = (databasePath: string, snapshotId: string) =>
       return db
         .query<{readonly count: number}, [string]>(
           `SELECT COUNT(*) AS count FROM snapshot_candidate_receipts AS receipt
-             JOIN snapshot_candidate_page_snapshots AS candidate ON candidate.snapshot_id = receipt.snapshot_id AND candidate.format_version = 3
-             JOIN snapshot_candidate_page_receipts AS proof ON proof.snapshot_key = candidate.snapshot_key AND proof.format_version = 3
+             JOIN snapshot_candidate_synopsis_snapshots AS candidate ON candidate.snapshot_id = receipt.snapshot_id AND candidate.format_version = 4
+             JOIN snapshot_candidate_synopsis_receipts AS proof ON proof.snapshot_key = candidate.snapshot_key AND proof.format_version = 4
                AND proof.protocol_sha = candidate.protocol_sha AND proof.authority_token = candidate.authority_token
              JOIN snapshot_candidate_authority AS authority ON authority.singleton = 1 AND authority.state = 'ready'
                AND authority.token = candidate.authority_token WHERE receipt.snapshot_id = ?`,
@@ -202,6 +220,300 @@ describe('candidate evidence publication and repeated structural updates', () =>
         expect(reported).toMatchObject({value: {unit: 'milliseconds', samples: 1, p95: 124, maximum: 124}});
       }),
     );
+
+    for (const point of ['preseal', 'postseal', 'prepromotion', 'postpromotion'] as const) {
+      it.effect(`preserves actual committed proof and pointer state when interrupted at ${point}`, () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const source = yield* CodeGraphStore;
+          const originalIndexer = yield* CodeGraphIndexer;
+          const root = yield* fs.makeTempDirectoryScoped({prefix: 'candidate-commit-cancellation-'});
+          const repository = path.join(root, 'repository'),
+            home = path.join(root, 'home');
+          yield* fs.makeDirectory(repository);
+          yield* fs.makeDirectory(home);
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+          const commit = (message: string) =>
+            git(['add', '.']).pipe(
+              Effect.andThen(
+                git([
+                  '-c',
+                  'user.name=Fixture',
+                  '-c',
+                  'user.email=fixture@example.invalid',
+                  '-c',
+                  'core.hooksPath=/dev/null',
+                  '-c',
+                  'commit.gpgsign=false',
+                  'commit',
+                  '-qm',
+                  message,
+                ]),
+              ),
+            );
+          yield* git(['init', '--quiet']);
+          yield* fs.writeFileString(path.join(repository, 'file.ts'), 'export const beforeBarrier = 1;\n');
+          yield* commit('before barrier');
+          const options = {
+            cwd: repository,
+            threadnoteHome: home,
+            sourceOnly: true,
+            vectorPolicy: 'off' as const,
+            force: true,
+            incrementalOverlay: false,
+          };
+          const old = yield* originalIndexer.index(options);
+          const layout = codeGraphLayout(path, home, old.identity.checkoutId, old.identity.worktreeId);
+          const oldGraph = yield* source.loadGraph(layout.databasePath, old.snapshot.id);
+          yield* fs.writeFileString(path.join(repository, 'file.ts'), 'export const afterBarrier = 2;\n');
+          yield* commit('after barrier');
+          const reached = yield* Deferred.make<void>(),
+            hold = yield* Deferred.make<void>();
+          const barrier = Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(hold)));
+          const receipts = new Map<string, string>();
+          const released: string[] = [];
+          const admissionFiles = new Set<string>();
+          const diskRoot = codeGraphDiskReservationRoot(path, home);
+          const admissionRoot = codeGraphBuilderAdmissionRoot(path, home);
+          const observedFs = {
+            ...fs,
+            rename: (...args: Parameters<typeof fs.rename>) =>
+              fs.rename(...args).pipe(
+                Effect.tap(() =>
+                  Effect.gen(function* () {
+                    if (
+                      EffectString.startsWith(diskRoot + path.sep)(args[1]) &&
+                      EffectString.endsWith('.json')(args[1])
+                    )
+                      receipts.set(args[1], yield* fs.readFileString(args[1]));
+                    if (
+                      EffectString.startsWith(admissionRoot + path.sep)(args[1]) &&
+                      EffectString.endsWith('.json')(args[1])
+                    )
+                      admissionFiles.add(args[1]);
+                  }),
+                ),
+              ),
+            remove: (...args: Parameters<typeof fs.remove>) =>
+              fs.remove(...args).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (receipts.has(args[0])) released.push(args[0]);
+                  }),
+                ),
+              ),
+          };
+          let targetId: string | undefined,
+            finishChildren = 0,
+            promoteCalls = 0,
+            activationReleases = 0;
+          const activationTokens = new Set<string>();
+          const stages: {
+            covered: CodeGraphDirectPersistentCapacityProtector;
+            children: number;
+            limit: number;
+            closed: boolean;
+          }[] = [];
+          const wrap = (
+            protector: CodeGraphDirectPersistentCapacityProtector,
+            finishing: boolean,
+          ): CodeGraphDirectPersistentCapacityProtector => {
+            const originalWindow = protector.candidateWindow;
+            expect(originalWindow).toBeTypeOf('function');
+            const window: NonNullable<CodeGraphDirectPersistentCapacityProtector['candidateWindow']> = (
+              plan,
+              binding,
+              gate,
+              use,
+            ) =>
+              originalWindow!(plan, binding, gate, covered => {
+                const record = {covered, children: 0, limit: plan.children, closed: false};
+                if (!finishing) stages.push(record);
+                const watched: CodeGraphDirectPersistentCapacityProtector = (boundary, transaction) => {
+                  record.children++;
+                  if (finishing) finishChildren++;
+                  const finalReceipt = finishing && record.children === 1;
+                  const before = finalReceipt && point === 'preseal' ? barrier : Effect.void;
+                  const after = finalReceipt && point === 'postseal' ? barrier : Effect.void;
+                  return covered(
+                    boundary,
+                    before.pipe(
+                      Effect.andThen(transaction),
+                      Effect.tap(() => after),
+                    ),
+                  );
+                };
+                // Delegate the exact original window, binding, gate and covered capabilities; no test-minted authority.
+                return use(Object.assign(watched, covered)).pipe(
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      record.closed = true;
+                    }),
+                  ),
+                );
+              });
+            const forwarded: CodeGraphDirectPersistentCapacityProtector = (boundary, transaction) =>
+              protector(boundary, transaction);
+            return Object.assign(forwarded, protector, {candidateWindow: window});
+          };
+          const observedStore = CodeGraphStore.of({
+            ...source,
+            stageResolutionCandidateIndex: (database, input, protector) =>
+              source.stageResolutionCandidateIndex!(database, input, protector ? wrap(protector, false) : protector),
+            finishResolutionCandidateIndex: (database, input, protector) => {
+              targetId = input.snapshotId;
+              return source.finishResolutionCandidateIndex!(
+                database,
+                input,
+                protector ? wrap(protector, true) : protector,
+              );
+            },
+            activateStaged: (...args) =>
+              source.activateStaged(...args).pipe(
+                Effect.tap(lease =>
+                  Effect.sync(() => {
+                    if (Option.isSome(lease)) activationTokens.add(lease.value);
+                  }),
+                ),
+              ),
+            releaseSnapshotLease: (database, token) =>
+              source.releaseSnapshotLease(database, token).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (activationTokens.has(token)) activationReleases++;
+                  }),
+                ),
+              ),
+            promote: (...args) => {
+              const selected = args[2] === targetId;
+              if (selected) promoteCalls++;
+              return (selected && point === 'prepromotion' ? barrier : Effect.void).pipe(
+                Effect.andThen(source.promote(...args)),
+                Effect.tap(() => (selected && point === 'postpromotion' ? barrier : Effect.void)),
+              );
+            },
+          });
+          const indexer = Context.get(
+            yield* Layer.build(
+              Layer.fresh(CodeGraphIndexer.layer).pipe(
+                Layer.provide(Layer.succeed(CodeGraphStore, observedStore)),
+                Layer.provide(Layer.succeed(FileSystem.FileSystem, observedFs)),
+              ),
+            ),
+            CodeGraphIndexer,
+          );
+          const owner = yield* indexer.index(options).pipe(Effect.forkChild);
+          yield* Deferred.await(reached);
+          if (!targetId) return yield* Effect.die('Barrier did not identify actual target');
+          const readState = () =>
+            Effect.sync(() => {
+              const db = new Database(layout.databasePath, {readonly: true});
+              try {
+                return {
+                  snapshot: db.query<{state: string}, [string]>('SELECT state FROM snapshots WHERE id=?').get(targetId!)
+                    ?.state,
+                  active: db
+                    .query<{snapshot_id: string}, [string]>(
+                      'SELECT snapshot_id FROM active_snapshots WHERE worktree_id=?',
+                    )
+                    .get(old.identity.worktreeId)?.snapshot_id,
+                  activePointer: db
+                    .query('SELECT * FROM active_snapshots WHERE worktree_id=?')
+                    .get(old.identity.worktreeId),
+                  legacyProof: db.query('SELECT * FROM snapshot_candidate_receipts WHERE snapshot_id=?').all(targetId!),
+                  currentProof: db
+                    .query(
+                      `SELECT proof.* FROM snapshot_candidate_synopsis_receipts AS proof
+                    JOIN snapshot_candidate_synopsis_snapshots AS owner ON owner.snapshot_key=proof.snapshot_key
+                    WHERE owner.snapshot_id=?`,
+                    )
+                    .all(targetId!),
+                };
+              } finally {
+                db.close();
+              }
+            });
+          const atBarrier = yield* readState();
+          expect(atBarrier.snapshot).toBe('ready');
+          expect(atBarrier.active).toBe(point === 'postpromotion' ? targetId : old.snapshot.id);
+          expect(yield* completeIndex(layout.databasePath, targetId)).toBe(point === 'preseal' ? 0 : 1);
+          expect(finishChildren).toBe(1); // Existing namespace needs only the receipt child; actual proof state confirms it.
+          expect(stages.length).toBeGreaterThan(0);
+          expect(admissionFiles.size).toBeGreaterThan(0);
+          expect(EffectArray.every(stages, stage => stage.closed)).toBe(true);
+          const beforeChildren = finishChildren,
+            beforePromotions = promoteCalls;
+          const interrupter = yield* Effect.fiberId;
+          yield* Fiber.interrupt(owner);
+          const stopped = yield* Fiber.await(owner); // interrupts and observes the joined actual indexing owner
+          expect(Exit.isFailure(stopped)).toBe(true);
+          if (Exit.isFailure(stopped)) {
+            expect(stopped.cause.reasons).toHaveLength(1);
+            expect(Cause.hasInterruptsOnly(stopped.cause)).toBe(true);
+            expect(
+              EffectArray.some(
+                stopped.cause.reasons,
+                reason => Cause.isInterruptReason(reason) && reason.fiberId === interrupter,
+              ),
+            ).toBe(true);
+          }
+          expect(yield* readState()).toEqual(atBarrier);
+          expect(yield* completeIndex(layout.databasePath, targetId)).toBe(point === 'preseal' ? 0 : 1);
+          expect(finishChildren).toBe(beforeChildren);
+          expect(promoteCalls).toBe(beforePromotions);
+          expect(activationTokens.size).toBe(1);
+          expect(activationReleases).toBe(1);
+          expect(receipts.size).toBeGreaterThan(0);
+          for (const [receipt, canonical] of receipts) {
+            expect(canonical.length).toBeGreaterThan(0);
+            expect(EffectArray.filter(released, value => value === receipt)).toHaveLength(1);
+            expect(yield* fs.exists(receipt)).toBe(false);
+          }
+          expect(yield* fs.readDirectory(diskRoot)).toEqual([]);
+          for (const file of admissionFiles) expect(yield* fs.exists(file)).toBe(false);
+          for (const slot of [0, 1] as const) {
+            expect(yield* fs.exists(codeGraphBuilderAdmissionSlotPath(path, home, slot))).toBe(false);
+            expect(yield* fs.exists(codeGraphBuilderAdmissionSlotPath(path, home, slot) + '.owner.json')).toBe(false);
+          }
+          expect(yield* fs.exists(layout.databaseWriteLockPath)).toBe(false);
+          const spare = EffectArray.findFirst(stages, stage => stage.children < stage.limit);
+          expect(Option.isSome(spare)).toBe(true);
+          let laterUse = 0;
+          if (Option.isSome(spare)) {
+            const revoked = yield* spare.value
+              .covered(
+                {operation: 'stage persistent code graph facts', rowCount: 0, finalFactBytes: 0},
+                Effect.sync(() => {
+                  laterUse++;
+                }),
+              )
+              .pipe(Effect.exit);
+            expect(Exit.isFailure(revoked)).toBe(true);
+            if (Exit.isFailure(revoked))
+              expect(revoked.cause.reasons).toMatchObject([
+                {
+                  error: {
+                    _tag: 'CodeGraphStoreError',
+                    message: 'Candidate capacity witness is stale, foreign, concurrent or exhausted.',
+                  },
+                },
+              ]);
+          }
+          expect(laterUse).toBe(0);
+          const activeGraph = yield* source.loadGraph(layout.databasePath, atBarrier.active!);
+          if (point === 'postpromotion')
+            expect(EffectArray.some(activeGraph.symbols, symbol => symbol.name === 'afterBarrier')).toBe(true);
+          else
+            expect({symbols: activeGraph.symbols, edges: activeGraph.edges}).toEqual({
+              symbols: oldGraph.symbols,
+              edges: oldGraph.edges,
+            });
+          const privateGraph = yield* source.loadGraph(layout.databasePath, targetId);
+          expect(EffectArray.some(privateGraph.symbols, symbol => symbol.name === 'afterBarrier')).toBe(true);
+        }).pipe(TestClock.withLive),
+      );
+    }
 
     for (const callback of ['typed-error', 'sync-throw', 'die'] as const) {
       for (const outcome of ['success', 'store-failure', 'interrupted'] as const) {
@@ -499,6 +811,12 @@ describe('candidate evidence publication and repeated structural updates', () =>
         const observedStore = (source: typeof store) =>
           CodeGraphStore.of({
             ...source,
+            stageResolutionCandidateIndex: (databasePath, input, protector) =>
+              Effect.gen(function* () {
+                expect(input.preparationGate?.candidateStage).toBeTypeOf('function');
+                expect(input.preparationGate?.coveredPreparation).toBeTypeOf('function');
+                return yield* source.stageResolutionCandidateIndex!(databasePath, input, protector);
+              }),
             finishResolutionCandidateIndex: (...args) =>
               source.finishResolutionCandidateIndex!(...args).pipe(
                 Effect.tap(() =>
@@ -670,16 +988,20 @@ describe('candidate evidence publication and repeated structural updates', () =>
         expect(dirty.materialization).toMatchObject({mode: 'incremental-overlay'});
         expect(yield* graph(dirty)).toEqual(yield* oracle());
         expect(yield* completeIndex(database(dirty), dirty.snapshot.id)).toBe(1);
-        // A lost populated v3 hint index cannot trigger a repository-wide CREATE INDEX during ordinary publication.
+        // A lost populated format4 namespace index cannot trigger repository-wide CREATE INDEX during ordinary publication.
+        // The fresh format4 producer never populates either retained v3 route tree.
         yield* Effect.sync(() => {
           const db = new Database(database(dirty));
           try {
             expect(
               db
-                .query<{readonly count: number}, []>('SELECT COUNT(*) AS count FROM snapshot_candidate_page_routes')
+                .query<{readonly count: number}, []>(
+                  'SELECT COUNT(*) AS count FROM snapshot_candidate_synopsis_snapshots',
+                )
                 .get()?.count,
             ).toBeGreaterThan(0);
-            db.exec('DROP INDEX snapshot_candidate_page_routes_hint');
+            expect(db.query('SELECT COUNT(*) AS count FROM snapshot_candidate_page_routes').get()).toEqual({count: 0});
+            db.exec('DROP INDEX snapshot_candidate_synopsis_snapshots_path');
           } finally {
             db.close();
           }
@@ -709,7 +1031,7 @@ describe('candidate evidence publication and repeated structural updates', () =>
           const db = new Database(database(fallback), {readonly: true});
           try {
             expect(
-              db.query("SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_page_routes_hint'").all(),
+              db.query("SELECT 1 FROM sqlite_master WHERE name = 'snapshot_candidate_synopsis_snapshots_path'").all(),
             ).toEqual([]);
             expect(db.query('SELECT state FROM snapshot_candidate_authority').all()).toEqual([{state: 'blocked'}]);
           } finally {

@@ -1,14 +1,15 @@
+import {candidateSynopsis} from './candidate_synopsis_bits.js';
 import {unzlibSync} from 'fflate';
 import {Array as EffectArray, Option} from 'effect';
 import * as EffectString from 'effect/String';
 
-export const CANDIDATE_PAGE_VERSION = 3;
+export const CANDIDATE_PAGE_VERSION = 4;
 export const CANDIDATE_PAGE_ROWS = 64;
 export const CANDIDATE_PAGE_RAW_BYTES = 65_536;
 export const CANDIDATE_PAGE_LOGICAL_BYTES = 8 * 1_048_576;
 export const CANDIDATE_CODEC_BUFFER_BYTES = 8 * CANDIDATE_PAGE_RAW_BYTES + 32_768;
 export const CANDIDATE_PAGE_PROTOCOL =
-  'candidate-v3/utf8-binary-pairs/u32be/64x65536/file-owned/sha256-first16/zlib3-libdeflate/literal-pair/prefix-v1';
+  'candidate-v4/utf8-binary-pairs/u32be/64x65536/file-owned/sha256-first16/zlib3-libdeflate/literal-pair/synopsis1024x8/prefix-v1';
 export const CANDIDATE_PAGE_PROTOCOL_SHA = Bun.SHA256.hash(CANDIDATE_PAGE_PROTOCOL, 'hex');
 const hintPrefix = new TextEncoder().encode('cgp3-sha256-first16-length-framed-pair-v1\0');
 const encoder = new TextEncoder();
@@ -20,7 +21,7 @@ export type CandidatePageCodec = 'raw-v1' | 'zlib3-v1' | 'literal-pair-v1';
 export interface CandidatePage {
   readonly ordinal: number;
   readonly pairs: readonly CandidatePair[];
-  readonly hints: readonly Uint8Array[];
+  readonly synopsis: Uint8Array;
   readonly codec: CandidatePageCodec;
   readonly rawBytes: number;
   readonly rawSha: string;
@@ -73,19 +74,26 @@ export const compareCandidatePair = (left: CandidatePair, right: CandidatePair) 
 /** Retain references to complete original strings, never a serialized-key dictionary. */
 export function canonicalCandidatePairs(values: Iterable<CandidatePair>): readonly CandidatePair[] {
   const domains = new Map<string, Set<string>>();
+  let allBmp = true;
   for (const [domain, key] of values) {
     const admitted = domains.get(domain);
     if (admitted?.has(key)) continue;
     // Reuse only this invocation's already validated immutable scalar membership.
     if ((!admitted && !candidateTextRepresentable(domain)) || !candidateTextRepresentable(key))
       throw new Error('Candidate key is not losslessly representable as SQLite UTF8.');
+    if ((!admitted && surrogateUnits.test(domain)) || surrogateUnits.test(key)) allBmp = false;
     const keys = admitted ?? new Set<string>();
     keys.add(key);
     domains.set(domain, keys);
   }
   const result: CandidatePair[] = [];
   for (const [domain, keys] of domains) for (const key of keys) result.push([domain, key]);
-  return result.sort(compareCandidatePair);
+  return result.sort(
+    allBmp
+      ? (left, right) =>
+          left[0] === right[0] ? (left[1] === right[1] ? 0 : left[1] < right[1] ? -1 : 1) : left[0] < right[0] ? -1 : 1
+      : compareCandidatePair,
+  );
 }
 
 export const candidatePairBytes = (pair: CandidatePair) => 8 + Buffer.byteLength(pair[0]) + Buffer.byteLength(pair[1]);
@@ -143,7 +151,10 @@ function encodePage(ordinal: number, pairs: readonly CandidatePair[], hints: Bun
   const rawBytes = 8 + EffectArray.reduce(pairs, 0, (n, pair) => n + candidatePairBytes(pair));
   if (pairs.length === 0 || pairs.length > CANDIDATE_PAGE_ROWS || rawBytes > CANDIDATE_PAGE_LOGICAL_BYTES)
     throw new Error('Candidate page exceeds its unchanged logical limits.');
-  const routeHints = EffectArray.map(pairs, pair => hintWith(hints, pair));
+  function* pageHints() {
+    for (const pair of pairs) yield hintWith(hints, pair);
+  }
+  const synopsis = candidateSynopsis(pageHints());
   if (rawBytes > CANDIDATE_PAGE_RAW_BYTES) {
     if (pairs.length !== 1) throw new Error('Only one full literal pair may exceed a normal page.');
     const hash = new Bun.CryptoHasher('sha256');
@@ -152,7 +163,7 @@ function encodePage(ordinal: number, pairs: readonly CandidatePair[], hints: Bun
     return {
       ordinal,
       pairs,
-      hints: routeHints,
+      synopsis,
       codec: 'literal-pair-v1',
       rawBytes,
       rawSha: hash.digest('hex'),
@@ -191,7 +202,7 @@ function encodePage(ordinal: number, pairs: readonly CandidatePair[], hints: Bun
   return {
     ordinal,
     pairs,
-    hints: routeHints,
+    synopsis,
     codec,
     rawBytes,
     rawSha,

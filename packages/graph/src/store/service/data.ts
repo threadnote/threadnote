@@ -203,7 +203,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
               yield* ensureSchemaInitialized(databasePath, sql);
               yield* stageResolutionCandidateIndex(
                 sql,
-                input,
+                {...input, databasePath},
                 effect => withWriterGate(databasePath, effect),
                 protector,
               );
@@ -222,7 +222,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
               yield* ensureSchemaInitialized(databasePath, sql);
               return yield* finishResolutionCandidateIndex(
                 sql,
-                input,
+                {...input, databasePath},
                 effect => withWriterGate(databasePath, effect),
                 protector,
               );

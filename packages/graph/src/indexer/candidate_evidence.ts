@@ -71,7 +71,9 @@ export function makeResolutionCandidateEvidenceBuilder(
     finish: (identity: ResolutionCandidateIndexFinish) => {
       const finishIndex = input.store.finishResolutionCandidateIndex;
       return finishIndex
-        ? timedCandidateWrite(finishIndex(input.layout.databasePath, identity, protector))
+        ? timedCandidateWrite(
+            finishIndex(input.layout.databasePath, {...identity, preparationGate: runPreparation}, protector),
+          )
         : Effect.succeed(false);
     },
     stageFull: Effect.fn('codeGraph.stageFullCandidateEvidence')(function* (batch: {

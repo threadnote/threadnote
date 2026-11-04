@@ -1,6 +1,7 @@
+import {CurrentCandidateStage} from '../build/resources.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
-import {Clock, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import {Clock, Context, DateTime, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -70,6 +71,10 @@ export function withCodeGraphBuilderAdmission<A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | unknown, R | SecureRandom.SecureRandom | FileSystem.FileSystem | Path.Path | SystemInfo> {
   return Effect.gen(function* () {
+    if (yield* CurrentCandidateStage)
+      return yield* CodeGraphBuilderAdmissionError.make({
+        message: 'Candidate stage cannot acquire another home ticket.',
+      });
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
@@ -102,10 +107,18 @@ export function withCodeGraphBuilderAdmission<A, E, R>(
                   Effect.gen(function* () {
                     const ownership = yield* claimSlot(fs, path, system, options.threadnoteHome, ticket, slot);
                     if (!ownership) return {state: 'contended' as const};
-                    return yield* (options.onAdmitted ?? Effect.void).pipe(
-                      Effect.andThen(waitingReported ? (options.onResumed ?? Effect.void) : Effect.void),
-                      Effect.andThen(effect),
-                      Effect.map(value => ({state: 'completed' as const, value})),
+                    return yield* withOwnedBuilderSlot(
+                      fs,
+                      path,
+                      system,
+                      options.threadnoteHome,
+                      ticket,
+                      slot,
+                      (options.onAdmitted ?? Effect.void).pipe(
+                        Effect.andThen(waitingReported ? (options.onResumed ?? Effect.void) : Effect.void),
+                        Effect.andThen(effect),
+                        Effect.map(value => ({state: 'completed' as const, value})),
+                      ),
                     );
                   }).pipe(
                     Effect.ensuring(
@@ -342,7 +355,7 @@ const readSlotOwnership = Effect.fn('codeGraph.builderAdmission.readSlot')(funct
   )
     return undefined;
   const ticket = parseTicket(JSON.stringify(value), value.token);
-  return ticket ? {lockToken: value.lockToken, ticket} : undefined;
+  return ticket ? {lockToken: value.lockToken, ticket, canonical: content} : undefined;
 });
 
 function sameAdmissionFileInfo(left: FileSystem.File.Info, right: FileSystem.File.Info): boolean {
@@ -489,3 +502,159 @@ const removeOwnedTicket = Effect.fn('codeGraph.builderAdmission.removeTicket')(f
     }),
   );
 });
+
+interface BuilderSlotWitness {
+  readonly identity: symbol;
+}
+interface BuilderSlotState {
+  readonly fs: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly system: SystemInfoShape;
+  readonly home: string;
+  readonly slot: 0 | 1;
+  readonly ticket: OwnedTicket;
+  readonly canonical: string;
+  readonly lockToken: string;
+  readonly fiberId: number;
+  active: boolean;
+}
+const ownedBuilderSlots = new WeakMap<object, BuilderSlotState>();
+const CurrentBuilderSlot = Context.Reference<BuilderSlotWitness | undefined>('graph/ActualBuilderSlot', {
+  defaultValue: () => undefined,
+});
+const CurrentCandidateSlot = Context.Reference<
+  {readonly witness: BuilderSlotWitness; readonly mode: 'new' | 'borrowed'} | undefined
+>('graph/ActualCandidateSlot', {defaultValue: () => undefined});
+
+/** Only the actual selected-ticket/slot callback may mint this invocation-local authority. */
+function withOwnedBuilderSlot<A, E, R>(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  system: SystemInfoShape,
+  home: string,
+  ticket: OwnedTicket,
+  slot: 0 | 1,
+  effect: Effect.Effect<A, E, R>,
+) {
+  return Effect.acquireUseRelease(
+    Effect.gen(function* () {
+      const slotPath = codeGraphBuilderAdmissionSlotPath(path, home, slot);
+      const owner = yield* readExclusiveFileLockOwner(fs, slotPath);
+      const ownership = yield* readSlotOwnership(fs, slotPath);
+      if (
+        Option.isNone(owner) ||
+        !ownership ||
+        ownership.ticket.token !== ticket.token ||
+        ownership.lockToken !== owner.value.token ||
+        ownership.canonical !== JSON.stringify({...JSON.parse(ticket.serialized), lockToken: owner.value.token})
+      )
+        return yield* CodeGraphBuilderAdmissionError.make({message: 'Actual builder slot ownership is unavailable.'});
+      const witness = Object.freeze({identity: Symbol('builder-slot')});
+      ownedBuilderSlots.set(witness, {
+        fs,
+        path,
+        system,
+        home,
+        slot,
+        ticket,
+        canonical: ownership.canonical,
+        lockToken: owner.value.token,
+        fiberId: yield* Effect.fiberId,
+        active: true,
+      });
+      return witness;
+    }),
+    witness => Effect.scoped(effect).pipe(Effect.provideService(CurrentBuilderSlot, witness)),
+    witness =>
+      Effect.sync(() => {
+        const state = ownedBuilderSlots.get(witness);
+        if (state) state.active = false;
+      }),
+  );
+}
+
+/** Live bounded ownership proof. Resource-coordinator booleans never grant slot authority. */
+const assertBuilderSlot = Effect.fn('codeGraph.builderAdmission.assertOwnedSlot')(function* (
+  witness: BuilderSlotWitness,
+  expected: {readonly threadnoteHome: string; readonly identity: CodeGraphBuilderAdmissionIdentity},
+) {
+  const state = ownedBuilderSlots.get(witness);
+  const fs = yield* FileSystem.FileSystem,
+    path = yield* Path.Path,
+    system = yield* SystemInfo;
+  if (
+    !state ||
+    !state.active ||
+    state.fs !== fs ||
+    state.path !== path ||
+    state.system !== system ||
+    state.home !== expected.threadnoteHome ||
+    state.fiberId !== (yield* Effect.fiberId) ||
+    state.ticket.checkoutId !== expected.identity.checkoutId ||
+    state.ticket.worktreeId !== expected.identity.worktreeId ||
+    (expected.identity.requestKey !== undefined && state.ticket.requestKey !== expected.identity.requestKey) ||
+    (expected.identity.desiredOverlayDigest !== undefined &&
+      state.ticket.desiredOverlayDigest !== expected.identity.desiredOverlayDigest)
+  )
+    return yield* CodeGraphBuilderAdmissionError.make({
+      message: 'Builder slot witness is stale, foreign or belongs to another invocation.',
+    });
+  const slotPath = codeGraphBuilderAdmissionSlotPath(path, state.home, state.slot);
+  const owner = yield* readExclusiveFileLockOwner(fs, slotPath);
+  const current = yield* readSlotOwnership(fs, slotPath);
+  if (
+    Option.isNone(owner) ||
+    owner.value.token !== state.lockToken ||
+    !current ||
+    current.lockToken !== state.lockToken ||
+    current.canonical !== state.canonical
+  )
+    return yield* CodeGraphBuilderAdmissionError.make({message: 'Builder slot ticket or lock ownership changed.'});
+});
+
+/** New slots are released by their own bracket. A same-invocation borrowed slot is never released here. */
+export function withCodeGraphCandidateStageSlot<A, E, R>(
+  expected: {readonly threadnoteHome: string; readonly identity: CodeGraphBuilderAdmissionIdentity},
+  acquireNew: <B, E2, R2>(effect: Effect.Effect<B, E2, R2>) => Effect.Effect<B, E2 | unknown, R2>,
+  effect: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    if (yield* CurrentCandidateStage)
+      return yield* CodeGraphBuilderAdmissionError.make({message: 'Nested candidate stage ownership is forbidden.'});
+    const previous = yield* CurrentBuilderSlot;
+    const use = (witness: BuilderSlotWitness, mode: 'new' | 'borrowed') =>
+      assertBuilderSlot(witness, expected).pipe(
+        Effect.andThen(
+          Effect.scoped(effect).pipe(
+            Effect.provideService(CurrentCandidateSlot, {witness, mode}),
+            Effect.provideService(CurrentCandidateStage, true),
+          ),
+        ),
+      );
+    if (previous) return yield* use(previous, 'borrowed');
+    return yield* acquireNew(
+      Effect.gen(function* () {
+        const owned = yield* CurrentBuilderSlot;
+        if (!owned)
+          return yield* CodeGraphBuilderAdmissionError.make({
+            message: 'Candidate stage admission did not provide its actual owned slot.',
+          });
+        return yield* use(owned, 'new');
+      }),
+    );
+  });
+}
+
+export const codeGraphCandidateStageOwnership = Effect.fn('codeGraph.builderAdmission.candidateOwnership')(
+  function* (expected: {readonly threadnoteHome: string; readonly identity: CodeGraphBuilderAdmissionIdentity}) {
+    const current = yield* CurrentCandidateSlot;
+    if (!current)
+      return yield* CodeGraphBuilderAdmissionError.make({message: 'Candidate stage has no actual slot witness.'});
+    yield* assertBuilderSlot(current.witness, expected);
+    return current.mode;
+  },
+);
+
+/** @internal Read-only ownership evidence and validation seam; neither can mint or revive a witness. */
+export const currentCodeGraphBuilderSlotForTest = Effect.map(CurrentBuilderSlot, witness => witness);
+export const assertCodeGraphBuilderSlotForTest = assertBuilderSlot;

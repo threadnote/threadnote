@@ -459,7 +459,9 @@
     "./workspace/diagnostics": "./src/workspace/diagnostics.ts",
     "./workspace/node": "./src/workspace/node.ts",
     "./workspace/primitives": "./src/workspace/primitives.ts",
-    "./worktree_reconciliation": "./src/worktree_reconciliation.ts"
+    "./worktree_reconciliation": "./src/worktree_reconciliation.ts",
+    "./store/resolution/candidate_synopsis": "./src/store/resolution/candidate_synopsis.ts",
+    "./store/resolution/candidate_capacity": "./src/store/resolution/candidate_capacity.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",

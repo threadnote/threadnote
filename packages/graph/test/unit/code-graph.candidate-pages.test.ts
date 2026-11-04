@@ -1,3 +1,4 @@
+import {candidateSynopsis} from '@threadnote/graph/store/resolution/candidate_synopsis';
 import {Array as EffectArray} from 'effect';
 import * as EffectString from 'effect/String';
 import {describe, expect, it} from 'vitest';
@@ -145,7 +146,7 @@ describe('complete file-owned candidate key pages', () => {
     ]);
     for (const page of pages) {
       expect(decodeCandidatePage(page.payload!, envelope(page))).toEqual(page.pairs);
-      expect(page.hints).toEqual(EffectArray.map(page.pairs, candidatePairHint));
+      expect(page.synopsis).toEqual(candidateSynopsis(EffectArray.map(page.pairs, candidatePairHint)));
     }
     expect(pages[0].pairs[63]).toEqual(pairs[63]);
     expect(pages[1].pairs[0]).toEqual(pairs[64]);

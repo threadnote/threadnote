@@ -62,13 +62,13 @@ const initializeSchema = Effect.fn('codeGraph.initializeSchema')(function* (sql:
     `PRAGMA wal_autocheckpoint = ${Math.max(1, Math.floor(CODE_GRAPH_WAL_AUTOCHECKPOINT_BYTES / pageSize))}`,
   );
   if (receiptCurrent) {
-    if (yield* ensureResolutionCandidateIndexSchema(sql)) yield* recordCodeGraphSchemaInitializationReceipt(sql);
+    if (yield* ensureResolutionCandidateIndexSchema(sql, false)) yield* recordCodeGraphSchemaInitializationReceipt(sql);
     if ((yield* codeGraphEmbeddingDemandSchemaState(sql)) !== 'ready')
       return yield* CodeGraphStoreError.of('Code graph embedding demand authority is incompatible.');
     return;
   }
   yield* initializeSchemaFully(sql);
-  yield* ensureResolutionCandidateIndexSchema(sql);
+  yield* ensureResolutionCandidateIndexSchema(sql, false);
   yield* recordCodeGraphSchemaInitializationReceipt(sql);
 });
 

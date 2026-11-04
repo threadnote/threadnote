@@ -1,13 +1,22 @@
 import {
+  candidateCapacityPlan,
+  candidateProjectionCapacityPlan,
+  candidatePreparationWork,
+  assertCurrentCandidateCapacity,
+} from './candidate_capacity.js';
+import {
   CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_FILES,
   CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_ROWS,
   CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES,
 } from '../../incremental/work.js';
-import {Effect} from 'effect';
+import {Array as EffectArray, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {CodeGraphStoreError} from '../../types.js';
 import type {CodeGraphDirectPersistentCapacityProtector} from '../models.js';
 import {
+  ensureResolutionCandidateIndexSchema,
+  CANDIDATE_SCHEMA_BOOTSTRAP_ROWS,
+  CANDIDATE_SCHEMA_BOOTSTRAP_BYTES,
   RESOLUTION_CANDIDATE_INDEX_PAGE_ROWS,
   RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
   RESOLUTION_CANDIDATE_INDEX_VERSION,
@@ -22,7 +31,6 @@ import {
   completeCandidateFiles,
   type CandidateFileCompletion,
   type CandidateWriteOperation,
-  candidatePreparationWork,
   candidateSnapshotKey,
   prepareCandidateFiles,
   type CandidatePreparedFile,
@@ -49,6 +57,7 @@ export function candidateIndexWrite<A, E, R>(
   const write = writer(
     sql.withTransaction(
       Effect.gen(function* () {
+        yield* assertCurrentCandidateCapacity(sql);
         if (
           authorityToken !== undefined &&
           ((schemaVersion === undefined
@@ -58,6 +67,7 @@ export function candidateIndexWrite<A, E, R>(
             (yield* resolutionCandidateAuthorityToken(sql)) !== authorityToken)
         )
           return yield* Effect.fail(authorityChanged);
+        yield* assertCurrentCandidateCapacity(sql);
         return yield* effect;
       }),
     ),
@@ -95,10 +105,15 @@ export const candidateIndexPages = Effect.fn('codeGraph.candidateIndexPages')(fu
 
 /** One full schema admission, then compare its monotonically changed SQLite cookie inside every guarded transaction. */
 const candidateWriteAdmission = Effect.fn('codeGraph.candidateWriteAdmission')(function* (sql: SqlClient.SqlClient) {
+  yield* assertCurrentCandidateCapacity(sql);
   const before = (yield* sql<{readonly schema_version: number}>`PRAGMA schema_version`)[0]?.schema_version;
+  yield* assertCurrentCandidateCapacity(sql);
   if (!(yield* resolutionCandidateIndexSchemaReady(sql))) return undefined;
+  yield* assertCurrentCandidateCapacity(sql);
   const token = yield* resolutionCandidateAuthorityToken(sql);
+  yield* assertCurrentCandidateCapacity(sql);
   const after = (yield* sql<{readonly schema_version: number}>`PRAGMA schema_version`)[0]?.schema_version;
+  yield* assertCurrentCandidateCapacity(sql);
   return token && before !== undefined && before === after ? {token, schemaVersion: before} : undefined;
 });
 
@@ -119,8 +134,8 @@ const stagePreparedCandidateFiles = Effect.fn('codeGraph.stagePreparedCandidateF
       1,
       Buffer.byteLength(snapshotId) + 256,
       Effect.gen(function* () {
-        yield* sql`INSERT OR IGNORE INTO snapshot_candidate_page_snapshots
-        (snapshot_id,authority_token,protocol_sha,format_version) VALUES (${snapshotId},${admission.token},${CANDIDATE_PAGE_PROTOCOL_SHA},3)`;
+        yield* sql`INSERT OR IGNORE INTO snapshot_candidate_synopsis_snapshots
+        (snapshot_id,authority_token,protocol_sha,format_version) VALUES (${snapshotId},${admission.token},${CANDIDATE_PAGE_PROTOCOL_SHA},4)`;
         return yield* candidateSnapshotKey(sql, snapshotId, admission.token);
       }),
     );
@@ -184,24 +199,70 @@ const stageResolutionCandidateIndexInternal = Effect.fn('codeGraph.stageCandidat
   writer: CandidateIndexWriter,
   protector?: CodeGraphDirectPersistentCapacityProtector,
 ) {
-  if (!(yield* resolutionCandidateIndexSchemaReady(sql))) return;
-  const work = yield* Effect.try(() => candidatePreparationWork(input));
-  const prepare = Effect.try(() => prepareCandidateFiles(input));
-  const ownedPreparation = input.preparationGate ? input.preparationGate(prepare) : prepare;
-  // Reservation admission/maintenance precedes preparation ownership; no writer wait is nested inside the preparation gate.
-  const files = yield* protector
-    ? protector(
-        {operation: 'stage persistent code graph facts', rowCount: work.rowCount, finalFactBytes: work.originalBytes},
-        ownedPreparation,
-      )
-    : ownedPreparation;
-  yield* stagePreparedCandidateFiles(sql, input.snapshotId, files, writer, protector);
+  if (!(yield* resolutionCandidateIndexSchemaReady(sql))) {
+    if (
+      (yield* sql`SELECT 1 FROM snapshot_candidate_authority WHERE singleton = 1 AND state = 'blocked' LIMIT 1`)
+        .length > 0
+    )
+      return;
+    const bootstrap = writer(ensureResolutionCandidateIndexSchema(sql));
+    const boundary = {
+      operation: 'stage persistent code graph facts' as const,
+      rowCount: CANDIDATE_SCHEMA_BOOTSTRAP_ROWS,
+      finalFactBytes: CANDIDATE_SCHEMA_BOOTSTRAP_BYTES,
+    };
+    yield* protector?.candidateBootstrap
+      ? protector.candidateBootstrap(boundary, input.preparationGate, bootstrap)
+      : protector
+        ? protector(boundary, bootstrap)
+        : bootstrap;
+    if (!(yield* resolutionCandidateIndexSchemaReady(sql))) return;
+  }
+  const plan = yield* Effect.try(() => candidateCapacityPlan(input));
+  const authority = yield* resolutionCandidateAuthorityToken(sql);
+  if (!authority) return;
+  const run = (covered: CodeGraphDirectPersistentCapacityProtector | undefined, window: boolean) =>
+    Effect.gen(function* () {
+      const work = yield* Effect.try(() => candidatePreparationWork(input));
+      const prepare = Effect.try(() => {
+        if (candidateCapacityPlan(input).sourceFingerprint !== plan.sourceFingerprint)
+          throw new Error('Candidate source changed after admission.');
+        return prepareCandidateFiles(input);
+      });
+      const gate = window ? input.preparationGate?.coveredPreparation : input.preparationGate;
+      const ownedPreparation = gate ? gate(prepare) : prepare;
+      const files = yield* covered
+        ? covered(
+            {
+              operation: 'stage persistent code graph facts',
+              rowCount: work.rowCount,
+              finalFactBytes: work.originalBytes,
+            },
+            ownedPreparation,
+          )
+        : ownedPreparation;
+      yield* stagePreparedCandidateFiles(sql, input.snapshotId, files, writer, covered);
+    });
+  if (protector?.candidateWindow)
+    yield* protector.candidateWindow(
+      plan,
+      {
+        sql,
+        databasePath: input.databasePath ?? 'unbound-candidate-database',
+        snapshotId: input.snapshotId,
+        authority,
+        sourceFingerprint: plan.sourceFingerprint,
+      },
+      input.preparationGate,
+      covered => run(covered, true),
+    );
+  else yield* run(protector, false);
 });
 
 export const stageResolutionCandidateIndex = (...args: Parameters<typeof stageResolutionCandidateIndexInternal>) =>
   stageResolutionCandidateIndexInternal(...args).pipe(Effect.catchIf(isAuthorityChanged, () => Effect.void));
 
-/** Carry every key/hyperedge of each bounded inherited file, including keys not queried by this change. */
+/** First admit bounded metadata for every inherited file; only a fresh owned window may hydrate payload. */
 const inheritCandidateDelta = Effect.fn('codeGraph.inheritCandidateDelta')(function* (
   sql: SqlClient.SqlClient,
   snapshotId: string,
@@ -209,22 +270,44 @@ const inheritCandidateDelta = Effect.fn('codeGraph.inheritCandidateDelta')(funct
   authorityToken: string,
   writer: CandidateIndexWriter,
   protector?: CodeGraphDirectPersistentCapacityProtector,
+  gate?: import('../models.js').CodeGraphPreparationGate,
+  databasePath?: string,
 ) {
   const snapshotKey = yield* candidateSnapshotKey(sql, inheritedId, authorityToken);
   if (snapshotKey === undefined) return false;
-  const files: CandidatePreparedFile[] = [];
-  let copiedRows = 0;
-  let copiedBytes = 0;
-  let afterFile = -1;
+  const metadata: {
+    fileKey: number;
+    path: string;
+    contentHash: string;
+    associations: number;
+    pages: number;
+    reexports: number;
+    originalBytes: number;
+    canonicalSha: string;
+  }[] = [];
+  let copiedRows = 0,
+    copiedBytes = 0,
+    after = -1,
+    identityBytes = 0,
+    associations = 0,
+    pages = 0,
+    reexports = 0,
+    originalBytes = 0,
+    rawBytes = 0,
+    storedBytes = 0,
+    literals = 0,
+    reexportBytes = 0;
+  const hash = new Bun.CryptoHasher('sha256');
+  hash.update(inheritedId);
+  hash.update(authorityToken);
   for (;;) {
-    // Pre-exhaustion precedes even the next metadata cursor; a nonempty sentinel is charged.
     if (
       copiedRows >= CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_ROWS ||
       copiedBytes + 256 > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES
     )
       return false;
-    const remainingBytes = CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES - copiedBytes - 256;
-    const metadata = yield* sql<{
+    const left = CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES - copiedBytes - 256;
+    const rows = yield* sql<{
       readonly file_key: number;
       readonly path: string | null;
       readonly content_hash: string | null;
@@ -233,78 +316,191 @@ const inheritCandidateDelta = Effect.fn('codeGraph.inheritCandidateDelta')(funct
       readonly page_count: number;
       readonly original_tuple_bytes: number;
       readonly canonical_sha: string;
+      readonly eligible: number;
     }>`
-      SELECT prior.file_key, CASE WHEN length(CAST(prior.path AS BLOB)) + length(CAST(prior.content_hash AS BLOB)) <= ${remainingBytes}
-        THEN prior.path ELSE NULL END AS path,
-        CASE WHEN length(CAST(prior.path AS BLOB)) + length(CAST(prior.content_hash AS BLOB)) <= ${remainingBytes}
-        THEN prior.content_hash ELSE NULL END AS content_hash,
-        prior.association_count,prior.reexport_count,prior.page_count,prior.original_tuple_bytes,prior.canonical_sha
-      FROM snapshot_candidate_page_files AS prior WHERE prior.snapshot_key = ${snapshotKey} AND prior.sealed = 1
-        AND prior.file_key > ${afterFile} AND EXISTS (SELECT 1 FROM snapshot_files AS current
-          WHERE current.snapshot_id = ${snapshotId} AND current.path = prior.path AND current.content_hash = prior.content_hash)
-        AND NOT EXISTS (SELECT 1 FROM snapshot_candidate_files AS fresh WHERE fresh.snapshot_id = ${snapshotId} AND fresh.path = prior.path)
-      ORDER BY prior.file_key LIMIT 1`;
+      SELECT prior.file_key,CASE WHEN length(CAST(prior.path AS BLOB))+length(CAST(prior.content_hash AS BLOB))<=${left} THEN prior.path ELSE NULL END AS path,
+      CASE WHEN length(CAST(prior.path AS BLOB))+length(CAST(prior.content_hash AS BLOB))<=${left} THEN prior.content_hash ELSE NULL END AS content_hash,
+      prior.association_count,prior.reexport_count,prior.page_count,prior.original_tuple_bytes,prior.canonical_sha,
+      CASE WHEN prior.sealed=1 AND EXISTS(SELECT 1 FROM snapshot_files AS current WHERE current.snapshot_id=${snapshotId} AND current.path=prior.path AND current.content_hash=prior.content_hash)
+        AND NOT EXISTS(SELECT 1 FROM snapshot_candidate_files AS fresh WHERE fresh.snapshot_id=${snapshotId} AND fresh.path=prior.path) THEN 1 ELSE 0 END AS eligible
+      FROM snapshot_candidate_synopsis_files AS prior WHERE prior.snapshot_key=${snapshotKey} AND prior.file_key>${after} ORDER BY prior.file_key LIMIT 1`;
     copiedBytes += 256;
-    if (metadata.length === 0) break;
+    if (rows.length === 0) break;
     copiedRows += 1;
-    if (files.length >= CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_FILES) return false;
-    const file = metadata[0];
-    afterFile = file.file_key;
-    if (file.path === null || file.content_hash === null) return false;
-    copiedBytes += Buffer.byteLength(file.path) + Buffer.byteLength(file.content_hash);
-    const logicalRows = file.association_count * 2 + file.page_count + file.reexport_count + 2;
+    const row = rows[0];
+    if (
+      !Number.isSafeInteger(row.file_key) ||
+      row.file_key <= 0 ||
+      row.path === null ||
+      row.content_hash === null ||
+      !EffectArray.every(
+        [row.association_count, row.page_count, row.reexport_count, row.original_tuple_bytes],
+        n => Number.isSafeInteger(n) && n >= 0,
+      )
+    )
+      return false;
+    after = row.file_key;
+    copiedBytes += Buffer.byteLength(row.path) + Buffer.byteLength(row.content_hash);
+    if (row.eligible !== 0 && row.eligible !== 1) return false;
+    if (row.eligible === 0) continue;
+    if (metadata.length >= CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_FILES) return false;
+    const logicalRows = row.association_count * 2 + row.page_count + row.reexport_count + 2;
     if (
       !Number.isSafeInteger(logicalRows) ||
       logicalRows < 0 ||
-      copiedRows + logicalRows > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_ROWS ||
-      copiedBytes + file.original_tuple_bytes > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES
+      copiedRows + logicalRows > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_ROWS
     )
       return false;
-    const totals = yield* sql<{readonly rows: number; readonly bytes: number}>`SELECT COUNT(*) AS rows,
-      COALESCE(SUM(raw_bytes + stored_bytes + 256),0) AS bytes FROM (SELECT raw_bytes,stored_bytes FROM snapshot_candidate_pages
-        WHERE snapshot_key = ${snapshotKey} AND file_key = ${file.file_key} LIMIT ${file.page_count + 1})`;
-    if (totals[0]?.rows !== file.page_count || !Number.isSafeInteger(totals[0].bytes)) return false;
-    copiedBytes += totals[0].bytes + file.original_tuple_bytes;
+    const pageTotals = (yield* sql<{
+      readonly rows: number;
+      readonly raw: number;
+      readonly stored: number;
+      readonly literals: number;
+    }>`SELECT COUNT(*) AS rows,
+      COALESCE(SUM(raw_bytes),0) AS raw,COALESCE(SUM(stored_bytes),0) AS stored,COALESCE(SUM(codec='literal-pair-v1'),0) AS literals
+      FROM(SELECT raw_bytes,stored_bytes,codec FROM snapshot_candidate_synopsis_pages WHERE snapshot_key=${snapshotKey} AND file_key=${row.file_key} LIMIT ${row.page_count + 1})`)[0];
+    const edgeTotals = (yield* sql<{
+      readonly rows: number;
+      readonly bytes: number;
+    }>`SELECT COUNT(*) AS rows,COALESCE(SUM(bytes),0) AS bytes FROM(
+      SELECT length(CAST(edge_id AS BLOB))+length(CAST(payload_json AS BLOB)) AS bytes FROM snapshot_candidate_reexports
+      WHERE snapshot_id=${inheritedId} AND evidence_path=${row.path} LIMIT ${row.reexport_count + 1})`)[0];
+    if (!pageTotals || pageTotals.rows !== row.page_count || !edgeTotals || edgeTotals.rows !== row.reexport_count)
+      return false;
+    const total =
+      pageTotals.raw +
+      pageTotals.stored +
+      416 * row.page_count +
+      row.original_tuple_bytes +
+      edgeTotals.bytes +
+      128 * (row.reexport_count + 1);
+    if (
+      !Number.isSafeInteger(total) ||
+      total < 0 ||
+      copiedBytes + total > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES
+    )
+      return false;
     copiedRows += logicalRows;
-    if (copiedBytes > CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES) return false;
-    const projection = yield* readCandidateFileProjection(
-      sql,
-      snapshotKey,
-      file.file_key,
-      file.path,
-      file.association_count,
-      file.page_count,
-      file.canonical_sha,
-    );
-    if (!projection) return false;
-    const reexports: {id: string; json: string}[] = [];
-    let afterEdge: string | undefined;
-    for (;;) {
-      const left = CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES - copiedBytes;
-      if (left < 128) return false;
-      copiedBytes += 128;
-      const rows = yield* sql.unsafe<{readonly edge_id: string | null; readonly payload_json: string | null}>(
-        `
-        SELECT CASE WHEN length(CAST(edge_id AS BLOB)) + length(CAST(payload_json AS BLOB)) <= ? THEN edge_id ELSE NULL END AS edge_id,
-          CASE WHEN length(CAST(edge_id AS BLOB)) + length(CAST(payload_json AS BLOB)) <= ? THEN payload_json ELSE NULL END AS payload_json
-        FROM snapshot_candidate_reexports WHERE snapshot_id = ? AND evidence_path = ? ${afterEdge === undefined ? '' : 'AND edge_id > ?'}
-        ORDER BY edge_id LIMIT 1`,
-        [left - 128, left - 128, inheritedId, file.path, ...(afterEdge === undefined ? [] : [afterEdge])],
-      );
-      if (rows.length === 0) break;
-      const row = rows[0];
-      if (row.edge_id === null || row.payload_json === null || reexports.length >= file.reexport_count) return false;
-      copiedBytes += Buffer.byteLength(row.edge_id) + Buffer.byteLength(row.payload_json);
-      reexports.push({id: row.edge_id, json: row.payload_json});
-      afterEdge = row.edge_id;
-    }
-    if (reexports.length !== file.reexport_count) return false;
-    files.push({path: file.path, contentHash: file.content_hash, pairs: projection.pairs, reexports});
+    copiedBytes += total;
+    associations += row.association_count;
+    pages += row.page_count;
+    reexports += row.reexport_count;
+    originalBytes +=
+      row.original_tuple_bytes +
+      row.association_count * Math.max(0, Buffer.byteLength(snapshotId) - Buffer.byteLength(inheritedId));
+    rawBytes += pageTotals.raw;
+    storedBytes += pageTotals.stored;
+    literals += pageTotals.literals;
+    identityBytes += Buffer.byteLength(snapshotId) + Buffer.byteLength(row.path) + Buffer.byteLength(row.content_hash);
+    reexportBytes +=
+      edgeTotals.bytes + (Buffer.byteLength(snapshotId) + Buffer.byteLength(row.path)) * row.reexport_count;
+    const record = {
+      fileKey: row.file_key,
+      path: row.path,
+      contentHash: row.content_hash,
+      associations: row.association_count,
+      pages: row.page_count,
+      reexports: row.reexport_count,
+      originalBytes: row.original_tuple_bytes,
+      canonicalSha: row.canonical_sha,
+    };
+    metadata.push(record);
+    hash.update(JSON.stringify(record));
   }
-  // Recheck inherited authority before carrying fully verified independent tuples into the current file-owned pages.
-  if ((yield* resolutionCandidateAuthorityToken(sql)) !== authorityToken) return false;
-  yield* stagePreparedCandidateFiles(sql, snapshotId, files, writer, protector);
-  return true;
+  const plan = candidateProjectionCapacityPlan({
+    snapshotId,
+    sourceFingerprint: hash.digest('hex'),
+    files: metadata.length,
+    associations,
+    pages,
+    reexports,
+    literals,
+    identityBytes,
+    originalBytes,
+    rawBytes,
+    storedBytes,
+    reexportBytes,
+  });
+  const run = (covered: CodeGraphDirectPersistentCapacityProtector | undefined, window: boolean) =>
+    Effect.gen(function* () {
+      const read = Effect.gen(function* () {
+        const files: CandidatePreparedFile[] = [];
+        for (const file of metadata) {
+          const projection = yield* readCandidateFileProjection(
+            sql,
+            snapshotKey,
+            file.fileKey,
+            file.path,
+            file.associations,
+            file.pages,
+            file.canonicalSha,
+          );
+          if (!projection) return undefined;
+          yield* assertCurrentCandidateCapacity(sql);
+          const edges: {id: string; json: string}[] = [];
+          let edgeAfter: string | undefined;
+          let edgeBytes = 0;
+          for (;;) {
+            yield* assertCurrentCandidateCapacity(sql);
+            const remaining = CODE_GRAPH_INCREMENTAL_FOLD_FORWARD_MAX_PAYLOAD_BYTES - edgeBytes;
+            if (remaining < 128) return undefined;
+            edgeBytes += 128;
+            const rows = yield* sql.unsafe<{readonly edge_id: string | null; readonly payload_json: string | null}>(
+              `SELECT
+            CASE WHEN length(CAST(edge_id AS BLOB))+length(CAST(payload_json AS BLOB))<=? THEN edge_id ELSE NULL END AS edge_id,
+            CASE WHEN length(CAST(edge_id AS BLOB))+length(CAST(payload_json AS BLOB))<=? THEN payload_json ELSE NULL END AS payload_json
+            FROM snapshot_candidate_reexports WHERE snapshot_id=? AND evidence_path=? ${edgeAfter === undefined ? '' : 'AND edge_id>?'} ORDER BY edge_id LIMIT 1`,
+              [
+                remaining - 128,
+                remaining - 128,
+                inheritedId,
+                file.path,
+                ...(edgeAfter === undefined ? [] : [edgeAfter]),
+              ],
+            );
+            yield* assertCurrentCandidateCapacity(sql);
+            if (rows.length === 0) break;
+            const row = rows[0];
+            if (row.edge_id === null || row.payload_json === null || edges.length >= file.reexports) return undefined;
+            edgeBytes += Buffer.byteLength(row.edge_id) + Buffer.byteLength(row.payload_json);
+            edges.push({id: row.edge_id, json: row.payload_json});
+            edgeAfter = row.edge_id;
+          }
+          if (edges.length !== file.reexports) return undefined;
+          files.push({path: file.path, contentHash: file.contentHash, pairs: projection.pairs, reexports: edges});
+        }
+        return files;
+      });
+      const local = window ? gate?.coveredPreparation : gate;
+      const owned = local ? local(read) : read;
+      const files = yield* covered
+        ? covered(
+            {
+              operation: 'stage persistent code graph facts',
+              rowCount: plan.preparationRows,
+              finalFactBytes: plan.preparationBytes,
+            },
+            owned,
+          )
+        : owned;
+      if (!files || (yield* resolutionCandidateAuthorityToken(sql)) !== authorityToken) return false;
+      yield* stagePreparedCandidateFiles(sql, snapshotId, files, writer, covered);
+      return true;
+    });
+  return yield* protector?.candidateWindow
+    ? protector.candidateWindow(
+        plan,
+        {
+          sql,
+          databasePath: databasePath ?? 'unbound-candidate-database',
+          snapshotId,
+          authority: authorityToken,
+          sourceFingerprint: plan.sourceFingerprint,
+        },
+        gate,
+        covered => run(covered, true),
+      )
+    : run(protector, false);
 });
 
 const finishResolutionCandidateIndexInternal = Effect.fn('codeGraph.finishCandidateIndex')(function* (
@@ -326,9 +522,6 @@ const finishResolutionCandidateIndexInternal = Effect.fn('codeGraph.finishCandid
     SELECT base_snapshot_id, state, file_count, graph_content_id, extractor_set FROM snapshots WHERE id = ${input.snapshotId} LIMIT 1`;
   const snapshot = snapshots[0];
   if (!snapshot || snapshot.state !== 'ready') return false;
-  yield* stagePreparedCandidateFiles(sql, input.snapshotId, [], writer, protector);
-  const snapshotKey = yield* candidateSnapshotKey(sql, input.snapshotId, authorityToken);
-  if (snapshotKey === undefined) return false;
   if (snapshot.base_snapshot_id !== null) {
     const root = yield* resolutionCandidateIndexLayers(
       sql,
@@ -345,51 +538,68 @@ const finishResolutionCandidateIndexInternal = Effect.fn('codeGraph.finishCandid
       if (!inherited || inherited.rootId !== root.rootId) return false;
       if (
         inherited.deltaId !== undefined &&
-        !(yield* inheritCandidateDelta(sql, input.snapshotId, inherited.deltaId, authorityToken, writer, protector))
+        !(yield* inheritCandidateDelta(
+          sql,
+          input.snapshotId,
+          inherited.deltaId,
+          authorityToken,
+          writer,
+          protector,
+          input.preparationGate,
+          input.databasePath,
+        ))
       )
         return false;
     }
   }
-  return yield* candidateIndexWrite(
-    sql,
-    writer,
-    protector,
-    1,
-    Buffer.byteLength(JSON.stringify(input)) + 256,
+  const finish = (covered: CodeGraphDirectPersistentCapacityProtector | undefined) =>
     Effect.gen(function* () {
-      const unchanged = yield* sql`SELECT 1 FROM snapshots WHERE id = ${input.snapshotId} AND state = 'ready'
+      yield* stagePreparedCandidateFiles(sql, input.snapshotId, [], writer, covered);
+      const snapshotKey = yield* candidateSnapshotKey(sql, input.snapshotId, authorityToken);
+      if (snapshotKey === undefined) return false;
+      return yield* candidateIndexWrite(
+        sql,
+        writer,
+        covered,
+        1,
+        Buffer.byteLength(JSON.stringify(input)) + 256,
+        Effect.gen(function* () {
+          const unchanged = yield* sql`SELECT 1 FROM snapshots WHERE id = ${input.snapshotId} AND state = 'ready'
         AND base_snapshot_id IS ${snapshot.base_snapshot_id} AND file_count = ${snapshot.file_count}
         AND extractor_set = ${snapshot.extractor_set} AND graph_content_id = ${snapshot.graph_content_id} LIMIT 1`;
-      if (unchanged.length !== 1) return false;
-      if (snapshot.base_snapshot_id !== null) {
-        const root = yield* resolutionCandidateIndexLayers(
-          sql,
-          {...input, snapshotId: snapshot.base_snapshot_id},
-          authorityToken,
-        );
-        if (!root || root.deltaId !== undefined) return false;
-        if (
-          input.inheritedSnapshotId !== undefined &&
-          !(yield* resolutionCandidateIndexLayers(
-            sql,
-            {...input, snapshotId: input.inheritedSnapshotId},
-            authorityToken,
-          ))
-        )
-          return false;
-      }
-      const counts = yield* sql<{
-        readonly actual: number;
-        readonly indexed: number;
-        readonly mismatched: number;
-        readonly incomplete: number;
-        readonly current_files: number;
-        readonly current_sealed: number;
-        readonly current_mismatched: number;
-      }>`
-      SELECT (SELECT COUNT(*) FROM snapshot_candidate_page_files WHERE snapshot_key = ${snapshotKey}) AS current_files,
-        (SELECT COUNT(*) FROM snapshot_candidate_page_files WHERE snapshot_key = ${snapshotKey} AND sealed = 1) AS current_sealed,
-        (SELECT COUNT(*) FROM snapshot_candidate_page_files AS file LEFT JOIN snapshot_files AS source
+          yield* assertCurrentCandidateCapacity(sql);
+          if (unchanged.length !== 1) return false;
+          if (snapshot.base_snapshot_id !== null) {
+            const root = yield* resolutionCandidateIndexLayers(
+              sql,
+              {...input, snapshotId: snapshot.base_snapshot_id},
+              authorityToken,
+            );
+            yield* assertCurrentCandidateCapacity(sql);
+            if (!root || root.deltaId !== undefined) return false;
+            if (
+              input.inheritedSnapshotId !== undefined &&
+              !(yield* resolutionCandidateIndexLayers(
+                sql,
+                {...input, snapshotId: input.inheritedSnapshotId},
+                authorityToken,
+              ))
+            )
+              return false;
+            yield* assertCurrentCandidateCapacity(sql);
+          }
+          const counts = yield* sql<{
+            readonly actual: number;
+            readonly indexed: number;
+            readonly mismatched: number;
+            readonly incomplete: number;
+            readonly current_files: number;
+            readonly current_sealed: number;
+            readonly current_mismatched: number;
+          }>`
+      SELECT (SELECT COUNT(*) FROM snapshot_candidate_synopsis_files WHERE snapshot_key = ${snapshotKey}) AS current_files,
+        (SELECT COUNT(*) FROM snapshot_candidate_synopsis_files WHERE snapshot_key = ${snapshotKey} AND sealed = 1) AS current_sealed,
+        (SELECT COUNT(*) FROM snapshot_candidate_synopsis_files AS file LEFT JOIN snapshot_files AS source
           ON source.snapshot_id = ${input.snapshotId} AND source.path = file.path AND source.content_hash = file.content_hash
           WHERE file.snapshot_key = ${snapshotKey} AND source.path IS NULL) AS current_mismatched,
         (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id = ${input.snapshotId}) AS actual,
@@ -401,32 +611,74 @@ const finishResolutionCandidateIndexInternal = Effect.fn('codeGraph.finishCandid
           (file.complete <> 1 OR NOT EXISTS (SELECT 1 FROM snapshot_candidate_generations AS generation
             WHERE generation.snapshot_id = file.snapshot_id AND generation.kind = 'file' AND generation.path = file.path
               AND generation.authority_token = ${authorityToken}))) AS incomplete`;
-      const count = counts[0];
-      if (
-        !count ||
-        count.incomplete !== 0 ||
-        count.mismatched !== 0 ||
-        count.actual !== count.indexed ||
-        count.current_files !== count.actual ||
-        count.current_sealed !== count.actual ||
-        count.current_mismatched !== 0 ||
-        (snapshot.base_snapshot_id === null && count.actual !== snapshot.file_count)
-      )
-        return false;
-      yield* sql`INSERT INTO snapshot_candidate_generations (snapshot_id, kind, path, authority_token)
+          const count = counts[0];
+          yield* assertCurrentCandidateCapacity(sql);
+          if (
+            !count ||
+            count.incomplete !== 0 ||
+            count.mismatched !== 0 ||
+            count.actual !== count.indexed ||
+            count.current_files !== count.actual ||
+            count.current_sealed !== count.actual ||
+            count.current_mismatched !== 0 ||
+            (snapshot.base_snapshot_id === null && count.actual !== snapshot.file_count)
+          )
+            return false;
+          yield* sql`INSERT INTO snapshot_candidate_generations (snapshot_id, kind, path, authority_token)
         VALUES (${input.snapshotId}, 'receipt', '', ${authorityToken})
         ON CONFLICT(snapshot_id, kind, path) DO UPDATE SET authority_token = excluded.authority_token`;
-      yield* sql`INSERT OR REPLACE INTO snapshot_candidate_receipts (
+          yield* assertCurrentCandidateCapacity(sql);
+          yield* sql`INSERT OR REPLACE INTO snapshot_candidate_receipts (
       snapshot_id, version, root_snapshot_id, extractor_set, graph_content_id, workspace_fingerprint, file_set_fingerprint, file_count
     ) VALUES (${input.snapshotId}, ${RESOLUTION_CANDIDATE_INDEX_VERSION}, ${snapshot.base_snapshot_id}, ${snapshot.extractor_set},
       ${snapshot.graph_content_id}, ${input.workspaceFingerprint}, ${input.fileSetFingerprint}, ${snapshot.file_count})`;
-      yield* sql`INSERT OR REPLACE INTO snapshot_candidate_page_receipts
+          yield* assertCurrentCandidateCapacity(sql);
+          yield* sql`INSERT OR REPLACE INTO snapshot_candidate_synopsis_receipts
         (snapshot_key,format_version,protocol_sha,authority_token,file_count)
-        VALUES (${snapshotKey},3,${CANDIDATE_PAGE_PROTOCOL_SHA},${authorityToken},${snapshot.file_count})`;
-      return true;
-    }),
-    authorityToken,
-  );
+        VALUES (${snapshotKey},4,${CANDIDATE_PAGE_PROTOCOL_SHA},${authorityToken},${snapshot.file_count})`;
+          yield* assertCurrentCandidateCapacity(sql);
+          return true;
+        }),
+        authorityToken,
+      );
+    });
+  const receiptBytes = Buffer.byteLength(JSON.stringify(input)) + 256;
+  const initBytes = Buffer.byteLength(input.snapshotId) + 256;
+  const empty = candidateCapacityPlan({snapshotId: input.snapshotId, files: [], references: []});
+  const plan = {
+    ...empty,
+    sourceFingerprint: Bun.SHA256.hash(
+      JSON.stringify([
+        input.snapshotId,
+        input.workspaceFingerprint,
+        input.fileSetFingerprint,
+        input.inheritedSnapshotId,
+      ]),
+      'hex',
+    ),
+    preparationRows: 0,
+    preparationBytes: 0,
+    writeRows: 2,
+    writeBytes: initBytes + receiptBytes,
+    writeChildren: 2,
+    children: 2,
+    rows: 8,
+    bytes: initBytes + receiptBytes,
+  };
+  return yield* protector?.candidateWindow
+    ? protector.candidateWindow(
+        plan,
+        {
+          sql,
+          databasePath: input.databasePath ?? 'unbound-candidate-database',
+          snapshotId: input.snapshotId,
+          authority: authorityToken,
+          sourceFingerprint: plan.sourceFingerprint,
+        },
+        input.preparationGate,
+        finish,
+      )
+    : finish(protector);
 });
 
 export const finishResolutionCandidateIndex = (...args: Parameters<typeof finishResolutionCandidateIndexInternal>) =>

@@ -1,3 +1,4 @@
+import {makeCandidatePreparationGates} from './candidate_resources.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
@@ -209,7 +210,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               () => resources.releaseLegacyBuilder,
             ),
           );
-        const preparationGate: CodeGraphIndexResourceGate = effect =>
+        const ordinaryPreparation: CodeGraphIndexResourceGate = effect =>
           admit(
             Effect.acquireUseRelease(
               resources.acquirePreparation,
@@ -217,8 +218,16 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               () => resources.releasePreparation,
             ),
           );
-        const extractionPreparationGate: CodeGraphIndexResourceGate = effect =>
-          resources.current.pipe(Effect.flatMap(current => (current.legacyBuilder ? effect : preparationGate(effect))));
+        const {preparationGate, extractionPreparationGate} = makeCandidatePreparationGates({
+          admit,
+          ordinaryPreparation,
+          resources,
+          fs,
+          path,
+          system,
+          threadnoteHome: input.threadnoteHome,
+          identity: admissionOptions.identity,
+        });
         const preparedSpoolBudgetGate: CodeGraphPreparedSpoolBudgetGate = (bytes, snapshotId, effect) =>
           withCodeGraphPreparedSpoolBudget(
             {
@@ -795,6 +804,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                                   bypassReusableInventoryBase = true;
                                 }),
                                 options,
+                                preparationGate: buildResources.extractionPreparationGate,
                                 requestedOverlay,
                                 startedAt,
                                 store,

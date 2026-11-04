@@ -1,13 +1,14 @@
 import {Array as EffectArray, Effect, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
-import type {ProjectResolutionLookupKey} from '../../incremental/closure.js';
+import {projectResolutionLookupKeyIdentity, type ProjectResolutionLookupKey} from '../../incremental/closure.js';
 import {chunk} from '../utilities.js';
 import {CANDIDATE_PAGE_PROTOCOL_SHA} from './candidate_pages.js';
-import {readCandidateKeyPages} from './candidate_page_read.js';
+import {readCandidateKeyWavePages} from './candidate_page_read.js';
 import {PROJECT_INCREMENTAL_CLOSURE_MAX_FILES} from '../../incremental/closure.js';
 import {CODE_GRAPH_RESOLUTION_SURFACE_VERSION, CODE_GRAPH_REUSABLE_BASE_RECEIPT_VERSION} from '../models.js';
 import {
   PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS,
+  PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS,
   PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
   PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORTS,
   PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_KEY_BYTES,
@@ -52,12 +53,12 @@ const matchingReceipt = Effect.fn('codeGraph.matchingCandidateReceipt')(function
       AND generation.kind = 'receipt' AND generation.path = ''
     JOIN snapshot_candidate_authority AS authority ON authority.singleton = 1 AND authority.state = 'ready'
       AND authority.token = generation.authority_token AND authority.token = ${authorityToken}
-    JOIN snapshot_candidate_page_snapshots AS page_snapshot ON page_snapshot.snapshot_id = receipt.snapshot_id
+    JOIN snapshot_candidate_synopsis_snapshots AS page_snapshot ON page_snapshot.snapshot_id = receipt.snapshot_id
       AND page_snapshot.authority_token = ${authorityToken} AND page_snapshot.protocol_sha = ${CANDIDATE_PAGE_PROTOCOL_SHA}
-      AND page_snapshot.format_version = 3
-    JOIN snapshot_candidate_page_receipts AS page_receipt ON page_receipt.snapshot_key = page_snapshot.snapshot_key
+      AND page_snapshot.format_version = 4
+    JOIN snapshot_candidate_synopsis_receipts AS page_receipt ON page_receipt.snapshot_key = page_snapshot.snapshot_key
       AND page_receipt.authority_token = ${authorityToken} AND page_receipt.protocol_sha = ${CANDIDATE_PAGE_PROTOCOL_SHA}
-      AND page_receipt.format_version = 3 AND page_receipt.file_count = receipt.file_count
+      AND page_receipt.format_version = 4 AND page_receipt.file_count = receipt.file_count
     WHERE receipt.snapshot_id = ${input.snapshotId}
       AND receipt.workspace_fingerprint = ${input.workspaceFingerprint}
       AND receipt.file_set_fingerprint = ${input.fileSetFingerprint} LIMIT 1`;
@@ -126,7 +127,7 @@ const ReexportSchema = Schema.Struct({
   candidates: Schema.Array(KeySchema),
   sourcePath: Schema.String,
 });
-const identity = (key: ProjectResolutionLookupKey) => `${key.resolutionDomain}\0${key.key}`;
+const identity = (key: ProjectResolutionLookupKey) => projectResolutionLookupKeyIdentity(key.resolutionDomain, key.key);
 const bound = (detail: ProjectResolutionCandidateScanFallbackDetail, observed: number, limit: number) =>
   ({mode: 'fallback', reason: 'project-closure-unbounded', detail, observed, limit}) as const;
 
@@ -152,6 +153,8 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
   const reexportPaths = new Set<string>();
   const reexports: ProjectResolutionReexportKeys[] = [];
   let associationsRead = 0;
+  let observations = 0;
+  let bitTests = 0;
   let bytesRead = 0;
   let keysQueried = 0;
   let reexportKeys = 0;
@@ -189,109 +192,100 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
     for (const reexport of [...input.additionalReexports, ...reexports]) {
       for (const key of [...reexport.aliases, ...reexport.candidates]) keys.set(identity(key), key);
     }
-    let progressed = false;
+    const wave: ProjectResolutionLookupKey[] = [];
     for (const id of closure.identities) {
       if (queried.has(id)) continue;
       const key = keys.get(id);
       if (!key) return undefined;
       queried.add(id);
+      wave.push(key);
       keysQueried += 1;
       bytesRead += Buffer.byteLength(id);
-      if (bytesRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES)
+    }
+    const progressed = wave.length > 0;
+    if (bytesRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES)
+      return bound(
+        'candidate-projection-observed-key-bytes',
+        bytesRead,
+        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
+      );
+    for (const snapshotId of sources) {
+      const selected = yield* readCandidateKeyWavePages(
+        sql,
+        snapshotId,
+        masked(snapshotId),
+        wave,
+        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS - associationsRead,
+        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES - bytesRead,
+        input.maximumSelectedFiles,
+        authorityToken,
+        PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS - observations,
+      );
+      if (!selected) return undefined;
+      associationsRead += selected.associations;
+      observations += selected.observations;
+      bitTests += selected.bitTests;
+      bytesRead += selected.bytes;
+      if (selected.exceeded === 'rows')
+        return bound(
+          'candidate-projection-associations',
+          associationsRead,
+          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS,
+        );
+      if (selected.exceeded === 'observations')
+        return bound(
+          'candidate-projection-observations',
+          observations,
+          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVATIONS,
+        );
+      if (selected.exceeded === 'bytes')
         return bound(
           'candidate-projection-observed-key-bytes',
           bytesRead,
           PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
         );
-      for (const snapshotId of sources) {
-        const mask = masked(snapshotId);
-        const selected = yield* readCandidateKeyPages(
-          sql,
-          snapshotId,
-          mask,
-          key,
-          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS - associationsRead,
-          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES - bytesRead,
+      for (const path of selected.paths) paths.add(path);
+      if (selected.exceeded === 'files' || paths.size > input.maximumSelectedFiles)
+        return bound(
+          'candidate-selected-files',
+          Math.max(paths.size, input.maximumSelectedFiles + 1),
           input.maximumSelectedFiles,
-          authorityToken,
         );
-        if (selected === undefined) return undefined;
-        associationsRead += selected.associations;
-        bytesRead += selected.bytes;
-        if (selected.exceeded === 'rows')
-          return bound(
-            'candidate-projection-associations',
-            associationsRead,
-            PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_ASSOCIATIONS,
-          );
-        if (selected.exceeded === 'bytes')
-          return bound(
-            'candidate-projection-observed-key-bytes',
-            bytesRead,
-            PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
-          );
-        for (const path of selected.paths) paths.add(path);
-        if (selected.exceeded === 'files' || paths.size > input.maximumSelectedFiles)
-          return bound(
-            'candidate-selected-files',
-            Math.max(paths.size, input.maximumSelectedFiles + 1),
-            input.maximumSelectedFiles,
-          );
-      }
-      if (bytesRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES)
-        return bound(
-          'candidate-projection-observed-key-bytes',
-          bytesRead,
-          PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
-        );
-      progressed = true;
     }
     for (const path of paths) {
       if (reexportPaths.has(path)) continue;
       reexportPaths.add(path);
       for (const snapshotId of sources) {
         const mask = masked(snapshotId);
-        // A single payload is independently bounded; never hydrate 10,001 potentially 8 MiB rows at once.
+        // Complete cursor AND payload UTF8 are admitted against the remaining shared budget in SQL.
         let afterEdge: string | undefined;
         for (;;) {
-          const rows = yield* sql.unsafe<{readonly edge_id: string; readonly payload_json: string | null}>(
-            `
-          SELECT edge_id, CASE WHEN length(CAST(payload_json AS BLOB)) <= ?
-            THEN payload_json ELSE NULL END AS payload_json
-          FROM snapshot_candidate_reexports AS candidate
-          WHERE snapshot_id = ? AND evidence_path = ? ${afterEdge === undefined ? '' : 'AND edge_id > ?'}
-            AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement
-              WHERE replacement.snapshot_id = ? AND replacement.path = candidate.evidence_path)
-            AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.path = candidate.evidence_path)
-          ORDER BY edge_id LIMIT 1`,
-            [
-              RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
-              snapshotId,
-              path,
-              ...(afterEdge === undefined ? [] : [afterEdge]),
-              mask ?? null,
-              mask ?? null,
-            ],
+          const selected = yield* readCandidateReexportRow(
+            sql,
+            snapshotId,
+            path,
+            mask,
+            afterEdge,
+            PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES - bytesRead,
           );
-          if (rows.length === 0) break;
-          for (const row of rows) {
-            afterEdge = row.edge_id;
-            if (row.payload_json === null) return undefined;
-            const decoded = yield* Effect.try((): unknown => JSON.parse(row.payload_json!)).pipe(
-              Effect.orElseSucceed(() => undefined),
+          if (!selected) return undefined;
+          bytesRead += selected.bytes;
+          if (selected.exceeded)
+            return bound(
+              'candidate-projection-observed-key-bytes',
+              bytesRead,
+              PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
             );
-            if (!Schema.is(ReexportSchema)(decoded) || decoded.sourcePath !== path) return undefined;
-            reexports.push(decoded);
-            const exceeded = chargeReexport(decoded);
-            if (exceeded) return exceeded;
-            bytesRead += Buffer.byteLength(row.payload_json);
-            if (bytesRead > PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES)
-              return bound(
-                'candidate-projection-observed-key-bytes',
-                bytesRead,
-                PROJECT_RESOLUTION_CANDIDATE_MAX_PROJECTION_OBSERVED_KEY_BYTES,
-              );
-          }
+          const row = selected.row;
+          if (!row) break;
+          const decoded = yield* Effect.try((): unknown => JSON.parse(row.payload_json)).pipe(
+            Effect.orElseSucceed(() => undefined),
+          );
+          if (!Schema.is(ReexportSchema)(decoded) || decoded.sourcePath !== path) return undefined;
+          afterEdge = row.edge_id;
+          reexports.push(decoded);
+          const exceeded = chargeReexport(decoded);
+          if (exceeded) return exceeded;
         }
       }
     }
@@ -340,6 +334,73 @@ export const selectResolutionCandidateIndexClosure = Effect.fn('codeGraph.select
     factBytes: 0,
     scannedFiles: 0,
     lookupKeys: closure.identities.size,
-    candidateIndex: {keysQueried, associationsRead, reexportsRead: reexports.length, bytesRead},
+    candidateIndex: {keysQueried, associationsRead, reexportsRead: reexports.length, bytesRead, observations, bitTests},
   } satisfies Extract<ProjectResolutionCandidateClosure, {readonly mode: 'eligible'}>;
+});
+
+/** Scalar admission precedes BOTH complete cursor and payload hydration/JSON parsing. */
+export const readCandidateReexportRow = Effect.fn('codeGraph.readCandidateReexportRow')(function* (
+  sql: SqlClient.SqlClient,
+  snapshotId: string,
+  path: string,
+  mask: string | undefined,
+  afterEdge: string | undefined,
+  maximumBytes: number,
+) {
+  // 128 query/sentinel + 64 for the two scalar lengths and row status, before driver materialization.
+  const metadataBytes = 192;
+  if (maximumBytes < metadataBytes) return {bytes: metadataBytes, exceeded: true as const};
+  const available = maximumBytes - metadataBytes;
+  const rows = yield* sql.unsafe<{
+    readonly edge_bytes: number;
+    readonly payload_bytes: number;
+    readonly edge_id: string | null;
+    readonly payload_json: string | null;
+  }>(
+    `SELECT length(CAST(edge_id AS BLOB)) AS edge_bytes,
+    length(CAST(payload_json AS BLOB)) AS payload_bytes,
+    CASE WHEN length(CAST(payload_json AS BLOB)) <= ?
+      AND length(CAST(edge_id AS BLOB)) + length(CAST(payload_json AS BLOB)) <= ? THEN edge_id ELSE NULL END AS edge_id,
+    CASE WHEN length(CAST(payload_json AS BLOB)) <= ?
+      AND length(CAST(edge_id AS BLOB)) + length(CAST(payload_json AS BLOB)) <= ? THEN payload_json ELSE NULL END AS payload_json
+    FROM snapshot_candidate_reexports AS candidate
+    WHERE snapshot_id = ? AND evidence_path = ? ${afterEdge === undefined ? '' : 'AND edge_id > ?'}
+      AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement
+        WHERE replacement.snapshot_id = ? AND replacement.path = candidate.evidence_path)
+      AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion
+        WHERE deletion.snapshot_id = ? AND deletion.path = candidate.evidence_path)
+    ORDER BY candidate.edge_id LIMIT 1`,
+    [
+      RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
+      available,
+      RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES,
+      available,
+      snapshotId,
+      path,
+      ...(afterEdge === undefined ? [] : [afterEdge]),
+      mask ?? null,
+      mask ?? null,
+    ],
+  );
+  const row = rows[0];
+  if (!row) return {bytes: metadataBytes};
+  if (
+    !Number.isSafeInteger(row.edge_bytes) ||
+    row.edge_bytes < 0 ||
+    !Number.isSafeInteger(row.payload_bytes) ||
+    row.payload_bytes < 0 ||
+    row.payload_bytes > RESOLUTION_CANDIDATE_INDEX_PAYLOAD_BYTES
+  )
+    return undefined;
+  const bytes = metadataBytes + row.edge_bytes + row.payload_bytes;
+  if (!Number.isSafeInteger(bytes)) return undefined;
+  if (bytes > maximumBytes) return {bytes, exceeded: true as const};
+  if (
+    row.edge_id === null ||
+    row.payload_json === null ||
+    Buffer.byteLength(row.edge_id) !== row.edge_bytes ||
+    Buffer.byteLength(row.payload_json) !== row.payload_bytes
+  )
+    return undefined;
+  return {bytes, row: {edge_id: row.edge_id, payload_json: row.payload_json}};
 });

@@ -1,4 +1,4 @@
-import {CANDIDATE_PAGE_CLEANUP_TABLES} from './resolution/candidate_page_schema.js';
+import {CANDIDATE_PAGE_CLEANUP_FAMILIES} from './resolution/candidate_page_schema.js';
 import {RESOLUTION_CANDIDATE_INDEX_TABLES} from './resolution/candidate_index.js';
 import {Array as EffectArray} from 'effect';
 import {Effect, Option, pipe} from 'effect';
@@ -767,21 +767,21 @@ export const reclaimCandidatePageRows = Effect.fn('codeGraph.reclaimCandidatePag
   sql: SqlClient.SqlClient,
   snapshotId: string,
 ) {
-  if (!(yield* tableExists(sql, 'snapshot_candidate_page_snapshots'))) return undefined;
-  const targets = yield* sql<{
-    readonly snapshot_key: unknown;
-  }>`SELECT snapshot_key FROM snapshot_candidate_page_snapshots
-    WHERE snapshot_id = ${snapshotId} LIMIT 1`;
-  const snapshotKey = targets[0]?.snapshot_key;
-  if (snapshotKey === undefined) return undefined;
-  // Default SQLite numeric decoding can round a64-bit key into a different owner.
-  // Refuse unsupported identities before the first destructive family statement.
-  if (typeof snapshotKey !== 'number' || !Number.isSafeInteger(snapshotKey) || snapshotKey <= 0)
-    return yield* CodeGraphStoreError.of('Candidate page cleanup snapshot identity is not losslessly representable.');
-  for (const spec of CANDIDATE_PAGE_CLEANUP_TABLES) {
-    const key = `(${EffectArray.join(spec.keyColumns, ',')})`;
-    yield* sql.unsafe(
-      `DELETE FROM ${spec.name} WHERE ${key} IN (
+  for (const family of CANDIDATE_PAGE_CLEANUP_FAMILIES) {
+    if (!(yield* tableExists(sql, family.snapshots))) continue;
+    const targets = yield* sql.unsafe<{
+      readonly snapshot_key: unknown;
+    }>(`SELECT snapshot_key FROM ${family.snapshots} WHERE snapshot_id = ? LIMIT 1`, [snapshotId]);
+    const snapshotKey = targets[0]?.snapshot_key;
+    if (snapshotKey === undefined) continue;
+    // Default SQLite numeric decoding can round a64-bit key into a different owner.
+    // Refuse unsupported identities before the first destructive family statement.
+    if (typeof snapshotKey !== 'number' || !Number.isSafeInteger(snapshotKey) || snapshotKey <= 0)
+      return yield* CodeGraphStoreError.of('Candidate page cleanup snapshot identity is not losslessly representable.');
+    for (const spec of family.tables) {
+      const key = `(${EffectArray.join(spec.keyColumns, ',')})`;
+      yield* sql.unsafe(
+        `DELETE FROM ${spec.name} WHERE ${key} IN (
       SELECT ${EffectArray.join(
         EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
         ',',
@@ -790,11 +790,12 @@ export const reclaimCandidatePageRows = Effect.fn('codeGraph.reclaimCandidatePag
         EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
         ',',
       )} LIMIT ?)`,
-      [snapshotKey, 1000],
-    );
-    const deleted = yield* lastStatementChangeCount(sql);
-    if (deleted > 0)
-      return {complete: false, rowsDeleted: deleted, table: spec.name, batchRows: 1000, maximumBatchRows: 1000};
+        [snapshotKey, 1000],
+      );
+      const deleted = yield* lastStatementChangeCount(sql);
+      if (deleted > 0)
+        return {complete: false, rowsDeleted: deleted, table: spec.name, batchRows: 1000, maximumBatchRows: 1000};
+    }
   }
   return undefined;
 });
@@ -804,13 +805,19 @@ export const reclaimRetiredCandidatePageRows = Effect.fn('codeGraph.reclaimRetir
   sql: SqlClient.SqlClient,
   snapshotId?: string,
 ) {
-  if (!(yield* tableExists(sql, 'snapshot_candidate_page_snapshots'))) return undefined;
-  const targets = yield* sql<{readonly snapshot_id: string}>`SELECT candidate.snapshot_id
-    FROM snapshot_candidate_page_snapshots AS candidate
-    WHERE candidate.snapshot_id IN (SELECT id FROM snapshots WHERE state = 'retired'
-      AND (${snapshotId ?? null} IS NULL OR id = ${snapshotId ?? null}) ORDER BY id LIMIT 100)
-    ORDER BY candidate.snapshot_id LIMIT 1`;
-  return targets[0] ? yield* reclaimCandidatePageRows(sql, targets[0].snapshot_id) : undefined;
+  for (const family of CANDIDATE_PAGE_CLEANUP_FAMILIES) {
+    if (!(yield* tableExists(sql, family.snapshots))) continue;
+    const targets = yield* sql.unsafe<{readonly snapshot_id: string}>(
+      `SELECT candidate.snapshot_id
+      FROM ${family.snapshots} AS candidate
+      WHERE candidate.snapshot_id IN (SELECT id FROM snapshots WHERE state = 'retired'
+        AND (? IS NULL OR id = ?) ORDER BY id LIMIT 100)
+      ORDER BY candidate.snapshot_id LIMIT 1`,
+      [snapshotId ?? null, snapshotId ?? null],
+    );
+    if (targets[0]) return yield* reclaimCandidatePageRows(sql, targets[0].snapshot_id);
+  }
+  return undefined;
 });
 
 const clearSnapshotOwnedRows = Effect.fn('codeGraph.clearSnapshotOwnedRows')(function* (

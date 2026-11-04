@@ -532,6 +532,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
           layout: input.layout,
           onProgress: input.onProgress,
           persistentMaterializationTransactionBatchLimit: input.persistentMaterializationTransactionBatchLimit,
+          preparationGate: input.preparationGate,
           requestedOverlay: input.requestedOverlay,
           startedAt: input.startedAt,
           store: input.store,
@@ -961,8 +962,14 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     input.persistentOwnerToken !== undefined &&
     input.incrementalPrepared !== true &&
     input.incrementalAssessment?.mode !== 'eligible';
-  const runPreparation = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    splitPreparation && input.preparationGate ? input.preparationGate(effect) : effect;
+  const runPreparation = Object.assign(
+    <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      splitPreparation && input.preparationGate ? input.preparationGate(effect) : effect,
+    {
+      candidateStage: input.preparationGate?.candidateStage,
+      coveredPreparation: input.preparationGate?.coveredPreparation,
+    },
+  );
   const workspace =
     input.workspace ??
     input.inventory.workspace ??

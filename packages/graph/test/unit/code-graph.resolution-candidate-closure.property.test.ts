@@ -4,7 +4,10 @@ import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as FC from 'fast-check';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '@threadnote/graph/fact/budget';
-import type {ProjectResolutionLookupKey} from '@threadnote/graph/incremental/closure';
+import {
+  projectResolutionLookupKeyIdentity,
+  type ProjectResolutionLookupKey,
+} from '@threadnote/graph/incremental/closure';
 import {
   assessResolutionCandidateReexportSafety,
   boundedReusableReexportsFromKeys,
@@ -37,6 +40,25 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 describe('resolution-candidate closure', () => {
+  fcProp(
+    effectIt,
+    'frames exact domain/key pairs injectively even with embedded separators and NULs',
+    {
+      leftDomain: FC.string({maxLength: 32}),
+      leftKey: FC.string({maxLength: 32}),
+      rightDomain: FC.string({maxLength: 32}),
+      rightKey: FC.string({maxLength: 32}),
+    },
+    ({leftDomain, leftKey, rightDomain, rightKey}) => {
+      expect(
+        projectResolutionLookupKeyIdentity(leftDomain, leftKey) ===
+          projectResolutionLookupKeyIdentity(rightDomain, rightKey),
+      ).toBe(leftDomain === rightDomain && leftKey === rightKey);
+      expect(projectResolutionLookupKeyIdentity('a\0b', 'c')).not.toBe(projectResolutionLookupKeyIdentity('a', 'b\0c'));
+    },
+    {fastCheck: {numRuns: 200}},
+  );
+
   fcProp(
     effectIt,
     'partitions every file exactly once independent of inventory order',
@@ -277,7 +299,7 @@ describe('resolution-candidate closure', () => {
       expect(closure.mode).toBe('eligible');
       if (closure.mode === 'eligible') {
         expect(closure.paths).toEqual(['a-consumer.ts', 'z-barrel.ts']);
-        expect([...closure.directAliasSymbolConflictIdentities]).toEqual(['typescript\0alias']);
+        expect([...closure.directAliasSymbolConflictIdentities]).toEqual(['10:typescript5:alias']);
       }
     }),
   );
@@ -307,7 +329,7 @@ describe('resolution-candidate closure', () => {
       expect(closure.mode).toBe('eligible');
       if (closure.mode === 'eligible') {
         expect(closure.paths).toEqual(['a-unrelated.ts', 'b-target.ts', 'z-barrel.ts']);
-        expect([...closure.directAliasSymbolConflictIdentities]).toEqual(['typescript\0alias']);
+        expect([...closure.directAliasSymbolConflictIdentities]).toEqual(['10:typescript5:alias']);
       }
     }),
   );
@@ -457,11 +479,11 @@ describe('resolution-candidate closure', () => {
       expect(closure.mode).toBe('eligible');
       if (closure.mode === 'eligible') {
         expect(closure.paths).toEqual(['src/barrel.ts', 'src/typescript-alias.ts', 'src/typescript-direct.ts']);
-        expect([...closure.affectedAliasLookupIdentities]).toEqual(['typescript\0alias']);
+        expect([...closure.affectedAliasLookupIdentities]).toEqual(['10:typescript5:alias']);
         const jvmClosure = resolutionCandidateLookupKeyClosure([lookup('jvm', 'shared')], closure.reexports);
         expect(jvmClosure.mode).toBe('eligible');
         if (jvmClosure.mode === 'eligible') {
-          expect([...jvmClosure.identities]).not.toContain('typescript\0alias');
+          expect([...jvmClosure.identities]).not.toContain('10:typescript5:alias');
         }
       }
     }),
@@ -751,7 +773,7 @@ describe('resolution-candidate closure', () => {
 
   effectIt.effect('accepts exact one-pass projection limits and fails before dedupe can hide excess work', () =>
     Effect.gen(function* () {
-      const duplicateIdentity = 'typescript\0seed';
+      const duplicateIdentity = '10:typescript4:seed';
       const duplicateBytes = Buffer.byteLength(duplicateIdentity, 'utf8');
       const oneFile = [inventory('a.ts', 1)];
       const duplicateFacts = new Map([['a.ts', facts('a.ts', [reference('a.ts', [['seed', 'seed']])])]]);
@@ -999,8 +1021,8 @@ describe('resolution-candidate closure', () => {
         reexports: [
           reexportKeys('barrel.ts', lookup('typescript', 'not-canonical'), lookup('typescript', firstTarget)),
         ],
-        safetyAliasLookupIdentities: new Set(['typescript\0not-canonical']),
-        stagedAliasLookupIdentities: new Set(['typescript\0not-canonical']),
+        safetyAliasLookupIdentities: new Set(['10:typescript13:not-canonical']),
+        stagedAliasLookupIdentities: new Set(['10:typescript13:not-canonical']),
       }),
     ).toEqual({mode: 'fallback', reason: 'unparseable-alias'});
   });
@@ -1178,7 +1200,7 @@ function lookup(resolutionDomain: string, key: string): ProjectResolutionLookupK
 }
 
 function lookupIdentity(value: ProjectResolutionLookupKey): string {
-  return `${value.resolutionDomain}\0${value.key}`;
+  return `${value.resolutionDomain.length}:${value.resolutionDomain}${value.key.length}:${value.key}`;
 }
 
 function partitionProjectionFingerprint(identity: string): bigint {
@@ -1197,14 +1219,15 @@ function partitionProjectionFingerprint(identity: string): bigint {
 }
 
 function parseLookupIdentity(identity: string): ProjectResolutionLookupKey {
-  const separator = Effect2.pipe(
-    identity,
-    EffectString.indexOf('\0'),
-    Effect2.Option.getOrElse(() => -1),
+  const separator = Effect2.Option.getOrElse(EffectString.indexOf(':')(identity), () => -1);
+  const domainEnd = separator + 1 + Number(EffectString.slice(0, separator)(identity));
+  const keySeparator = Effect2.Option.getOrElse(
+    EffectString.indexOf(':')(EffectString.slice(domainEnd)(identity)),
+    () => -1,
   );
   return {
-    key: Effect2.pipe(identity, EffectString.slice(separator + 1)),
-    resolutionDomain: Effect2.pipe(identity, EffectString.slice(0, separator)),
+    key: EffectString.slice(domainEnd + keySeparator + 1)(identity),
+    resolutionDomain: EffectString.slice(separator + 1, domainEnd)(identity),
   };
 }
 

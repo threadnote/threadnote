@@ -11,11 +11,12 @@ import {pruneRetiredSnapshotRowsPage} from '@threadnote/graph/store/view_cleanup
 import {makeRetiredSnapshotReclamationPage} from '@threadnote/graph/store/staging_core';
 import {
   candidateCanonicalSha,
+  candidatePairHint,
   candidateFilePages,
   CANDIDATE_PAGE_PROTOCOL_SHA,
 } from '@threadnote/graph/store/resolution/candidate_pages';
 import {resolutionCandidateAuthorityToken} from '@threadnote/graph/store/resolution/candidate_index';
-import {CANDIDATE_PAGE_TABLES} from '@threadnote/graph/store/resolution/candidate_page_schema';
+import {LEGACY_CANDIDATE_SCHEMA_TABLES as CANDIDATE_PAGE_TABLES} from '@threadnote/graph/store/resolution/candidate_page_schema';
 import {RESOLUTION_CANDIDATE_INDEX_TABLES} from '@threadnote/graph/store/resolution/candidate_index';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -79,7 +80,7 @@ describe('required snapshot reclamation pages', () => {
         yield* sql`INSERT INTO snapshot_candidate_page_files VALUES (1,1,'a.ts','hash',1,0,1,100,${page.rawSha},0)`;
         yield* sql`INSERT INTO snapshot_candidate_pages VALUES (1,1,0,1,${page.rawBytes},${page.storedBytes},100,
       ${page.rawSha},${page.storedSha},${page.codec},${page.payload!},NULL,NULL)`;
-        yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (1,1,0,0,${page.hints[0]})`;
+        yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (1,1,0,0,${candidatePairHint(['typescript', 'key'])})`;
         yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 1 WHERE file_key = 1`;
         yield* sql`INSERT INTO snapshot_candidate_page_receipts VALUES (1,3,${CANDIDATE_PAGE_PROTOCOL_SHA},${token},1)`;
         yield* sql`INSERT INTO snapshot_leases (token,snapshot_id,expires_at) VALUES ('new-reader',${TARGET},60000)`;
@@ -136,7 +137,7 @@ describe('required snapshot reclamation pages', () => {
           yield* sql`INSERT INTO snapshot_candidate_page_files VALUES (${fileKey},CAST(${key} AS INTEGER),'a.ts','hash',1,0,1,100,${candidateCanonicalSha(pairs)},0)`;
           yield* sql`INSERT INTO snapshot_candidate_pages VALUES (CAST(${key} AS INTEGER),${fileKey},0,1,${page.rawBytes},${page.storedBytes},100,
             ${page.rawSha},${page.storedSha},${page.codec},${page.payload!},NULL,NULL)`;
-          yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (CAST(${key} AS INTEGER),${fileKey},0,0,${page.hints[0]})`;
+          yield* sql`INSERT INTO snapshot_candidate_page_routes VALUES (CAST(${key} AS INTEGER),${fileKey},0,0,${candidatePairHint(['typescript', 'key'])})`;
           yield* sql`UPDATE snapshot_candidate_page_files SET sealed = 1 WHERE file_key = ${fileKey}`;
           yield* sql`INSERT INTO snapshot_candidate_page_receipts VALUES (CAST(${key} AS INTEGER),3,${CANDIDATE_PAGE_PROTOCOL_SHA},${token},1)`;
         }

@@ -1,7 +1,9 @@
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {describe, expect, it, it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Array as EffectArray, Effect, Path} from 'effect';
+import * as BunPath from '@effect/platform-bun/BunPath';
+import {win32} from '@threadnote/testing/node-path';
 import {
   CODE_GRAPH_CACHE_PERSISTENT_CAPACITY_CALIBRATION,
   CODE_GRAPH_DISK_RESERVATION_OPERATIONS,
@@ -22,7 +24,10 @@ import {
   sqliteWalCapacityBytes,
   type CodeGraphDiskCapacityInput,
 } from '@threadnote/graph/disk/capacity';
-import {codeGraphCapacityTemporaryDirectory} from '@threadnote/graph/disk/reservation';
+import {
+  codeGraphCapacityTemporaryDirectory,
+  codeGraphCandidateWindowsTemporaryDirectory,
+} from '@threadnote/graph/disk/reservation';
 import {
   CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION,
   CodeGraphStoreNoSpaceError,
@@ -42,6 +47,113 @@ const capacityMagnitude = fc.oneof(
 );
 
 describe('code graph disk capacity properties', () => {
+  fcProp(
+    it,
+    'keeps ordinary bounded Windows selections scalar and independent of TMPDIR or captured fallbacks',
+    {components: fc.array(fc.stringMatching(/^[a-z]{1,8}$/), {minLength: 1, maxLength: 4})},
+    ({components}) => {
+      const directory = 'C:\\p' + EffectArray.join(components, '\\p');
+      const environment = {TMP: directory, TEMP: directory + '\\', TMPDIR: 'D:\\ignored'};
+      const original = {...environment};
+      expect(codeGraphCandidateWindowsTemporaryDirectory({environment, runtimeVersion: '1.4.4', path: win32})).toBe(
+        directory,
+      );
+      expect(environment).toEqual(original);
+      expect(
+        codeGraphCandidateWindowsTemporaryDirectory({
+          environment: {...environment, TEMP: 'D:\\other'},
+          runtimeVersion: '1.4.4',
+          path: win32,
+        }),
+      ).toBeUndefined();
+    },
+    {fastCheck: {numRuns: 100}},
+  );
+  effectIt.layer(BunPath.layerWin32)(windows =>
+    windows.effect('selects only the fresh bounded default Windows TMP and TEMP intersection for candidates', () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const select = (environment: Readonly<Record<string, string | undefined>>, runtimeVersion = '1.4.4') =>
+          codeGraphCandidateWindowsTemporaryDirectory({environment, runtimeVersion, path});
+        for (const [environment, expected] of [
+          [{TMP: 'C:\\temp'}, 'C:\\temp'],
+          [{TEMP: 'D:\\temp'}, 'D:\\temp'],
+          [{TMP: 'C:\\', TEMP: 'C:\\'}, 'C:\\'],
+          [{TMP: 'C:\\temp\\', TEMP: 'C:\\temp'}, 'C:\\temp'],
+          [{TMP: '', TEMP: 'C:\\temp'}, 'C:\\temp'],
+          [{TMP: 'C:\\temp', TEMP: 'D:\\temp'}, undefined],
+          [{TMP: 'C:\\temp', TEMP: 'c:\\temp'}, undefined],
+          [{TMP: 'relative'}, undefined],
+          [{TMP: 'C:relative'}, undefined],
+          [{TMP: '\\\\server\\share'}, undefined],
+          [{TMP: '\\\\?\\C:\\temp'}, undefined],
+          [{TMP: 'C:/temp'}, undefined],
+          [{TMP: 'C:\\a\\..\\temp'}, undefined],
+          [{TMP: 'C:\\a\\.\\temp'}, undefined],
+          [{TMP: 'C:\\a\\\\temp'}, undefined],
+          [{TMP: 'C:\\temp\\\\'}, undefined],
+          [{TMP: 'C:\\temp.'}, undefined],
+          [{TMP: 'C:\\NUL'}, undefined],
+          [{TMP: 'C:\\temp\0'}, undefined],
+          [{TMP: 'C:\\temp\ud800'}, undefined],
+          [{TMPDIR: 'C:\\ignored'}, undefined],
+          [{TMP: 'C:\\' + EffectString.repeat(255)('x')}, 'C:\\' + EffectString.repeat(255)('x')],
+          [{TMP: 'C:\\' + EffectString.repeat(256)('x')}, undefined],
+        ] as const)
+          expect(select(environment)).toBe(expected);
+        expect(select({TMP: 'C:\\temp'}, '1.4.3')).toBeUndefined();
+        const environment = {TMP: 'C:\\first'};
+        expect(select(environment)).toBe('C:\\first');
+        environment.TMP = 'D:\\second';
+        expect(select(environment)).toBe('D:\\second');
+        let probes = 0;
+        const candidate = {
+          operation: 'stage persistent code graph facts' as const,
+          rowCount: 1,
+          finalFactBytes: 1,
+          transientFilesystem: 'temporary' as const,
+          candidateWindow: {children: 1, rows: 1, bytes: 1},
+        };
+        const input = {
+          boundary: candidate,
+          environment: {TMP: 'C:\\temp', TEMP: 'D:\\temp'},
+          platform: 'win32',
+          temporaryDirectory: 'captured-is-not-proof',
+          runtimeVersion: '1.4.4',
+          path,
+        };
+        const usable = () =>
+          Effect.sync(() => {
+            probes++;
+            return true;
+          });
+        expect(yield* codeGraphCapacityTemporaryDirectory(input, usable)).toBeUndefined();
+        expect(probes).toBe(0);
+        expect(yield* codeGraphCapacityTemporaryDirectory({...input, environment: {TEMP: 'D:\\temp'}}, usable)).toBe(
+          'D:\\temp',
+        );
+        expect(probes).toBe(1);
+        expect(
+          yield* codeGraphCapacityTemporaryDirectory({...input, environment: {TEMP: 'D:\\temp'}}, () =>
+            Effect.succeed(false),
+          ),
+        ).toBeUndefined();
+        // Old scalar/bootstrap/spool Windows selection stays unchanged, including its captured preference.
+        for (const boundary of [
+          {...candidate, candidateWindow: undefined},
+          {
+            ...candidate,
+            operation: 'sort persistent code graph materialization spool' as const,
+            candidateWindow: undefined,
+          },
+        ])
+          expect(yield* codeGraphCapacityTemporaryDirectory({...input, boundary}, usable)).toBe(
+            'captured-is-not-proof',
+          );
+      }),
+    ),
+  );
+
   effectIt.effect('probes the SQLite sorter directory when it differs from the process TEMP directory', () =>
     Effect.gen(function* () {
       const sortBoundary = {
