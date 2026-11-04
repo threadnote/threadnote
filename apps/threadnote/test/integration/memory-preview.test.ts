@@ -28,6 +28,7 @@ import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {resolvePreviewMemoryIdentity} from '../../src/manager/memory/read.js';
 
 const origin = 'http://127.0.0.1:41377';
@@ -854,19 +855,114 @@ it.effect('follows a real relocation receipt without changing the corpus on read
       return files;
     });
     const before = yield* snapshot();
-    const read = () => readManagedMemory(config, 'threadnote://memory/tn_receipt', {preview: true});
+    const store = yield* ResourceStore;
+    let boundedReads = 0;
+    let unboundedReads = 0;
+    const instrumented = ResourceStore.of({
+      ...store,
+      read: () => {
+        unboundedReads++;
+        return Effect.die('Unexpected unbounded witness read');
+      },
+      readBounded: (location, uri, maximumBytes) => {
+        boundedReads++;
+        return store.readBounded(location, uri, maximumBytes);
+      },
+    });
+    const read = () =>
+      readManagedMemory(config, 'threadnote://memory/tn_receipt', {preview: true}).pipe(
+        Effect.provideService(ResourceStore, instrumented),
+      );
     expect((yield* read()).content).toBe(withoutId);
     expect((yield* read()).node.uri).toBe(toUri);
+    expect(boundedReads).toBe(2);
+    expect(unboundedReads).toBe(0);
+    let chargedBytes = 0;
+    let chargedEntries = 0;
+    const resolved = yield* resolvePreviewMemoryIdentity(config, 'threadnote://memory/tn_receipt', {
+      grant: {
+        take: async (bytes, entries) => {
+          chargedBytes += bytes;
+          chargedEntries += entries;
+        },
+      },
+    }).pipe(Effect.provideService(ResourceStore, instrumented));
+    expect(resolved.canonicalUri).toBe(toUri);
+    expect(chargedBytes).toBeGreaterThanOrEqual(512 * 1024 + 1);
+    expect(chargedEntries).toBe(5);
+    expect(boundedReads).toBe(3);
     expect(yield* snapshot()).toEqual(before);
-    yield* fs.writeFileString(destination, `${withoutId}${EffectString.repeat(512 * 1024)('x')}`);
+    const boundary = `${withoutId}${EffectString.repeat(512 * 1024 - withoutId.length)('x')}`;
+    yield* fs.writeFileString(destination, boundary);
+    expect((yield* read()).content).toBe(boundary);
+    expect(boundedReads).toBe(4);
+    yield* fs.writeFileString(destination, `${boundary}x`);
     const oversized = yield* snapshot();
     expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    expect(boundedReads).toBe(5);
+    expect(unboundedReads).toBe(0);
     expect(yield* snapshot()).toEqual(oversized);
+    const marker = 'synthetic-corrupt-witness-secret';
+    const prefix = new TextEncoder().encode(withoutId);
+    const suffix = new TextEncoder().encode(marker);
+    const malformed = new Uint8Array(prefix.length + 1 + suffix.length);
+    malformed.set(prefix);
+    malformed[prefix.length] = 0xff;
+    malformed.set(suffix, prefix.length + 1);
+    yield* fs.writeFile(destination, malformed);
+    const invalid = yield* Effect.exit(read());
+    expect(Exit.isFailure(invalid)).toBe(true);
+    if (Exit.isFailure(invalid)) {
+      const handler = createMemoryPreviewHandler({
+        token,
+        port: () => 41377,
+        prepare: async () => {
+          throw new Error('Witness unavailable', {cause: invalid.cause});
+        },
+      });
+      const request = () => new Request(`${origin}/`, {headers: {cookie: `threadnote_preview_41377=${token}`}});
+      yield* Effect.promise(() => handler(request()));
+      yield* Effect.yieldNow;
+      const response = yield* Effect.promise(() => handler(request()));
+      expect(response.status).toBe(404);
+      const output = yield* Effect.promise(() => response.text());
+      expect(output).toContain('Memory unavailable');
+      expect(output).not.toContain(marker);
+    }
     yield* fs.remove(destination);
     const unavailable = yield* snapshot();
     expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
     expect(yield* snapshot()).toEqual(unavailable);
+    const outside = yield* fs.makeTempDirectoryScoped({prefix: 'preview-receipt-outside-'});
+    yield* fs.writeFileString(path.join(outside, 'other.md'), withoutId);
+    yield* fs.symlink(path.join(outside, 'other.md'), destination);
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
+    expect(unboundedReads).toBe(0);
   }).pipe(provide),
+);
+
+it.effect.prop(
+  'bounded relocation witnesses preserve destination content across body sizes',
+  {size: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 32768}))},
+  ({size}) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-witness-property-'});
+      const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories', 'shared', 'team');
+      yield* fs.makeDirectory(root, {recursive: true});
+      const config = {...unusedConfig, agentContextHome: home};
+      const fromUri = 'threadnote://user/tester/memories/durable/old.md';
+      const toUri = 'threadnote://user/tester/memories/shared/team/moved.md';
+      const source = 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_witness_property\n\nOriginal';
+      yield* recordMemoryRelocation(config, {fromUri, toUri, fromContent: source, toContent: source});
+      const current = `MEMORY\nkind: durable\nstatus: active\n\n${EffectString.repeat(size)('x')}`;
+      yield* fs.writeFileString(path.join(root, 'moved.md'), current);
+      expect(
+        (yield* readManagedMemory(config, 'threadnote://memory/tn_witness_property', {preview: true})).content,
+      ).toBe(current);
+    }).pipe(provide),
+  {arbitrary: {runs: 12}},
 );
 
 it.effect('reports a bounded bind error without exposing its cause in the user message', () =>

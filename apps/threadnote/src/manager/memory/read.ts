@@ -4,6 +4,7 @@ import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
 import {classifyMemoryIdentityCandidates, MemoryIdentityResolutionError} from '@threadnote/recall/memory/identity';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
+import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {runtimeTextDirectoryNames} from '@threadnote/platform/system';
@@ -244,7 +245,30 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   const found = classifyMemoryIdentityCandidates(candidates, memoryId, [scope]);
   if (found.state === 'resolved') return {canonicalUri: found.uri, expectedMemoryId: memoryId, requestedUri: uri};
   if (found.state === 'not-found') {
-    const witnesses = yield* loadMemoryRelocationIdentityWitnesses(config, [memoryId], [scope]);
+    const store = yield* ResourceStore;
+    const boundedStore = ResourceStore.of({
+      ...store,
+      read: (location, uri) =>
+        checkpoint(MAX_PREVIEW_IDENTITY_FILE_BYTES + 1, 1).pipe(
+          Effect.mapError(cause =>
+            ResourceIoFailed.make({cause, message: 'Memory preview read was interrupted.', operation: 'read', uri}),
+          ),
+          Effect.andThen(store.readBounded(location, uri, MAX_PREVIEW_IDENTITY_FILE_BYTES)),
+          Effect.flatMap(result =>
+            result.truncated
+              ? ResourceIoFailed.make({
+                  cause: undefined,
+                  message: 'Memory preview target is too large.',
+                  operation: 'read',
+                  uri,
+                })
+              : Effect.succeed(result.content),
+          ),
+        ),
+    });
+    const witnesses = yield* loadMemoryRelocationIdentityWitnesses(config, [memoryId], [scope]).pipe(
+      Effect.provideService(ResourceStore, boundedStore),
+    );
     const witnessed = classifyMemoryIdentityCandidates(witnesses, memoryId, [scope]);
     if (witnessed.state === 'resolved')
       return {
