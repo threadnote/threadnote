@@ -468,6 +468,104 @@ const smallPlan = () =>
   });
 
 describe('native authoring lifecycle', () => {
+  effectIt.effect('ready-saves, reads back, and exports a reviewed prose-only architecture plan', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      const base = smallPlan();
+      if (base.kind !== 'plan') throw new Error('Expected a plan fixture.');
+      const document = decodeNativeAuthoringDocument({
+        ...base,
+        current: {
+          ...base.current,
+          summary: 'The existing reader returns entries from local memory.',
+          diagram: '',
+        },
+        target: {
+          ...base.target,
+          summary: 'The reader will preserve each verified history root.',
+          diagram: '',
+        },
+        phases: EffectArray.map(base.phases, phase => ({
+          ...phase,
+          acceptance: EffectArray.map(phase.acceptance, ({scenarioIds: _scenarioIds, ...acceptance}) => acceptance),
+        })),
+        review: {required: true, reason: 'A plan review is required before cycle export.'},
+      });
+      const packet = authoring(yield* authoringRequest(f, 'review-packet', {document}));
+      const review = {documentHash: packet.documentHash, outcome: 'accepted', blockingIssueCount: 0};
+      const draft = authoring(yield* authoringRequest(f, 'save', {document, ready: false, expectedRevision: null}));
+      const draftRoot = reference(draft.root);
+      const ready = authoring(
+        yield* authoringRequest(f, 'save', {
+          document,
+          ready: true,
+          uri: draftRoot.uri,
+          expectedRevision: draftRoot.revision,
+          review,
+        }),
+      );
+      expect(ready.readiness).toBe('ready');
+      const root = reference(ready.root);
+      const loaded = authoring(yield* authoringRequest(f, 'load', {uri: root.uri, detail: 'document'}));
+      expect(loaded.document).toEqual(document);
+      const exported = authoring(
+        yield* authoringRequest(f, 'export-dev-cycle', {
+          uri: root.uri,
+          delivery: 'local',
+          bindings: {'phase-save': {branch: 'feature/save', baseBranch: 'main'}},
+        }),
+      );
+      expect(exported).toMatchObject({
+        format: 'threadnote-native-cycle-plan',
+        version: 1,
+        featureId: document.id,
+        phases: [{id: 'phase-save', branch: 'feature/save', baseBranch: 'main'}],
+      });
+    }).pipe(run),
+  );
+
+  effectIt.effect('renders architecture prose as prose and keeps Mermaid diagrams fenced', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      const base = smallPlan();
+      if (base.kind !== 'plan') throw new Error('Expected a plan fixture.');
+      const document = decodeNativeAuthoringDocument({
+        ...base,
+        current: {
+          ...base.current,
+          diagram: 'graph traversal follows imports and returns the cached result.',
+        },
+        target: {...base.target, diagram: 'graph TD\n  Caller --> Store --> History'},
+        phases: EffectArray.map(base.phases, phase => ({
+          ...phase,
+          acceptance: EffectArray.map(phase.acceptance, ({scenarioIds: _scenarioIds, ...acceptance}) => acceptance),
+        })),
+      });
+      const saved = authoring(yield* authoringRequest(f, 'save', {document, ready: false, expectedRevision: null}));
+      const root = reference(saved.root);
+      const prose = authoring(
+        yield* authoringRequest(f, 'read', {
+          uri: root.uri,
+          artifactId: 'current',
+          detail: 'section',
+          sectionId: 'diagram',
+        }),
+      );
+      expect(prose.content).toBe('graph traversal follows imports and returns the cached result.');
+      const mermaid = authoring(
+        yield* authoringRequest(f, 'read', {
+          uri: root.uri,
+          artifactId: 'target',
+          detail: 'section',
+          sectionId: 'diagram',
+        }),
+      );
+      expect(mermaid.content).toBe('```mermaid\ngraph TD\n  Caller --> Store --> History\n```');
+    }).pipe(run),
+  );
+
   effectIt.effect('clears a reservation whose state commit succeeded but whose acknowledgement was interrupted', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

@@ -141,7 +141,7 @@ const architecture = Schema.Struct({
   summary: prose,
   components: proseList(1, 128),
   contracts: Schema.Array(prose).check(Schema.isMaxLength(128)),
-  diagram: prose,
+  diagram: boundedText(8192),
 });
 const acceptance = Schema.Struct({
   id: portableId,
@@ -267,6 +267,22 @@ export function canonicalAuthoringJson(value: unknown): string {
 export function nativeAuthoringDigest(document: NativeAuthoringDocument): string {
   const decoded = decodeNativeAuthoringDocument(document);
   return sha256HexSync(`threadnote.native-authoring.document.v1\n${canonicalAuthoringJson(decoded)}`);
+}
+
+export function isNativeMermaidDiagram(value: string): boolean {
+  const firstLine = Effect.pipe(
+    value,
+    EffectString.trimStart,
+    EffectString.split(/\r?\n/u),
+    EffectArray.findFirst(() => true),
+    EffectOption.getOrElse(() => ''),
+    EffectString.trim,
+  );
+  if (firstLine.length === 0 || Effect.pipe(firstLine, EffectString.startsWith('```'))) return false;
+  return (
+    /^(?:graph|flowchart)\s+(?:TB|TD|BT|RL|LR)(?:\s*;.*)?$/iu.test(firstLine) ||
+    /^(?:sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s*;.*)?$/iu.test(firstLine)
+  );
 }
 
 export function nativeSpecIntentDigest(document: NativeAuthoringDocument): string {
@@ -577,12 +593,8 @@ export function validateNativeAuthoring(
         ['current.diagram', decoded.current.diagram],
         ['target.diagram', decoded.target.diagram],
       ] as const) {
-        if (!validMermaid(diagram))
-          add(
-            'diagram-invalid',
-            label,
-            'Ready architecture diagrams need a supported raw Mermaid declaration without fences.',
-          );
+        if (Effect.pipe(diagram, EffectString.trimStart, EffectString.startsWith('```')))
+          add('diagram-invalid', label, 'Architecture Mermaid diagrams must not be fenced in the authoring document.');
       }
     }
     if (
@@ -694,14 +706,4 @@ function hasDependencyCycle(phases: readonly {readonly id: string; readonly depe
     return false;
   };
   return EffectArray.some([...graph.keys()], visit);
-}
-
-function validMermaid(diagram: string): boolean {
-  const firstLine =
-    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-    Effect.pipe(Effect.pipe(diagram, EffectString.trimStart).split(/\r?\n/u, 1)[0], effectOptionalString =>
-      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
-    ) ?? '';
-  if (Effect.pipe(diagram, EffectString.trimStart, EffectString.startsWith('```'))) return false;
-  return /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(firstLine);
 }

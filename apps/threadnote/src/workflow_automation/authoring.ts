@@ -9,6 +9,7 @@ import {
   NativeAuthoringDocumentSchema,
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
+  isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
@@ -280,7 +281,7 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         summary: value.summary,
         components: compact(bullets(value.components), 3000),
         contracts: compact(bullets(value.contracts), 3000),
-        diagram: '```mermaid\n' + value.diagram + '\n```',
+        diagram: isNativeMermaidDiagram(value.diagram) ? '```mermaid\n' + value.diagram + '\n```' : value.diagram,
       },
     });
   return [
