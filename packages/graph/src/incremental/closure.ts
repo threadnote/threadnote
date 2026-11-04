@@ -1,7 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import type {CodeGraphWorkspaceProject} from '../languages/types.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../fact/budget.js';
-import {CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES} from './work.js';
+import {CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES} from './limits.js';
 import {compareCodeUnits} from '../ordering.js';
 import {
   hasSameCodeGraphReexportResolutionSurface,

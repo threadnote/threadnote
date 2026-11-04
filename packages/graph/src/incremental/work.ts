@@ -8,11 +8,12 @@ import {
 } from '../store/resolution/candidate_closure.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 import * as EffectRecord from 'effect/Record';
+import {CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES} from './limits.js';
+
+export {CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES} from './limits.js';
 
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FILES = 128;
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_SOURCE_BYTES = 16 * 1_048_576;
-/** Matches one governed persistent materialization transaction while retaining 8 MiB per-file batches. */
-export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES = 32 * 1_048_576;
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BATCHES = 4;
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_ROWS = 250_000;
 /** Persisted rows may be carried without decoding, but remain independently bounded. */
