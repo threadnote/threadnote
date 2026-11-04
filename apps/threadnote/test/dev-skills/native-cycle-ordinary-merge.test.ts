@@ -298,6 +298,68 @@ describe('ordinary merge native qualification', () => {
   );
 
   effectIt.effect(
+    'cancels retained-object reads, final source capture and the final fence before any pin or receipt writes',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* mergeFixture();
+        const before = yield* f.fs.readFileString(f.statePath());
+        const stored = JSON.parse(before);
+        const journal = yield* f.fs.readFileString(f.journalPath(stored.bindingId));
+        const refs = yield* retentionRefs(f);
+        const executor = yield* CommandExecutor;
+        for (const point of ['retained-pin', 'source-renormalize', 'final-fence']) {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let retentionStarted = false;
+          let held = false;
+          const beforeCommand = (args: readonly string[]) =>
+            Effect.gen(function* () {
+              const pinRead =
+                args.includes('show-ref') && EffectArray.some(args, arg => EffectString.includes('/merge-prior/')(arg));
+              if (pinRead) retentionStarted = true;
+              if (
+                held ||
+                !retentionStarted ||
+                !(point === 'retained-pin'
+                  ? pinRead
+                  : point === 'source-renormalize'
+                    ? args.includes('--renormalize')
+                    : args.includes(`${f.old.baselines.one.pinnedRef}^{tree}`))
+              )
+                return;
+              held = true;
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            });
+          const blocked = CommandExecutor.of({
+            ...executor,
+            execute: (executable, args, options) =>
+              beforeCommand(args).pipe(Effect.andThen(executor.execute(executable, args, options))),
+            executeBytes: (executable, args, options) =>
+              beforeCommand(args).pipe(Effect.andThen(executor.executeBytes!(executable, args, options))),
+          });
+          yield* Effect.acquireUseRelease(
+            f.capture().pipe(Effect.provideService(CommandExecutor, blocked), Effect.forkChild),
+            child =>
+              Effect.gen(function* () {
+                yield* Deferred.await(entered);
+                yield* Effect.sync(() => child.interruptUnsafe());
+                // Completion while the gate is still closed proves the pre-pin work was interruptible.
+                const exit = yield* Fiber.await(child).pipe(Effect.timeout('5 seconds'));
+                expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true);
+                expect(held).toBe(true);
+                expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+                expect(yield* f.fs.readFileString(f.journalPath(stored.bindingId))).toBe(journal);
+                expect(yield* retentionRefs(f)).toBe(refs);
+              }),
+            child => Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.interrupt(child))),
+          );
+        }
+      }).pipe(run),
+    {timeout: 60_000},
+  );
+
+  effectIt.effect(
     'settles an in-flight rename before cancellation can race retention cleanup',
     () =>
       Effect.gen(function* () {

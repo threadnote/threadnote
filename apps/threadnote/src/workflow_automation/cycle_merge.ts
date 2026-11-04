@@ -156,8 +156,8 @@ export const prepareNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cyc
   };
 });
 
-/** Last read boundary before any receipt/pin write. Ref creation is one all-or-nothing transaction. */
-export const retainNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycle.retainOrdinaryMerge')(function* (
+/** Interruptible validation ending at the final source fence; the caller owns the retention/write critical section. */
+const prepareMergeRetention = Effect.fn('workflowAutomation.cycle.prepareMergeRetention')(function* (
   repo: string,
   snapshot: NativeCycleSnapshot,
   prior: NativeCycleSnapshot,
@@ -219,12 +219,10 @@ export const retainNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cycl
     [baseline.pinnedRef, baseline.tree],
   ]);
   for (const [ref, object] of verified) operations.push(`verify ${ref} ${object}`);
-  yield* runCommandEffect('git', ['--no-optional-locks', '-C', repo, 'update-ref', '--stdin'], {
+  return {
+    created,
     input: new TextEncoder().encode(EffectArray.join(['start', ...operations, 'prepare', 'commit', ''], '\n')),
-    timeoutMs: 30_000,
-    maxOutputBytes: 4096,
-  });
-  return created;
+  };
 });
 
 const recoveryRequired = (message: string) =>
@@ -244,10 +242,15 @@ export const persistNativeCycleOrdinaryMerge = Effect.fn('workflowAutomation.cyc
   prepared: PreparedNativeWorkflowStateWrite,
   expectedRevision: string,
 ) {
+  const {created, input} = yield* prepareMergeRetention(repo, snapshot, prior, baseline, phase);
   return yield* Effect.uninterruptible(
     Effect.gen(function* () {
-      // Settle filesystem operations before readback/cleanup; interruption must not leave a late rename racing rollback.
-      const created = yield* retainNativeCycleOrdinaryMerge(repo, snapshot, prior, baseline, phase);
+      // Mask only the ref transaction and settled persistence/recovery; a late rename must never race rollback.
+      yield* runCommandEffect('git', ['--no-optional-locks', '-C', repo, 'update-ref', '--stdin'], {
+        input,
+        timeoutMs: 30_000,
+        maxOutputBytes: 4096,
+      });
       const written = yield* Effect.exit(writePreparedNativeWorkflowState(config, prepared, expectedRevision));
       if (Exit.isSuccess(written)) return written.value;
       const observed = yield* Effect.exit(readNativeWorkflowState(config, prepared.state.runId));

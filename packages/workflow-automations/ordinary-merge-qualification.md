@@ -47,8 +47,10 @@ immutable refs and one Git transaction that also verifies the source/base/prior
 refs. Native-state persistence consumes those exact prepared bytes and retains
 the exact CAS check.
 
-Once retention starts, persistence and recovery settle before interruption can
-leave the critical section; a late rename must never race pin cleanup.
+Retained-object checks, ancestry validation, source capture, and the final source
+fence remain interruptible. The critical section starts at the atomic retention
+transaction; that transaction, persistence, and recovery settle before interruption
+can leave it. A late rename must never race pin cleanup.
 If persistence reports failure, a fresh state read determines recovery. An exact
 candidate revision proves admission and returns its receipt. Only the exact
 original revision permits rollback: a conditional Git transaction deletes only
