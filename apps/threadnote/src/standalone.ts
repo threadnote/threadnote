@@ -36,6 +36,8 @@ import {
 } from './worker_protocol.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {MemoryPreviewRead} from './preview/server.js';
+import type {ApplicationServices} from './effect/runtime.js';
 
 const executableName = Effect2.pipe(
   Effect2.pipe(process.execPath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
@@ -725,6 +727,7 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
   }
   const cliOperation = invocation.operation;
   const isWatchCollector = arguments_[0] === 'workflow-automation' && arguments_[1] === 'watch-collector';
+  const previewMemory = cliOperation === 'memory-preview' ? await import('./manager/server.js') : undefined;
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';
   const processOperation = isWatchCollector
     ? 'workflow-watch-collector'
@@ -736,14 +739,43 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
   const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
   return processHome.pipe(
     Effect.flatMap(home => {
-      const cli = withCliOutputConsole(cliEffect(arguments_));
+      const cliCommand = previewMemory
+        ? Effect.gen(function* () {
+            const context = yield* Effect.context<ApplicationServices>();
+            return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
+              Effect.provideService(MemoryPreviewRead, {
+                read: (config, uri) =>
+                  Effect.runPromiseWith(context)(previewMemory.readManagedMemory(config, uri)).then(document => {
+                    const source = document.record?.metadata;
+                    const metadata = source
+                      ? {
+                          kind: source.kind,
+                          project: source.project,
+                          sourceAgentClient: source.sourceAgentClient,
+                          status: source.status,
+                          timestamp: source.timestamp,
+                          topic: source.topic,
+                        }
+                      : undefined;
+                    return {
+                      content: document.content,
+                      node: {...document.node, metadata},
+                      memoryId: source?.memoryId,
+                    };
+                  }),
+              }),
+            );
+          })
+        : withCliOutputConsole(cliEffect(arguments_));
       // Filesystem-only support diagnostics must remain usable when inference coordination is unavailable.
       const command = isLogsRequest
-        ? cli
-        : processDiagnostics.withThreadnoteProcessRegistration(home, processRole, cli, processOperation);
+        ? cliCommand
+        : processDiagnostics.withThreadnoteProcessRegistration(home, processRole, cliCommand, processOperation);
       const applicationLayer = isLogsRequest
         ? runtimeBootstrap.telemetryLayerForHome(home, 'invocation').pipe(Layer.provideMerge(runtime.ApplicationLayer))
-        : runtime.applicationLayerForHome(home, 'cli');
+        : previewMemory
+          ? runtime.ApplicationLayer
+          : runtime.applicationLayerForHome(home, 'cli');
       return (isStaticVersionRequest ? Effect.scoped(command) : processLease.withStandaloneProcessLease(command)).pipe(
         Effect.provide(applicationLayer),
       );

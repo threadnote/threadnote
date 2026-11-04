@@ -5,6 +5,7 @@
   "exports": {
     "./child-environment-policy": "./src/child-environment-policy.ts",
     "./command": "./src/command.ts",
+    "./open-url": "./src/open_url.ts",
     "./digest": "./src/digest.ts",
     "./errors": "./src/errors.ts",
     "./file/durability": "./src/file/durability.ts",
