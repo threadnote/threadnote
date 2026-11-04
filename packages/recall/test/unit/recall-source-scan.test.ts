@@ -137,6 +137,38 @@ const verifyInventory = Effect.fn('test.verifyRecallSourceInventory')(function* 
 
 describe('Recall source staging', () => {
   effectIt.layer(BunServices.layer)(it => {
+    it.effect('batches exact selected-row metadata reads by inventory page', () =>
+      Effect.gen(function* () {
+        const {expected, scan, fs, path, config, policy} = yield* fixture(sources(513));
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          let metadataReads = 0;
+          const counted = new Proxy(sql, {
+            get(target, property, receiver) {
+              if (property !== 'unsafe') return Reflect.get(target, property, receiver);
+              return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+                if (EffectString.includes('FROM documents WHERE uri IN (')(text)) metadataReads += 1;
+                return target.unsafe<A>(text, parameters);
+              };
+            },
+          });
+          const result = yield* stageRecallSources(counted, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set(EffectArray.map(expected, row => row.uri)),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          const staged = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
+          expect(result.mode).toBe('touched');
+          expect(result.scannedSourceCount).toBe(expected.length);
+          expect(staged).toHaveLength(expected.length);
+          expect(EffectArray.every(staged, row => row.invalidated === 1)).toBe(true);
+          expect(metadataReads).toBe(Math.ceil(expected.length / 256));
+        }).pipe(withDatabase);
+      }),
+    );
     for (const includeInactive of [false, true])
       it.effect(`keeps direct inactive-folder files ${includeInactive ? 'in' : 'out of'} the selected variant`, () =>
         Effect.gen(function* () {
@@ -377,6 +409,31 @@ describe('Recall source staging', () => {
         }),
       );
     }
+    it.effect('falls back to a clean source scan when persisted inventory URI validation fails', () =>
+      Effect.gen(function* () {
+        const {expected, scan, fs, path, config, policy} = yield* fixture(sources(2));
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* scan(sql);
+          yield* seedPersistedInventory(sql);
+          yield* sql.unsafe("UPDATE documents SET uri = 'threadnote://foreign/untrusted.md' WHERE uri = ?", [
+            expected[0].uri,
+          ]);
+          const result = yield* stageRecallSources(sql, fs, path, config, {
+            includeInactive: true,
+            canonicalResourcePolicy: policy,
+            invalidatedUris: new Set([expected[1].uri]),
+            mode: {kind: 'touched', contentGeneration: 'baseline'},
+          });
+          expect(result.mode).toBe('full');
+          const staged = yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`);
+          yield* scanRecallSources(sql, fs, path, config, true, policy, new Set([expected[1].uri]));
+          expect(
+            yield* sql.unsafe<SourceRow>(`SELECT * FROM temp.${RECALL_REFRESH_SOURCE_TABLE} ORDER BY uri`),
+          ).toEqual(staged);
+        }).pipe(withDatabase);
+      }),
+    );
     fcEffectProp(
       it,
       'touched inventories equal a clean scan after finite file mutations without changing persisted rows',

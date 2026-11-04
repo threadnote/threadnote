@@ -1,4 +1,3 @@
-import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray} from 'effect';
 import {Effect, Result} from 'effect';
 import {resolveRecallScope} from '../../memory/recall_scope.js';
@@ -14,13 +13,7 @@ import {exactRecallTerms, type ExactMatch, type RecallHit} from '@threadnote/rec
 import {resolveEffectAiConfiguration} from '../../effect/ai/consolidator.js';
 import {jevConfiguration} from '../../effect/ai/jev.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {readRecallExactMatches} from '@threadnote/recall/index';
-import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
-import {
-  lexicalReadFailureWarning,
-  recallReadStateWarnings,
-  type RecallOperationalWarning,
-} from '@threadnote/recall/warning';
+import {type RecallOperationalWarning} from '@threadnote/recall/warning';
 import {
   exactMemoryScopes,
   MAX_WORKSET_PASSES,
@@ -109,13 +102,16 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     }
     const eligibility = scope.eligibility;
 
-    const exactLookup = yield* collectExactMemoryMatches(
-      config,
-      query,
-      params.includeArchived,
-      eligibility,
-      params.pinnedUri ? [params.pinnedUri] : params.allowedUriScopes,
-    );
+    const exactRead = navigationOnly
+      ? undefined
+      : {
+          terms: exactRecallTerms(query),
+          uriScopes: params.pinnedUri
+            ? [params.pinnedUri]
+            : (params.allowedUriScopes ??
+              exactMemoryScopes(config, params.includeArchived, query, undefined, undefined)),
+          limitPerTerm: 25,
+        };
     const effectAiResult = navigationOnly
       ? undefined
       : yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment()).pipe(Effect.result);
@@ -131,9 +127,10 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       effectAi,
       jev,
       eligibility,
-      exactMatches: exactLookup.matches,
+      exactRead,
+      exactMatches: [] as readonly ExactMatch[],
       navigationOnly,
-      operationalWarnings: exactLookup.operationalWarnings,
+      operationalWarnings: [] as readonly RecallOperationalWarning[],
       passes,
       query,
       recallProjectName,
@@ -148,38 +145,3 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     };
   });
 }
-
-const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatches')(function* (
-  config: RuntimeConfig,
-  query: string,
-  includeArchived: boolean,
-  eligibility: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  const terms = exactRecallTerms(query);
-  if (terms.length === 0) {
-    return {
-      matches: [] as readonly ExactMatch[],
-      operationalWarnings: [] as readonly RecallOperationalWarning[],
-    };
-  }
-  const scopes = allowedUriScopes ?? exactMemoryScopes(config, includeArchived, query, undefined, undefined);
-  let readState: import('@threadnote/recall/index').RecallReadyReadState | undefined;
-  const result = yield* readRecallExactMatches(config, {
-    onReadState: state => {
-      readState = state;
-    },
-    eligibility,
-    includeInactive: includeArchived,
-    limitPerTerm: 25,
-    terms,
-    uriScopes: scopes,
-  }).pipe(Effect.result);
-  if (Result.isFailure(result) && isReadCleanupUnconfirmed(result.failure)) return yield* Effect.fail(result.failure);
-  return Result.isSuccess(result)
-    ? {matches: result.success, operationalWarnings: recallReadStateWarnings(readState)}
-    : {
-        matches: [],
-        operationalWarnings: [lexicalReadFailureWarning(result.failure)],
-      };
-});

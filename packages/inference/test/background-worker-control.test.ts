@@ -125,6 +125,35 @@ const drainFixture = Effect.gen(function* () {
 });
 
 describe('owned fixture cooperative drain', () => {
+  for (const stillRunning of [false, true])
+    effectIt.effect(`observes positive process exit after missing birth (still running=${stillRunning})`, () =>
+      Effect.gen(function* () {
+        const f = yield* drainFixture;
+        yield* f.run(
+          Effect.gen(function* () {
+            yield* wakeBackgroundWorker(f.options);
+            const {owner, lifecycle} = yield* f.child(f.launches[0]);
+            expect(yield* lifecycle.register(owner)).toBe(true);
+            f.identities.set(owner.processId, undefined);
+            let livenessChecks = 0;
+            const raced = SystemInfo.of({
+              ...f.system,
+              isProcessRunning: pid =>
+                pid === owner.processId ? ++livenessChecks === 1 || stillRunning : f.system.isProcessRunning(pid),
+            });
+            const result = yield* drainBackgroundWorkerFixture(
+              f.capability,
+              (yield* Clock.currentTimeMillis) + 100,
+            ).pipe(Effect.provideService(SystemInfo, raced), Effect.result);
+            expect(livenessChecks).toBe(2);
+            if (stillRunning) expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
+            else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
+            expect(yield* f.fs.exists(f.home)).toBe(true);
+          }),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
   for (const kind of ['control', 'receipt', 'lock'] as const)
     effectIt.effect(`rejects dangling ${kind} evidence before minting a fixture capability`, () =>
       Effect.gen(function* () {

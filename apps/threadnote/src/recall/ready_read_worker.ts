@@ -1,4 +1,5 @@
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {serveRecallSections} from '@threadnote/recall/sections_read';
 import {retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
@@ -89,6 +90,8 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
   const onCanonicalMismatch = (value: number) => observe({kind: 'mismatch', value});
   const program = Effect.gen(function* () {
     switch (request.operation) {
+      case 'sections':
+        return yield* serveRecallSections(request.config, request.options);
       case 'memory-connections': {
         const instant = DateTime.make(request.options.now);
         if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});

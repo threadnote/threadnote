@@ -261,7 +261,7 @@ function connectionResult(value: unknown): RecallMemoryConnectionsResult {
   if (!isConnectionResult(value)) throw new Error('Invalid connection result.');
   return value;
 }
-function isConnectionResult(value: unknown): value is RecallMemoryConnectionsResult {
+export function isConnectionResult(value: unknown): value is RecallMemoryConnectionsResult {
   const count = (n: unknown) => Number.isSafeInteger(n) && typeof n === 'number' && n >= 0;
   const state = (s: unknown) => s === 'current' || s === 'historical' || s === 'unresolved' || s === 'conflicted';
   return (

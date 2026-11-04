@@ -36,6 +36,7 @@
     "./results": "./src/results.ts",
     "./runtime": "./src/runtime.ts",
     "./selection": "./src/selection.ts",
+    "./sections_read": "./src/sections_read.ts",
     "./threshold": "./src/threshold.ts",
     "./tokenize": "./src/tokenize.ts",
     "./vector-index": "./src/vector-index.ts",

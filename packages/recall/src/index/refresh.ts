@@ -94,6 +94,7 @@ export const RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE = 'recall_refresh_indexed_
 export const RECALL_REFRESH_INDEXED_POSTING_TABLE = 'recall_refresh_indexed_postings';
 export const RECALL_REFRESH_REPLACED_DOCUMENT_TABLE = 'recall_refresh_replaced_documents';
 export const RECALL_REFRESH_SOURCE_TABLE = 'recall_refresh_sources';
+const RECALL_REFRESH_SOURCE_DIGEST_TABLE = 'recall_refresh_source_digests';
 
 export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   sql: SqlClient.SqlClient,
@@ -193,6 +194,21 @@ function insertRecallSourceMetadata(sql: SqlClient.SqlClient, sources: readonly 
       source.authorityPolicyKey,
       source.invalidated ? 1 : 0,
     ]),
+  );
+}
+
+function insertRecallSourceDigests(
+  sql: SqlClient.SqlClient,
+  sources: readonly {readonly uri: string; readonly uriLocatorDigest: string}[],
+) {
+  if (sources.length === 0) return Effect.void;
+  return sql.unsafe(
+    `INSERT INTO temp.${RECALL_REFRESH_SOURCE_DIGEST_TABLE} (uri, uri_locator_digest)
+     VALUES ${EffectArray.join(
+       EffectArray.map(sources, () => '(?, ?)'),
+       ', ',
+     )}`,
+    EffectArray.flatMap(sources, source => [source.uri, source.uriLocatorDigest]),
   );
 }
 function indexRecallSourceLocators(sql: SqlClient.SqlClient) {
@@ -319,13 +335,14 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
     }
   let cursor: string | undefined;
   for (;;) {
-    const rows = yield* sql.unsafe<RetainedRecallSourceRow>(
-      `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key FROM documents
+    const rows = yield* sql.unsafe<{readonly uri: string}>(
+      `SELECT uri FROM documents
        ${cursor === undefined ? '' : 'WHERE uri COLLATE BINARY > ? COLLATE BINARY'}
        ORDER BY uri COLLATE BINARY LIMIT ?`,
       cursor === undefined ? [RECALL_REFRESH_SOURCE_PAGE_SIZE] : [cursor, RECALL_REFRESH_SOURCE_PAGE_SIZE],
     );
-    const retained: RecallRefreshSourceInsert[] = [];
+    const retainedDigests: {uri: string; uriLocatorDigest: string}[] = [];
+    const selectedUris: string[] = [];
     for (const row of rows) {
       const alias = folded.get(EffectString.toLowerCase(row.uri));
       if (alias !== undefined && alias !== row.uri) return undefined;
@@ -341,22 +358,43 @@ const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(functi
           recallSourcePathsMayAlias(segments, target.segments)
         )
           ambiguousTargets.add(uri);
-      if (selected.has(row.uri)) previous.set(row.uri, row);
-      else
-        retained.push({
-          uri: row.uri,
-          path: row.source_path,
-          size: row.source_size,
-          modifiedAt: row.source_modified_at ?? undefined,
-          authorityPolicyKey: row.authority_policy_key,
-          invalidated: false,
-          uriLocatorDigest: memoryLinkLocatorDigest(row.uri),
-        });
+      if (selected.has(row.uri)) {
+        selectedUris.push(row.uri);
+      } else {
+        retainedDigests.push({uri: row.uri, uriLocatorDigest: memoryLinkLocatorDigest(row.uri)});
+      }
     }
-    yield* insertRecallSourceMetadata(sql, retained);
+    if (selectedUris.length > 0) {
+      const priorRows = yield* sql.unsafe<RetainedRecallSourceRow>(
+        `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key
+         FROM documents WHERE uri IN (${EffectArray.join(
+           EffectArray.map(selectedUris, () => '?'),
+           ', ',
+         )})`,
+        selectedUris,
+      );
+      if (priorRows.length !== selectedUris.length) return undefined;
+      for (const prior of priorRows) {
+        if (!selected.has(prior.uri) || previous.has(prior.uri)) return undefined;
+        previous.set(prior.uri, prior);
+      }
+    }
+    yield* insertRecallSourceDigests(sql, retainedDigests);
     cursor = rows.at(-1)?.uri;
     if (rows.length < RECALL_REFRESH_SOURCE_PAGE_SIZE) break;
   }
+  // Keep URI validation and digest generation in the bounded JS pass, but let SQLite
+  // project the retained source metadata directly from the same snapshot.
+  yield* sql.unsafe(`
+    INSERT INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (
+      uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
+    )
+    SELECT document.uri, digest.uri_locator_digest, document.source_path, document.source_modified_at,
+      document.source_size, document.authority_policy_key, 0
+    FROM documents AS document
+    INNER JOIN temp.${RECALL_REFRESH_SOURCE_DIGEST_TABLE} AS digest ON digest.uri = document.uri
+    ORDER BY document.uri COLLATE BINARY
+  `);
   // Oversized files have no documents row; unknown prior membership requires a full count.
   if (skipped > 0 && EffectArray.some([...selected.keys()], uri => !previous.has(uri))) return undefined;
   for (const [uri, target] of selected)
@@ -794,6 +832,7 @@ export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
       RECALL_REFRESH_INDEXED_CODE_LINK_TABLE,
       RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
       RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
+      RECALL_REFRESH_SOURCE_DIGEST_TABLE,
       RECALL_REFRESH_SOURCE_TABLE,
     ]) {
       yield* sql.unsafe(`DROP TABLE IF EXISTS temp.${table}`);
@@ -813,6 +852,11 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       source_path TEXT NOT NULL, source_modified_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
       invalidated INTEGER NOT NULL CHECK (invalidated IN (0, 1))) WITHOUT ROWID`);
+    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_SOURCE_DIGEST_TABLE} (
+      uri TEXT PRIMARY KEY NOT NULL,
+      uri_locator_digest TEXT NOT NULL CHECK (
+        length(uri_locator_digest) = 64 AND uri_locator_digest NOT GLOB '*[^0-9a-f]*'
+      )) WITHOUT ROWID`);
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),

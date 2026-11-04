@@ -341,7 +341,11 @@ const fixtureOwnerExited = Effect.fn('backgroundWorker.fixtureOwnerExited')(func
   const system = yield* SystemInfo;
   if (!system.isProcessRunning(owner.processId)) return true;
   const identity = yield* system.processStartIdentity(owner.processId);
-  if (identity === undefined) return yield* drainUnavailable('identity-unknown');
+  if (identity === undefined) {
+    // The owned process can exit while its birth probe is in flight.
+    if (!system.isProcessRunning(owner.processId)) return true;
+    return yield* drainUnavailable('identity-unknown');
+  }
   return identity !== owner.processStartIdentity;
 });
 

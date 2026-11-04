@@ -89,8 +89,51 @@ export const recallIndexStatusReadSchema = Schema.Union([
 ]);
 const vectorOptions = {model: vectorModel, corpusGeneration: optional(text)};
 
+const sectionsFields = {
+  allowExactRescue: Schema.Boolean,
+  allowSemanticRescue: optional(Schema.Boolean),
+  allowedUriScopes: optional(strings),
+  eligibility: optional(eligibility),
+  feedbackQuery: text,
+  includeInactive: Schema.Boolean,
+  limit: count,
+  minimumScore: optional(Schema.Finite),
+  memoryRefs: optional(Schema.Array(text).check(Schema.isMaxLength(8))),
+  preferredUriScopes: optional(strings),
+  project: optional(text),
+  query: text,
+  queryVariants: optional(strings),
+  relationTypes: optional(Schema.Array(Schema.Literals(MEMORY_RELATION_TYPES))),
+  seedUris: optional(strings),
+  workspaceBranch: optional(text),
+  workspaceScope: optional(text),
+};
+export const recallReadySectionsSemanticSchema = Schema.Struct({
+  corpusGeneration: optional(text),
+  scores: optional(Schema.Array(Schema.Tuple([text, Schema.Finite])).check(Schema.isMaxLength(4096))),
+  warning: optional(text),
+});
+export const recallReadySectionsOptionsSchema = Schema.Union([
+  Schema.Struct({
+    ...sectionsFields,
+    mode: Schema.Literal('baseline'),
+    exact: optional(Schema.Struct({terms: strings, uriScopes: strings, limitPerTerm: count})),
+  }),
+  Schema.Struct({
+    ...sectionsFields,
+    mode: Schema.Literal('closing'),
+    candidateUris: strings,
+    semantic: recallReadySectionsSemanticSchema,
+    rerankerScores: Schema.Array(
+      Schema.Tuple([Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)), Schema.Finite]),
+    ).check(Schema.isMaxLength(4096)),
+  }),
+]);
+export type RecallReadySectionsOptions = typeof recallReadySectionsOptionsSchema.Type;
+
 /** Closed private transport. No refresh, authorization-defer marker or executable callback is representable. */
 export const recallReadyReadRequestSchema = Schema.Union([
+  Schema.Struct({...requestFields, operation: Schema.Literal('sections'), options: recallReadySectionsOptionsSchema}),
   Schema.Struct({
     ...requestFields,
     operation: Schema.Literal('memory-connections'),
@@ -216,6 +259,7 @@ export const recallReadyReadResponseSchema = Schema.Struct({
   protocol: Schema.Literal(1),
   binding: Schema.String,
   operation: Schema.Literals([
+    'sections',
     'data',
     'batch',
     'exact',

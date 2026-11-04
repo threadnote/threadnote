@@ -1,5 +1,6 @@
+import type {ExactMatch} from '@threadnote/recall/results';
+import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
 import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
-import {readRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
@@ -112,18 +113,14 @@ import {
   emptyRecallSemanticScoresResult,
   loadRecallExpansionVocabulary,
   loadRecallSemanticScoresResult,
-  prepareRecallSections,
   recallSelectionQueries,
   recallSelectionAnchorIds,
   selectedRecallCandidateUris,
   type RecallSemanticScoresResult,
 } from '@threadnote/recall/runtime';
-import {readRecallExactMatches} from '@threadnote/recall/index';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
-import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
-  lexicalReadFailureWarning,
   recallReadPhaseOutcome,
   mergeRecallOperationalWarnings,
   renderRecallOperationalWarning,
@@ -514,16 +511,16 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const eligibility = scope.eligibility;
 
   const baselineStarted = yield* Clock.monotonicTimeNanos;
-  const exactLookup =
+  const exactRead =
     dryRun || navigationOnly
-      ? {matches: [], operationalWarnings: []}
-      : yield* collectNativeExactMemoryMatches(config, query, {
-          includeArchived,
-          eligibility,
-          allowedUriScopes: explicitUri ? [explicitUri] : undefined,
-        });
-  const exactMatches = exactLookup.matches;
-  let operationalWarnings: readonly RecallOperationalWarning[] = exactLookup.operationalWarnings;
+      ? undefined
+      : {
+          terms: exactRecallTerms(query),
+          uriScopes: explicitUri ? [explicitUri] : exactMemoryScopes(config, includeArchived, query),
+          limitPerTerm: 25,
+        };
+  let exactMatches: readonly ExactMatch[] = [];
+  let operationalWarnings: readonly RecallOperationalWarning[] = [];
   let hybridMinimumScore = recallHybridMinimumScore(Number(recallThreshold));
   const expansionQueries: string[] = [];
   const recallLimit = nodeLimit ?? 12;
@@ -551,7 +548,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           ? Effect.void
           : Effect.sync(() => surfacedSemanticWarnings.add(warning)).pipe(Effect.andThen(Console.warn(warning))),
     });
-  yield* surfaceOperationalWarnings(exactLookup.operationalWarnings);
   if (Option.isSome(semanticResult)) yield* surfaceSemanticWarning(semanticResult.value);
   const rerankerCache = createRecallRerankerCache();
   let allowReranker = false;
@@ -559,7 +555,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
       Effect.gen(function* () {
-        const prepared = yield* prepareRecallSections(config, {
+        const prepared = yield* prepareDefaultRecallSections(config, {
           allowReranker,
           allowExactRescue: !thresholdConfigured,
           allowSemanticRescue: !thresholdConfigured,
@@ -567,6 +563,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           candidateUris,
           closingCandidateUris: closingRead ? candidateUris : undefined,
           exactMatches: closingRead ? [] : exactMatches,
+          exact: closingRead ? undefined : exactRead,
           eligibility,
           feedbackQuery: query,
           includeInactive: includeArchived,
@@ -578,8 +575,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           project: recallProjectName,
           query,
           queryVariants: expansionQueries,
-          readMemoryConnections: input => readRecallMemoryConnections(config, input),
-          readRecords: uris => readMemoryRecordsByUri(config, uris),
           relationTypes: memoryConnections?.relationTypes,
           rerankerCache,
           seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
@@ -588,6 +583,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           workspaceBranch,
           workspaceScope: workspaceComponent?.scope,
         });
+        if (!closingRead) exactMatches = prepared.exactMatches;
         semanticResult = Option.some(prepared.semanticResult);
         operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
         yield* surfaceOperationalWarnings(prepared.operationalWarnings);
@@ -597,7 +593,10 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
     );
   let recallSections = yield* prepareSections();
-  const closingReadMilliseconds = Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
+  // Baseline now has one owned startup. Reserve two observed windows for a later
+  // closing startup and its final proof; this stays inside the original compute allowance.
+  const closingReadMilliseconds =
+    2 * Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
   // Finish and retain the useful lexical baseline before querying optional models.
   const baselineSections = recallSections;
   // Rejected admission performs no optional work, so its completed lexical proof can stand.
@@ -1432,33 +1431,6 @@ export function hasAgentSkillCatalogIntent(query: string): boolean {
     /\bskills?\b.{0,48}\b(for|to|that|which|about)\b/.test(normalized)
   );
 }
-
-const collectNativeExactMemoryMatches = Effect.fn('memory.collectNativeExactMemoryMatches')(function* (
-  config: RuntimeConfig,
-  query: string,
-  options: {
-    readonly eligibility: RecallEligibilityPolicy;
-    readonly allowedUriScopes?: readonly string[];
-    readonly includeArchived: boolean;
-  },
-) {
-  const terms = exactRecallTerms(query);
-  if (terms.length === 0) return {matches: [], operationalWarnings: []};
-  const result = yield* readRecallExactMatches(config, {
-    eligibility: options.eligibility,
-    includeInactive: options.includeArchived,
-    limitPerTerm: 25,
-    terms,
-    uriScopes: options.allowedUriScopes ?? exactMemoryScopes(config, options.includeArchived, query),
-  }).pipe(Effect.result);
-  if (Result.isFailure(result) && isReadCleanupUnconfirmed(result.failure)) return yield* Effect.fail(result.failure);
-  return Result.isSuccess(result)
-    ? {matches: result.success, operationalWarnings: []}
-    : {
-        matches: [],
-        operationalWarnings: [lexicalReadFailureWarning(result.failure)],
-      };
-});
 
 export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeConfig, input: StoreMemoryOptions) {
   if (input.replaceUri) {

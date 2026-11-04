@@ -90,6 +90,7 @@ export interface ProductionLogPhaseTiming {
 }
 
 interface ProductionLogPhaseRecorderShape {
+  readonly unavailable: (phase: ProductionLogPhase) => Effect.Effect<void>;
   readonly time: <A, E, R>(
     phase: ProductionLogPhase,
     effect: Effect.Effect<A, E, R>,
@@ -202,6 +203,11 @@ export function withProductionLogging<A, E, R>(
     );
 
     const phaseRecorder = ProductionLogPhaseRecorder.of({
+      unavailable: phase =>
+        Effect.sync(() => {
+          if (phaseTimings.length < PRODUCTION_LOG_PHASE_TIMING_MAX_COUNT)
+            phaseTimings.push({phase, outcome: 'unavailable', durationMilliseconds: 0});
+        }),
       time: <PhaseValue, PhaseError, PhaseRequirements>(
         phase: ProductionLogPhase,
         phaseEffect: Effect.Effect<PhaseValue, PhaseError, PhaseRequirements>,
@@ -274,6 +280,12 @@ export function withProductionPhaseTiming<A, E, R>(
     ),
   );
 }
+
+/** No phase attempt ran, so its duration is exactly zero rather than a measured no-op. */
+export const recordUnavailableProductionPhase = (phase: ProductionLogPhase) =>
+  Effect.serviceOption(ProductionLogPhaseRecorder).pipe(
+    Effect.flatMap(recorder => (Option.isSome(recorder) ? recorder.value.unavailable(phase) : Effect.void)),
+  );
 
 export const runProductionLogs = Effect.fn('productionLog.runProductionLogs')(function* (config: RuntimeConfig) {
   const fs = yield* FileSystem.FileSystem;

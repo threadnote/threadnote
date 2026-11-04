@@ -72,14 +72,14 @@ import {
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-interface RecallRuntimeConfig {
+export interface RecallRuntimeConfig {
   readonly account: string;
   readonly agentContextHome: string;
   readonly manifestPath?: string;
   readonly user: string;
 }
 
-interface PrepareRecallSectionsInput<R> {
+export interface PrepareRecallSectionsInput<R> {
   readonly allowExactRescue: boolean;
   /** Deterministic baseline retrieval precedes optional model refinement. */
   readonly allowReranker?: boolean;
@@ -238,6 +238,17 @@ export const prepareRecallSections = Effect.fn('recall.prepareSections')(functio
   input: PrepareRecallSectionsInput<R>,
 ) {
   let operationalWarnings: readonly RecallOperationalWarning[] = [];
+  const rerank = (candidates: readonly RecallCandidate[]) =>
+    input.closingCandidateUris !== undefined
+      ? Effect.succeed(applyCachedRerankerScores(candidates, input.rerankerCache))
+      : applySelectedNativeReranker(config.agentContextHome, input.query, candidates, input.rerankerCache).pipe(
+          Effect.catch(() =>
+            Effect.sync(() => {
+              if (input.rerankerCache) input.rerankerCache.unavailable = true;
+              return applyCachedRerankerScores(candidates, input.rerankerCache);
+            }),
+          ),
+        );
   let semanticResult =
     input.semanticResult === undefined
       ? yield* loadRecallSemanticScoresResult(
@@ -249,7 +260,7 @@ export const prepareRecallSections = Effect.fn('recall.prepareSections')(functio
         )
       : Option.getOrElse(input.semanticResult, emptyRecallSemanticScoresResult);
   for (let retry = 0; ; retry += 1) {
-    const prepared = yield* prepareRecallSectionsAttempt(config, input, semanticResult);
+    const prepared = yield* prepareRecallSectionsAttempt(config, input, semanticResult, rerank);
     operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
     if (yield* semanticResultMatchesLexicalSnapshot(config, semanticResult, prepared.generations)) {
       return {...prepared.sections, operationalWarnings, semanticResult};
@@ -259,6 +270,7 @@ export const prepareRecallSections = Effect.fn('recall.prepareSections')(functio
         config,
         input,
         emptyRecallSemanticScoresResult(semanticResult.warning),
+        rerank,
       );
       return {
         ...lexicalOnly.sections,
@@ -276,10 +288,34 @@ export const prepareRecallSections = Effect.fn('recall.prepareSections')(functio
   }
 });
 
-const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(function* <R>(
+/** Complete model-free preparation; the final semantic fence remains after hydration and ranking. */
+export const prepareRecallSectionsWithoutInference = Effect.fn('recall.prepareSectionsWithoutInference')(function* <R>(
   config: RecallRuntimeConfig,
   input: PrepareRecallSectionsInput<R>,
   semanticResult: RecallSemanticScoresResult,
+  cachedScores: (candidates: readonly RecallCandidate[]) => readonly RecallCandidate[],
+) {
+  const prepared = yield* prepareRecallSectionsAttempt(config, input, semanticResult, candidates =>
+    Effect.succeed(cachedScores(candidates)),
+  );
+  if (yield* semanticResultMatchesLexicalSnapshot(config, semanticResult, prepared.generations))
+    return {...prepared.sections, operationalWarnings: prepared.operationalWarnings, semanticResult};
+  const lexical = emptyRecallSemanticScoresResult(semanticResult.warning);
+  const fallback = yield* prepareRecallSectionsAttempt(config, input, lexical, candidates =>
+    Effect.succeed(cachedScores(candidates)),
+  );
+  return {
+    ...fallback.sections,
+    operationalWarnings: mergeRecallOperationalWarnings(prepared.operationalWarnings, fallback.operationalWarnings),
+    semanticResult: lexical,
+  };
+});
+
+const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(function* <R, R2>(
+  config: RecallRuntimeConfig,
+  input: PrepareRecallSectionsInput<R>,
+  semanticResult: RecallSemanticScoresResult,
+  rerank: (candidates: readonly RecallCandidate[]) => Effect.Effect<readonly RecallCandidate[], never, R2>,
 ) {
   const memoryConnections: RecallMemoryConnectionsResult | undefined = input.memoryRefs?.length
     ? yield* (
@@ -581,22 +617,10 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     },
   );
   const indexedCandidates = closingRead
-    ? applyCachedRerankerScores(semanticCandidates, input.rerankerCache)
+    ? yield* rerank(semanticCandidates)
     : input.allowReranker === false || navigationOnly
       ? semanticCandidates
-      : yield* applySelectedNativeReranker(
-          config.agentContextHome,
-          input.query,
-          semanticCandidates,
-          input.rerankerCache,
-        ).pipe(
-          Effect.catch(() =>
-            Effect.sync(() => {
-              if (input.rerankerCache) input.rerankerCache.unavailable = true;
-              return applyCachedRerankerScores(semanticCandidates, input.rerankerCache);
-            }),
-          ),
-        );
+      : yield* rerank(semanticCandidates);
   const unreadIndexedMemoryUris = unreadIndexedMemoryRecordUris(indexedCandidates, records);
   const extraRecords = unreadIndexedMemoryUris.length > 0 ? yield* input.readRecords(unreadIndexedMemoryUris) : [];
   const liveRecords = extraRecords.length > 0 ? [...records, ...extraRecords] : records;

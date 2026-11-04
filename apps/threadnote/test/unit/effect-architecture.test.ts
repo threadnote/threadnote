@@ -259,6 +259,7 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/effect/mcp_broker_process.ts',
       'packages/platform/src/system.ts',
       'apps/threadnote/src/standalone.ts',
+      'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
     for (const path of await sourceFiles()) {
       const relativePath = relative(repoRoot, path);

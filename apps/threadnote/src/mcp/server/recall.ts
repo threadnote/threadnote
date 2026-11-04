@@ -1,3 +1,5 @@
+import {recordUnavailableProductionPhase} from '../../effect/production_log.js';
+import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
 import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../../recall/ready_read_boundary.js';
@@ -105,7 +107,7 @@ import {
 import {candidateReviewResult, candidateReviewStructuredContent} from './recall/candidate_review_response.js';
 import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
-import {parseRecallMemoryConnectionInput, readRecallMemoryConnections} from '@threadnote/recall/memory/connections';
+import {parseRecallMemoryConnectionInput} from '@threadnote/recall/memory/connections';
 import type {MemoryRelationType} from '@threadnote/memory/document';
 import {
   projectRecallMcpResponse,
@@ -123,7 +125,6 @@ import {
   warmRecallReranker,
   loadRecallExpansionVocabulary,
   loadMcpRecallSemanticScoresResult,
-  prepareRecallSections,
   recallSelectionAnchorIds,
   recallSelectionQueries,
   selectedRecallCandidateUris,
@@ -1155,7 +1156,7 @@ function runRecallTool(
         const seededUri = workspaceContext.seededUri;
         const sections = workspaceContext.sections;
         const eligibility = workspaceContext.eligibility;
-        const exactMatches = workspaceContext.exactMatches;
+        let exactMatches = workspaceContext.exactMatches;
         let operationalWarnings = workspaceContext.operationalWarnings;
         const effectAi = workspaceContext.effectAi;
         const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
@@ -1183,7 +1184,7 @@ function runRecallTool(
             withProductionPhaseTiming(
               'recall.lexical-ranking',
               Effect.gen(function* () {
-                const prepared = yield* prepareRecallSections(config, {
+                const prepared = yield* prepareDefaultRecallSections(config, {
                   allowReranker,
                   allowExactRescue: !thresholdConfigured,
                   allowSemanticRescue: !thresholdConfigured,
@@ -1192,6 +1193,7 @@ function runRecallTool(
                   closingCandidateUris: closingRead ? candidateUris : undefined,
                   eligibility,
                   exactMatches: closingRead ? [] : exactMatches,
+                  exact: closingRead ? undefined : workspaceContext.exactRead,
                   feedbackQuery: params.query,
                   includeInactive: params.includeArchived,
                   limit: recallLimit,
@@ -1202,8 +1204,6 @@ function runRecallTool(
                   project: recallProjectName,
                   query,
                   queryVariants: expansionQueries,
-                  readMemoryConnections: input => readRecallMemoryConnections(config, input),
-                  readRecords: uris => readMemoryRecordsByUri(config, uris),
                   relationTypes: params.relationTypes,
                   rerankerCache,
                   seedUris: EffectArray.filter(
@@ -1215,6 +1215,7 @@ function runRecallTool(
                   workspaceBranch,
                   workspaceScope: workspaceComponent?.scope,
                 });
+                if (!closingRead) exactMatches = prepared.exactMatches;
                 semanticResult = prepared.semanticResult;
                 operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
                 appendSemanticWarning(semanticResult);
@@ -1234,9 +1235,10 @@ function runRecallTool(
           );
         };
         let recallSections = yield* prepareSections();
-        const closingReadMilliseconds = Math.ceil(
-          Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000,
-        );
+        // Consolidation removed a startup from the measured baseline. Keep a second
+        // observed window for closing variance, within the same original deadline.
+        const closingReadMilliseconds =
+          2 * Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
         const baselineSections = recallSections;
         const baselineNoticeCount = sections.length;
         // Rejected admission performs no optional work, so its completed lexical proof can stand.
@@ -1382,6 +1384,8 @@ function runRecallTool(
                 }),
                 {closingReadMilliseconds},
               );
+              if (!refinementStarted && !navigationOnly)
+                yield* recordUnavailableProductionPhase('recall.semantic-retrieval');
               if (refinementStarted) {
                 const selectedSections = Option.getOrElse(refined, () => baselineSections);
                 allowReranker = false;
