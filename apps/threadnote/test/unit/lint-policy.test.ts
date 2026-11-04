@@ -49,6 +49,50 @@ function officialEffectRules(): readonly string[] {
 }
 
 describe('lint policy', () => {
+  it('limits production Effect runtimes to the two explicit application entrypoints', async () => {
+    const config = Schema.decodeUnknownSync(
+      Schema.Struct({
+        overrides: Schema.Array(
+          Schema.Struct({
+            files: Schema.Array(Schema.String),
+            rules: Schema.Record(Schema.String, Schema.Unknown),
+          }),
+        ),
+      }),
+    )(await Bun.file(new URL('../../../../.oxlintrc.strict.json', import.meta.url)).json());
+    const assertEntrypointExceptions = (overrides: typeof config.overrides) => {
+      const exceptions = EffectArray.filter(overrides, override =>
+        EffectArray.some(
+          ['threadnote/no-effect-runtime', 'effecttsgo/strict-effect-provide'],
+          rule => override.rules[rule] !== undefined && override.rules[rule] !== 'error',
+        ),
+      );
+      expect(exceptions).toEqual([
+        {
+          files: ['apps/threadnote/src/standalone.ts', 'apps/threadnote/src/recall/ready_read_entry.ts'],
+          rules: {'effecttsgo/strict-effect-provide': 'off', 'threadnote/no-effect-runtime': 'off'},
+        },
+        {
+          files: ['apps/threadnote/src/integrations/**/test/**/*.ts'],
+          rules: {
+            'threadnote/no-effect-runtime': 'off',
+            'threadnote/no-node-runtime': 'off',
+            'effecttsgo/new-promise': 'off',
+          },
+        },
+      ]);
+    };
+    assertEntrypointExceptions(config.overrides);
+    for (const rule of ['threadnote/no-effect-runtime', 'effecttsgo/strict-effect-provide']) {
+      expect(() =>
+        assertEntrypointExceptions([
+          ...config.overrides,
+          {files: ['apps/threadnote/src/recall/ready_read_entry.ts'], rules: {[rule]: 'off'}},
+        ]),
+      ).toThrow();
+    }
+    expect(config.overrides[0].rules['threadnote/no-effect-runtime']).toBe('error');
+  });
   it('enforces every official Effect lint category at error except documented application boundaries', async () => {
     const configSchema = Schema.Struct({
       extends: Schema.optionalKey(Schema.Array(Schema.String)),

@@ -1,3 +1,4 @@
+import {signalTransparentTeardown} from './process/signal_transparent_main.js';
 import {compiledHandoffSaveIdentity, HANDOFF_SAVE_WORKER_ARGUMENT} from './memory/handoff_save_contract.js';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Array as EffectArray} from 'effect';
@@ -83,13 +84,8 @@ const oauthM2MHelperIO = {
     process.stdout.write(text);
   },
 };
-const runSignalTransparentMain = Runtime.makeRunMain(({fiber, teardown}) => {
-  fiber.addObserver(exit => {
-    teardown(exit, code => {
-      if (code !== 0) process.exit(code);
-    });
-  });
-});
+
+const runSignalTransparentMain = Runtime.makeRunMain(signalTransparentTeardown);
 
 if (
   isCodeGraphDeepDiagnosticsWorker ||
@@ -518,40 +514,8 @@ async function contextBriefNativeReadWorkerProgram() {
 }
 
 async function recallReadyReadWorkerProgram() {
-  const [worker, processDiagnostics, processLease, command] = await Promise.all([
-    import('./recall/ready_read_worker.js'),
-    import('./process/diagnostics.js'),
-    import('./process/standalone_lease.js'),
-    import('@threadnote/platform/command'),
-  ]);
-  const processHome = normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess);
-  const noChildren = command.CommandExecutor.of({
-    execute: () =>
-      Effect.fail(
-        command.CommandSpawnFailed.make({
-          args: [],
-          executable: '<ready-read>',
-          message: 'Ready lexical workers do not launch commands.',
-          cause: undefined,
-        }),
-      ),
-    executeStreaming: () => Effect.die('Ready lexical workers do not launch commands.'),
-    spawnDetached: () => Effect.succeed(false),
-  });
-  return processHome.pipe(
-    Effect.flatMap(home =>
-      processLease.withStandaloneProcessLease(
-        processDiagnostics.withSignalTransparentThreadnoteWorkerRegistration(
-          home,
-          'recall-read-worker',
-          'ready-recall',
-          worker.recallReadyReadWorkerProgram,
-        ),
-      ),
-    ),
-    Effect.provideService(command.CommandExecutor, noChildren),
-    Effect.provide(worker.readyRecallReadWorkerLayer),
-  );
+  const {makeReadyRecallReadWorkerProgram, readyRecallReadWorkerLayer} = await import('./recall/ready_read_main.js');
+  return makeReadyRecallReadWorkerProgram(arguments_, process.env).pipe(Effect.provide(readyRecallReadWorkerLayer));
 }
 
 async function codeGraphAnalysisWorkerProgram() {

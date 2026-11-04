@@ -158,7 +158,18 @@ export class FixtureStdioTransport implements Transport {
   private child?: FixtureChild;
   private readonly buffer = new ReadBuffer();
   private closePromise?: Promise<void>;
-  private exit: {code: number | null; signal: NodeJS.Signals | null} | undefined;
+  private exit:
+    | {
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        stdinEofRequested: boolean;
+        stdinEofFinished: boolean;
+      }
+    | undefined;
+  private stdinEofRequested = false;
+  private stdinEofFinished = false;
+  private closeObserved = false;
+  private mcpInitialized = false;
   constructor(
     private readonly processes: FixtureProcesses,
     private readonly options: {
@@ -167,18 +178,33 @@ export class FixtureStdioTransport implements Transport {
       cwd: string;
       env: NodeJS.ProcessEnv;
       deadline: number;
+      shutdownMode?: 'strict' | 'effect-mcp-stdio-eof-130';
     },
   ) {}
+
+  markMcpInitialized(): void {
+    if (this.options.shutdownMode === 'effect-mcp-stdio-eof-130') this.mcpInitialized = true;
+  }
+
   async start(): Promise<void> {
     if (this.child) throw new Error('MCP transport already started');
     if (this.processes.remaining(this.options.deadline) <= 0) throw new Error('Fixture body deadline expired');
     const child = this.processes.spawn(this.options.command, this.options.args, this.options);
     this.child = child;
+    child.stdin?.once('finish', () => {
+      this.stdinEofFinished = true;
+    });
     child.once('exit', (code, signal) => {
-      this.exit = {code, signal};
+      this.exit = {
+        code,
+        signal,
+        stdinEofRequested: this.stdinEofRequested,
+        stdinEofFinished: this.stdinEofFinished,
+      };
     });
     this.closePromise = new Promise(resolve =>
       child.once('close', () => {
+        this.closeObserved = true;
         this.onclose?.();
         resolve();
       }),
@@ -209,9 +235,22 @@ export class FixtureStdioTransport implements Transport {
     );
   }
   async close(): Promise<void> {
-    this.child?.stdin?.end();
+    const stdin = this.child?.stdin;
+    if (stdin && !stdin.writableEnded && !stdin.destroyed) {
+      this.stdinEofRequested = true;
+      stdin.end();
+    }
     await this.closePromise;
-    if (!this.exit || this.exit.code !== 0 || this.exit.signal !== null)
+    const expectedMcpEofInterrupt =
+      this.options.shutdownMode === 'effect-mcp-stdio-eof-130' &&
+      this.mcpInitialized &&
+      this.exit?.stdinEofRequested === true &&
+      this.exit.stdinEofFinished &&
+      this.exit.code === 130 &&
+      this.exit.signal === null &&
+      this.closeObserved &&
+      this.processes.remaining(this.options.deadline) > 0;
+    if (!this.exit || ((this.exit.code !== 0 || this.exit.signal !== null) && !expectedMcpEofInterrupt))
       throw new Error('MCP child did not exit cleanly');
   }
 }

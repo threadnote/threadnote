@@ -37,10 +37,12 @@ import {
   makeReadyRecallReadBoundary,
   withReadyRecallReadBoundary,
   readyRecallReadRequestBinding,
+  readyReadWorkerInvocation,
   ReadyRecallReadWorkerAdmission,
 } from '../../src/recall/ready_read_boundary.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 import {createRecallRerankerCache, prepareRecallSections, warmRecallReranker} from '@threadnote/recall/runtime';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -87,6 +89,22 @@ const waitForPid = Effect.fn('test.waitForReadyReadPid')(function* (filename: st
 });
 
 describe('owned native ready-read boundary', () => {
+  it('preserves compiled and explicitly injected source worker routing', () => {
+    expect(readyReadWorkerInvocation('/runtime/threadnote', '/source/standalone.ts')).toEqual({
+      executable: '/runtime/threadnote',
+      arguments: [RECALL_READY_READ_WORKER_ARGUMENT],
+    });
+    fc.assert(
+      fc.property(fc.uuid(), token => {
+        const entrypoint = `/injected/${token}/worker.ts`;
+        expect(readyReadWorkerInvocation('/runtime/bun', entrypoint)).toEqual({
+          executable: '/runtime/bun',
+          arguments: [entrypoint, RECALL_READY_READ_WORKER_ARGUMENT],
+        });
+      }),
+      {numRuns: 24},
+    );
+  });
   effectIt.effect.prop(
     'one source worker preserves direct connection proof and excludes a foreign identity for every relation kind',
     {relationType: Schema.Literals(['depends_on', 'evidence_for', 'related_to', 'references'])},
@@ -290,9 +308,25 @@ describe('owned native ready-read boundary', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
+        const commands = yield* CommandExecutor;
+        const system = yield* SystemInfo;
+        const workerArguments: (readonly string[])[] = [];
+        const observed = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) =>
+            Effect.gen(function* () {
+              workerArguments.push(args);
+              expect(executable).toBe(system.executablePath);
+              expect(options?.env?.THREADNOTE_HOME).toBe(f.home);
+              expect(options?.verifyOwnedProcessExit).toBeDefined();
+              return yield* commands.execute(executable, args, options);
+            }),
+        });
         const started = yield* Clock.monotonicTimeNanos;
         const deadline = yield* makeReadDeadline(2000);
-        const boundary = yield* makeReadyRecallReadBoundary(deadline);
+        const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
+          Effect.provideService(CommandExecutor, observed),
+        );
         const exact = yield* boundary.read({
           operation: 'exact',
           config: f.config,
@@ -307,6 +341,11 @@ describe('owned native ready-read boundary', () => {
         });
         expect(ranked.outcome).toBe('success');
         expect(recallIndexDataResult(ranked.value).candidates[0]?.uri).toBe(f.uri);
+        const sourceEntry = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url));
+        expect(workerArguments).toEqual([
+          [sourceEntry, RECALL_READY_READ_WORKER_ARGUMENT],
+          [sourceEntry, RECALL_READY_READ_WORKER_ARGUMENT],
+        ]);
         expect(Number((yield* Clock.monotonicTimeNanos) - started) / 1_000_000).toBeLessThan(2000);
         expect(yield* readDeadlineRemaining(deadline)).toBeGreaterThan(0);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),

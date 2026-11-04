@@ -43,9 +43,17 @@ export function readyReadWorkerInvocation(executable: string, entrypoint: string
   const name = EffectString.toLowerCase(
     EffectString.split('/')(EffectString.replaceAll('\\', '/')(executable)).at(-1) ?? '',
   );
+  const source = name === 'bun' || name === 'bun.exe';
+  // Only the application's ordinary source entry is replaced. Explicit injected
+  // entrypoints keep their own protocol/cancellation behavior; compiled workers
+  // continue to use the same executable and private role argument.
+  const workerEntrypoint =
+    source && entrypoint === Bun.fileURLToPath(new URL('../standalone.ts', import.meta.url))
+      ? Bun.fileURLToPath(new URL('./ready_read_entry.ts', import.meta.url))
+      : entrypoint;
   return {
     executable,
-    arguments: [...(name === 'bun' || name === 'bun.exe' ? [entrypoint] : []), RECALL_READY_READ_WORKER_ARGUMENT],
+    arguments: [...(source ? [workerEntrypoint] : []), RECALL_READY_READ_WORKER_ARGUMENT],
   };
 }
 

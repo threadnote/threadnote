@@ -1,5 +1,5 @@
 import {it} from '@effect/vitest';
-import {Effect, Schema} from 'effect';
+import {Cause, Effect, Exit, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
@@ -68,57 +68,119 @@ const plan = (objective = 'Preserve a small native draft across exact reads.') =
   return document;
 };
 
-it.effect('exports both bounded authoring path lists as the exact cycle scope', () =>
+for (const [affectedCount, newCount] of [
+  [136, 53],
+  [256, 0],
+  [0, 256],
+  [128, 128],
+]) {
+  it.effect(`exports classified authoring scope ${affectedCount}+${newCount} as exact cycle paths`, () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      const original = plan();
+      const affectedPaths = Array.from({length: affectedCount}, (_, index) => `src/affected-${index}.ts`);
+      const newPaths = Array.from({length: newCount}, (_, index) => `src/new-${index}.ts`);
+      const document = {
+        ...original,
+        phases: EffectArray.map(original.phases, phase => ({...phase, affectedPaths, newPaths})),
+        decisions: [
+          {
+            id: 'exact-scope',
+            question: 'Which paths may the phase change?',
+            selection: 'retain',
+            selected: 'Retain the exact affected and new path lists.',
+            alternatives: [],
+            rationale: 'This source-free fixture verifies export preserves the exact declared path scope.',
+            affectedPhases: ['read'],
+            authority: 'orchestrator',
+          } as const,
+        ],
+      };
+      const saved = object(
+        object(yield* f.call({...f.base('authoring'), command: 'save', document, ready: true, expectedRevision: null}))
+          .authoring,
+      );
+      expect(saved).toMatchObject({readiness: 'ready', readinessBlockers: []});
+      const exported = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring'),
+            command: 'export-dev-cycle',
+            uri: object(saved.root).uri,
+            delivery: 'local',
+            bindings: {read: {branch: 'feature/read', baseBranch: 'main'}},
+          }),
+        ).authoring,
+      );
+      const before = JSON.stringify(exported);
+      const decoded = decodeNativeCyclePlan(JSON.parse(before));
+      expect(decoded).toEqual(exported);
+      expect(decoded.phases[0].allowedPaths).toEqual([...affectedPaths, ...newPaths]);
+      expect(decoded.phases[0]).toMatchObject({
+        acceptanceCriteria: [document.phases[0].acceptance[0].criterion],
+        acceptanceRefs: [{requirements: ['req-read']}],
+        branch: 'feature/read',
+        baseBranch: 'main',
+      });
+      expect(decoded.source).toMatchObject({root: saved.root, documentHash: saved.documentHash});
+      expect(JSON.stringify(exported)).toBe(before);
+    }).pipe(TestClock.withLive, provideNative),
+  );
+}
+
+it.effect('rejects combined scope overflow before changing saved authoring state', () =>
   Effect.gen(function* () {
     const f = yield* nativeFixture();
-    yield* f.init();
-    const original = plan();
-    const affectedPaths = Array.from({length: 128}, (_, index) => `src/affected-${index}.ts`);
-    const newPaths = Array.from({length: 128}, (_, index) => `src/new-${index}.ts`);
-    const document = {
-      ...original,
-      phases: EffectArray.map(original.phases, phase => ({...phase, affectedPaths, newPaths})),
-      decisions: [
-        {
-          id: 'exact-scope',
-          question: 'Which paths may the phase change?',
-          selection: 'retain',
-          selected: 'Retain the exact affected and new path lists.',
-          alternatives: [],
-          rationale: 'This source-free fixture verifies export preserves the exact declared path scope.',
-          affectedPhases: ['read'],
-          authority: 'orchestrator',
-        } as const,
-      ],
-    };
+    const initialized = yield* f.init();
+    const document = plan();
     const saved = object(
-      object(yield* f.call({...f.base('authoring'), command: 'save', document, ready: true, expectedRevision: null}))
-        .authoring,
-    );
-    expect(saved).toMatchObject({readiness: 'ready', readinessBlockers: []});
-    const exported = object(
       object(
         yield* f.call({
           ...f.base('authoring'),
-          command: 'export-dev-cycle',
-          uri: object(saved.root).uri,
-          delivery: 'local',
-          bindings: {read: {branch: 'feature/read', baseBranch: 'main'}},
+          command: 'save',
+          document,
+          ready: false,
+          expectedRevision: null,
         }),
       ).authoring,
     );
-    const before = JSON.stringify(exported);
-    const decoded = decodeNativeCyclePlan(JSON.parse(before));
-    expect(decoded).toEqual(exported);
-    expect(decoded.phases[0].allowedPaths).toEqual([...affectedPaths, ...newPaths]);
-    expect(decoded.phases[0]).toMatchObject({
-      acceptanceCriteria: [document.phases[0].acceptance[0].criterion],
-      acceptanceRefs: [{requirements: ['req-read']}],
-      branch: 'feature/read',
-      baseBranch: 'main',
-    });
-    expect(decoded.source).toMatchObject({root: saved.root, documentHash: saved.documentHash});
-    expect(JSON.stringify(exported)).toBe(before);
+    const root = object(saved.root);
+    if (typeof root.uri !== 'string' || typeof root.revision !== 'string') throw new Error('Expected saved root');
+    const uri = root.uri;
+    const snapshot = () =>
+      Effect.all({
+        state: f.fs.readFileString(f.statePath()),
+        journal: f.fs.readFileString(f.journalPath(initialized.bindingId)),
+        root: f.store.read(f.location, uri),
+      });
+    const before = yield* snapshot();
+    for (const [affected, added] of [
+      [256, 1],
+      [129, 128],
+      [1, 256],
+      [257, 0],
+    ]) {
+      const rejected = yield* Effect.exit(
+        f.call({
+          ...f.base('authoring'),
+          command: 'save',
+          ready: false,
+          expectedRevision: root.revision,
+          document: {
+            ...document,
+            phases: EffectArray.map(document.phases, phase => ({
+              ...phase,
+              affectedPaths: Array.from({length: affected}, (_, index) => `src/affected-${index}.ts`),
+              newPaths: Array.from({length: added}, (_, index) => `src/new-${index}.ts`),
+            })),
+          },
+        }),
+      );
+      expect(Exit.isFailure(rejected)).toBe(true);
+      if (Exit.isFailure(rejected)) expect(Cause.squash(rejected.cause)).toMatchObject({code: 'invalid-document'});
+      expect(yield* snapshot()).toEqual(before);
+    }
   }).pipe(TestClock.withLive, provideNative),
 );
 

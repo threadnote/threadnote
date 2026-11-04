@@ -1,11 +1,16 @@
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Clock, Effect, Fiber, FileSystem, Option, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Context, Effect, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect} from 'vitest';
 import * as EffectString from 'effect/String';
-import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
+import {
+  CommandCleanupUnconfirmed,
+  CommandExecutor,
+  CommandSpawnFailed,
+  CommandTimedOut,
+} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {TestError} from '@threadnote/testing/test-error';
 import {makeReadDeadline, readDeadlineRemaining, withinReadDeadline} from '@threadnote/platform/read_deadline';
@@ -17,7 +22,11 @@ import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import {recallReadyReadRequestSchema} from '@threadnote/recall/read_boundary';
+import {
+  RecallReadyReadBoundary,
+  recallReadyReadResponseSchema,
+  recallReadyReadRequestSchema,
+} from '@threadnote/recall/read_boundary';
 import {ensureVectorIndex} from '@threadnote/recall/vector-index';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {withProductionLogging} from '../../src/effect/production_log.js';
@@ -32,6 +41,15 @@ import {
   ReadyRecallReadWorkerAdmission,
 } from '../../src/recall/ready_read_boundary.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {
+  readyRecallReadWorkerLayer,
+  serveRecallReadyRead,
+  RECALL_READY_READ_INPUT_BYTES,
+  RECALL_READY_READ_OUTPUT_BYTES,
+} from '../../src/recall/ready_read_worker.js';
+import {telemetryChildEnvironmentPolicyLayer} from '../../src/telemetry/session.js';
+import {runtimeEntrypointLayer} from '../../src/effect/runtime-entrypoint.js';
+import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 
 const embedding = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
@@ -81,7 +99,14 @@ Runtime.makeRunMain(({fiber, teardown}) => fiber.addObserver(exit => teardown(ex
 `,
     );
     const built = yield* Effect.tryPromise({
-      try: () => Bun.build({entrypoints: [entrypoint], outdir: path.join(home, 'worker'), target: 'bun'}),
+      try: () =>
+        Bun.build({
+          entrypoints: [entrypoint],
+          outdir: path.join(home, 'worker'),
+          target: 'bun',
+          format: 'esm',
+          minify: true,
+        }),
       catch: cause => TestError.make({message: 'Could not compile the current ready-read test worker.', cause}),
     });
     if (!built.success || built.outputs.length !== 1)
@@ -188,6 +213,77 @@ function invoke(
     Effect.provideService(SystemInfo, f.system),
   );
 }
+
+// Only selector continuation cases use this source-authority composition seam.
+// The caller still creates its real boundary/deadline and validates the protocol.
+// The other 27 examples retain their native or admission-property coverage.
+const selectorCompositionCommands = (system: SystemInfo['Service']) =>
+  Effect.gen(function* () {
+    const parent = yield* CommandExecutor;
+    const rejected = () =>
+      CommandSpawnFailed.make({
+        args: [],
+        executable: '<ready-read>',
+        message: 'Invalid composition read.',
+        cause: undefined,
+      });
+    const noChildren = CommandExecutor.of({
+      execute: () => Effect.fail(rejected()),
+      executeStreaming: () => Effect.die('Ready lexical workers do not launch commands.'),
+      spawnDetached: () => Effect.succeed(false),
+    });
+    const workerContext = (yield* Layer.build(
+      Layer.fresh(
+        readyRecallReadWorkerLayer.pipe(
+          Layer.provideMerge(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
+          Layer.provideMerge(Layer.succeed(CommandExecutor, noChildren)),
+        ),
+      ),
+    )).pipe(Context.omit(RecallReadyReadBoundary, ReadyRecallReadDeadline, ReadyRecallReadWorkerAdmission));
+    return CommandExecutor.of({
+      ...parent,
+      execute: (executable, args, options) => {
+        if (!args.includes(RECALL_READY_READ_WORKER_ARGUMENT)) return parent.execute(executable, args, options);
+        return Effect.gen(function* () {
+          if (
+            executable !== system.executablePath ||
+            args.length !== 2 ||
+            args[0] !== system.developmentEntrypoint ||
+            args[1] !== RECALL_READY_READ_WORKER_ARGUMENT ||
+            !options?.sensitiveOutput ||
+            !options.input ||
+            options.input.byteLength > RECALL_READY_READ_INPUT_BYTES ||
+            options.timeoutMs === undefined ||
+            options.timeoutMs <= 0
+          )
+            return yield* rejected();
+          const request = yield* Schema.decodeEffect(operationSchema, {onExcessProperty: 'error'})(
+            new TextDecoder().decode(options.input),
+          );
+          const timeoutMs = options.timeoutMs;
+          const response = yield* serveRecallReadyRead(request).pipe(
+            Effect.setContext(workerContext),
+            Effect.timeoutOrElse({
+              duration: timeoutMs,
+              orElse: () =>
+                Effect.fail(
+                  CommandTimedOut.make({
+                    executable,
+                    args: [...args],
+                    timeoutMs,
+                    message: 'Composition ready read timed out.',
+                  }),
+                ),
+            }),
+          );
+          yield* Schema.decodeEffect(recallReadyReadResponseSchema)(response);
+          const stdout = `${JSON.stringify(response)}\n`;
+          if (new TextEncoder().encode(stdout).byteLength > RECALL_READY_READ_OUTPUT_BYTES) return yield* rejected();
+          return {exitCode: 0, stdout, stderr: ''};
+        }).pipe(Effect.mapError(error => (Schema.is(CommandTimedOut)(error) ? error : rejected())));
+      },
+    });
+  });
 
 describe('production recall admission budget', () => {
   effectIt.effect(
@@ -427,10 +523,11 @@ describe('production recall admission budget', () => {
     );
     for (const mutation of [false, true]) {
       effectIt.effect(
-        `${surface} closes score-bearing refinement after a later selector returns undefined (${mutation ? 'archived' : 'current'})`,
+        `${surface} composes source-authorized score-bearing refinement after a later selector returns undefined (${mutation ? 'archived' : 'current'})`,
         () =>
           Effect.gen(function* () {
             const f = yield* fixture(true);
+            const command = yield* selectorCompositionCommands(f.system);
             const lexical = mutation
               ? undefined
               : yield* invoke(surface, {
@@ -438,6 +535,7 @@ describe('production recall admission budget', () => {
                   system: {...f.system, environment: () => ({...f.system.environment(), THREADNOTE_EFFECT_AI: '0'})},
                 }).pipe(
                   Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+                  Effect.provideService(CommandExecutor, command),
                   Effect.provideService(LocalModelRuntime, {
                     ...fastRuntime,
                     embedMany: ({inputs, manifest}) =>
@@ -449,12 +547,11 @@ describe('production recall admission budget', () => {
                   }),
                   Effect.provideService(LocalModelStore, f.store),
                 );
-            const command = yield* CommandExecutor;
             let scored = false;
             let refinedBatches = 0;
             let providerCalls = 0;
             let selectorAfterRefinement = false;
-            let activeChildren = 0;
+            let inFlightReadyReads = 0;
             const deadlines = new Set<bigint>();
             const observed = CommandExecutor.of({
               ...command,
@@ -468,7 +565,7 @@ describe('production recall admission budget', () => {
                       : undefined;
                   const deadline = yield* Effect.serviceOption(ReadyRecallReadDeadline);
                   if (Option.isSome(deadline)) deadlines.add(deadline.value.expiresAtNanos);
-                  activeChildren++;
+                  inFlightReadyReads++;
                   return yield* command.execute(executable, args, options).pipe(
                     Effect.tap(result =>
                       Effect.gen(function* () {
@@ -485,7 +582,7 @@ describe('production recall admission budget', () => {
                     ),
                     Effect.ensuring(
                       Effect.sync(() => {
-                        activeChildren--;
+                        inFlightReadyReads--;
                       }),
                     ),
                   );
@@ -560,7 +657,7 @@ describe('production recall admission budget', () => {
             expect(scored).toBe(true);
             expect(selectorAfterRefinement).toBe(true);
             expect(providerCalls).toBeGreaterThanOrEqual(2);
-            expect(activeChildren).toBe(0);
+            expect(inFlightReadyReads).toBe(0);
             expect(deadlines.size).toBe(1);
             expect(Number((yield* Clock.monotonicTimeNanos) - started) / 1_000_000).toBeLessThan(2000);
             expect(result.isError, result.output).toBe(false);

@@ -176,7 +176,7 @@
       }
     },
     {
-      "files": ["apps/threadnote/src/standalone.ts"],
+      "files": ["apps/threadnote/src/standalone.ts", "apps/threadnote/src/recall/ready_read_entry.ts"],
       "rules": {
         "effecttsgo/strict-effect-provide": "off",
         "threadnote/no-effect-runtime": "off"

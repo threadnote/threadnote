@@ -429,11 +429,15 @@ const verifyMcp = Effect.fn('smokeSelfContained.verifyMcp')(function* (
     cwd,
     env: {...getDefaultEnvironment(), ...environment},
     deadline: bodyDeadline,
+    shutdownMode: 'effect-mcp-stdio-eof-130',
   });
   const client = new Client({name: 'threadnote-standalone-smoke', version: '1.0.0'});
   yield* Effect.acquireUseRelease(
     Effect.tryPromise({
-      try: () => client.connect(transport),
+      try: async () => {
+        await client.connect(transport);
+        transport.markMcpInitialized();
+      },
       catch: cause => ScriptError.make({message: 'Could not start the standalone MCP server.', cause}),
     }),
     () =>

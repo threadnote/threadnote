@@ -1,11 +1,19 @@
 import {loadRecallIndexData} from '@threadnote/recall/index';
+import {
+  readRecallLexicalDemand,
+  recallLexicalDemandKey,
+  RECALL_LEXICAL_DEMAND_DIRECTORY,
+  type RecallLexicalScope,
+} from '@threadnote/recall/background/lexical-demand';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {runShareSync} from '@threadnote/threadnote/effect/share';
 import {Array as EffectArray, Schema} from 'effect';
+import * as EffectString from 'effect/String';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {execFile} from '@threadnote/testing/node-child-process';
+import {watch} from '@threadnote/testing/node-fs';
 import {access, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -35,6 +43,22 @@ const gitIdentityEnvironment = {
   GIT_AUTHOR_NAME: 'Cursor Cloud Test',
   GIT_COMMITTER_EMAIL: 'cursor-cloud@threadnote.local',
   GIT_COMMITTER_NAME: 'Cursor Cloud Test',
+};
+
+const expectColdUnavailableWarnings = (value: unknown): void => {
+  expect(value).toMatchObject({results: []});
+  if (value === null || typeof value !== 'object' || !('warnings' in value) || !EffectArray.isArray(value.warnings))
+    throw new Error('Expected bounded recall warnings.');
+  const codes = EffectArray.map(value.warnings, (warning: unknown) => {
+    if (warning === null || typeof warning !== 'object' || !('code' in warning) || typeof warning.code !== 'string')
+      throw new Error('Expected a typed recall warning.');
+    return warning.code;
+  });
+  expect(codes).toContain('lexical_index_unavailable');
+  expect(
+    EffectArray.every(codes, code => code === 'lexical_index_unavailable' || code === 'lexical_read_budget_exhausted'),
+  ).toBe(true);
+  expect(new Set(codes).size).toBe(codes.length);
 };
 
 describe('Cursor Cloud integration', () => {
@@ -236,10 +260,7 @@ describe('Cursor Cloud integration', () => {
           },
         });
         expect(recall.isError).not.toBe(true);
-        expect(recall.structuredContent).toMatchObject({
-          results: [],
-          warnings: [expect.objectContaining({code: 'lexical_index_unavailable'})],
-        });
+        expectColdUnavailableWarnings(recall.structuredContent);
         expect(JSON.stringify(recall)).toContain('Automatic synchronization is queued in the background');
         await expect(
           client.readResource({
@@ -436,10 +457,7 @@ describe('Cursor Cloud integration', () => {
               responseFormat: 'dual',
             },
           });
-          expect(deferred.structuredContent).toMatchObject({
-            results: [],
-            warnings: [expect.objectContaining({code: 'lexical_index_unavailable'})],
-          });
+          expectColdUnavailableWarnings(deferred.structuredContent);
           await runEffect(
             runShareSync(
               {
@@ -545,22 +563,6 @@ describe('Cursor Cloud integration', () => {
           ).resolves.toContain('authorized memory scope');
         });
 
-        await rm(join(fixture.home, 'share', 'fetch-receipts', 'docs.json'), {force: true});
-        await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
-          await callText(client, 'list_context', {recursive: true, team: 'engineering'});
-          const teamScopedRemoteUri =
-            'threadnote://user/cloud-user/memories/shared/docs/durable/projects/threadnote/remote-team-scoped.md';
-          await pushRemoteMemory(
-            fixture.root,
-            docsRemote,
-            'durable/projects/threadnote/remote-team-scoped.md',
-            memoryDocument('remote-team-scoped', 'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL'),
-          );
-          await expect(callText(client, 'read_context', {uri: teamScopedRemoteUri})).resolves.toContain(
-            'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL',
-          );
-        });
-
         const engineeringTree = await gitTree(fixture.remote);
         const docsTree = await gitTree(docsRemote);
         expect(engineeringTree).toContain('engineering-contract.md');
@@ -572,6 +574,64 @@ describe('Cursor Cloud integration', () => {
       }
     },
   );
+
+  it('completes deferred exact-share synchronization before reading a newly pushed remote URI', async () => {
+    const fixture = await cloudFixture();
+    const docsRemote = await seedRemote(fixture.root, 'deferred-docs-share');
+    const teamScopedRemoteUri =
+      'threadnote://user/cloud-user/memories/shared/docs/durable/projects/threadnote/remote-team-scoped.md';
+    try {
+      await bootstrap(fixture, 'engineering', fixture.remote);
+      await bootstrap(fixture, 'docs', docsRemote);
+      await runEffect(
+        runShareSync(
+          {
+            account: 'local',
+            user: 'cloud-user',
+            agentId: 'cloud-agent',
+            agentContextHome: fixture.home,
+          },
+          {team: 'docs'},
+        ),
+      );
+      await prepareCloudReadyFixture(fixture);
+      await pushRemoteMemory(
+        fixture.root,
+        docsRemote,
+        'durable/projects/threadnote/remote-team-scoped.md',
+        memoryDocument('remote-team-scoped', 'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL'),
+      );
+      await rm(join(fixture.home, 'share', 'fetch-receipts', 'docs.json'), {force: true});
+
+      await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
+        const scope: RecallLexicalScope = {
+          account: 'local',
+          agentContextHome: fixture.home,
+          user: 'cloud-user',
+          manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+          includeInactive: false,
+          work: {kind: 'synchronize', sources: false, teams: ['docs']},
+        };
+        const completionFence = await armLexicalSyncCompletionFence(scope);
+        try {
+          const firstRead = await callText(client, 'read_context', {uri: teamScopedRemoteUri});
+          expect(
+            EffectString.includes('REMOTE_TEAM_SCOPED_REFRESH_SENTINEL')(firstRead) ||
+              EffectString.includes(`Memory resource does not exist: ${teamScopedRemoteUri}`)(firstRead),
+          ).toBe(true);
+          completionFence.check();
+          await completionFence.wait;
+          await expect(callText(client, 'read_context', {uri: teamScopedRemoteUri})).resolves.toContain(
+            'REMOTE_TEAM_SCOPED_REFRESH_SENTINEL',
+          );
+        } finally {
+          completionFence.close();
+        }
+      });
+    } finally {
+      await rm(fixture.root, {force: true, recursive: true});
+    }
+  });
 
   it('renders and idempotently prepares remote-hybrid mode without a memory checkout', async () => {
     const root = await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-hybrid-'));
@@ -833,6 +893,18 @@ describe('Cursor Cloud integration', () => {
         'durable/projects/threadnote/reference-scope-source.md',
         memoryDocument('reference-scope-source', 'REFERENCE_SCOPE_SOURCE_SENTINEL', privateUri),
       );
+      await runEffect(
+        runShareSync(
+          {
+            account: 'local',
+            user: 'cloud-user',
+            agentId: 'cloud-agent',
+            agentContextHome: fixture.home,
+          },
+          {team: 'engineering'},
+        ),
+      );
+      await prepareCloudReadyFixture(fixture);
 
       await withCloudMcp(fixture, async client => {
         const tools = await client.listTools();
@@ -1155,6 +1227,90 @@ async function prepareCloudReadyFixture(fixture: CloudFixture): Promise<void> {
       {includeInactive: false, validateNow: true},
     ),
   );
+}
+
+async function armLexicalSyncCompletionFence(scope: RecallLexicalScope): Promise<{
+  readonly wait: Promise<void>;
+  check(): void;
+  close(): void;
+}> {
+  const before = await runEffect(readRecallLexicalDemand(scope));
+  const directory = join(scope.agentContextHome, 'recall', RECALL_LEXICAL_DEMAND_DIRECTORY);
+  await mkdir(directory, {recursive: true, mode: 0o700});
+  const filename = `${recallLexicalDemandKey(scope)}.json`;
+  const requestedAt = Date.now();
+  let settled = false;
+  let inspecting = false;
+  let dirty = false;
+  let lastObserved = `before=${before?.completedAt ?? 'absent'}`;
+  let closed = false;
+  let resolveWait!: () => void;
+  let rejectWait!: (error: Error) => void;
+  const wait = new Promise<void>((resolve, reject) => {
+    resolveWait = resolve;
+    rejectWait = reject;
+  });
+  let inspect = () => {};
+  const watcher = watch(directory, {persistent: false}, (_event, changedFile) => {
+    if (changedFile === null || changedFile.toString() === filename) inspect();
+  });
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    watcher.close();
+  };
+  const finish = (error?: Error) => {
+    if (settled) return;
+    settled = true;
+    close();
+    if (error) rejectWait(error);
+    else resolveWait();
+  };
+  const timer = setTimeout(
+    () =>
+      finish(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
+    20_000,
+  );
+  watcher.on('error', error => finish(error));
+  inspect = () => {
+    dirty = true;
+    if (inspecting || settled) return;
+    inspecting = true;
+    void (async () => {
+      try {
+        while (dirty && !settled) {
+          dirty = false;
+          const current = await runEffect(readRecallLexicalDemand(scope));
+          lastObserved = current
+            ? JSON.stringify({revision: current.revision, completedAt: current.completedAt, failures: current.failures})
+            : 'absent';
+          if (!current) continue;
+          if (current.failures > (before?.failures ?? 0)) {
+            finish(new Error('Deferred lexical synchronization recorded a failure.'));
+            return;
+          }
+          if (
+            current.revision === undefined &&
+            current.failures === 0 &&
+            current.completedAt !== undefined &&
+            current.completedAt >= requestedAt &&
+            (before?.completedAt === undefined || current.completedAt > before.completedAt)
+          ) {
+            finish();
+            return;
+          }
+        }
+      } catch (cause) {
+        finish(cause instanceof Error ? cause : new Error('Could not read lexical synchronization state.'));
+      } finally {
+        inspecting = false;
+        if (dirty && !settled) inspect();
+      }
+    })();
+  };
+  void wait.catch(() => undefined);
+  return {wait, check: inspect, close};
 }
 
 async function withCloudMcp<T>(
