@@ -1,5 +1,5 @@
 import {Array as EffectArray, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
-import {parseMemoryDocument} from '@threadnote/memory/document';
+import {memoryHeaderValue, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
 import {classifyMemoryIdentityCandidates, MemoryIdentityResolutionError} from '@threadnote/recall/memory/identity';
@@ -8,7 +8,43 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
-export const MAX_PREVIEW_IDENTITY_SCAN_BYTES = 16 * 1024 * 1024;
+/** A header may span the entire allowed file. Never truncate it to infer absence. */
+const readIdentityHeader = (fs: FileSystem.FileSystem, file: string, expectedSize: number) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const handle = yield* fs.open(file, {flag: 'r'});
+      const before = yield* handle.stat;
+      if (before.type !== 'File' || Number(before.size) !== expectedSize) return undefined;
+      const decoder = new TextDecoder();
+      let text = '';
+      let length = 0;
+      let header: string | undefined;
+      while (length <= expectedSize) {
+        const chunk = yield* handle.readAlloc(Math.min(16 * 1024, expectedSize + 1 - length));
+        if (Option.isNone(chunk)) {
+          if (length !== expectedSize) return undefined;
+          text += decoder.decode();
+          break;
+        }
+        length += chunk.value.length;
+        if (length > expectedSize) return undefined;
+        text += decoder.decode(chunk.value, {stream: true});
+        const normalized = EffectString.replace(/\r\n?/gu, '\n')(EffectString.trimStart(text));
+        const separator = Option.getOrElse(EffectString.indexOf('\n\n')(normalized), () => -1);
+        if (separator !== -1) {
+          header = EffectString.slice(0, separator)(normalized);
+          break;
+        }
+      }
+      const after = yield* handle.stat;
+      if (
+        Number(after.size) !== expectedSize ||
+        Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(before.mtime)?.getTime()
+      )
+        return undefined;
+      return header ?? EffectString.replace(/\r\n?/gu, '\n')(EffectString.trim(text));
+    }),
+  );
 const readBoundedIdentityFile = (fs: FileSystem.FileSystem, file: string, expectedSize: number) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -76,17 +112,9 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
   const root = path.join(config.agentContextHome, 'data', config.account, 'user', user, 'memories');
   const pending = [root];
   const candidates: {uri: string; memoryId: string; status: string}[] = [];
-  let count = 0;
-  let scannedBytes = 0;
   while (pending.length > 0) {
     const directory = pending.pop()!;
     for (const name of yield* fs.readDirectory(directory)) {
-      if (++count > 100_000)
-        return yield* MemoryIdentityResolutionError.make({
-          memoryId,
-          reason: 'ambiguous',
-          message: 'Local memory identity scan exceeded its limit.',
-        });
       const file = path.join(directory, name);
       const stat = yield* fs.lstat(file);
       if (stat.type === 'Directory') {
@@ -105,13 +133,14 @@ export const resolvePreviewMemoryIdentity = Effect.fn('preview.resolveMemoryIden
         !/^\.(?:abstract|overview)\.md$/u.test(name)
       ) {
         if (Number(stat.size) > MAX_PREVIEW_IDENTITY_FILE_BYTES) continue;
-        scannedBytes += Number(stat.size);
-        if (scannedBytes > MAX_PREVIEW_IDENTITY_SCAN_BYTES)
+        const header = yield* readIdentityHeader(fs, file, Number(stat.size));
+        if (header === undefined)
           return yield* MemoryIdentityResolutionError.make({
             memoryId,
             reason: 'ambiguous',
-            message: 'Local memory identity scan exceeded its byte limit.',
+            message: 'Local memory identity scan changed during reading.',
           });
+        if (memoryHeaderValue(header, 'memory_id') !== memoryId) continue;
         const segments = EffectArray.map(
           EffectString.split(path.sep)(path.relative(root, file)),
           EffectString.normalize('NFC'),

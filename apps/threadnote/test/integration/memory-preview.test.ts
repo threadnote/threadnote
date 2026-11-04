@@ -19,6 +19,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readManagedMemory} from '../../src/manager/server.js';
 import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256Hex} from '@threadnote/platform/digest';
 
 const origin = 'http://127.0.0.1:41377';
@@ -293,7 +294,7 @@ it.effect('excludes oversized and packed files without hiding eligible memories'
   }).pipe(provide),
 );
 
-it.effect('fails closed when the eligible corpus exceeds the aggregate scan budget', () =>
+it.effect('resolves a small identity and detects conflicts beyond 16 MiB of unrelated eligible files', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -301,16 +302,80 @@ it.effect('fails closed when the eligible corpus exceeds the aggregate scan budg
     const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
     yield* fs.makeDirectory(root, {recursive: true});
     const body = EffectString.repeat(512 * 1024 - 100)('x');
-    for (let index = 0; index < 33; index++)
+    for (let index = 0; index < 34; index++)
       yield* fs.writeFileString(
         path.join(root, `${index}.md`),
-        `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_${index === 0 ? 'target' : `other_${index}`}\n\n${body}`,
+        `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_other_${index}\n\n${body}`,
       );
-    const result = yield* Effect.exit(
-      readManagedMemory({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {preview: true}),
+    const config = {...unusedConfig, agentContextHome: home};
+    const target = path.join(root, 'target.md');
+    yield* fs.writeFileString(target, 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_target\n\nTiny target\n');
+    const read = () => readManagedMemory(config, 'threadnote://memory/tn_target', {preview: true});
+    expect((yield* read()).content).toContain('Tiny target');
+    yield* fs.writeFileString(
+      path.join(root, '32.md'),
+      'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_target\n\nConflict\n',
     );
-    expect(Exit.isFailure(result)).toBe(true);
+    expect(Exit.isFailure(yield* Effect.exit(read()))).toBe(true);
   }).pipe(provide),
+);
+
+it.effect('finds long CRLF headers and ignores identity-like body text', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-header-'});
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(
+      path.join(root, 'target.md'),
+      `  MEMORY\r\nkind: durable\r\nnotes: ${EffectString.repeat(33000)('x')}\r\nmemory_id: tn_long\r\n\r\nBody`,
+    );
+    yield* fs.writeFileString(
+      path.join(root, 'body.md'),
+      'MEMORY\nkind: durable\nmemory_id: tn_other\n\nmemory_id: tn_long\n',
+    );
+    const result = yield* readManagedMemory({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_long', {
+      preview: true,
+    });
+    expect(result.node.name).toBe('target.md');
+  }).pipe(provide),
+);
+
+it.effect.prop(
+  'header filtering agrees with the full memory parser across line endings and boundaries',
+  {
+    ending: Schema.Literals(['\n', '\r', '\r\n']),
+    padding: Schema.Literals([0, 16377, 32769]),
+    matching: Schema.Boolean,
+    separator: Schema.Boolean,
+  },
+  ({ending, padding, matching, separator}) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-header-property-'});
+      const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+      yield* fs.makeDirectory(root, {recursive: true});
+      const content =
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            `notes: ${EffectString.repeat(padding)('x')}`,
+            `memory_id: ${matching ? 'tn_target' : 'tn_other'}`,
+          ],
+          ending,
+        ) + (separator ? `${ending}${ending}memory_id: tn_target` : '');
+      const uri = 'threadnote://user/tester/memories/file.md';
+      yield* fs.writeFileString(path.join(root, 'file.md'), content);
+      const expected = parseMemoryDocument(uri, content)?.metadata.memoryId === 'tn_target';
+      const actual = yield* Effect.exit(
+        readManagedMemory({...unusedConfig, agentContextHome: home}, 'threadnote://memory/tn_target', {preview: true}),
+      );
+      expect(Exit.isSuccess(actual)).toBe(expected);
+    }).pipe(provide),
+  {arbitrary: {runs: 24}},
 );
 
 it.effect.prop(
