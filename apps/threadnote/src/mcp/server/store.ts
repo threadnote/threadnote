@@ -279,7 +279,7 @@ export function registerStoreTool(
         }
         const replacement =
           memoryScope === undefined && checkedReplaceUri.value
-            ? yield* resolveLocalMemoryReplacementTarget(config, checkedReplaceUri.value)
+            ? yield* resolveLocalMemoryReplacementTarget(config, checkedReplaceUri.value, {prepare: true})
             : undefined;
         const replaceUri = replacement?.canonicalUri ?? checkedReplaceUri.value;
         const sharedTarget =

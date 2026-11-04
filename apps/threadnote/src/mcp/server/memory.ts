@@ -64,6 +64,7 @@ import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   MemoryRelationWriteError,
   memoryIdentityWriteLockKeys,
+  prepareAuthoredMemoryRelationTargetIdentities,
   verifyAuthoredMemoryRelationTargetIdentities,
 } from '../../memory/relations.js';
 import {
@@ -603,7 +604,7 @@ export const prepareCursorCloudSharedMemory = Effect.fn('mcpServer.prepareCursor
 export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDurableMemoryParams) {
   return Effect.gen(function* () {
     const replacement = inputParams.replaceUri
-      ? yield* resolveLocalMemoryReplacementTarget(config, inputParams.replaceUri)
+      ? yield* resolveLocalMemoryReplacementTarget(config, inputParams.replaceUri, {prepare: true})
       : undefined;
     const replacementMemoryId =
       inputParams.expectedReplaceMemoryId ?? replacement?.memoryId ?? inputParams.metadata.memoryId;
@@ -893,6 +894,8 @@ export function writeCursorCloudSharedMemory(
         return argumentError('A replace write requires replaceUri.');
       if (params.replaceUri && params.replaceUri !== targetUri)
         return argumentError('Prepared shared memory destination does not match replaceUri.');
+      // Earlier publication stages may have invalidated these identities; prepare before URI/account locks.
+      yield* prepareAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent ?? []);
       const fs = yield* FileSystem.FileSystem;
       return yield* withMemoryUriLocks(
         fs,
@@ -1067,7 +1070,7 @@ export function preparePersonalMemoryWrite(
     const observer = yield* CurrentHandoffSaveObserver;
     if (observer) yield* observer.stage('preparing');
     const replacement = inputParams.replaceUri
-      ? yield* resolveLocalMemoryReplacementTarget(config, inputParams.replaceUri)
+      ? yield* resolveLocalMemoryReplacementTarget(config, inputParams.replaceUri, {prepare: true})
       : undefined;
     const replacementMemoryId =
       inputParams.expectedReplaceMemoryId ?? replacement?.memoryId ?? inputParams.metadata.memoryId;

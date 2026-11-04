@@ -16,7 +16,11 @@ import {
 } from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias, memoryIdentityLockKey} from '@threadnote/memory/identity-alias';
 import {MemoryPointerNotFound, readMemoryWithRelocations} from '@threadnote/memory/relocation';
-import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {
+  prepareMemoryIdentityAliases,
+  resolveMemoryIdentityAliases,
+  verifyResolvedMemoryIdentity,
+} from '@threadnote/recall/memory/identity';
 import {refreshWorkflowRecall, trackPotentialWorkflowMutation} from './recall_refresh.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
@@ -97,7 +101,7 @@ const allowedScopes = Effect.fn('workflowMemory.allowedScopes')(function* (
   evidenceRefs: readonly WorkflowEvidenceReference[] = [],
 ) {
   const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
-  const evidenceScopes = yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+  const evidenceScopes = yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs, {readyOnly: readOnly});
   const scopes = [
     ...new Set([
       ...sharedRoots,
@@ -337,7 +341,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
           'out-of-scope',
           'Relation targets must belong to this workflow or its configured shares.',
         );
-    const candidates = yield* resolveMemoryIdentityAliases(config, relationUris, relationScopes);
+    const candidates = yield* prepareMemoryIdentityAliases(config, relationUris, relationScopes);
     for (const candidate of candidates) {
       if (!EffectArray.some(relationScopes, scope => resourceIds.isWithin(candidate.canonicalUri, scope)))
         return yield* workflowError('out-of-scope', 'The resolved relation target is outside this workflow scope.');

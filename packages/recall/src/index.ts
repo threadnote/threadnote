@@ -119,6 +119,14 @@ class RecallIndexOperationError extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
+/** Expected readiness gaps, distinct from unexpected storage or query failures. */
+export class RecallReadyReadUnavailable extends Schema.TaggedError<
+  RecallReadyReadUnavailable,
+  {readonly brand: unique symbol}
+>()('RecallReadyReadUnavailable', {
+  message: Schema.String,
+}) {}
+
 export interface RecallIndexConfig {
   readonly account: string;
   readonly agentContextHome: string;
@@ -307,24 +315,27 @@ const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(fu
   );
   if (options.readyOnly) {
     const maintenance = makeReadyRecallMaintenance({...config, includeInactive: options.includeInactive});
-    return yield* executeRecallIndexQuery(
-      databasePath,
-      fixedDatabasePath,
-      config,
-      options,
-      undefined,
-      maintenance,
-    ).pipe(
+    return yield* Effect.gen(function* () {
+      if (!(yield* fs.exists(databasePath)))
+        return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+      return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options, undefined, maintenance);
+    }).pipe(
       Effect.onError(maintenance.onError),
       Effect.catchCauseIf(
         cause => !Cause.hasInterrupts(cause),
-        cause =>
-          Effect.fail(
-            RecallIndexOperationError.make({
-              cause,
-              message: 'No readable ready lexical snapshot is available.',
-            }),
-          ),
+        cause => {
+          const error = Cause.squash(cause);
+          return Effect.fail(
+            Schema.is(RecallReadyReadUnavailable)(error) ||
+              Schema.is(RecallReadyReadIncomplete)(error) ||
+              Schema.is(RecallIndexCorrupt)(error)
+              ? RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'})
+              : RecallIndexOperationError.make({
+                  cause,
+                  message: 'No readable ready lexical snapshot is available.',
+                }),
+          );
+        },
       ),
     );
   }
@@ -347,6 +358,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
   }),
 ) {
   let metadataStale = false;
+  let selectorCanonicalMismatch = false;
   return yield* (options.readyOnly ? useRecallDatabaseReadOnly : useRecallDatabase)(
     databasePath,
     Effect.gen(function* () {
@@ -425,7 +437,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
               ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
               externalResources,
             };
-      const effectiveOptions =
+      const scopedOptions =
         'selections' in options
           ? {
               ...options,
@@ -435,6 +447,16 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
               })),
             }
           : {...options, eligibility: accessEligibility(options.eligibility)};
+      const effectiveOptions =
+        'memorySeeds' in scopedOptions
+          ? {
+              ...scopedOptions,
+              onCanonicalMismatch: (count: number) => {
+                selectorCanonicalMismatch ||= count > 0;
+                scopedOptions.onCanonicalMismatch?.(count);
+              },
+            }
+          : scopedOptions;
       let result: unknown = yield* 'anchors' in effectiveOptions
         ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
         : 'memorySeeds' in effectiveOptions
@@ -480,8 +502,8 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
           exactWindows,
         );
         result = validated.result;
-        if (validated.reconcileNeeded || metadataStale) {
-          const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded);
+        if (validated.reconcileNeeded || selectorCanonicalMismatch || metadataStale) {
+          const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded || selectorCanonicalMismatch);
           readState = {freshness: 'stale', maintenance};
         } else if (validated.unverified) readState = {freshness: 'stale', maintenance: 'unavailable'};
         if (readState) options.onReadState?.(readState);
@@ -496,6 +518,11 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
       return finalResult;
     }),
   ).pipe(
+    Effect.onError(cause =>
+      options.readyOnly && selectorCanonicalMismatch && !Cause.hasInterrupts(cause)
+        ? readyMaintenance.request(true).pipe(Effect.asVoid)
+        : Effect.void,
+    ),
     Effect.mapError(error =>
       Schema.is(RecallReadyReadIncomplete)(error) ? retainReadyRecallMaintenance(error, metadataStale) : error,
     ),
@@ -743,7 +770,7 @@ export const readRecallMemoryIdentities = (
     Effect.flatMap(data =>
       data.readState?.freshness === 'stale'
         ? Effect.fail(
-            RecallIndexOperationError.make({
+            RecallReadyReadUnavailable.make({
               message: 'Stable identity resolution requires a current lexical snapshot.',
             }),
           )
@@ -1565,7 +1592,7 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
       total: prepared.refreshCounts.changedSourceCount,
     }) ?? Effect.void;
     yield* options.onProgress?.({phase: 'activating', documentCount}) ?? Effect.void;
-  }).pipe(Effect.ensuring(dropRecallSourceScan(sql).pipe(Effect.ignore)));
+  }).pipe(Effect.withSpan('recall.refreshDatabase'), Effect.ensuring(dropRecallSourceScan(sql).pipe(Effect.ignore)));
 });
 
 function recallIndexForegroundFreshness(

@@ -13,9 +13,11 @@ import {
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
 import {describe, expect, it, vi} from 'vitest';
-import {Effect, FileSystem, Path, Predicate, Ref, Result, Schema} from 'effect';
+import {Effect, FileSystem, Path, PlatformError, Predicate, Ref, Result, Schema} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import * as memoryIdentity from '@threadnote/recall/memory/identity';
+import {expireRecallIndexValidation} from '@threadnote/recall/index';
+import * as recallIndex from '@threadnote/recall/index';
 import * as modelDiscovery from '../../src/manager/consolidation_models.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
@@ -724,7 +726,7 @@ describe('ordinary memory exact public review', () => {
     Effect.gen(function* () {
       const f = yield* publicRelatedFixture();
       const changed = yield* Ref.make(false);
-      const resolve = memoryIdentity.resolveMemoryIdentityAliases;
+      const resolve = memoryIdentity.prepareMemoryIdentityAliases;
       const raced = Effect2.pipe(
         f.source,
         EffectString.replace(`memory_id: ${f.sourceId}`, 'memory_id: tn_reused_source_identity'),
@@ -732,7 +734,7 @@ describe('ordinary memory exact public review', () => {
       yield* Effect.acquireUseRelease(
         Effect.sync(() =>
           vi
-            .spyOn(memoryIdentity, 'resolveMemoryIdentityAliases')
+            .spyOn(memoryIdentity, 'prepareMemoryIdentityAliases')
             .mockImplementation((...args) =>
               resolve(...args).pipe(
                 Effect.tap(routes =>
@@ -1535,6 +1537,8 @@ describe('ordinary memory exact public review', () => {
               expect(saved.maintenance?.proposal.draft.outcome).toBe('propose-update');
               expect(saved.candidates[0].proposedText).toBe('The timeout is 90 seconds.');
               expect(saved.maintenanceApproval).toBeUndefined();
+              // The fixture edited source bytes directly; reconcile derived state before ready-only source checks.
+              yield* expireRecallIndexValidation(f.home, false, [f.sourceUri]);
               // Explicit human preview takes ownership before the next source change.
               const preview = yield* f.review({action: 'preview', reviewId: saved.reviewId, revision: saved.revision});
               expect(preview.isError).not.toBe(true);
@@ -1813,6 +1817,105 @@ describe('ordinary memory exact public review', () => {
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
   );
+
+  for (const fault of ['readiness', 'source-io', 'identity-query'] as const)
+    effectIt.effect(`keeps a postwrite ${fault} failure pending and retries the same approved review`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const packet = yield* requestAutomaticMemoryReview(f.config, {
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(f.content),
+        });
+        if ('reviewId' in packet) throw new Error('Expected source packet');
+        const preview = (yield* f.review({
+          action: 'automatic-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(f.content),
+          draftJson: draft(packet, packet.basis.body),
+        })).structuredContent;
+        const input = {
+          action: 'apply',
+          reviewId: preview.reviewId,
+          revision: preview.revision,
+          approvalDigest: preview.approval.approvalDigest,
+          approved: true,
+        };
+        const store = yield* ResourceStore;
+        const original = recallIndex.loadRecallMemoryIdentities;
+        const originalRead = recallIndex.readRecallMemoryIdentities;
+        const sourcePath = yield* f.fs.realPath(f.sourcePath);
+        let preparations = 0;
+        let injected = false;
+        const failingFs = FileSystem.FileSystem.of({
+          ...f.fs,
+          open: (filename, options) =>
+            injected && fault === 'source-io' && (filename === f.sourcePath || filename === sourcePath)
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: 'Unknown',
+                    module: 'FileSystem',
+                    method: 'open',
+                    description: 'Synthetic source I/O failure',
+                  }),
+                )
+              : f.fs.open(filename, options),
+        });
+        const pending = yield* Effect.acquireUseRelease(
+          Effect.sync(() => ({
+            query: vi
+              .spyOn(recallIndex, 'readRecallMemoryIdentities')
+              .mockImplementation((...args) =>
+                injected && fault === 'identity-query'
+                  ? Effect.fail(TestError.make({message: 'Synthetic identity query I/O failure'}))
+                  : originalRead(...args),
+              ),
+            warm: vi.spyOn(recallIndex, 'loadRecallMemoryIdentities').mockImplementation((...args) =>
+              original(...args).pipe(
+                Effect.tap(() => {
+                  if (args[1].memoryIds.length || args[1].allowedUriScopes.length || ++preparations !== 2)
+                    return Effect.void;
+                  return Effect.gen(function* () {
+                    expect(yield* f.fs.readDirectory(f.path.join(f.home, 'threadnote', 'memory-locks'))).toEqual([]);
+                    injected = true;
+                    if (fault !== 'readiness') return;
+                    const record = parseMemoryDocument(f.uri, f.content)!;
+                    yield* store.write(
+                      {account: f.config.account, home: f.home, user: f.config.user},
+                      'threadnote://user/tester/memories/durable/projects/fixture/unrelated-retry.md',
+                      formatMemoryDocument(
+                        'MEMORY',
+                        {...record.metadata, memoryId: 'tn_unrelated_retry', topic: 'unrelated'},
+                        'Unrelated canonical mutation.',
+                      ),
+                      {mode: 'create'},
+                    );
+                  });
+                }),
+              ),
+            ),
+          })),
+          () => f.rawReview(input).pipe(Effect.provideService(FileSystem.FileSystem, failingFs)),
+          spies =>
+            Effect.sync(() => {
+              spies.warm.mockRestore();
+              spies.query.mockRestore();
+            }),
+        );
+        expect(injected).toBe(true);
+        expect(pending.isError).toBe(true);
+        const prepared = yield* loadCandidateReview(f.home, preview.reviewId);
+        expect(prepared.maintenanceApproval?.stage).toBe('prepared');
+        expect(prepared.candidates[0].state).toBe('applying');
+        const postimage = yield* f.fs.readFileString(f.targetPath);
+        const retried = yield* f.review(input);
+        expect(retried.isError).not.toBe(true);
+        const complete = yield* loadCandidateReview(f.home, preview.reviewId);
+        expect(complete.maintenanceApproval?.stage).toBe('written');
+        expect(complete.candidates[0].state).toBe('applied');
+        expect(EffectArray.filter(complete.auditEvents, event => event.action === 'apply')).toHaveLength(1);
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(postimage);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
 
   for (const kind of ['durable', 'smoke', 'incident', 'handoff', 'preference'] as const)
     effectIt.effect(`supports exact no-text approval for ${kind} while preserving protected roles`, () =>

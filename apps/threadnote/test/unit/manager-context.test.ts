@@ -31,7 +31,7 @@ import {
   type ManagerRecallResult,
 } from '@threadnote/threadnote/manager/context';
 import {projectManagerRecallPage} from '@threadnote/manager/context/paging';
-import {loadRecallIndex} from '@threadnote/recall/index';
+import {loadRecallIndex, recallIndexStatus} from '@threadnote/recall/index';
 import {MemoryIdentityResolutionError} from '@threadnote/recall/memory/identity';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -499,6 +499,37 @@ describe('Manager context backends', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('reports unavailable connections after a real write without initializing the historical index', () =>
+    Effect.gen(function* () {
+      const fixture = yield* managerContextFixture('connections-cold');
+      yield* runRemember(fixture.config, {
+        kind: 'durable',
+        project: 'threadnote',
+        sourceAgentClient: 'test',
+        topic: 'cold-connections',
+        text: 'Canonical memory awaiting background connection readiness.',
+      });
+      expect((yield* recallIndexStatus(fixture.config, false)).ready).toBe(true);
+      const before = yield* recallIndexStatus(fixture.config, true);
+      expect(before.ready).toBe(false);
+      const result = yield* handleManagerContextRequest({
+        body: Effect.succeed({
+          uri: 'threadnote://user/test-user/memories/durable/projects/threadnote/cold-connections.md',
+        }),
+        config: fixture.config,
+        method: 'POST',
+        url: new URL('http://manager.test/api/context/connections'),
+      });
+      expect(result).toMatchObject({
+        status: 503,
+        body: {code: 'connections-unavailable', retryAfterMilliseconds: 0},
+      });
+      if (!result) throw new Error('Expected the connections route to handle this request.');
+      expect(result.body).not.toHaveProperty('coverage');
+      expect(yield* recallIndexStatus(fixture.config, true)).toEqual(before);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect(
     'returns list-first verified connections, currentness, code metadata, and an editor CAS snapshot',
     () =>
@@ -518,6 +549,7 @@ describe('Manager context backends', () => {
           {mode: 'create'},
         );
 
+        yield* loadRecallIndex(fixture.config, {includeInactive: true});
         const result = yield* runManagerContextConnections(fixture.config, {uri: sourceUri});
 
         expect(result).toMatchObject({

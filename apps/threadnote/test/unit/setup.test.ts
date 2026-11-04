@@ -563,7 +563,8 @@ describe('setup orchestration', () => {
 
         expect(result.status).toBe('applied');
         expect(
-          (yield* recallIndexStatus({account: 'local', agentContextHome: home, user: 'tester'}, false)).ready,
+          (yield* recallIndexStatus({account: 'local', agentContextHome: home, manifestPath, user: 'tester'}, false))
+            .ready,
         ).toBe(true);
       }),
     ).pipe(run),

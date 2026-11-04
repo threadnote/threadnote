@@ -4,7 +4,7 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
-import {readRecallMemoryIdentities} from '../index.js';
+import {loadRecallMemoryIdentities, readRecallMemoryIdentities} from '../index.js';
 
 interface MemoryIdentityRuntime {
   readonly account: string;
@@ -59,12 +59,12 @@ export function classifyMemoryIdentityCandidates(
   return activeMatches.length === 0 && !identityConflict ? {state: 'not-found'} : {state: 'ambiguous'};
 }
 
-/** Resolve only inside the caller-authorized recall corpus; conflicts and missing IDs fail closed. */
-export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdentityAliases')(function* (
+const resolveMemoryIdentityAliasesInternal = Effect.fn('recall.resolveMemoryIdentityAliases')(function* (
   config: MemoryIdentityRuntime,
   inputs: readonly string[],
   allowedUriScopes: readonly string[],
-  options: {readonly validateNow?: boolean} = {},
+  options: {readonly validateNow?: boolean},
+  prepare: boolean,
 ) {
   const memoryIds = [
     ...new Set(
@@ -88,7 +88,7 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
       reason: 'scope-required',
     });
   }
-  const candidates = yield* readRecallMemoryIdentities(config, {
+  const candidates = yield* (prepare ? loadRecallMemoryIdentities : readRecallMemoryIdentities)(config, {
     allowedUriScopes,
     memoryIds,
     validateNow: options.validateNow,
@@ -152,6 +152,22 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
   return resolved;
 });
 
+/** Resolve from a ready snapshot only; ordinary reads never initialize or refresh the index. */
+export const resolveMemoryIdentityAliases = (
+  config: MemoryIdentityRuntime,
+  inputs: readonly string[],
+  allowedUriScopes: readonly string[],
+  options: {readonly validateNow?: boolean} = {},
+) => resolveMemoryIdentityAliasesInternal(config, inputs, allowedUriScopes, options, false);
+
+/** Explicit write preparation, before the writer takes its canonical mutation fence. */
+export const prepareMemoryIdentityAliases = (
+  config: MemoryIdentityRuntime,
+  inputs: readonly string[],
+  allowedUriScopes: readonly string[],
+  options: {readonly validateNow?: boolean} = {},
+) => resolveMemoryIdentityAliasesInternal(config, inputs, allowedUriScopes, options, true);
+
 type MemoryIdentityResolutionRequirements =
   ReturnType<typeof resolveMemoryIdentityAliases> extends Effect.Effect<unknown, unknown, infer Requirements>
     ? Requirements
@@ -186,13 +202,18 @@ export function resolveMemoryReplacementTarget<Record extends {readonly content:
   requestedUri: string,
   allowedUriScopes: readonly string[],
   read: (uri: string) => Effect.Effect<readonly Record[], E, R>,
+  options: {readonly prepare?: boolean} = {},
 ): Effect.Effect<
   ResolvedMemoryIdentityAlias & {readonly record: Record | undefined},
   unknown,
   R | MemoryIdentityResolutionRequirements
 > {
   return Effect.gen(function* () {
-    const [resolved] = yield* resolveMemoryIdentityAliases(config, [requestedUri], allowedUriScopes);
+    const [resolved] = yield* (options.prepare ? prepareMemoryIdentityAliases : resolveMemoryIdentityAliases)(
+      config,
+      [requestedUri],
+      allowedUriScopes,
+    );
     const [record] = yield* read(resolved.canonicalUri);
     if (record) {
       yield* verifyResolvedMemoryIdentity(resolved, resolved.canonicalUri, record.content);

@@ -1,7 +1,17 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Deferred, Effect, Fiber, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  DateTime,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -21,6 +31,7 @@ import {
   recallIndexStatus,
   recallIndexDatabaseFilename,
   readRecallMemoryIdentities,
+  readRecallMemoryLinks,
 } from '@threadnote/recall/index';
 import {
   requestRecallLexicalRefresh,
@@ -89,6 +100,124 @@ const eligibility = {
   authority: 'any',
   projects: {mode: 'allow-projects-and-projectless', projects: ['allowed']},
 } as const;
+
+const staleSelectorFixture = Effect.gen(function* () {
+  const f = yield* fixture;
+  const {fs, path, config, filename} = f;
+  yield* fs.writeFileString(filename, body('allowed', 'active', {memoryId: 'tn_ready_seed'}));
+  const supersederPath = path.join(path.dirname(filename), 'superseder.md');
+  const original = parseMemoryDocument(
+    'threadnote://user/me/memories/durable/superseder.md',
+    body('allowed', 'active', {memoryId: 'tn_ready_superseder', validFrom: '2027-08-31T12:00:00.000Z'}),
+  )!;
+  const content = formatMemoryDocument(
+    'MEMORY',
+    {...original.metadata, supersedes: 'threadnote://memory/tn_ready_seed'},
+    original.body,
+  );
+  yield* fs.writeFileString(supersederPath, content);
+  yield* loadRecallIndexData(config, {includeInactive: false, forceRefresh: true});
+  yield* fs.writeFileString(supersederPath, EffectString.replace('2027-08-31', '2025-08-31')(content));
+  return {
+    ...f,
+    root: yield* fs.realPath(path.join(config.agentContextHome, 'data', config.account)),
+    before: yield* recallIndexStatus(config),
+    query: {
+      allowedUriScopes: ['threadnote://user/me/memories'],
+      includeInactive: false,
+      directions: ['incoming'],
+      memorySeeds: [{memoryId: 'tn_ready_seed', requestedOrdinal: 0}],
+      relationTypes: ['supersedes'],
+      sourceCurrentAt: DateTime.toDateUtc(DateTime.makeUnsafe('2026-08-31T12:00:00.000Z')),
+    } as const,
+  };
+});
+
+effectIt.effect('retains selector reconciliation when a later callback fails', () =>
+  Effect.gen(function* () {
+    const f = yield* staleSelectorFixture;
+    const failed = yield* readRecallMemoryLinks(f.config, {
+      ...f.query,
+      onCanonicalMismatch: () => {
+        throw new Error('Synthetic later selector callback failure');
+      },
+    }).pipe(Effect.result);
+    expect(failed).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallIndexOperationError'}});
+    expect(yield* readRecallLexicalDemand({...f.config, includeInactive: false})).toMatchObject({reconcile: true});
+    expect(yield* recallIndexStatus(f.config)).toEqual(f.before);
+  }).pipe(provide),
+);
+
+effectIt.effect('does not enqueue maintenance when interrupted after a selector mismatch', () =>
+  Effect.gen(function* () {
+    const f = yield* staleSelectorFixture;
+    const paused = yield* Deferred.make<void>();
+    let observed = false;
+    let attempts = 0;
+    const guarded = FileSystem.FileSystem.of({
+      ...f.fs,
+      makeDirectory: (filename, options) => {
+        if (observed && EffectString.includes('lexical-demand')(filename)) attempts++;
+        return f.fs.makeDirectory(filename, options);
+      },
+      realPath: filename =>
+        observed && filename === f.root
+          ? Deferred.succeed(paused, undefined).pipe(Effect.andThen(Effect.never))
+          : f.fs.realPath(filename),
+    });
+    const reader = yield* readRecallMemoryLinks(f.config, {
+      ...f.query,
+      onCanonicalMismatch: () => {
+        observed = true;
+      },
+    }).pipe(Effect.provideService(FileSystem.FileSystem, guarded), Effect.forkScoped);
+    yield* Deferred.await(paused).pipe(Effect.timeout('2 seconds'));
+    yield* Fiber.interrupt(reader);
+    expect(observed).toBe(true);
+    expect(attempts).toBe(0);
+    expect(yield* readRecallLexicalDemand({...f.config, includeInactive: false})).toBeUndefined();
+    expect(yield* recallIndexStatus(f.config)).toEqual(f.before);
+  }).pipe(provide),
+);
+
+effectIt.effect('reconciles a witnessed identity-less source retired before the link read', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const record = parseMemoryDocument(f.uri, body())!;
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        ...record.metadata,
+        relations: [{type: 'depends_on', uri: 'threadnote://memory/tn_neighbor'}],
+      },
+      record.body,
+    );
+    yield* f.fs.writeFileString(f.filename, content);
+    yield* loadRecallIndexData(f.config, {includeInactive: false, forceRefresh: true});
+    const before = yield* recallIndexStatus(f.config);
+    yield* f.fs.writeFileString(f.filename, EffectString.replace('status: active', 'status: archived')(content));
+    let mismatches = 0;
+    let freshness: string | undefined;
+    const result = yield* readRecallMemoryLinks(f.config, {
+      allowedUriScopes: ['threadnote://user/me/memories'],
+      includeInactive: false,
+      directions: ['outgoing'],
+      memorySeeds: [{memoryId: 'tn_witness_seed', requestedOrdinal: 0}],
+      witnessedSources: [{memoryId: 'tn_witness_seed', requestedOrdinal: 0, uri: f.uri}],
+      onCanonicalMismatch: count => {
+        mismatches += count;
+      },
+      onReadState: state => {
+        freshness = state.freshness;
+      },
+    });
+    expect(result).toEqual([]);
+    expect(mismatches).toBeGreaterThan(0);
+    expect(freshness).toBe('stale');
+    expect(yield* readRecallLexicalDemand({...f.config, includeInactive: false})).toMatchObject({reconcile: true});
+    expect(yield* recallIndexStatus(f.config)).toEqual(before);
+  }).pipe(provide),
+);
 
 describe('ready lexical readers', () => {
   effectIt.effect('fills the eligible ranked quota after date exclusion without counting pinned results', () =>

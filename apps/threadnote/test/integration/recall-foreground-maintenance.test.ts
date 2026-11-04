@@ -103,7 +103,7 @@ describe('foreground reads and lexical maintenance', () => {
             withExclusiveFileLock(fs, Bun.argv[3], options, Effect.promise(async () => {
               const db = new Database(Bun.argv[1]); db.exec('BEGIN IMMEDIATE');
               db.exec('DELETE FROM exact_search'); db.exec('DELETE FROM documents');
-              console.log('held'); await Bun.stdin.text(); db.exec('ROLLBACK'); db.close();
+              process.stdout.write('held\\n'); await Bun.stdin.text(); db.exec('ROLLBACK'); db.close();
             })));
         }).pipe(Effect.provide(ApplicationLayer)));`;
         const lexicalLock = path.join(

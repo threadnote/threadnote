@@ -329,7 +329,7 @@ export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(funct
       admissionRequest.action === 'recover'
         ? state.operations[admissionRequest.operationId ?? '']?.request.evidenceRefs
         : admissionRequest.evidenceRefs;
-    yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+    yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs, {readyOnly: admissionRequest.action === 'read'});
   }
   yield* reconcileManifest(config, state, recoverManifest);
   return state;
@@ -406,7 +406,9 @@ export const withWorkflowJournalSession = <A, E, R>(
                     : 'evidenceRefs' in request
                       ? request.evidenceRefs
                       : undefined;
-                yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+                yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs, {
+                  readyOnly: request.action === 'read',
+                });
                 yield* reconcileManifest(
                   config,
                   state,

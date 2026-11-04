@@ -231,7 +231,9 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
       message: '--defer-code-refs can be used only when storing an active memory.',
     });
   }
-  const replacement = options.replace ? yield* resolveLocalMemoryReplacementTarget(config, options.replace) : undefined;
+  const replacement = options.replace
+    ? yield* resolveLocalMemoryReplacementTarget(config, options.replace, {prepare: true})
+    : undefined;
   const {canonicalUri: replaceUri, record: replaced} = replacement ?? {};
   if (replaced) yield* attemptSync(() => assertMemoryDocumentSchemaWritable(replaced.content));
   const callerCwd = yield* getInvocationCwd();
@@ -1116,7 +1118,9 @@ export const runList = Effect.fn('runList')(function* (config: RuntimeConfig, ur
 });
 
 export const runHandoff = Effect.fn('runHandoff')(function* (config: RuntimeConfig, options: HandoffOptions) {
-  const replacement = options.replace ? yield* resolveLocalMemoryReplacementTarget(config, options.replace) : undefined;
+  const replacement = options.replace
+    ? yield* resolveLocalMemoryReplacementTarget(config, options.replace, {prepare: true})
+    : undefined;
   const {canonicalUri: replaceUri, record: replaced} = replacement ?? {};
   if (replaced) yield* attemptSync(() => assertMemoryDocumentSchemaWritable(replaced.content));
   const {bodyText, metadata: baseMetadata} = yield* buildHandoff(options, replacement?.memoryId);
@@ -1448,7 +1452,7 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   const options = yield* resolveStoreMemoryReplacementOptions(config, input);
   const replaceUri = options.replaceUri;
   if (replaceUri) {
-    const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri);
+    const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri, {prepare: true});
     const maintenanceError = topicMaintenanceReplacementError(current.record, {
       body: Effect2.pipe(options.bodyText, EffectString.trim),
       metadata: options.metadata,
