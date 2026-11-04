@@ -12,6 +12,7 @@ const PathText = Schema.String.check(
 const MaxItems = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1000));
 const MaxBytes = Counter.check(Schema.isGreaterThanOrEqualTo(1024), Schema.isLessThanOrEqualTo(8 * 1024 * 1024));
 const Milliseconds = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(45000));
+const ContextBudget = Counter.check(Schema.isGreaterThanOrEqualTo(800), Schema.isLessThanOrEqualTo(1500));
 const Cursor = Schema.Struct({...Continuation.fields, observation: Schema.String.check(Schema.isMaxLength(32768))});
 export const SemanticAgentReadOperation = Schema.Literals([...SemanticQuery.literals, 'diagnostics']);
 
@@ -29,6 +30,8 @@ export const SemanticAgentQuery = Schema.Struct({
   maxBytes: Schema.optionalKey(MaxBytes),
   milliseconds: Schema.optionalKey(Milliseconds),
   cursor: Schema.optionalKey(Cursor),
+  task: Schema.optionalKey(PathText.check(Schema.isMaxLength(4096))),
+  budgetTokens: Schema.optionalKey(ContextBudget),
 });
 export type SemanticAgentQuery = typeof SemanticAgentQuery.Type;
 

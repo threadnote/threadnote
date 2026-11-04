@@ -28,6 +28,7 @@
     "./navigation/assemble": "./src/navigation/assemble.ts"
   },
   "dependencies": {
+    "@threadnote/semantic": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
     "@threadnote/memory": "workspace:*",

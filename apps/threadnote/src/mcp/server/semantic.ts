@@ -21,13 +21,17 @@ export function registerSemanticTool(server: EffectMcpServerRegistry): void {
   );
 }
 
-export function registerSemanticQueryTool(server: EffectMcpServerRegistry, config: RuntimeConfig): void {
+export function registerSemanticQueryTool(
+  server: EffectMcpServerRegistry,
+  config: RuntimeConfig,
+  knowledgeAuthorized = false,
+): void {
   server.registerTool(
     'semantic_query',
     {
       annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true},
       description:
-        'Read saved-disk semantic evidence. request: {callerCwd,file,language,operation,position?,project?,environment?,maxItems?,maxBytes?,milliseconds?,cursor?}. Requires an opt-in host profile; no setup or edits.',
+        'Read saved-disk semantic evidence. request: {callerCwd,file,language,operation,position?,project?,environment?,maxItems?,maxBytes?,milliseconds?,cursor?}. context also requires task and position; optional budgetTokens 800-1500. Knowledge links are document-scoped. Requires an opt-in host profile; no setup or edits.',
       inputSchema: {
         request: Schema.Json,
         responseFormat: McpInput.literals(
@@ -37,7 +41,7 @@ export function registerSemanticQueryTool(server: EffectMcpServerRegistry, confi
       },
     },
     ({request, responseFormat}) =>
-      runSemanticAgentQuery(config, request).pipe(
+      runSemanticAgentQuery(config, request, knowledgeAuthorized).pipe(
         Effect.map(result => ({
           content: [{type: 'text' as const, text: formatSemanticAgentQuery(result)}],
           ...(responseFormat === 'dual' ? {structuredContent: result} : {}),

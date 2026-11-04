@@ -852,6 +852,11 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
 });
 const Request = Schema.Union([
   Schema.Struct({operation: Schema.Literal('agent-query'), request: SemanticAgentEndpointQuery}),
+  Schema.Struct({
+    operation: Schema.Literal('agent-observe'),
+    observation: Observation,
+    milliseconds: Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(45000)),
+  }),
   Schema.Struct({operation: Schema.Literal('status')}),
   Schema.Struct({operation: Schema.Literal('shutdown')}),
   Schema.Struct({
@@ -941,6 +946,10 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
         shutdown = true;
         return {status: 'shutting-down'};
       }
+      if (body.operation === 'agent-observe')
+        return agentQueries
+          ? yield* agentQueries.observe(body.observation, body.milliseconds)
+          : yield* LspFault.make({code: 'prerequisite'});
       if (body.operation === 'agent-query')
         return agentQueries
           ? yield* agentQueries.query(body.request)

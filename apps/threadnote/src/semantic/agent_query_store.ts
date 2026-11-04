@@ -164,6 +164,12 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
         ),
       ),
     prune: store.prune,
+    observe: (observation: Observation, milliseconds: number) =>
+      observation.worktree === worktree &&
+      observation.view.kind === 'disk' &&
+      observation.view.owner === 'agent-disk:' + sha256HexSync(namespace)
+        ? coordinator.observe(observation, milliseconds)
+        : Effect.fail(SemanticSessionFault.make({reason: 'conflict'})),
     status: store.status,
   };
 });

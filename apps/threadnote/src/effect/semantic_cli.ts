@@ -53,10 +53,10 @@ export function semanticCapabilities(input: unknown = {}) {
     },
     readSurface: {
       scope: 'api-operations' as const,
-      operations: [...SemanticAgentReadOperation.literals],
+      operations: [...SemanticAgentReadOperation.literals, 'context'],
       view: 'disk' as const,
       providerCapabilities: 'assessed-per-project' as const,
-      pending: ['context', 'owned-overlays', 'changes'],
+      pending: ['owned-overlays', 'changes'],
     },
     providers,
     reason: deferred
@@ -65,7 +65,7 @@ export function semanticCapabilities(input: unknown = {}) {
         ? 'No selected provider for this language'
         : null,
     nextAction:
-      'Saved-disk navigation and document diagnostics require an enabled private host profile and standalone runtime. Owned overlays and context composition remain pending; graph and memory remain available.',
+      'Saved-disk navigation, diagnostics and document-linked context require an enabled private host profile and standalone runtime. Context requires task and position. Owned overlays remain pending; graph and memory remain available.',
   });
 }
 
