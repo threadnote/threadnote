@@ -37,11 +37,14 @@ import {canonicalFileUri, type Observation} from '@threadnote/semantic/contracts
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
+import {compileContextBrief, compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
 import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
 import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import type {SemanticContextKnowledgeV1} from '@threadnote/context/types';
+import {projectContextBriefAgentView} from '@threadnote/context/projector';
+import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store.js';
+import type {SemanticSession} from '../../src/semantic/provider.js';
 
 const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
   Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
@@ -128,6 +131,13 @@ const memoryContextFixture = Effect.gen(function* () {
   };
   const run = method('run');
   const other = method('other');
+  let renamed = false;
+  let expectedSource = source(43);
+  let closingReply: Observation | undefined;
+  let definitionRange = {
+    start: {line: run.span.line - 1, character: run.span.column - 1},
+    end: {line: run.span.endLine - 1, character: run.span.endColumn - 1},
+  };
   const resources = yield* ResourceStore;
   const location = {account: config.account, home, user: config.user};
   const stored = new Map<string, string>();
@@ -166,7 +176,8 @@ const memoryContextFixture = Effect.gen(function* () {
           lastKnowledge = knowledge;
           expect(knowledge.binding?.scope).toBe('document');
           expect(knowledge.memorySelection?.scope).toBe('symbol-and-file');
-          expect(knowledge.memorySelection?.nodeId).toBe(run.id);
+          if (renamed) expect(knowledge.memorySelection?.nodeId).not.toBe(run.id);
+          else expect(knowledge.memorySelection?.nodeId).toBe(run.id);
         }),
       ),
     );
@@ -191,12 +202,9 @@ const memoryContextFixture = Effect.gen(function* () {
               documentVersion: null,
               projectEpoch: 1,
             };
-            if (body.operation === 'agent-observe') return yield* Schema.decodeEffect(Schema.Json)(observed);
+            if (body.operation === 'agent-observe')
+              return yield* Schema.decodeEffect(Schema.Json)(closingReply ?? observed);
             if (body.operation !== 'agent-query') return yield* LspFault.make({code: 'protocol'});
-            const range = {
-              start: {line: run.span.line - 1, character: run.span.column - 1},
-              end: {line: run.span.endLine - 1, character: run.span.endColumn - 1},
-            };
             return yield* Schema.decodeEffect(Schema.Json)({
               version: 1,
               status: 'ok',
@@ -207,7 +215,10 @@ const memoryContextFixture = Effect.gen(function* () {
                 completeness: 'partial',
                 limitations: ['Stable provider fixture; graph and canonical memory are real'],
               },
-              items: body.request.operation === 'definition' ? [{uri, range}] : ['Alpha.run(): number'],
+              items:
+                body.request.operation === 'definition'
+                  ? [{uri, range: definitionRange}]
+                  : [renamed ? 'Alpha.renamedRun(): number' : 'Alpha.run(): number'],
               offset: 0,
               remaining: 0,
               next: null,
@@ -240,7 +251,7 @@ const memoryContextFixture = Effect.gen(function* () {
         knowledge: Schema.Unknown,
       }),
     )(result.items[0]);
-    expect(item.semantic).toEqual(['Alpha.run(): number']);
+    expect(item.semantic).toEqual([renamed ? 'Alpha.renamedRun(): number' : 'Alpha.run(): number']);
     if (lastKnowledge === undefined) throw new Error('Semantic handler did not invoke the actual context compiler');
     const publicKnowledge = yield* Schema.decodeUnknownEffect(
       Schema.Struct({
@@ -266,12 +277,13 @@ const memoryContextFixture = Effect.gen(function* () {
         }),
       }),
     )(item.knowledge);
-    expect(publicKnowledge.memorySelection.nodeId).toBe(run.id);
+    if (renamed) expect(publicKnowledge.memorySelection.nodeId).not.toBe(run.id);
+    else expect(publicKnowledge.memorySelection.nodeId).toBe(run.id);
     return {result, knowledge: lastKnowledge, publicKnowledge};
   });
   const unchanged = Effect.gen(function* () {
     for (const [memoryUri, content] of stored) expect(yield* resources.read(location, memoryUri)).toBe(content);
-    expect(yield* fs.readFileString(file)).toBe(source(43));
+    expect(yield* fs.readFileString(file)).toBe(expectedSource);
     expect(compilerCalls).toBeGreaterThan(0);
   });
   const update = Effect.gen(function* () {
@@ -279,10 +291,235 @@ const memoryContextFixture = Effect.gen(function* () {
     yield* commit;
     yield* publish;
   });
-  return {remember, ask, run, other, update, unchanged};
+  const addReference = Effect.gen(function* () {
+    expectedSource = source(43) + 'const instance = new Alpha();\ninstance.run();\n';
+    yield* fs.writeFileString(file, expectedSource);
+    yield* commit;
+    yield* publish;
+  });
+  const rename = Effect.gen(function* () {
+    const methodLine = '  renamedRun() { return 43; }';
+    expectedSource =
+      '// External editor rename\nexport class Alpha {\n' +
+      methodLine +
+      '\n  other() { return 7; }\n}\nconst instance = new Alpha();\ninstance.renamedRun();\n';
+    yield* fs.writeFileString(file, expectedSource);
+    yield* commit;
+    yield* publish;
+    // The provider fixture supplies the full authored definition, independently of graph naming/caret heuristics.
+    definitionRange = {start: {line: 2, character: 2}, end: {line: 2, character: methodLine.length}};
+    request.position = {line: 6, character: 12};
+    request.task = 'Understand Alpha.renamedRun and its invariant';
+    renamed = true;
+  });
+  const document = compileContextBrief(config, {
+    task: 'Inspect the decision attached to Alpha.run in main.ts',
+    scope: {kind: 'repository', callerCwd: repository},
+    codeRefs: ['main.ts'],
+    mode: 'explain',
+    budgetTokens: 1500,
+    responseFormat: 'agent',
+  }).pipe(Effect.map(projected => projectContextBriefAgentView(projected.structuredContent, true)));
+  const diagnostics = Effect.gen(function* () {
+    let attached: Observation | undefined;
+    let diagnosticCalls = 0;
+    const evidence = (observed: Observation) => ({
+      basis: 'semantic' as const,
+      observation: observed,
+      scope: 'document',
+      completeness: 'partial' as const,
+      limitations: ['Stable diagnostic provider fixture'],
+    });
+    const api: SemanticSession = {
+      upsert: () => Effect.die('The disk coordinator owns attachment'),
+      query: () => Effect.die('Diagnostics must not issue navigation queries'),
+      diagnostics: observed =>
+        Effect.sync(() => {
+          diagnosticCalls++;
+          const items = EffectArray.map([0, 1], code => ({
+            id: sha256HexSync(JSON.stringify([observed.content, code])),
+            range: definitionRange,
+            code,
+            category: 'warning',
+            message: renamed ? `renamedRun diagnostic ${code}` : `run diagnostic ${code}`,
+          }));
+          return {
+            observation: observed,
+            evidence: evidence(observed),
+            items,
+            added: items,
+            remaining: [],
+            resolved: [],
+          };
+        }),
+      project: () => Effect.die('The coordinator owns project verification'),
+      observation: () => Effect.succeed(attached),
+      available: Effect.succeed(true),
+      invalidate: Effect.void,
+      close: Effect.die('No provider process exists in this fixture'),
+    };
+    const coordinator: Parameters<typeof makeSemanticAgentDiskQueries>[0] = {
+      attach: seed =>
+        Effect.sync(() => {
+          attached = {
+            ...seed,
+            configuration: sha256HexSync('configuration'),
+            toolchain: sha256HexSync('toolchain'),
+            provider: {...seed.provider, version: 'fixture', generation: 1},
+            projectEpoch: 1,
+          };
+          return {
+            observation: attached,
+            status: 'experimental' as const,
+            completeness: 'partial' as const,
+            edits: 'preparation-only' as const,
+            project: undefined,
+          };
+        }),
+      observe: observed => fs.readFile(file).pipe(Effect.map(bytes => ({...observed, content: sha256HexSync(bytes)}))),
+      use: (_observed, _milliseconds, action) => action(api),
+    };
+    const disk = yield* makeSemanticAgentDiskQueries(coordinator, worktree, sha256HexSync('stable-provider-runtime'));
+    const services = yield* Effect.context<Effect.Services<ReturnType<typeof disk.query>>>();
+    const diagnosticHost: SemanticAgentQueryHost = {
+      runtimeIdentity: host.runtimeIdentity,
+      connect: () =>
+        Effect.succeed({
+          request: body => {
+            if (body.operation !== 'agent-query') return Effect.die('Unexpected diagnostic endpoint operation');
+            return disk.query(body.request).pipe(
+              Effect.provide(services),
+              Effect.flatMap(value => Schema.decodeUnknownEffect(Schema.Json)(value)),
+              Effect.mapError(() => LspFault.make({code: 'protocol'})),
+            );
+          },
+        }),
+    };
+    const input = {
+      callerCwd: repository,
+      file: 'main.ts',
+      language: 'typescript',
+      operation: 'diagnostics',
+      maxItems: 1,
+      maxBytes: 8192,
+    };
+    return {
+      read: (cursor?: import('@threadnote/semantic/views').Continuation) =>
+        runSemanticAgentQueryWith(diagnosticHost, config, {...input, ...(cursor ? {cursor} : {})}),
+      calls: () => diagnosticCalls,
+    };
+  });
+  return {
+    remember,
+    ask,
+    run,
+    other,
+    update,
+    unchanged,
+    addReference,
+    rename,
+    document,
+    diagnostics,
+    rawContext: runSemanticAgentQueryWith(host, config, request),
+    closing: (value: Observation | undefined) => {
+      closingReply = value;
+    },
+    node: (nodeId: string) =>
+      query.inspect({
+        threadnoteHome: home,
+        cwd: repository,
+        operation: 'node',
+        nodeId,
+        refresh: false,
+        requestMaintenance: false,
+      }),
+    sourceHash: () => sha256HexSync(expectedSource),
+  };
 });
 
 describe('semantic context with canonical citation-backed memory', () => {
+  effectIt.effect(
+    'invalidates pre-rename reads while keeping old citations visibly unresolved without rewriting memory',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* memoryContextFixture;
+        yield* f.update;
+        yield* f.addReference;
+        yield* f.remember('before-rename', f.run.id, 'Applies to: Alpha.run\nInvariant: ORIGINAL_RUN_CONSTRAINT.');
+        const before = yield* f.ask;
+        const beforeImage = structuredClone(before.result);
+        expect(JSON.stringify(before.publicKnowledge)).toContain('ORIGINAL_RUN_CONSTRAINT');
+        const diagnostics = yield* f.diagnostics;
+        const first = yield* diagnostics.read();
+        expect(first.status).toBe('ok');
+        if (first.status !== 'ok' || first.next === null) throw new Error('Expected retained pre-rename diagnostics');
+        const firstImage = structuredClone(first);
+        expect(first.evidence.observation.content).toBe(before.result.evidence.observation.content);
+        expect(diagnostics.calls()).toBe(1);
+
+        // This is an external editor action, not a Threadnote rename/apply request.
+        yield* f.rename;
+        const oldPage = yield* diagnostics.read(first.next);
+        expect(oldPage.status).toBe('stale');
+        expect(oldPage.evidence).toBeNull();
+        expect(diagnostics.calls()).toBe(1);
+
+        // An earlier provider observation cannot close a newly composed context read.
+        f.closing(before.result.evidence.observation);
+        const oldProof = yield* f.rawContext;
+        expect(oldProof.status).toBe('stale');
+        expect(oldProof.evidence).toBeNull();
+        f.closing(undefined);
+        const after = yield* f.ask;
+        expect(after.result.evidence.observation.content).toBe(f.sourceHash());
+        expect(after.result.evidence.observation.content).not.toBe(before.result.evidence.observation.content);
+        expect(after.knowledge.binding?.semanticContent).toBe(f.sourceHash());
+        expect(after.knowledge.binding?.graph.snapshotId).not.toBe(before.knowledge.binding?.graph.snapshotId);
+        expect(after.knowledge.memorySelection?.nodeId).not.toBe(f.run.id);
+        const selected = yield* f.node(after.publicKnowledge.memorySelection.nodeId);
+        expect(selected.nodes).toHaveLength(1);
+        expect(selected.nodes[0]).toMatchObject({
+          name: 'renamedRun',
+          kind: 'method',
+          path: 'main.ts',
+          span: {line: 3, column: 3, endLine: 3, endColumn: 30},
+        });
+        expect(JSON.stringify(after.publicKnowledge)).not.toContain('ORIGINAL_RUN_CONSTRAINT');
+        expect(after.knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+
+        const freshDiagnostics = yield* diagnostics.read();
+        expect(freshDiagnostics.status).toBe('ok');
+        if (freshDiagnostics.status !== 'ok') throw new Error('Expected fresh post-rename diagnostics');
+        expect(freshDiagnostics.evidence.observation.content).toBe(after.result.evidence.observation.content);
+        expect(freshDiagnostics.evidence.observation.uri).toBe(after.result.evidence.observation.uri);
+        expect(freshDiagnostics.items).not.toEqual(first.items);
+        expect(JSON.stringify(freshDiagnostics.items)).toContain('renamedRun diagnostic');
+        expect(diagnostics.calls()).toBe(2);
+        expect(before.result).toEqual(beforeImage);
+        expect(first).toEqual(firstImage);
+
+        // The document projection exposes the old citation; new-symbol context safely excludes that constraint.
+        const document = yield* f.document;
+        const unresolved = memoryByUri(document.durableDecisions ?? [], 'threadnote://memory/tn_before-rename');
+        expect(unresolved, JSON.stringify(unresolved)).toMatchObject({
+          freshness: 'unknown',
+          freshnessBasis: 'code-citations',
+          authority: 'user_approved',
+          memoryTrust: 'approved',
+          preciseStatus: 'unknown',
+          citationSummary: {unknown: 1},
+        });
+        expect(
+          EffectArray.some(
+            document.stalenessAndConflicts ?? [],
+            issue =>
+              issue.kind === 'unknown-memory-freshness' && issue.uris.includes('threadnote://memory/tn_before-rename'),
+          ),
+        ).toBe(true);
+        yield* f.unchanged;
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect('selects the exact current constraint, labels stale decisions and excludes another method', () =>
     Effect.gen(function* () {
       const f = yield* memoryContextFixture;
