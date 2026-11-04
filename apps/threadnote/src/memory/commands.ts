@@ -31,6 +31,7 @@ import {withSharedRepositoryLock} from '../effect/share/lock.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
+import {withProductionPhaseTiming} from '../effect/production_log.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
 import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -554,42 +555,46 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
-      Effect.gen(function* () {
-        const prepared = yield* prepareDefaultRecallSections(config, {
-          allowReranker,
-          allowExactRescue: !thresholdConfigured,
-          allowSemanticRescue: !thresholdConfigured,
-          allowedUriScopes: explicitUri ? [explicitUri] : undefined,
-          candidateUris,
-          closingCandidateUris: closingRead ? candidateUris : undefined,
-          exactMatches: closingRead ? [] : exactMatches,
-          exact: closingRead ? undefined : exactRead,
-          eligibility,
-          feedbackQuery: query,
-          includeInactive: includeArchived,
-          limit: recallLimit,
-          memoryRefs: memoryConnections?.memoryRefs,
-          minimumScore: hybridMinimumScore,
-          passes: closingRead ? [] : passes,
-          preferredUriScopes: explicitUri ? undefined : [...scopedRecallUris],
-          project: recallProjectName,
-          query,
-          queryVariants: expansionQueries,
-          relationTypes: memoryConnections?.relationTypes,
-          rerankerCache,
-          seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
-          semanticResult,
-          semanticGenerationMismatchPolicy: closingRead ? 'fallback' : undefined,
-          workspaceBranch,
-          workspaceScope: workspaceComponent?.scope,
-        });
-        if (!closingRead) exactMatches = prepared.exactMatches;
-        semanticResult = Option.some(prepared.semanticResult);
-        operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
-        yield* surfaceOperationalWarnings(prepared.operationalWarnings);
-        yield* surfaceSemanticWarning(prepared.semanticResult);
-        return prepared;
-      }),
+      withProductionPhaseTiming(
+        'recall.lexical-ranking',
+        Effect.gen(function* () {
+          const prepared = yield* prepareDefaultRecallSections(config, {
+            allowReranker,
+            allowExactRescue: !thresholdConfigured,
+            allowSemanticRescue: !thresholdConfigured,
+            allowedUriScopes: explicitUri ? [explicitUri] : undefined,
+            candidateUris,
+            closingCandidateUris: closingRead ? candidateUris : undefined,
+            exactMatches: closingRead ? [] : exactMatches,
+            exact: closingRead ? undefined : exactRead,
+            eligibility,
+            feedbackQuery: query,
+            includeInactive: includeArchived,
+            limit: recallLimit,
+            memoryRefs: memoryConnections?.memoryRefs,
+            minimumScore: hybridMinimumScore,
+            passes: closingRead ? [] : passes,
+            preferredUriScopes: explicitUri ? undefined : [...scopedRecallUris],
+            project: recallProjectName,
+            query,
+            queryVariants: expansionQueries,
+            relationTypes: memoryConnections?.relationTypes,
+            rerankerCache,
+            seedUris: EffectArray.filter([inferredUri, seededUri], (uri): uri is string => uri !== undefined),
+            semanticResult,
+            semanticGenerationMismatchPolicy: closingRead ? 'fallback' : undefined,
+            workspaceBranch,
+            workspaceScope: workspaceComponent?.scope,
+          });
+          if (!closingRead) exactMatches = prepared.exactMatches;
+          semanticResult = Option.some(prepared.semanticResult);
+          operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
+          yield* surfaceOperationalWarnings(prepared.operationalWarnings);
+          yield* surfaceSemanticWarning(prepared.semanticResult);
+          return prepared;
+        }),
+        prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+      ),
       prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
     );
   let recallSections = yield* prepareSections();
@@ -616,12 +621,21 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           : Option.some(
               yield* withAnonymousTelemetryPhase(
                 'recall.semantic-retrieval',
-                loadRecallSemanticScoresResult(
-                  config,
-                  query,
-                  recallLimit,
-                  eligibility,
-                  explicitUri ? [explicitUri] : undefined,
+                withProductionPhaseTiming(
+                  'recall.semantic-retrieval',
+                  loadRecallSemanticScoresResult(
+                    config,
+                    query,
+                    recallLimit,
+                    eligibility,
+                    explicitUri ? [explicitUri] : undefined,
+                  ),
+                  result =>
+                    Option.isSome(result.warning)
+                      ? 'failure'
+                      : Option.isSome(result.scores)
+                        ? 'success'
+                        : 'unavailable',
                 ),
                 result =>
                   Option.isSome(result.warning) ? 'failure' : Option.isSome(result.scores) ? 'success' : 'unavailable',

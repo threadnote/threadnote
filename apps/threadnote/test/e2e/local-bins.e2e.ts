@@ -135,6 +135,65 @@ const SynchronizationDemandSchema = withRest(
     failures: Schema.Int,
   }),
 );
+const RecallPhaseDiagnosticSchema = withRest(
+  Schema.Struct({
+    phase: Schema.Literals(['recall.lexical-ranking', 'recall.semantic-retrieval']),
+    outcome: Schema.Literals(['success', 'unavailable', 'timed-out', 'interrupted', 'failure']),
+    durationMilliseconds: Schema.Finite,
+  }),
+);
+const RecallCompletionDiagnosticSchema = withRest(
+  Schema.Struct({
+    component: Schema.Literal('cli'),
+    event: Schema.Literal('invocation.finished'),
+    operation: Schema.Literal('recall'),
+    outcome: Schema.Literals(['success', 'interrupted', 'failure']),
+    phaseTimings: Schema.Unknown.pipe(Schema.Array, Schema.optionalKey),
+  }),
+);
+
+// Failure-only, bounded read of already emitted diagnostics. No invocation,
+// path, query, content, arbitrary error text or unknown field is rendered.
+async function recallFailureStages(): Promise<string> {
+  try {
+    const handle = await open(join(home, 'logs', 'threadnote.log'), 'r');
+    try {
+      const size = (await handle.stat()).size;
+      const bytes = new Uint8Array(Math.min(64 * 1024, size));
+      const read = await handle.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length));
+      let latest:
+        | {outcome: string; phaseTimings: readonly {phase: string; outcome: string; durationMilliseconds: number}[]}
+        | undefined;
+      for (const line of EffectString.split('\n')(new TextDecoder().decode(bytes.subarray(0, read.bytesRead))).slice(
+        -64,
+      )) {
+        let entry: unknown;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!Schema.is(RecallCompletionDiagnosticSchema)(entry)) continue;
+        latest = {
+          outcome: entry.outcome,
+          phaseTimings: EffectArray.map(
+            EffectArray.filter(entry.phaseTimings ?? [], Schema.is(RecallPhaseDiagnosticSchema)).slice(0, 32),
+            timing => ({
+              phase: timing.phase,
+              outcome: timing.outcome,
+              durationMilliseconds: timing.durationMilliseconds,
+            }),
+          ),
+        };
+      }
+      return JSON.stringify(latest ?? {diagnostics: 'not-present'});
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return JSON.stringify({diagnostics: 'unavailable'});
+  }
+}
 
 const root = process.cwd();
 const cli = join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
@@ -302,7 +361,9 @@ describe('built self-contained distribution', () => {
 
   it('recalls saved memory immediately and explicitly rebuilds vectors through built launchers', async () => {
     const recall = await runCli(['recall', '--query', 'QZ9 native recall background service']);
-    expect(recall).toContain('native-e2e.md');
+    expect(recall, EffectString.includes('native-e2e.md')(recall) ? undefined : await recallFailureStages()).toContain(
+      'native-e2e.md',
+    );
     expect(await runCli(['doctor'])).toMatch(
       /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot)/,
     );

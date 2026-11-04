@@ -1137,7 +1137,6 @@ function runRecallTool(
     }
     return yield* withReadyRecallReadBoundary(
       Effect.gen(function* () {
-        const baselineStarted = yield* Clock.monotonicTimeNanos;
         const workspaceContext = yield* withMcpProgressHeartbeat(
           progress,
           RECALL_MCP_PROGRESS.workspaceContext,
@@ -1234,9 +1233,11 @@ function runRecallTool(
             progressTiming.heartbeatMilliseconds,
           );
         };
+        const baselineStarted = yield* Clock.monotonicTimeNanos;
         let recallSections = yield* prepareSections();
         // Consolidation removed a startup from the measured baseline. Keep a second
         // observed window for closing variance, within the same original deadline.
+        // Workspace resolution already consumed that deadline but is not repeated by closing.
         const closingReadMilliseconds =
           2 * Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
         const baselineSections = recallSections;

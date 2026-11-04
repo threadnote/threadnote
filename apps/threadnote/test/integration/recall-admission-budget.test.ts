@@ -1,5 +1,18 @@
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Clock, Context, Effect, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Clock,
+  Context,
+  Deferred,
+  Duration,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Schema,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -319,101 +332,202 @@ const selectorCompositionCommands = (system: SystemInfo['Service'], workerFileSy
   });
 
 describe('production recall admission budget', () => {
-  effectIt.effect(
-    'MCP production semantic timing excludes reranker and closing proof work',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* fixture(false);
-        const path = yield* Path.Path;
-        const liveClock = yield* Clock.Clock;
-        const commands = yield* CommandExecutor;
-        const diagnosticEpoch = yield* Clock.currentTimeMillis;
-        yield* f.fs.writeFileString(
-          path.join(f.config.agentContextHome, 'layout.json'),
-          `${JSON.stringify({createdBy: 'threadnote', version: 2})}\n`,
-          {mode: 0o600},
-        );
-        let diagnosticElapsed = 0;
-        let reranks = 0;
-        let closingReads = 0;
-        yield* selectLocalModel(
-          f.config.agentContextHome,
-          yield* LocalModelCatalog,
-          'reranker',
-          'jina-reranker-v1-turbo-en-f16',
-        );
-        const runtime = LocalModelRuntime.of({
-          ...fastRuntime,
-          rerank: ({documents}) =>
-            Effect.sync(() => {
-              reranks++;
-              // Mark later work on the diagnostic wall clock only. Native admission,
-              // cancellation, sleeps and the original deadline retain the live clock.
-              diagnosticElapsed = 137;
-              return EffectArray.map(documents, () => 1);
-            }),
-        });
-        const observed = CommandExecutor.of({
-          ...commands,
-          execute: (executable, args, options) =>
-            Effect.gen(function* () {
-              if (options?.sensitiveOutput && options.input) {
-                const request = yield* Schema.decodeEffect(operationSchema)(
-                  new TextDecoder().decode(options.input),
-                ).pipe(Effect.orDie);
-                if (
-                  reranks > 0 &&
-                  (request.operation === 'batch' ||
-                    request.operation === 'memory-connections' ||
-                    (request.operation === 'sections' && request.options.mode === 'closing'))
-                )
-                  closingReads++;
-              }
-              return yield* commands.execute(executable, args, options);
-            }),
-        });
-        const result = yield* withProductionLogging(
-          f.config.agentContextHome,
-          {component: 'mcp', operation: 'recall_context'},
-          invoke('mcp', f),
-        ).pipe(
-          Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
-          Effect.provideService(LocalModelRuntime, runtime),
-          Effect.provideService(LocalModelStore, f.store),
-          Effect.provideService(CommandExecutor, observed),
-          Effect.provideService(Clock.Clock, {
-            currentTimeNanos: liveClock.currentTimeNanos,
-            currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
-            monotonicTimeNanos: liveClock.monotonicTimeNanos,
-            monotonicTimeNanosUnsafe: () => liveClock.monotonicTimeNanosUnsafe(),
-            sleep: duration => liveClock.sleep(duration),
-            currentTimeMillis: Effect.sync(() => diagnosticEpoch + diagnosticElapsed),
-            currentTimeMillisUnsafe: () => diagnosticEpoch + diagnosticElapsed,
+  effectIt.effect('MCP closing reserve excludes workspace resolution without resetting the request deadline', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(false);
+      yield* selectLocalModel(
+        f.config.agentContextHome,
+        yield* LocalModelCatalog,
+        'reranker',
+        'jina-reranker-v1-turbo-en-f16',
+      );
+      const clock = yield* Clock.Clock;
+      const workspace = yield* Deferred.make<void>();
+      const baseline = yield* Deferred.make<void>();
+      const reranker = yield* Deferred.make<void>();
+      const closing = yield* Deferred.make<void>();
+      const command = yield* selectorCompositionCommands(f.system);
+      const deadlines = new Set<bigint>();
+      const windows: number[] = [];
+      let interrupted = 0;
+      let calls = 0;
+      const observed = CommandExecutor.of({
+        ...command,
+        execute: (executable, args, options) =>
+          Effect.gen(function* () {
+            const deadline = yield* Effect.serviceOption(ReadyRecallReadDeadline);
+            if (Option.isSome(deadline)) deadlines.add(deadline.value.expiresAtNanos);
+            const input = options?.input
+              ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(Effect.orDie)
+              : undefined;
+            if (input?.operation === 'sections') {
+              windows.push(options!.timeoutMs!);
+              yield* Deferred.succeed(input.options.mode === 'baseline' ? baseline : closing, undefined);
+              yield* Effect.sleep(100);
+            }
+            return yield* command.execute(executable, args, options);
           }),
-        );
-        expect(reranks).toBe(1);
-        expect(closingReads).toBeGreaterThan(0);
-        expect(result.isError, result.output).toBe(false);
-        expect(result.output).toContain('memories/durable/alpha.md');
-        const log = yield* f.fs.readFileString(path.join(f.config.agentContextHome, 'logs', 'threadnote.log'));
-        const entries = yield* Effect.forEach(EffectString.split(EffectString.trim(log), '\n'), line =>
-          Schema.decodeEffect(phaseLogEntrySchema)(line),
-        );
-        const finished = Option.getOrUndefined(
-          EffectArray.findFirst(entries, entry => entry.event === 'invocation.finished'),
-        );
-        const semantic = finished?.phaseTimings
-          ? EffectArray.filter(finished.phaseTimings, timing => timing.phase === 'recall.semantic-retrieval')
-          : undefined;
-        expect(semantic).toEqual([
-          {phase: 'recall.semantic-retrieval', durationMilliseconds: 0, outcome: 'unavailable'},
-        ]);
-        expect(log).not.toContain(query);
-        expect(log).not.toContain(f.uri);
-        expect(log).not.toContain('FOREIGN_PRIVATE_SENTINEL');
-      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
-    {timeout: 15000},
+      });
+      const runtime = LocalModelRuntime.of({
+        ...fastRuntime,
+        rerank: () =>
+          Effect.gen(function* () {
+            calls++;
+            yield* Deferred.succeed(reranker, undefined);
+            return yield* Effect.never.pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  interrupted++;
+                }),
+              ),
+            );
+          }),
+      });
+      const system = {
+        ...f.system,
+        environment: () => ({
+          ...f.system.environment(),
+          NODE_ENV: 'test',
+          THREADNOTE_TEST_MCP_PROGRESS_WORKSPACE_DELAY_MILLISECONDS: '350',
+        }),
+      };
+      const started = yield* Clock.monotonicTimeNanos;
+      // This new composition regression controls only elapsed orchestration time.
+      // All existing real-process deadline, cancellation and currentness tests remain unchanged.
+      const reader = yield* invoke('mcp', {...f, system}).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        Effect.provideService(CommandExecutor, observed),
+        Effect.provideService(LocalModelRuntime, runtime),
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          sleep: duration =>
+            Duration.toMillis(duration) === 350
+              ? Deferred.succeed(workspace, undefined).pipe(Effect.andThen(clock.sleep(duration)))
+              : clock.sleep(duration),
+        }),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(workspace);
+      yield* TestClock.adjust(350);
+      yield* Deferred.await(baseline);
+      yield* TestClock.adjust(100);
+      const admission = yield* Effect.raceFirst(
+        Deferred.await(reranker).pipe(Effect.as('entered')),
+        Fiber.join(reader).pipe(Effect.as('completed')),
+      );
+      expect(admission).toBe('entered');
+      yield* TestClock.adjust(250);
+      yield* Deferred.await(closing);
+      yield* TestClock.adjust(100);
+      const result = yield* Fiber.join(reader);
+      expect(result.isError, result.output).toBe(false);
+      expect(result.output).toContain('memories/durable/alpha.md');
+      expect(calls).toBe(1);
+      expect(interrupted).toBe(1);
+      expect(windows).toEqual([550, 200]);
+      expect([...deadlines]).toEqual([started + 2_000_000_000n]);
+      expect((yield* Clock.monotonicTimeNanos) - started).toBe(800_000_000n);
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
+
+  for (const surface of ['mcp', 'cli'] as const) {
+    effectIt.effect(
+      `${surface === 'mcp' ? 'MCP' : 'CLI composition'} production semantic timing excludes reranker and closing proof work`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture(false);
+          const path = yield* Path.Path;
+          const liveClock = yield* Clock.Clock;
+          const commands = surface === 'mcp' ? yield* CommandExecutor : yield* selectorCompositionCommands(f.system);
+          const diagnosticEpoch = yield* Clock.currentTimeMillis;
+          yield* f.fs.writeFileString(
+            path.join(f.config.agentContextHome, 'layout.json'),
+            `${JSON.stringify({createdBy: 'threadnote', version: 2})}\n`,
+            {mode: 0o600},
+          );
+          let diagnosticElapsed = 0;
+          let reranks = 0;
+          let closingReads = 0;
+          yield* selectLocalModel(
+            f.config.agentContextHome,
+            yield* LocalModelCatalog,
+            'reranker',
+            'jina-reranker-v1-turbo-en-f16',
+          );
+          const runtime = LocalModelRuntime.of({
+            ...fastRuntime,
+            rerank: ({documents}) =>
+              Effect.sync(() => {
+                reranks++;
+                // Mark later work on the diagnostic wall clock only. Native admission,
+                // cancellation, sleeps and the original deadline retain the live clock.
+                diagnosticElapsed = 137;
+                return EffectArray.map(documents, () => 1);
+              }),
+          });
+          const observed = CommandExecutor.of({
+            ...commands,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                if (options?.sensitiveOutput && options.input) {
+                  const request = yield* Schema.decodeEffect(operationSchema)(
+                    new TextDecoder().decode(options.input),
+                  ).pipe(Effect.orDie);
+                  if (
+                    reranks > 0 &&
+                    (request.operation === 'batch' ||
+                      request.operation === 'memory-connections' ||
+                      (request.operation === 'sections' && request.options.mode === 'closing'))
+                  )
+                    closingReads++;
+                }
+                return yield* commands.execute(executable, args, options);
+              }),
+          });
+          const result = yield* withProductionLogging(
+            f.config.agentContextHome,
+            {component: surface, operation: surface === 'mcp' ? 'recall_context' : 'recall'},
+            invoke(surface, f),
+          ).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(LocalModelRuntime, runtime),
+            Effect.provideService(LocalModelStore, f.store),
+            Effect.provideService(CommandExecutor, observed),
+            Effect.provideService(Clock.Clock, {
+              currentTimeNanos: liveClock.currentTimeNanos,
+              currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
+              monotonicTimeNanos: liveClock.monotonicTimeNanos,
+              monotonicTimeNanosUnsafe: () => liveClock.monotonicTimeNanosUnsafe(),
+              sleep: duration => liveClock.sleep(duration),
+              currentTimeMillis: Effect.sync(() => diagnosticEpoch + diagnosticElapsed),
+              currentTimeMillisUnsafe: () => diagnosticEpoch + diagnosticElapsed,
+            }),
+          );
+          expect(reranks).toBe(1);
+          expect(closingReads).toBeGreaterThan(0);
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          const log = yield* f.fs.readFileString(path.join(f.config.agentContextHome, 'logs', 'threadnote.log'));
+          const entries = yield* Effect.forEach(EffectString.split(EffectString.trim(log), '\n'), line =>
+            Schema.decodeEffect(phaseLogEntrySchema)(line),
+          );
+          const finished = Option.getOrUndefined(
+            EffectArray.findFirst(entries, entry => entry.event === 'invocation.finished'),
+          );
+          const semantic = finished?.phaseTimings
+            ? EffectArray.filter(finished.phaseTimings, timing => timing.phase === 'recall.semantic-retrieval')
+            : undefined;
+          expect(semantic).toEqual([
+            {phase: 'recall.semantic-retrieval', durationMilliseconds: 0, outcome: 'unavailable'},
+          ]);
+          expect(log).not.toContain(query);
+          expect(log).not.toContain(f.uri);
+          expect(log).not.toContain('FOREIGN_PRIVATE_SENTINEL');
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      {timeout: 15000},
+    );
+  }
   fcEffectProp(
     effectIt,
     'refinement reserves closing proof or rejects optional work without entering it',
@@ -950,6 +1064,13 @@ describe('production recall admission budget', () => {
         () =>
           Effect.gen(function* () {
             const f = yield* fixture(mode !== 'absent');
+            const deterministicSlowComposition = surface === 'mcp' && mode === 'slow';
+            const baselineReadStarted = yield* Deferred.make<void>();
+            const baselineReadCompleted = yield* Deferred.make<void>();
+            const slowInferenceStarted = yield* Deferred.make<void>();
+            const slowInferenceInterrupted = yield* Deferred.make<void>();
+            const closingReadStarted = yield* Deferred.make<void>();
+            const closingReadCompleted = yield* Deferred.make<void>();
             const completedReads: number[] = [];
             const starts: number[] = [];
             let activeReads = 0;
@@ -959,6 +1080,10 @@ describe('production recall admission budget', () => {
             let completedFastCallback = false;
             let hydrated = 0;
             let lateHydrations = 0;
+            let baselineReadStartedAt: bigint | undefined;
+            let baselineReadCompletedAt: bigint | undefined;
+            let closingReadStartedAt: bigint | undefined;
+            let closingReadCompletedAt: bigint | undefined;
             const deadlines = new Set<bigint>();
             const fs = {
               ...f.fs,
@@ -992,6 +1117,12 @@ describe('production recall admission budget', () => {
               ...command,
               execute: (executable, args, options) =>
                 Effect.gen(function* () {
+                  const request =
+                    deterministicSlowComposition && options?.sensitiveOutput && options.input
+                      ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(
+                          Effect.orDie,
+                        )
+                      : undefined;
                   const admitted = yield* Effect.serviceOption(ReadyRecallReadDeadline);
                   if (options?.sensitiveOutput && options.input) {
                     expect(Option.isSome(admitted)).toBe(true);
@@ -1000,7 +1131,19 @@ describe('production recall admission budget', () => {
                     expect(options.timeoutMs).toBeGreaterThan(0);
                     starts.push(options.timeoutMs!);
                     activeReads++;
-                    return yield* command.execute(executable, args, options).pipe(
+                    const readMode = request?.operation === 'sections' ? request.options.mode : undefined;
+                    if (deterministicSlowComposition && (readMode === 'baseline' || readMode === 'closing')) {
+                      const startedAt = yield* Clock.monotonicTimeNanos;
+                      if (readMode === 'baseline') baselineReadStartedAt = startedAt;
+                      else closingReadStartedAt = startedAt;
+                      yield* Deferred.succeed(
+                        readMode === 'baseline' ? baselineReadStarted : closingReadStarted,
+                        undefined,
+                      );
+                      // Hold the real composition behind the test clock for one fixed observed read cost.
+                      yield* Effect.sleep(Duration.millis(100));
+                    }
+                    const result = yield* command.execute(executable, args, options).pipe(
                       Effect.tap(result =>
                         Effect.sync(() => {
                           completedReads.push(starts.length);
@@ -1015,6 +1158,15 @@ describe('production recall admission budget', () => {
                         }),
                       ),
                     );
+                    if (deterministicSlowComposition && readMode === 'baseline') {
+                      baselineReadCompletedAt = yield* Clock.monotonicTimeNanos;
+                      yield* Deferred.succeed(baselineReadCompleted, undefined);
+                    }
+                    if (deterministicSlowComposition && readMode === 'closing') {
+                      closingReadCompletedAt = yield* Clock.monotonicTimeNanos;
+                      yield* Deferred.succeed(closingReadCompleted, undefined);
+                    }
+                    return result;
                   }
                   return yield* command.execute(executable, args, options);
                 }),
@@ -1034,11 +1186,18 @@ describe('production recall admission budget', () => {
                   }
                   if (mode === 'slow') {
                     enteredSlowCallback = true;
+                    if (deterministicSlowComposition) yield* Deferred.succeed(slowInferenceStarted, undefined);
                     return yield* Effect.never.pipe(
                       Effect.ensuring(
                         Effect.sync(() => {
                           interruptedModel++;
-                        }),
+                        }).pipe(
+                          Effect.andThen(
+                            deterministicSlowComposition
+                              ? Deferred.succeed(slowInferenceInterrupted, undefined)
+                              : Effect.void,
+                          ),
+                        ),
                       ),
                     );
                   }
@@ -1048,13 +1207,41 @@ describe('production recall admission budget', () => {
                 }),
             });
             const start = yield* Clock.monotonicTimeNanos;
-            const result = yield* invoke(surface, f).pipe(
+            const responseEffect = invoke(surface, f).pipe(
               Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
               Effect.provideService(CommandExecutor, observedCommand),
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(LocalModelRuntime, runtime),
               Effect.provideService(LocalModelStore, f.store),
             );
+            let result: {
+              readonly output: string;
+              readonly isError: boolean;
+              readonly confidenceScore: number | undefined;
+            };
+            if (deterministicSlowComposition) {
+              const reader = yield* responseEffect.pipe(Effect.forkScoped);
+              yield* Deferred.await(baselineReadStarted);
+              yield* TestClock.adjust(100);
+              yield* Deferred.await(baselineReadCompleted);
+              yield* Deferred.await(slowInferenceStarted);
+              // 900 compute - 100 baseline - 2 * 100 closing reservation = 600 optional.
+              // Stop exactly at interruption: adjust also advances newly registered sleeps,
+              // so overshooting would spend closing time while real SQLite I/O is suspended.
+              yield* TestClock.adjust(600);
+              yield* Deferred.await(slowInferenceInterrupted);
+              yield* Deferred.await(closingReadStarted);
+              yield* TestClock.adjust(100);
+              yield* Deferred.await(closingReadCompleted);
+              result = yield* Fiber.join(reader);
+              expect(baselineReadCompletedAt! - baselineReadStartedAt!).toBe(100_000_000n);
+              expect(closingReadCompletedAt! - closingReadStartedAt!).toBe(100_000_000n);
+              expect(baselineReadStartedAt! - start).toBe(0n);
+              expect(closingReadStartedAt! - start).toBe(700_000_000n);
+              expect((yield* Clock.monotonicTimeNanos) - start).toBe(800_000_000n);
+            } else {
+              result = yield* responseEffect;
+            }
             expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(2000);
             expect(result.isError, result.output).toBe(false);
             expect(result.output).toContain('memories/durable/alpha.md');
@@ -1069,8 +1256,12 @@ describe('production recall admission budget', () => {
             expect(activeReads).toBe(0);
             expect(completedReads.length).toBeGreaterThanOrEqual(2);
             expect(deadlines.size).toBe(1);
+            if (deterministicSlowComposition) expect([...deadlines]).toEqual([start + 2_000_000_000n]);
+            if (deterministicSlowComposition) expect(starts).toEqual([900, 800, 200]);
             for (let i = 1; i < starts.length; i++) expect(starts[i]).toBeLessThanOrEqual(starts[i - 1]);
-          }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+          }).pipe(provideTestLayer(ApplicationLayer), effect =>
+            surface === 'mcp' && mode === 'slow' ? effect : TestClock.withLive(effect),
+          ),
         {timeout: 15000},
       );
     }
