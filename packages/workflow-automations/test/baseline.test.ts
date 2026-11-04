@@ -1,9 +1,10 @@
-import {Array as EffectArray, Predicate} from 'effect';
+import {Array as EffectArray, Predicate, String as EffectString} from 'effect';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {mkdtemp, mkdir, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
+import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {workflowScenarios} from '../src/scenarios.js';
 import {captureBaseline} from './helpers/capture-baseline.js';
@@ -18,6 +19,13 @@ type BaselineMeasurements = {
 type RuntimeMeasurements = {
   readonly startup: {readonly durationsMilliseconds: number[]};
   readonly fileSize: {readonly bytes: number; readonly label: string};
+};
+type GitFixtureProcessResult = {
+  readonly status: number | null;
+  readonly signal: string | null;
+  readonly error?: {readonly code?: unknown; readonly message?: unknown};
+  readonly stdout?: unknown;
+  readonly stderr?: unknown;
 };
 
 const isStringArray = (value: unknown): value is string[] =>
@@ -56,6 +64,30 @@ const isRuntimeMeasurements = (value: unknown): value is RuntimeMeasurements =>
   typeof value.fileSize.bytes === 'number' &&
   typeof value.fileSize.label === 'string';
 
+const boundedFixtureText = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const bytes = Buffer.from(value, 'utf8');
+  let length = Math.min(bytes.byteLength, 4_096);
+  while (length > 0 && (bytes[length] & 0xc0) === 0x80) length--;
+  return bytes.subarray(0, length).toString('utf8');
+};
+const gitFixtureFailure = (args: string[], result: GitFixtureProcessResult) => {
+  const error = result.error;
+  return EffectArray.join(
+    [
+      `bounded git fixture command failed (${args[0]})`,
+      `argv=${boundedFixtureText(JSON.stringify(['git', ...args]))}`,
+      `status=${result.status ?? 'null'}`,
+      `signal=${result.signal ?? 'null'}`,
+      `errorCode=${boundedFixtureText(typeof error?.code === 'string' ? error.code : '')}`,
+      `errorMessage=${boundedFixtureText(typeof error?.message === 'string' ? error.message : '')}`,
+      `stdout=${boundedFixtureText(result.stdout)}`,
+      `stderr=${boundedFixtureText(result.stderr)}`,
+    ],
+    '; ',
+  );
+};
+
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
@@ -88,7 +120,7 @@ async function makeGitFixture() {
     ['-c', 'user.name=Baseline Test', '-c', 'user.email=baseline@example.invalid', 'commit', '-qm', 'fixture'],
   ]) {
     const result = spawnSync('git', args, {cwd: root, encoding: 'utf8', timeout: 4_000, maxBuffer: 4_096});
-    if (result.status !== 0) throw new Error(`bounded git fixture command failed (${args[0]})`);
+    if (result.status !== 0) throw new Error(gitFixtureFailure(args, result));
   }
   return {root};
 }
@@ -138,6 +170,78 @@ async function makeEncodedPathCliCheckout() {
 }
 
 describe('workflow baseline capture', () => {
+  it('reports bounded diagnostics for fixture Git failures', () => {
+    const args = ['--definitely-invalid-baseline-fixture-option'];
+    const invalidGit = spawnSync('git', args, {encoding: 'utf8', timeout: 4_000, maxBuffer: 4_096});
+    expect(invalidGit.status).not.toBe(0);
+    expect(gitFixtureFailure(args, invalidGit)).toContain(
+      'bounded git fixture command failed (--definitely-invalid-baseline-fixture-option)',
+    );
+
+    for (const [, result, expected] of [
+      [
+        'git rejection',
+        {status: 17, signal: null, stdout: 'git-rejection-stdout', stderr: 'git-rejection-stderr'},
+        ['status=17', 'signal=null', 'stdout=git-rejection-stdout', 'stderr=git-rejection-stderr'],
+      ],
+      [
+        'launch failure',
+        {
+          status: null,
+          signal: null,
+          error: {code: 'ENOENT', message: 'launch-failure-message'},
+          stdout: 'launch-failure-stdout',
+          stderr: 'launch-failure-stderr',
+        },
+        [
+          'status=null',
+          'signal=null',
+          'errorCode=ENOENT',
+          'errorMessage=launch-failure-message',
+          'stdout=launch-failure-stdout',
+          'stderr=launch-failure-stderr',
+        ],
+      ],
+      [
+        'timeout',
+        {
+          status: null,
+          signal: 'SIGTERM',
+          error: {code: 'ETIMEDOUT', message: 'timeout-message'},
+          stdout: 'timeout-stdout',
+          stderr: 'timeout-stderr',
+        },
+        [
+          'status=null',
+          'signal=SIGTERM',
+          'errorCode=ETIMEDOUT',
+          'errorMessage=timeout-message',
+          'stdout=timeout-stdout',
+          'stderr=timeout-stderr',
+        ],
+      ],
+    ] as const) {
+      const diagnostic = gitFixtureFailure(args, result);
+      expect(diagnostic).toContain(`bounded git fixture command failed (--definitely-invalid-baseline-fixture-option)`);
+      for (const value of expected) expect(diagnostic).toContain(value);
+    }
+
+    expect(Buffer.byteLength(boundedFixtureText(EffectString.repeat(1_366)('€')))).toBeLessThanOrEqual(4_096);
+    fc.assert(
+      fc.property(
+        fc.integer({min: 4_088, max: 4_096}),
+        fc.array(fc.constantFrom('a', 'é', '€', '😀'), {minLength: 1, maxLength: 8}),
+        (prefixLength, suffix) => {
+          const input = `${EffectString.repeat(prefixLength)('a')}${EffectArray.join(suffix, '')}`;
+          const output = boundedFixtureText(input);
+          expect(Buffer.byteLength(output)).toBeLessThanOrEqual(4_096);
+          if (Buffer.byteLength(input) <= 4_096) expect(output).toBe(input);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
   it('accounts UTF-8 bytes deterministically and includes the complete frozen scenario catalog', async () => {
     const {root} = await makeGitFixture();
     const first = await captureBaseline({repo: root});

@@ -1,8 +1,9 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Array as A, String as S} from 'effect';
 import {
+  NativeCyclePacketOptionsSchema,
   nativeCyclePacket,
   validateNativeCycleCapacityRecord,
   validateNativeCycleFeaturePublication,
@@ -504,6 +505,36 @@ describe('native cycle pure domain', () => {
     expect(reconciled.state.phases.one?.phaseHash).toBe(nativeCyclePhaseHash(reconciled.state.plan, 'one'));
   });
 
+  it('invalidates base-dependent acceptance while preserving generated delivery history and phase identity', () => {
+    fc.assert(
+      fc.property(fc.constantFrom('stable', 'prerelease', 'release'), baseBranch => {
+        const delivered = recordNativeCycleDelivery(validateFirst(), 'one', prDelivery());
+        const before = structuredClone(delivered);
+        const plan = makePlan();
+        plan.phases[0].baseBranch = baseBranch;
+        const reconciled = reconcileNativeCyclePlan(delivered, decodeNativeCyclePlan(plan), 'Approved new PR base');
+        expect(reconciled.affected).toEqual(['one', 'two']);
+        for (const id of ['one', 'two']) {
+          expect(reconciled.state.phases[id].status).toBe('stale');
+          expect(reconciled.state.phases[id].phaseHash).toBe(before.phases[id].phaseHash);
+          expect(reconciled.state.phases[id].validation).toBeUndefined();
+          expect(reconciled.state.phases[id].delivery).toBeUndefined();
+        }
+        expect(reconciled.state.phases.one.history?.at(-1)).toMatchObject({
+          delivery: before.phases.one.delivery,
+          validation: before.phases.one.validation,
+        });
+        expect(nextNativeCycle(reconciled.state)).toEqual({
+          action: 'blocked',
+          phaseId: 'one',
+          reason: 'Approved new PR base',
+        });
+        expect(delivered).toEqual(before);
+      }),
+      {numRuns: 12},
+    );
+  });
+
   it('rejects removal or rewriting of accepted and merged evidence', () => {
     const first = recordNativeCycleDelivery(validateFirst(), 'one', prDelivery());
     const accepted = validateNativeCyclePhase(first, 'two', snapshot(['test/a.ts']), {
@@ -589,5 +620,8 @@ describe('native cycle pure domain', () => {
     expect(() =>
       validateNativeCycleCapacityRecord({...packetOptions.capacity, selection: 'escalation', risk: 'settled'}),
     ).toThrow();
+    const mainAgentCapacity = {...packetOptions.capacity, selection: 'main-agent'};
+    expect(() => validateNativeCycleCapacityRecord(mainAgentCapacity)).toThrow('background worker');
+    expect(Schema.is(NativeCyclePacketOptionsSchema)({...packetOptions, capacity: mainAgentCapacity})).toBe(false);
   });
 });

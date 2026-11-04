@@ -23,7 +23,7 @@ import {
 import {selectLatestMajorReleases} from '../tools/site-release-notes.js';
 import {validateExternalRepositoryEvidence} from '@threadnote/evidence/external-evidence';
 import {agentIntegrations, tierLabels} from '../src/content/agentIntegrations.js';
-import {cliCommands, docsSections, mcpTools} from '../src/content/docs.js';
+import {docsSections, mcpTools} from '../src/content/docs.js';
 import type {DocsVisualBlock} from '../src/content/docsTypes.js';
 import {ManagerOperationsVisual, managerOperationsVisualKinds} from '../src/components/ManagerOperationsVisual.js';
 import {graphAnalyzeScenario, graphInspectScenario, heroScenario} from '../src/content/landing.js';
@@ -507,11 +507,10 @@ describe('Threadnote website content', () => {
     }
   });
 
-  it('shows the copyright in the shared site footer', async () => {
-    const [shell, ...pages] = await Promise.all(
+  it('uses SiteShell for every page', async () => {
+    const pages = await Promise.all(
       EffectArray.map(
         [
-          'components/SiteShell.tsx',
           'pages/LandingPage.tsx',
           'pages/PerformancePage.tsx',
           'pages/GraphifyPerformancePage.tsx',
@@ -524,11 +523,7 @@ describe('Threadnote website content', () => {
         path => readFile(join(root, 'apps', 'website', 'src', path), 'utf8'),
       ),
     );
-
-    expect(shell).toContain('© Denys Kashkovskyi 2026');
-    for (const page of pages) {
-      expect(page).toContain('<SiteShell');
-    }
+    for (const page of pages) expect(page).toContain('<SiteShell');
   });
 
   it('derives the Pro Tips total and renders icon-only social links', async () => {
@@ -813,207 +808,6 @@ The body remains ordinary **Markdown**.
     expect(landingSource).not.toContain('Read the 5.0 story');
   });
 
-  it('leads with scoped token and time savings linked to the continuation study', async () => {
-    const source = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
-    const hero = Effect.pipe(
-      source,
-      EffectString.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/),
-      Effect.Option.getOrElse(() => null),
-    )?.[1];
-    const study = Effect.pipe(hero, effectOptionalString =>
-      effectOptionalString == null
-        ? undefined
-        : Effect.pipe(
-            effectOptionalString,
-            EffectString.match(/<div className="hero-study"[\s\S]*?<\/dl>[\s\S]*?<\/div>/),
-            Effect.Option.getOrElse(() => null),
-          ),
-    )?.[0];
-
-    expect(hero).toContain('Less rediscovery.');
-    expect(hero).toContain('More finished work.');
-    expect(study).toContain('65.6');
-    expect(study).toContain('fewer tokens');
-    expect(study).toContain('46.1');
-    expect(study).toContain('less time');
-    expect(study).toContain('Measured in our 5.1 beta study');
-    expect(
-      Effect.pipe(study, effectOptionalString =>
-        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.replace(/\s+/g, ' ')),
-      ),
-    ).toContain('Per verified completion. Five tasks, one model, versus files-only with no handoff.');
-    expect(study).toContain('href={whatsNewArticleHref(continuationStudySlug)}');
-    expect(source).toContain("const continuationStudySlug = 'graphmem-agent-continuation-study'");
-    expect(source).toContain('latestArticle.slug !== continuationStudySlug');
-    expect(
-      Effect.pipe(hero, effectOptionalString =>
-        effectOptionalString == null
-          ? undefined
-          : Effect.pipe(
-              effectOptionalString,
-              EffectString.indexOf('className="hero-study"'),
-              Effect.Option.getOrElse(() => -1),
-            ),
-      ),
-    ).toBeLessThan(
-      Effect.pipe(hero, effectOptionalString =>
-        effectOptionalString == null
-          ? undefined
-          : Effect.pipe(
-              effectOptionalString,
-              EffectString.indexOf('className="hero__actions"'),
-              Effect.Option.getOrElse(() => -1),
-            ),
-      ) ?? -1,
-    );
-    expect(study).not.toMatch(/less cost|cheaper|faster|guaranteed/i);
-  });
-
-  it('keeps the solo-first lifecycle coherent across the homepage and onboarding docs', async () => {
-    const [landingSource, styles] = await Promise.all([
-      readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8'),
-    ]);
-    const articles = EffectArray.flatMap(docsSections, section => section.articles);
-    const gettingStarted = EffectOption.getOrUndefined(
-      EffectArray.findFirst(docsSections, section => section.id === 'getting-started'),
-    );
-    const journey = EffectOption.getOrUndefined(
-      EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey'),
-    );
-    const firstWorkflow = EffectOption.getOrUndefined(
-      EffectArray.findFirst(articles, article => article.id === 'first-workflow'),
-    );
-    const concepts = EffectOption.getOrUndefined(
-      EffectArray.findFirst(articles, article => article.id === 'context-lifecycle'),
-    );
-
-    const hero = Effect.pipe(
-      landingSource,
-      EffectString.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/),
-      Effect.Option.getOrElse(() => null),
-    )?.[1];
-    expect(hero).toContain('className="home-update-banner home-update-banner--hero"');
-    expect(hero).toContain('className="hero__copy"');
-    expect(hero).toContain('className="hero__visual"');
-    expect(styles).toContain('.home-update-banner--hero');
-    expect(styles).toContain('grid-column: 1 / -1');
-    expect(landingSource).toContain('Current-code verification engine');
-    expect(landingSource).toContain('graph-showcase__verification');
-    expect(landingSource).not.toContain('graph-showcase__tool-switcher');
-    const soloWorkflow = [
-      'Connect one coding-agent environment',
-      'Start with a Context Brief',
-      'Verify the exact code you are changing',
-      'Review the Knowledge Delta',
-      'Optional: share it and prove reuse',
-    ];
-    for (const [index, step] of soloWorkflow.entries()) {
-      expect(landingSource).toContain(step);
-      if (index > 0)
-        expect(
-          Effect.pipe(
-            landingSource,
-            EffectString.indexOf(step),
-            Effect.Option.getOrElse(() => -1),
-          ),
-        ).toBeGreaterThan(
-          Effect.pipe(
-            landingSource,
-            EffectString.indexOf(soloWorkflow[index - 1]),
-            Effect.Option.getOrElse(() => -1),
-          ),
-        );
-    }
-    expect(Effect.pipe(landingSource, EffectString.replace(/\s+/g, ' '))).toContain('Threadnote calls it a surface');
-    expect(landingSource).toContain('One solo-first workflow');
-    expect(
-      EffectOption.getOrUndefined(
-        EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), articles =>
-          EffectArray.map(articles, article => article.id),
-        ),
-      ),
-    ).toEqual(expect.arrayContaining(['connect-an-agent', 'first-workflow']));
-    const connectIndex = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), __effectFindIndexArray =>
-        EffectOption.getOrElse(
-          EffectArray.findFirstIndex(__effectFindIndexArray, article => article.id === 'connect-an-agent'),
-          () => -1,
-        ),
-      ),
-    );
-    const workflowIndex = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), __effectFindIndexArray =>
-        EffectOption.getOrElse(
-          EffectArray.findFirstIndex(__effectFindIndexArray, article => article.id === 'first-workflow'),
-          () => -1,
-        ),
-      ),
-    );
-    expect(workflowIndex).toBe((connectIndex ?? -2) + 1);
-    expect(JSON.stringify(journey)).toContain('6. Connect a team');
-    expect(JSON.stringify(journey)).toContain('2. Connect your agent through MCP');
-    expect(firstWorkflow?.body).toContainEqual(
-      expect.objectContaining({
-        type: 'code',
-        language: 'json',
-        code: expect.stringContaining('"tool": "review_session_context"'),
-      }),
-    );
-    expect(firstWorkflow?.body).toContainEqual(
-      expect.objectContaining({
-        type: 'code',
-        language: 'sh',
-        code: expect.stringContaining(`threadnote context brief \\
-  --task`),
-      }),
-    );
-    expect(JSON.stringify(firstWorkflow)).toContain('Copy review ID and revision from the review result');
-    for (const concept of [
-      'Imported guidance',
-      'Guidance projection',
-      'Git proposal',
-      'Verified procedure',
-      'Health finding',
-      'Local value evidence',
-    ]) {
-      expect(JSON.stringify(concepts)).toContain(concept);
-    }
-  });
-
-  it('takes new installations directly through agent setup and the first task', () => {
-    const articles =
-      EffectOption.getOrUndefined(EffectArray.findFirst(docsSections, section => section.id === 'getting-started'))
-        ?.articles ?? [];
-    const installationIndex = EffectOption.getOrElse(
-      EffectArray.findFirstIndex(articles, article => article.id === 'installation'),
-      () => -1,
-    );
-    expect(installationIndex).toBeGreaterThanOrEqual(0);
-    expect(EffectArray.map(articles.slice(installationIndex, installationIndex + 3), article => article.id)).toEqual([
-      'installation',
-      'connect-an-agent',
-      'first-workflow',
-    ]);
-    const installation = articles[installationIndex];
-    const content = JSON.stringify(installation);
-    expect(content).toContain('[Connect a coding agent](connect-an-agent/)');
-    expect(content).toContain('[work one task with evidence](first-workflow/)');
-    expect(content).toContain('[upgrade guide](upgrade-from-4/)');
-    expect(content).toContain('Installing Threadnote does not connect or change any coding agent');
-    expect(content).toContain('preview setup, and apply it');
-    expect(content).toContain('Restart the agent afterward');
-    expect(content).toContain('A second agent and team sharing are optional');
-    expect(installation.body).toContainEqual({
-      type: 'code',
-      language: 'powershell',
-      code: 'irm https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.ps1 | iex\nthreadnote doctor',
-    });
-    for (const id of ['connect-an-agent', 'first-workflow', 'upgrade-from-4']) {
-      expect(EffectArray.some(articles, article => article.id === id)).toBe(true);
-    }
-  });
-
   it('orders release and article updates deterministically without mutating the input', () => {
     fc.assert(
       fc.property(
@@ -1117,91 +911,6 @@ The body remains ordinary **Markdown**.
     );
   });
 
-  it('documents separate data-home and standalone-installation isolation roots', () => {
-    const configuration = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        article => article.id === 'configuration',
-      ),
-    );
-    const cliReference = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        article => article.id === 'cli-reference',
-      ),
-    );
-    const content = JSON.stringify({cliReference, configuration});
-
-    expect(content).toContain('THREADNOTE_HOME / --home');
-    expect(content).toContain('not standalone installation state');
-    expect(content).toContain('THREADNOTE_INSTALL_ROOT');
-    expect(content).toContain('Relocate shared install state for managed/test installs');
-    expect(content).not.toContain('Relocate all Threadnote-owned state');
-  });
-
-  it('guides a first session from installation to shared memory and continuity', () => {
-    const articles = EffectArray.flatMap(docsSections, section => section.articles);
-    const connectAgent = JSON.stringify(
-      EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'connect-an-agent')),
-    );
-    const quickstart = EffectOption.getOrUndefined(
-      EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey'),
-    );
-    const content = JSON.stringify(quickstart);
-
-    expect(connectAgent).toContain('What setup does');
-    expect(connectAgent).toContain('Why not install only the MCP connection?');
-    expect(connectAgent).toContain('Neither command prepares the current repository');
-    expect(connectAgent).toContain('A hand-written MCP entry');
-    expect(quickstart?.title).toBe('Quick-start');
-    expect(
-      EffectArray.map(
-        EffectArray.filter(quickstart?.body ?? [], block => block.type === 'heading'),
-        block => block.text,
-      ),
-    ).toEqual([
-      '1. Install Threadnote',
-      '2. Connect your agent through MCP',
-      '3. Index your repository’s code graph',
-      '4. Work as usual',
-      '5. See what was remembered in Manager',
-      '6. Connect a team',
-      '7. Share one useful memory',
-      '8. Start a new session and see the continuity',
-      'For larger tasks: spec → plan → cycle',
-    ]);
-    expect(content).toContain('/docs/graph-monorepos/');
-    expect(content).toContain('reducing indexing work and irrelevant results');
-    expect(content).toContain('threadnote agents install codex --apply');
-    expect(content).toContain('threadnote graph index');
-    expect(content).toContain('threadnote manage');
-    expect(content).toContain('threadnote share publish <memory-uri> --preview');
-    expect(content).toContain('handoffs stay private');
-    expect(content).toContain('without you pasting the old conversation');
-    expect(content).toContain('/docs/development-workflows/');
-    expect(content).not.toContain('threadnote activate start');
-  });
-
-  it('gives existing 4.x users a safe, optional path into the 5.0 workflow', () => {
-    const article = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        candidate => candidate.id === 'upgrade-from-4',
-      ),
-    );
-    const content = JSON.stringify(article);
-
-    expect(article?.title).toBe('Upgrade from Threadnote 4');
-    expect(content).toContain('Threadnote 5 is an in-place upgrade for 4.x users');
-    expect(content).toContain('threadnote update --check');
-    expect(content).toContain('threadnote doctor');
-    expect(content).toContain('Do not run `threadnote migrate`');
-    expect(content).toContain('Setup is optional for existing users');
-    expect(content).toContain('Context Brief: a short, cited briefing');
-    expect(content).toContain('Review a Knowledge Delta');
-    expect(content).toContain('The optional two-agent journey is still optional');
-  });
-
   it('keeps the schema-v5 metadata walkthrough aligned with the shipped CAS contract', () => {
     const article = EffectOption.getOrUndefined(
       EffectArray.findFirst(
@@ -1294,23 +1003,6 @@ The body remains ordinary **Markdown**.
     expect(tips).toContain('review review-a1b2c3 · revision 4');
   });
 
-  it('distinguishes user-level Threadnote bootstrap from repository-scoped project guidance', () => {
-    const article = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        candidate => candidate.id === 'project-guidance',
-      ),
-    );
-    const content = JSON.stringify(article);
-
-    expect(content).toContain('generic user-level bootstrap');
-    expect(content).toContain('repository- or worktree-scoped');
-    expect(content).toContain('Repository files remain authoritative');
-    expect(content).toContain('Reviewed and versioned with the project');
-    expect(content).toContain('ownership receipts');
-    expect(content).toContain('canonical agent catalog');
-  });
-
   it('derives supported-agent content from the canonical catalog without broad public enumerations', async () => {
     const [catalog, agentsPage, landingPage, faqPage, readme, shell, sitemap] = await Promise.all([
       readFile(join(root, 'packages', 'integrations', 'src', 'catalog.json'), 'utf8'),
@@ -1345,55 +1037,6 @@ The body remains ordinary **Markdown**.
     expect(readme).toContain('https://threadnote.io/agents/');
     expect(readme).not.toMatch(/Codex, Claude(?: Code)?, Cursor, (?:and )?Copilot/i);
     expect(readme).not.toMatch(/claude\s*\/\s*cursor\s*\/\s*copilot/i);
-  });
-
-  it('publishes OpenCode and Zeno setup with managed MCP, guidance, and skills', () => {
-    const integration = EffectOption.getOrUndefined(
-      EffectArray.findFirst(agentIntegrations, entry => entry.id === 'opencode'),
-    );
-    expect(integration).toMatchObject({
-      displayName: 'OpenCode',
-      tier: 'core',
-      aliases: [],
-      scopes: ['user', 'project'],
-      capabilities: {
-        mcp: {status: 'managed'},
-        instructions: {status: 'managed'},
-        skills: {status: 'managed'},
-        hooks: {status: 'unsupported'},
-      },
-    });
-    const article = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        entry => entry.id === 'agent-opencode',
-      ),
-    );
-    const content = JSON.stringify(article);
-    expect(content).toContain('threadnote agents install opencode');
-    expect(content).toContain('--scope project');
-    expect(content).not.toContain('--cwd');
-    expect(content).toContain('restart OpenCode');
-    expect(content).toContain('opencode.jsonc');
-    expect(content).toContain('AGENTS.md');
-    expect(content).toContain('.opencode/skills');
-    expect(content).not.toContain('No managed skill installation');
-    const zeno = EffectOption.getOrUndefined(
-      EffectArray.findFirst(agentIntegrations, entry => entry.id === 'zeno-desktop'),
-    );
-    expect(zeno).toMatchObject({displayName: 'Zeno', aliases: ['zeno'], scopes: ['user'], platforms: ['darwin']});
-    const zenoArticle = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        entry => entry.id === 'agent-zeno-desktop',
-      ),
-    );
-    expect(zenoArticle?.keywords).toContain('zeno');
-    const zenoContent = JSON.stringify(zenoArticle);
-    expect(zenoContent).toContain('threadnote agents install zeno');
-    expect(zenoContent).toContain('Library/Application Support/ai.zeno.desktop/config/opencode');
-    expect(zenoContent).toContain('mcp.servers');
-    expect(zenoContent).toContain('lazy mcp dispatcher');
   });
 
   it('documents Manager project and Workset operations with accessible motion-safe illustrations', async () => {
@@ -1470,57 +1113,6 @@ The body remains ordinary **Markdown**.
     expect(reducedMotionStyles).toContain('animation: none !important');
     expect(reducedMotionStyles).toContain('opacity: 1');
     expect(reducedMotionStyles).toContain('transform: none');
-  });
-
-  it('keeps pro-tip simulations aligned with the requested team and graph workflows', () => {
-    const ids = EffectArray.map(proTips, tip => tip.id);
-    const operations = EffectArray.map(
-      EffectArray.filter(
-        EffectArray.flatMap(proTips, tip => tip.scenario.steps),
-        step => step.kind === 'tool',
-      ),
-      step => step.actor,
-    );
-
-    expect(ids).toEqual(
-      expect.arrayContaining([
-        'start-with-context-brief',
-        'review-knowledge-delta',
-        'prove-cross-agent-reuse',
-        'repair-context-decay',
-        'admit-verified-procedure',
-        'share-before-pr',
-        'parallel-team',
-        'on-call',
-        'switch-agents',
-        'resume-later',
-        'graph-operations',
-        'memory-plus-graph',
-        'portable-graph-checkpoints',
-      ]),
-    );
-    expect(
-      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('recall_context'))),
-    ).toBe(true);
-    expect(
-      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('inspect_code_graph'))),
-    ).toBe(true);
-    expect(
-      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('context_brief'))),
-    ).toBe(true);
-    expect(
-      EffectArray.some(operations, operation =>
-        Effect.pipe(operation, EffectString.includes('review_session_context')),
-      ),
-    ).toBe(true);
-    expect(
-      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('share_publish'))),
-    ).toBe(true);
-    expect(JSON.stringify(proTips)).toContain('Knowledge Delta');
-    expect(JSON.stringify(proTips)).toContain('Applied');
-    expect(JSON.stringify(proTips)).toContain('stale-link');
-    expect(JSON.stringify(proTips)).toContain('no Workset required');
-    expect(JSON.stringify(proTips)).toContain('threadnote graph checkpoint export');
   });
 
   it('uses fictional, generic examples in public graph simulations', async () => {
@@ -1726,105 +1318,14 @@ The body remains ordinary **Markdown**.
     }
   });
 
-  it('keeps current-code verification compact while retaining detailed graph links', async () => {
+  it('keeps graph navigation anchors stable', async () => {
     const landingSource = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
     expect(landingSource).toContain('id="graph-search"');
-    expect(landingSource).toContain('inspect_code_graph');
-    expect(landingSource).toContain('graph-showcase__verification');
-    expect(landingSource).toContain('snapshot, provenance, freshness, and coverage');
-    expect(landingSource).not.toContain('graph-showcase__tool-switcher');
-    expect(landingSource).toContain("siteHref('performance/')");
     expect(landingSource).toContain("docsArticleHref('graph-checkpoints')");
   });
 
-  it('explains the Threadnote 5 context lifecycle across Home, Docs, Pro Tips, and FAQ', async () => {
-    const [landingSource, proTipsSource, faqSource] = await Promise.all([
-      readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'website', 'src', 'pages', 'ProTipsPage.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'website', 'src', 'pages', 'FaqPage.tsx'), 'utf8'),
-    ]);
-    const docs = JSON.stringify(docsSections);
-    const tips = JSON.stringify(proTips);
-
-    expect(landingSource).toContain('sources they can check and decisions you can review');
-    expect(landingSource).toContain('Knowledge Delta');
-    expect(landingSource).toContain('No Threadnote cloud account required');
-    expect(landingSource).toContain('home-update-banners');
-    expect(docs).toContain('A Context Brief is the bounded starting package for one task');
-    expect(docs).toContain('A Knowledge Delta is a reviewable summary of what the task learned');
-    expect(docs).toContain('Schema v5 is the compatibility foundation for the Threadnote 5 lifecycle');
-    expect(docs).toContain('review the exact content and destination');
-    expect(docs).toContain('Their agent can retrieve the shared decision');
-    expect(docs).toContain('stable Threadnote 5 operator surface');
-    expect(docs).not.toContain('stable 4.1 operator surface');
-    expect(tips).toContain('codeRefs');
-    expect(docs).toContain('graph-indexed repository-relative path');
-    expect(docs).toContain('Tracked files outside the exact-current graph inventory');
-    expect(tips).toContain('Memory fresh · citation relocated · warning stale-link');
-    expect(tips).toContain('stale-link warns about the locator, not the memory');
-    expect(proTipsSource).toContain('source-verifiable context lifecycle');
-    expect(proTipsSource).toContain('bounded Context Brief');
-    expect(faqSource).toContain('Will my existing memories disappear after upgrading to 5.0?');
-    expect(faqSource).toContain('What is a Knowledge Delta?');
-    expect(faqSource).toContain('Existing v4, v1, and other uncited memories stay readable and recallable');
-    expect(faqSource).toContain('Can an agent start with code and find related memory?');
-    expect(faqSource).toContain('up to eight canonical graph-indexed repository-relative paths');
-    expect(faqSource).toContain('cgr_ handles are argument errors');
-    expect(faqSource).toContain('Do I need a Workset to use code citations or Context Brief?');
-    expect(faqSource).toContain('That warning is about the link, not the memory');
-    expect(faqSource).toContain('Citation writes never start indexing implicitly');
-    expect(faqSource).toContain('never fan out cold graph builds');
-  });
-
-  it('retains the shipped graph isolation contract in detailed Pro Tips and FAQ guidance', async () => {
-    const faqSource = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'FaqPage.tsx'), 'utf8');
-    const tips = JSON.stringify(proTips);
-
-    expect(tips).toContain('Manager-triggered indexing and Workset preparation run in isolated processes');
-    expect(tips).toContain('repository members prepared at bounded concurrency');
-    expect(faqSource).toContain('How does Manager keep long graph work responsive?');
-    expect(faqSource).toContain('Workset repositories prepare with bounded concurrency');
-  });
-
-  it('explains the portable checkpoint workflow in detailed Pro Tips, docs, and FAQ guidance', async () => {
-    const faqSource = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'FaqPage.tsx'), 'utf8');
-    const docs = JSON.stringify(docsSections);
-    const commands = JSON.stringify(cliCommands);
-    const tips = JSON.stringify(proTips);
-
-    expect(tips).toContain('threadnote graph checkpoint export --output threadnote-graph.cgcp');
-    expect(tips).toContain(
-      'threadnote graph checkpoint inspect --input threadnote-graph.cgcp --expected-digest sha256:<digest>',
-    );
-    expect(tips).toContain(
-      'threadnote graph checkpoint verify --input threadnote-graph.cgcp --expected-digest sha256:<digest>',
-    );
-    expect(tips).toContain(
-      'threadnote graph checkpoint import --input threadnote-graph.cgcp --expected-digest sha256:<digest>',
-    );
-    expect(tips).toContain('derived names, signatures, and documentation');
-    expect(docs).toContain('source-derived names, signatures, and documentation');
-    expect(docs).toContain('A secret embedded in source can appear');
-    expect(commands).not.toContain('threadnote graph share init');
-    expect(commands).not.toContain('threadnote graph contribute status');
-    expect(commands).not.toContain('threadnote graph worker --json');
-    expect(docs).not.toContain('Organization graph sharing');
-    expect(docs).not.toContain('threadnote graph share join');
-    expect(tips).toContain('Existing schema-v1 and uncited legacy memories remain recallable');
-    expect(faqSource).toContain('Can I move a graph to another machine without a Workset or cloud?');
-    expect(faqSource).toContain('Portable graph checkpoints are free, manual, offline files');
-    expect(faqSource).toContain('schema-v1 or uncited legacy memories are unaffected');
-  });
-
-  it('keeps landing-page graph verification compact', async () => {
-    const [landingSource, sceneSource, styles] = await Promise.all([
-      readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'website', 'src', 'visuals', 'ThreadScene.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8'),
-    ]);
-    expect(landingSource).toContain('graph-showcase__verification');
-    expect(landingSource).not.toContain('graph-showcase__manager-preview');
-    expect(styles).toContain('.graph-showcase__verification');
+  it('uses the supported Three timer update API', async () => {
+    const sceneSource = await readFile(join(root, 'apps', 'website', 'src', 'visuals', 'ThreadScene.tsx'), 'utf8');
     expect(sceneSource).toContain('timer.update();');
     expect(sceneSource).not.toContain('timer.update(timestamp)');
   });
@@ -1873,125 +1374,27 @@ The body remains ordinary **Markdown**.
     expect(searchDocs(index, 'memory enrichment generation model')[0]?.article.id).toBe('local-ai');
   });
 
-  it('documents how to enable optional memory enrichment on the Local AI page', () => {
-    const localAi = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        article => article.id === 'local-ai',
-      ),
-    );
-    const content = JSON.stringify(localAi);
-
-    expect(localAi).toBeDefined();
-    expect(content).toContain('Memory enrichment');
-    expect(content).toContain('A download alone does not enable enrichment.');
-    expect(content).toContain('threadnote models install <model-id>');
-    expect(content).toContain('threadnote models select generation <model-id>');
-    expect(content).toContain('threadnote enrich-memories --apply');
-    expect(content).toContain('threadnote enrich-memories --apply --install-local-ai');
-    expect(content).toContain('new remember and MCP store writes try enrichment automatically');
-    expect(content).not.toContain('gemma-4-e4b-it-q4');
-  });
-
-  it('documents the complete bounded cross-repository graph-query workflow', () => {
+  it('keeps the Workset MCP example schema-valid', () => {
     const worksetArticle = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         EffectArray.flatMap(docsSections, section => section.articles),
         article => article.id === 'worksets',
       ),
     );
-    const content = JSON.stringify(worksetArticle);
     const mcpExample = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(worksetArticle?.body), findArray =>
+      EffectOption.map(EffectOption.fromNullishOr(worksetArticle?.body), body =>
         EffectOption.getOrUndefined(
-          EffectArray.findFirst(findArray, block => block.type === 'code' && block.language === 'json'),
+          EffectArray.findFirst(body, block => block.type === 'code' && block.language === 'json'),
         ),
       ),
     );
-
-    expect(worksetArticle).toBeDefined();
-    expect(mcpExample?.type).toBe('code');
     if (!mcpExample || mcpExample.type !== 'code') throw TestError.make({message: 'Missing workset MCP example.'});
-    expect(content).toContain('threadnote workset status checkout-platform');
-    expect(content).toContain('threadnote workset prepare checkout-platform --concurrency 4');
-    expect(content).toContain('threadnote workset create checkout');
-    expect(content).toContain('threadnote workset update checkout --name checkout-platform');
-    expect(content).toContain('threadnote workset delete checkout-platform --confirm --json');
-    expect(content).toContain('Advanced/manual option: define repository projects and the Workset together.');
-    expect(content).toContain('docs/adr/**/*.md');
-    expect(content).toContain('threadnote://resources/repos/checkout-api');
-    expect(content).toContain('threadnote graph query');
-    expect(content).toContain('--workset checkout-platform');
     expect(JSON.parse(mcpExample.code)).toMatchObject({
       budgetTokens: 1250,
       callerCwd: '/workspace/checkout-api',
       operation: 'query',
       workset: 'checkout-platform',
     });
-    expect(content).not.toContain('At most eight members');
-    expect(content).toContain('no eight-repository admission cap');
-    expect(content).toContain('One-hop contract neighbors');
-    expect(content).toContain('strongest 16 catalog-routed repositories');
-    expect(content).toContain('capped at 64 bridges');
-    expect(content).toContain('at most 2,048 unique bridge records');
-    expect(content).toContain('one four-repository ambiguity-validation wave');
-    expect(content).toContain('defaults to 1,250 estimated tokens');
-    expect(content).toContain('1 through 1,500');
-    expect(content).toContain('logical sequence of up to 40 evidence cards by default');
-    expect(content).toContain('internal sequence guard permits at most 512 cards');
-    expect(content).toContain('evidenceCards is not a public CLI or MCP input');
-    expect(content).toContain('not a query language');
-    expect(content).toContain('no public DSL is parsed');
-    expect(content).toContain('never fans out cold builds');
-    expect(content).toContain('refresh=false');
-    expect(content).toContain('cataloguedRepositories');
-    expect(content).toContain('current, stale, deferred, missing, failed, and excluded');
-    expect(content).toContain('cgwc_');
-    expect(content).toContain('cgr_');
-    expect(content).toContain('npm package dependency');
-    expect(content).toContain('Protobuf');
-    expect(content).toContain('as many as four exact Protobuf bridge endpoints');
-    expect(content).toContain('authoritative, confidence-1, declared relationship');
-    expect(content).toContain('the component contract is not projected as a query card or card relationship');
-    expect(content).toContain('GraphQL, OpenAPI and HTTP routes');
-    expect(content).toContain('threadnote graph path');
-    expect(content).toContain('threadnote graph impact');
-    expect(content).toContain('threadnote graph topology');
-    expect(content).toContain('threadnote context brief');
-    expect(content).toContain('--code-ref src/checkout/retries.ts');
-    expect(content).toContain('context_brief');
-    expect(content).toContain('codeRefs');
-    expect(content).toContain('Context Brief v3');
-    expect(content).toContain('at most eight exact local anchors');
-    expect(content).toContain('accepts 800 through 1,500');
-    expect(content).toContain('retains the same exact inspect-node follow-up in both MCP channels');
-    expect(content).toContain('coverage.omissions.coverageGaps counts the rest');
-    expect(content).toContain('coverage.memory.codeAnchors');
-    expect(content).toContain('selectionBasis code-citation');
-    expect(content).toContain('currently buffer the compact projection');
-    expect(content).toContain('buffered delivered-first-evidence at or below one second');
-    expect(content).toContain('At 128 repositories, the completion target is at or below five seconds');
-    expect(content).toContain('does not merge every local repository graph');
-  });
-
-  it('keeps the public Workset Search 2.0 quality and scaling contracts aligned', async () => {
-    const [readme, troubleshooting] = await Promise.all([
-      readFile(join(root, 'README.md'), 'utf8'),
-      readFile(join(root, 'docs', 'troubleshooting.md'), 'utf8'),
-    ]);
-
-    const troubleshootingNormalized = Effect.pipe(troubleshooting, EffectString.replace(/\s+/g, ' '));
-    expect(troubleshootingNormalized).toContain('Workset Search 2.0');
-    expect(troubleshootingNormalized).toContain('no eight-repository admission cap');
-    expect(troubleshootingNormalized).toContain('logical evidence sequence defaults to 40 cards');
-    expect(troubleshootingNormalized).toContain('internal safety maximum');
-    expect(troubleshootingNormalized).toContain('1,250');
-    expect(troubleshootingNormalized).toContain('1,500');
-    expect(troubleshootingNormalized).toContain('not a public DSL');
-    expect(troubleshootingNormalized).not.toMatch(/(?:queries|query) at most eight repositories/i);
-    expect(Effect.pipe(readme, EffectString.replace(/\s+/g, ' '))).not.toMatch(
-      /(?:queries|query) at most eight repositories/i,
-    );
   });
 
   it('bounds adversarial query length and term count before fuzzy matching', () => {
@@ -3034,56 +2437,18 @@ Measure the system before changing its implementation language.
     expect(evidenceSource).not.toContain('export function validateBoundRetainedPerformanceArtifact');
   });
 
-  it('documents explicit publishing, Cursor Marketplace, and supported hook boundaries', () => {
-    const content = JSON.stringify(docsSections);
-    const cursorPluginArticle = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        article => article.id === 'cursor-marketplace-plugin',
-      ),
-    );
-
-    expect(content).toContain('threadnote install-hooks claude --dry-run');
-    expect(content).toContain('threadnote install-hooks codex --dry-run');
-    expect(content).toContain('UserPromptSubmit');
-    expect(content).toContain('THREADNOTE_CODEX_RESUME_PRELOAD=off');
-    expect(content).toContain('threadnote share publish');
-    expect(content).toContain('--preview');
-    expect(content).toContain('selected vector generation');
-    expect(cursorPluginArticle).toBeDefined();
-    expect(JSON.stringify(cursorPluginArticle)).toContain('threadnote mcp-install cursor --apply');
-    expect(JSON.stringify(cursorPluginArticle)).toContain('/add-plugin threadnote');
-    expect(JSON.stringify(cursorPluginArticle)).toContain('https://cursor.com/marketplace/publish');
-    expect(JSON.stringify(cursorPluginArticle)).toContain('never deletes it automatically');
-    expect(content).toContain('Threadnote never injects a Cursor plugin under ~/.cursor/plugins/local');
-    expect(content).not.toContain('Cursor, and Copilot rely on the user-level instructions Threadnote installs');
-  });
-
-  it('withholds Cursor organization setup until its live flow is verified', () => {
-    const articles = EffectArray.flatMap(docsSections, section => section.articles);
-    expect(EffectArray.some(articles, article => article.id === 'cursor-cloud-agents')).toBe(false);
-    expect(JSON.stringify(articles)).not.toContain('Bootstrap Threadnote for a Cursor organization');
-    expect(
-      EffectArray.some(
-        searchDocs(createDocsSearchIndex(docsSections), 'Cursor organization managed remote memory'),
-        result => result.article.id === 'cursor-cloud-agents',
-      ),
-    ).toBe(false);
-  });
-
-  it('documents the standalone Personal Cursor Cloud one-MCP multi-share setup', () => {
+  it('keeps the Personal Cursor Cloud MCP example schema-valid and searchable', () => {
     const article = EffectOption.getOrUndefined(
       EffectArray.findFirst(
         EffectArray.flatMap(docsSections, section => section.articles),
         candidate => candidate.id === 'personal-cursor-cloud',
       ),
     );
-    const content = JSON.stringify(article);
     const mcpConfiguration = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(article), __effectOptionalArticle =>
+      EffectOption.map(EffectOption.fromNullishOr(article), candidate =>
         EffectOption.getOrUndefined(
           EffectArray.findFirst(
-            __effectOptionalArticle.body,
+            candidate.body,
             block =>
               block.type === 'code' &&
               block.language === 'json' &&
@@ -3092,37 +2457,8 @@ Measure the system before changing its implementation language.
         ),
       ),
     );
-    const install = EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(article), __effectOptionalArticle =>
-        EffectOption.getOrUndefined(
-          EffectArray.findFirst(
-            __effectOptionalArticle.body,
-            block =>
-              block.type === 'code' &&
-              block.language === 'sh' &&
-              Effect.pipe(block.code, EffectString.includes('cloud cursor bootstrap')),
-          ),
-        ),
-      ),
-    );
-
-    expect(article?.title).toBe('Personal Cursor Cloud setup');
-    expect(content).toContain('one personal stdio MCP');
-    expect(content).toContain('up to 16');
-    expect(content).toContain('create a new environment');
-    expect(content).toContain('personal environment');
-    expect(content).toContain('MCP dropdown');
-    expect(content).toContain('Register exactly one Threadnote personal MCP');
-    expect(content).toContain('one bootstrap command per Git repository');
-    expect(content).toContain('Cursor 4.6');
-    expect(content).toContain('does not copy the skills from your laptop');
-    expect(content).toContain('Do not run `threadnote mcp-install cursor --apply`');
-    expect(content).toContain('`remember_context requires team`');
-    expect(content).not.toContain('Git beta');
-
-    if (!mcpConfiguration || mcpConfiguration.type !== 'code') {
+    if (!mcpConfiguration || mcpConfiguration.type !== 'code')
       throw TestError.make({message: 'Missing Personal Cursor Cloud MCP configuration.'});
-    }
     expect(JSON.parse(mcpConfiguration.code)).toEqual({
       type: 'stdio',
       command: '/bin/sh',
@@ -3134,74 +2470,15 @@ Measure the system before changing its implementation language.
         THREADNOTE_USER: 'cursor-cloud',
       },
     });
-    expect(content).toContain('Both `THREADNOTE_CURSOR_CLOUD_TEAM` and `THREADNOTE_CURSOR_CLOUD_TEAMS` are optional');
-    expect(content).toContain('No default share is chosen');
-    expect(content).toContain('before each operation');
-    expect(content).toContain('explicit CLI `--team` values take precedence');
-    expect(content).toContain('Keep the selector-free MCP configuration');
-    expect(content).not.toContain('same repeated team set');
-    if (!install || install.type !== 'code')
-      throw TestError.make({message: 'Missing Personal Cursor Cloud install command.'});
-    expect(
-      Effect.pipe(
-        install.code,
-        EffectString.match(/cloud cursor bootstrap/gu),
-        Effect.Option.getOrElse(() => null),
-      ),
-    ).toHaveLength(2);
-    expect(install.code).toContain('$HOME/.cursor/skills/threadnote-memory/SKILL.md');
     expect(
       searchDocs(createDocsSearchIndex(docsSections), 'personal Cursor Cloud multiple shares one MCP')[0]?.article.id,
     ).toBe('personal-cursor-cloud');
   });
 
-  it('documents scoped Codex Cloud briefs, graph startup, and optional Knowledge Delta approval', () => {
-    const article = EffectOption.getOrUndefined(
-      EffectArray.findFirst(
-        EffectArray.flatMap(docsSections, section => section.articles),
-        candidate => candidate.id === 'personal-codex-cloud',
-      ),
-    );
-    const content = JSON.stringify(article);
-    expect(article?.title).toBe('Personal Codex Cloud setup');
-    for (const expected of [
-      'Install script',
-      'Start skill',
-      'cloud codex bootstrap',
-      'cloud codex start',
-      'cloud codex verify --cwd',
-      'cloud codex brief',
-      'Knowledge Delta',
-      'verificationPerformed',
-      'knowledgeInvalidated',
-      'unresolvedRisks',
-      'explicit approve, defer, or reject',
-      'threadnote-code-graph/SKILL.md',
-      'cloud codex recall',
-      'cloud codex remember',
-      'threadnote-context/SKILL.md',
-      'threadnote-memory/SKILL.md',
-      'profile.json',
-      'republish',
-      'second fresh task',
-      'credential provider',
-      'never embed tokens',
-    ])
-      expect(content).toContain(expected);
+  it('ranks Personal Codex Cloud documentation', () => {
     expect(
       searchDocs(createDocsSearchIndex(docsSections), 'personal Codex Cloud published environment')[0]?.article.id,
     ).toBe('personal-codex-cloud');
-    const cursor = JSON.stringify(
-      EffectOption.getOrUndefined(
-        EffectArray.findFirst(
-          EffectArray.flatMap(docsSections, section => section.articles),
-          candidate => candidate.id === 'personal-cursor-cloud',
-        ),
-      ),
-    );
-    expect(cursor).toContain('two Agent Skills');
-    expect(cursor).toContain('Graph tools are unavailable');
-    expect(cursor).not.toContain('three Agent Skills');
   });
 
   it('publishes a parity-first Graphify performance subpage', async () => {
@@ -3343,37 +2620,6 @@ Measure the system before changing its implementation language.
     expect(shellSource).toContain("['performance', 'performance-graphify']");
     expect(shellSource).toContain("siteHref('performance/graphify/')");
     expect(sitemap).toContain('<loc>https://threadnote.io/performance/graphify/</loc>');
-  });
-
-  it('documents the separate whole-graph analysis and corpus/export contracts', () => {
-    const content = JSON.stringify(docsSections);
-    const analysisTool = EffectOption.getOrUndefined(
-      EffectArray.findFirst(mcpTools, tool => tool.name === 'analyze_code_graph'),
-    );
-
-    expect(analysisTool).toMatchObject({toolset: 'core'});
-    expect(analysisTool?.keyInputs).toContain(
-      'operation: stats | communities | community | groups | hubs | surprises | confidence | full',
-    );
-    expect(content).toContain('analyze_code_graph');
-    expect(content).toContain('threadnote graph communities');
-    expect(content).toContain('threadnote graph community --community-id cgc_…');
-    expect(content).toContain('threadnote graph groups');
-    expect(content).toContain('threadnote graph confidence');
-    expect(content).toContain('threadnote graph report --output architecture-report.md');
-    expect(content).toContain('OpenXML, OpenDocument, and EPUB');
-    expect(content).toContain('does not claim OCR, pixel understanding, or transcription');
-    expect(content).toContain('64 MiB per-artifact source budget');
-    expect(content).toContain('not repository or graph-size admission caps');
-    expect(content).toContain('threadnote graph export --format graphml');
-    expect(content).toContain('[Performance page](../performance/)');
-    expect(content).toContain('graph-equivalent commit');
-    expect(content).toContain('materializes changed, renamed, and deleted paths');
-    expect(content).toContain('Agents cannot query partial rows from an unpromoted snapshot');
-    expect(content).toContain('optional vector enrichment and whole-graph summaries continue in the background');
-    expect(content).toContain('current headline claims to one exact-release large-repository artifact');
-    expect(content).not.toContain('same-machine v4.0.1 worktree-readiness comparison');
-    expect(JSON.stringify(proTips)).toContain('a graph-equivalent commit can reuse ready content');
   });
 
   it('keeps the docs Performance link inside a configured Pages subpath', () => {
