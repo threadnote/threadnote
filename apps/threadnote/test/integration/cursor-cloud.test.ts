@@ -3,6 +3,7 @@ import {
   readRecallLexicalDemand,
   recallLexicalDemandKey,
   RECALL_LEXICAL_DEMAND_DIRECTORY,
+  type RecallLexicalDemand,
   type RecallLexicalScope,
 } from '@threadnote/recall/background/lexical-demand';
 import {runEffect} from '../helpers/effect-runtime.js';
@@ -62,6 +63,113 @@ const expectColdUnavailableWarnings = (value: unknown): void => {
 };
 
 describe('Cursor Cloud integration', () => {
+  it('rejects a failed terminal lexical demand before fixture publication', () => {
+    const before: RecallLexicalDemand = {
+      version: 2,
+      account: 'local',
+      user: 'cloud-user',
+      includeInactive: false,
+      manifestPath: '/tmp/seed-manifest.yaml',
+      work: {kind: 'synchronize', sources: false, teams: ['docs', 'engineering']},
+      completedAt: 1,
+      failures: 0,
+    };
+    const failedTerminal = {...before, failures: 1};
+
+    expect(() => classifyLexicalSyncSettlement(before, failedTerminal)).toThrow(
+      'Lexical synchronization has a failed terminal outcome.',
+    );
+  });
+
+  it('accepts durable completion when its timestamp predates fixture observation', () => {
+    const active: RecallLexicalDemand = {
+      version: 2,
+      account: 'local',
+      user: 'cloud-user',
+      includeInactive: false,
+      manifestPath: '/tmp/seed-manifest.yaml',
+      work: {kind: 'synchronize', sources: false, teams: ['docs', 'engineering']},
+      revision: '00000000-0000-4000-8000-000000000001',
+      completedAt: 1,
+      failures: 0,
+    };
+    const completed: RecallLexicalDemand = {
+      version: 2,
+      account: 'local',
+      user: 'cloud-user',
+      includeInactive: false,
+      manifestPath: '/tmp/seed-manifest.yaml',
+      work: {kind: 'synchronize', sources: false, teams: ['docs', 'engineering']},
+      completedAt: 1,
+      failures: 0,
+    };
+
+    expect(classifyLexicalSyncSettlement(active, completed)).toBe('complete');
+  });
+
+  it('propagates a latched fence error after a complete terminal observation', () => {
+    const completed: RecallLexicalDemand = {
+      version: 2,
+      account: 'local',
+      user: 'cloud-user',
+      includeInactive: false,
+      manifestPath: '/tmp/seed-manifest.yaml',
+      work: {kind: 'synchronize', sources: false, teams: ['docs', 'engineering']},
+      completedAt: 1,
+      failures: 0,
+    };
+    const observerFailure = new Error('Synthetic fence inspection failure.');
+
+    expect(classifyLexicalSyncSettlement(undefined, completed)).toBe('complete');
+    expect(() => assertLexicalFenceHealthy(observerFailure)).toThrow('Lexical synchronization observer failed.');
+  });
+
+  it('drains an in-flight inspection before accepting active settlement', async () => {
+    let inspecting = true;
+    const inspectionState: {failure?: Error} = {};
+    let resolveInspection!: () => void;
+    const inspectionTask = new Promise<void>(resolve => {
+      resolveInspection = resolve;
+    });
+    let settlementReached = false;
+    const checkSettlement = (async () => {
+      await Promise.resolve();
+      settlementReached = true;
+      await drainLexicalFenceInspection(
+        () => inspecting,
+        () => inspectionTask,
+        () => inspectionState.failure,
+        <A>(operation: Promise<A>) => operation,
+      );
+    })();
+
+    await Promise.resolve();
+    expect(settlementReached).toBe(true);
+    inspectionState.failure = new Error('Late lexical fence inspection failure.');
+    inspecting = false;
+    resolveInspection();
+
+    await expect(checkSettlement).rejects.toThrow('Lexical synchronization observer failed.');
+  });
+
+  it('bounds a never-settling inspection by the shared fence failure', async () => {
+    let rejectDeadline!: (error: Error) => void;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject;
+    });
+    const neverSettlingInspection = new Promise<void>(() => {});
+    const draining = drainLexicalFenceInspection(
+      () => true,
+      () => neverSettlingInspection,
+      () => undefined,
+      <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, deadline),
+    );
+
+    rejectDeadline(new Error('Deferred lexical synchronization timed out.'));
+
+    await expect(draining).rejects.toThrow('Deferred lexical synchronization timed out.');
+  });
+
   it('prints deterministic Dashboard configuration and idempotently bootstraps a writable share', async () => {
     const fixture = await cloudFixture();
     try {
@@ -469,6 +577,14 @@ describe('Cursor Cloud integration', () => {
               {team: 'docs'},
             ),
           );
+          await settlePendingLexicalSync({
+            account: 'local',
+            user: 'cloud-user',
+            agentContextHome: fixture.home,
+            manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+            includeInactive: false,
+            work: {kind: 'synchronize', sources: false, teams: ['docs', 'engineering']},
+          });
           await prepareCloudReadyFixture(fixture);
           const refreshedAllShares = await client.callTool({
             arguments: {callerCwd: process.cwd(), query: 'REMOTE_ALL_SHARES_REFRESH_SENTINEL'},
@@ -536,6 +652,34 @@ describe('Cursor Cloud integration', () => {
             },
             name: 'recall_context',
           });
+          const docsErrorText = EffectArray.isArray(docsRecall.content)
+            ? EffectArray.flatMap(docsRecall.content, (item: unknown) =>
+                typeof item === 'object' &&
+                item !== null &&
+                'type' in item &&
+                item.type === 'text' &&
+                'text' in item &&
+                typeof item.text === 'string'
+                  ? [item.text]
+                  : [],
+              )
+            : [];
+          const docsErrorTag = EffectArray.some(docsErrorText, text => /RecallIndexSourceChanged/u.test(text))
+            ? 'RecallIndexSourceChanged'
+            : EffectArray.some(docsErrorText, text => /ReadDeadlineExceeded|timed out/iu.test(text))
+              ? 'read-timeout'
+              : docsRecall.isError
+                ? 'other-mcp-error'
+                : 'none';
+          expect(
+            docsRecall.structuredContent,
+            JSON.stringify({
+              isError: docsRecall.isError === true,
+              phase: docsRecall.isError ? 'recall-context-tool-error' : 'recall-context-response',
+              errorTag: docsErrorTag,
+              structuredContentPresent: docsRecall.structuredContent !== undefined,
+            }),
+          ).toBeDefined();
           expect(JSON.stringify(docsRecall.structuredContent)).toContain('/shared/docs/');
           expect(JSON.stringify(docsRecall.structuredContent)).not.toContain('/shared/engineering/');
           await expect(
@@ -1229,88 +1373,231 @@ async function prepareCloudReadyFixture(fixture: CloudFixture): Promise<void> {
   );
 }
 
+async function settlePendingLexicalSync(scope: RecallLexicalScope): Promise<void> {
+  const completionFence = await armLexicalSyncCompletionFence(scope);
+  try {
+    await completionFence.settleCurrent();
+  } finally {
+    completionFence.close();
+  }
+}
+
+function classifyLexicalSyncSettlement(
+  before: RecallLexicalDemand | undefined,
+  current: RecallLexicalDemand | undefined,
+): 'no-demand' | 'active' | 'complete' {
+  if (!current) {
+    if (!before) return 'no-demand';
+    throw new Error('Lexical synchronization demand disappeared before successful completion.');
+  }
+  if (current.failures > (before?.failures ?? 0) || current.failures > 0)
+    throw new Error('Lexical synchronization has a failed terminal outcome.');
+  if (current.revision !== undefined) return 'active';
+  if (
+    current.completedAt !== undefined &&
+    (before?.completedAt === undefined || current.completedAt >= before.completedAt)
+  )
+    return 'complete';
+  throw new Error('Lexical synchronization terminal outcome is unknown.');
+}
+
+function assertLexicalFenceHealthy(failure: Error | undefined): void {
+  if (failure !== undefined) throw new Error('Lexical synchronization observer failed.', {cause: failure});
+}
+
+async function drainLexicalFenceInspection(
+  isInspecting: () => boolean,
+  inspection: () => Promise<void> | undefined,
+  failure: () => Error | undefined,
+  awaitForeground: <A>(operation: Promise<A>) => Promise<A>,
+): Promise<void> {
+  while (isInspecting()) {
+    const task = inspection();
+    if (!task) break;
+    await awaitForeground(task);
+  }
+  assertLexicalFenceHealthy(failure());
+}
+
+function raceLexicalFenceFailure<A>(operation: Promise<A>, failure: Promise<never>): Promise<A> {
+  return Promise.race([operation, failure]);
+}
+
 async function armLexicalSyncCompletionFence(scope: RecallLexicalScope): Promise<{
   readonly wait: Promise<void>;
   check(): void;
+  settleCurrent(): Promise<void>;
   close(): void;
 }> {
-  const before = await runEffect(readRecallLexicalDemand(scope));
   const directory = join(scope.agentContextHome, 'recall', RECALL_LEXICAL_DEMAND_DIRECTORY);
-  await mkdir(directory, {recursive: true, mode: 0o700});
   const filename = `${recallLexicalDemandKey(scope)}.json`;
-  const requestedAt = Date.now();
-  let settled = false;
+  let before: RecallLexicalDemand | undefined;
+  let requestedAt = 0;
+  let waitSettled = false;
+  let settlementSettled = false;
+  let settlementRequested = false;
+  let observedActive = false;
   let inspecting = false;
   let dirty = false;
-  let lastObserved = `before=${before?.completedAt ?? 'absent'}`;
+  let lastObserved = 'before=unread';
+  let observerError: Error | undefined;
   let closed = false;
+  let watcher: ReturnType<typeof watch> | undefined;
+  const readScopedDemand = () => {
+    const demand = readRecallLexicalDemand(scope);
+    return runEffect(demand);
+  };
   let resolveWait!: () => void;
   let rejectWait!: (error: Error) => void;
+  let resolveSettlement!: () => void;
+  let rejectSettlement!: (error: Error) => void;
   const wait = new Promise<void>((resolve, reject) => {
     resolveWait = resolve;
     rejectWait = reject;
   });
-  let inspect = () => {};
-  const watcher = watch(directory, {persistent: false}, (_event, changedFile) => {
-    if (changedFile === null || changedFile.toString() === filename) inspect();
+  const settlement = new Promise<void>((resolve, reject) => {
+    resolveSettlement = resolve;
+    rejectSettlement = reject;
   });
+  let rejectTerminalFailure!: (error: Error) => void;
+  let terminalFailureSettled = false;
+  const terminalFailure = new Promise<never>((_resolve, reject) => {
+    rejectTerminalFailure = reject;
+  });
+  let inspect = () => {};
   const close = () => {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
-    watcher.close();
+    watcher?.close();
   };
-  const finish = (error?: Error) => {
-    if (settled) return;
-    settled = true;
+  const fail = (error: Error) => {
+    if (observerError === undefined) observerError = error;
+    if (!terminalFailureSettled) {
+      terminalFailureSettled = true;
+      rejectTerminalFailure(observerError);
+    }
+    if (waitSettled && settlementSettled) return;
+    waitSettled = true;
+    settlementSettled = true;
     close();
-    if (error) rejectWait(error);
-    else resolveWait();
+    rejectWait(error);
+    rejectSettlement(error);
   };
   const timer = setTimeout(
     () =>
-      finish(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
+      fail(new Error(`Deferred lexical synchronization timed out; last demand state: ${lastObserved ?? 'unread'}.`)),
     20_000,
   );
-  watcher.on('error', error => finish(error));
+  void wait.catch(() => undefined);
+  void settlement.catch(() => undefined);
+  void terminalFailure.catch(() => undefined);
+  const awaitForeground = <A>(operation: Promise<A>) => raceLexicalFenceFailure(operation, terminalFailure);
+  try {
+    before = await awaitForeground(readScopedDemand());
+    lastObserved = `before=${before?.completedAt ?? 'absent'}`;
+    await awaitForeground(mkdir(directory, {recursive: true, mode: 0o700}));
+    requestedAt = Date.now();
+    watcher = watch(directory, {persistent: false}, (_event, changedFile) => {
+      if (changedFile === null || changedFile.toString() === filename) inspect();
+    });
+    watcher.on('error', fail);
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error('Could not arm lexical synchronization fence.');
+    fail(error);
+    throw error;
+  }
+  let inspectionTask: Promise<void> | undefined;
   inspect = () => {
     dirty = true;
-    if (inspecting || settled) return;
+    if (inspecting || (waitSettled && settlementSettled)) return;
     inspecting = true;
-    void (async () => {
+    inspectionTask = (async () => {
       try {
-        while (dirty && !settled) {
+        while (dirty && !(waitSettled && settlementSettled)) {
           dirty = false;
-          const current = await runEffect(readRecallLexicalDemand(scope));
+          const current = await awaitForeground(readScopedDemand());
           lastObserved = current
             ? JSON.stringify({revision: current.revision, completedAt: current.completedAt, failures: current.failures})
             : 'absent';
-          if (!current) continue;
+          if (!current) {
+            if (before !== undefined || observedActive) {
+              fail(new Error('Lexical synchronization demand disappeared before successful completion.'));
+              return;
+            }
+            continue;
+          }
           if (current.failures > (before?.failures ?? 0)) {
-            finish(new Error('Deferred lexical synchronization recorded a failure.'));
+            fail(new Error('Deferred lexical synchronization recorded a failure.'));
             return;
           }
+          if (current.failures > 0) {
+            fail(new Error('Deferred lexical synchronization has a failed terminal outcome.'));
+            return;
+          }
+          if (current.revision !== undefined) {
+            if (settlementRequested) observedActive = true;
+            continue;
+          }
+          if (current.completedAt === undefined) {
+            fail(new Error('Lexical synchronization terminal outcome is unknown.'));
+            return;
+          }
+          if (settlementRequested && observedActive && !settlementSettled) {
+            settlementSettled = true;
+            resolveSettlement();
+          }
           if (
-            current.revision === undefined &&
-            current.failures === 0 &&
-            current.completedAt !== undefined &&
             current.completedAt >= requestedAt &&
             (before?.completedAt === undefined || current.completedAt > before.completedAt)
           ) {
-            finish();
-            return;
+            if (!waitSettled) {
+              waitSettled = true;
+              resolveWait();
+            }
           }
         }
       } catch (cause) {
-        finish(cause instanceof Error ? cause : new Error('Could not read lexical synchronization state.'));
+        fail(cause instanceof Error ? cause : new Error('Could not read lexical synchronization state.'));
       } finally {
         inspecting = false;
-        if (dirty && !settled) inspect();
+        if (dirty && !(waitSettled && settlementSettled)) inspect();
       }
     })();
   };
-  void wait.catch(() => undefined);
-  return {wait, check: inspect, close};
+  const settleCurrent = async () => {
+    inspect();
+    await drainLexicalFenceInspection(
+      () => inspecting,
+      () => inspectionTask,
+      () => observerError,
+      awaitForeground,
+    );
+    assertLexicalFenceHealthy(observerError);
+    const current = await awaitForeground(readScopedDemand());
+    assertLexicalFenceHealthy(observerError);
+    const status = classifyLexicalSyncSettlement(before, current);
+    if (status === 'active') {
+      settlementRequested = true;
+      observedActive = true;
+      inspect();
+      await awaitForeground(settlement);
+      await drainLexicalFenceInspection(
+        () => inspecting,
+        () => inspectionTask,
+        () => observerError,
+        awaitForeground,
+      );
+      return;
+    }
+    await drainLexicalFenceInspection(
+      () => inspecting,
+      () => inspectionTask,
+      () => observerError,
+      awaitForeground,
+    );
+  };
+  return {wait, check: inspect, settleCurrent, close};
 }
 
 async function withCloudMcp<T>(
