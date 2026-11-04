@@ -758,7 +758,7 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     Effect.flatMap(home => {
       const cliCommand = previewMemory
         ? Effect.gen(function* () {
-            const context = yield* Effect.context<import('./effect/runtime.js').ApplicationServices>();
+            const context = yield* Effect.context<Layer.Success<typeof runtime.ApplicationLayer>>();
             return yield* withCliOutputConsole(cliEffect(arguments_)).pipe(
               Effect.provideService(MemoryPreviewRead, {
                 prepare: async (config, uri, signal, grant) => {
