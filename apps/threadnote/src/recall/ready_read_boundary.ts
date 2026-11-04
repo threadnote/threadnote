@@ -1,4 +1,4 @@
-import {Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
 import {
@@ -71,11 +71,17 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
         // A worker interrupted after durable enqueue may not have returned its wake bit.
         // Read only this request's bounded demand receipt; never enqueue a new revision here.
         if (requested === undefined) {
-          const demand = yield* readRecallLexicalDemand({
-            ...request.config,
-            includeInactive: 'includeInactive' in request.options ? request.options.includeInactive : false,
-          });
-          if (demand?.revision === undefined) return;
+          const variants =
+            request.operation === 'memory-connections'
+              ? [false, true]
+              : ['includeInactive' in request.options ? request.options.includeInactive : false];
+          const demands = yield* Effect.forEach(variants, includeInactive =>
+            readRecallLexicalDemand({
+              ...request.config,
+              includeInactive,
+            }),
+          );
+          if (!EffectArray.some(demands, demand => demand?.revision !== undefined)) return;
         }
         yield* wake(request.config.agentContextHome);
       }),

@@ -74,6 +74,7 @@ it('runs the actual Cursor CLI protocol from a user-hook cwd, recalls the payloa
         );
         child.stdin!.end(JSON.stringify(payload));
       });
+    await writeFile(join(home, 'seed-manifest.yaml'), 'version: 1\nprojects: []\n');
     await runEffect(
       loadRecallIndexData(
         {account: 'local', user: 'local', agentContextHome: home, manifestPath: join(home, 'seed-manifest.yaml')},

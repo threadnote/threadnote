@@ -769,13 +769,15 @@ export const readRecallIndexDataBatch = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallIndexBatchOptions, 'forceRefresh' | 'readyOnly'>,
 ) =>
-  throughReadyReadBoundary(
-    'batch',
-    config,
-    options,
-    loadRecallIndexDataBatch(config, {...options, readyOnly: true}),
-    value => EffectArray.map(recallIndexDataBatchResult(value), readyBoundaryData),
-  );
+  options.selections.length === 0
+    ? Effect.succeed([])
+    : throughReadyReadBoundary(
+        'batch',
+        config,
+        options,
+        loadRecallIndexDataBatch(config, {...options, readyOnly: true}),
+        value => EffectArray.map(recallIndexDataBatchResult(value), readyBoundaryData),
+      );
 export const readRecallExactMatches = (
   config: RecallIndexConfig,
   options: Omit<LoadRecallExactMatchesOptions, 'forceRefresh' | 'readyOnly'>,

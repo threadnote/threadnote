@@ -91,6 +91,19 @@ const vectorOptions = {model: vectorModel, corpusGeneration: optional(text)};
 
 /** Closed private transport. No refresh, authorization-defer marker or executable callback is representable. */
 export const recallReadyReadRequestSchema = Schema.Union([
+  Schema.Struct({
+    ...requestFields,
+    operation: Schema.Literal('memory-connections'),
+    options: Schema.Struct({
+      allowedUriScopes: strings,
+      eligibility: optional(eligibility),
+      includeHistorical: optional(Schema.Boolean),
+      limit: optional(count),
+      memoryRefs: Schema.Array(text).check(Schema.isMaxLength(8), Schema.isMinLength(1)),
+      relationTypes: optional(Schema.Array(Schema.Literals(MEMORY_RELATION_TYPES))),
+      now: text,
+    }),
+  }),
   Schema.Struct({...requestFields, operation: Schema.Literal('status'), options: Schema.Struct(shared)}),
   Schema.Struct({
     ...requestFields,
@@ -208,6 +221,7 @@ export const recallReadyReadResponseSchema = Schema.Struct({
     'exact',
     'code-links',
     'memory-links',
+    'memory-connections',
     'identities',
     'status',
     'generation',

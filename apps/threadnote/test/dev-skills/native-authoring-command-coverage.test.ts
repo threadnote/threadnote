@@ -68,22 +68,24 @@ const plan = (objective = 'Preserve a small native draft across exact reads.') =
   return document;
 };
 
-it.effect('exports a ready no-code phase to a decodable zero-write cycle plan', () =>
+it.effect('exports both bounded authoring path lists as the exact cycle scope', () =>
   Effect.gen(function* () {
     const f = yield* nativeFixture();
     yield* f.init();
     const original = plan();
+    const affectedPaths = Array.from({length: 128}, (_, index) => `src/affected-${index}.ts`);
+    const newPaths = Array.from({length: 128}, (_, index) => `src/new-${index}.ts`);
     const document = {
       ...original,
-      phases: EffectArray.map(original.phases, phase => ({...phase, affectedPaths: [], newPaths: []})),
+      phases: EffectArray.map(original.phases, phase => ({...phase, affectedPaths, newPaths})),
       decisions: [
         {
-          id: 'zero-write',
-          question: 'Which paths may the verification phase change?',
+          id: 'exact-scope',
+          question: 'Which paths may the phase change?',
           selection: 'retain',
-          selected: 'Keep both path lists empty.',
+          selected: 'Retain the exact affected and new path lists.',
           alternatives: [],
-          rationale: 'This phase only verifies saved data and has no source write authority.',
+          rationale: 'This source-free fixture verifies export preserves the exact declared path scope.',
           affectedPhases: ['read'],
           authority: 'orchestrator',
         } as const,
@@ -108,8 +110,8 @@ it.effect('exports a ready no-code phase to a decodable zero-write cycle plan', 
     const before = JSON.stringify(exported);
     const decoded = decodeNativeCyclePlan(JSON.parse(before));
     expect(decoded).toEqual(exported);
+    expect(decoded.phases[0].allowedPaths).toEqual([...affectedPaths, ...newPaths]);
     expect(decoded.phases[0]).toMatchObject({
-      allowedPaths: [],
       acceptanceCriteria: [document.phases[0].acceptance[0].criterion],
       acceptanceRefs: [{requirements: ['req-read']}],
       branch: 'feature/read',

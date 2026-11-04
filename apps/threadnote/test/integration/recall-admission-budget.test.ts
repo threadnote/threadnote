@@ -20,6 +20,7 @@ import {loadRecallIndexData} from '@threadnote/recall/index';
 import {recallReadyReadRequestSchema} from '@threadnote/recall/read_boundary';
 import {ensureVectorIndex} from '@threadnote/recall/vector-index';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
+import {withProductionLogging} from '../../src/effect/production_log.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {runRecall} from '../../src/memory/commands.js';
@@ -189,6 +190,106 @@ function invoke(
 }
 
 describe('production recall admission budget', () => {
+  effectIt.effect(
+    'MCP production semantic timing excludes reranker and closing proof work',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false);
+        const path = yield* Path.Path;
+        const liveClock = yield* Clock.Clock;
+        const commands = yield* CommandExecutor;
+        const diagnosticEpoch = yield* Clock.currentTimeMillis;
+        yield* f.fs.writeFileString(
+          path.join(f.config.agentContextHome, 'layout.json'),
+          `${JSON.stringify({createdBy: 'threadnote', version: 2})}\n`,
+          {mode: 0o600},
+        );
+        let diagnosticElapsed = 0;
+        let reranks = 0;
+        let closingReads = 0;
+        yield* selectLocalModel(
+          f.config.agentContextHome,
+          yield* LocalModelCatalog,
+          'reranker',
+          'jina-reranker-v1-turbo-en-f16',
+        );
+        const runtime = LocalModelRuntime.of({
+          ...fastRuntime,
+          rerank: ({documents}) =>
+            Effect.sync(() => {
+              reranks++;
+              // Mark later work on the diagnostic wall clock only. Native admission,
+              // cancellation, sleeps and the original deadline retain the live clock.
+              diagnosticElapsed = 137;
+              return EffectArray.map(documents, () => 1);
+            }),
+        });
+        const observed = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) =>
+            Effect.gen(function* () {
+              if (options?.sensitiveOutput && options.input) {
+                const request = yield* Schema.decodeEffect(operationSchema)(
+                  new TextDecoder().decode(options.input),
+                ).pipe(Effect.orDie);
+                if (reranks > 0 && (request.operation === 'batch' || request.operation === 'memory-connections'))
+                  closingReads++;
+              }
+              return yield* commands.execute(executable, args, options);
+            }),
+        });
+        const result = yield* withProductionLogging(
+          f.config.agentContextHome,
+          {component: 'mcp', operation: 'recall_context'},
+          invoke('mcp', f),
+        ).pipe(
+          Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+          Effect.provideService(LocalModelRuntime, runtime),
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(CommandExecutor, observed),
+          Effect.provideService(Clock.Clock, {
+            currentTimeNanos: liveClock.currentTimeNanos,
+            currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
+            monotonicTimeNanos: liveClock.monotonicTimeNanos,
+            monotonicTimeNanosUnsafe: () => liveClock.monotonicTimeNanosUnsafe(),
+            sleep: duration => liveClock.sleep(duration),
+            currentTimeMillis: Effect.sync(() => diagnosticEpoch + diagnosticElapsed),
+            currentTimeMillisUnsafe: () => diagnosticEpoch + diagnosticElapsed,
+          }),
+        );
+        expect(reranks).toBe(1);
+        expect(closingReads).toBeGreaterThan(0);
+        expect(result.isError, result.output).toBe(false);
+        expect(result.output).toContain('memories/durable/alpha.md');
+        const log = yield* f.fs.readFileString(path.join(f.config.agentContextHome, 'logs', 'threadnote.log'));
+        const entrySchema = Schema.fromJsonString(
+          Schema.Struct({
+            event: Schema.String,
+            phaseTimings: Schema.optionalKey(
+              Schema.Array(
+                Schema.Struct({phase: Schema.String, durationMilliseconds: Schema.Finite, outcome: Schema.String}),
+              ),
+            ),
+          }),
+        );
+        const entries = yield* Effect.forEach(EffectString.split(EffectString.trim(log), '\n'), line =>
+          Schema.decodeEffect(entrySchema)(line),
+        );
+        const finished = Option.getOrUndefined(
+          EffectArray.findFirst(entries, entry => entry.event === 'invocation.finished'),
+        );
+        const semantic = finished?.phaseTimings
+          ? EffectArray.filter(finished.phaseTimings, timing => timing.phase === 'recall.semantic-retrieval')
+          : undefined;
+        expect(semantic).toEqual([
+          {phase: 'recall.semantic-retrieval', durationMilliseconds: 0, outcome: 'unavailable'},
+        ]);
+        expect(log).not.toContain(query);
+        expect(log).not.toContain(f.uri);
+        expect(log).not.toContain('FOREIGN_PRIVATE_SENTINEL');
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 15000},
+  );
   fcEffectProp(
     effectIt,
     'refinement reserves closing proof or rejects optional work without entering it',

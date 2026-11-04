@@ -1,8 +1,11 @@
+import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {readRecallMemoryConnections, retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
   Clock,
   Context,
+  DateTime,
   Deferred,
   Effect,
   Fiber,
@@ -24,7 +27,11 @@ import {RecallEmbeddingWakePort} from '@threadnote/recall/background/demand';
 import {readRecallLexicalDemand, requestRecallLexicalRefresh} from '@threadnote/recall/background/lexical-demand';
 import {loadRecallIndexData, readRecallExactMatches, readRecallIndexData} from '@threadnote/recall/index';
 import {recallIndexDataResult} from '@threadnote/recall/index/result';
-import {RecallReadyReadBoundaryError, type RecallReadyReadRequest} from '@threadnote/recall/read_boundary';
+import {
+  RecallReadyReadBoundary,
+  RecallReadyReadBoundaryError,
+  type RecallReadyReadRequest,
+} from '@threadnote/recall/read_boundary';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
   makeReadyRecallReadBoundary,
@@ -80,6 +87,101 @@ const waitForPid = Effect.fn('test.waitForReadyReadPid')(function* (filename: st
 });
 
 describe('owned native ready-read boundary', () => {
+  effectIt.effect.prop(
+    'one source worker preserves direct connection proof and excludes a foreign identity for every relation kind',
+    {relationType: Schema.Literals(['depends_on', 'evidence_for', 'related_to', 'references'])},
+    ({relationType}) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-connection-worker-'});
+        const f = {fs, path, home, config: {account: 'local', agentContextHome: home, user: 'test'}};
+        yield* fs.makeDirectory(path.join(home, 'data/local/user/test/memories/durable'), {recursive: true});
+        const seed = formatMemoryDocument(
+          'MEMORY',
+          {
+            kind: 'durable',
+            status: 'active',
+            memoryId: 'tn_owned_alpha',
+            timestamp: '2026-11-04T00:00:00.000Z',
+            sourceAgentClient: 'test',
+            relations: [{type: relationType, uri: 'threadnote://memory/tn_owned_beta'}],
+          },
+          'Explicit source entrypoint seed.',
+        );
+        const target = 'threadnote://user/test/memories/durable/beta.md';
+        yield* f.fs.writeFileString(f.path.join(f.home, 'data/local/user/test/memories/durable/alpha.md'), seed);
+        yield* f.fs.writeFileString(
+          f.path.join(f.home, 'data/local/user/test/memories/durable/beta.md'),
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              memoryId: 'tn_owned_beta',
+              timestamp: '2026-11-04T00:00:00.000Z',
+              sourceAgentClient: 'test',
+            },
+            'Authorized one-hop neighbor.',
+          ),
+        );
+        const foreign = f.path.join(f.home, 'data/local/user/foreign/memories/durable/beta.md');
+        yield* f.fs.makeDirectory(f.path.dirname(foreign), {recursive: true});
+        yield* f.fs.writeFileString(
+          foreign,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              memoryId: 'tn_owned_beta',
+              timestamp: '2026-11-04T00:00:00.000Z',
+              sourceAgentClient: 'test',
+            },
+            'FOREIGN_CONNECTION_PRIVATE_SENTINEL',
+          ),
+        );
+        yield* loadRecallIndexData(f.config, {includeInactive: false});
+        yield* loadRecallIndexData(f.config, {includeInactive: true});
+        const input = {
+          allowedUriScopes: ['threadnote://user/test/memories'],
+          memoryRefs: ['threadnote://memory/tn_owned_alpha'],
+          relationTypes: [relationType],
+          now: DateTime.toDateUtc(DateTime.makeUnsafe('2026-11-04T12:00:00.000Z')),
+        };
+        const direct = yield* retrieveRecallMemoryConnections(f.config, {
+          ...input,
+          readRecords: uris => readLocalMemoryRecordsByUri(f.config, uris),
+        });
+        const command = yield* CommandExecutor;
+        let nativeReads = 0;
+        const observed = CommandExecutor.of({
+          ...command,
+          execute: (executable, args, options) =>
+            Effect.suspend(() => {
+              nativeReads++;
+              return command.execute(executable, args, options);
+            }),
+        });
+        const deadline = yield* makeReadDeadline(2000);
+        const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
+          Effect.provideService(CommandExecutor, observed),
+        );
+        const result = yield* readRecallMemoryConnections(f.config, input).pipe(
+          Effect.provideService(RecallReadyReadBoundary, boundary),
+        );
+        expect(result).toEqual(direct);
+        expect(result.connections).toContainEqual(
+          expect.objectContaining({neighborUri: target, relationType, resolution: 'resolved', currentness: 'current'}),
+        );
+        expect(JSON.stringify(result)).not.toContain('FOREIGN_CONNECTION_PRIVATE_SENTINEL');
+        expect(JSON.stringify(result)).not.toContain('user/foreign');
+        expect(nativeReads).toBe(1);
+        expect(yield* readDeadlineRemaining(deadline)).toBeGreaterThan(0);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {arbitrary: {runs: 4}},
+  );
+
   effectIt.effect(
     'fresh closing reads reject canonical revocation even when optional reranking cached the old authorized row',
     () =>
@@ -226,6 +328,17 @@ describe('owned native ready-read boundary', () => {
         });
         expect(response.outcome).toBe('unavailable');
         expect(response.maintenanceRequested).toBe(true);
+        const connections = yield* boundary.read({
+          operation: 'memory-connections',
+          config: {account: 'local', agentContextHome: home, user: 'test'},
+          options: {
+            allowedUriScopes: ['threadnote://user/test/memories'],
+            memoryRefs: ['threadnote://memory/tn_missing_seed'],
+            now: '2026-11-04T12:00:00.000Z',
+          },
+        });
+        expect(connections.outcome).toBe('unavailable');
+        expect(connections.maintenanceRequested).toBe(true);
         expect(yield* fs.exists(path.join(home, 'indexes/lexical/active-v13.sqlite'))).toBe(false);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 10000},
@@ -559,6 +672,43 @@ describe('owned native ready-read boundary', () => {
       );
       yield* boundary
         .read({operation: 'data', config: f.config, options: {includeInactive: false}})
+        .pipe(Effect.result);
+      expect(wakes).toBe(1);
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBe(revision);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('a lost composite connection response wakes inactive demand without revising or preparing it', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const command = yield* CommandExecutor;
+      const scope = {...f.config, includeInactive: true};
+      const revision = yield* requestRecallLexicalRefresh(scope);
+      let wakes = 0;
+      const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        Effect.provideService(RecallEmbeddingWakePort, () =>
+          Effect.sync(() => {
+            wakes += 1;
+          }),
+        ),
+        Effect.provideService(CommandExecutor, {
+          ...command,
+          execute: () =>
+            Effect.fail(
+              CommandTimedOut.make({args: [], executable: '<worker>', message: 'Owned fixture timeout.', timeoutMs: 1}),
+            ),
+        }),
+      );
+      yield* boundary
+        .read({
+          operation: 'memory-connections',
+          config: f.config,
+          options: {
+            allowedUriScopes: ['threadnote://user/test/memories'],
+            memoryRefs: ['threadnote://memory/tn_owned_alpha'],
+            now: '2026-11-04T12:00:00.000Z',
+          },
+        })
         .pipe(Effect.result);
       expect(wakes).toBe(1);
       expect((yield* readRecallLexicalDemand(scope))?.revision).toBe(revision);

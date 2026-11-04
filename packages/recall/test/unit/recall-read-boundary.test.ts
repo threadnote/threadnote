@@ -66,6 +66,17 @@ const provide = <A, E, R>(
   );
 
 describe('ready recall boundary', () => {
+  effectIt.effect('empty selection batches return no evidence without crossing the native boundary', () =>
+    Effect.gen(function* () {
+      for (const includeInactive of [false, true]) {
+        const result = yield* provide(readRecallIndexDataBatch(config, {includeInactive, selections: []}), () =>
+          Effect.die('An empty selection must not launch a ready-read worker.'),
+        );
+        expect(result).toEqual([]);
+      }
+    }),
+  );
+
   effectIt.effect('passes full scope and replays diagnostics per batch selection without opening an index', () => {
     const calls: number[] = [];
     let seen: RecallReadyReadRequest | undefined;

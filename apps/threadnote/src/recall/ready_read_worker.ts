@@ -1,3 +1,7 @@
+import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {
   Array as EffectArray,
   DateTime,
@@ -51,8 +55,12 @@ export const RECALL_READY_READ_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 // Reuse production authorization/configuration without constructing graph or model services.
 const workerPlatform = Layer.mergeAll(BunServices.layer, cryptoLayer, SystemInfo.layer);
-export const readyRecallReadWorkerLayer = integrationExternalSourcePolicyLayer.pipe(
+const readWorkerDependencies = integrationExternalSourcePolicyLayer.pipe(
   Layer.provideMerge(sourceConfigurationLayer.pipe(Layer.provideMerge(workerPlatform))),
+);
+
+export const readyRecallReadWorkerLayer = ResourceStore.layer.pipe(
+  Layer.provideMerge(Layer.merge(readWorkerDependencies, recallResourceInvalidationLayer)),
 );
 
 export function recallReadyReadBinding(request: RecallReadyReadRequest): string {
@@ -81,6 +89,15 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
   const onCanonicalMismatch = (value: number) => observe({kind: 'mismatch', value});
   const program = Effect.gen(function* () {
     switch (request.operation) {
+      case 'memory-connections': {
+        const instant = DateTime.make(request.options.now);
+        if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+        return yield* retrieveRecallMemoryConnections(request.config, {
+          ...request.options,
+          now: DateTime.toDateUtc(instant.value),
+          readRecords: uris => readLocalMemoryRecordsByUri(request.config, uris),
+        });
+      }
       case 'vector-readiness': {
         const corpus = yield* currentRecallCorpusGeneration(request.config);
         if (Option.isNone(corpus) || corpus.value !== request.options.corpusGeneration) return 'stale';

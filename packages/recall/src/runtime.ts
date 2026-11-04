@@ -64,7 +64,11 @@ import {
   scheduleMcpRecallBackgroundRefresh,
   type McpRecallBackgroundRefreshSchedule,
 } from './mcp/refresh.js';
-import {retrieveRecallMemoryConnections, type RecallMemoryConnectionsResult} from './memory/connections.js';
+import {
+  retrieveRecallMemoryConnections,
+  type RecallMemoryConnectionsResult,
+  type RetrieveRecallMemoryConnectionsInput,
+} from './memory/connections.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -97,6 +101,9 @@ interface PrepareRecallSectionsInput<R> {
   readonly query: string;
   readonly queryVariants?: readonly string[];
   readonly relationTypes?: readonly MemoryRelationType[];
+  readonly readMemoryConnections?: (
+    input: Omit<RetrieveRecallMemoryConnectionsInput<never>, 'readRecords'>,
+  ) => Effect.Effect<RecallMemoryConnectionsResult, unknown, R>;
   readonly readRecords: (uris: readonly string[]) => Effect.Effect<readonly MemoryRecord[], unknown, R>;
   readonly rerankerCache?: RecallRerankerCache;
   readonly seedUris?: readonly string[];
@@ -275,7 +282,10 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   semanticResult: RecallSemanticScoresResult,
 ) {
   const memoryConnections: RecallMemoryConnectionsResult | undefined = input.memoryRefs?.length
-    ? yield* retrieveRecallMemoryConnections(config, {
+    ? yield* (
+        input.readMemoryConnections ??
+        (options => retrieveRecallMemoryConnections(config, {...options, readRecords: input.readRecords}))
+      )({
         allowedUriScopes: input.allowedUriScopes?.length
           ? [...input.allowedUriScopes]
           : [`threadnote://user/${uriSegment(config.user)}/memories`],
@@ -283,7 +293,6 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         includeHistorical: input.includeInactive,
         limit: input.limit,
         memoryRefs: input.memoryRefs,
-        readRecords: input.readRecords,
         relationTypes: input.relationTypes,
       })
     : undefined;

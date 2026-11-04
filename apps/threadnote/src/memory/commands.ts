@@ -1,3 +1,5 @@
+import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {readRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {deferRecallReadMaintenance} from '../recall/read_maintenance.js';
@@ -92,7 +94,6 @@ export {runArchive} from './archive.js';
 import {
   attemptSync,
   ensureMemoryDirectory,
-  localMemoryPathForUri,
   localUserMemoriesRoot,
   memoryDirectoryUri,
   MemoryOperationError,
@@ -577,6 +578,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
           project: recallProjectName,
           query,
           queryVariants: expansionQueries,
+          readMemoryConnections: input => readRecallMemoryConnections(config, input),
           readRecords: uris => readMemoryRecordsByUri(config, uris),
           relationTypes: memoryConnections?.relationTypes,
           rerankerCache,
@@ -602,6 +604,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   let refinementStarted = false;
   const refined = yield* optionalReadyRecallRead(
     Effect.gen(function* () {
+      if (navigationOnly) return recallSections;
       refinementStarted = true;
       allowReranker = true;
       const effectAi =
@@ -1068,27 +1071,8 @@ function formatKindCounts(counts: ReadonlyMap<CompactableMemoryKind, number>): s
   );
 }
 
-export const readMemoryRecordsByUri = Effect.fn('memory.readMemoryRecordsByUri')(function* (
-  config: RuntimeConfig,
-  uris: readonly string[],
-) {
-  const records = yield* Effect.forEach(
-    uris,
-    uri =>
-      Effect.gen(function* () {
-        const localPath = yield* localMemoryPathForUri(config, uri);
-        if (!localPath) return undefined;
-        const content = yield* readTextIfExists(localPath);
-        if (!content) return undefined;
-        return parseMemoryDocument(uri, content);
-      }),
-    {concurrency: 16},
-  );
-  return EffectArray.filter(
-    records,
-    (record, __effectArrayIndex4): record is MemoryRecord => __effectArrayIndex4 in records && record !== undefined,
-  );
-});
+export const readMemoryRecordsByUri = (config: RuntimeConfig, uris: readonly string[]) =>
+  readLocalMemoryRecordsByUri(config, uris);
 
 const localMemoryDirectoryForCompact = Effect.fn('memory.localMemoryDirectoryForCompact')(function* (
   config: RuntimeConfig,

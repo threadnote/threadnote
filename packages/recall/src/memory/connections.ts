@@ -1,6 +1,8 @@
+import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {RecallReadyReadBoundary, RecallReadyReadBoundaryError, recallReadyReadRequestSchema} from '../read_boundary.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {DateTime, Effect} from 'effect';
+import {DateTime, Effect, Option, Predicate, Schema} from 'effect';
 import {
   MEMORY_RELATION_TYPES,
   isMemoryRelationType,
@@ -212,6 +214,99 @@ export function classifyRecallMemoryPremiseState(
   if (!dateWindowContains(now, evidence.validFrom, evidence.validTo)) return 'historical';
   if ((evidence.activeSupersederCount ?? 0) === 1) return 'historical';
   return 'current';
+}
+
+/** One owned native call preserves all internal canonical/currentness reads without repeated source-process startup. */
+export const readRecallMemoryConnections = Effect.fn('recall.readMemoryConnections')(function* (
+  config: RecallMemoryConnectionsConfig,
+  input: Omit<RetrieveRecallMemoryConnectionsInput<never>, 'readRecords'>,
+) {
+  parseRecallMemoryConnectionInput(input);
+  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+  if (Option.isNone(boundary))
+    return yield* retrieveRecallMemoryConnections(config, {
+      ...input,
+      readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
+    });
+  const invalid = () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+  const now = input.now ?? (yield* DateTime.nowAsDate);
+  const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})({
+    operation: 'memory-connections',
+    config: {
+      account: config.account,
+      user: config.user,
+      agentContextHome: config.agentContextHome,
+      ...(config.manifestPath === undefined ? {} : {manifestPath: config.manifestPath}),
+    },
+    options: {...input, now: now.toISOString()},
+  }).pipe(Effect.mapError(invalid));
+  const response = yield* boundary.value.read(request).pipe(
+    Effect.mapError(error =>
+      error.reason === 'budget-exhausted'
+        ? RecallReadyReadUnavailable.make({
+            reason: 'budget-exhausted',
+            message: 'The lexical read budget is exhausted.',
+          })
+        : error,
+    ),
+  );
+  if (response.operation !== 'memory-connections') return yield* invalid();
+  if (response.outcome === 'unavailable')
+    return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+  if (response.outcome !== 'success') return yield* RecallReadyReadBoundaryError.make({reason: 'worker-failed'});
+  return yield* Effect.try({try: () => connectionResult(response.value), catch: invalid});
+});
+
+function connectionResult(value: unknown): RecallMemoryConnectionsResult {
+  if (!isConnectionResult(value)) throw new Error('Invalid connection result.');
+  return value;
+}
+function isConnectionResult(value: unknown): value is RecallMemoryConnectionsResult {
+  const count = (n: unknown) => Number.isSafeInteger(n) && typeof n === 'number' && n >= 0;
+  const state = (s: unknown) => s === 'current' || s === 'historical' || s === 'unresolved' || s === 'conflicted';
+  return (
+    Predicate.isObject(value) &&
+    EffectArray.isArray(value.candidates) &&
+    value.candidates.length <= 4096 &&
+    EffectArray.every(
+      value.candidates,
+      c => Predicate.isObject(c) && typeof c.uri === 'string' && typeof c.text === 'string',
+    ) &&
+    EffectArray.isArray(value.premises) &&
+    value.premises.length <= 8 &&
+    EffectArray.every(
+      value.premises,
+      p => Predicate.isObject(p) && count(p.requestedOrdinal) && typeof p.requestedRef === 'string' && state(p.state),
+    ) &&
+    EffectArray.isArray(value.connections) &&
+    value.connections.length <= 32 &&
+    EffectArray.every(
+      value.connections,
+      c =>
+        Predicate.isObject(c) &&
+        count(c.requestedOrdinal) &&
+        count(c.relationOrdinal) &&
+        c.distance === 1 &&
+        (c.direction === 'incoming' || c.direction === 'outgoing') &&
+        state(c.currentness) &&
+        typeof c.relationType === 'string' &&
+        isMemoryRelationType(c.relationType) &&
+        (c.resolution === 'resolved' || c.resolution === 'unresolved' || c.resolution === 'conflicted') &&
+        (c.origin === 'evidence' || c.origin === 'references' || c.origin === 'relation' || c.origin === 'supersedes'),
+    ) &&
+    Predicate.isObject(value.coverage) &&
+    value.coverage.version === 1 &&
+    count(value.coverage.connectionCount) &&
+    count(value.coverage.premiseCount) &&
+    count(value.coverage.resultCount) &&
+    typeof value.coverage.truncated === 'boolean' &&
+    Predicate.isObject(value.diagnostics) &&
+    count(value.diagnostics.canonicalMismatches) &&
+    count(value.diagnostics.canonicalRereads) &&
+    count(value.diagnostics.rawLinkRows) &&
+    count(value.diagnostics.refreshRepairs) &&
+    EffectArray.isArray(value.diagnostics.truncatedSeedOrdinals)
+  );
 }
 
 /**

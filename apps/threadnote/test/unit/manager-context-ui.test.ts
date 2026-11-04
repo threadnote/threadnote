@@ -479,24 +479,32 @@ describe('Manager Context workspace', () => {
 
   it('does not let a delayed relation refresh override newer reader navigation', async () => {
     const routedFetch = globalThis.fetch;
+    const newerResult = recallResponse('relation refresh race').results[1];
+    if (!newerResult) throw new Error('Newer recall fixture result is missing.');
+    const newerUri = newerResult.canonicalUri;
+    const delayedRefresh = Promise.withResolvers<Response>();
     let refreshAborted = false;
     globalThis.fetch = Object.assign(
       (input: string | URL | Request, init?: RequestInit) => {
         const path =
           typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
         const body = init?.body ? parseJsonObject(String(init.body)) : {};
+        if (path === '/api/context/read' && body.uri === newerUri) {
+          requests.push({body, path});
+          return Promise.resolve(
+            jsonResponse({
+              ...readResponse(0),
+              canonicalUri: newerUri,
+              content: 'Newer reader canonical body.',
+              requestedUri: newerUri,
+            }),
+          );
+        }
         if (path !== '/api/context/read' || body.uri !== RELOCATED_URI) return routedFetch(input, init);
         requests.push({body, path});
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener(
-            'abort',
-            () => {
-              refreshAborted = true;
-              reject(new DOMException('Cancelled', 'AbortError'));
-            },
-            {once: true},
-          );
-        });
+        init?.signal?.addEventListener('abort', () => (refreshAborted = true), {once: true});
+        // A late server response must not regain authority even when transport cancellation loses the race.
+        return delayedRefresh.promise;
       },
       {preconnect: originalFetch.preconnect},
     );
@@ -511,18 +519,30 @@ describe('Manager Context workspace', () => {
     await clickButton('Connections');
     await waitForText('Structured relations');
 
-    await clickButton('Save relations');
-    await waitForRequestCount('/api/context/read', 2);
-    await clickButton('Open neighbor');
-    await waitForRequestCount('/api/context/read', 3);
-    await flush();
+    try {
+      await clickButton('Save relations');
+      await waitForRequestCount('/api/context/read', 2);
+      expect(findButton('Open neighbor')).toBeUndefined();
+      expect(document.body.textContent).not.toContain('Structured relations');
 
-    expect(refreshAborted).toBe(true);
-    expect(EffectArray.filter(requests, request => request.path === '/api/context/connections')).toHaveLength(1);
-    expect(requests.at(-1)).toMatchObject({
-      body: {uri: expect.stringContaining('neighbor.md')},
-      path: '/api/context/read',
-    });
+      const newerPointer = document.querySelectorAll<HTMLButtonElement>('.context-recall-card > button')[1];
+      if (!newerPointer) throw new Error('Newer recall pointer did not render.');
+      await act(async () => newerPointer.click());
+      await waitForRequestCount('/api/context/read', 3);
+      await waitForText('Newer reader canonical body.');
+
+      delayedRefresh.resolve(jsonResponse({...readResponse(0), content: 'Stale relation-refresh body.'}));
+      await flush();
+
+      expect(refreshAborted).toBe(true);
+      expect(document.body.textContent).toContain('Newer reader canonical body.');
+      expect(document.body.textContent).not.toContain('Stale relation-refresh body.');
+      expect(EffectArray.filter(requests, request => request.path === '/api/context/connections')).toHaveLength(1);
+      expect(requests.at(-1)).toMatchObject({body: {uri: newerUri}, path: '/api/context/read'});
+    } finally {
+      delayedRefresh.resolve(jsonResponse(readResponse(0)));
+      await flush();
+    }
   });
 
   it('cancels an in-flight connection lookup when the reader returns to content', async () => {

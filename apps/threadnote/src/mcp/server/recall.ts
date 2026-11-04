@@ -105,7 +105,7 @@ import {
 import {candidateReviewResult, candidateReviewStructuredContent} from './recall/candidate_review_response.js';
 import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
-import {parseRecallMemoryConnectionInput} from '@threadnote/recall/memory/connections';
+import {parseRecallMemoryConnectionInput, readRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import type {MemoryRelationType} from '@threadnote/memory/document';
 import {
   projectRecallMcpResponse,
@@ -1176,60 +1176,63 @@ function runRecallTool(
         appendSemanticWarning(semanticResult);
         const rerankerCache = createRecallRerankerCache();
         let allowReranker = false;
-        const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
-          withMcpProgressHeartbeat(
-            progress,
-            RECALL_MCP_PROGRESS.lexicalRanking,
-            withAnonymousTelemetryPhase(
+        let lexicalProgressPending = true;
+        const prepareSections = (candidateUris?: readonly string[], closingRead = false) => {
+          const work = withAnonymousTelemetryPhase(
+            'recall.lexical-ranking',
+            withProductionPhaseTiming(
               'recall.lexical-ranking',
-              withProductionPhaseTiming(
-                'recall.lexical-ranking',
-                Effect.gen(function* () {
-                  const prepared = yield* prepareRecallSections(config, {
-                    allowReranker,
-                    allowExactRescue: !thresholdConfigured,
-                    allowSemanticRescue: !thresholdConfigured,
-                    allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-                    candidateUris,
-                    closingCandidateUris: closingRead ? candidateUris : undefined,
-                    eligibility,
-                    exactMatches: closingRead ? [] : exactMatches,
-                    feedbackQuery: params.query,
-                    includeInactive: params.includeArchived,
-                    limit: recallLimit,
-                    memoryRefs: params.memoryRefs,
-                    minimumScore: hybridMinimumScore,
-                    passes: closingRead ? [] : passes,
-                    preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
-                    project: recallProjectName,
-                    query,
-                    queryVariants: expansionQueries,
-                    readRecords: uris => readMemoryRecordsByUri(config, uris),
-                    relationTypes: params.relationTypes,
-                    rerankerCache,
-                    seedUris: EffectArray.filter(
-                      [params.pinnedUri, seededUri],
-                      (uri): uri is string => uri !== undefined,
-                    ),
-                    semanticGenerationMismatchPolicy: 'fallback',
-                    semanticResult: Option.some(semanticResult),
-                    workspaceBranch,
-                    workspaceScope: workspaceComponent?.scope,
-                  });
-                  semanticResult = prepared.semanticResult;
-                  operationalWarnings = mergeRecallOperationalWarnings(
-                    operationalWarnings,
-                    prepared.operationalWarnings,
-                  );
-                  appendSemanticWarning(semanticResult);
-                  return prepared;
-                }),
-                prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
-              ),
+              Effect.gen(function* () {
+                const prepared = yield* prepareRecallSections(config, {
+                  allowReranker,
+                  allowExactRescue: !thresholdConfigured,
+                  allowSemanticRescue: !thresholdConfigured,
+                  allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                  candidateUris,
+                  closingCandidateUris: closingRead ? candidateUris : undefined,
+                  eligibility,
+                  exactMatches: closingRead ? [] : exactMatches,
+                  feedbackQuery: params.query,
+                  includeInactive: params.includeArchived,
+                  limit: recallLimit,
+                  memoryRefs: params.memoryRefs,
+                  minimumScore: hybridMinimumScore,
+                  passes: closingRead ? [] : passes,
+                  preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
+                  project: recallProjectName,
+                  query,
+                  queryVariants: expansionQueries,
+                  readMemoryConnections: input => readRecallMemoryConnections(config, input),
+                  readRecords: uris => readMemoryRecordsByUri(config, uris),
+                  relationTypes: params.relationTypes,
+                  rerankerCache,
+                  seedUris: EffectArray.filter(
+                    [params.pinnedUri, seededUri],
+                    (uri): uri is string => uri !== undefined,
+                  ),
+                  semanticGenerationMismatchPolicy: 'fallback',
+                  semanticResult: Option.some(semanticResult),
+                  workspaceBranch,
+                  workspaceScope: workspaceComponent?.scope,
+                });
+                semanticResult = prepared.semanticResult;
+                operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
+                appendSemanticWarning(semanticResult);
+                return prepared;
+              }),
               prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
             ),
+            prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+          );
+          if (!lexicalProgressPending) return work;
+          lexicalProgressPending = false;
+          return withMcpProgressHeartbeat(
+            progress,
+            RECALL_MCP_PROGRESS.lexicalRanking,
+            work,
             progressTiming.heartbeatMilliseconds,
           );
+        };
         let recallSections = yield* prepareSections();
         const closingReadMilliseconds = Math.ceil(
           Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000,
@@ -1238,37 +1241,26 @@ function runRecallTool(
         const baselineNoticeCount = sections.length;
         // Rejected admission performs no optional work, so its completed lexical proof can stand.
         let refinementStarted = false;
-        const refined = yield* optionalReadyRecallRead(
-          Effect.gen(function* () {
-            refinementStarted = true;
-            allowReranker = true;
-            const semanticRetrieval: McpRecallSemanticScoresResult = navigationOnly
-              ? {
-                  result: {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()},
-                  status: 'unavailable',
-                }
-              : yield* withMcpProgressHeartbeat(
-                  progress,
-                  RECALL_MCP_PROGRESS.semanticRetrieval,
-                  withAnonymousTelemetryPhase(
+        let semanticPhaseOutcome: 'success' | 'unavailable' | 'timed-out' | 'failure' = 'unavailable';
+        yield* withMcpProgressHeartbeat(
+          progress,
+          RECALL_MCP_PROGRESS.semanticRetrieval,
+          withAnonymousTelemetryPhase(
+            'recall.semantic-retrieval',
+            Effect.gen(function* () {
+              const refined = yield* optionalReadyRecallRead(
+                Effect.gen(function* () {
+                  if (navigationOnly) return recallSections;
+                  refinementStarted = true;
+                  allowReranker = true;
+                  const semanticRetrieval = yield* withProductionPhaseTiming(
                     'recall.semantic-retrieval',
-                    withProductionPhaseTiming(
-                      'recall.semantic-retrieval',
-                      loadMcpRecallSemanticScoresResult(
-                        config,
-                        query,
-                        recallLimit,
-                        eligibility,
-                        params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-                      ),
-                      result =>
-                        result.status === 'available'
-                          ? 'success'
-                          : result.status === 'unavailable'
-                            ? 'unavailable'
-                            : result.status === 'timed-out'
-                              ? 'timed-out'
-                              : 'failure',
+                    loadMcpRecallSemanticScoresResult(
+                      config,
+                      query,
+                      recallLimit,
+                      eligibility,
+                      params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
                     ),
                     result =>
                       result.status === 'available'
@@ -1278,133 +1270,148 @@ function runRecallTool(
                           : result.status === 'timed-out'
                             ? 'timed-out'
                             : 'failure',
-                  ),
-                  progressTiming.heartbeatMilliseconds,
-                );
-            semanticResult = semanticRetrieval.result;
-            appendSemanticWarning(semanticResult);
-            yield* warmRecallReranker(
-              config.agentContextHome,
-              query,
-              baselineSections.expansionCandidates,
-              rerankerCache,
-            );
-            if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0)
-              recallSections = yield* prepareSections();
-            const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
-            const indexSelectionCandidates = shouldAttemptAiExpansion
-              ? buildRecallIndexSelectionCandidates(
-                  recallSections.expansionCandidates,
-                  recallProjectName,
-                  24,
-                  eligibility,
-                )
-              : [];
-            const indexSelectionIds =
-              indexSelectionCandidates.length > 0
-                ? yield* selectRecallCandidates({candidates: indexSelectionCandidates, query: params.query})
-                : undefined;
-            const groundedExpansionQueries =
-              indexSelectionIds && indexSelectionIds.length > 0
-                ? limitRecallRewritesForConfidence(
+                  );
+                  semanticPhaseOutcome =
+                    semanticRetrieval.status === 'available'
+                      ? 'success'
+                      : semanticRetrieval.status === 'unavailable'
+                        ? 'unavailable'
+                        : semanticRetrieval.status === 'timed-out'
+                          ? 'timed-out'
+                          : 'failure';
+                  semanticResult = semanticRetrieval.result;
+                  appendSemanticWarning(semanticResult);
+                  yield* warmRecallReranker(
+                    config.agentContextHome,
+                    query,
+                    baselineSections.expansionCandidates,
+                    rerankerCache,
+                  );
+                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0)
+                    recallSections = yield* prepareSections();
+                  const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
+                  const indexSelectionCandidates = shouldAttemptAiExpansion
+                    ? buildRecallIndexSelectionCandidates(
+                        recallSections.expansionCandidates,
+                        recallProjectName,
+                        24,
+                        eligibility,
+                      )
+                    : [];
+                  const indexSelectionIds =
+                    indexSelectionCandidates.length > 0
+                      ? yield* selectRecallCandidates({candidates: indexSelectionCandidates, query: params.query})
+                      : undefined;
+                  const groundedExpansionQueries =
+                    indexSelectionIds && indexSelectionIds.length > 0
+                      ? limitRecallRewritesForConfidence(
+                          recallSections.confidence,
+                          recallSelectionQueries(
+                            indexSelectionCandidates,
+                            recallSections.expansionCandidates,
+                            indexSelectionIds,
+                            params.query,
+                            2,
+                          ),
+                        )
+                      : [];
+                  const needsFallbackExpansion =
+                    shouldAttemptAiExpansion &&
+                    groundedExpansionQueries.length < recallRewriteLimitForConfidence(recallSections.confidence);
+                  const expansionVocabulary = needsFallbackExpansion
+                    ? yield* loadRecallExpansionVocabulary(config, {
+                        allowedUriScopes:
+                          params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                        eligibility,
+                        includeInactive: params.includeArchived,
+                        project: recallProjectName,
+                        rankedCandidates: recallSections.expansionCandidates,
+                      }).pipe(
+                        Effect.catchIf(
+                          error => !isReadCleanupUnconfirmed(error),
+                          () => Effect.succeed([]),
+                        ),
+                      )
+                    : [];
+                  const fallbackExpansionQueries = needsFallbackExpansion
+                    ? yield* expandWeakRecallQueryEffect(
+                        {
+                          confidence: recallSections.confidence,
+                          project: recallProjectName,
+                          query: params.query,
+                          vocabulary: expansionVocabulary,
+                        },
+                        config,
+                        effectAi,
+                      )
+                    : [];
+                  const proposedExpansionQueries = mergeRecallRewritesForConfidence(
                     recallSections.confidence,
-                    recallSelectionQueries(
-                      indexSelectionCandidates,
+                    groundedExpansionQueries,
+                    fallbackExpansionQueries,
+                  );
+                  for (const expansionQuery of proposedExpansionQueries) {
+                    expansionQueries.push(expansionQuery);
+                    hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
+                    recallSections = yield* prepareSections();
+                  }
+                  if (expansionQueries.length > 0) {
+                    sections.push(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
+                    const selectionCandidates = buildRecallSelectionCandidates(
+                      recallSections.ranked,
                       recallSections.expansionCandidates,
-                      indexSelectionIds,
-                      params.query,
-                      2,
-                    ),
-                  )
-                : [];
-            const needsFallbackExpansion =
-              shouldAttemptAiExpansion &&
-              groundedExpansionQueries.length < recallRewriteLimitForConfidence(recallSections.confidence);
-            const expansionVocabulary = needsFallbackExpansion
-              ? yield* loadRecallExpansionVocabulary(config, {
-                  allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-                  eligibility,
-                  includeInactive: params.includeArchived,
-                  project: recallProjectName,
-                  rankedCandidates: recallSections.expansionCandidates,
-                }).pipe(
-                  Effect.catchIf(
-                    error => !isReadCleanupUnconfirmed(error),
-                    () => Effect.succeed([]),
-                  ),
-                )
-              : [];
-            const fallbackExpansionQueries = needsFallbackExpansion
-              ? yield* expandWeakRecallQueryEffect(
-                  {
-                    confidence: recallSections.confidence,
-                    project: recallProjectName,
-                    query: params.query,
-                    vocabulary: expansionVocabulary,
-                  },
-                  config,
-                  effectAi,
-                )
-              : [];
-            const proposedExpansionQueries = mergeRecallRewritesForConfidence(
-              recallSections.confidence,
-              groundedExpansionQueries,
-              fallbackExpansionQueries,
-            );
-            for (const expansionQuery of proposedExpansionQueries) {
-              expansionQueries.push(expansionQuery);
-              hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
-              recallSections = yield* prepareSections();
-            }
-            if (expansionQueries.length > 0) {
-              sections.push(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
-              const selectionCandidates = buildRecallSelectionCandidates(
-                recallSections.ranked,
-                recallSections.expansionCandidates,
-                Math.max(params.nodeLimit ?? 12, 12) * 2,
+                      Math.max(params.nodeLimit ?? 12, 12) * 2,
+                    );
+                    const selectedIds = yield* selectRecallCandidates({
+                      candidates: selectionCandidates,
+                      query: params.query,
+                    });
+                    if (selectedIds !== undefined) {
+                      const selectedUris = selectedRecallCandidateUris(
+                        selectionCandidates,
+                        selectedIds,
+                        recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
+                      );
+                      recallSections = yield* prepareSections(selectedUris);
+                      sections.push(
+                        `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
+                      );
+                    }
+                  }
+                  return recallSections;
+                }),
+                {closingReadMilliseconds},
               );
-              const selectedIds = yield* selectRecallCandidates({candidates: selectionCandidates, query: params.query});
-              if (selectedIds !== undefined) {
-                const selectedUris = selectedRecallCandidateUris(
-                  selectionCandidates,
-                  selectedIds,
-                  recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
+              if (refinementStarted) {
+                const selectedSections = Option.getOrElse(refined, () => baselineSections);
+                allowReranker = false;
+                if (Option.isNone(refined)) {
+                  semanticResult = {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()};
+                  hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
+                  expansionQueries.length = 0;
+                  sections.length = baselineNoticeCount;
+                  rerankerCache.scores.clear();
+                }
+                recallSections = yield* prepareSections(
+                  EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),
+                  true,
                 );
-                recallSections = yield* prepareSections(selectedUris);
-                sections.push(
-                  `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
-                );
+                if (recallReadPhaseOutcome(recallSections.operationalWarnings) !== 'success')
+                  recallSections = {
+                    ...recallSections,
+                    confidence: undefined,
+                    ranked: [],
+                    expansionCandidates: [],
+                    semanticSection: undefined,
+                    exactTail: undefined,
+                    memoryConnections: undefined,
+                  };
               }
-            }
-            return recallSections;
-          }),
-          {closingReadMilliseconds},
+            }),
+            () => semanticPhaseOutcome,
+          ),
+          progressTiming.heartbeatMilliseconds,
         );
-        if (refinementStarted) {
-          const selectedSections = Option.getOrElse(refined, () => baselineSections);
-          allowReranker = false;
-          if (Option.isNone(refined)) {
-            semanticResult = {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()};
-            hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
-            expansionQueries.length = 0;
-            sections.length = baselineNoticeCount;
-            rerankerCache.scores.clear();
-          }
-          recallSections = yield* prepareSections(
-            EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),
-            true,
-          );
-          if (recallReadPhaseOutcome(recallSections.operationalWarnings) !== 'success')
-            recallSections = {
-              ...recallSections,
-              confidence: undefined,
-              ranked: [],
-              expansionCandidates: [],
-              semanticSection: undefined,
-              exactTail: undefined,
-              memoryConnections: undefined,
-            };
-        }
         const {semanticSection, exactTail} = recallSections;
         if (semanticSection) sections.push(semanticSection);
         if (exactTail) sections.push(exactTail);
