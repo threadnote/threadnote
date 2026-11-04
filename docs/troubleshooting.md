@@ -258,6 +258,12 @@ the `threadnote graph index` command to limit the override to a graph build. `1`
 
 ## An index rebuild was interrupted
 
+To prepare lexical and semantic recall immediately, run `threadnote index rebuild`. It refreshes lexical recall,
+builds the selected embedding model's vector generation in the foreground, and returns success only after both
+indexes are verified ready. Use `--model <id>` to prepare a specific embedding model. Input changes or a build failure
+return an error; rerun the command after resolving the cause. This command preserves canonical memories and existing
+worker ownership. Normal saves and repair continue to queue optional vector work in the background.
+
 Re-run `threadnote repair` or `threadnote index rebuild`. The lexical and vector SQLite databases are disposable and
 rebuilt from canonical Markdown after corruption. Vector values are content-addressed, so a retry reuses every valid
 value already written. A changed active mapping is committed in one SQLite transaction only after every required

@@ -124,7 +124,7 @@ export const cliCommands: CliCommandReference[] = [
   ...lifecycleCliCommands,
   {
     command: 'models / index',
-    summary: 'Inspect pinned local model state and rebuild or verify the selected vector generation.',
+    summary: 'Inspect pinned local models, prepare lexical and vector recall now, or verify vector generations.',
     examples: [
       'threadnote models list',
       'threadnote models runtime',
@@ -1688,7 +1688,7 @@ threadnote repair`,
       {
         id: 'models-and-indexes',
         title: 'Models and recall indexes',
-        summary: 'Verify the pinned core model, manage vector generations, and repair all derived recall state safely.',
+        summary: 'Verify the pinned core model and prepare lexical and semantic recall indexes in the foreground.',
         body: [
           {
             type: 'code',
@@ -1698,8 +1698,9 @@ threadnote models runtime
 threadnote models verify bge-small-en-v1.5-q8
 threadnote index status
 threadnote index verify
+# Prepare lexical and vector recall now, waiting for both:
 threadnote index rebuild
-# Validate or rebuild lexical and vector state together:
+# Preview or repair broader home and integration state:
 threadnote repair --dry-run
 threadnote repair`,
           },
@@ -1709,7 +1710,7 @@ threadnote repair`,
           },
           {
             type: 'paragraph',
-            text: 'The index commands above manage the selected vector generation only. Vector rebuild creates a complete generation and switches the active mapping transactionally only after every required row is ready; content-addressed vectors already verified on disk are reused after interruption. Use threadnote repair when lexical and vector derived state both need validation or rebuilding.',
+            text: 'Run threadnote index rebuild to refresh lexical recall and build the selected model’s semantic vectors in the foreground. It returns success only after both indexes are verified ready; --model <id> selects a specific embedding model. The active vector mapping switches transactionally after every required row is ready, and verified content-addressed vectors are reused after interruption. If inputs change or preparation fails, the command reports an error instead of readiness. Normal saves and repair queue optional vector work in the background. The status and verify commands inspect vector generations.',
           },
           {
             type: 'warning',
