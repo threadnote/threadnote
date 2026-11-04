@@ -403,17 +403,22 @@ describe('ordinary merge native qualification', () => {
     'retains uncertain evidence when readback is unavailable, changed, or conditional cleanup loses an exact ref',
     () =>
       Effect.gen(function* () {
-        for (const point of ['unreadable', 'changed-state', 'changed-ref']) {
-          const f = yield* mergeFixture();
+        const f = yield* mergeFixture();
+        const initialState = yield* f.fs.readFileString(f.statePath());
+        // Share only the real prepared ancestry. Distinct IDs isolate retained pins;
+        // the state-mutating fault runs last so no scenario needs a state rewind.
+        for (const point of ['unreadable', 'changed-ref', 'changed-state']) {
+          const fields = {...f.fields, snapshotId: `${f.fields.snapshotId}-${point}`};
           const stored = (yield* readNativeWorkflowState(f.config, 'native-run'))!;
           const before = yield* f.fs.readFileString(f.statePath());
+          expect(before).toBe(initialState);
           const journal = yield* f.fs.readFileString(f.journalPath(stored.state.bindingId));
           const priorRefs = yield* retentionRefs(f);
           const fs = yield* FileSystem.FileSystem;
           const stateFile = yield* fs.realPath(f.statePath());
           const executor = yield* CommandExecutor;
           let injected = false;
-          const changedRef = `refs/threadnote/cycles/merge-head/${sha256HexSync(JSON.stringify([stored.state.bindingId, 'merge-head', f.fields.snapshotId]))}`;
+          const changedRef = `refs/threadnote/cycles/merge-head/${sha256HexSync(JSON.stringify([stored.state.bindingId, 'merge-head', fields.snapshotId]))}`;
           const failed = FileSystem.FileSystem.of({
             ...fs,
             rename: (from, to) =>
@@ -453,7 +458,9 @@ describe('ordinary merge native qualification', () => {
                 : fs.readFileString(path, encoding),
           });
           refused(
-            yield* f.capture().pipe(Effect.provideService(FileSystem.FileSystem, failed), Effect.result),
+            yield* f
+              .mutate('snapshot', fields)
+              .pipe(Effect.provideService(FileSystem.FileSystem, failed), Effect.result),
             'ordinary-merge-recovery-required',
           );
           expect(injected).toBe(true);
@@ -461,6 +468,10 @@ describe('ordinary merge native qualification', () => {
           const refs = yield* retentionRefs(f);
           expect(EffectString.split(EffectString.trim(refs), '\n').length).toBe(
             EffectString.split(EffectString.trim(priorRefs), '\n').length + 5,
+          );
+          // Later uncertainty must also preserve every earlier exact retained ref.
+          expect(EffectString.split(EffectString.trim(refs), '\n')).toEqual(
+            expect.arrayContaining(EffectString.split(EffectString.trim(priorRefs), '\n')),
           );
           if (point !== 'changed-state') expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
           expect((yield* f.read()).snapshots.at(-1)!.snapshot.snapshotId).toBe(f.prior.snapshotId);

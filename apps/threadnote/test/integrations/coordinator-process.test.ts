@@ -442,13 +442,15 @@ describe('integration coordinator process composition', () => {
           'Replacement did not consume accepted demand after the old lock was released',
         );
         await writeFile(join(home, 'release'), 'finish accepted source work');
-        await until(
-          async () =>
-            EffectOption.getOrUndefined(
-              EffectArray.findFirst(await events(), event => event.kind === 'end' && event.pid === replacement.pid),
-            ),
-          'Accepted demand did not finish without another client call',
-        );
+        await until(async () => {
+          const completed = EffectOption.getOrUndefined(
+            EffectArray.findFirst(await events(), event => event.kind === 'end' && event.pid === replacement.pid),
+          );
+          if (completed === undefined) return undefined;
+          // Provider return precedes the coordinator's durable completion transaction.
+          const jobs = persistedJob(home);
+          return jobs.length === 1 && jobs[0].generation === 2 && jobs[0].state === 'idle' ? completed : undefined;
+        }, 'Accepted demand did not finish without another client call');
         expect(persistedJob(home)).toEqual([{generation: 2, state: 'idle'}]);
       } finally {
         await proxy.stop(true);
