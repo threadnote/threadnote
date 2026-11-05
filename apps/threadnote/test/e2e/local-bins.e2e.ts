@@ -39,6 +39,7 @@ import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {recallLexicalDemandKey, RECALL_LEXICAL_DEMAND_DIRECTORY} from '@threadnote/recall/background/lexical-demand';
 import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
 import {reportLocalBinsCleanupFailure, type LocalBinsCleanupFacts} from '../helpers/local-bins-cleanup-diagnostics.js';
+import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -231,6 +232,7 @@ async function enrollPositiveWorkerHome(positiveHome: string, label: LocalBinsPo
     ...(await runLocalBinsWorkerDrain(createLocalBinsWorkerDrains(positiveHome, temporaryRoot, cli, label))),
   );
 }
+let stdioTransportCloseEvent: LocalBinsCleanupFacts['stdioTransportCloseEvent'] = 'not-attempted';
 
 function installedLauncher(
   mode: 'cli' | 'mcp' = 'cli',
@@ -347,7 +349,14 @@ afterAll(async () => {
   } catch (cause) {
     reportLocalBinsCleanupFailure(
       cause,
-      {endpointRead, coordinatorPid, coordinatorPidWasRunning, terminationOutcome, coordinatorExitWaitCompleted},
+      {
+        endpointRead,
+        coordinatorPid,
+        coordinatorPidWasRunning,
+        stdioTransportCloseEvent,
+        terminationOutcome,
+        coordinatorExitWaitCompleted,
+      },
       line => {
         process.stderr.write(line);
       },
@@ -1491,6 +1500,7 @@ describe('built self-contained distribution', () => {
       stderr: 'pipe',
     });
     const transportClose = observeStdioClientTransportClose(transport);
+    stdioTransportCloseEvent = 'not-observed';
     const client = new Client({name: 'threadnote-e2e', version: '4.0.0'});
     let operationFailed = false;
     let operationFailure: unknown;
@@ -1673,6 +1683,7 @@ describe('built self-contained distribution', () => {
     if (!cleanupFailed) {
       try {
         await transportClose.waitForCloseIfStarted(signal);
+        if (transportClose.closeObserved) stdioTransportCloseEvent = 'observed';
       } catch (cause) {
         cleanupFailed = true;
         cleanupFailure = cause;

@@ -7,6 +7,7 @@ const cleanupFacts: LocalBinsCleanupFacts = {
   coordinatorPid: 1234,
   coordinatorPidWasRunning: true,
   endpointRead: 'present',
+  stdioTransportCloseEvent: 'observed',
   terminationOutcome: 'tree-kill-returned',
 };
 

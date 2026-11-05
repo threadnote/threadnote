@@ -3,6 +3,7 @@ export interface LocalBinsCleanupFacts {
   readonly coordinatorPid: number | null;
   readonly coordinatorPidWasRunning: boolean | null;
   readonly endpointRead: 'present' | 'absent-or-unreadable';
+  readonly stdioTransportCloseEvent: 'not-attempted' | 'not-observed' | 'observed';
   readonly terminationOutcome:
     | 'not-applicable'
     | 'not-needed'
