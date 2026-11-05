@@ -363,6 +363,33 @@ describe('native authoring documents', () => {
       review: {documentHash: planIntent, outcome: 'accepted', blockingIssueCount: 0},
     });
     expect(validReady).toMatchObject({ready: true, issues: []});
+    expect(() =>
+      validPlan({
+        current: {...asPlan(validPlan()).current, summary: ''},
+      }),
+    ).toThrow();
+
+    const proseArchitecture = validPlan({
+      current: {
+        ...asPlan(validPlan()).current,
+        diagram: 'graph traversal follows imports and returns the cached result.',
+      },
+      target: {...asPlan(validPlan()).target, diagram: ''},
+    });
+    const proseReady = validateNativeAuthoring(proseArchitecture, {
+      ready: true,
+      confirmation: {
+        decision: 'approved',
+        intentHash: nativeAuthoringDigest(proseArchitecture),
+        response: 'Approved implementation plan.',
+      },
+      review: {
+        documentHash: nativeAuthoringDigest(proseArchitecture),
+        outcome: 'accepted',
+        blockingIssueCount: 0,
+      },
+    });
+    expect(proseReady).toMatchObject({ready: true, issues: []});
 
     const changedRequirement = validPlan({
       requirements: [{id: 'req-cache', behavior: 'Fresh entries only are returned.'}],
@@ -444,5 +471,13 @@ describe('native authoring documents', () => {
         issue => issue.code,
       ),
     ).toContain('diagram-invalid');
+
+    const proseDiagram = validPlan({
+      current: {
+        ...asPlan(validPlan()).current,
+        diagram: 'The reader checks freshness before it returns a cached entry.',
+      },
+    });
+    expect(issueCodes(proseDiagram)).not.toContain('diagram-invalid');
   });
 });

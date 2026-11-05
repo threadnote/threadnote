@@ -212,10 +212,20 @@ afterAll(async () => {
   if (endpoint) {
     expect(await realpath(endpoint.home)).toBe(await realpath(home));
     expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
-    try {
-      process.kill(endpoint.pid, 'SIGKILL');
-    } catch (cause) {
-      if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
+    if (process.platform === 'win32') {
+      if (isProcessRunning(endpoint.pid)) {
+        try {
+          await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
+        } catch (cause) {
+          if (isProcessRunning(endpoint.pid)) throw cause;
+        }
+      }
+    } else {
+      try {
+        process.kill(endpoint.pid, 'SIGKILL');
+      } catch (cause) {
+        if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
+      }
     }
     await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
   }
@@ -289,7 +299,7 @@ describe('built self-contained distribution', () => {
     const recall = await runCli(['recall', '--query', 'QZ9 native recall background service']);
     expect(recall).toContain('native-e2e.md');
     expect(await runCli(['doctor'])).toMatch(
-      /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot)/,
+      /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot|deferred until spare CPU capacity)/,
     );
     expect(await activeVectorRevision()).toBe(initialVectorRevision);
     const rebuilt = await runCli(['index', 'rebuild']);
