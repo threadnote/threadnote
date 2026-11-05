@@ -63,6 +63,7 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   previous: Schema.optionalKey(id),
   supersedes: Schema.optionalKey(id),
   previousTree: Schema.optionalKey(gitObject),
+  unreviewedSupersession: Schema.optionalKey(Schema.Struct({reason: text()})),
   acceptedHead: Schema.optionalKey(gitObject),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
@@ -73,7 +74,15 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
     (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
     (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
       ? 'Version2 requires only the ordinary merge qualification.'
-      : undefined,
+      : snapshot.unreviewedSupersession &&
+          (!snapshot.supersedes ||
+            snapshot.previous !== undefined ||
+            snapshot.previousTree !== undefined ||
+            snapshot.baseRequalification !== undefined ||
+            snapshot.ordinaryMergeQualificationV1 !== undefined ||
+            !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim))
+        ? 'An unreviewed supersession requires one explicit superseded snapshot and reason.'
+        : undefined,
   ),
 );
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
@@ -212,7 +221,10 @@ export function validateNativeCycleReviewHistory(
     EffectArray.some([...selected], name => !lanes.has(name))
   )
     fail('Selected and completed review lanes differ.');
-  if ((snapshot.previous || snapshot.supersedes) && !previous) fail('Prior review evidence is required.');
+  if ((snapshot.previous || snapshot.supersedes) && !previous && !snapshot.unreviewedSupersession)
+    fail('Prior review evidence is required.');
+  if (snapshot.unreviewedSupersession && previous)
+    fail('Unreviewed supersession cannot claim a prior accepted review.');
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
   if (
     previous &&

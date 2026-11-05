@@ -229,6 +229,7 @@ const CORE_TOOL_NAMES = [
   'workflow_task_view',
   'workflow_task_work',
   'workflow_task_record_snapshot',
+  'workflow_task_supersede_unreviewed_snapshot',
   'workflow_task_record_review',
   'workflow_task_record_validation',
   'workflow_task_deliver_local',
@@ -299,6 +300,7 @@ const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
   workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
   workflow_task_record_snapshot: 700,
+  workflow_task_supersede_unreviewed_snapshot: 1_500,
   workflow_task_record_review: 2_300,
   workflow_task_record_validation: 1_300,
   workflow_task_deliver_local: 700,
@@ -721,7 +723,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
         // Semantic task bootstrap adds one tool beyond compact authoring; keep the additive catalog budget explicit.
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(53_500);
+        const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
+        expect(totalCatalogBytes).toBeLessThanOrEqual(58_000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

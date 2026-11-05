@@ -190,6 +190,25 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     }),
   );
   server.registerTool(
+    'workflow_task_supersede_unreviewed_snapshot',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false},
+      description:
+        'Preserve the latest unreviewed snapshot and explicitly require a full review of changed source. Only that unreviewed predecessor can be superseded.',
+      inputSchema: {
+        runId: McpInput.requiredString('Existing native workflow run identifier'),
+        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
+        snapshotRef: McpInput.requiredString('Exact immutable reference for the unreviewed source snapshot'),
+        reason: McpInput.requiredString('Why corrected source supersedes the unreviewed snapshot'),
+      },
+    },
+    Effect.fn('mcp_server.workflowTaskSupersedeUnreviewedSnapshot')(function* (input) {
+      const result = yield* runNativeTaskAction(config, {command: 'supersede-unreviewed-snapshot', ...input});
+      const text = JSON.stringify(result);
+      return {content: [{type: 'text' as const, text}], structuredContent: result};
+    }),
+  );
+  server.registerTool(
     'workflow_task_record_review',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},

@@ -263,6 +263,19 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               Effect.mapError(nativeWorkflowError),
             ),
           ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'supersede-unreviewed-snapshot',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              snapshotRef: options.snapshotRef,
+              reason: options.reason,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
       ),
     ]),
   );
