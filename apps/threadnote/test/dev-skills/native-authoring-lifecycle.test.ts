@@ -10,6 +10,7 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
+  nativeSpecIntentDigest,
   type NativeAuthoringDocument,
 } from '@threadnote/workflow-automations/authoring';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
@@ -1249,7 +1250,7 @@ describe('native authoring lifecycle', () => {
         spec: specPacket.spec,
       });
       const imported = authoring(yield* authoringRequest(f, 'from-spec', {document: plan, packet: specPacket}));
-      const planDocument = object(imported.document);
+      const planDocument = decodeNativeAuthoringDocument(imported.document);
       const planDraft = authoring(
         yield* authoringRequest(f, 'save', {document: planDocument, ready: false, expectedRevision: null}),
       );
@@ -1262,30 +1263,73 @@ describe('native authoring lifecycle', () => {
           expectedRevision: planRoot.revision,
         }),
       );
-      const readyPlanRef = reference(readyPlan.root);
+      const originalReadyPlanRef = reference(readyPlan.root);
+      const storedPlanRoot = decodeAuthoringArtifact(
+        Effect2.pipe(yield* f.store.read(f.location, originalReadyPlanRef.uri), EffectString.trimEnd) + '\n',
+        AuthoringRootSchema,
+      );
+      expect(storedPlanRoot.planIntentPolicyVersion).toBe(2);
+      expect(storedPlanRoot.intentHash).toBe(nativeSpecIntentDigest(planDocument));
+      expect(storedPlanRoot.intentHash).not.toBe(nativeAuthoringDigest(planDocument));
+      const refreshedPlan = decodeNativeAuthoringDocument({
+        ...planDocument,
+        context: {...context, note: 'Refreshed source context for the unchanged plan.'},
+      });
+      const refreshedReadyPlan = authoring(
+        yield* authoringRequest(f, 'save', {
+          document: refreshedPlan,
+          ready: true,
+          uri: originalReadyPlanRef.uri,
+          expectedRevision: originalReadyPlanRef.revision,
+        }),
+      );
+      const refreshedPlanRef = reference(refreshedReadyPlan.root);
+      expect(refreshedReadyPlan.readiness).toBe('ready');
+      expect(refreshedPlanRef.revision).not.toBe(originalReadyPlanRef.revision);
+      const refreshedRoot = decodeAuthoringArtifact(
+        Effect2.pipe(yield* f.store.read(f.location, refreshedPlanRef.uri), EffectString.trimEnd) + '\n',
+        AuthoringRootSchema,
+      );
+      expect(refreshedRoot.intentHash).toBe(storedPlanRoot.intentHash);
+      expect(refreshedRoot.documentHash).toBe(nativeAuthoringDigest(refreshedPlan));
+      expect(refreshedRoot.documentHash).not.toBe(storedPlanRoot.documentHash);
+      expect(
+        authoring(yield* authoringRequest(f, 'load', {uri: refreshedPlanRef.uri, detail: 'document'})).document,
+      ).toEqual(refreshedPlan);
+      const refreshedExport = authoring(
+        yield* authoringRequest(f, 'export-dev-cycle', {
+          uri: refreshedPlanRef.uri,
+          delivery: 'local',
+          bindings: {'phase-save': {branch: 'phase/save', baseBranch: 'main'}},
+        }),
+      );
+      expect(refreshedExport).toMatchObject({
+        format: 'threadnote-native-cycle-plan',
+        source: {documentHash: nativeAuthoringDigest(refreshedPlan)},
+      });
       const stateFile = f.statePath();
       const journalFile = f.journalPath(initialized.bindingId);
       const savedState = yield* f.fs.readFileString(stateFile);
       const savedJournal = yield* f.fs.readFileString(journalFile);
-      const savedRoot = yield* f.store.read(f.location, readyPlanRef.uri);
+      const savedRoot = yield* f.store.read(f.location, refreshedPlanRef.uri);
 
       yield* f.fs.writeFileString(sourcePath, 'export const fixture = false;\n');
       const changedPlan = decodeNativeAuthoringDocument({
-        ...planDocument,
+        ...refreshedPlan,
         objective: 'Changed after source inspection.',
       });
       const refusedEdit = yield* failure(
         authoringRequest(f, 'save', {
           document: changedPlan,
           ready: true,
-          uri: readyPlanRef.uri,
-          expectedRevision: readyPlanRef.revision,
+          uri: refreshedPlanRef.uri,
+          expectedRevision: refreshedPlanRef.revision,
         }),
       );
       expect(refusedEdit).toMatchObject({_tag: 'Failure', failure: {code: 'source-drift'}});
       const cycle = yield* failure(
         authoringRequest(f, 'export-dev-cycle', {
-          uri: readyPlanRef.uri,
+          uri: refreshedPlanRef.uri,
           delivery: 'local',
           bindings: {'phase-save': {branch: 'phase/save', baseBranch: 'main'}},
         }),
@@ -1293,19 +1337,21 @@ describe('native authoring lifecycle', () => {
       expect(cycle).toMatchObject({_tag: 'Failure', failure: {code: 'source-drift'}});
       expect(yield* f.fs.readFileString(stateFile)).toBe(savedState);
       expect(yield* f.fs.readFileString(journalFile)).toBe(savedJournal);
-      expect(yield* f.store.read(f.location, readyPlanRef.uri)).toBe(savedRoot);
+      expect(yield* f.store.read(f.location, refreshedPlanRef.uri)).toBe(savedRoot);
 
-      const historicalLoad = authoring(yield* authoringRequest(f, 'load', {uri: readyPlanRef.uri, detail: 'document'}));
-      expect(historicalLoad.document).toEqual(planDocument);
+      const historicalLoad = authoring(
+        yield* authoringRequest(f, 'load', {uri: refreshedPlanRef.uri, detail: 'document'}),
+      );
+      expect(historicalLoad.document).toEqual(refreshedPlan);
       const historicalView = authoring(
-        yield* authoringRequest(f, 'read', {uri: readyPlanRef.uri, artifactId: 'plan', detail: 'outline'}),
+        yield* authoringRequest(f, 'read', {uri: refreshedPlanRef.uri, artifactId: 'plan', detail: 'outline'}),
       );
       expect(historicalView.outline).toMatchObject({kind: 'plan'});
-      const closeout = authoring(yield* authoringRequest(f, 'closeout-input', {uri: readyPlanRef.uri}));
-      expect(closeout).toMatchObject({format: 'threadnote-native-closeout-input', root: readyPlanRef});
+      const closeout = authoring(yield* authoringRequest(f, 'closeout-input', {uri: refreshedPlanRef.uri}));
+      expect(closeout).toMatchObject({format: 'threadnote-native-closeout-input', root: refreshedPlanRef});
       expect(yield* f.fs.readFileString(stateFile)).toBe(savedState);
       expect(yield* f.fs.readFileString(journalFile)).toBe(savedJournal);
-      expect(yield* f.store.read(f.location, readyPlanRef.uri)).toBe(savedRoot);
+      expect(yield* f.store.read(f.location, refreshedPlanRef.uri)).toBe(savedRoot);
     }).pipe(run),
   );
 
