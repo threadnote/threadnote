@@ -1367,11 +1367,34 @@ describe('native private job lifecycle', () => {
         expect(prepared.status).toBe('prepared');
         expect(EffectRecord.keys(prepared.archives)).toHaveLength(0);
         expect(EffectRecord.keys(prepared.outputs)).toHaveLength(0);
-        const finishWork = {...f.base('closeout', f.controllerRunId), command: 'finish'};
+        const inspectedPrepared = object(yield* f.closeout('inspect'));
+        const expectedRevision = requiredString(object(inspectedPrepared.closeout).revision);
+        const staleFinishWork = {
+          ...f.base('closeout', f.controllerRunId),
+          command: 'finish',
+          expectedRevision: Effect2.pipe('0', EffectString.repeat(64)),
+        };
+        const staleFinishJobId = requiredString(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: staleFinishWork})).jobId,
+        );
+        const beforeStaleFinish = yield* f.fs.readFileString(journalFile);
+        expect(object(yield* runNativeJobWorker(f.config, f.controllerRunId, staleFinishJobId, f.call)).status).toBe(
+          'blocked-with-progress',
+        );
+        expect(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'result', jobId: staleFinishJobId})),
+        ).toMatchObject({code: 'closeout-conflict'});
+        expect(yield* f.fs.readFileString(journalFile)).toBe(beforeStaleFinish);
+        const finishWork = {
+          ...f.base('closeout', f.controllerRunId),
+          command: 'finish',
+          expectedRevision,
+        };
         const finishJobId = requiredString(
           object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: finishWork})).jobId,
         );
         expect(finishJobId).not.toBe(jobId);
+        expect(finishJobId).not.toBe(staleFinishJobId);
         expect(object(yield* runNativeJobWorker(f.config, f.controllerRunId, finishJobId, f.call)).status).toBe(
           'completed',
         );

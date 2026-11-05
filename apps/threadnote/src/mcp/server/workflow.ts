@@ -6,6 +6,7 @@ import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/c
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
+import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from './common.js';
 import type {EffectMcpServerAdapter} from '../../effect/ai/mcp.js';
 
@@ -42,7 +43,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
         capacity: NativeCyclePacketOptionsSchema.fields.capacity,
-        anchors: NativeCyclePacketOptionsSchema.fields.anchors,
+        anchors: Schema.Array(NativeTaskAnchorSchema).check(Schema.isBetweenLength(1, 128)),
         ownership: NativeCyclePacketOptionsSchema.fields.ownership,
         checks: NativeCyclePacketOptionsSchema.fields.checks,
         budgetBytes: NativeCyclePacketOptionsSchema.fields.budgetBytes,
@@ -192,9 +193,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         proposal: Schema.optionalKey(NativeCloseoutProposalSchema),
         prepareRef: McpInput.string('Opaque preparation reference returned by an earlier finish call'),
         finishRef: McpInput.string('Opaque finish reference returned by an earlier finish call'),
+        resume: McpInput.boolean('Explicitly continue a canonical closeout job using the same opaque reference'),
       },
     },
-    Effect.fn('mcp_server.workflowTaskFinish')(function* ({runId, callerCwd, proposal, prepareRef, finishRef}) {
+    Effect.fn('mcp_server.workflowTaskFinish')(function* ({runId, callerCwd, proposal, prepareRef, finishRef, resume}) {
       const result = yield* runNativeTaskAction(config, {
         command: 'finish',
         runId,
@@ -202,6 +204,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(proposal === undefined ? {} : {proposal}),
         ...(prepareRef === undefined ? {} : {prepareRef}),
         ...(finishRef === undefined ? {} : {finishRef}),
+        ...(resume === true ? {resume: true} : {}),
       });
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};

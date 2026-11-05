@@ -1,13 +1,44 @@
-import {Effect} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal} from 'effect';
+import {ChildProcessSpawner} from 'effect/process';
+import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
-import {sha256HexSync} from '@threadnote/platform/sha256';
-import {nativeTaskSnapshotId} from '@threadnote/workflow-automations/task';
+import {
+  decodeNativeTaskActionRef,
+  encodeNativeTaskActionRef,
+  nativeTaskSnapshotId,
+} from '@threadnote/workflow-automations/task';
+import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
+import {makeNativeTaskActionCommands} from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
 import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
-import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
+import {completeLocalPhase, fixture, object, run} from './native-cycle-lifecycle-fixture.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+
+const cliTestLayer = Layer.mergeAll(
+  FileSystem.layerNoop({}),
+  Path.layer,
+  Stdio.layerTest({}),
+  Layer.succeed(
+    Terminal.Terminal,
+    Terminal.make({
+      columns: Effect.succeed(80),
+      rows: Effect.succeed(24),
+      size: Effect.die('unused'),
+      readInput: Effect.die('unused'),
+      readLine: Effect.die('unused'),
+      display: () => Effect.void,
+    }),
+  ),
+  Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make(() => Effect.die('unused')),
+  ),
+);
 
 const packet = {
   capacity: {
@@ -18,7 +49,7 @@ const packet = {
     reason: 'The fixture exercises a bounded one-file phase.',
     catalogEvidence: 'Synthetic local test capability record.',
   },
-  anchors: [{path: 'source.ts', sha256: '', pattern: 'export const fixture'}],
+  anchors: [{path: 'source.ts', pattern: 'export const fixture'}],
   ownership: ['source.ts'],
   checks: ['bun test focused fixture'],
 };
@@ -28,13 +59,12 @@ describe('native task actions', () => {
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
       yield* f.mutate('begin-phase', {phaseId: 'one'});
-      const anchor = {...packet.anchors[0], sha256: sha256HexSync('export const fixture = true;\n')};
       const work = object(
         yield* runNativeTaskAction(f.config, {
           command: 'work',
           runId: 'native-run',
           callerCwd: f.repo,
-          packet: {...packet, anchors: [anchor]},
+          packet,
         }),
       );
       expect(work.status).toBe('ready');
@@ -137,6 +167,35 @@ describe('native task actions', () => {
         }),
       );
       expect(delivery).toMatchObject({status: 'delivered', replayed: false, receipt: {delivery: 'local'}});
+      const afterDelivery = yield* f.fs.readFileString(f.statePath());
+      const exactValidation = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(validation.validationRef),
+          validation: validationEvidence,
+        }),
+      );
+      expect(exactValidation).toMatchObject({status: 'recorded', replayed: true});
+      expect(exactValidation.validation).toEqual(validation.validation);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
+      yield* f.fs.writeFileString(
+        f.path.join(f.repo, 'source.ts'),
+        'export const fixture = "post-validation drift";\n',
+      );
+      const exactDelivery = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'deliver-local',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef: String(delivery.deliveryRef),
+        }),
+      );
+      expect(exactDelivery).toMatchObject({status: 'delivered', replayed: true});
+      expect(exactDelivery.receipt).toEqual(delivery.receipt);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
+      yield* f.git(['checkout', '--', 'source.ts']);
       const proposal = {
         architecture: {
           summary: 'The fixture records a source-checked local implementation.',
@@ -164,17 +223,32 @@ describe('native task actions', () => {
           },
         ],
       };
-      const preparing = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'finish',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          proposal,
-        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, f.config);
+      const finishThroughMcp = (input: Record<string, unknown>) =>
+        mcp.invokeTool('workflow_task_finish', input).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+      let lostPrepareAcknowledgment: Record<string, unknown> | undefined;
+      const lostPrepare = yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}).pipe(
+        Effect.tap(value => Effect.sync(() => (lostPrepareAcknowledgment = object(object(value).structuredContent)))),
+        Effect.andThen(
+          Effect.fail(
+            WorkflowAutomationError.make({code: 'test-lost-ack', message: 'Simulated lost MCP preparation response.'}),
+          ),
+        ),
+        Effect.result,
       );
+      expect(lostPrepare._tag).toBe('Failure');
+      const preparingEnvelope = object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}));
+      const preparing = object(preparingEnvelope.structuredContent);
       expect(preparing).toMatchObject({status: 'pending', stage: 'prepare'});
+      expect(preparing.job).not.toHaveProperty('jobId');
+      expect(preparing.job).not.toHaveProperty('generation');
+      expect(preparing.job).not.toHaveProperty('protocolVersion');
+      expect(decodeNativeTaskActionRef(String(lostPrepareAcknowledgment?.prepareRef))?.jobId).toBe(
+        decodeNativeTaskActionRef(String(preparing.prepareRef))?.jobId,
+      );
       const prepareRef = String(preparing.prepareRef);
-      const prepareJobId = String(object(preparing.job).jobId);
+      const prepareJobId = String(decodeNativeTaskActionRef(prepareRef)?.jobId);
       const changedProposal = {
         ...proposal,
         architectureVerification: 'Changed semantic evidence on the same prepare reference.',
@@ -187,19 +261,91 @@ describe('native task actions', () => {
         prepareRef,
       }).pipe(Effect.result);
       expect(changedPrepare).toMatchObject({failure: {code: 'closeout-intent-conflict'}});
+      expect(object(yield* f.call({...f.base('job'), command: 'cancel', jobId: prepareJobId})).stopRequested).toBe(
+        true,
+      );
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe(
+        'stopped-with-progress',
+      );
+      const stoppedStatus = object(yield* f.call({...f.base('job'), command: 'status', jobId: prepareJobId}));
+      const blockedPreparation = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'finish',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          prepareRef,
+        }),
+      );
+      expect(blockedPreparation).toMatchObject({
+        status: 'blocked',
+        stage: 'prepare',
+        job: {status: 'stopped-with-progress', nextAction: expect.stringContaining('resume:true')},
+      });
+      expect(blockedPreparation.job).not.toHaveProperty('jobId');
+      expect(blockedPreparation.job).not.toHaveProperty('generation');
+      expect(object(yield* f.call({...f.base('job'), command: 'status', jobId: prepareJobId}))).toEqual(stoppedStatus);
+      const explicitlyResumed = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'finish',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          prepareRef,
+          resume: true,
+        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+      );
+      expect(explicitlyResumed).toMatchObject({status: 'pending', stage: 'prepare', job: {status: 'accepted'}});
       expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe('completed');
+      expect(object(yield* f.call({...f.base('closeout'), command: 'recover'})).closeout).toMatchObject({
+        state: 'superseded',
+      });
+      yield* f.mutate('invalidate', {
+        phaseId: 'one',
+        reason: 'Requalify after superseding the first closeout admission.',
+      });
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Revalidate the current local implementation.'});
+      const previousSnapshotId = String(object(object(recorded.snapshot).snapshot).snapshotId);
+      yield* completeLocalPhase(f, 'one', 'replacement', previousSnapshotId);
+      const replacementEnvelope = object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}));
+      const replacementPrepare = object(replacementEnvelope.structuredContent);
+      expect(replacementPrepare).toMatchObject({status: 'pending', stage: 'prepare'});
+      const replacementJobId = String(decodeNativeTaskActionRef(String(replacementPrepare.prepareRef))?.jobId);
+      expect(replacementJobId).not.toBe(prepareJobId);
+      const replacementStatus = object(yield* runNativeJobWorker(f.config, 'native-run', replacementJobId, f.call));
+      expect(replacementStatus.status, JSON.stringify(replacementStatus)).toBe('completed');
+      const closeoutFile = f.statePath() + '.closeout.json';
+      const beforeStalePrepareRef = yield* f.fs.readFileString(closeoutFile);
+      const beforeStaleNativeState = yield* f.fs.readFileString(f.statePath());
+      const stalePrepareRef = yield* runNativeTaskAction(f.config, {
+        command: 'finish',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        prepareRef,
+      }).pipe(Effect.result);
+      expect(stalePrepareRef).toMatchObject({failure: {code: 'stale-closeout-ref'}});
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforeStalePrepareRef);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStaleNativeState);
+      const replacementPrepareRef = String(replacementPrepare.prepareRef);
       const finishing = object(
         yield* runNativeTaskAction(f.config, {
           command: 'finish',
           runId: 'native-run',
           callerCwd: f.repo,
-          proposal,
-          prepareRef,
+          prepareRef: replacementPrepareRef,
         }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
       );
       expect(finishing).toMatchObject({status: 'pending', stage: 'finish'});
       const finishRef = String(finishing.finishRef);
-      const finishJobId = String(object(finishing.job).jobId);
+      const finishJobId = String(decodeNativeTaskActionRef(finishRef)?.jobId);
+      const beforeConflictingFinish = yield* f.fs.readFileString(closeoutFile);
+      const conflictingFinish = yield* runNativeTaskAction(f.config, {
+        command: 'finish',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        proposal: changedProposal,
+        finishRef,
+      }).pipe(Effect.result);
+      expect(conflictingFinish).toMatchObject({failure: {code: 'stale-closeout-ref'}});
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforeConflictingFinish);
       expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
       const complete = object(
         yield* runNativeTaskAction(f.config, {
@@ -210,7 +356,6 @@ describe('native task actions', () => {
         }),
       );
       expect(complete).toMatchObject({status: 'complete', replayed: true});
-      const closeoutFile = f.statePath() + '.closeout.json';
       const completedCloseoutBytes = yield* f.fs.readFileString(closeoutFile);
       const completedCloseout = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
       expect(completedCloseout?.state.status).toBe('complete');
@@ -221,22 +366,10 @@ describe('native task actions', () => {
         outputs: completedCloseout?.state.outputs,
         archives: completedCloseout?.state.archives,
       });
-      const afterDelivery = yield* f.fs.readFileString(f.statePath());
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "post-validation drift";\n',
       );
-      const exactDelivery = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'deliver-local',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          validationRef: String(delivery.deliveryRef),
-        }),
-      );
-      expect(exactDelivery).toMatchObject({status: 'delivered', replayed: true});
-      expect(exactDelivery.receipt).toEqual(delivery.receipt);
-      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
       const exactFinish = object(
         yield* runNativeTaskAction(f.config, {
           command: 'finish',
@@ -247,18 +380,6 @@ describe('native task actions', () => {
       );
       expect(exactFinish).toMatchObject({status: 'complete', replayed: true});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
-      const exactValidation = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'record-validation',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          snapshotRef: String(validation.validationRef),
-          validation: validationEvidence,
-        }),
-      );
-      expect(exactValidation).toMatchObject({status: 'recorded', replayed: true});
-      expect(exactValidation.validation).toEqual(validation.validation);
-      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
     }).pipe(run),
   );
 
@@ -266,13 +387,12 @@ describe('native task actions', () => {
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
       yield* f.mutate('begin-phase', {phaseId: 'one'});
-      const anchor = {...packet.anchors[0], sha256: sha256HexSync('export const fixture = true;\n')};
       const work = object(
         yield* runNativeTaskAction(f.config, {
           command: 'work',
           runId: 'native-run',
           callerCwd: f.repo,
-          packet: {...packet, anchors: [anchor]},
+          packet,
         }),
       );
       yield* f.mutate('invalidate', {phaseId: 'one', reason: 'Fixture drift invalidates this packet.'});
@@ -286,5 +406,213 @@ describe('native task actions', () => {
       expect(result).toMatchObject({failure: {code: 'stale-work-ref'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
     }).pipe(run),
+  );
+
+  effectIt.effect(
+    'replays a CLI review mutation through MCP after its acknowledgment is lost and source advances',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'local');
+        yield* f.mutate('begin-phase', {phaseId: 'one'});
+        const work = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            packet,
+          }),
+        );
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "reviewed";\n');
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', 'Review snapshot']);
+        const snapshot = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: String(work.workRef),
+          }),
+        );
+        const snapshotRef = String(snapshot.snapshotRef);
+        yield* f.git(['checkout', '--', 'source.ts']);
+        const report = {
+          mode: 'full',
+          selected: ['correctness', 'simplicity'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
+          findings: [],
+        };
+        const invalidReview = yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          report: {mode: 'full', selected: ['correctness'], findings: []},
+        }).pipe(Effect.result);
+        expect(invalidReview).toMatchObject({
+          failure: {code: 'invalid-request', message: expect.stringContaining('lanes')},
+        });
+        const beforeReviewCommit = yield* f.fs.readFileString(f.statePath());
+        let lostAcknowledgmentResult: Record<string, unknown> | undefined;
+        const lostAck = WorkflowAutomationError.make({code: 'test-lost-ack', message: 'Simulated lost CLI response.'});
+        const commands = makeNativeTaskActionCommands(
+          () => Effect.void,
+          () => Effect.void,
+          options =>
+            runNativeTaskAction(f.config, {command: 'record-review', ...options}).pipe(
+              Effect.tap(value => Effect.sync(() => (lostAcknowledgmentResult = object(value)))),
+              Effect.andThen(Effect.fail(lostAck)),
+            ),
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+        );
+        const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([commands]));
+        const runCli = Command.runWith(cli, {version: 'fixture'});
+        const cliResult = yield* runCli([
+          'task-action',
+          'record-review',
+          '--run-id',
+          'native-run',
+          '--caller-cwd',
+          f.repo,
+          '--snapshot-ref',
+          snapshotRef,
+          '--report',
+          JSON.stringify(report),
+        ]).pipe(Effect.result);
+        expect(cliResult._tag).toBe('Failure');
+        const persistedAfterCli = yield* f.fs.readFileString(f.statePath());
+        expect(persistedAfterCli).not.toBe(beforeReviewCommit);
+        expect(lostAcknowledgmentResult).toMatchObject({status: 'recorded', replayed: false});
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "advanced";\n');
+        const stateBeforeRetry = yield* f.fs.readFileString(f.statePath());
+
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const response = object(
+          yield* mcp.invokeTool('workflow_task_record_review', {
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            ...report,
+          }),
+        );
+        expect(response.isError).not.toBe(true);
+        const retry = object(response.structuredContent);
+        expect(retry).toMatchObject({status: 'recorded', replayed: true});
+        expect(retry.attempt).toEqual(lostAcknowledgmentResult?.attempt);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(stateBeforeRetry);
+        expect(stateBeforeRetry).toBe(persistedAfterCli);
+      }).pipe(run, provideTestLayer(cliTestLayer)),
+  );
+
+  effectIt.effect('derives anchor digests at both CLI and MCP work boundaries', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      let cliWork: Record<string, unknown> | undefined;
+      const commands = makeNativeTaskActionCommands(
+        options =>
+          runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            packet: options.packet,
+          }).pipe(
+            Effect.tap(value => Effect.sync(() => (cliWork = object(value)))),
+            Effect.asVoid,
+          ),
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+      );
+      const command = Command.make('workflow-automation').pipe(Command.withSubcommands([commands]));
+      const runCommand = Command.runWith(command, {version: 'fixture'});
+      yield* runCommand([
+        'task-action',
+        'work',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--model',
+        'fixture-background',
+        '--effort',
+        'low',
+        '--selection',
+        'least-sufficient',
+        '--risk',
+        'settled',
+        '--reason',
+        packet.capacity.reason,
+        '--catalog-evidence',
+        packet.capacity.catalogEvidence,
+        '--anchor-path',
+        'source.ts',
+        '--anchor-pattern',
+        'export const fixture',
+        '--ownership',
+        'source.ts',
+        '--check',
+        'bun test focused fixture',
+      ]);
+      expect(cliWork).toMatchObject({status: 'ready'});
+
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, f.config);
+      const response = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...packet,
+        }),
+      );
+      expect(response.isError).not.toBe(true);
+      const mcpWork = object(response.structuredContent);
+      expect(mcpWork.status).toBe('ready');
+      expect(mcpWork.workRef).toBe(cliWork?.workRef);
+    }).pipe(run, provideTestLayer(cliTestLayer)),
+  );
+
+  effectIt.effect.prop(
+    'refuses generated wrong-run work references without changing canonical native state',
+    {
+      suffixes: Schema.Array(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,12}$/u))).check(
+        Schema.isBetweenLength(1, 4),
+      ),
+    },
+    ({suffixes}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'local');
+        yield* f.mutate('begin-phase', {phaseId: 'one'});
+        const work = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            packet,
+          }),
+        );
+        const ref = decodeNativeTaskActionRef(String(work.workRef));
+        if (!ref) throw new Error('The admitted work reference must decode before scope mutation.');
+        const stateBefore = yield* f.fs.readFileString(f.statePath());
+        for (const suffix of new Set(suffixes)) {
+          const altered = encodeNativeTaskActionRef({...ref, runId: `foreign-${suffix}`});
+          const refusal = yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: altered,
+          }).pipe(Effect.result);
+          expect(refusal).toMatchObject({failure: {code: 'invalid-work-ref'}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(stateBefore);
+        }
+      }).pipe(run),
+    {arbitrary: {runs: 4}},
   );
 });

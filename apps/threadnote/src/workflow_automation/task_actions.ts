@@ -8,6 +8,7 @@ import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/clo
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
+  NativeTaskAnchorSchema,
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -21,12 +22,13 @@ import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journ
 import {runWorkflowAutomation} from './index.js';
 import {readNativeTaskView} from './task.js';
 import {gitValue} from '../utils.js';
+import {makeWorkflowGitAdapter} from './cycle_git.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const packetInputSchema = Schema.Struct({
   capacity: NativeCyclePacketOptionsSchema.fields.capacity,
-  anchors: NativeCyclePacketOptionsSchema.fields.anchors,
+  anchors: Schema.Array(NativeTaskAnchorSchema).check(Schema.isBetweenLength(1, 128)),
   ownership: NativeCyclePacketOptionsSchema.fields.ownership,
   checks: NativeCyclePacketOptionsSchema.fields.checks,
   budgetBytes: NativeCyclePacketOptionsSchema.fields.budgetBytes,
@@ -82,6 +84,7 @@ const requestSchema = Schema.Union([
     proposal: Schema.optionalKey(NativeCloseoutProposalSchema),
     prepareRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     finishRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    resume: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
 
@@ -119,6 +122,30 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   return value;
 };
 
+const taskJobSummary = (value: unknown): Record<string, unknown> => {
+  if (!Predicate.isObject(value) || typeof value.status !== 'string')
+    return {status: 'unknown', nextAction: 'Inspect the canonical closeout job using its continuation reference.'};
+  return {
+    status: value.status,
+    ...(Predicate.isObject(value.progress) ? {progress: value.progress} : {}),
+    ...(typeof value.code === 'string' ? {code: value.code} : {}),
+    ...(typeof value.nextAction === 'string'
+      ? {nextAction: value.nextAction}
+      : value.status === 'blocked-with-progress' ||
+          value.status === 'stopped-with-progress' ||
+          value.status === 'failed'
+        ? {
+            nextAction:
+              'Resolve the canonical job issue, then explicitly retry with resume:true and the same reference.',
+          }
+        : value.status === 'accepted'
+          ? {nextAction: 'Continue this accepted job with the same reference and resume:true.'}
+          : value.status === 'running'
+            ? {nextAction: 'Wait for this job, then query again with the same reference.'}
+            : {}),
+  };
+};
+
 const snapshotRef = (work: NonNullable<ReturnType<typeof decodeNativeTaskActionRef>>, entry: unknown) => {
   if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
     throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
@@ -145,8 +172,8 @@ const snapshotRef = (work: NonNullable<ReturnType<typeof decodeNativeTaskActionR
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(requestSchema, {onExcessProperty: 'error'})(input).pipe(
-      Effect.mapError(() =>
-        fail('invalid-request', 'Provide a typed work packet request or workRef snapshot request.'),
+      Effect.mapError(error =>
+        fail('invalid-request', `Invalid task-action input: ${EffectString.slice(0, 768)(error.message)}`),
       ),
     );
     const path = yield* Path.Path;
@@ -181,7 +208,10 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         return yield* fail('finish-scope', 'Task finish supports one fully delivered local cycle phase.');
       if (request.prepareRef && request.finishRef)
         return yield* fail('invalid-request', 'Continue one closeout reference at a time.');
-      const proposalDigest = request.proposal ? sha256HexSync(stableJson(request.proposal)) : undefined;
+      if (request.resume && !request.prepareRef && !request.finishRef)
+        return yield* fail('invalid-request', 'Explicit job resume requires its exact prepareRef or finishRef.');
+      let proposalDigest = request.proposal ? sha256HexSync(stableJson(request.proposal)) : undefined;
+      let expectedPreparedRevision: string | undefined;
       const journal = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
       const jobRequest = (command: 'submit' | 'result' | 'resume', jobId?: string, work?: unknown) =>
         runWorkflowAutomation(config, {
@@ -215,6 +245,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           !ref.jobId ||
           !ref.transactionId ||
           !ref.payloadDigest ||
+          (proposalDigest !== undefined && proposalDigest !== ref.payloadDigest) ||
           !journal ||
           journal.state.transactionId !== ref.transactionId ||
           journal.state.status === 'superseded' ||
@@ -227,8 +258,19 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         const result = yield* inCheckout(jobRequest('result', ref.jobId), checkout);
         const status = Predicate.isObject(result) && typeof result.status === 'string' ? result.status : 'unknown';
         if (status !== 'completed') {
-          const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
-          return {status: 'pending', stage: 'finish', finishRef: request.finishRef, job: resumed};
+          if (status === 'blocked-with-progress' || status === 'stopped-with-progress' || status === 'failed') {
+            if (!request.resume)
+              return {status: 'blocked', stage: 'finish', finishRef: request.finishRef, job: taskJobSummary(result)};
+            const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
+            return {status: 'pending', stage: 'finish', finishRef: request.finishRef, job: taskJobSummary(resumed)};
+          }
+          if (status === 'accepted' || status === 'running') {
+            if (!request.resume)
+              return {status: 'pending', stage: 'finish', finishRef: request.finishRef, job: taskJobSummary(result)};
+            const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
+            return {status: 'pending', stage: 'finish', finishRef: request.finishRef, job: taskJobSummary(resumed)};
+          }
+          return yield* fail('invalid-job-state', 'The canonical finish job has an unrecognized lifecycle state.');
         }
         const latestJournal = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
         if (
@@ -255,7 +297,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           },
         };
       }
-      if (!request.proposal || !proposalDigest || !prepareWork)
+      if (!request.prepareRef && (!request.proposal || !proposalDigest || !prepareWork))
         return yield* fail(
           'invalid-request',
           'Provide the semantic closeout proposal or its exact prepare/finish reference.',
@@ -268,17 +310,57 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           ref.runId !== request.runId ||
           ref.generationHash !== sha256HexSync(stored.state.generation) ||
           !ref.jobId ||
-          ref.payloadDigest !== proposalDigest
+          !ref.payloadDigest ||
+          (proposalDigest !== undefined && ref.payloadDigest !== proposalDigest)
         )
           return yield* fail(
             'closeout-intent-conflict',
             'The prepare reference is bound to different proposal content.',
           );
         const result = yield* inCheckout(jobRequest('result', ref.jobId), checkout);
-        if (!Predicate.isObject(result) || result.status !== 'completed') {
-          const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
-          return {status: 'pending', stage: 'prepare', prepareRef: request.prepareRef, job: resumed};
+        const status = Predicate.isObject(result) && typeof result.status === 'string' ? result.status : 'unknown';
+        if (status !== 'completed') {
+          if (status === 'blocked-with-progress' || status === 'stopped-with-progress' || status === 'failed') {
+            if (!request.resume)
+              return {status: 'blocked', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(result)};
+            const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
+            return {status: 'pending', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(resumed)};
+          }
+          if (status === 'accepted' || status === 'running') {
+            if (!request.resume)
+              return {status: 'pending', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(result)};
+            const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
+            return {status: 'pending', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(resumed)};
+          }
+          return yield* fail('invalid-job-state', 'The canonical preparation job has an unrecognized lifecycle state.');
         }
+        const resultValue: unknown = result;
+        const completedResult =
+          Predicate.isObject(resultValue) && Predicate.isObject(resultValue.result) ? resultValue.result : undefined;
+        const preparedRevision =
+          completedResult &&
+          Predicate.isObject(completedResult.closeout) &&
+          typeof completedResult.closeout.revision === 'string'
+            ? completedResult.closeout.revision
+            : undefined;
+        if (!preparedRevision)
+          return yield* fail(
+            'closeout-result-unavailable',
+            'The canonical prepare job lacks its journal revision readback.',
+          );
+        proposalDigest = ref.payloadDigest;
+        const prepared = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
+        if (
+          !prepared ||
+          prepared.revision !== preparedRevision ||
+          prepared.state.status !== 'prepared' ||
+          sha256HexSync(stableJson(prepared.state.proposal)) !== proposalDigest
+        )
+          return yield* fail(
+            'stale-closeout-ref',
+            'This preparation reference no longer identifies the current canonical closeout admission.',
+          );
+        expectedPreparedRevision = preparedRevision;
       } else {
         const graphResult = yield* inCheckout(
           runWorkflowAutomation(config, {
@@ -323,12 +405,15 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           payloadDigest: proposalDigest,
           jobId: submittedValue.jobId,
         });
-        return {status: 'pending', stage: 'prepare', prepareRef, job: submittedValue};
+        return {status: 'pending', stage: 'prepare', prepareRef, job: taskJobSummary(submittedValue)};
       }
       const prepared = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
       if (
         !prepared ||
+        (expectedPreparedRevision !== undefined && prepared.revision !== expectedPreparedRevision) ||
         prepared.state.status !== 'prepared' ||
+        (request.prepareRef && !request.proposal && proposalDigest === undefined) ||
+        proposalDigest === undefined ||
         sha256HexSync(stableJson(prepared.state.proposal)) !== proposalDigest
       )
         return yield* fail(
@@ -342,6 +427,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         command: 'finish',
         runId: request.runId,
         generation: stored.state.generation,
+        expectedRevision: expectedPreparedRevision ?? prepared.revision,
       };
       const submitted = yield* inCheckout(jobRequest('submit', undefined, finishWork), checkout);
       const submittedValue: unknown = submitted;
@@ -357,7 +443,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         transactionId: prepared.state.transactionId,
         jobId: submittedValue.jobId,
       });
-      return {status: 'pending', stage: 'finish', finishRef, job: submittedValue};
+      return {status: 'pending', stage: 'finish', finishRef, job: taskJobSummary(submittedValue)};
     }
 
     if (request.command === 'record-review') {
@@ -681,6 +767,22 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         );
       const tree = yield* gitValue(['rev-parse', 'HEAD^{tree}'], checkout);
       if (!tree) return yield* fail('source-unavailable', 'Could not read the current source tree.');
+      const source = yield* inCheckout(
+        Effect.gen(function* () {
+          const git = yield* makeWorkflowGitAdapter();
+          return yield* git.inspect(checkout, [
+            ...new Set(EffectArray.map(request.packet.anchors, anchor => anchor.path)),
+          ]);
+        }),
+        checkout,
+      );
+      if (source.head !== graph.head || source.tree !== tree)
+        return yield* fail('source-drift', 'Source changed while deriving task anchor evidence.');
+      const packetAnchors = EffectArray.map(request.packet.anchors, anchor => {
+        const sha256 = source.files[anchor.path];
+        if (sha256 === undefined) throw fail('invalid-anchor', `Could not derive checkout bytes for ${anchor.path}.`);
+        return {...anchor, sha256};
+      });
       const packet = unwrapCycle(
         yield* inCheckout(
           runWorkflowAutomation(
@@ -688,7 +790,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
             cycleRequest(current, {
               command: 'packet',
               phaseId,
-              packet: {...request.packet, graphProof: {...graph, tree}},
+              packet: {...request.packet, anchors: packetAnchors, graphProof: {...graph, tree}},
             }),
           ),
           checkout,
