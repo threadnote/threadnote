@@ -256,6 +256,27 @@ describe('native task projection', () => {
     }
   });
 
+  it('round-trips task action references deterministically across bounded UTF-8 scope references', () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom('a', 'Z', '0', '漢', '🙂', '/'), {minLength: 1, maxLength: 80}), parts => {
+        const ref = {
+          version: 1 as const,
+          kind: 'work' as const,
+          runId: 'run-fixture',
+          generationHash: Effect.pipe('a', EffectString.repeat(64)),
+          stateRevision: Effect.pipe('b', EffectString.repeat(64)),
+          phaseId: 'phase-one',
+          phaseHash: Effect.pipe('c', EffectString.repeat(64)),
+          baselineRef: `threadnote://fixture/${EffectArray.join(parts, '')}`,
+        };
+        const encoded = encodeNativeTaskActionRef(ref);
+        expect(encodeNativeTaskActionRef(ref)).toBe(encoded);
+        expect(decodeNativeTaskActionRef(encoded)).toEqual(ref);
+      }),
+      {numRuns: 80},
+    );
+  });
+
   it('projects an unreviewed canonical snapshot as review work with required inputs', () => {
     const cycleState = state.cycle!.state;
     const snapshot: NativeCycleSnapshot = {

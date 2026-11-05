@@ -112,6 +112,7 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly proposal?: unknown;
     readonly prepareRef?: string;
     readonly finishRef?: string;
+    readonly resume?: boolean;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const work = Command.make(
@@ -138,7 +139,6 @@ export function makeNativeTaskActionCommands<E, R>(
       userAuthority: optionalString('user-authority', 'Explicit authority for an override or escalation'),
       nearestSupportedEffort: optionalString('nearest-supported-effort', 'Nearest available lower effort'),
       anchorPaths: repeatedString('anchor-path', 'Repository-relative source anchor path', 128),
-      anchorDigests: repeatedString('anchor-sha256', 'SHA-256 for each anchor path, in matching order', 128),
       anchorPatterns: repeatedString(
         'anchor-pattern',
         'Literal source pattern for each anchor path, in matching order',
@@ -150,14 +150,11 @@ export function makeNativeTaskActionCommands<E, R>(
       detailRefs: repeatedString('detail-ref', 'Optional bounded detail reference', 16),
     },
     options => {
-      if (
-        options.anchorPaths.length !== options.anchorDigests.length ||
-        options.anchorPaths.length !== options.anchorPatterns.length
-      )
+      if (options.anchorPaths.length !== options.anchorPatterns.length)
         return Effect.fail(
           WorkflowAutomationError.make({
             code: 'invalid-request',
-            message: 'Repeat --anchor-path, --anchor-sha256 and --anchor-pattern the same number of times.',
+            message: 'Repeat --anchor-path and --anchor-pattern the same number of times.',
           }),
         );
       return workHandler({
@@ -178,10 +175,10 @@ export function makeNativeTaskActionCommands<E, R>(
               ? {}
               : {nearestSupportedEffort: options.nearestSupportedEffort}),
           },
-          anchors: EffectArray.map(
-            EffectArray.zip(EffectArray.zip(options.anchorPaths, options.anchorDigests), options.anchorPatterns),
-            ([[path, sha256], pattern]) => ({path, sha256, pattern}),
-          ),
+          anchors: EffectArray.map(EffectArray.zip(options.anchorPaths, options.anchorPatterns), ([path, pattern]) => ({
+            path,
+            pattern,
+          })),
           ownership: options.ownership,
           checks: options.checks,
           ...(options.budgetBytes === undefined ? {} : {budgetBytes: options.budgetBytes}),
@@ -255,6 +252,7 @@ export function makeNativeTaskActionCommands<E, R>(
       proposal: optionalString('proposal', 'Typed semantic closeout proposal as JSON, strictly schema-validated'),
       prepareRef: optionalString('prepare-ref', 'Opaque reference returned while closeout preparation is pending'),
       finishRef: optionalString('finish-ref', 'Opaque reference returned while verified finish is pending'),
+      resume: boolean('resume', 'Explicitly continue a canonical closeout job using the same opaque reference'),
     },
     options => {
       const rawProposal = options.proposal;
@@ -277,6 +275,7 @@ export function makeNativeTaskActionCommands<E, R>(
             ...(value === undefined ? {} : {proposal: value}),
             ...(options.prepareRef === undefined ? {} : {prepareRef: options.prepareRef}),
             ...(options.finishRef === undefined ? {} : {finishRef: options.finishRef}),
+            ...(options.resume ? {resume: true} : {}),
           }),
         ),
       );

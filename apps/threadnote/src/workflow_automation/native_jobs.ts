@@ -594,11 +594,8 @@ const parseWork = (value: unknown, runId: string, generation: string): Work => {
     const work = Schema.decodeUnknownSync(nativeCloseoutRequestSchema, {onExcessProperty: 'error'})(value);
     if (work.command === 'prepare' && !work.proposal)
       throw fail('invalid-request', 'Closeout prepare requires its exact proposal.');
-    if (work.command === 'finish' && (work.proposal !== undefined || work.expectedRevision !== undefined))
-      throw fail(
-        'job-capability',
-        'Background finish uses the already prepared transaction without a new proposal or revision override.',
-      );
+    if (work.command === 'finish' && work.proposal !== undefined)
+      throw fail('job-capability', 'Background finish uses the already prepared transaction without a new proposal.');
     return {
       ...work,
       action: 'closeout',
