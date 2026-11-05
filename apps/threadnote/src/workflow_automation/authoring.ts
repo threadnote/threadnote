@@ -28,6 +28,8 @@ import {createNativeDocument, nativeDocumentTemplateDefinitions} from '@threadno
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   admitNativeAuthoringSave,
+  decodeNativeWorkflowRequest,
+  nativeWorkflowIntentDigest,
   nativeAuthoringPrefixDigest,
   nativeAuthoringSaveByteBudget,
   type NativeWorkflowState,
@@ -203,6 +205,9 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
     return yield* fail('invalid-scope', 'Source inspection requires an existing Git commit.');
   return {head, files};
 });
+
+/** Run the same bounded Git/filesystem source inspection before a run is initialized. */
+export const inspectNativeSourcePaths = (repo: string, paths: readonly string[]) => inspectSource(repo, paths, true);
 
 const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(function* (
   repo: string,
@@ -1184,8 +1189,95 @@ const saveAuthoring = <R>(
       );
       if (state.authoringSave && state.authoringSave.intentDigest !== saveDigest)
         return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+      const initialCompactResume =
+        state.authoringSave?.operationStart === 0 &&
+        state.authoringSave.rootUri === null &&
+        document.kind === 'plan' &&
+        document.compactOrigin !== undefined &&
+        !document.compactOrigin.expanded &&
+        readiness === 'draft' &&
+        request.confirmation === undefined &&
+        request.review === undefined;
+      const retainedPrefix = initialCompactResume ? state.operations : [];
+      if (
+        EffectArray.some(
+          retainedPrefix,
+          (operation, index) => operation.status === 'prepared' && index !== retainedPrefix.length - 1,
+        )
+      )
+        return yield* fail('pending-operation', 'The initial compact save has a nonsequential prepared prefix.');
+      let prefixPosition = 0;
       const authoringCall: NativeAuthoringCall<R> = input =>
-        call(input).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+        Effect.gen(function* () {
+          if (
+            initialCompactResume &&
+            typeof input === 'object' &&
+            input !== null &&
+            'action' in input &&
+            input.action === 'write'
+          ) {
+            const child = yield* Effect.try({
+              try: () => decodeNativeWorkflowRequest(input),
+              catch: nativeWorkflowError,
+            });
+            if (child.action !== 'write')
+              return yield* fail('pending-operation', 'Resume only the original authoring write sequence.');
+            const {
+              protocolVersion: _protocol,
+              executorVersion: _executor,
+              action: _action,
+              runId,
+              generation,
+              ...fields
+            } = child;
+            const existing = retainedPrefix[prefixPosition];
+            if (
+              runId !== state.runId ||
+              generation !== state.generation ||
+              (existing &&
+                nativeWorkflowIntentDigest(
+                  {...fields, bindingId: state.bindingId, sourceRunId: state.runId},
+                  sha256HexSync,
+                ) !== existing.intentDigest)
+            )
+              return yield* fail(
+                'pending-operation',
+                'The admitted compact save prefix differs from its exact original write sequence.',
+              );
+            prefixPosition++;
+            if (existing?.status === 'verified') {
+              const retained = existing.artifact;
+              if (!retained)
+                return yield* fail('invalid-readback', 'The verified compact prefix lacks its artifact receipt.');
+              // Pure readback while matching the retained prefix: a later mismatch must not
+              // trigger any recovery/manifest write for an earlier already verified child.
+              const observed = yield* call({
+                protocolVersion: 1,
+                executorVersion: 1,
+                action: 'read',
+                runId,
+                generation,
+                uri: retained.uri,
+                ...(child.evidenceRefs ? {evidenceRefs: child.evidenceRefs} : {}),
+              });
+              const artifact = yield* Effect.try({try: () => asArtifact(observed), catch: nativeWorkflowError});
+              if (
+                artifact.uri !== retained.uri ||
+                artifact.memoryId !== retained.memoryId ||
+                artifact.revision !== retained.revision ||
+                artifact.storageKind !== retained.storageKind ||
+                artifact.state !== 'active' ||
+                artifact.body !== existing.intent.body
+              )
+                return yield* fail(
+                  'invalid-readback',
+                  'An original compact save receipt differs from current artifact readback.',
+                );
+              return observed;
+            }
+          }
+          return yield* call(input).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+        });
 
       let artifacts = makeAuthoringArtifacts({
         call: authoringCall,
@@ -1200,7 +1292,7 @@ const saveAuthoring = <R>(
         EffectArray.findFirst(state.operations, operation => operation.status === 'prepared'),
       );
       const key = 'author-root-' + document.kind;
-      if (pending?.intent.artifactKey === key && pending.intent.role === 'authoring-root') {
+      if (!initialCompactResume && pending?.intent.artifactKey === key && pending.intent.role === 'authoring-root') {
         const intent = pending.intent;
         if (
           intent.artifactKey !== key ||
@@ -1356,7 +1448,7 @@ const saveAuthoring = <R>(
       yield* admitLinkedSpec(document);
       const priorOperation = EffectOption.getOrUndefined(
         EffectArray.findFirst(
-          [...state.operations].reverse(),
+          [...(initialCompactResume ? [] : state.operations)].reverse(),
           operation =>
             operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
         ),
@@ -1635,6 +1727,11 @@ const saveAuthoring = <R>(
       );
       const admitted = yield* CurrentNativeJobSourceView;
       if (admitted && readiness === 'ready') yield* assertNativeJobLiveSource(admitted);
+      if (initialCompactResume && prefixPosition < retainedPrefix.length)
+        return yield* fail(
+          'pending-operation',
+          'The compact reservation contains operations outside its original save.',
+        );
       yield* clearAuthoringSave(config, request.runId, saveDigest);
       return {...rootSummary(root, artifact), changed: true};
     }).pipe(

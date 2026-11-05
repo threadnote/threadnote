@@ -7,9 +7,9 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {SystemInfo} from '@threadnote/platform/system';
 import {runNativeWatchCollector} from '../workflow_automation/watch.js';
 import {runNativeJobWorker} from '../workflow_automation/native_jobs.js';
-import {makeNativeTaskActionCommands, makeNativeTaskViewCommand} from './workflow_cli.js';
+import {makeNativeTaskActionCommands, makeNativeTaskStartCommand, makeNativeTaskViewCommand} from './workflow_cli.js';
 import {readNativeTaskView} from '../workflow_automation/task.js';
-import {runNativeTaskAction} from '../workflow_automation/task_actions.js';
+import {runNativeTaskAction, runNativeTaskStart} from '../workflow_automation/task_actions.js';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
 
@@ -113,6 +113,35 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             Effect.mapError(nativeWorkflowError),
           ),
         ),
+      ),
+      makeNativeTaskStartCommand(options =>
+        withRuntime(config => {
+          const {eligibility, missingDecision, evidenceRefs, reviewRequired, reviewReason, ...fields} = options;
+          const intent = {
+            title: fields.title,
+            currentBehavior: fields.currentBehavior,
+            desiredChange: fields.desiredChange,
+            affectedPaths: fields.affectedPaths,
+            acceptanceCriterion: fields.acceptanceCriterion,
+            verification: fields.verification,
+            eligibilityRationale: fields.eligibilityRationale,
+            eligibility:
+              eligibility === 'eligible'
+                ? {status: 'eligible' as const}
+                : {status: 'needs-planning' as const, missingDecision: missingDecision ?? '', evidenceRefs},
+            review: {required: reviewRequired, reason: reviewReason},
+          };
+          return runNativeTaskStart(config, {
+            callerCwd: fields.callerCwd,
+            featureName: fields.featureName,
+            ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
+            ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
+            intent,
+          }).pipe(
+            Effect.flatMap(value => Console.log(JSON.stringify(value))),
+            Effect.mapError(nativeWorkflowError),
+          );
+        }),
       ),
       makeNativeTaskActionCommands(
         options =>

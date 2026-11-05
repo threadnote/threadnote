@@ -1,7 +1,7 @@
 import {Effect, Schema} from 'effect';
 import {McpInput} from '../../effect/ai/mcp.js';
 import {readNativeTaskView} from '../../workflow_automation/task.js';
-import {runNativeTaskAction} from '../../workflow_automation/task_actions.js';
+import {runNativeTaskAction, runNativeTaskStart} from '../../workflow_automation/task_actions.js';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
@@ -12,6 +12,33 @@ import type {RuntimeConfig} from './common.js';
 import type {EffectMcpServerAdapter} from '../../effect/ai/mcp.js';
 
 export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+  server.registerTool(
+    'workflow_task_start',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false},
+      description:
+        'Start or resume a bounded task from business intent; the runtime verifies installed workflow resources and owns native run metadata.',
+      inputSchema: {
+        callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
+        featureName: McpInput.requiredString('Stable feature name used to resume this task'),
+        installationTarget: McpInput.string('Installed Threadnote host target, required only for a new task'),
+        taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
+        intent: NativeCompactIntentSchema,
+      },
+    },
+    Effect.fn('mcp_server.workflowTaskStart')(function* (input) {
+      const {callerCwd, featureName, installationTarget, taskRef, intent} = input;
+      const result = yield* runNativeTaskStart(config, {
+        callerCwd,
+        featureName,
+        ...(installationTarget === undefined ? {} : {installationTarget}),
+        ...(taskRef === undefined ? {} : {taskRef}),
+        intent,
+      });
+      const text = JSON.stringify(result);
+      return {content: [{type: 'text' as const, text}], structuredContent: result};
+    }),
+  );
   server.registerTool(
     'workflow_task_compact_start',
     {

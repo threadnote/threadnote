@@ -1,8 +1,14 @@
-import {Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal, Tracer} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal, Tracer} from 'effect';
+import * as EffectString from 'effect/String';
 import {ChildProcessSpawner} from 'effect/process';
 import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {
+  ResourceStore,
+  type ResourceStoreLocation,
+  type ResourceStoreWriteOptions,
+} from '@threadnote/store/resource-store';
 import {describe, expect} from 'vitest';
 import {
   decodeNativeTaskActionRef,
@@ -21,9 +27,17 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
-import {makeNativeTaskActionCommands, makeNativeTaskViewCommand} from '../../src/effect/workflow_cli.js';
-import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
-import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {
+  makeNativeTaskActionCommands,
+  makeNativeTaskStartCommand,
+  makeNativeTaskViewCommand,
+} from '../../src/effect/workflow_cli.js';
+import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
+import {applyDevSkills} from '../../src/dev_skills/index.js';
+import {SystemInfo} from '@threadnote/platform/system';
+import {readNativeWorkflowState, serializeNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
+import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
 import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
@@ -140,6 +154,598 @@ const inspectTaskOnce = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   });
 
 describe('native task actions', () => {
+  effectIt.effect.each([
+    'prepared-data-before-write',
+    'prepared-data',
+    'prepared-view',
+    'verified-data-prefix',
+    'verified-last-child',
+    'prepared-root',
+    'verified-root',
+  ])('recovers an exact semantic compact save at %s', cut =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const system = yield* SystemInfo;
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const scopedSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scopedSystem));
+      const indexer = yield* CodeGraphIndexer;
+      expect((yield* indexer.index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe('ready');
+      const intent = {
+        title: 'Recover one compact fixture change',
+        currentBehavior: 'Expired fixture data is returned.',
+        desiredChange: 'Expired fixture data is refreshed before return.',
+        affectedPaths: ['source.ts'],
+        acceptanceCriterion: 'The refreshed fixture value is returned.',
+        verification: 'Read an expired fixture.',
+        eligibilityRationale: 'One source-bound fixture behavior with no unresolved decisions.',
+        eligibility: {status: 'eligible'},
+        review: {required: false, reason: 'Bounded fixture correction.'},
+      };
+      const featureName = 'Recovery ' + cut;
+      const runId = 'task-' + EffectString.slice(0, 48)(sha256HexSync('repo\nrecovery-' + cut));
+      const base = {featureName, callerCwd: repo, installationTarget: 'codex', intent};
+      const statePath = f.path.join(home, 'workflow-automations', 'native-v1', runId + '.json');
+      const actualFs = yield* FileSystem.FileSystem;
+      const actualPath = yield* Path.Path;
+      const observe = () =>
+        readNativeWorkflowState(config, runId).pipe(
+          Effect.provideService(FileSystem.FileSystem, actualFs),
+          Effect.provideService(Path.Path, actualPath),
+          Effect.orDie,
+        );
+      let injected = false;
+      const writes = new Map<string, number>();
+      const stop = () =>
+        Effect.sync(() => {
+          injected = true;
+        }).pipe(Effect.andThen(Effect.die(new Error('Synthetic compact cut: ' + cut))));
+      const matchesPrepared = (state: Effect.Success<ReturnType<typeof readNativeWorkflowState>>) => {
+        const last = state?.state.operations.at(-1);
+        if (!state?.state.authoringSave || last?.status !== 'prepared') return false;
+        if (cut === 'prepared-data' || cut === 'prepared-data-before-write') return last.intent.nameHint === 'source';
+        if (cut === 'prepared-view') return last.intent.nameHint === 'plan-overview';
+        return (
+          cut === 'prepared-root' &&
+          last.intent.role === 'authoring-root' &&
+          last.intent.artifactKey === 'author-root-plan'
+        );
+      };
+      const observedStore = ResourceStore.of({
+        ...f.store,
+        writeChecked: <E, R>(
+          location: ResourceStoreLocation,
+          uri: string,
+          content: string,
+          options: ResourceStoreWriteOptions,
+          check: Effect.Effect<void, E, R>,
+        ) =>
+          Effect.gen(function* () {
+            if (!injected && cut === 'prepared-data-before-write' && matchesPrepared(yield* observe()))
+              return yield* stop();
+            const result = yield* f.store.writeChecked(location, uri, content, options, check);
+            writes.set(uri, (writes.get(uri) ?? 0) + 1);
+            if (!injected && cut !== 'prepared-data-before-write' && matchesPrepared(yield* observe()))
+              return yield* stop();
+            return result;
+          }),
+      });
+      const faultFs = {
+        ...actualFs,
+        rename: (from: string, to: string) =>
+          actualFs.rename(from, to).pipe(
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                if (injected || to !== statePath) return;
+                const state = yield* observe();
+                const last = state?.state.operations.at(-1);
+                if (!state?.state.authoringSave || last?.status !== 'verified') return;
+                const selected =
+                  cut === 'verified-data-prefix'
+                    ? last.intent.nameHint === 'source'
+                    : cut === 'verified-last-child'
+                      ? last.intent.nameHint === 'decisions'
+                      : cut === 'verified-root' && last.intent.role === 'authoring-root';
+                if (selected) return yield* stop();
+              }),
+            ),
+          ),
+      };
+      const scoped = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(
+          Effect.provideService(SystemInfo, scopedSystem),
+          Effect.provideService(ResourceStore, observedStore),
+          Effect.provideService(FileSystem.FileSystem, faultFs),
+        );
+      const interrupted = yield* scoped(runNativeTaskStart(config, base)).pipe(Effect.result);
+      expect(interrupted, cut).toMatchObject({
+        failure: {message: expect.stringContaining('Synthetic compact cut: ' + cut)},
+      });
+      expect(injected, cut).toBe(true);
+      const pending = yield* observe();
+      if (!pending?.state.authoringSave) throw new Error('Expected the original admitted save at ' + cut);
+      const reservation = pending.state.authoringSave;
+      expect(reservation.operationStart).toBe(0);
+      expect(reservation.rootUri).toBeNull();
+      const prefix = pending.state.operations;
+      expect(prefix.length).toBeGreaterThan(0);
+      expect(prefix.at(-1)?.status).toBe(EffectString.startsWith('verified-')(cut) ? 'verified' : 'prepared');
+      const originalBytes = yield* f.fs.readFileString(statePath);
+      const journalPath = f.journalPath(pending.state.bindingId);
+      const originalJournal = yield* f.fs.readFileString(journalPath);
+      const writesBefore = [...writes];
+      const prefixReadbacks: {uri: string; bytes: string}[] = [];
+      for (const operation of prefix)
+        if (operation.status === 'verified' && operation.artifact)
+          prefixReadbacks.push({
+            uri: operation.artifact.uri,
+            bytes: yield* f.store.read(f.location, operation.artifact.uri),
+          });
+      const unchanged = () =>
+        Effect.gen(function* () {
+          expect(yield* f.fs.readFileString(statePath), cut).toBe(originalBytes);
+          expect(yield* f.fs.readFileString(journalPath), cut).toBe(originalJournal);
+          expect([...writes], cut).toEqual(writesBefore);
+        });
+      const changed = yield* scoped(
+        runNativeTaskStart(config, {
+          ...base,
+          taskRef: runId,
+          intent: {...intent, desiredChange: 'Discard expired fixture data.'},
+        }),
+      ).pipe(Effect.result);
+      expect(changed, cut).toMatchObject({failure: {code: 'pending-operation'}});
+      yield* unchanged();
+      yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'export const fixture = false;\n');
+      const drifted = yield* scoped(runNativeTaskStart(config, {...base, taskRef: runId})).pipe(Effect.result);
+      expect(drifted, cut).toMatchObject({failure: {code: 'evidence-unavailable'}});
+      yield* unchanged();
+      yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'export const fixture = true;\n');
+      const foreignRepo = f.path.join(f.root, 'other', 'repo');
+      yield* f.fs.makeDirectory(foreignRepo, {recursive: true});
+      yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
+      const foreign = yield* scoped(runNativeTaskStart(config, {...base, taskRef: runId, callerCwd: foreignRepo})).pipe(
+        Effect.result,
+      );
+      expect(foreign, cut).toMatchObject({failure: {code: 'binding-drift'}});
+      yield* unchanged();
+      const notEligible = yield* scoped(
+        runNativeTaskStart(config, {
+          ...base,
+          taskRef: runId,
+          intent: {
+            ...intent,
+            eligibility: {status: 'needs-planning', missingDecision: 'Choose another behavior.', evidenceRefs: []},
+          },
+        }),
+      ).pipe(Effect.result);
+      expect(notEligible).toMatchObject({failure: {code: 'task-intent-conflict'}});
+      yield* unchanged();
+      const firstRoot = EffectArray.some(
+        prefix,
+        item => item.status === 'verified' && item.intent.role === 'authoring-root',
+      );
+      if (!firstRoot) {
+        const {authoringSave: _reservation, ...unrelated} = pending.state;
+        yield* Effect.acquireUseRelease(
+          f.fs.writeFileString(statePath, serializeNativeWorkflowState(unrelated)),
+          () =>
+            Effect.gen(function* () {
+              const unreservedBytes = yield* f.fs.readFileString(statePath);
+              const refused = yield* scoped(runNativeTaskStart(config, {...base, taskRef: runId})).pipe(Effect.result);
+              expect(refused).toMatchObject({failure: {code: 'task-intent-missing'}});
+              expect(yield* f.fs.readFileString(statePath)).toBe(unreservedBytes);
+              expect(yield* f.fs.readFileString(journalPath)).toBe(originalJournal);
+              expect([...writes]).toEqual(writesBefore);
+            }),
+          () => f.fs.writeFileString(statePath, originalBytes),
+        );
+      }
+      if (prefix.length >= 2 && prefix[0].status === 'verified' && prefix[1].status === 'verified') {
+        const malformed = {...pending.state, operations: [prefix[1], prefix[0], ...prefix.slice(2)]};
+        yield* Effect.acquireUseRelease(
+          f.fs.writeFileString(statePath, serializeNativeWorkflowState(malformed)),
+          () =>
+            Effect.gen(function* () {
+              const badBytes = yield* f.fs.readFileString(statePath);
+              const refused = yield* scoped(runNativeTaskStart(config, {...base, taskRef: runId})).pipe(Effect.result);
+              expect(refused, cut).toMatchObject({failure: {code: 'pending-operation'}});
+              expect(yield* f.fs.readFileString(statePath)).toBe(badBytes);
+              expect(yield* f.fs.readFileString(journalPath)).toBe(originalJournal);
+              expect([...writes]).toEqual(writesBefore);
+            }),
+          () => f.fs.writeFileString(statePath, originalBytes),
+        );
+      }
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, config);
+      const recovered = object(yield* scoped(mcp.invokeTool('workflow_task_start', {...base, taskRef: runId})));
+      expect(recovered.isError, cut).not.toBe(true);
+      const complete = yield* observe();
+      if (!complete) throw new Error('Expected recovered task state.');
+      expect(complete.state.authoringSave, cut).toBeUndefined();
+      expect(complete.state.runId).toBe(pending.state.runId);
+      expect(complete.state.generation).toBe(pending.state.generation);
+      expect(complete.state.bindingId).toBe(pending.state.bindingId);
+      for (const key of ['project', 'featureId', 'title', 'profile', 'team', 'naming'] as const)
+        expect(complete.state[key], cut + ' identity ' + key).toEqual(pending.state[key]);
+      expect(new Set(EffectArray.map(complete.state.operations, item => item.intent.operationId)).size).toBe(
+        complete.state.operations.length,
+      );
+      expect(EffectArray.every(complete.state.operations, item => item.status === 'verified')).toBe(true);
+      expect(EffectArray.map(complete.state.operations, item => item.intent.nameHint)).toEqual([
+        'source',
+        'index',
+        'plan-overview',
+        'decisions',
+        'plan',
+      ]);
+      for (const original of prefixReadbacks)
+        expect(yield* f.store.read(f.location, original.uri)).toBe(original.bytes);
+      expect(
+        EffectArray.map(complete.state.operations.slice(0, prefix.length), item => ({
+          intent: item.intent,
+          digest: item.intentDigest,
+        })),
+      ).toEqual(EffectArray.map(prefix, item => ({intent: item.intent, digest: item.intentDigest})));
+      for (const operation of complete.state.operations) {
+        if (!operation.artifact) throw new Error('Expected verified artifact.');
+        expect(writes.get(operation.artifact.uri), cut + ' ' + operation.intent.nameHint).toBe(1);
+      }
+      const view = object(yield* scoped(readNativeTaskView(config, {runId, callerCwd: repo, detail: 'packet'})));
+      const authoring = object(view.authoring);
+      expect(authoring).toMatchObject({readiness: 'draft', status: 'awaiting-user-confirmation'});
+      expect(authoring.confirmation).toBeUndefined();
+      const document = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(
+        object(authoring.packet).document,
+      );
+      expect(document.current.summary).toBe(intent.currentBehavior);
+      expect(document.target.summary).toBe(intent.desiredChange);
+      expect(authoring.documentHash).toBe(nativeAuthoringDigest(document));
+      const loaded = object(
+        object(
+          yield* scoped(
+            runWorkflowAutomation(config, {
+              protocolVersion: 1,
+              executorVersion: 1,
+              action: 'authoring',
+              command: 'load',
+              runId,
+              generation: complete.state.generation,
+              uri: object(authoring.root).uri,
+              detail: 'document',
+            }),
+          ),
+        ).authoring,
+      );
+      expect(loaded.document).toEqual(document);
+      const finishedBytes = yield* f.fs.readFileString(statePath);
+      const finishedWrites = [...writes];
+      yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'export const fixture = false;\n');
+      const replay = object(yield* scoped(runNativeTaskStart(config, {...base, taskRef: runId})));
+      expect(replay.status).toBe('resumed');
+      expect(yield* f.fs.readFileString(statePath)).toBe(finishedBytes);
+      expect([...writes]).toEqual(finishedWrites);
+      yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'export const fixture = true;\n');
+      const confirmed = object(
+        yield* scoped(
+          runNativeTaskAction(config, {
+            command: 'compact-confirm',
+            runId,
+            callerCwd: repo,
+            presentedIntentHash: authoring.intentHash,
+            userDecision: 'approve',
+            userResponse: 'I approve this exact recovered fixture change.',
+            baseBranch: 'main',
+          }),
+        ),
+      );
+      expect(confirmed, cut).toMatchObject({status: 'admitted', taskReadiness: 'ready'});
+      expect((yield* observe())?.state.authoringSave).toBeUndefined();
+    }).pipe(run),
+  );
+
+  effectIt.effect(
+    'starts a semantic task from a verified local installed bundle and safely replays or refuses changed intent',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          f.repo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Fixture source',
+        ]);
+        const intent = {
+          title: 'Refresh expired fixture data',
+          currentBehavior: 'Expired fixture data is returned without a freshness check.',
+          desiredChange: 'Expired fixture data is refreshed before it is returned.',
+          affectedPaths: ['source.ts'],
+          acceptanceCriterion: 'Expired fixture data is refreshed before return.',
+          verification: 'Exercise expired fixture data and observe the refresh.',
+          eligibilityRationale:
+            'One behavior and one inspected file are explicit, with no unresolved product decision.',
+          eligibility: {status: 'eligible' as const},
+          review: {required: false, reason: 'Routine local fixture correction.'},
+        };
+        const base = {callerCwd: f.repo, featureName: 'Fixture refresh', installationTarget: 'codex', intent};
+        const withoutTarget = {callerCwd: f.repo, featureName: 'Fixture refresh', intent};
+        const missingResources = yield* runNativeTaskStart(f.config, withoutTarget).pipe(Effect.result);
+        expect(missingResources).toMatchObject({failure: {code: 'needs-resources'}});
+        const needsPlanning = yield* runNativeTaskStart(f.config, {
+          ...base,
+          intent: {
+            ...intent,
+            eligibility: {
+              status: 'needs-planning' as const,
+              missingDecision: 'Select refresh behavior.',
+              evidenceRefs: [],
+            },
+          },
+        });
+        expect(needsPlanning).toMatchObject({status: 'needs-planning', missingDecision: 'Select refresh behavior.'});
+
+        const system = yield* SystemInfo;
+        const canonicalRepo = yield* f.fs.realPath(f.repo);
+        const canonicalHome = yield* f.fs.realPath(f.home);
+        const config = {
+          ...f.config,
+          agentContextHome: canonicalHome,
+          manifestPath: f.path.join(canonicalHome, 'manifest.json'),
+        };
+        const testSystem = {...system, currentDirectory: () => canonicalRepo, homeDirectory: canonicalHome};
+        const expectedRunId = 'task-' + EffectString.slice(0, 48)(sha256HexSync('repo\nfixture-refresh'));
+        const installed = yield* applyDevSkills(config, 'install', {
+          agent: 'codex',
+        }).pipe(Effect.provideService(SystemInfo, testSystem));
+        expect(installed.applied).toBe(true);
+        const graphBlocked = yield* runNativeTaskStart(config, base).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        );
+        expect(graphBlocked).toMatchObject({failure: {code: 'evidence-unavailable'}});
+        expect(yield* readNativeWorkflowState(config, expectedRunId)).toBeUndefined();
+        const indexer = yield* CodeGraphIndexer;
+        expect((yield* indexer.index({cwd: canonicalRepo, threadnoteHome: canonicalHome})).snapshot.state).toBe(
+          'ready',
+        );
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, config);
+        const testFs = yield* FileSystem.FileSystem;
+        const testPath = yield* Path.Path;
+        let injectedPreparedRoot = false;
+        let checkedWrites = 0;
+        const interruptedStore = ResourceStore.of({
+          ...f.store,
+          writeChecked: <E, R>(
+            location: ResourceStoreLocation,
+            uri: string,
+            content: string,
+            options: ResourceStoreWriteOptions,
+            check: Effect.Effect<void, E, R>,
+          ) =>
+            f.store.writeChecked(location, uri, content, options, check).pipe(
+              Effect.tap(() => {
+                checkedWrites++;
+                if (injectedPreparedRoot) return Effect.void;
+                return readNativeWorkflowState(config, expectedRunId).pipe(
+                  Effect.provideService(FileSystem.FileSystem, testFs),
+                  Effect.provideService(Path.Path, testPath),
+                  Effect.orDie,
+                  Effect.map(state => {
+                    if (!state?.state.authoringSave) return false;
+                    const firstPrepared = EffectArray.findFirst(
+                      state.state.operations,
+                      operation => operation.status === 'prepared',
+                    );
+                    const last = state.state.operations[state.state.operations.length - 1];
+                    return (
+                      firstPrepared._tag === 'Some' &&
+                      firstPrepared.value === last &&
+                      last?.intent.artifactKey === 'author-root-plan' &&
+                      last.intent.role === 'authoring-root' &&
+                      last.intent.sourceRunId === expectedRunId
+                    );
+                  }),
+                  Effect.flatMap(isPreparedRoot => {
+                    if (!isPreparedRoot) return Effect.void;
+                    injectedPreparedRoot = true;
+                    return Effect.die(new Error('Synthetic lost acknowledgement after prepared compact root'));
+                  }),
+                );
+              }),
+            ),
+        });
+        const interrupted = yield* runNativeTaskStart(config, base).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.provideService(ResourceStore, interruptedStore),
+          Effect.result,
+        );
+        expect(interrupted._tag).toBe('Failure');
+        expect(injectedPreparedRoot).toBe(true);
+        const preparedState = yield* readNativeWorkflowState(config, expectedRunId);
+        expect(preparedState?.state.authoringSave).toBeDefined();
+        const pendingRoot = preparedState?.state.operations[preparedState.state.operations.length - 1];
+        expect(pendingRoot).toMatchObject({
+          status: 'prepared',
+          intent: {artifactKey: 'author-root-plan', role: 'authoring-root', sourceRunId: expectedRunId},
+        });
+        const writesAtFailure = checkedWrites;
+        const preparedStatePath = f.path.join(
+          canonicalHome,
+          'workflow-automations',
+          'native-v1',
+          expectedRunId + '.json',
+        );
+        const preparedBytes = yield* f.fs.readFileString(preparedStatePath);
+        const changedPendingIntent = yield* runNativeTaskStart(config, {
+          ...base,
+          intent: {...intent, desiredChange: 'Delete expired fixture data.'},
+        }).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.provideService(ResourceStore, interruptedStore),
+          Effect.result,
+        );
+        expect(changedPendingIntent).toMatchObject({failure: {code: 'pending-operation'}});
+        expect(yield* f.fs.readFileString(preparedStatePath)).toBe(preparedBytes);
+        expect(checkedWrites).toBe(writesAtFailure);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
+        const changedPendingSource = yield* runNativeTaskStart(config, base).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.provideService(ResourceStore, interruptedStore),
+          Effect.result,
+        );
+        expect(changedPendingSource._tag).toBe('Failure');
+        expect(yield* f.fs.readFileString(preparedStatePath)).toBe(preparedBytes);
+        expect(checkedWrites).toBe(writesAtFailure);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
+        const startResponse = object(
+          yield* mcp
+            .invokeTool('workflow_task_start', base)
+            .pipe(
+              Effect.provideService(SystemInfo, testSystem),
+              Effect.provideService(ResourceStore, interruptedStore),
+            ),
+        );
+        expect(checkedWrites).toBe(writesAtFailure);
+        expect(startResponse.isError).not.toBe(true);
+        const started = object(startResponse.structuredContent);
+        expect(started.status).toBe('awaiting-user-confirmation');
+        expect(typeof started.taskRef).toBe('string');
+        const runId = String(started.taskRef);
+        const statePath = f.path.join(canonicalHome, 'workflow-automations', 'native-v1', runId + '.json');
+        const savedState = yield* f.fs.readFileString(statePath);
+        const resumed = object(
+          yield* runNativeTaskStart(config, base).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+            Effect.provideService(ResourceStore, interruptedStore),
+          ),
+        );
+        expect(resumed.status).toBe('resumed');
+        expect(resumed.taskRef).toBe(runId);
+        expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
+
+        let cliResult: Record<string, unknown> | undefined;
+        const taskStart = makeNativeTaskStartCommand(options => {
+          const {eligibility, missingDecision, evidenceRefs, reviewRequired, reviewReason, ...fields} = options;
+          const cliIntent = {
+            title: fields.title,
+            currentBehavior: fields.currentBehavior,
+            desiredChange: fields.desiredChange,
+            affectedPaths: fields.affectedPaths,
+            acceptanceCriterion: fields.acceptanceCriterion,
+            verification: fields.verification,
+            eligibilityRationale: fields.eligibilityRationale,
+            eligibility:
+              eligibility === 'eligible'
+                ? {status: 'eligible' as const}
+                : {status: 'needs-planning' as const, missingDecision: missingDecision ?? '', evidenceRefs},
+            review: {required: reviewRequired, reason: reviewReason},
+          };
+          return runNativeTaskStart(config, {
+            callerCwd: fields.callerCwd,
+            featureName: fields.featureName,
+            ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
+            ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
+            intent: cliIntent,
+          }).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+            Effect.tap(value => Effect.sync(() => (cliResult = object(value)))),
+            Effect.asVoid,
+          );
+        });
+        const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([taskStart]));
+        const runCli = Command.runWith(cli, {version: 'fixture'});
+        yield* runCli([
+          'task-start',
+          '--caller-cwd',
+          f.repo,
+          '--feature-name',
+          'Fixture refresh',
+          '--installation-target',
+          'codex',
+          '--title',
+          intent.title,
+          '--current-behavior',
+          intent.currentBehavior,
+          '--desired-change',
+          intent.desiredChange,
+          '--affected-path',
+          'source.ts',
+          '--acceptance',
+          intent.acceptanceCriterion,
+          '--verification',
+          intent.verification,
+          '--eligibility-rationale',
+          intent.eligibilityRationale,
+          '--eligibility',
+          'eligible',
+          '--review-reason',
+          intent.review.reason,
+        ]).pipe(Effect.provideService(SystemInfo, testSystem));
+        expect(cliResult).toMatchObject({status: 'resumed', taskRef: runId});
+        expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
+
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
+        const replayAfterSourceDrift = object(
+          yield* runNativeTaskStart(config, base).pipe(Effect.provideService(SystemInfo, testSystem)),
+        );
+        expect(replayAfterSourceDrift.status).toBe('resumed');
+        expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
+
+        const foreignRepo = f.path.join(f.root, 'foreign');
+        yield* f.fs.makeDirectory(foreignRepo);
+        yield* f.fs.writeFileString(f.path.join(foreignRepo, 'source.ts'), 'export const fixture = true;\n');
+        yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
+        yield* runCommandEffect('git', ['-C', foreignRepo, 'add', 'source.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          foreignRepo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Foreign source',
+        ]);
+        const foreignResume = yield* runNativeTaskStart(config, {
+          ...base,
+          callerCwd: foreignRepo,
+          taskRef: runId,
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+        expect(foreignResume).toMatchObject({failure: {code: 'task-identity-conflict'}});
+        expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
+
+        const changed = yield* runNativeTaskStart(config, {
+          ...base,
+          intent: {...intent, desiredChange: 'Delete expired fixture data.'},
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+        expect(changed).toMatchObject({failure: {code: 'task-intent-conflict'}});
+        expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
+      }).pipe(run, provideTestLayer(cliTestLayer)),
+  );
+
   effectIt.effect('saves a compact draft, records exact user approval and initializes the same task facade', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

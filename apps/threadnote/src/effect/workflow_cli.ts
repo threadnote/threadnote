@@ -84,6 +84,50 @@ export function makeNativeTaskViewCommand<E, R>(
   ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
 }
 
+export function makeNativeTaskStartCommand<E, R>(
+  handler: (options: {
+    readonly callerCwd: string;
+    readonly featureName: string;
+    readonly installationTarget?: string;
+    readonly taskRef?: string;
+    readonly title: string;
+    readonly currentBehavior: string;
+    readonly desiredChange: string;
+    readonly affectedPaths: readonly string[];
+    readonly acceptanceCriterion: string;
+    readonly verification: string;
+    readonly eligibilityRationale: string;
+    readonly eligibility: 'eligible' | 'needs-planning';
+    readonly missingDecision?: string;
+    readonly evidenceRefs: readonly string[];
+    readonly reviewRequired: boolean;
+    readonly reviewReason: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  return Command.make(
+    'task-start',
+    {
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task'),
+      featureName: requiredString('feature-name', 'Stable feature name used to resume this task'),
+      installationTarget: optionalString('installation-target', 'Installed Threadnote host target for a new task'),
+      taskRef: optionalString('task-ref', 'Opaque task reference returned by a previous start'),
+      title: requiredString('title', 'Task title'),
+      currentBehavior: requiredString('current-behavior', 'Current behavior'),
+      desiredChange: requiredString('desired-change', 'Desired behavior'),
+      affectedPaths: repeatedString('affected-path', 'Repository-relative source path; repeat for each path'),
+      acceptanceCriterion: requiredString('acceptance', 'Acceptance criterion'),
+      verification: requiredString('verification', 'How the acceptance criterion will be verified'),
+      eligibilityRationale: requiredString('eligibility-rationale', 'Human-authored bounded-fix eligibility rationale'),
+      eligibility: requiredChoice('eligibility', ['eligible', 'needs-planning'], 'Semantic bounded-fix eligibility'),
+      missingDecision: optionalString('missing-decision', 'Unresolved decision that requires expanded planning'),
+      evidenceRefs: repeatedString('evidence-ref', 'Evidence URI for needs-planning; repeat as needed'),
+      reviewRequired: boolean('review-required', 'Whether an independent authoring review is required'),
+      reviewReason: requiredString('review-reason', 'Why review is or is not required'),
+    },
+    handler,
+  ).pipe(Command.withDescription('Start or resume a bounded task from semantic intent'));
+}
+
 export function makeNativeTaskActionCommands<E, R>(
   workHandler: (options: {
     readonly runId: string;
