@@ -203,10 +203,25 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       fail('The pre-implementation baseline lost its phase or preserved-work manifest.');
   }
   const capturedSnapshots = new Set<string>();
+  const latestSnapshotByPhase = new Map<string, string>();
   for (const {snapshot, incoming} of runtime.snapshots) {
     const baseline = runtime.baselines[snapshot.phaseId];
     if (!baseline || baseline.tree !== snapshot.baseTree || baseline.repo !== snapshot.repo)
       fail('Snapshot baseline differs from its pre-implementation source pin.');
+    if (snapshot.unreviewedSupersession) {
+      const prior = snapshot.supersedes ? snapshots.get(snapshot.supersedes) : undefined;
+      if (
+        !prior ||
+        latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
+        prior.snapshot.phaseId !== snapshot.phaseId ||
+        prior.snapshot.phaseHash !== snapshot.phaseHash ||
+        prior.snapshot.tree === snapshot.tree ||
+        prior.snapshot.baseTree !== snapshot.baseTree ||
+        reviews.has(prior.snapshot.snapshotId) ||
+        !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim)
+      )
+        fail('Unreviewed supersession must retain the latest changed-source snapshot without an accepted review.');
+    }
     if (snapshot.baseRequalification) {
       const receipt = snapshot.baseRequalification;
       const predecessor = snapshot.previous ?? snapshot.supersedes;
@@ -308,10 +323,13 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         snapshot.previous ||
         prior.phaseId !== snapshot.phaseId ||
         prior.baseTree !== snapshot.baseTree ||
-        prior.phaseHash === snapshot.phaseHash
+        (snapshot.unreviewedSupersession
+          ? prior.phaseHash !== snapshot.phaseHash
+          : prior.phaseHash === snapshot.phaseHash)
       )
         fail('Material review restart lacks its historical source boundary.');
     }
+    latestSnapshotByPhase.set(snapshot.phaseId, snapshot.snapshotId);
   }
   for (const {snapshotId, report} of runtime.reviews) {
     const snapshot = snapshots.get(snapshotId)?.snapshot;
@@ -319,7 +337,8 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     const predecessor = snapshot.previous ?? snapshot.supersedes;
     const previous = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
     const priorReport = previous ? reviews.get(previous.snapshotId) : undefined;
-    if (previous && !priorReport) fail('Review history lost its prior finding ledger.');
+    if (previous && !priorReport && !snapshot.unreviewedSupersession)
+      fail('Review history lost its prior finding ledger.');
     validateNativeCycleReviewHistory(
       snapshot,
       report,

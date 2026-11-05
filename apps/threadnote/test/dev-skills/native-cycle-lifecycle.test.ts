@@ -105,6 +105,168 @@ describe('native cycle lifecycle', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('explicitly supersedes only the latest changed unreviewed snapshot and requires a full review', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      const firstResult = yield* f.mutate('snapshot', {phaseId: 'one', snapshotId: 'unreviewed-one'});
+      const first = object(object(firstResult.snapshot).snapshot);
+      const initialInvalid = yield* f.mutate('validate-review', {
+        snapshotId: first.snapshotId,
+        attemptId: 'first-unreviewed-invalid-attempt',
+        report: {
+          snapshotId: first.snapshotId,
+          phaseHash: first.phaseHash,
+          snapshotTree: first.tree,
+          status: 'complete',
+          mode: 'full',
+          selected: ['correctness'],
+          lanes: [{name: 'correctness', status: 'complete'}],
+          findings: [],
+        },
+      });
+      expect(initialInvalid).toMatchObject({status: 'error', code: 'invalid-cycle-review'});
+      const reviewReport = (snapshot: Record<string, unknown>, mode: 'full' | 'incremental') => ({
+        snapshotId: snapshot.snapshotId,
+        phaseHash: snapshot.phaseHash,
+        snapshotTree: snapshot.tree,
+        status: 'complete',
+        mode,
+        selected: ['correctness', 'simplicity'],
+        lanes: [
+          {name: 'correctness', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+        findings: [],
+      });
+      const changedSource = 'export const fixture = "corrected before review";\n';
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), changedSource);
+      const beforeRefusals = yield* f.fs.readFileString(f.statePath());
+      const ordinary = yield* f
+        .mutate('snapshot', {
+          phaseId: 'one',
+          snapshotId: 'ordinary-retry',
+          previous: first.snapshotId,
+        })
+        .pipe(Effect.result);
+      expect(ordinary).toMatchObject({failure: {code: 'review-pending'}});
+      const staleReview = yield* f
+        .mutate('validate-review', {
+          snapshotId: first.snapshotId,
+          attemptId: 'cannot-review-old-source',
+          report: reviewReport(first, 'full'),
+        })
+        .pipe(Effect.result);
+      expect(staleReview).toMatchObject({failure: {code: 'source-drift'}});
+      const foreign = yield* f
+        .mutate('snapshot', {
+          phaseId: 'one',
+          snapshotId: 'foreign-predecessor',
+          previous: 'not-a-retained-snapshot',
+          supersedeUnreviewed: true,
+          reason: 'Attempt to select an unretained predecessor.',
+        })
+        .pipe(Effect.result);
+      expect(foreign).toMatchObject({failure: {code: 'review-history'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRefusals);
+
+      const reason = 'Corrected admitted files before any review was accepted; require a new full review.';
+      const recoveryRequest = {
+        phaseId: 'one',
+        snapshotId: 'corrected-candidate-two',
+        previous: first.snapshotId,
+        supersedeUnreviewed: true,
+        reason,
+      };
+      const recovered = yield* f.mutate('snapshot', recoveryRequest);
+      const second = object(object(recovered.snapshot).snapshot);
+      expect(second).toMatchObject({
+        snapshotId: 'corrected-candidate-two',
+        supersedes: first.snapshotId,
+        unreviewedSupersession: {reason},
+        phaseHash: first.phaseHash,
+        baseTree: first.baseTree,
+      });
+      expect(second.tree).not.toBe(first.tree);
+      expect(second.previous).toBeUndefined();
+      const afterRecovery = yield* f.fs.readFileString(f.statePath());
+      expect(yield* f.mutate('snapshot', recoveryRequest)).toMatchObject({status: 'ok'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterRecovery);
+      const changedIntent = yield* f
+        .mutate('snapshot', {...recoveryRequest, reason: 'Changed intent.'})
+        .pipe(Effect.result);
+      expect(changedIntent).toMatchObject({failure: {code: 'snapshot-conflict'}});
+      const stalePredecessor = yield* f
+        .mutate('snapshot', {
+          ...recoveryRequest,
+          snapshotId: 'stale-old-predecessor',
+        })
+        .pipe(Effect.result);
+      expect(stalePredecessor).toMatchObject({failure: {code: 'review-history'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterRecovery);
+
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "drifted again";\n');
+      const staleCandidateReview = yield* f
+        .mutate('validate-review', {
+          snapshotId: second.snapshotId,
+          attemptId: 'candidate-two-stale-review',
+          report: reviewReport(second, 'full'),
+        })
+        .pipe(Effect.result);
+      expect(staleCandidateReview).toMatchObject({failure: {code: 'source-drift'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterRecovery);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), changedSource);
+
+      const incremental = yield* f.mutate('validate-review', {
+        snapshotId: second.snapshotId,
+        attemptId: 'candidate-two-incremental-refused',
+        report: reviewReport(second, 'incremental'),
+      });
+      expect(incremental).toMatchObject({status: 'error', code: 'invalid-cycle-review'});
+      const full = yield* f.mutate('validate-review', {
+        snapshotId: second.snapshotId,
+        attemptId: 'candidate-two-full-review',
+        report: reviewReport(second, 'full'),
+      });
+      expect(full.status).toBe('ok');
+      const finalEnvelope = object(JSON.parse(yield* f.fs.readFileString(f.statePath())));
+      const runtime = decodeNativeCycleRuntime(finalEnvelope.cycle);
+      expect(runtime.snapshots).toHaveLength(2);
+      expect(runtime.snapshots[0]?.snapshot).toEqual(first);
+      expect(runtime.snapshots[1]?.snapshot).toEqual(second);
+      expect(EffectArray.map(runtime.reviews, entry => entry.report.mode)).toEqual(['full']);
+      expect(EffectArray.map(runtime.attempts, entry => entry.id)).toEqual([
+        'first-unreviewed-invalid-attempt',
+        'candidate-two-incremental-refused',
+        'candidate-two-full-review',
+      ]);
+      expect(EffectArray.map(runtime.attempts, entry => entry.status)).toEqual(['invalid', 'invalid', 'accepted']);
+    }).pipe(run),
+  );
+
+  effectIt.effect('does not allow explicit supersession to skip an accepted predecessor review', () =>
+    Effect.gen(function* () {
+      const f = yield* reviewed();
+      yield* f.mutate('validate-review', {
+        snapshotId: f.snapshot.snapshotId,
+        attemptId: 'accepted-predecessor-review',
+        report: f.report,
+      });
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "after review";\n');
+      const before = yield* f.fs.readFileString(f.statePath());
+      const refused = yield* f
+        .mutate('snapshot', {
+          phaseId: 'one',
+          snapshotId: 'accepted-predecessor-bypass',
+          previous: f.snapshot.snapshotId,
+          supersedeUnreviewed: true,
+          reason: 'This accepted review must not be bypassed.',
+        })
+        .pipe(Effect.result);
+      expect(refused).toMatchObject({failure: {code: 'review-history'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(run),
+  );
+
   effectIt.effect('checks declared-base deletions even when they cancel out of the original baseline diff', () =>
     Effect.gen(function* () {
       const f = yield* fixture();

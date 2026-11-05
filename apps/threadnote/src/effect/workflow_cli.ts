@@ -185,6 +185,12 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly bindings?: unknown;
     readonly review?: unknown;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  supersedeUnreviewedSnapshotHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const work = Command.make(
     'work',
@@ -267,6 +273,24 @@ export function makeNativeTaskActionCommands<E, R>(
     },
     snapshotHandler,
   ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
+  const supersedeUnreviewedSnapshot = Command.make(
+    'supersede-unreviewed-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact immutable reference for the unreviewed source snapshot'),
+      reason: requiredString('reason', 'Why corrected source supersedes the unreviewed snapshot'),
+    },
+    options =>
+      supersedeUnreviewedSnapshotHandler
+        ? supersedeUnreviewedSnapshotHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'This task-action command has no supersession handler.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Retain an unreviewed snapshot and require a full review of changed source'));
   const recordReview = Command.make(
     'record-review',
     {
@@ -431,6 +455,7 @@ export function makeNativeTaskActionCommands<E, R>(
     Command.withSubcommands([
       work,
       recordSnapshot,
+      supersedeUnreviewedSnapshot,
       recordReview,
       recordValidation,
       deliverLocal,

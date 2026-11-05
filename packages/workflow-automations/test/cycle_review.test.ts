@@ -1,8 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {validateNativeCycleReview, validateNativeCycleReviewHistory} from '../src/cycle_review.js';
+import {NativeCycleSnapshotSchema} from '../src/cycle_review.js';
 import type {NativeCycleReview, NativeCycleSnapshot} from '../src/cycle_review.js';
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 import * as Effect2 from 'effect';
 
 const hash = (char: string) => Effect2.pipe(char, EffectString.repeat(64));
@@ -185,6 +186,32 @@ describe('native cycle review validation', () => {
       expect(caught(() => validateNativeCycleReview(current, input))).toMatchObject({
         code: 'invalid-cycle-review',
       });
+  });
+
+  it('requires a full independent review for an explicitly superseding unreviewed source', () => {
+    const recovered = snapshot({
+      previous: undefined,
+      previousTree: undefined,
+      supersedes: priorSnapshot.snapshotId,
+      unreviewedSupersession: {reason: 'Corrected the admitted source before any review was accepted.'},
+      tree: objectId('f'),
+    });
+    const complete = review({mode: 'full', findings: [finding({state: 'new'})]}, recovered);
+    expect(validateNativeCycleReview(recovered, complete).summary.blockingIssueCount).toBe(1);
+    expect(caught(() => validateNativeCycleReview(recovered, {...complete, mode: 'incremental'}))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    expect(caught(() => validateNativeCycleReview(recovered, complete, previous))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    expect(
+      caught(() =>
+        Schema.decodeSync(NativeCycleSnapshotSchema)(snapshot({...recovered, unreviewedSupersession: {reason: '   '}})),
+      ),
+    ).toMatchObject({_tag: 'SchemaError'});
+    expect(
+      caught(() => Schema.decodeSync(NativeCycleSnapshotSchema)(snapshot({...recovered, supersedes: undefined}))),
+    ).toMatchObject({_tag: 'SchemaError'});
   });
 
   it.each(['full', 'incremental'] as const)(

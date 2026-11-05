@@ -104,6 +104,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   phaseId: Schema.optionalKey(id),
   snapshotId: Schema.optionalKey(id),
   previous: Schema.optionalKey(id),
+  supersedeUnreviewed: Schema.optionalKey(Schema.Boolean),
   acceptedHead: Schema.optionalKey(text),
   baseRequalification: Schema.optionalKey(NativeCycleBaseRequalificationInputSchema),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeInputSchema),
@@ -151,6 +152,8 @@ export const nativeCycleSemanticPrerequisites = (command: string) => ({
     ? {
         phaseId: 'A phase from this plan.',
         snapshotId: 'A fresh immutable identifier.',
+        supersedeUnreviewed:
+          'Only for a changed source tree whose latest predecessor is still unreviewed: provide its exact previous snapshotId and a concrete reason. The predecessor and all attempts remain retained; the new snapshot requires a complete full review. Reviewed predecessors cannot use this recovery path.',
         ordinaryMergeQualificationV1:
           'Use protocolVersion2 only for an ordinary-merge snapshot, with previous, exact acceptedHead, reason, userAuthority, exact current planDocumentHash and complete explicit phaseOwnedPaths. Requires clean committed source, an ancestry-preserving advanced base and full current-base phase review. Produces manifest version2; legacy readers must reject it. Historical base identity comes from the retained predecessor, including a same-label moved base.',
         baseRequalification:
@@ -288,6 +291,8 @@ export const runNativeCycle = <R>(
       );
     if (request.baseRequalification && request.command !== 'snapshot')
       return yield* fail('invalid-request', 'Base requalification belongs only to a snapshot request.');
+    if (request.supersedeUnreviewed && request.command !== 'snapshot')
+      return yield* fail('invalid-request', 'Unreviewed supersession belongs only to a snapshot request.');
     if (request.command === 'schema') {
       const budget = request.maxBytes ?? 16_384;
       if (budget < nativeCycleDetailMinimumBytes)
@@ -638,6 +643,14 @@ export const runNativeCycle = <R>(
                 'snapshot-conflict',
                 'Keep the immutable base-requalification witness, predecessor, reason and authority.',
               );
+            if (
+              ((request.supersedeUnreviewed || existing.snapshot.unreviewedSupersession !== undefined) &&
+                request.supersedeUnreviewed !== (existing.snapshot.unreviewedSupersession !== undefined)) ||
+              (request.supersedeUnreviewed &&
+                (existing.snapshot.supersedes !== request.previous ||
+                  existing.snapshot.unreviewedSupersession?.reason !== request.reason))
+            )
+              return yield* fail('snapshot-conflict', 'Replay the exact unreviewed-supersession intent.');
             yield* currentSnapshot(repo, existing.snapshot, request.acceptedHead, selected);
             return {status: 'ok', revision: stored.revision, snapshot: existing};
           }
@@ -649,6 +662,22 @@ export const runNativeCycle = <R>(
           const phaseSnapshots = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === selected.id);
           const last = phaseSnapshots.at(-1)?.snapshot;
           const reviewed = new Set(EffectArray.map(runtime.reviews, item => item.snapshotId));
+          if (
+            request.supersedeUnreviewed &&
+            (!prior ||
+              !last ||
+              prior.snapshotId !== last.snapshotId ||
+              reviewed.has(prior.snapshotId) ||
+              state.phases[selected.id].status !== 'pending' ||
+              prior.phaseHash !== state.phases[selected.id].phaseHash ||
+              !EffectString.trim(request.reason ?? '') ||
+              request.baseRequalification !== undefined ||
+              request.ordinaryMergeQualificationV1 !== undefined)
+          )
+            return yield* fail(
+              'review-history',
+              'Explicitly supersede only the latest unreviewed snapshot under the unchanged phase contract.',
+            );
           if (last && prior?.snapshotId !== last.snapshotId) {
             const priorIndex = EffectOption.getOrElse(
               EffectArray.findFirstIndex(phaseSnapshots, item => item.snapshot.snapshotId === prior?.snapshotId),
@@ -670,11 +699,16 @@ export const runNativeCycle = <R>(
               );
           } else if (!last && request.previous)
             return yield* fail('review-history', 'Continue from this phase’s latest immutable snapshot.');
-          if (prior && !reviewed.has(prior.snapshotId))
+          if (prior && !reviewed.has(prior.snapshotId) && !request.supersedeUnreviewed)
             return yield* fail('review-pending', 'Record the previous review before the next source iteration.');
           const baseline = runtime.baselines[selected.id];
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');
           const captured = yield* captureNativeCycleSource(repo, baseline.tree);
+          if (request.supersedeUnreviewed && prior?.tree === captured.tree)
+            return yield* fail(
+              'review-history',
+              'The superseding source tree must differ from the unreviewed snapshot.',
+            );
           if (
             request.base &&
             Effect2.pipe(yield* git(repo, ['rev-parse', request.base + '^{tree}']), EffectString.trim) !== baseline.tree
@@ -826,9 +860,14 @@ export const runNativeCycle = <R>(
             declaredBaseHead: scope.declaredBaseHead,
             scopeFiles: scope.scopeFiles,
             ...(prior
-              ? materialRestart
-                ? {supersedes: prior.snapshotId}
-                : {previous: prior.snapshotId, previousTree: prior.tree}
+              ? request.supersedeUnreviewed
+                ? {
+                    supersedes: prior.snapshotId,
+                    unreviewedSupersession: {reason: request.reason!},
+                  }
+                : materialRestart
+                  ? {supersedes: prior.snapshotId}
+                  : {previous: prior.snapshotId, previousTree: prior.tree}
               : {}),
             ...(request.acceptedHead ? {acceptedHead: request.acceptedHead} : {}),
             pinnedRef:

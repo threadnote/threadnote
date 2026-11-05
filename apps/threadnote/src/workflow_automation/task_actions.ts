@@ -112,6 +112,13 @@ const requestSchema = Schema.Union([
     workRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
+    command: Schema.Literal('supersede-unreviewed-snapshot'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    snapshotRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
     command: Schema.Literal('record-review'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -801,7 +808,10 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     if (!stored.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
     const runtime = stored.state.cycle;
     const state = runtime.state;
-    if (state.plan.delivery !== 'local' || state.plan.phases.length !== 1)
+    if (
+      request.command !== 'supersede-unreviewed-snapshot' &&
+      (state.plan.delivery !== 'local' || state.plan.phases.length !== 1)
+    )
       return yield* fail('task-scope', 'Task actions support one approved local-delivery phase.');
 
     if (request.command === 'finish') {
@@ -1512,6 +1522,99 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         payloadDigest: sha256HexSync(JSON.stringify(request.packet)),
       });
       return {status: 'ready', phaseId, workRef, packet};
+    }
+
+    if (request.command === 'supersede-unreviewed-snapshot') {
+      const ref = decodeNativeTaskActionRef(request.snapshotRef);
+      if (
+        !ref ||
+        ref.kind !== 'snapshot' ||
+        ref.runId !== request.runId ||
+        ref.generationHash !== sha256HexSync(stored.state.generation) ||
+        !ref.phaseId ||
+        !ref.phaseHash ||
+        !ref.snapshotId ||
+        !ref.sourceHead ||
+        !ref.sourceTree ||
+        !ref.baselineHead ||
+        !ref.baselineTree ||
+        !ref.baselineRef
+      )
+        return yield* fail('invalid-snapshot-ref', 'Use the exact reference for the unreviewed snapshot to supersede.');
+      const entry = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === ref.snapshotId),
+      );
+      if (state.plan.delivery !== 'local' && state.plan.delivery !== 'pr')
+        return yield* fail('task-scope', 'Snapshot recovery supports approved local or PR delivery plans.');
+      const snapshotId = `superseded-${sha256HexSync(stableJson([ref.snapshotId, request.reason]))}`;
+      const alreadyAdmitted = EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === snapshotId);
+      const exactReplay =
+        alreadyAdmitted._tag === 'Some' &&
+        alreadyAdmitted.value.snapshot.supersedes === ref.snapshotId &&
+        alreadyAdmitted.value.snapshot.unreviewedSupersession?.reason === request.reason;
+      const baseline = runtime.baselines[ref.phaseId];
+      const latest = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === ref.phaseId).at(-1);
+      if (
+        !entry ||
+        entry.snapshot.phaseId !== ref.phaseId ||
+        entry.snapshot.phaseHash !== ref.phaseHash ||
+        entry.snapshot.head !== ref.sourceHead ||
+        entry.snapshot.tree !== ref.sourceTree ||
+        !baseline ||
+        baseline.head !== ref.baselineHead ||
+        baseline.tree !== ref.baselineTree ||
+        baseline.pinnedRef !== ref.baselineRef ||
+        state.phases[ref.phaseId]?.phaseHash !== ref.phaseHash ||
+        state.phases[ref.phaseId]?.status !== 'pending' ||
+        (latest?.snapshot.snapshotId !== ref.snapshotId && !exactReplay)
+      )
+        return yield* fail('stale-snapshot-ref', 'The exact snapshot is no longer the current phase predecessor.');
+      if (EffectArray.some(runtime.reviews, item => item.snapshotId === ref.snapshotId))
+        return yield* fail('review-history', 'Only an unreviewed snapshot can use supersession recovery.');
+      const currentTask = yield* readNativeTaskView(config, {
+        runId: request.runId,
+        callerCwd: checkout,
+        role: 'review',
+      });
+      if (
+        currentTask.revision !== stored.revision ||
+        currentTask.status !== 'ready' ||
+        currentTask.next.action !== 'review' ||
+        currentTask.next.phaseId !== ref.phaseId ||
+        (currentTask.next.snapshotId !== ref.snapshotId &&
+          !(exactReplay && currentTask.next.snapshotId === snapshotId)) ||
+        currentTask.phase?.snapshot?.snapshotId !== currentTask.next.snapshotId
+      )
+        return yield* fail(
+          'stale-snapshot-ref',
+          'Recovery requires the exact unreviewed snapshot on the current phase review card.',
+        );
+      const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
+      if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
+      const result = unwrapCycle(
+        yield* inCheckout(
+          runWorkflowAutomation(
+            config,
+            cycleRequest(stored, {
+              command: 'snapshot',
+              phaseId: ref.phaseId,
+              snapshotId,
+              previous: ref.snapshotId,
+              supersedeUnreviewed: true,
+              acceptedHead: head,
+              reason: request.reason,
+              expectedRevision: stored.revision,
+            }),
+          ),
+          checkout,
+        ),
+      );
+      return {
+        status: 'recorded',
+        replayed: alreadyAdmitted._tag === 'Some',
+        snapshot: result.snapshot,
+        snapshotRef: snapshotRef(ref, result.snapshot),
+      };
     }
 
     const ref = decodeNativeTaskActionRef(request.workRef);
