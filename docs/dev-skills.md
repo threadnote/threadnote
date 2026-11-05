@@ -13,6 +13,8 @@ Invoke a skill using your agent host's skill picker or supported invocation synt
 
 The dev-cycle orchestrator requires an independent background correctness review and a separate simplicity review by a distinct agent. The orchestrator does not count itself as a reviewer. Simplicity checks duplication, unnecessary complexity and simpler equivalent designs; additional specialist lanes depend on the change and its risks.
 
+Team feature-memory publication is author-owned (`dev-cycle`). Independent review of someone else's PR may recall shared knowledge for alignment; it must not publish feature memory or ask which team to share to. Authors refresh and publish when they land the change or address review that alters durable contracts.
+
 ## Install and manage
 
 Standard agent setup installs these workflows by default, including personal Codex and Cursor cloud bootstrap on supported platforms. Pass `--no-dev-skills` during setup to keep them disabled. Repeating setup or repairing an integration respects that choice; explicit `dev-skills install` enables them again.
