@@ -223,6 +223,7 @@ const CORE_TOOL_NAMES = [
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
+  'workflow_task_view',
   'context_health',
   'context_health_aggregate',
   'context_health_schedule',
@@ -634,12 +635,23 @@ describe('Threadnote MCP toolsets', () => {
         const status = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'memory_write_status'),
         );
-        const priorCore = EffectArray.filter(tools.tools, tool => tool.name !== 'memory_write_status');
-        // Preserve the existing catalog budget; bound the required owned-save status addition separately.
+        const workflowTaskView = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_view'),
+        );
+        expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
+        expect(workflowTaskView).toBeDefined();
+        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        const priorCore = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'memory_write_status' && tool.name !== 'workflow_task_view',
+        );
+        const withoutWorkflowTaskView = EffectArray.filter(tools.tools, tool => tool.name !== 'workflow_task_view');
+        // Preserve the existing core and total catalog budgets; bound each required addition separately.
         expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
         expect(status).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(36_500);
+        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(37_200);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
