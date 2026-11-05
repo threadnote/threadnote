@@ -367,7 +367,7 @@ describe('built self-contained distribution', () => {
       'native-e2e.md',
     );
     expect(await runCli(['doctor'])).toMatch(
-      /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot)/,
+      /WARN\s+vector recall index:.*(?:queued|deferred until a safe background capacity slot|deferred until spare CPU capacity)/,
     );
     expect(await activeVectorRevision()).toBe(initialVectorRevision);
     const rebuilt = await runCli(['index', 'rebuild']);
