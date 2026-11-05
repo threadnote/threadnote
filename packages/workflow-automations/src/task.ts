@@ -7,6 +7,7 @@ import {
   pipe as EffectPipe,
 } from 'effect';
 import {nextNativeCycle as cycleNext} from './cycle.js';
+import {NativeCycleDeliverySchema} from './cycle.js';
 import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
@@ -32,6 +33,7 @@ export interface NativeTaskView {
     readonly snapshotId?: string;
     readonly reason?: string;
   };
+  readonly taskRef?: string;
   readonly role?: NativeTaskRole;
   readonly phase?: {
     readonly id: string;
@@ -77,11 +79,12 @@ export interface NativeTaskProjectionOptions {
 
 export const NativeTaskActionRefSchema = Schema.Struct({
   version: Schema.Literal(1),
-  kind: Schema.Literals(['work', 'snapshot', 'validation', 'delivery', 'closeout-prepare', 'closeout-finish']),
+  kind: Schema.Literals(['task', 'work', 'snapshot', 'validation', 'delivery', 'closeout-prepare', 'closeout-finish']),
   runId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)),
   generationHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   stateRevision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  taskAction: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
   phaseHash: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   baselineHead: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
   baselineTree: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
@@ -92,11 +95,45 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   attemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   previousAttemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   payloadDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  delivery: Schema.optionalKey(NativeCycleDeliverySchema),
+  watchId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  consumerId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  wakeupId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  eventKey: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[0-9]+:[0-9]+$/u)),
+  ),
+  watchAttemptId: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu)),
+  ),
+  watchDeliveryId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(32))),
+  watchEventId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(384))),
   closeoutRevision: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)))),
   transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
 });
 export type NativeTaskActionRef = typeof NativeTaskActionRefSchema.Type;
+
+export function nativeTaskCardRef(
+  state: NativeWorkflowState,
+  revision: string,
+  taskAction: string,
+  phaseId?: string,
+  snapshotId?: string,
+  payloadDigest?: string,
+): string {
+  const phaseHash = phaseId ? state.cycle?.state.phases[phaseId]?.phaseHash : undefined;
+  return encodeNativeTaskActionRef({
+    version: 1,
+    kind: 'task',
+    runId: state.runId,
+    generationHash: sha256HexSync(state.generation),
+    ...(/^[a-f0-9]{64}$/u.test(revision) ? {stateRevision: revision} : {}),
+    taskAction,
+    ...(phaseId && phaseHash ? {phaseId, phaseHash} : {}),
+    ...(snapshotId ? {snapshotId} : {}),
+    ...(payloadDigest ? {payloadDigest} : {}),
+  });
+}
 
 const encodeOpaqueRef = (value: string): string => {
   const binary = EffectArray.join(
@@ -272,6 +309,7 @@ export function projectNativeTaskView(
       featureId: state.featureId,
       objective: 'Reconcile this cycle to its current approved plan.',
       next: {action: 'reconcile-plan', reason: options.planDrift},
+      taskRef: nativeTaskCardRef(state, revision, 'reconcile-plan'),
       ...(options.role ? {role: options.role} : {}),
       page: {offset, limit: pageSize},
       counts: {scope: 0, acceptance: 0, acceptanceRefs: 0, snapshotFiles: 0, snapshotScopeFiles: 0},
@@ -290,6 +328,7 @@ export function projectNativeTaskView(
       featureId: state.featureId,
       objective: state.title ?? `Continue workflow ${state.featureId}`,
       next: {action: 'initialize-cycle', reason: 'This run has no initialized implementation cycle.'},
+      taskRef: nativeTaskCardRef(state, revision, 'initialize-cycle'),
       ...(options.role ? {role: options.role} : {}),
       page: {offset, limit: pageSize},
       counts: {scope: 0, acceptance: 0, acceptanceRefs: 0, snapshotFiles: 0, snapshotScopeFiles: 0},
@@ -456,5 +495,18 @@ export function projectNativeTaskView(
     counts,
     missingInputs,
   };
-  return view;
+  return {
+    ...view,
+    ...(next.action === 'complete'
+      ? {}
+      : {
+          taskRef: nativeTaskCardRef(
+            state,
+            revision,
+            next.action,
+            next.phaseId,
+            'snapshotId' in next ? next.snapshotId : undefined,
+          ),
+        }),
+  };
 }

@@ -84,6 +84,161 @@ export function makeNativeTaskViewCommand<E, R>(
   ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
 }
 
+export function makeNativeTaskPrDeliveryCommand<E, R>(
+  handler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly validationRef: string;
+    readonly commitEvidence: string;
+    readonly pr: unknown;
+    readonly publication: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  return Command.make(
+    'deliver-pr',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
+      commitEvidence: requiredString('commit-evidence', 'Actual verified PR commit evidence'),
+      pr: requiredString('pr', 'Physical PR metadata as JSON'),
+      publication: requiredString('publication', 'Actual publication authority input as JSON'),
+    },
+    options =>
+      Effect.try({
+        try: () => ({pr: JSON.parse(options.pr) as unknown, publication: JSON.parse(options.publication) as unknown}),
+        catch: () =>
+          WorkflowAutomationError.make({
+            code: 'invalid-request',
+            message: 'PR and publication inputs must be valid JSON.',
+          }),
+      }).pipe(Effect.flatMap(value => handler({...options, ...value}))),
+  ).pipe(
+    Command.withDescription('Verify a current approved PR delivery and return the next watch card when it is open'),
+  );
+}
+
+export function makeNativeTaskPrWatchCommand<E, R>(
+  handler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly validationRef: string;
+    readonly deliveryRef: string;
+    readonly operation:
+      'start' | 'inspect' | 'relay' | 'disposition' | 'ack' | 'work' | 'work-disposition' | 'stop' | 'complete';
+    readonly host?: 'codex' | 'cursor-cli';
+    readonly executable?: string;
+    readonly hostReference?: string;
+    readonly workspace?: string;
+    readonly takeover?: boolean;
+    readonly recoverWakeup?: boolean;
+    readonly noticeRef?: string;
+    readonly watchDeliveryRef?: string;
+    readonly dispositionEventRefs: readonly string[];
+    readonly dispositionStatuses: readonly string[];
+    readonly dispositionReasons: readonly string[];
+    readonly dispositionEvidence: readonly string[];
+    readonly wakeup?: unknown;
+    readonly dispositions?: readonly unknown[];
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  return Command.make(
+    'watch-pr',
+    {
+      runId: requiredString('run-id', 'Native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
+      validationRef: requiredString('validation-ref', 'Current opaque validation reference'),
+      deliveryRef: requiredString('delivery-ref', 'Opaque open PR delivery reference'),
+      operation: requiredChoice(
+        'operation',
+        ['start', 'inspect', 'relay', 'disposition', 'ack', 'work', 'work-disposition', 'stop', 'complete'],
+        'Task-bound watch operation',
+      ),
+      host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
+      executable: optionalString('host-executable', 'Absolute registered host executable'),
+      hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
+      workspace: optionalString('workspace', 'Cursor workspace path'),
+      noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      watchDeliveryRef: optionalString('watch-delivery-ref', 'Opaque current event delivery returned by relay'),
+      takeover: boolean('takeover', 'Explicitly take over an expired task watch consumer'),
+      recoverWakeup: boolean('recover-wakeup', 'Explicitly recover the owned ambiguous host wakeup'),
+      dispositionEventRefs: repeatedString(
+        'disposition-event-ref',
+        'Opaque event reference returned by the current delivery',
+      ),
+      dispositionStatuses: repeatedString('disposition-status', 'Disposition status in matching order'),
+      dispositionReasons: repeatedString('disposition-reason', 'Disposition reason in matching order'),
+      dispositionEvidence: repeatedString('disposition-evidence', 'Disposition evidence in matching order'),
+    },
+    options => {
+      const lengths = [
+        options.dispositionEventRefs.length,
+        options.dispositionStatuses.length,
+        options.dispositionReasons.length,
+        options.dispositionEvidence.length,
+      ];
+      if (EffectArray.some(lengths, value => value !== lengths[0]))
+        return Effect.fail(
+          WorkflowAutomationError.make({
+            code: 'invalid-request',
+            message: 'Disposition fields must have the same number of values.',
+          }),
+        );
+      const dispositionStatuses: ('open' | 'blocked' | 'resolved' | 'ignored')[] = [];
+      for (const status of options.dispositionStatuses) {
+        if (status !== 'open' && status !== 'blocked' && status !== 'resolved' && status !== 'ignored')
+          return Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'Disposition status must be open, blocked, resolved, or ignored.',
+            }),
+          );
+        dispositionStatuses.push(status);
+      }
+      const dispositions: {
+        eventRef: string;
+        status: 'open' | 'blocked' | 'resolved' | 'ignored';
+        reason: string;
+        evidence: string;
+      }[] = [];
+      for (let index = 0; index < options.dispositionEventRefs.length; index++) {
+        const eventRef = options.dispositionEventRefs[index];
+        const status = dispositionStatuses[index];
+        const reason = options.dispositionReasons[index];
+        const evidence = options.dispositionEvidence[index];
+        if (eventRef === undefined || status === undefined || reason === undefined || evidence === undefined)
+          return Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'Disposition fields must align by position.',
+            }),
+          );
+        dispositions.push({eventRef, status, reason, evidence});
+      }
+      return handler({
+        ...options,
+        ...(options.host && options.executable && options.hostReference
+          ? {
+              wakeup:
+                options.host === 'codex'
+                  ? {host: 'codex' as const, executable: options.executable, threadId: options.hostReference}
+                  : {
+                      host: 'cursor-cli' as const,
+                      executable: options.executable,
+                      sessionId: options.hostReference,
+                      workspace: options.workspace ?? '',
+                      exclusiveSession: true as const,
+                    },
+            }
+          : {}),
+        ...(options.takeover ? {takeover: true} : {}),
+        ...(options.recoverWakeup ? {recoverWakeup: true} : {}),
+        dispositions,
+      });
+    },
+  ).pipe(Command.withDescription('Run a task-bound PR watch step through native watch state and receipts'));
+}
+
 export function makeNativeTaskStartCommand<E, R>(
   handler: (options: {
     readonly callerCwd: string;
@@ -138,6 +293,7 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly runId: string;
     readonly callerCwd: string;
     readonly workRef: string;
+    readonly reason?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   reviewHandler: (options: {
     readonly runId: string;
@@ -191,7 +347,75 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly snapshotRef: string;
     readonly reason: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  lifecycleHandler?: (options: {
+    readonly command: 'begin' | 'resume' | 'reconcile' | 'extend-review-budget';
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly taskRef: string;
+    readonly reason?: string;
+    readonly bindings?: unknown;
+    readonly additionalReviews?: number;
+    readonly userAuthority?: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
+  const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
+    lifecycleHandler
+      ? lifecycleHandler(options)
+      : Effect.fail(
+          WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+        );
+  const begin = Command.make(
+    'begin',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current phase task reference from workflow task view'),
+    },
+    options => lifecycle({command: 'begin', ...options}),
+  ).pipe(Command.withDescription('Begin the phase on the current eligible task card'));
+  const resume = Command.make(
+    'resume',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current blocked phase task reference'),
+      reason: requiredString('reason', 'Concrete recovery reason for resuming the blocked phase'),
+    },
+    options => lifecycle({command: 'resume', ...options}),
+  ).pipe(Command.withDescription('Resume the current blocked phase after its dependencies are accepted'));
+  const reconcile = Command.make(
+    'reconcile',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current approved-plan reconciliation reference'),
+      reason: requiredString('reason', 'Concrete reason for reconciling the approved plan'),
+      bindings: optionalString('bindings', 'Branch bindings for new approved phases as JSON'),
+    },
+    options =>
+      (options.bindings === undefined
+        ? Effect.void
+        : Effect.try({
+            try: () => JSON.parse(options.bindings!) as unknown,
+            catch: () =>
+              WorkflowAutomationError.make({code: 'invalid-request', message: 'Bindings must be valid JSON.'}),
+          })
+      ).pipe(
+        Effect.flatMap(bindings => lifecycle({command: 'reconcile', ...options, ...(bindings ? {bindings} : {})})),
+      ),
+  ).pipe(Command.withDescription('Reconcile the current ready, approved plan on the same run'));
+  const extendReviewBudget = Command.make(
+    'extend-review-budget',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current exhausted-review task reference'),
+      additionalReviews: integerFlag('additional-reviews'),
+      reason: requiredString('reason', 'Concrete reason to add review attempts'),
+      userAuthority: requiredString('user-authority', 'Actual human authority for the budget increase'),
+    },
+    options => lifecycle({command: 'extend-review-budget', ...options}),
+  ).pipe(Command.withDescription('Extend an exhausted phase review budget with explicit authority'));
   const work = Command.make(
     'work',
     {
@@ -270,6 +494,7 @@ export function makeNativeTaskActionCommands<E, R>(
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       workRef: requiredString('work-ref', 'Opaque reference returned by workflow-automation task-action work'),
+      reason: optionalString('reason', 'Concrete reason for another source iteration'),
     },
     snapshotHandler,
   ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
@@ -375,7 +600,7 @@ export function makeNativeTaskActionCommands<E, R>(
         ),
       );
     },
-  ).pipe(Command.withDescription('Prepare and finish a completed single-phase local cycle through canonical jobs'));
+  ).pipe(Command.withDescription('Prepare and finish a completed local cycle through canonical jobs'));
   const compactStart = Command.make(
     'compact-start',
     {
@@ -454,6 +679,10 @@ export function makeNativeTaskActionCommands<E, R>(
   return Command.make('task-action', {}).pipe(
     Command.withSubcommands([
       work,
+      begin,
+      resume,
+      reconcile,
+      extendReviewBudget,
       recordSnapshot,
       supersedeUnreviewedSnapshot,
       recordReview,

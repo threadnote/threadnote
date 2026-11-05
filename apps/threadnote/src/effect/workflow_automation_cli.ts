@@ -1,3 +1,4 @@
+import {makeNativeTaskAuthoringCommand} from './task_authoring_cli.js';
 import {Console, Effect, Schema, Stdio, Stream} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
@@ -7,7 +8,13 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {SystemInfo} from '@threadnote/platform/system';
 import {runNativeWatchCollector} from '../workflow_automation/watch.js';
 import {runNativeJobWorker} from '../workflow_automation/native_jobs.js';
-import {makeNativeTaskActionCommands, makeNativeTaskStartCommand, makeNativeTaskViewCommand} from './workflow_cli.js';
+import {
+  makeNativeTaskActionCommands,
+  makeNativeTaskPrDeliveryCommand,
+  makeNativeTaskPrWatchCommand,
+  makeNativeTaskStartCommand,
+  makeNativeTaskViewCommand,
+} from './workflow_cli.js';
 import {readNativeTaskView} from '../workflow_automation/task.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../workflow_automation/task_actions.js';
 
@@ -90,6 +97,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
   ).pipe(
     Command.withDescription('Opt-in structured native workflow execution for fresh runs'),
     Command.withSubcommands([
+      makeNativeTaskAuthoringCommand(withRuntime),
       Command.make('watch-collector', {watchId: Flag.String('watch-id'), token: Flag.String('token')}, options =>
         withRuntime(config => runNativeWatchCollector(config, options.watchId, options.token)),
       ).pipe(Command.withDescription('Internal same-executable native watcher process')),
@@ -143,6 +151,43 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
           );
         }),
       ),
+      makeNativeTaskPrDeliveryCommand(options =>
+        withRuntime(config =>
+          runNativeTaskAction(config, {
+            command: 'deliver-pr',
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            validationRef: options.validationRef,
+            commitEvidence: options.commitEvidence,
+            pr: options.pr,
+            publication: options.publication,
+          }).pipe(
+            Effect.flatMap(value => Console.log(JSON.stringify(value))),
+            Effect.mapError(nativeWorkflowError),
+          ),
+        ),
+      ),
+      makeNativeTaskPrWatchCommand(options =>
+        withRuntime(config =>
+          runNativeTaskAction(config, {
+            command: 'watch-pr',
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            validationRef: options.validationRef,
+            deliveryRef: options.deliveryRef,
+            operation: options.operation,
+            ...('wakeup' in options && options.wakeup !== undefined ? {wakeup: options.wakeup} : {}),
+            ...(options.takeover ? {takeover: true} : {}),
+            ...(options.recoverWakeup ? {recoverWakeup: true} : {}),
+            ...(options.noticeRef === undefined ? {} : {noticeRef: options.noticeRef}),
+            ...(options.watchDeliveryRef === undefined ? {} : {watchDeliveryRef: options.watchDeliveryRef}),
+            ...(options.dispositions === undefined ? {} : {dispositions: options.dispositions}),
+          }).pipe(
+            Effect.flatMap(value => Console.log(JSON.stringify(value))),
+            Effect.mapError(nativeWorkflowError),
+          ),
+        ),
+      ),
       makeNativeTaskActionCommands(
         options =>
           withRuntime(config =>
@@ -163,6 +208,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               runId: options.runId,
               callerCwd: options.callerCwd,
               workRef: options.workRef,
+              ...(options.reason === undefined ? {} : {reason: options.reason}),
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
@@ -272,6 +318,13 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               snapshotRef: options.snapshotRef,
               reason: options.reason,
             }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, options).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
             ),
