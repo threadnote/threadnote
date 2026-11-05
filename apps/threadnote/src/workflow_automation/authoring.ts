@@ -11,6 +11,7 @@ import {
   decodeNativeAuthoringDocument,
   isNativeMermaidDiagram,
   nativeAuthoringDigest,
+  NativePlanIntentPolicyVersion,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -480,6 +481,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         });
         if (
           nativeAuthoringDigest(document) !== root.documentHash ||
+          nativeSpecIntentDigest(document, root.planIntentPolicyVersion ?? 1) !== root.intentHash ||
           document.id !== root.featureId ||
           document.kind !== root.kind ||
           document.project !== state.project
@@ -597,6 +599,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         });
         const linkedValidation = validateNativeAuthoring(linked, {
           ready: true,
+          planIntentPolicyVersion: root.planIntentPolicyVersion ?? 1,
           confirmation: root.confirmation,
           review: root.review,
         });
@@ -1435,6 +1438,7 @@ const saveAuthoring = <R>(
         },
         documentHash: validation.documentHash,
         intentHash: validation.intentHash,
+        ...(document.kind === 'plan' ? {planIntentPolicyVersion: NativePlanIntentPolicyVersion} : {}),
         baseRevision: prior?.revision ?? null,
         readiness,
         data,
@@ -1508,6 +1512,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
 ) {
   const validation = validateNativeAuthoring(document, {
     ready: true,
+    planIntentPolicyVersion: root.planIntentPolicyVersion ?? 1,
     confirmation: root.confirmation,
     review: root.review,
   });
