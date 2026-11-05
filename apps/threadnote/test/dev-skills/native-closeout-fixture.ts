@@ -1,6 +1,7 @@
 import {Array as EffectArray, String as EffectString, Effect, Predicate, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
@@ -15,7 +16,13 @@ import {
 } from '@threadnote/workflow-automations/cycle';
 import {persistCodexCloudProfile} from '../../src/codex/profile.js';
 import {persistCursorCloudIdentityProfile} from '../../src/cursor/profile.js';
-import {AuthoringReferenceSchema} from '../../src/workflow_automation/authoring_artifacts.js';
+import {
+  AuthoringReferenceSchema,
+  AuthoringRootSchema,
+  authoringRelations,
+  decodeAuthoringArtifact,
+  encodeAuthoringArtifact,
+} from '../../src/workflow_automation/authoring_artifacts.js';
 import {
   readNativeWorkflowState,
   writeNativeWorkflowState,
@@ -130,6 +137,8 @@ const planDocument = () =>
 const loadedRootSchema = Schema.Struct({
   authoring: Schema.Struct({root: AuthoringReferenceSchema, readiness: Schema.Literal('ready')}),
 });
+const artifactReferenceSchema = Schema.Struct({uri: Schema.String, memoryId: Schema.String, revision: Schema.String});
+const writtenArtifactSchema = Schema.Struct({artifact: artifactReferenceSchema});
 
 const decodeExportedCyclePlan = (value: unknown) => {
   if (!value || typeof value !== 'object' || !('authoring' in value)) throw new Error('Expected exported cycle plan.');
@@ -141,6 +150,7 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   profile: CloseoutProfile = 'desktop',
   controllerRunId = 'controller',
   cycleDelivery: 'local' | 'pr' = 'local',
+  planRootPolicy: 'v1' | 'missing-marker' | 'unknown-version' | 'mismatched-intent' | undefined = undefined,
 ) {
   const system = yield* SystemInfo;
   const environment = EffectRecord.fromEntries(
@@ -258,7 +268,56 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
     ready: true,
     expectedRevision: null,
   });
-  const planRoot = (yield* Schema.decodeUnknownEffect(loadedRootSchema)(savedPlan)).authoring.root;
+  let planRoot = (yield* Schema.decodeUnknownEffect(loadedRootSchema)(savedPlan)).authoring.root;
+  if (planRootPolicy) {
+    const currentMemory = parseMemoryDocument(planRoot.uri, yield* f.store.read(f.location, planRoot.uri));
+    if (!currentMemory) throw new Error('Expected the persisted plan root memory.');
+    const currentRoot = decodeAuthoringArtifact(
+      Effect2.pipe(currentMemory.body, EffectString.trimEnd) + '\n',
+      AuthoringRootSchema,
+    );
+    const {planIntentPolicyVersion: _policyVersion, ...legacyRoot} = currentRoot;
+    const rootPayload = {
+      ...legacyRoot,
+      ...(planRootPolicy === 'unknown-version' ? {planIntentPolicyVersion: 3} : {}),
+      intentHash:
+        planRootPolicy === 'v1'
+          ? nativeAuthoringDigest(plan)
+          : planRootPolicy === 'mismatched-intent'
+            ? EffectString.repeat(64)('0')
+            : currentRoot.intentHash,
+      baseRevision: planRoot.revision,
+      previous: planRoot,
+    };
+    const links = [
+      rootPayload.data,
+      ...EffectArray.map(rootPayload.documents, item => item.reference),
+      rootPayload.previous,
+    ];
+    const summary =
+      plan.objective +
+      '\n\nReadiness: ready. Complete structured data and decision history are linked below.\n\n' +
+      EffectArray.join(
+        EffectArray.map(links, reference => '- [Artifact](' + reference.uri + ')'),
+        '\n',
+      );
+    const body = encodeAuthoringArtifact(plan.title, summary, rootPayload);
+    const rewritten = yield* call({
+      ...f.base('write', 'plan-run'),
+      operationId: 'seed-policy-' + planRootPolicy,
+      artifactKey: 'author-root-plan-legacy',
+      role: 'authoring-root',
+      nameHint: 'plan',
+      body,
+      expectedRevision: null,
+      storageKind: profile === 'desktop' ? 'durable' : 'handoff',
+      codeRefs: plan.context.codeRefs,
+      evidenceRefs: plan.context.evidenceRefs,
+      relations: authoringRelations(plan.context.evidenceRefs, links),
+    });
+    const written = yield* Schema.decodeUnknownEffect(writtenArtifactSchema)(rewritten);
+    planRoot = written.artifact;
+  }
   const planState = yield* readNativeWorkflowState(config, 'plan-run');
   if (!planState) throw new Error('Expected ready plan state.');
   const unrelatedWrite = yield* call({
@@ -405,6 +464,7 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
     config,
     generation,
     plan,
+    planRoot,
     unrelated,
     profile,
     controllerRunId,

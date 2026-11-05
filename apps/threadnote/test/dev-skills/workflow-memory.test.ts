@@ -129,15 +129,6 @@ describe('private workflow artifact protocol', () => {
       yield* f.fs.writeFileString(f.path.join(f.repo, 'src/value.ts'), 'export const value = 1;\n');
       yield* git(['add', '.']);
       yield* git(['commit', '-m', 'fixture']);
-      const second = yield* f.call({
-        protocolVersion: 1,
-        action: 'bind',
-        workflowRunId: 'another-run',
-        project: 'fixture',
-        featureId: 'feature',
-        generation: 'bundle-v1',
-      });
-      if (!('binding' in second)) throw new Error('Expected second binding');
       const query = yield* CodeGraphQueryService;
       const paused = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
@@ -164,9 +155,17 @@ describe('private workflow artifact protocol', () => {
       yield* Deferred.await(paused);
       yield* Effect.gen(function* () {
         const other = yield* f
-          .call({...f.write, bindingId: second.binding.bindingId})
+          .call({
+            protocolVersion: 1,
+            action: 'bind',
+            workflowRunId: 'another-run',
+            project: 'fixture',
+            featureId: 'feature',
+            generation: 'bundle-v1',
+          })
           .pipe(Effect.timeoutOption('3 seconds'));
         expect(other).toMatchObject({_tag: 'Some', value: {status: 'ok'}});
+        if (other._tag !== 'Some' || !('binding' in other.value)) throw new Error('Expected second binding');
         expect(events).toEqual(['graph:0', 'graph:0']);
       }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
       expect(yield* Fiber.join(first)).toMatchObject({status: 'ok'});
