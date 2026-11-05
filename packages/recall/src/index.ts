@@ -12,6 +12,7 @@ import {
 } from './index/result.js';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
+  readRecallPublishedMetadataHint,
   readyRecallSelectionPolicy,
   useRecallDatabaseReadOnly,
   recallSelectionDefersExternalAuthorization,
@@ -1001,6 +1002,20 @@ const replayReadyReadObservations = Effect.fn('recall.replayReadyReadObservation
         break;
     }
   }
+});
+
+/** Negative optional-inference hint only; this is never a ready/content/permission proof. */
+export const readRecallPublishedGenerationHint = Effect.fn('recall.publishedGenerationHint')(function* (
+  config: RecallIndexConfig,
+) {
+  const path = yield* Path.Path;
+  return yield* readRecallPublishedMetadataHint({
+    root: recallIndexRoot(path, config.agentContextHome),
+    pointer: recallIndexPointerPath(path, config.agentContextHome, false),
+    fixed: recallIndexDatabasePath(path, config.agentContextHome, false),
+    pointerVersion: RECALL_INDEX_POINTER_VERSION,
+    schemaVersion: RECALL_INDEX_DATABASE_VERSION,
+  });
 });
 
 const directRecallIndexStatus = Effect.fn('recall.indexStatus')(function* (

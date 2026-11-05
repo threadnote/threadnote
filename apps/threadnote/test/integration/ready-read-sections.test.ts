@@ -139,6 +139,10 @@ describe('complete ready sections', () => {
         const original = transportFixture(candidates, [...candidates].reverse());
         const encoded = encodeRecallReadySectionsResult(original);
         const decoded = yield* wireResult(encoded);
+        const normalized = JSON.parse(JSON.stringify(encoded));
+        const before = JSON.stringify(normalized);
+        expect(yield* decodeRecallReadySectionsResult(normalized)).toEqual(decoded);
+        expect(JSON.stringify(normalized)).toBe(before);
         expect(decoded).toEqual(original);
         expect(encoded.texts.length).toBe(new Set(texts).size);
         expect(decoded.expansionCandidates).not.toBe(original.expansionCandidates);

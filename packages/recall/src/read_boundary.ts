@@ -64,6 +64,11 @@ const vectorModel = Schema.Struct({
   promptPrefixes: optional(Schema.Struct({document: optional(text), query: optional(text)})),
 });
 export type RecallVectorReadModel = typeof vectorModel.Type;
+export const recallSemanticPreflightSchema = Schema.Struct({
+  model: vectorModel,
+  readiness: Schema.Literals(['missing', 'stale', 'current', 'unknown']),
+});
+export type RecallSemanticPreflight = typeof recallSemanticPreflightSchema.Type;
 export const recallVectorReadStateSchema = Schema.Struct({
   chunkCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   generation: text,
@@ -117,6 +122,7 @@ export const recallReadySectionsOptionsSchema = Schema.Union([
   Schema.Struct({
     ...sectionsFields,
     mode: Schema.Literal('baseline'),
+    semanticPreflightModel: optional(vectorModel),
     exact: optional(Schema.Struct({terms: strings, uriScopes: strings, limitPerTerm: count})),
   }),
   Schema.Struct({

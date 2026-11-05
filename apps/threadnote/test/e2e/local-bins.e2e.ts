@@ -144,9 +144,9 @@ const RecallPhaseDiagnosticSchema = withRest(
 );
 const RecallCompletionDiagnosticSchema = withRest(
   Schema.Struct({
-    component: Schema.Literal('cli'),
+    component: Schema.Literals(['cli', 'mcp']),
     event: Schema.Literal('invocation.finished'),
-    operation: Schema.Literal('recall'),
+    operation: Schema.Literals(['recall', 'recall_context']),
     outcome: Schema.Literals(['success', 'interrupted', 'failure']),
     phaseTimings: Schema.Unknown.pipe(Schema.Array, Schema.optionalKey),
   }),
@@ -154,7 +154,7 @@ const RecallCompletionDiagnosticSchema = withRest(
 
 // Failure-only, bounded read of already emitted diagnostics. No invocation,
 // path, query, content, arbitrary error text or unknown field is rendered.
-async function recallFailureStages(): Promise<string> {
+async function recallFailureStages(component: 'cli' | 'mcp' = 'cli'): Promise<string> {
   try {
     const handle = await open(join(home, 'logs', 'threadnote.log'), 'r');
     try {
@@ -174,6 +174,8 @@ async function recallFailureStages(): Promise<string> {
           continue;
         }
         if (!Schema.is(RecallCompletionDiagnosticSchema)(entry)) continue;
+        if (entry.component !== component || entry.operation !== (component === 'cli' ? 'recall' : 'recall_context'))
+          continue;
         latest = {
           outcome: entry.outcome,
           phaseTimings: EffectArray.map(
@@ -1483,7 +1485,9 @@ describe('built self-contained distribution', () => {
         arguments: {query: 'MCP-OBSIDIAN-881'},
         name: 'recall_context',
       });
-      expect(requested.isError).not.toBe(true);
+      expect(requested.isError, requested.isError === true ? await recallFailureStages('mcp') : undefined).not.toBe(
+        true,
+      );
       expect(JSON.stringify(requested.content)).not.toContain('Auto-synced sources:');
       expect(JSON.stringify(requested)).not.toContain('Automatic synchronization enqueue was not confirmed');
       await expectAutomaticSourceSynchronizationRequested(manifestPath, requestedAt);

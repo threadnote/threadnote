@@ -16,6 +16,7 @@ import {
   RecallReadyReadBoundaryError,
   recallReadyReadRequestSchema,
   recallReadySectionsSemanticSchema,
+  recallSemanticPreflightSchema,
   type RecallReadySectionsOptions,
 } from './read_boundary.js';
 import type {RecallCandidate} from './rank.js';
@@ -85,6 +86,7 @@ const hitSchema = Schema.Struct({
   uri: Schema.String,
 });
 export const recallReadySectionsResultSchema = Schema.Struct({
+  semanticPreflight: optional(recallSemanticPreflightSchema),
   confidence: optional(
     Schema.Struct({
       level: Schema.Literals(['high', 'low', 'medium', 'no_answer']),
@@ -290,7 +292,7 @@ export const prepareDefaultRecallSections = Effect.fn('recall.prepareDefaultSect
       readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
       readMemoryConnections: options => readRecallMemoryConnections(config, options),
     });
-    return {...prepared, exactMatches: input.exactMatches};
+    return {...prepared, exactMatches: input.exactMatches, semanticPreflight: undefined};
   }
   const {allowReranker: _allowReranker, passes: _passes, exactMatches: _exactMatches, ...ready} = input;
   return yield* readReadyRecallSections(config, ready);
@@ -354,7 +356,11 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
             }),
           ),
         );
-    return yield* decodeRecallReadySectionsResult(JSON.parse(JSON.stringify(value))).pipe(Effect.mapError(invalid));
+    // Native responses were already parsed from JSON by the owned boundary.
+    // Direct serving still normalizes optional own-undefined fields before strict decoding.
+    return yield* decodeRecallReadySectionsResult(
+      Option.isNone(boundary) ? JSON.parse(JSON.stringify(value)) : value,
+    ).pipe(Effect.mapError(invalid));
   }).pipe(
     Effect.catchIf(
       error => !isReadCleanupUnconfirmed(error),
@@ -374,6 +380,7 @@ export const readReadyRecallSections = Effect.fn('recall.readReadySections')(fun
                 })
               : error;
           return {
+            semanticPreflight: undefined,
             ranked: [],
             expansionCandidates: [],
             exactMatches: [],

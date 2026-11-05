@@ -1,3 +1,4 @@
+import {VECTOR_SCOPE_MAPPING_VERSION} from './vector/negative-readiness.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -92,7 +93,7 @@ class VectorIndexOperationError extends Schema.TaggedError<
 }) {}
 
 const VECTOR_INDEX_DATABASE_VERSION = 5;
-const VECTOR_SCOPE_MAPPING_VERSION = 1;
+
 const VECTOR_INDEX_EMBED_BATCH_SIZE = 256;
 const VECTOR_INDEX_PAGE_SIZE = 400;
 const VECTOR_INDEX_INSERT_BATCH_SIZE = 100;
@@ -1182,6 +1183,7 @@ const initializeVectorDatabase = Effect.fn('vectorIndex.initializeDatabase')(fun
 const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(function* (
   sql: SqlClient.SqlClient,
   busyTimeoutMilliseconds = 5000,
+  requireMetadataKeys = false,
 ) {
   yield* sql.unsafe('PRAGMA foreign_keys = ON');
   yield* sql.unsafe(`PRAGMA busy_timeout = ${busyTimeoutMilliseconds}`);
@@ -1192,14 +1194,23 @@ const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(functio
       message: `Unsupported vector index schema ${version}; expected ${VECTOR_INDEX_DATABASE_VERSION}.`,
     });
   }
-  yield* validateVectorDatabaseStructure(sql);
+  yield* validateVectorDatabaseStructure(sql, requireMetadataKeys);
 });
 
 const validateVectorDatabaseStructure = Effect.fn('vectorIndex.validateDatabaseStructure')(function* (
   sql: SqlClient.SqlClient,
+  requireMetadataKeys = false,
 ) {
   for (const [table, expected] of EffectRecord.toEntries(VECTOR_INDEX_SCHEMA_COLUMNS)) {
-    const rows = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info('${table}')`);
+    const rows = yield* sql.unsafe<{readonly name: string; readonly pk: number}>(`PRAGMA table_info('${table}')`);
+    const key = table === 'vector_pointer' ? 'singleton' : table === 'vector_generations' ? 'generation' : undefined;
+    if (
+      requireMetadataKeys &&
+      key !== undefined &&
+      (EffectArray.filter(rows, row => row.pk > 0).length !== 1 ||
+        !EffectArray.some(rows, row => row.name === key && row.pk === 1))
+    )
+      return yield* VectorIndexOperationError.make({message: 'Vector metadata primary key is invalid.'});
     const actual = EffectArray.map(rows, row => row.name);
     const compatibleColumns =
       table === 'vector_generations' && !actual.includes('scope_mapping_version') ? expected.slice(0, -1) : expected;

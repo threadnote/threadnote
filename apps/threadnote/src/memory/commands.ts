@@ -110,6 +110,7 @@ import {
   buildRecallIndexSelectionCandidates,
   buildRecallSelectionCandidates,
   createRecallRerankerCache,
+  prepareRecallSemanticPreflight,
   warmRecallReranker,
   emptyRecallSemanticScoresResult,
   loadRecallExpansionVocabulary,
@@ -552,6 +553,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   if (Option.isSome(semanticResult)) yield* surfaceSemanticWarning(semanticResult.value);
   const rerankerCache = createRecallRerankerCache();
   let allowReranker = false;
+  const semanticPreflightModel = dryRun || navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
   const prepareSections = (candidateUris?: readonly string[], closingRead = false) =>
     withAnonymousTelemetryPhase(
       'recall.lexical-ranking',
@@ -559,6 +561,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
         'recall.lexical-ranking',
         Effect.gen(function* () {
           const prepared = yield* prepareDefaultRecallSections(config, {
+            ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
             allowReranker,
             allowExactRescue: !thresholdConfigured,
             allowSemanticRescue: !thresholdConfigured,
@@ -629,6 +632,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
                     recallLimit,
                     eligibility,
                     explicitUri ? [explicitUri] : undefined,
+                    baselineSections.semanticPreflight,
                   ),
                   result =>
                     Option.isSome(result.warning)

@@ -16,7 +16,7 @@ import {
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import * as EffectString from 'effect/String';
 import {
   CommandCleanupUnconfirmed,
@@ -331,7 +331,154 @@ const selectorCompositionCommands = (system: SystemInfo['Service'], workerFileSy
     });
   });
 
+// Fix observed read cost with test-clock barriers; the real gate and canonical APIs still run.
+// This coordinates source-composition examples, never physical child cancellation evidence.
+const controlledCompositionReads = (system: SystemInfo['Service'], workerFileSystem?: FileSystem.FileSystem) =>
+  Effect.gen(function* () {
+    const command = yield* selectorCompositionCommands(system, workerFileSystem);
+    const baselineStarted = yield* Deferred.make<void>();
+    const releaseBaseline = yield* Deferred.make<void>();
+    const closingStarted = yield* Deferred.make<void>();
+    const releaseClosing = yield* Deferred.make<void>();
+    const beforeClosing = Deferred.succeed(closingStarted, undefined).pipe(
+      Effect.andThen(Deferred.await(releaseClosing)),
+    );
+    const observed = CommandExecutor.of({
+      ...command,
+      execute: (executable, args, options) =>
+        Effect.gen(function* () {
+          const request =
+            options?.sensitiveOutput && options.input
+              ? yield* Schema.decodeEffect(operationSchema)(new TextDecoder().decode(options.input)).pipe(Effect.orDie)
+              : undefined;
+          if (
+            request?.operation === 'sections' &&
+            (request.options.mode === 'baseline' || request.options.mode === 'closing')
+          ) {
+            const baseline = request.options.mode === 'baseline';
+            yield* Deferred.succeed(baseline ? baselineStarted : closingStarted, undefined);
+            yield* Deferred.await(baseline ? releaseBaseline : releaseClosing);
+          }
+          return yield* command.execute(executable, args, options);
+        }),
+    });
+    const run = <A, E, R>(
+      program: Effect.Effect<A, E, R>,
+      options?: {
+        readonly closing?: boolean;
+        readonly held?: {readonly entered: Deferred.Deferred<void>; readonly interrupted: Deferred.Deferred<void>};
+      },
+    ) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const reader = yield* program.pipe(Effect.forkScoped);
+          yield* Deferred.await(baselineStarted);
+          yield* TestClock.adjust(100);
+          yield* Deferred.succeed(releaseBaseline, undefined);
+          if (options?.held) {
+            yield* Deferred.await(options.held.entered);
+            yield* TestClock.adjust(600);
+            yield* Deferred.await(options.held.interrupted);
+          }
+          if (options?.closing !== false) {
+            yield* Deferred.await(closingStarted);
+            yield* TestClock.adjust(100);
+            yield* Deferred.succeed(releaseClosing, undefined);
+          }
+          return yield* Fiber.join(reader);
+        }),
+      );
+    return {command: observed, run, beforeClosing};
+  });
+
 describe('production recall admission budget', () => {
+  for (const [surface, preflightTimeout] of [
+    ['cli', false],
+    ['mcp', false],
+    ['mcp', true],
+  ] as const) {
+    effectIt.effect(
+      `${surface} ${preflightTimeout ? 'falls back after controlled metadata timeout' : 'omits only the stale semantic worker'} and still closes current proof`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture(true);
+          yield* f.fs.writeFileString(f.filename, `${yield* f.fs.readFileString(f.filename)}\nchanged generation\n`);
+          yield* loadRecallIndexData(f.config, {includeInactive: false, forceRefresh: true});
+          const commands = yield* selectorCompositionCommands(f.system);
+          const entered = yield* Deferred.make<void>();
+          let finalized = 0;
+          let first = true;
+          const selectionFs = FileSystem.FileSystem.of({
+            ...f.fs,
+            open: (...args) =>
+              f.fs.open(...args).pipe(
+                Effect.flatMap(file =>
+                  Effect.gen(function* () {
+                    if (!preflightTimeout || !first || args[0] !== `${f.config.agentContextHome}/models/selection.json`)
+                      return file;
+                    first = false;
+                    const spy = vi
+                      .spyOn(file, 'readAlloc')
+                      .mockImplementation(() =>
+                        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+                      );
+                    yield* Effect.addFinalizer(() =>
+                      Effect.sync(() => {
+                        finalized++;
+                        spy.mockRestore();
+                      }),
+                    );
+                    return file;
+                  }),
+                ),
+              ),
+          });
+          const operations: string[] = [];
+          const deadlines = new Set<bigint>();
+          const observed = CommandExecutor.of({
+            ...commands,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                if (options?.sensitiveOutput && options.input) {
+                  const request = yield* Schema.decodeEffect(operationSchema)(
+                    new TextDecoder().decode(options.input),
+                  ).pipe(Effect.orDie);
+                  operations.push(
+                    request.operation === 'sections' ? `sections:${request.options.mode}` : request.operation,
+                  );
+                  const deadline = yield* Effect.serviceOption(ReadyRecallReadDeadline);
+                  if (Option.isSome(deadline)) deadlines.add(deadline.value.expiresAtNanos);
+                }
+                return yield* commands.execute(executable, args, options);
+              }),
+          });
+          const response = invoke(surface, f).pipe(
+            Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+            Effect.provideService(CommandExecutor, observed),
+            Effect.provideService(FileSystem.FileSystem, selectionFs),
+            Effect.provideService(LocalModelStore, f.store),
+            Effect.provideService(LocalModelRuntime, fastRuntime),
+          );
+          const reader = yield* response.pipe(Effect.forkChild);
+          if (preflightTimeout) {
+            yield* Deferred.await(entered);
+            yield* TestClock.adjust(25);
+          }
+          const result = yield* Fiber.join(reader);
+          expect(finalized).toBe(preflightTimeout ? 1 : 0);
+          expect(result.isError, result.output).toBe(false);
+          expect(result.output).toContain('memories/durable/alpha.md');
+          expect(EffectArray.filter(operations, value => value === 'vector-state')).toHaveLength(
+            preflightTimeout ? 1 : 0,
+          );
+          expect(EffectArray.filter(operations, value => value === 'sections:baseline')).toHaveLength(1);
+          expect(EffectArray.filter(operations, value => value === 'sections:closing')).toHaveLength(1);
+          expect(deadlines.size).toBe(1);
+        }).pipe(provideTestLayer(ApplicationLayer)),
+      {timeout: 15000},
+    );
+  }
+
   effectIt.effect('MCP closing reserve excludes workspace resolution without resetting the request deadline', () =>
     Effect.gen(function* () {
       const f = yield* fixture(false);
@@ -850,7 +997,7 @@ describe('production recall admission budget', () => {
     }
     for (const mutation of ['archive', 'delete', 'unavailable-closing'] as const) {
       effectIt.effect(
-        `${surface} ${surface === 'cli' && mutation === 'archive' ? 'composition ' : ''}closes current canonical proof after a reranker ${mutation}s the baseline and stalls`,
+        `${surface} ${(surface === 'cli' && mutation === 'archive') || (surface === 'mcp' && mutation !== 'archive') ? 'composition ' : ''}closes current canonical proof after a reranker ${mutation}s the baseline and stalls`,
         () =>
           Effect.gen(function* () {
             const f = yield* fixture(false);
@@ -860,6 +1007,10 @@ describe('production recall admission budget', () => {
               'reranker',
               'jina-reranker-v1-turbo-en-f16',
             );
+            const entered = yield* Deferred.make<void>();
+            const stopped = yield* Deferred.make<void>();
+            const controlled =
+              surface === 'mcp' && mutation !== 'archive' ? yield* controlledCompositionReads(f.system) : undefined;
             let calls = 0;
             let interrupted = 0;
             let closingReads = 0;
@@ -869,9 +1020,10 @@ describe('production recall admission budget', () => {
             // This source-composition case proves mutation and closing-currentness behavior deterministically.
             // Real native child startup/cancellation remains covered by the neighboring boundary tests.
             const command =
-              surface === 'cli' && mutation === 'archive'
+              controlled?.command ??
+              (surface === 'cli' && mutation === 'archive'
                 ? yield* selectorCompositionCommands(f.system)
-                : yield* CommandExecutor;
+                : yield* CommandExecutor);
             const observed = CommandExecutor.of({
               ...command,
               execute: (executable, args, options) =>
@@ -889,13 +1041,15 @@ describe('production recall admission budget', () => {
                     closingReads++;
                     expect(input.options.candidateUris).toContain(f.uri);
                     expect(input.options.mode).toBe('closing');
-                    if (mutation === 'unavailable-closing')
+                    if (mutation === 'unavailable-closing') {
+                      if (controlled) yield* controlled.beforeClosing;
                       return yield* CommandTimedOut.make({
                         executable,
                         args: [...args],
                         timeoutMs: options!.timeoutMs!,
                         message: 'Owned ready read reached its deadline.',
                       });
+                    }
                   }
                   activeChildren++;
                   return yield* command.execute(executable, args, options).pipe(
@@ -921,22 +1075,26 @@ describe('production recall admission budget', () => {
                         'status: archived',
                       )(yield* f.fs.readFileString(f.filename)),
                     );
+                  yield* Deferred.succeed(entered, undefined);
                   return yield* Effect.never.pipe(
                     Effect.ensuring(
                       Effect.sync(() => {
                         interrupted++;
-                      }),
+                      }).pipe(Effect.andThen(Deferred.succeed(stopped, undefined))),
                     ),
                   );
                 }).pipe(Effect.orDie),
             });
             const started = yield* Clock.monotonicTimeNanos;
-            const result = yield* invoke(surface, f).pipe(
+            const response = invoke(surface, f).pipe(
               Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
               Effect.provideService(CommandExecutor, observed),
               Effect.provideService(LocalModelRuntime, runtime),
               Effect.provideService(LocalModelStore, f.store),
             );
+            const result = yield* controlled
+              ? controlled.run(response, {held: {entered, interrupted: stopped}})
+              : response;
             expect(calls).toBe(1);
             expect(interrupted).toBe(1);
             expect(closingReads).toBe(1);
@@ -948,7 +1106,9 @@ describe('production recall admission budget', () => {
             expect(result.output).not.toContain('memories/durable/alpha.md');
             expect(result.output).not.toContain('useful private canonical baseline');
             if (mutation === 'unavailable-closing') expect(result.output).toContain('time budget');
-          }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+          }).pipe(provideTestLayer(ApplicationLayer), effect =>
+            surface === 'mcp' && mutation !== 'archive' ? effect : TestClock.withLive(effect),
+          ),
         {timeout: 15000},
       );
     }
@@ -1004,11 +1164,12 @@ describe('production recall admission budget', () => {
       {timeout: 15000},
     );
     effectIt.effect(
-      `${surface} preserves unknown vocabulary child cleanup after the lexical baseline`,
+      `${surface} ${surface === 'mcp' ? 'composition ' : ''}preserves unknown vocabulary child cleanup after the lexical baseline`,
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(false);
-          const command = yield* CommandExecutor;
+          const controlled = surface === 'mcp' ? yield* controlledCompositionReads(f.system) : undefined;
+          const command = controlled?.command ?? (yield* CommandExecutor);
           let completedBaseline = 0;
           let vocabularyRequests = 0;
           const observed = CommandExecutor.of({
@@ -1039,7 +1200,7 @@ describe('production recall admission budget', () => {
                 );
               }),
           });
-          const result = yield* invoke(surface, f, {
+          const response = invoke(surface, f, {
             query: 'unmatched project issue',
             project: 'budget-fixture',
           }).pipe(
@@ -1047,6 +1208,7 @@ describe('production recall admission budget', () => {
             Effect.provideService(CommandExecutor, observed),
             Effect.result,
           );
+          const result = yield* controlled ? controlled.run(response, {closing: false}) : response;
           expect(vocabularyRequests).toBe(1);
           if (surface === 'cli') {
             expect(result._tag).toBe('Failure');
@@ -1055,15 +1217,19 @@ describe('production recall admission budget', () => {
             expect(result._tag).toBe('Success');
             if (result._tag === 'Success') expect(result.success.isError).toBe(true);
           }
-        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+        }).pipe(provideTestLayer(ApplicationLayer), effect =>
+          surface === 'mcp' ? effect : TestClock.withLive(effect),
+        ),
       {timeout: 15000},
     );
     for (const mode of ['absent', 'fast', 'slow'] as const) {
       effectIt.effect(
-        `${surface} ${surface === 'mcp' && mode !== 'absent' ? 'composition ' : ''}returns its authorized lexical baseline with ${mode} semantic inference`,
+        `${surface} ${surface === 'mcp' ? 'composition ' : ''}returns its authorized lexical baseline with ${mode} semantic inference`,
         () =>
           Effect.gen(function* () {
             const f = yield* fixture(mode !== 'absent');
+            const controlled =
+              surface === 'mcp' && mode === 'absent' ? yield* controlledCompositionReads(f.system) : undefined;
             const deterministicSlowComposition = surface === 'mcp' && mode === 'slow';
             const baselineReadStarted = yield* Deferred.make<void>();
             const baselineReadCompleted = yield* Deferred.make<void>();
@@ -1110,9 +1276,10 @@ describe('production recall admission budget', () => {
             // The source seam observes canonical reads through this fixture service; it does not emit the
             // compiled child's stderr marker or prove native process behavior.
             const command =
-              surface === 'mcp' && mode !== 'absent'
+              controlled?.command ??
+              (surface === 'mcp' && mode !== 'absent'
                 ? yield* selectorCompositionCommands(f.system, observedWorkerFileSystem)
-                : yield* CommandExecutor;
+                : yield* CommandExecutor);
             const observedCommand = CommandExecutor.of({
               ...command,
               execute: (executable, args, options) =>
@@ -1240,7 +1407,7 @@ describe('production recall admission budget', () => {
               expect(closingReadStartedAt! - start).toBe(700_000_000n);
               expect((yield* Clock.monotonicTimeNanos) - start).toBe(800_000_000n);
             } else {
-              result = yield* responseEffect;
+              result = yield* controlled ? controlled.run(responseEffect) : responseEffect;
             }
             expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(2000);
             expect(result.isError, result.output).toBe(false);
@@ -1260,13 +1427,13 @@ describe('production recall admission budget', () => {
             if (deterministicSlowComposition) expect(starts).toEqual([900, 800, 200]);
             for (let i = 1; i < starts.length; i++) expect(starts[i]).toBeLessThanOrEqual(starts[i - 1]);
           }).pipe(provideTestLayer(ApplicationLayer), effect =>
-            surface === 'mcp' && mode === 'slow' ? effect : TestClock.withLive(effect),
+            surface === 'mcp' && mode !== 'fast' ? effect : TestClock.withLive(effect),
           ),
         {timeout: 15000},
       );
     }
     effectIt.effect(
-      `${surface} retains its hydrated baseline when the selected native reranker is held`,
+      `${surface} ${surface === 'mcp' ? 'composition ' : ''}retains its hydrated baseline when the selected native reranker is held`,
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(false);
@@ -1276,6 +1443,8 @@ describe('production recall admission budget', () => {
             'reranker',
             'jina-reranker-v1-turbo-en-f16',
           );
+          const entered = yield* Deferred.make<void>();
+          const stopped = yield* Deferred.make<void>();
           let hydrated = 0;
           let hydratedBeforeRerank = 0;
           let rerankCalls = 0;
@@ -1292,7 +1461,9 @@ describe('production recall admission budget', () => {
                 return yield* f.fs.readFileString(...args);
               }),
           };
-          const command = yield* CommandExecutor;
+          const controlled =
+            surface === 'mcp' ? yield* controlledCompositionReads(f.system, FileSystem.FileSystem.of(fs)) : undefined;
+          const command = controlled?.command ?? (yield* CommandExecutor);
           const observed = CommandExecutor.of({
             ...command,
             execute: (executable, args, options) =>
@@ -1312,23 +1483,27 @@ describe('production recall admission budget', () => {
               Effect.gen(function* () {
                 rerankCalls++;
                 hydratedBeforeRerank = hydrated;
+                yield* Deferred.succeed(entered, undefined);
                 return yield* Effect.never.pipe(
                   Effect.ensuring(
                     Effect.sync(() => {
                       interrupted++;
-                    }),
+                    }).pipe(Effect.andThen(Deferred.succeed(stopped, undefined))),
                   ),
                 );
               }),
           });
           const started = yield* Clock.monotonicTimeNanos;
-          const result = yield* invoke(surface, f).pipe(
+          const response = invoke(surface, f).pipe(
             Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
             Effect.provideService(FileSystem.FileSystem, fs),
             Effect.provideService(CommandExecutor, observed),
             Effect.provideService(LocalModelRuntime, runtime),
             Effect.provideService(LocalModelStore, f.store),
           );
+          const result = yield* controlled
+            ? controlled.run(response, {held: {entered, interrupted: stopped}})
+            : response;
           expect(Number((yield* Clock.monotonicTimeNanos) - started) / 1_000_000).toBeLessThan(2000);
           expect(result.isError, result.output).toBe(false);
           expect(result.output).toContain('memories/durable/alpha.md');
@@ -1337,7 +1512,9 @@ describe('production recall admission budget', () => {
           expect(hydratedBeforeRerank).toBeGreaterThan(0);
           expect(interrupted).toBe(1);
           expect(lateHydrations).toBeGreaterThan(0);
-        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+        }).pipe(provideTestLayer(ApplicationLayer), effect =>
+          surface === 'mcp' ? effect : TestClock.withLive(effect),
+        ),
       {timeout: 15000},
     );
     effectIt.effect(

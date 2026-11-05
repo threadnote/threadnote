@@ -27,7 +27,7 @@ export type DerivedIndexRefreshOutcome =
   | {readonly state: 'unavailable'}
   | {readonly state: 'blocked'; readonly repair: string};
 
-import {deferRecallEmbeddings, readRecallEmbeddingDemand, requestRecallEmbeddings} from '../background/demand.js';
+import {deferRecallEmbeddings, requestRecallEmbeddingsReceipt} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -42,9 +42,7 @@ export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpB
   config: McpRecallRefreshConfig,
   _manifest: LocalModelManifest,
 ) {
-  const previous = yield* readRecallEmbeddingDemand(config);
-  yield* requestRecallEmbeddings(config, true);
-  return previous?.desired ? ('coalesced' as const) : ('scheduled' as const);
+  return (yield* requestRecallEmbeddingsReceipt(config, true)).disposition;
 });
 
 /** Canonical and lexical readiness complete now; document inference is durable idle demand. */

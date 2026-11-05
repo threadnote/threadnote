@@ -3,7 +3,7 @@ import {Cause, Context, Effect, FileSystem, Option, Path, Schema, String as Effe
 import {runtimeReadBoundedStableRegularFile, SystemInfo} from '@threadnote/platform/system';
 import {fromPromise} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 
 export interface RecallEmbeddingScope {
@@ -71,8 +71,48 @@ export type RecallEmbeddingDemand = typeof demandSchema.Type;
 export class RecallEmbeddingDemandUnavailable extends Schema.TaggedError<
   RecallEmbeddingDemandUnavailable,
   {readonly brand: unique symbol}
->()('RecallEmbeddingDemandUnavailable', {message: Schema.String}) {}
-const unavailable = () => RecallEmbeddingDemandUnavailable.make({message: 'Recall embedding demand requires repair.'});
+>()('RecallEmbeddingDemandUnavailable', {
+  message: Schema.String,
+  stage: Schema.optionalKey(Schema.Literals(['prepare', 'guard', 'read', 'validate', 'publish'])),
+  reason: Schema.optionalKey(
+    Schema.Literals([
+      'state-changed',
+      'invalid-file',
+      'invalid-utf8',
+      'invalid-state',
+      'scope-mismatch',
+      'guard-timeout',
+      'io',
+      'unknown',
+    ]),
+  ),
+}) {}
+const unavailable = (
+  stage: NonNullable<RecallEmbeddingDemandUnavailable['stage']> = 'read',
+  reason: NonNullable<RecallEmbeddingDemandUnavailable['reason']> = 'unknown',
+) => RecallEmbeddingDemandUnavailable.make({message: 'Recall embedding demand requires repair.', stage, reason});
+const mappedFailure = (stage: NonNullable<RecallEmbeddingDemandUnavailable['stage']>, error: unknown) =>
+  Schema.is(RecallEmbeddingDemandUnavailable)(error)
+    ? error
+    : unavailable(stage, stage === 'guard' && Schema.is(FileLockTimeout)(error) ? 'guard-timeout' : 'io');
+const replacementReadFailure = Schema.is(
+  Schema.Struct({
+    _tag: Schema.Literals(['SystemOperationError']),
+    message: Schema.Literals(['Target changed while opening.', 'Target changed during bounded read.']),
+  }),
+);
+const unsafeReadFailure = Schema.is(
+  Schema.Struct({
+    _tag: Schema.Literals(['SystemOperationError']),
+    message: Schema.Literals(['Target is not a bounded stable regular file.']),
+  }),
+);
+
+export interface RecallEmbeddingDemandReceipt {
+  readonly token: string;
+  readonly revision: string;
+  readonly disposition: 'scheduled' | 'coalesced';
+}
 
 export function recallEmbeddingDemandKey(scope: Pick<RecallEmbeddingScope, 'account' | 'user'>): string {
   return sha256HexSync(JSON.stringify([scope.account, scope.user]));
@@ -84,52 +124,61 @@ const locations = (path: Path.Path, scope: RecallEmbeddingScope) => {
   return {directory, state: path.join(directory, key + '.json'), guard: path.join(directory, key + '.lock')};
 };
 
-const readDemandFile = Effect.fn('recall.readEmbeddingDemandFile')(function* (filename: string) {
-  const text = yield* fromPromise('recall.readEmbeddingDemandFile', () =>
-    runtimeReadBoundedStableRegularFile(filename, 8192),
-  ).pipe(
-    Effect.retry({
-      times: 2,
-      while: error =>
-        Schema.is(
-          Schema.Struct({
-            _tag: Schema.Literals(['SystemOperationError']),
-            message: Schema.Literals(['Target changed while opening.', 'Target changed during bounded read.']),
-          }),
-        )(error.cause),
-    }),
-  );
-  const decoded = yield* Effect.try({
-    try: () => new TextDecoder('utf-8', {fatal: true}).decode(text),
-    catch: unavailable,
-  });
-  const state = yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Union([legacyDemandSchema, demandSchema])))(
-    decoded,
-  );
-  const normalized: RecallEmbeddingDemand =
-    state.version === 1
-      ? {
-          version: 2,
-          account: state.account,
-          user: state.user,
-          ...(state.desired ? {desired: {...state.desired, revision: state.desired.token}} : {}),
-        }
-      : state;
-  return normalized;
-}, Effect.mapError(unavailable));
+const readDemandFile = Effect.fn('recall.readEmbeddingDemandFile')(
+  function* (filename: string) {
+    const text = yield* fromPromise('recall.readEmbeddingDemandFile', () =>
+      runtimeReadBoundedStableRegularFile(filename, 8192),
+    ).pipe(
+      Effect.retry({
+        times: 2,
+        while: error => replacementReadFailure(error.cause),
+      }),
+      Effect.mapError(error =>
+        unavailable(
+          'read',
+          replacementReadFailure(error.cause)
+            ? 'state-changed'
+            : unsafeReadFailure(error.cause)
+              ? 'invalid-file'
+              : 'io',
+        ),
+      ),
+    );
+    const decoded = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', {fatal: true}).decode(text),
+      catch: () => unavailable('validate', 'invalid-utf8'),
+    });
+    const state = yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Union([legacyDemandSchema, demandSchema])))(
+      decoded,
+    ).pipe(Effect.mapError(() => unavailable('validate', 'invalid-state')));
+    const normalized: RecallEmbeddingDemand =
+      state.version === 1
+        ? {
+            version: 2,
+            account: state.account,
+            user: state.user,
+            ...(state.desired ? {desired: {...state.desired, revision: state.desired.token}} : {}),
+          }
+        : state;
+    return normalized;
+  },
+  Effect.mapError(error => mappedFailure('read', error)),
+);
 
 /** Absence means no demand. Malformed existing state never becomes an empty queue. */
-export const readRecallEmbeddingDemand = Effect.fn('recall.readEmbeddingDemand')(function* (
-  scope: RecallEmbeddingScope,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const location = locations(path, scope);
-  if (!(yield* fs.exists(location.state))) return undefined;
-  const state = yield* readDemandFile(location.state);
-  if (state.account !== scope.account || state.user !== scope.user) return yield* unavailable();
-  return state;
-}, Effect.mapError(unavailable));
+export const readRecallEmbeddingDemand = Effect.fn('recall.readEmbeddingDemand')(
+  function* (scope: RecallEmbeddingScope) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const location = locations(path, scope);
+    if (!(yield* fs.exists(location.state))) return undefined;
+    const state = yield* readDemandFile(location.state);
+    if (state.account !== scope.account || state.user !== scope.user)
+      return yield* unavailable('validate', 'scope-mismatch');
+    return state;
+  },
+  Effect.mapError(error => mappedFailure('read', error)),
+);
 
 /** One bounded physical catalog entry, with no memory-body reads or registry. */
 export const readRecallEmbeddingScope = Effect.fn('recall.readEmbeddingScope')(function* (
@@ -153,7 +202,7 @@ export const readRecallEmbeddingScope = Effect.fn('recall.readEmbeddingScope')(f
     state.user === '..' ||
     (state.desired?.manifestPath !== undefined && !path.isAbsolute(state.desired.manifestPath))
   )
-    return yield* unavailable();
+    return yield* unavailable('validate', 'invalid-state');
   return state.desired
     ? {
         account: state.account,
@@ -174,17 +223,16 @@ const updateDemand = <A>(
     const path = yield* Path.Path;
     const crypto = yield* SecureRandom.SecureRandom;
     // A worker must not resurrect an uninstalled home. No recursive mkdir crosses this boundary.
-    const home = yield* fs.stat(scope.agentContextHome);
-    if (home.type !== 'Directory') return yield* unavailable();
+    const home = yield* fs.stat(scope.agentContextHome).pipe(Effect.mapError(error => mappedFailure('prepare', error)));
+    if (home.type !== 'Directory') return yield* unavailable('prepare', 'invalid-file');
     const location = locations(path, scope);
     for (const directory of [path.join(scope.agentContextHome, 'recall'), location.directory]) {
-      yield* fs
-        .makeDirectory(directory, {mode: 0o700})
-        .pipe(
-          Effect.catchTag('PlatformError', error =>
-            error.reason._tag === 'AlreadyExists' ? Effect.void : Effect.fail(error),
-          ),
-        );
+      yield* fs.makeDirectory(directory, {mode: 0o700}).pipe(
+        Effect.catchTag('PlatformError', error =>
+          error.reason._tag === 'AlreadyExists' ? Effect.void : Effect.fail(error),
+        ),
+        Effect.mapError(error => mappedFailure('prepare', error)),
+      );
     }
     return yield* withExclusiveFileLock(
       fs,
@@ -212,25 +260,27 @@ const updateDemand = <A>(
               yield* fs.rename(location.state, location.state + '.invalid-' + (yield* crypto.uuidV4()));
               yield* syncDirectoryBestEffort(fs, location.directory);
               return undefined;
-            });
+            }).pipe(Effect.mapError(error => mappedFailure('publish', error)));
           }),
         );
         const result = update(previous ?? {version: 2, account: scope.account, user: scope.user});
         if (previous !== undefined && result.state === previous) return result.value;
         const encoded = JSON.stringify(result.state) + '\n';
         // Validate before any replacement, including caller supplied account/path sizes.
-        yield* Schema.decodeEffect(Schema.fromJsonString(demandSchema))(encoded);
+        yield* Schema.decodeEffect(Schema.fromJsonString(demandSchema))(encoded).pipe(
+          Effect.mapError(() => unavailable('validate', 'invalid-state')),
+        );
         const temporary = path.join(location.directory, (yield* crypto.uuidV4()) + '.tmp');
         yield* Effect.acquireUseRelease(
           fs.writeFileString(temporary, encoded, {mode: 0o600, flag: 'wx'}).pipe(Effect.as(temporary)),
           temporary => syncWritableFile(fs, temporary).pipe(Effect.andThen(fs.rename(temporary, location.state))),
           temporary => fs.remove(temporary, {force: true}).pipe(Effect.ignore),
-        );
+        ).pipe(Effect.mapError(error => mappedFailure('publish', error)));
         yield* syncDirectoryBestEffort(fs, location.directory);
         return result.value;
       }),
     );
-  }).pipe(Effect.mapError(unavailable));
+  }).pipe(Effect.mapError(error => mappedFailure('guard', error)));
 
 /** Signals reconciliation, never a trusted corpus/model target or a document body. */
 const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* (
@@ -257,7 +307,11 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
             ...(scope.manifestPath === undefined ? {} : {manifestPath: scope.manifestPath}),
           },
         },
-        value: selectedToken,
+        value: {
+          token: selectedToken,
+          revision,
+          disposition: state.desired ? 'coalesced' : 'scheduled',
+        } satisfies RecallEmbeddingDemandReceipt,
       };
     },
     resetInvalid,
@@ -273,10 +327,14 @@ const enqueueRecallEmbeddings = Effect.fn('recall.enqueueEmbeddings')(function* 
   return selected;
 });
 
-export const requestRecallEmbeddings = (scope: RecallEmbeddingScope, coalesce = false) =>
+/** Acknowledges this event only after the guarded durable update and original wake. */
+export const requestRecallEmbeddingsReceipt = (scope: RecallEmbeddingScope, coalesce = false) =>
   enqueueRecallEmbeddings(scope, coalesce, false);
+export const requestRecallEmbeddings = (scope: RecallEmbeddingScope, coalesce = false) =>
+  requestRecallEmbeddingsReceipt(scope, coalesce).pipe(Effect.map(receipt => receipt.token));
 /** Explicit operator repair preserves the rejected control file before rebuilding demand. */
-export const repairRecallEmbeddingDemand = (scope: RecallEmbeddingScope) => enqueueRecallEmbeddings(scope, false, true);
+export const repairRecallEmbeddingDemand = (scope: RecallEmbeddingScope) =>
+  enqueueRecallEmbeddings(scope, false, true).pipe(Effect.map(receipt => receipt.token));
 
 /** Completion must observe the same event, including when configuration coalesces its token. */
 export const completeRecallEmbeddingDemand = (scope: RecallEmbeddingScope, token: string, revision: string) =>

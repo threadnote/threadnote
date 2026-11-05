@@ -4,6 +4,7 @@ import {
   completeRecallEmbeddingDemand,
   readRecallEmbeddingDemand,
   requestRecallEmbeddings,
+  RecallEmbeddingDemandUnavailable,
 } from '@threadnote/recall/background/demand';
 import {stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
 import {Array as EffectArray} from 'effect';
@@ -11,7 +12,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Option, Path, Ref} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Option, Path, Ref, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
 import {describe, expect, vi} from 'vitest';
@@ -59,6 +60,117 @@ function recallGeneration(value: unknown): string {
 const manifest = Option.getOrUndefined(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
 )!;
+
+// Same existing private concurrent fixture; execution needs separate admission.
+const concurrentRefreshFixture = (callers: number) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-refresh-');
+      const config = {account: 'local', agentContextHome: home, user: 'tester'};
+      const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'refresh.md');
+      const uri = 'threadnote://resources/repos/threadnote/refresh.md';
+      yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+      yield* fs.writeFileString(resource, '# Refresh\n\nOriginal semantic content.\n');
+
+      const calls = yield* Ref.make(0);
+      const refreshStarted = yield* Deferred.make<void>();
+      const releaseRefresh = yield* Deferred.make<void>();
+      const requestsCompleted = yield* Deferred.make<void>();
+      const runtime = fakeRuntime((inputs, dimensions) =>
+        Ref.updateAndGet(calls, count => count + 1).pipe(
+          Effect.flatMap(call =>
+            call === 2
+              ? Deferred.succeed(refreshStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseRefresh)))
+              : Effect.void,
+          ),
+          Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
+        ),
+      );
+      const store = installedModelStore(home);
+
+      yield* Effect.gen(function* () {
+        const catalog = yield* LocalModelCatalog;
+        yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+        const initial = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+        yield* ensureVectorIndex(config, manifest, initial.candidates, {corpusGeneration: initial.generation});
+
+        yield* fs.writeFileString(resource, '# Refresh\n\nChanged semantic content.\n');
+        yield* expireRecallIndexValidation(home, false, [uri]);
+        expect(yield* recallIndexStatus(config)).toMatchObject({
+          ready: false,
+          reason: 'canonical documents changed; run `threadnote repair`',
+        });
+
+        const requests = yield* Effect.all(
+          Array.from({length: callers}, () => loadMcpRecallSemanticScoresResult(config, 'changed semantic content', 5)),
+          {concurrency: 'unbounded'},
+        ).pipe(Effect.ensuring(Deferred.succeed(requestsCompleted, undefined)), Effect.forkChild);
+        const results = yield* Fiber.join(requests);
+        yield* Effect.forEach(Array.from({length: 20}), () => Effect.yieldNow, {discard: true});
+        expect(Option.isSome(yield* Deferred.poll(requestsCompleted))).toBe(true);
+        expect(results).toHaveLength(callers);
+        expect(EffectArray.every(results, result => result.status === 'unavailable')).toBe(true);
+        expect(
+          EffectArray.every(results, result =>
+            Boolean(
+              Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect2.pipe(effectOptionalString, EffectString.includes('background refresh')),
+              ),
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.every(results, result =>
+            Boolean(
+              Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect2.pipe(effectOptionalString, EffectString.includes('without waiting')),
+              ),
+            ),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.every(
+            results,
+            result => new TextEncoder().encode(Option.getOrUndefined(result.result.warning) ?? '').byteLength <= 180,
+          ),
+        ).toBe(true);
+        expect(yield* Ref.get(calls)).toBe(1);
+        expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+        const worker = yield* finishQueuedRecall(config).pipe(Effect.forkScoped);
+        yield* Deferred.await(refreshStarted);
+        expect(yield* Ref.get(calls)).toBe(2);
+
+        yield* Deferred.succeed(releaseRefresh, undefined);
+        const refreshedGeneration = yield* Fiber.join(worker);
+        expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshedGeneration)).toBe('current');
+        expect((yield* recallIndexStatus(config)).ready).toBe(true);
+        const available = yield* loadMcpRecallSemanticScoresResult(config, 'changed semantic content', 5);
+        expect(available.status).toBe('available');
+        expect(yield* fs.exists(home)).toBe(true);
+      }).pipe(
+        Effect.provideService(LocalModelRuntime, runtime),
+        Effect.provideService(LocalModelStore, store),
+        Effect.ensuring(Deferred.succeed(releaseRefresh, undefined)),
+      );
+    }),
+  ).pipe(
+    TestClock.withLive,
+    provideTestLayer(ApplicationLayer),
+    Effect.tapError(error =>
+      Schema.is(RecallEmbeddingDemandUnavailable)(error)
+        ? Effect.logError('Recall demand enqueue failed', {
+            stage: error.stage ?? 'unknown',
+            reason: error.reason ?? 'unknown',
+          })
+        : Effect.void,
+    ),
+  );
 
 describe('MCP recall background vector refresh', () => {
   effectIt.effect('retains a new event when canonical invalidation makes the closing lexical status stale', () =>
@@ -645,108 +757,11 @@ describe('MCP recall background vector refresh', () => {
     effectIt,
     'returns promptly and single-flights every bounded number of concurrent refreshes for one canonical home',
     {callers: FC.integer({max: 24, min: 2})},
-    ({callers}) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-refresh-');
-          const config = {account: 'local', agentContextHome: home, user: 'tester'};
-          const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'refresh.md');
-          const uri = 'threadnote://resources/repos/threadnote/refresh.md';
-          yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-          yield* fs.writeFileString(resource, '# Refresh\n\nOriginal semantic content.\n');
-
-          const calls = yield* Ref.make(0);
-          const refreshStarted = yield* Deferred.make<void>();
-          const releaseRefresh = yield* Deferred.make<void>();
-          const requestsCompleted = yield* Deferred.make<void>();
-          const runtime = fakeRuntime((inputs, dimensions) =>
-            Ref.updateAndGet(calls, count => count + 1).pipe(
-              Effect.flatMap(call =>
-                call === 2
-                  ? Deferred.succeed(refreshStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseRefresh)))
-                  : Effect.void,
-              ),
-              Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
-            ),
-          );
-          const store = installedModelStore(home);
-
-          yield* Effect.gen(function* () {
-            const catalog = yield* LocalModelCatalog;
-            yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-            const initial = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-            yield* ensureVectorIndex(config, manifest, initial.candidates, {corpusGeneration: initial.generation});
-
-            yield* fs.writeFileString(resource, '# Refresh\n\nChanged semantic content.\n');
-            yield* expireRecallIndexValidation(home, false, [uri]);
-            expect(yield* recallIndexStatus(config)).toMatchObject({
-              ready: false,
-              reason: 'canonical documents changed; run `threadnote repair`',
-            });
-
-            const requests = yield* Effect.all(
-              Array.from({length: callers}, () =>
-                loadMcpRecallSemanticScoresResult(config, 'changed semantic content', 5),
-              ),
-              {concurrency: 'unbounded'},
-            ).pipe(Effect.ensuring(Deferred.succeed(requestsCompleted, undefined)), Effect.forkChild);
-            const results = yield* Fiber.join(requests);
-            yield* Effect.forEach(Array.from({length: 20}), () => Effect.yieldNow, {discard: true});
-            expect(Option.isSome(yield* Deferred.poll(requestsCompleted))).toBe(true);
-            expect(results).toHaveLength(callers);
-            expect(EffectArray.every(results, result => result.status === 'unavailable')).toBe(true);
-            expect(
-              EffectArray.every(results, result =>
-                Boolean(
-                  Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
-                    effectOptionalString == null
-                      ? undefined
-                      : Effect2.pipe(effectOptionalString, EffectString.includes('background refresh')),
-                  ),
-                ),
-              ),
-            ).toBe(true);
-            expect(
-              EffectArray.every(results, result =>
-                Boolean(
-                  Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
-                    effectOptionalString == null
-                      ? undefined
-                      : Effect2.pipe(effectOptionalString, EffectString.includes('without waiting')),
-                  ),
-                ),
-              ),
-            ).toBe(true);
-            expect(
-              EffectArray.every(
-                results,
-                result =>
-                  new TextEncoder().encode(Option.getOrUndefined(result.result.warning) ?? '').byteLength <= 180,
-              ),
-            ).toBe(true);
-            expect(yield* Ref.get(calls)).toBe(1);
-            expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
-            const worker = yield* finishQueuedRecall(config).pipe(Effect.forkScoped);
-            yield* Deferred.await(refreshStarted);
-            expect(yield* Ref.get(calls)).toBe(2);
-
-            yield* Deferred.succeed(releaseRefresh, undefined);
-            const refreshedGeneration = yield* Fiber.join(worker);
-            expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshedGeneration)).toBe('current');
-            expect((yield* recallIndexStatus(config)).ready).toBe(true);
-            const available = yield* loadMcpRecallSemanticScoresResult(config, 'changed semantic content', 5);
-            expect(available.status).toBe('available');
-            expect(yield* fs.exists(home)).toBe(true);
-          }).pipe(
-            Effect.provideService(LocalModelRuntime, runtime),
-            Effect.provideService(LocalModelStore, store),
-            Effect.ensuring(Deferred.succeed(releaseRefresh, undefined)),
-          );
-        }),
-      ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    ({callers}) => concurrentRefreshFixture(callers),
     {fastCheck: {numRuns: 8}},
+  );
+  effectIt.effect('fixed20 concurrent refresh diagnostic fixture preserves durable intent', () =>
+    concurrentRefreshFixture(20),
   );
 
   effectIt.effect('builds missing lexical and vector indexes after a non-blocking first-use request', () =>

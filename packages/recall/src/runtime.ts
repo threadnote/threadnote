@@ -1,9 +1,19 @@
-import {RecallReadyReadBoundary} from './read_boundary.js';
-import {hasReadCleanupUnconfirmed, isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {
+  RecallReadyReadBoundary,
+  recallSemanticPreflightSchema,
+  type RecallVectorReadModel,
+  type RecallSemanticPreflight,
+} from './read_boundary.js';
+import {
+  hasReadCleanupUnconfirmed,
+  isReadCleanupUnconfirmed,
+  ReadDeadlineContext,
+  readDeadlineRemaining,
+} from '@threadnote/platform/read_deadline';
 import {loadRecallVectorAuthorizationKey} from './vector/preparation-identity.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
+import {Cause, Clock, Console, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
 import {MAX_RECALL_SELECTION_CANDIDATES, type RecallSelectionCandidate} from '@threadnote/recall/selection';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -18,7 +28,7 @@ import {
 } from '@threadnote/recall/results';
 import {rerankWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, parseModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallFeedback} from './feedback.js';
@@ -80,6 +90,7 @@ export interface RecallRuntimeConfig {
 }
 
 export interface PrepareRecallSectionsInput<R> {
+  readonly semanticPreflightModel?: RecallVectorReadModel;
   readonly allowExactRescue: boolean;
   /** Deterministic baseline retrieval precedes optional model refinement. */
   readonly allowReranker?: boolean;
@@ -113,6 +124,76 @@ export interface PrepareRecallSectionsInput<R> {
   readonly workspaceBranch?: string;
   /** Structured, repo-relative component scope used for candidate sourcing and ranking, never as topical query text. */
   readonly workspaceScope?: string;
+}
+
+/** Small optional metadata allowance inside the original read deadline, never a new request budget. */
+export const RECALL_PREFLIGHT_METADATA_MILLISECONDS = 25;
+export const prepareRecallSemanticPreflight = Effect.fn('recall.prepareSemanticPreflight')(function* (
+  config: RecallRuntimeConfig,
+) {
+  if (Option.isNone(yield* Effect.serviceOption(RecallReadyReadBoundary))) return undefined;
+  const deadline = yield* Effect.serviceOption(ReadDeadlineContext);
+  if (Option.isNone(deadline)) return undefined;
+  const allowance = Math.min(
+    RECALL_PREFLIGHT_METADATA_MILLISECONDS,
+    yield* readDeadlineRemaining(deadline.value, 1100),
+  );
+  if (allowance <= 0) return undefined;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const file = yield* fs.open(path.join(config.agentContextHome, 'models', 'selection.json'));
+      const info = yield* file.stat;
+      if (info.type !== 'File' || info.size > 8192n) return undefined;
+      const bytes = yield* file.readAlloc(8193);
+      if (Option.isNone(bytes) || bytes.value.length !== Number(info.size) || bytes.value.length > 8192)
+        return undefined;
+      const raw = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes.value));
+      const selected = parseModelSelection(raw);
+      if (selected.status !== 'valid') return undefined;
+      const id = selected.selection.roles.embedding;
+      if (id === undefined) return undefined;
+      const catalog = yield* LocalModelCatalog;
+      const manifest = yield* catalog.get(id);
+      if (manifest.role !== 'embedding' || !manifest.dimensions) return undefined;
+      const store = yield* LocalModelStore;
+      if (!(yield* store.status(config.agentContextHome, manifest)).installed) return undefined;
+      const model = {
+        id: manifest.id,
+        sha256: manifest.sha256,
+        dimensions: manifest.dimensions,
+        ...(manifest.promptPrefixes === undefined ? {} : {promptPrefixes: manifest.promptPrefixes}),
+      } satisfies RecallVectorReadModel;
+      return (yield* Schema.decodeEffect(recallSemanticPreflightSchema, {onExcessProperty: 'error'})({
+        model,
+        readiness: 'unknown',
+      })).model;
+    }),
+  ).pipe(
+    Effect.catchCauseIf(
+      cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
+      () => Effect.void,
+    ),
+    Effect.timeoutOrElse({duration: allowance, orElse: () => Effect.void}),
+  );
+});
+
+/** A negative hint skips only optional vector probing, never a final content proof. */
+export function recallPreflightSkipsSemanticRead(
+  model: RecallVectorReadModel | undefined,
+  hint: RecallSemanticPreflight | undefined,
+): boolean {
+  return (
+    model !== undefined &&
+    hint !== undefined &&
+    (hint.readiness === 'missing' || hint.readiness === 'stale') &&
+    model.id === hint.model.id &&
+    model.sha256 === hint.model.sha256 &&
+    model.dimensions === hint.model.dimensions &&
+    model.promptPrefixes?.document === hint.model.promptPrefixes?.document &&
+    model.promptPrefixes?.query === hint.model.promptPrefixes?.query
+  );
 }
 
 const EXPANSION_VOCABULARY_LIMIT = 50;
@@ -764,12 +845,13 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
   limit: number,
   eligibility?: RecallEligibilityPolicy,
   allowedUriScopes?: readonly string[],
+  preflight?: RecallSemanticPreflight,
 ) {
   const semanticLimit = recallIndexPreselectionLimit(limit);
   const runtime = yield* LocalModelRuntime;
   const attempt = yield* mcpRecallSemanticRetrievalGate(
     runtime,
-    loadReadOnlySemanticScoresAttempt(config, query, semanticLimit, eligibility, allowedUriScopes),
+    loadReadOnlySemanticScoresAttempt(config, query, semanticLimit, eligibility, allowedUriScopes, preflight),
   );
   if (attempt.status === 'cooldown') {
     return {
@@ -821,6 +903,7 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   limit: number,
   eligibility?: RecallEligibilityPolicy,
   allowedUriScopes?: readonly string[],
+  preflight?: RecallSemanticPreflight,
 ) {
   const selection = yield* readModelSelection(config.agentContextHome);
   const modelId = selection.roles.embedding;
@@ -831,6 +914,18 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   const store = yield* LocalModelStore;
   const installed = yield* store.status(config.agentContextHome, manifest);
   if (!installed.installed) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
+  if (
+    recallPreflightSkipsSemanticRead(
+      {
+        id: manifest.id,
+        sha256: manifest.sha256,
+        dimensions: manifest.dimensions ?? 0,
+        promptPrefixes: manifest.promptPrefixes,
+      },
+      preflight,
+    )
+  )
+    return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
   if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) {
     const snapshot = yield* selectedSemanticScoreSnapshot(config, query, {allowedUriScopes, eligibility, limit});
     if (snapshot === undefined) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
@@ -911,6 +1006,7 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
   limit: number,
   eligibility?: RecallEligibilityPolicy,
   allowedUriScopes?: readonly string[],
+  preflight?: RecallSemanticPreflight,
 ) {
   return yield* Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
@@ -922,6 +1018,20 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
     const store = yield* LocalModelStore;
     const installed = yield* store.status(config.agentContextHome, manifest);
     if (!installed.installed) return undefined;
+    if (
+      recallPreflightSkipsSemanticRead(
+        {
+          id: manifest.id,
+          sha256: manifest.sha256,
+          dimensions: manifest.dimensions ?? 0,
+          promptPrefixes: manifest.promptPrefixes,
+        },
+        preflight,
+      )
+    ) {
+      yield* scheduleMcpRecallBackgroundRefresh(config, manifest);
+      return undefined;
+    }
     const semanticLimit = recallIndexPreselectionLimit(limit);
     return yield* loadCurrentSemanticScores(config, manifest, query, semanticLimit, eligibility, allowedUriScopes);
   }).pipe(

@@ -1,4 +1,15 @@
-import {Array as EffectArray, Effect, Layer, Schema, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Predicate,
+  Schema,
+  String as EffectString,
+  pipe as EffectArrayPipe,
+} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {SqlError} from 'effect/sql/SqlError';
@@ -91,3 +102,84 @@ export function chunkRecallValues<Value>(values: readonly Value[], size: number)
   }
   return chunks;
 }
+
+export const readRecallPublishedMetadataHint = Effect.fn('recall.publishedMetadataHint')(function* (config: {
+  readonly root: string;
+  readonly pointer: string;
+  readonly fixed: string;
+  readonly pointerVersion: number;
+  readonly schemaVersion: number;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const databasePath = yield* resolveNegativeHintDatabasePath(fs, path, config);
+  if (databasePath === undefined) return undefined;
+  if (!(yield* fs.exists(databasePath))) return undefined;
+  return yield* useRecallDatabaseReadOnly(
+    databasePath,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const columns = yield* sql.unsafe<{readonly name: string; readonly pk: number}>("PRAGMA table_info('metadata')");
+      if (
+        columns.length !== 2 ||
+        columns[0]?.name !== 'key' ||
+        columns[0].pk !== 1 ||
+        columns[1]?.name !== 'value' ||
+        columns[1].pk !== 0
+      )
+        return undefined;
+      const rows = yield* sql<{readonly key: string; readonly value: string | null}>`SELECT key,
+        CASE WHEN typeof(value) = 'text' THEN CASE WHEN octet_length(value) <= 65536 THEN value END END AS value FROM metadata
+      WHERE key IN ('schema_version', 'initialized', 'content_generation') LIMIT 3`;
+      const metadata = new Map(EffectArray.map(rows, row => [row.key, row.value]));
+      const generation = metadata.get('content_generation');
+      return metadata.get('schema_version') === String(config.schemaVersion) &&
+        metadata.get('initialized') === 'true' &&
+        typeof generation === 'string' &&
+        generation.length > 0 &&
+        generation.length <= 65536
+        ? generation
+        : undefined;
+    }),
+  );
+});
+
+// Optional negative metadata must not add an unbounded pointer read before useful recall.
+const resolveNegativeHintDatabasePath = Effect.fn('recall.resolveNegativeHintDatabasePath')(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  config: {readonly root: string; readonly pointer: string; readonly fixed: string; readonly pointerVersion: number},
+) {
+  const pointerPath = config.pointer;
+  if (!(yield* fs.exists(pointerPath))) return config.fixed;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const file = yield* fs.open(pointerPath);
+      const info = yield* file.stat;
+      if (info.type !== 'File' || info.size > 8192n) return undefined;
+      const bytes = yield* file.readAlloc(8193);
+      if (Option.isNone(bytes) || bytes.value.length !== Number(info.size) || bytes.value.length > 8192)
+        return undefined;
+      const raw = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes.value));
+      const pointer = yield* Effect.try(() => JSON.parse(raw) as unknown);
+      if (!Predicate.isObject(pointer)) return undefined;
+      const relative =
+        typeof pointer.database === 'string'
+          ? EffectArrayPipe(pointer.database, EffectString.replaceAll('\\', '/'))
+          : undefined;
+      if (
+        pointer.version !== config.pointerVersion ||
+        !relative ||
+        !EffectArrayPipe(relative, EffectString.startsWith('generations/')) ||
+        EffectArray.some(
+          EffectArrayPipe(relative, EffectString.split('/')),
+          segment => segment === '' || segment === '.' || segment === '..',
+        ) ||
+        !EffectArrayPipe(relative, EffectString.endsWith('.sqlite'))
+      )
+        return undefined;
+      const databasePath = path.join(config.root, ...EffectArrayPipe(relative, EffectString.split('/')));
+      return (yield* fs.exists(databasePath)) ? databasePath : undefined;
+    }),
+  );
+});

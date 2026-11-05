@@ -122,6 +122,7 @@ import {
   buildRecallIndexSelectionCandidates,
   buildRecallSelectionCandidates,
   createRecallRerankerCache,
+  prepareRecallSemanticPreflight,
   warmRecallReranker,
   loadRecallExpansionVocabulary,
   loadMcpRecallSemanticScoresResult,
@@ -1176,6 +1177,7 @@ function runRecallTool(
         appendSemanticWarning(semanticResult);
         const rerankerCache = createRecallRerankerCache();
         let allowReranker = false;
+        const semanticPreflightModel = navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
         let lexicalProgressPending = true;
         const prepareSections = (candidateUris?: readonly string[], closingRead = false) => {
           const work = withAnonymousTelemetryPhase(
@@ -1184,6 +1186,7 @@ function runRecallTool(
               'recall.lexical-ranking',
               Effect.gen(function* () {
                 const prepared = yield* prepareDefaultRecallSections(config, {
+                  ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
                   allowReranker,
                   allowExactRescue: !thresholdConfigured,
                   allowSemanticRescue: !thresholdConfigured,
@@ -1264,6 +1267,7 @@ function runRecallTool(
                       recallLimit,
                       eligibility,
                       params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                      baselineSections.semanticPreflight,
                     ),
                     result =>
                       result.status === 'available'

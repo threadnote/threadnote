@@ -5,6 +5,7 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
 import {
   Array as EffectArray,
+  Cause,
   DateTime,
   Effect,
   Layer,
@@ -46,10 +47,15 @@ import {
   readSelectedSemanticVectorState,
   readSelectedSemanticVectorScores,
   vectorIndexGenerationReadiness,
+  recallVectorStorage,
   loadRecallVectorAuthorizationKey,
 } from '@threadnote/recall/vector-index';
+import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {RecallIndexQueryDiagnostics, RecallReadyReadState} from '@threadnote/recall/index';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {RECALL_PREFLIGHT_METADATA_MILLISECONDS} from '@threadnote/recall/runtime';
+import type {RecallSemanticPreflight} from '@threadnote/recall/read_boundary';
 
 export const RECALL_READY_READ_INPUT_BYTES = 256 * 1024;
 export const RECALL_READY_READ_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -90,8 +96,28 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
   const onCanonicalMismatch = (value: number) => observe({kind: 'mismatch', value});
   const program = Effect.gen(function* () {
     switch (request.operation) {
-      case 'sections':
-        return yield* serveRecallSections(request.config, request.options);
+      case 'sections': {
+        const model = request.options.mode === 'baseline' ? request.options.semanticPreflightModel : undefined;
+        const semanticPreflight =
+          model === undefined
+            ? undefined
+            : yield* Effect.gen(function* () {
+                const readiness = yield* negativeSemanticReadinessHint(request.config, model, recallVectorStorage);
+                return {model, readiness} satisfies RecallSemanticPreflight;
+              }).pipe(
+                Effect.catchCauseIf(
+                  cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
+                  () => Effect.succeed({model, readiness: 'unknown' as const}),
+                ),
+                Effect.timeoutOrElse({
+                  duration: RECALL_PREFLIGHT_METADATA_MILLISECONDS,
+                  orElse: () => Effect.succeed({model, readiness: 'unknown' as const}),
+                }),
+              );
+        // Read-only preflight precedes the baseline's final canonical and permission proof.
+        const sections = yield* serveRecallSections(request.config, request.options);
+        return semanticPreflight === undefined ? sections : {...sections, semanticPreflight};
+      }
       case 'memory-connections': {
         const instant = DateTime.make(request.options.now);
         if (Option.isNone(instant)) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
