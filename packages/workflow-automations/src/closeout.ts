@@ -4,6 +4,7 @@ import {WorkflowAutomationError} from './contracts.js';
 import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
 import {
   decodeNativeAuthoringDocument,
+  isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeSpecIntentDigest,
   type NativeAuthoringDocument,
@@ -49,22 +50,15 @@ const path = text(4096).check(
   ),
 );
 const texts = (minimum = 0, maximum = 128) => Schema.Array(text()).check(Schema.isBetweenLength(minimum, maximum));
-const mermaid = text().check(
-  Schema.makeFilter(value =>
-    /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(
-      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-      Effect.pipe(value, EffectString.trimStart).split(/\r?\n/u, 1)[0] ?? '',
-    )
-      ? undefined
-      : 'Use a supported raw Mermaid declaration without fences.',
-  ),
-);
+const mermaid = text().check(Schema.makeFilter(value =>
+  isNativeMermaidDiagram(value) ? undefined : 'Use a supported raw Mermaid declaration without fences.',
+));
 export const NativeCloseoutProposalSchema = Schema.Struct({
   architecture: Schema.Struct({
     summary: text(),
     components: texts(1),
     contracts: texts(),
-    diagram: mermaid,
+    diagram: Schema.optionalKey(mermaid),
     invariants: texts(),
     unknowns: texts(),
     deviations: texts(),
@@ -238,7 +232,7 @@ export function prepareNativeCloseout(
         lines(proposal.architecture.unknowns) +
         '\n\nDeviations\n' +
         lines(proposal.architecture.deviations),
-      diagram: proposal.architecture.diagram,
+      ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
       'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs),
     },
   });
