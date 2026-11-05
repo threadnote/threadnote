@@ -12,6 +12,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {codeGraphWorksetCatalogLayout} from '@threadnote/graph/workset_catalog/layout';
 import {CodeGraphWorksetCatalogError} from '@threadnote/graph/workset_catalog/types';
 import * as SqlError from 'effect/sql/SqlError';
+import {managerWorksetFailureDiagnostic} from '../../src/manager/workset_status_diagnostics.js';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -22,7 +23,6 @@ import {validateManagerProjectRoots} from '@threadnote/threadnote/manager/projec
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   handleManagerWorksetRequest,
-  managerWorksetFailureDiagnostic,
   managerWorksetJobSummary,
   managerWorksetRequestAllowedDuringMaintenance,
   mutateManagerManifestProject,
