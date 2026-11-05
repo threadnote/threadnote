@@ -9,6 +9,7 @@ import {
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {makeNativeTaskActionCommands} from '../../src/effect/workflow_cli.js';
@@ -110,6 +111,58 @@ const completeDuringJournalRead = (f: Effect.Success<ReturnType<typeof fixture>>
   });
 
 describe('native task actions', () => {
+  effectIt.effect('accepts the bound checkout when Git reports an alternate root spelling', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const fs = yield* FileSystem.FileSystem;
+      const executor = yield* CommandExecutor;
+      const canonicalRoot = yield* fs.realPath(f.repo);
+      const separator = f.path.sep;
+      const reportedRoot = canonicalRoot + separator + '.';
+      let injectedAlternateRoot = false;
+      const alternateRootExecutor = CommandExecutor.of({
+        ...executor,
+        execute: (executable, args, options) =>
+          executor.execute(executable, args, options).pipe(
+            Effect.map(result => {
+              if (executable !== 'git' || args[0] !== 'rev-parse' || args[1] !== '--show-toplevel') return result;
+              injectedAlternateRoot = true;
+              return {...result, stdout: reportedRoot};
+            }),
+          ),
+      });
+      const work = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'work',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          packet,
+        }).pipe(Effect.provideService(CommandExecutor, alternateRootExecutor)),
+      );
+      expect(injectedAlternateRoot).toBe(true);
+      expect(work.status).toBe('ready');
+      expect(work.phaseId).toBe('one');
+    }).pipe(run),
+  );
+
+  effectIt.effect('canonicalizes the reported checkout root while refusing a different repository', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      const foreignRepo = yield* f.fs.makeTempDirectoryScoped({prefix: 'threadnote-task-foreign-checkout-'});
+      yield* runCommandEffect('git', ['init', foreignRepo]);
+      const before = yield* f.fs.readFileString(f.statePath());
+      const refusal = yield* runNativeTaskAction(f.config, {
+        command: 'work',
+        runId: 'native-run',
+        callerCwd: foreignRepo,
+        packet,
+      }).pipe(Effect.result);
+      expect(refusal).toMatchObject({failure: {code: expect.stringMatching(/^(?:wrong-checkout|binding-drift)$/u)}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(run),
+  );
+
   effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
