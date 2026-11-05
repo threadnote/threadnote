@@ -5,7 +5,7 @@ import {Clock, Effect, Exit, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {normalizeVector} from '@threadnote/inference/vector-search';
 import {openRecallVectorPreparationSource} from '../index/vector-preparation-source.js';
@@ -40,7 +40,7 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   if (manifest.role !== 'embedding' || !manifest.dimensions) return yield* preparationChanged();
   const verify = Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
-    if (selection.roles.embedding !== manifest.id || !(yield* stillDesired)) return yield* preparationChanged();
+    if (selectedEmbeddingModelId(selection, 'recall') !== manifest.id || !(yield* stillDesired)) return yield* preparationChanged();
     const selected = yield* (yield* LocalModelCatalog).get(manifest.id);
     if (recallVectorStorage.recipe(selected) !== recallVectorStorage.recipe(manifest))
       return yield* preparationChanged();

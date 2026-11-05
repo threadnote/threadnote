@@ -71,7 +71,7 @@ import {stopVerifiedLegacyLocalAi} from './migration/legacy-runtime.js';
 import {migrateLegacyLocalModels} from './migration/models.js';
 import {provisionCoreEmbedding} from './models/core-embedding.js';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
   loadRecallVectorAuthorizationKey,
@@ -472,14 +472,17 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
     yield* writeLayoutReceipt(fs, path, config.agentContextHome);
   }
   const embedding = yield* provisionCoreEmbedding(config, {dryRun});
+  const recallSelection = yield* readModelSelection(config.agentContextHome);
+  const recallModelId = selectedEmbeddingModelId(recallSelection, 'recall') ?? embedding.manifest.id;
+  const recallManifest = yield* (yield* LocalModelCatalog).get(recallModelId);
   if (dryRun && options.skipRecallIndexes !== true) {
     yield* Console.log(
-      `Would build the lexical SQLite index and queue ${embedding.manifest.id} document embeddings for idle background work.`,
+      `Would build the lexical SQLite index and queue ${recallManifest.id} document embeddings for idle background work.`,
     );
   } else if (!dryRun && options.skipRecallIndexes !== true) {
-    const {documentCount, vectors} = yield* maintainRecallIndexes(config, embedding.manifest);
+    const {documentCount, vectors} = yield* maintainRecallIndexes(config, recallManifest);
     yield* Console.log(
-      `Recall lexical index ready: ${documentCount} document(s). ${vectors.queued ? 'Document embeddings queued for idle background work.' : 'Vector index current.'}`,
+      `Recall lexical index ready: ${documentCount} document(s). ${vectors.queued ? `Document embeddings queued for idle background work. Model: ${recallManifest.id}.` : 'Vector index current.'}`,
     );
   }
   if (options.start !== false) {
@@ -514,9 +517,12 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
   });
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+    const selection = yield* readModelSelection(config.agentContextHome);
+    const recallModelId = selectedEmbeddingModelId(selection, 'recall') ?? embedding.manifest.id;
+    const recallManifest = yield* (yield* LocalModelCatalog).get(recallModelId);
     const verifyInputs = Effect.gen(function* () {
       if (
-        (yield* readModelSelection(config.agentContextHome)).roles.embedding !== embedding.manifest.id ||
+        selectedEmbeddingModelId(yield* readModelSelection(config.agentContextHome), 'recall') !== recallModelId ||
         (yield* loadRecallVectorAuthorizationKey(config)) !== authorizationKey
       ) {
         return yield* LifecycleOperationError.make({
@@ -524,7 +530,7 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
         });
       }
     });
-    yield* prepareRecallIndexes(config, embedding.manifest, authorizationKey, verifyInputs).pipe(
+    yield* prepareRecallIndexes(config, recallManifest, authorizationKey, verifyInputs).pipe(
       Effect.mapError(cause =>
         LifecycleOperationError.make({message: `Recall index repair failed: ${errorMessage(cause)}`}),
       ),
@@ -962,7 +968,7 @@ function recallIndexCheck(status: RecallIndexStatus): DoctorCheck {
 function embeddingModelCheck(config: RuntimeConfig) {
   return Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'graph');
     if (!modelId) {
       return {
         detail: 'missing; run `threadnote repair` to install the core embedding model',
@@ -1009,7 +1015,7 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
       };
     }
     const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'recall');
     if (!modelId) {
       return {
         detail: 'unavailable until the core embedding model is installed',

@@ -13,6 +13,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {runInstall} from '@threadnote/threadnote/lifecycle';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
+import {readModelSelection, writeModelSelection} from '@threadnote/inference/models/selection';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const embeddingManifest = EffectOption.getOrUndefined(
@@ -38,6 +39,11 @@ describe('agent instruction lifecycle', () => {
             manifestPath: path.join(threadnoteHome, 'seed-manifest.yaml'),
             user: 'tester',
           };
+          yield* writeModelSelection(threadnoteHome, {
+            purposes: {recall: 'qwen3-embedding-0.6b-q8'},
+            roles: {},
+            version: 1,
+          });
           const testSystem = SystemInfo.of({
             ...system,
             environment: () => ({...system.environment(), NVM_DIR: undefined, NVM_HOME: undefined}),
@@ -125,6 +131,9 @@ describe('agent instruction lifecycle', () => {
           );
           expect(installed.output).toContain('Activating lexical recall index with 0 document(s).');
           expect(installed.output).toContain('Document embeddings queued for idle background work.');
+          expect(installed.output).toContain('Model: qwen3-embedding-0.6b-q8.');
+          expect((yield* readModelSelection(threadnoteHome)).roles.embedding).toBe(embeddingManifest.id);
+          expect((yield* readModelSelection(threadnoteHome)).purposes?.recall).toBe('qwen3-embedding-0.6b-q8');
           expect(installed.output).not.toContain('Preparing vector recall index');
           expect(installed.output).not.toContain('Activating vector recall index');
           if (system.platform !== 'win32') {

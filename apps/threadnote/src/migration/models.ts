@@ -152,6 +152,7 @@ export const migrateLegacyLocalModels = Effect.fn('legacyLocalModelMigration.mig
     const selection = yield* readModelSelection(home);
     if (selection.roles.generation === undefined) {
       yield* writeModelSelection(home, {
+        ...selection,
         roles: {...selection.roles, generation: generationModel.id},
         version: selection.version,
       });

@@ -14,8 +14,15 @@ class ModelSelectionError extends Schema.TaggedError<ModelSelectionError, {reado
 
 export const MODEL_SELECTION_VERSION = 1 as const;
 
+export type EmbeddingPurpose = 'graph' | 'recall';
+const MODEL_SELECTION_ROLES: ReadonlyArray<LocalModelRole> = ['embedding', 'generation', 'reranker'];
+const EMBEDDING_PURPOSES: ReadonlyArray<EmbeddingPurpose> = ['graph', 'recall'];
+
 export interface ModelSelection {
+  /** Shared role selection retained for v1 compatibility and as a purpose fallback. */
   readonly roles: Readonly<Partial<Record<LocalModelRole, string>>>;
+  /** Optional purpose-specific embedding choices. */
+  readonly purposes?: Readonly<Partial<Record<EmbeddingPurpose, string>>>;
   readonly version: typeof MODEL_SELECTION_VERSION;
 }
 
@@ -47,6 +54,22 @@ export const readModelSelection = Effect.fn('models.readSelection')(function* (h
   return inspected.status === 'valid' ? inspected.selection : EMPTY_SELECTION;
 });
 
+/** Resolve an embedding choice while preserving the legacy shared role as fallback. */
+export function selectedEmbeddingModelId(selection: ModelSelection, purpose: EmbeddingPurpose): string | undefined {
+  return selection.purposes?.[purpose] ?? selection.roles.embedding;
+}
+
+/** Return every role and embedding purpose that still points at a model. */
+export function modelSelectionReferences(selection: ModelSelection, modelId: string): readonly string[] {
+  return [
+    ...EffectArray.map(EffectArray.filter(MODEL_SELECTION_ROLES, role => selection.roles[role] === modelId), role => role),
+    ...EffectArray.map(
+      EffectArray.filter(EMBEDDING_PURPOSES, purpose => selection.purposes?.[purpose] === modelId),
+      purpose => purpose,
+    ),
+  ];
+}
+
 export const writeModelSelection = Effect.fn('models.writeSelection')(function* (
   home: string,
   selection: ModelSelection,
@@ -74,9 +97,43 @@ export const selectLocalModel = Effect.fn('models.select')(function* (
   }
   const current = yield* readModelSelection(home);
   const selection: ModelSelection = {
+    ...current,
     roles: {...current.roles, [role]: modelId},
     version: MODEL_SELECTION_VERSION,
   };
+  yield* writeModelSelection(home, selection);
+  return selection;
+});
+
+export const selectLocalModelForPurpose = Effect.fn('models.selectPurpose')(function* (
+  home: string,
+  catalog: LocalModelCatalogShape,
+  purpose: EmbeddingPurpose,
+  modelId: string,
+) {
+  const manifest = yield* catalog.get(modelId);
+  if (manifest.role !== 'embedding') {
+    return yield* ModelSelectionError.make({message: `Model ${modelId} has role ${manifest.role}, not embedding.`});
+  }
+  const current = yield* readModelSelection(home);
+  const selection: ModelSelection = {
+    ...current,
+    purposes: {...current.purposes, [purpose]: modelId},
+  };
+  yield* writeModelSelection(home, selection);
+  return selection;
+});
+
+export const clearLocalModelPurposeSelection = Effect.fn('models.clearPurposeSelection')(function* (
+  home: string,
+  purpose: EmbeddingPurpose,
+) {
+  const current = yield* readModelSelection(home);
+  if (current.purposes?.[purpose] === undefined) return current;
+  const purposes = {...current.purposes};
+  delete purposes[purpose];
+  const hasPurposes = EffectArray.some(EMBEDDING_PURPOSES, key => purposes[key] !== undefined);
+  const selection: ModelSelection = {roles: current.roles, version: MODEL_SELECTION_VERSION, ...(hasPurposes ? {purposes} : {})};
   yield* writeModelSelection(home, selection);
   return selection;
 });
@@ -89,14 +146,15 @@ export const clearLocalModelSelection = Effect.fn('models.clearSelection')(funct
   if (current.roles[role] === undefined) return current;
   const roles = {...current.roles};
   delete roles[role];
-  const selection: ModelSelection = {roles, version: MODEL_SELECTION_VERSION};
+  const selection: ModelSelection = {...current, roles, version: MODEL_SELECTION_VERSION};
   yield* writeModelSelection(home, selection);
   return selection;
 });
 
 function isModelSelection(value: unknown): value is ModelSelection {
   if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
-  if (EffectArray.some(EffectRecord.keys(value), key => key !== 'version' && key !== 'roles')) return false;
+  if (EffectArray.some(EffectRecord.keys(value), key => key !== 'version' && key !== 'roles' && key !== 'purposes'))
+    return false;
   const candidate = value as Partial<ModelSelection>;
   if (
     candidate.version !== MODEL_SELECTION_VERSION ||
@@ -106,12 +164,23 @@ function isModelSelection(value: unknown): value is ModelSelection {
   ) {
     return false;
   }
-  return EffectArray.every(
-    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
-    Object.entries(candidate.roles),
-    ([role, id]) =>
-      ['embedding', 'generation', 'reranker'].includes(role) &&
-      typeof id === 'string' &&
-      /^[a-z0-9][a-z0-9._-]*$/.test(id),
-  );
+  return EffectArray.every(EffectRecord.keys(candidate.roles as Readonly<Record<string, unknown>>), role =>
+    EffectArray.some(MODEL_SELECTION_ROLES, allowedRole => role === allowedRole),
+  ) &&
+    EffectArray.every(MODEL_SELECTION_ROLES, role => {
+      const id = candidate.roles?.[role];
+      return id === undefined || (typeof id === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(id));
+    }) &&
+    (candidate.purposes === undefined || (
+      typeof candidate.purposes === 'object' &&
+      candidate.purposes !== null &&
+      !EffectArray.isArray(candidate.purposes) &&
+      EffectArray.every(EffectRecord.keys(candidate.purposes as Readonly<Record<string, unknown>>), purpose =>
+        EffectArray.some(EMBEDDING_PURPOSES, allowedPurpose => purpose === allowedPurpose),
+      ) &&
+      EffectArray.every(EMBEDDING_PURPOSES, purpose => {
+        const id = candidate.purposes?.[purpose];
+        return id === undefined || (typeof id === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(id));
+      })
+    ));
 }

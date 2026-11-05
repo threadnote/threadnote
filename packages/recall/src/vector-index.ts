@@ -9,7 +9,7 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {recallIndexScopeProject, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallApprovedAuthoritative, recallEligibilityPredicate} from './index/eligibility.js';
 import {
@@ -614,7 +614,7 @@ export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSema
   R = never,
 >(config: VectorReadConfig, query: string, options: SemanticScoreOptions<R> = {}) {
   const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = selection.roles.embedding;
+  const modelId = selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) return undefined;
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(modelId);

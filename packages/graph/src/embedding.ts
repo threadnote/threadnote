@@ -23,8 +23,8 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
-import {LocalModelCatalog, type LocalModelCatalogShape} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {LocalModelCatalog, type LocalModelCatalogShape, type LocalModelManifest} from '@threadnote/inference/models/catalog';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {normalizeVector, searchExactVectors, type VectorSearchResult} from '@threadnote/inference/vector-search';
 import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from './layout.js';
@@ -79,6 +79,10 @@ class CodeGraphVectorClaimCleanupPending extends Schema.TaggedError<
 }
 
 const CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION = 1;
+const CODE_GRAPH_GEMMA_EMBEDDING_TEMPLATE_VERSION = 2;
+const CODE_GRAPH_GEMMA_MODEL_ID = 'embeddinggemma-2-q8';
+const CODE_GRAPH_GEMMA_QUERY_PREFIX = 'task: search result | query: ';
+const CODE_GRAPH_GEMMA_SEMANTIC_MINIMUM_SCORE = 0.7313320191591935;
 const CODE_GRAPH_EMBEDDING_CONTEXT_CAP = 8;
 
 const CODE_GRAPH_SEMANTIC_MINIMUM_SCORE = 0.64;
@@ -248,7 +252,7 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
   const select = input.metadataOnly
     ? Effect.gen(function* () {
         const selection = yield* readModelSelection(input.threadnoteHome);
-        const modelId = selection.roles.embedding;
+        const modelId = selectedEmbeddingModelId(selection, 'graph');
         if (!modelId) return yield* CodeGraphEmbeddingError.make({message: 'No core embedding model is selected.'});
         const manifest = yield* input.catalog.get(modelId);
         if (manifest.role !== 'embedding' || !manifest.dimensions)
@@ -281,14 +285,14 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
         active.snapshot_id !== input.snapshotId ||
         active.model_id !== selected.manifest.id ||
         active.model_sha256 !== selected.manifest.sha256 ||
-        active.template_version !== CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION ||
+        active.template_version !== graphEmbeddingTemplateVersion(selected.manifest) ||
         active.dimensions !== selected.manifest.dimensions
       ) {
         return {reason: 'Code graph vectors do not match the ready snapshot.', state: 'stale'} as const;
       }
       if (input.metadataOnly) {
         const currentSelection = yield* readModelSelection(input.threadnoteHome);
-        const currentId = currentSelection.roles.embedding;
+        const currentId = selectedEmbeddingModelId(currentSelection, 'graph');
         const current = currentId ? yield* input.catalog.get(currentId) : undefined;
         if (
           current?.id !== selected.manifest.id ||
@@ -391,7 +395,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   const validate = Effect.gen(function* () {
     yield* input.publication?.validate ?? Effect.void;
     const selection = yield* readModelSelection(input.threadnoteHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'graph');
     const current = modelId ? yield* input.catalog.get(modelId) : undefined;
     if (
       current?.id !== selected.manifest.id ||
@@ -437,6 +441,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                       input.snapshot.id,
                       selected.manifest.sha256,
                       selected.manifest.dimensions!,
+                      graphEmbeddingTemplateVersion(selected.manifest),
                     );
                 let generation = exact;
                 if (!generation) {
@@ -454,7 +459,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                       input.snapshot.id,
                       selected.manifest.sha256,
                       selected.manifest.dimensions!,
-                      CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION,
+                      graphEmbeddingTemplateVersion(selected.manifest),
                       requestEpoch,
                     ],
                   );
@@ -466,7 +471,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                     const active = yield* selectActiveGeneration(sql, worktreeId);
                     reusable =
                       active?.model_sha256 === selected.manifest.sha256 &&
-                      active.template_version === CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION &&
+                      active.template_version === graphEmbeddingTemplateVersion(selected.manifest) &&
                       active.dimensions === selected.manifest.dimensions
                         ? active
                         : undefined;
@@ -474,7 +479,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                   const id = `${yield* Clock.currentTimeMillis}-${yield* crypto.uuidV4()}`;
                   yield* sql`INSERT INTO vector_generations (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
             VALUES (${id}, ${input.snapshot.id}, ${selected.manifest.id}, ${selected.manifest.sha256}, ${selected.manifest.dimensions!},
-              ${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}, 0, 'building', ${DateTime.formatIso(yield* DateTime.now)})`;
+              ${graphEmbeddingTemplateVersion(selected.manifest)}, 0, 'building', ${DateTime.formatIso(yield* DateTime.now)})`;
                   generation = (yield* sql.unsafe<VectorGenerationRow>(
                     'SELECT * FROM vector_generations WHERE generation = ?',
                     [id],
@@ -552,7 +557,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             if (atomicReuse) {
               const projected = new Map(
                 EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => {
-                  const item = projectSymbol(symbol);
+                  const item = projectSymbol(symbol, selected.manifest);
                   return [item.id, item.fingerprint] as const;
                 }),
               );
@@ -574,7 +579,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                     modelId: selected.manifest.id,
                     modelSha256: selected.manifest.sha256,
                     dimensions: selected.manifest.dimensions!,
-                    templateVersion: CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION,
+                    templateVersion: graphEmbeddingTemplateVersion(selected.manifest),
                     raw,
                     decode: value => {
                       try {
@@ -616,7 +621,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               forcedPrefix = rawPage.length > 1;
               rawPage = rawPage.slice(0, 1);
             }
-            let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
+            let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => projectSymbol(symbol, selected.manifest));
             const existing =
               projectedPage.length === 0
                 ? []
@@ -656,7 +661,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             const truncated = forcedPrefix || consumed < rawPage.length;
             rawPage = rawPage.slice(0, consumed);
             if (truncated) {
-              projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), projectSymbol);
+              projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => projectSymbol(symbol, selected.manifest));
               projected = EffectArray.filter(projectedPage, item => !inserted.has(item.id));
             }
             const rows: Array<readonly [string, string, string, Uint8Array]> = [];
@@ -682,7 +687,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                     embeddingContextPoolSize: input.embeddingContextPoolSize ?? CODE_GRAPH_EMBEDDING_CONTEXT_CAP,
                     inputs: EffectArray.map(
                       batch,
-                      item => `${selected.manifest.promptPrefixes?.document ?? ''}${item.text}`,
+                      item => item.text,
                     ),
                     manifest: selected.manifest,
                     modelPath: selected.modelPath,
@@ -895,13 +900,13 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
         !active ||
         active.snapshot_id !== input.snapshotId ||
         active.model_sha256 !== selected.manifest.sha256 ||
-        active.template_version !== CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION ||
+        active.template_version !== graphEmbeddingTemplateVersion(selected.manifest) ||
         active.dimensions !== selected.manifest.dimensions
       ) {
         return new Map<string, number>();
       }
       const [queryVector] = yield* input.runtime.embedMany({
-        inputs: [`${selected.manifest.promptPrefixes?.query ?? ''}${input.query}`],
+        inputs: [`${graphEmbeddingQueryPrefix(selected.manifest)}${input.query}`],
         manifest: selected.manifest,
         modelPath: selected.modelPath,
       });
@@ -925,7 +930,7 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
         const pageMatches = searchExactVectors(queryVector, records, {
           dimensions: active.dimensions,
           limit: Math.min(boundedLimit, records.length),
-          minimumScore: CODE_GRAPH_SEMANTIC_MINIMUM_SCORE,
+          minimumScore: graphEmbeddingMinimumScore(selected.manifest),
         });
         best = mergeSearchResults(best, pageMatches, boundedLimit);
         cursor = rows.at(-1)!.symbol_id;
@@ -942,7 +947,7 @@ const selectedEmbeddingModel = Effect.fn('codeGraph.selectedEmbeddingModel')(fun
   store: LocalModelStoreShape,
 ) {
   const selection = yield* readModelSelection(threadnoteHome);
-  const modelId = selection.roles.embedding;
+  const modelId = selectedEmbeddingModelId(selection, 'graph');
   if (!modelId) return yield* CodeGraphEmbeddingError.make({message: 'No core embedding model is selected.'});
   const manifest = yield* catalog.get(modelId);
   if (manifest.role !== 'embedding' || !manifest.dimensions) {
@@ -995,7 +1000,7 @@ function vectorPriority(symbol: CodeGraphSymbol): number {
   return (symbol.exported ? 100 : 0) + kind + (symbol.documentation ? 1 : 0);
 }
 
-function projectSymbol(symbol: CodeGraphSymbol): ProjectedSymbol {
+function projectSymbol(symbol: CodeGraphSymbol, manifest: LocalModelManifest): ProjectedSymbol {
   const text = EffectArray.join(
     EffectArray.filter(
       [
@@ -1011,11 +1016,46 @@ function projectSymbol(symbol: CodeGraphSymbol): ProjectedSymbol {
     ),
     '\n',
   );
-  return {
-    fingerprint: sha256HexSync(`code-graph-embedding-v${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}\n${text}`),
-    id: symbol.id,
+  const document = graphEmbeddingDocumentInput(
+    manifest.id,
+    symbol.qualifiedName,
     text,
+    manifest.promptPrefixes?.document ?? '',
+  );
+  return {
+    fingerprint: sha256HexSync(`code-graph-embedding-v${graphEmbeddingTemplateVersion(manifest)}\n${document}`),
+    id: symbol.id,
+    text: document,
   };
+}
+
+export function graphEmbeddingTemplateVersion(manifest: Pick<LocalModelManifest, 'id'>): number {
+  return manifest.id === CODE_GRAPH_GEMMA_MODEL_ID
+    ? CODE_GRAPH_GEMMA_EMBEDDING_TEMPLATE_VERSION
+    : CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION;
+}
+
+export function graphEmbeddingQueryPrefix(
+  manifest: Pick<LocalModelManifest, 'id' | 'promptPrefixes'>,
+): string {
+  return manifest.id === CODE_GRAPH_GEMMA_MODEL_ID
+    ? CODE_GRAPH_GEMMA_QUERY_PREFIX
+    : (manifest.promptPrefixes?.query ?? '');
+}
+
+export function graphEmbeddingMinimumScore(manifest: Pick<LocalModelManifest, 'id'>): number {
+  return manifest.id === CODE_GRAPH_GEMMA_MODEL_ID
+    ? CODE_GRAPH_GEMMA_SEMANTIC_MINIMUM_SCORE
+    : CODE_GRAPH_SEMANTIC_MINIMUM_SCORE;
+}
+
+export function graphEmbeddingDocumentInput(
+  modelId: string,
+  qualifiedName: string,
+  text: string,
+  fallbackPrefix: string,
+): string {
+  return modelId === CODE_GRAPH_GEMMA_MODEL_ID ? `title: ${qualifiedName} | text: ${text}` : `${fallbackPrefix}${text}`;
 }
 
 const loadReusableVectors = Effect.fn('codeGraph.loadReusableVectors')(function* (
@@ -1204,6 +1244,7 @@ const selectGenerationForSnapshot = Effect.fn('codeGraph.selectVectorGenerationF
   snapshotId: string,
   modelSha256: string,
   dimensions: number,
+  templateVersion: number,
 ) {
   const rows = yield* sql.unsafe<VectorGenerationRow>(
     `SELECT * FROM vector_generations
@@ -1218,7 +1259,7 @@ const selectGenerationForSnapshot = Effect.fn('codeGraph.selectVectorGenerationF
        )
      ORDER BY created_at DESC, generation DESC
      LIMIT 1`,
-    [snapshotId, modelSha256, dimensions, CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION],
+    [snapshotId, modelSha256, dimensions, templateVersion],
   );
   return rows[0];
 });
