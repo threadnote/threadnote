@@ -50,9 +50,11 @@ const path = text(4096).check(
   ),
 );
 const texts = (minimum = 0, maximum = 128) => Schema.Array(text()).check(Schema.isBetweenLength(minimum, maximum));
-const mermaid = text().check(Schema.makeFilter(value =>
-  isNativeMermaidDiagram(value) ? undefined : 'Use a supported raw Mermaid declaration without fences.',
-));
+const mermaid = text().check(
+  Schema.makeFilter(value =>
+    isNativeMermaidDiagram(value) ? undefined : 'Use a supported raw Mermaid declaration without fences.',
+  ),
+);
 export const NativeCloseoutProposalSchema = Schema.Struct({
   architecture: Schema.Struct({
     summary: text(),
