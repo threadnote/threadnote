@@ -54,6 +54,61 @@ const packet = {
   checks: ['bun test focused fixture'],
 };
 
+const proposal = {
+  architecture: {
+    summary: 'The fixture records a source-checked local implementation.',
+    components: ['Fixture source', 'Native cycle'],
+    contracts: ['Preserve exact local validation and delivery evidence.'],
+    diagram: 'flowchart TD\n Fixture --> Cycle',
+    invariants: ['Only the committed validated source is delivered.'],
+    unknowns: [],
+    deviations: [],
+    codeRefs: ['source.ts'],
+  },
+  architectureVerification: 'Inspected the committed fixture source and its recorded phase proof.',
+  combinedChecks: [
+    {command: 'focused fixture task flow', result: 'passed', evidence: 'The task action lifecycle passed.'},
+  ],
+  phaseEvidence: [
+    {id: 'one', acceptance: [{criterion: 'one works', evidence: 'Observed the committed worker result.'}]},
+  ],
+  scenarios: [],
+  decisions: [
+    {
+      id: 'delivery',
+      implemented: 'The phase delivered locally.',
+      rationale: 'The fixture plan selects local delivery.',
+    },
+  ],
+};
+
+// Hold the first journal read at its prepared bytes while the real worker completes.
+// The facade must reconcile that captured image with the later completed job result.
+const completeDuringJournalRead = (f: Effect.Success<ReturnType<typeof fixture>>, finishJobId: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const worker = runNativeJobWorker(f.config, 'native-run', finishJobId, f.call);
+    const context = yield* Effect.context<Effect.Services<typeof worker>>();
+    const closeoutFile = yield* fs.realPath(f.statePath() + '.closeout.json');
+    let captured = false;
+    const filesystem = FileSystem.FileSystem.of({
+      ...fs,
+      readFile: file =>
+        fs.readFile(file).pipe(
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              if (file !== closeoutFile || captured) return;
+              captured = true;
+              const before = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
+              expect(before?.state.status).toBe('prepared');
+              expect(object(yield* worker).status).toBe('completed');
+            }).pipe(Effect.provideContext(context), Effect.orDie),
+          ),
+        ),
+    });
+    return {filesystem, wasCaptured: () => captured};
+  });
+
 describe('native task actions', () => {
   effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
     Effect.gen(function* () {
@@ -196,33 +251,6 @@ describe('native task actions', () => {
       expect(exactDelivery.receipt).toEqual(delivery.receipt);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
       yield* f.git(['checkout', '--', 'source.ts']);
-      const proposal = {
-        architecture: {
-          summary: 'The fixture records a source-checked local implementation.',
-          components: ['Fixture source', 'Native cycle'],
-          contracts: ['Preserve exact local validation and delivery evidence.'],
-          diagram: 'flowchart TD\n Fixture --> Cycle',
-          invariants: ['Only the committed validated source is delivered.'],
-          unknowns: [],
-          deviations: [],
-          codeRefs: ['source.ts'],
-        },
-        architectureVerification: 'Inspected the committed fixture source and its recorded phase proof.',
-        combinedChecks: [
-          {command: 'focused fixture task flow', result: 'passed', evidence: 'The task action lifecycle passed.'},
-        ],
-        phaseEvidence: [
-          {id: 'one', acceptance: [{criterion: 'one works', evidence: 'Observed the committed worker result.'}]},
-        ],
-        scenarios: [],
-        decisions: [
-          {
-            id: 'delivery',
-            implemented: 'The phase delivered locally.',
-            rationale: 'The fixture plan selects local delivery.',
-          },
-        ],
-      };
       const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
       registerWorkflowTaskTool(mcp, f.config);
       const finishThroughMcp = (input: Record<string, unknown>) =>
@@ -342,9 +370,16 @@ describe('native task actions', () => {
         Effect.result,
       );
       expect(lostFinish._tag).toBe('Failure');
+      const beforePendingReplay = yield* f.fs.readFileString(closeoutFile);
+      const nativeStateBeforePendingReplay = yield* f.fs.readFileString(f.statePath());
+      const jobsDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run');
+      const jobsBeforeReplay = yield* f.fs.readDirectory(jobsDirectory);
       const finishingEnvelope = object(
         yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}),
       );
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforePendingReplay);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(nativeStateBeforePendingReplay);
+      expect(yield* f.fs.readDirectory(jobsDirectory)).toEqual(jobsBeforeReplay);
       const finishing = object(finishingEnvelope.structuredContent);
       expect(finishing).toMatchObject({status: 'pending', stage: 'finish'});
       const finishRef = String(finishing.finishRef);
@@ -360,11 +395,16 @@ describe('native task actions', () => {
       }).pipe(Effect.result);
       expect(conflictingFinish).toMatchObject({failure: {code: 'stale-closeout-ref'}});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforeConflictingFinish);
-      expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
+      const interleaving = yield* completeDuringJournalRead(f, finishJobId);
       const lostFinishReplay = object(
-        object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}))
-          .structuredContent,
+        object(
+          yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}).pipe(
+            Effect.provideService(FileSystem.FileSystem, interleaving.filesystem),
+          ),
+        ).structuredContent,
       );
+      expect(interleaving.wasCaptured()).toBe(true);
+      expect(yield* f.fs.readDirectory(jobsDirectory)).toEqual(jobsBeforeReplay);
       expect(lostFinishReplay).toMatchObject({status: 'complete', stage: 'finish', replayed: true, finishRef});
       const complete = object(
         yield* runNativeTaskAction(f.config, {
@@ -379,6 +419,17 @@ describe('native task actions', () => {
       const completedCloseout = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
       expect(completedCloseout?.state.status).toBe('complete');
       expect(completedCloseout?.state.outputs).not.toEqual({});
+      expect(completedCloseout?.state.admissionEpoch).toEqual(expect.any(String));
+      const completedNativeState = yield* f.fs.readFileString(f.statePath());
+      expect(
+        object(
+          object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}))
+            .structuredContent,
+        ),
+      ).toEqual(lostFinishReplay);
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
+      expect(yield* f.fs.readDirectory(jobsDirectory)).toEqual(jobsBeforeReplay);
       expect(complete.closeout).toEqual({
         transactionId: completedCloseout?.state.transactionId,
         documentDigest: completedCloseout?.state.documentDigest,
@@ -399,6 +450,68 @@ describe('native task actions', () => {
       );
       expect(exactFinish).toMatchObject({status: 'complete', replayed: true});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
+    }).pipe(run),
+  );
+
+  effectIt.effect('recovers an epochless first finish from only prepareRef through concurrent completion', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* completeLocalPhase(f, 'one');
+      const finish = (fields: Record<string, unknown>) =>
+        runNativeTaskAction(f.config, {
+          command: 'finish',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...fields,
+        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false), Effect.map(object));
+      const preparing = yield* finish({proposal});
+      const prepareRef = String(preparing.prepareRef);
+      const prepareJobId = String(decodeNativeTaskActionRef(prepareRef)?.jobId);
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe('completed');
+      const prepared = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
+      expect(prepared?.state.status).toBe('prepared');
+      expect(prepared?.state.admissionEpoch).toBeUndefined();
+      let lostAcknowledgment: Record<string, unknown> | undefined;
+      const lost = yield* finish({prepareRef}).pipe(
+        Effect.tap(value => Effect.sync(() => (lostAcknowledgment = value))),
+        Effect.andThen(Effect.fail(WorkflowAutomationError.make({code: 'test-lost-ack', message: 'Lost finish ACK'}))),
+        Effect.result,
+      );
+      expect(lost._tag).toBe('Failure');
+      const closeoutFile = f.statePath() + '.closeout.json';
+      const beforePending = yield* f.fs.readFileString(closeoutFile);
+      const stateBeforeReplay = yield* f.fs.readFileString(f.statePath());
+      const jobsDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run');
+      const jobsBeforeReplay = yield* f.fs.readDirectory(jobsDirectory);
+      const pending = yield* finish({prepareRef});
+      expect(pending).toMatchObject({status: 'pending', stage: 'finish', finishRef: lostAcknowledgment?.finishRef});
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforePending);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(stateBeforeReplay);
+      expect(yield* f.fs.readDirectory(jobsDirectory)).toEqual(jobsBeforeReplay);
+      const finishRef = String(pending.finishRef);
+      const finishJobId = String(decodeNativeTaskActionRef(finishRef)?.jobId);
+      const interleaving = yield* completeDuringJournalRead(f, finishJobId);
+      const completed = yield* finish({prepareRef}).pipe(
+        Effect.provideService(FileSystem.FileSystem, interleaving.filesystem),
+      );
+      expect(interleaving.wasCaptured()).toBe(true);
+      expect(completed).toMatchObject({status: 'complete', stage: 'finish', replayed: true, finishRef});
+      const canonical = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
+      expect(canonical?.state.status).toBe('complete');
+      expect(canonical?.state.transactionId).toBe(prepared?.state.transactionId);
+      expect(canonical?.state.admissionEpoch).toBeUndefined();
+      expect(completed.closeout).toEqual({
+        transactionId: canonical?.state.transactionId,
+        documentDigest: canonical?.state.documentDigest,
+        outputs: canonical?.state.outputs,
+        archives: canonical?.state.archives,
+      });
+      const completedBytes = yield* f.fs.readFileString(closeoutFile);
+      const completedState = yield* f.fs.readFileString(f.statePath());
+      expect(yield* finish({prepareRef})).toEqual(completed);
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedBytes);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(completedState);
+      expect(yield* f.fs.readDirectory(jobsDirectory)).toEqual(jobsBeforeReplay);
     }).pipe(run),
   );
 

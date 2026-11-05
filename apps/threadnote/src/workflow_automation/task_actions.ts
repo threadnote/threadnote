@@ -355,8 +355,11 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           );
         proposalDigest = ref.payloadDigest;
         if (
-          preparedAdmissionEpoch &&
           journal &&
+          journal.state.runId === request.runId &&
+          journal.state.generation === stored.state.generation &&
+          journal.state.bindingId === stored.state.bindingId &&
+          sha256HexSync(stableJson(journal.state.proposal)) === proposalDigest &&
           journal.state.admissionEpoch === preparedAdmissionEpoch &&
           ['prepared', 'archiving', 'complete'].includes(journal.state.status)
         ) {
@@ -386,19 +389,35 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
               Predicate.isObject(admittedFinish.success) && typeof admittedFinish.success.status === 'string'
                 ? admittedFinish.success.status
                 : 'unknown';
-            if (finishStatus === 'completed' && journal.state.status === 'complete')
+            if (finishStatus === 'completed') {
+              const completed = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
+              if (
+                !completed ||
+                completed.state.status !== 'complete' ||
+                completed.state.runId !== request.runId ||
+                completed.state.generation !== stored.state.generation ||
+                completed.state.bindingId !== stored.state.bindingId ||
+                completed.state.transactionId !== journal.state.transactionId ||
+                completed.state.admissionEpoch !== preparedAdmissionEpoch ||
+                sha256HexSync(stableJson(completed.state.proposal)) !== proposalDigest
+              )
+                return yield* fail(
+                  'closeout-incomplete',
+                  'The finish job completed without canonical completed closeout evidence for this admission.',
+                );
               return {
                 status: 'complete',
                 stage: 'finish',
                 replayed: true,
                 finishRef,
                 closeout: {
-                  transactionId: journal.state.transactionId,
-                  documentDigest: journal.state.documentDigest,
-                  outputs: journal.state.outputs,
-                  archives: journal.state.archives,
+                  transactionId: completed.state.transactionId,
+                  documentDigest: completed.state.documentDigest,
+                  outputs: completed.state.outputs,
+                  archives: completed.state.archives,
                 },
               };
+            }
             if (
               finishStatus === 'blocked-with-progress' ||
               finishStatus === 'stopped-with-progress' ||
