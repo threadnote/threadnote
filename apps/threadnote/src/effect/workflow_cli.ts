@@ -1,4 +1,4 @@
-import {Schema, type Effect} from 'effect';
+import {Array as EffectArray, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
 import {
@@ -15,6 +15,7 @@ import {
   requiredString,
 } from './cli/flags.js';
 import {CONTEXT_BRIEF_CWD_OPTION, type runContextBrief} from '../context_brief/commands.js';
+import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {runCompact} from '../memory/commands.js';
 import type {runRecallFeedback} from '../recall/feedback_commands.js';
 import type {runContextHealth} from '../memory/context/health_commands.js';
@@ -63,7 +64,7 @@ export function makeNativeTaskViewCommand<E, R>(
     readonly callerCwd: string;
     readonly role?: string;
     readonly cursor?: string;
-  }) => Effect.Effect<void, E, R>,
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
     'task-view',
@@ -75,6 +76,215 @@ export function makeNativeTaskViewCommand<E, R>(
     },
     handler,
   ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
+}
+
+export function makeNativeTaskActionCommands<E, R>(
+  workHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly packet: Readonly<Record<string, unknown>>;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  snapshotHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly workRef: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  reviewHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly report: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  validationHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly validation: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  deliveryHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly validationRef: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  finishHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly proposal?: unknown;
+    readonly prepareRef?: string;
+    readonly finishRef?: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+) {
+  const work = Command.make(
+    'work',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      model: requiredString('model', 'Selected background worker model'),
+      effort: requiredString('effort', 'Selected worker effort'),
+      selection: requiredChoice(
+        'selection',
+        ['least-sufficient', 'risk', 'user-override', 'escalation'],
+        'Capacity selection rationale',
+      ),
+      risk: requiredChoice('risk', ['settled', 'unresolved', 'high'], 'Implementation risk assessment'),
+      reason: requiredString('reason', 'Concrete capacity selection reason'),
+      catalogEvidence: requiredString('catalog-evidence', 'Available model/effort capability evidence'),
+      trigger: optionalString('trigger', 'Observed trigger for a risk selection'),
+      escalationCause: optionalChoice(
+        'escalation-cause',
+        ['reasoning-limit', 'new-complexity', 'user-request'],
+        'Observed reason for escalation',
+      ),
+      userAuthority: optionalString('user-authority', 'Explicit authority for an override or escalation'),
+      nearestSupportedEffort: optionalString('nearest-supported-effort', 'Nearest available lower effort'),
+      anchorPaths: repeatedString('anchor-path', 'Repository-relative source anchor path', 128),
+      anchorDigests: repeatedString('anchor-sha256', 'SHA-256 for each anchor path, in matching order', 128),
+      anchorPatterns: repeatedString(
+        'anchor-pattern',
+        'Literal source pattern for each anchor path, in matching order',
+        128,
+      ),
+      ownership: repeatedString('ownership', 'Repository-relative path owned by this worker', 128),
+      checks: repeatedString('check', 'Required focused check', 32),
+      budgetBytes: optional(integerFlag('budget-bytes')),
+      detailRefs: repeatedString('detail-ref', 'Optional bounded detail reference', 16),
+    },
+    options => {
+      if (
+        options.anchorPaths.length !== options.anchorDigests.length ||
+        options.anchorPaths.length !== options.anchorPatterns.length
+      )
+        return Effect.fail(
+          WorkflowAutomationError.make({
+            code: 'invalid-request',
+            message: 'Repeat --anchor-path, --anchor-sha256 and --anchor-pattern the same number of times.',
+          }),
+        );
+      return workHandler({
+        runId: options.runId,
+        callerCwd: options.callerCwd,
+        packet: {
+          capacity: {
+            model: options.model,
+            effort: options.effort,
+            selection: options.selection,
+            risk: options.risk,
+            reason: options.reason,
+            catalogEvidence: options.catalogEvidence,
+            ...(options.trigger === undefined ? {} : {trigger: options.trigger}),
+            ...(options.escalationCause === undefined ? {} : {escalationCause: options.escalationCause}),
+            ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
+            ...(options.nearestSupportedEffort === undefined
+              ? {}
+              : {nearestSupportedEffort: options.nearestSupportedEffort}),
+          },
+          anchors: EffectArray.map(
+            EffectArray.zip(EffectArray.zip(options.anchorPaths, options.anchorDigests), options.anchorPatterns),
+            ([[path, sha256], pattern]) => ({path, sha256, pattern}),
+          ),
+          ownership: options.ownership,
+          checks: options.checks,
+          ...(options.budgetBytes === undefined ? {} : {budgetBytes: options.budgetBytes}),
+          ...(options.detailRefs.length === 0 ? {} : {detailRefs: options.detailRefs}),
+        },
+      });
+    },
+  ).pipe(Command.withDescription('Prepare a source-checked implementation packet for the current native phase'));
+  const recordSnapshot = Command.make(
+    'record-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      workRef: requiredString('work-ref', 'Opaque reference returned by workflow-automation task-action work'),
+    },
+    snapshotHandler,
+  ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
+  const recordReview = Command.make(
+    'record-review',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Opaque snapshot reference returned by snapshot recording'),
+      report: requiredString('report', 'Complete semantic review report as JSON, strictly schema-validated'),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.report) as unknown,
+        catch: () =>
+          WorkflowAutomationError.make({
+            code: 'invalid-request',
+            message: 'The semantic review report must be valid JSON.',
+          }),
+      }).pipe(Effect.flatMap(report => reviewHandler({...options, report}))),
+  ).pipe(Command.withDescription('Record a complete independent review against an immutable snapshot'));
+  const recordValidation = Command.make(
+    'record-validation',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Opaque snapshot reference returned by review recording'),
+      validation: requiredString(
+        'validation',
+        'Passed check and acceptance evidence as JSON, strictly schema-validated',
+      ),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.validation) as unknown,
+        catch: () =>
+          WorkflowAutomationError.make({
+            code: 'invalid-request',
+            message: 'Validation evidence must be valid JSON.',
+          }),
+      }).pipe(Effect.flatMap(validation => validationHandler({...options, validation}))),
+  ).pipe(Command.withDescription('Record passed checks and acceptance evidence for the reviewed snapshot'));
+  const deliverLocal = Command.make(
+    'deliver-local',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      validationRef: requiredString('validation-ref', 'Opaque validation reference returned by validation recording'),
+    },
+    deliveryHandler,
+  ).pipe(Command.withDescription('Record the canonical local delivery receipt for a validated local phase'));
+  const finish = Command.make(
+    'finish',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      proposal: optionalString('proposal', 'Typed semantic closeout proposal as JSON, strictly schema-validated'),
+      prepareRef: optionalString('prepare-ref', 'Opaque reference returned while closeout preparation is pending'),
+      finishRef: optionalString('finish-ref', 'Opaque reference returned while verified finish is pending'),
+    },
+    options => {
+      const rawProposal = options.proposal;
+      const proposal =
+        rawProposal === undefined
+          ? Effect.void
+          : Effect.try({
+              try: () => JSON.parse(rawProposal) as unknown,
+              catch: () =>
+                WorkflowAutomationError.make({
+                  code: 'invalid-request',
+                  message: 'The semantic closeout proposal must be valid JSON.',
+                }),
+            });
+      return proposal.pipe(
+        Effect.flatMap(value =>
+          finishHandler({
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            ...(value === undefined ? {} : {proposal: value}),
+            ...(options.prepareRef === undefined ? {} : {prepareRef: options.prepareRef}),
+            ...(options.finishRef === undefined ? {} : {finishRef: options.finishRef}),
+          }),
+        ),
+      );
+    },
+  ).pipe(Command.withDescription('Prepare and finish a completed single-phase local cycle through canonical jobs'));
+  return Command.make('task-action', {}).pipe(
+    Command.withSubcommands([work, recordSnapshot, recordReview, recordValidation, deliverLocal, finish]),
+  );
 }
 
 export function makeRecallFeedbackCommand<E, R>(
