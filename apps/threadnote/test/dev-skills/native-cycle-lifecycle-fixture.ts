@@ -156,7 +156,7 @@ export const captureNativeCycleSource = (...args: Parameters<typeof captureSourc
   });
 export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   phaseIds: readonly string[] = ['one', 'two'],
-  delivery: 'pr' | 'local' = 'pr',
+  delivery: 'pr' | 'local' | 'commit' = 'pr',
   preservedWork = false,
   stackOnly = false,
   stacked = true,

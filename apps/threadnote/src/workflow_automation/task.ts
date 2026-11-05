@@ -3,6 +3,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {
   decodeNativeTaskCursor,
   nativeTaskCursorMatches,
+  nativeTaskCardRef,
   projectNativeTaskView,
 } from '@threadnote/workflow-automations/task';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -10,6 +11,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskInspection} from './index.js';
 import {gitValue} from '../utils.js';
+import {sha256HexSync} from '../workflow_memory/native_digest.js';
+import {stableJson} from '../workflow_memory/protocol.js';
 
 const requestSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
@@ -58,11 +61,54 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       return yield* fail('inspection-failed', 'The native run changed while reading its current authoring root.');
     const continueAuthoring = (view: ReturnType<typeof projectNativeTaskView>) => {
       if (!authoring) return view;
-      if (authoring.status === 'admitted') return {...view, authoring};
+      const currentRoot = Predicate.isObject(authoring.root) ? authoring.root : undefined;
+      if (authoring.status === 'admitted')
+        return view.next.action === 'reconcile-plan' && currentRoot
+          ? {
+              ...view,
+              authoring,
+              taskRef: nativeTaskCardRef(
+                stored.state,
+                stored.revision,
+                'reconcile-plan',
+                undefined,
+                undefined,
+                sha256HexSync(
+                  stableJson({
+                    uri: currentRoot.uri,
+                    revision: currentRoot.revision,
+                    documentHash: authoring.documentHash,
+                    intentHash: authoring.intentHash,
+                  }),
+                ),
+              ),
+            }
+          : {...view, authoring};
+      const reconcileReady = authoring.status === 'awaiting-admission';
+      const taskRef = reconcileReady
+        ? nativeTaskCardRef(
+            stored.state,
+            stored.revision,
+            'reconcile-plan',
+            undefined,
+            undefined,
+            currentRoot
+              ? sha256HexSync(
+                  stableJson({
+                    uri: currentRoot.uri,
+                    revision: currentRoot.revision,
+                    documentHash: authoring.documentHash,
+                    intentHash: authoring.intentHash,
+                  }),
+                )
+              : undefined,
+          )
+        : undefined;
       return {
         ...view,
         status: 'blocked' as const,
-        next: {action: 'compact-confirm'},
+        ...(taskRef ? {taskRef} : {}),
+        next: {action: reconcileReady ? 'reconcile-plan' : 'compact-confirm'},
         missingInputs: [
           ...view.missingInputs,
           authoring.status === 'awaiting-user-confirmation'

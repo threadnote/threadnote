@@ -688,7 +688,9 @@ export const runNativeAuthoring = <R>(
           );
         return {root, artifact, document: linked};
       });
-    if (request.command === 'current-plan') {
+    if (request.command === 'current-plan' || request.command === 'current-authoring') {
+      const kind = request.command === 'current-plan' ? 'plan' : request.documentKind;
+      if (!kind) return yield* fail('invalid-request', 'Select spec or plan for the current authoring document.');
       // Native receipts, not operation IDs or inferred filenames, own the current root.
       const operation = EffectOption.getOrUndefined(
         EffectArray.findFirst(
@@ -696,7 +698,7 @@ export const runNativeAuthoring = <R>(
           entry =>
             entry.status === 'verified' &&
             entry.intent.role === 'authoring-root' &&
-            entry.intent.artifactKey === 'author-root-plan',
+            entry.intent.artifactKey === 'author-root-' + kind,
         ),
       );
       if (!operation) return {currentPlan: null};
@@ -710,10 +712,13 @@ export const runNativeAuthoring = <R>(
       if (artifact.body !== operation.artifact.body || artifact.body !== operation.intent.body)
         return yield* fail('invalid-readback', 'The current authoring root differs from its verified write intent.');
       const loaded = yield* load(artifact.uri, artifact);
-      if (loaded.root.kind !== 'plan')
+      if (loaded.root.kind !== kind)
         return yield* fail('invalid-readback', 'The current plan receipt does not contain a plan root.');
       const document = yield* loadDocument(loaded.root);
-      if (document.kind !== 'plan' || !document.compactOrigin) return {currentPlan: null};
+      if (document.kind !== kind)
+        return yield* fail('invalid-readback', 'The current authoring kind differs from its receipt.');
+      if (request.command === 'current-plan' && (document.kind !== 'plan' || !document.compactOrigin))
+        return {currentPlan: null};
       const validation = yield* Effect.try({
         try: () =>
           validateNativeAuthoring(document, {
@@ -724,6 +729,15 @@ export const runNativeAuthoring = <R>(
           }),
         catch: nativeWorkflowError,
       });
+      if (request.command === 'current-authoring')
+        return {
+          currentAuthoring: {
+            ...rootSummary(loaded.root, artifact),
+            ...(request.detail === 'document' ? {document} : {}),
+            packet: acceptancePacket(document, validation, request.detail),
+            blockers: validation.issues,
+          },
+        };
       const confirmed =
         loaded.root.confirmation?.decision === 'approved' &&
         loaded.root.confirmation.intentHash === loaded.root.intentHash &&
@@ -949,7 +963,6 @@ export const runNativeAuthoring = <R>(
     if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
     if (request.command === 'confirm') {
       if (
-        (document.kind !== 'spec' && document.compactOrigin === undefined) ||
         (document.kind === 'plan' && request.presentedIntentHash !== validation.intentHash) ||
         !Effect2.pipe(request.userResponse, effectOptionalString =>
           effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),

@@ -112,6 +112,8 @@ export const nativeCycleRequestSchema = Schema.Struct({
   plan: Schema.optionalKey(Schema.Unknown),
   reason: Schema.optionalKey(text),
   userAuthority: Schema.optionalKey(text),
+  reviewExpansionReason: Schema.optionalKey(text),
+  reviewExpansionDigest: Schema.optionalKey(digest),
   reviewLimit: Schema.optionalKey(Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
   report: Schema.optionalKey(Schema.Unknown),
   attemptId: Schema.optionalKey(id),
@@ -515,6 +517,13 @@ export const runNativeCycle = <R>(
           const selected = yield* from(getPhase);
           const limit = yield* from(() => required(request.reviewLimit, 'the newly authorized review limit'));
           yield* from(() => required(request.userAuthority, 'the explicit human authority for expanding reviews'));
+          if (request.reviewExpansionReason && !Effect2.pipe(request.reviewExpansionReason, EffectString.trim))
+            return yield* fail('review-budget', 'Record a concrete reason for this review-budget expansion.');
+          if (
+            request.reviewExpansionDigest &&
+            EffectArray.some(runtime.reviewExpansions, item => item.requestDigest === request.reviewExpansionDigest)
+          )
+            return yield* fail('review-budget-conflict', 'This review-budget request identity was already recorded.');
           if (limit <= (runtime.reviewLimits[selected.id] ?? 5))
             return yield* fail('review-budget', 'Expansion must increase the existing continuous review budget.');
           return {
@@ -529,6 +538,8 @@ export const runNativeCycle = <R>(
                   from: runtime.reviewLimits[selected.id] ?? 5,
                   to: limit,
                   authority: request.userAuthority!,
+                  ...(request.reviewExpansionReason ? {reason: request.reviewExpansionReason} : {}),
+                  ...(request.reviewExpansionDigest ? {requestDigest: request.reviewExpansionDigest} : {}),
                 },
               ],
             }),

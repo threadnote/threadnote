@@ -49,6 +49,8 @@ export const NativeCycleReviewExpansionSchema = Schema.Struct({
   from: Schema.Finite,
   to: Schema.Finite,
   authority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  reason: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  requestDigest: Schema.optionalKey(digest),
 });
 export const NativeCycleReviewAttemptSchema = Schema.Struct({
   id,
@@ -181,6 +183,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       fail('Historical admission provenance does not match retained phase evidence and source base.');
   }
   const limits: Record<string, number> = {};
+  const expansionDigests = new Set<string>();
   for (const expansion of runtime.reviewExpansions) {
     if (
       !runtime.state.phases[expansion.phaseId] ||
@@ -191,6 +194,11 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       !Effect.pipe(expansion.authority, EffectString.trim)
     )
       fail('Review expansion lost its phase, prior budget or explicit authority.');
+    if (expansion.reason !== undefined && !Effect.pipe(expansion.reason, EffectString.trim))
+      fail('Review expansion lost its concrete reason.');
+    if (expansion.requestDigest && expansionDigests.has(expansion.requestDigest))
+      fail('Review expansion request identities must be unique.');
+    if (expansion.requestDigest) expansionDigests.add(expansion.requestDigest);
     limits[expansion.phaseId] = expansion.to;
   }
   if (
