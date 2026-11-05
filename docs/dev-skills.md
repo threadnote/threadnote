@@ -75,6 +75,6 @@ Removal disables the selected enrollment. Shared entrypoints remain while anothe
 
 ## Watching a PR
 
-`watch-pr` treats actionable CI failures and review feedback as work to investigate and address. The main agent makes scoped fixes, runs focused validation, commits and pushes when authorized, then watches the new head. The native collector only delivers events. Acknowledging an event does not resolve the issue.
+`watch-pr` treats actionable CI failures and review feedback as work to investigate and address. The main agent makes scoped fixes, runs focused validation, commits and pushes when authorized, then watches the new head. When a review fix changes durable contracts, the author refreshes feature memory (and publishes only when authorized); that is not a reviewer-pack duty. The native collector only delivers events. Acknowledging an event does not resolve the issue.
 
 Explicit monitoring-only or local-only instructions remain effective. Watching does not authorize merging, force-pushing, dismissing reviews or changing branch protection. A bounded repair budget prevents endless retries. Background monitoring can wake the conversation only when the agent host provides a supported wake mechanism.
