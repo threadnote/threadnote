@@ -62,6 +62,12 @@ interface NativePathModuleShape {
   readonly win32: PlatformPathShape;
 }
 
+interface NativeUtilModuleShape {
+  readonly types: {
+    readonly isProxy: (value: unknown) => boolean;
+  };
+}
+
 interface NativeOperatingSystemModuleShape {
   readonly cpus: () => readonly {
     readonly model: string;
@@ -177,6 +183,12 @@ export const runtimeOperatingSystemRelease = nativeOperatingSystemModule.release
 const nativeFileSystemModule = process.getBuiltinModule('fs');
 const nativeFileSystemPromises = nativeFileSystemModule.promises;
 const nativePathModule = process.getBuiltinModule('path') as NativePathModuleShape;
+const nativeUtilModule = process.getBuiltinModule('util') as NativeUtilModuleShape;
+
+/** Detect proxies without invoking traps before application code inspects own data descriptors. */
+export function runtimeIsProxy(value: unknown): boolean {
+  return nativeUtilModule.types.isProxy(value);
+}
 
 export function runtimeFileDescriptorStatSync(fd: number): RuntimeNativeFileStat {
   return nativeFileSystemModule.fstatSync(fd, {bigint: true});

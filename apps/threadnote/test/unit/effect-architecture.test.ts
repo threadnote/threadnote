@@ -173,7 +173,7 @@ describe('Effect architecture boundaries', () => {
           EffectString.match(/\bgetBuiltinModule\b/g),
           Effect.Option.getOrElse(() => null),
         )?.length ?? 0;
-      expect(mentions, relativePath).toBe(relativePath === 'packages/platform/src/system.ts' ? 3 : 0);
+      expect(mentions, relativePath).toBe(relativePath === 'packages/platform/src/system.ts' ? 4 : 0);
       const calls = [
         ...Effect.pipe(source, EffectString.matchAll(/process\.getBuiltinModule\(\s*['"]([^'"]+)['"]\s*\)/g)),
       ];
@@ -183,6 +183,7 @@ describe('Effect architecture boundaries', () => {
       {module: 'os', path: 'packages/platform/src/system.ts'},
       {module: 'fs', path: 'packages/platform/src/system.ts'},
       {module: 'path', path: 'packages/platform/src/system.ts'},
+      {module: 'util', path: 'packages/platform/src/system.ts'},
     ]);
 
     const system = await readFile(join(repoRoot, 'packages', 'platform', 'src', 'system.ts'), 'utf8');
