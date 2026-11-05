@@ -1,3 +1,4 @@
+import {CallerReadCancellation} from '@threadnote/platform/read_deadline';
 import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Cause, Clock, Effect, Exit, Fiber, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -94,6 +95,27 @@ describe('foreground recall inference owned cleanup', () => {
           Effect.provide(services),
           Effect.provideService(ReadyRecallReadDeadline, yield* makeReadDeadline(2000)),
         );
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 10000},
+  );
+
+  effectIt.effect(
+    'caller cancellation owns actual native exit and every pipe without an internal deadline',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const services = yield* Layer.build(
+          isolatedLocalModelRuntimeLayer({idleTimeoutMs: 0, spawnWorker: () => f.spawn()}),
+        );
+        const runtime = yield* LocalModelRuntime.pipe(Effect.provide(services));
+        const child = yield* runtime
+          .embedMany(request)
+          .pipe(Effect.provideService(CallerReadCancellation, true), Effect.forkScoped);
+        const pid = yield* f.waitEntered;
+        yield* Fiber.interrupt(child);
+        expect(Exit.isFailure(yield* Fiber.await(child))).toBe(true);
+        expect(f.system.isProcessRunning(pid)).toBe(false);
+        expect(f.flags).toMatchObject({stdinClosed: true, stdoutClosed: true, stderrClosed: true, spawns: 1});
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 10000},
   );

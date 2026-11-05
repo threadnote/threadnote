@@ -1,3 +1,6 @@
+import {CallerReadCancellation} from '@threadnote/platform/read_deadline';
+import {RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {RECALL_READY_READ_WORKER_ARGUMENT, RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT} from '../worker_protocol.js';
 import {Effect} from 'effect';
 import {CommandExecutor, CommandSpawnFailed} from '@threadnote/platform/command';
 import {threadnoteHomeForProcess, withSignalTransparentThreadnoteWorkerRegistration} from '../process/diagnostics.js';
@@ -8,6 +11,9 @@ import {recallReadyReadWorkerProgram, readyRecallReadWorkerLayer} from './ready_
 export {readyRecallReadWorkerLayer};
 
 export function makeReadyRecallReadWorkerProgram(arguments_: readonly string[], environment: NodeJS.ProcessEnv) {
+  const callerCancelled = arguments_.length === 2 && arguments_[1] === RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT;
+  if (arguments_[0] !== RECALL_READY_READ_WORKER_ARGUMENT || (!callerCancelled && arguments_.length !== 1))
+    return Effect.fail(RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}));
   const noChildren = CommandExecutor.of({
     execute: () =>
       Effect.fail(
@@ -38,5 +44,6 @@ export function makeReadyRecallReadWorkerProgram(arguments_: readonly string[], 
       ),
     ),
     Effect.provideService(CommandExecutor, noChildren),
+    Effect.provideService(CallerReadCancellation, callerCancelled),
   );
 }

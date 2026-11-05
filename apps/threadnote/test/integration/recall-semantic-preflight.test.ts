@@ -27,9 +27,13 @@ import {
   recallReadySectionsOptionsSchema,
   recallSemanticPreflightSchema,
 } from '@threadnote/recall/read_boundary';
-import {prepareRecallSemanticPreflight, recallPreflightSkipsSemanticRead} from '@threadnote/recall/runtime';
+import {
+  createMcpRecallSemanticRetrievalGate,
+  prepareRecallSemanticPreflight,
+  recallPreflightSkipsSemanticRead,
+} from '@threadnote/recall/runtime';
 import {decodeRecallReadySectionsResult} from '@threadnote/recall/sections_read';
-import {makeReadDeadline, ReadDeadlineContext} from '@threadnote/platform/read_deadline';
+import {CallerReadCancellation, makeReadDeadline, ReadDeadlineContext} from '@threadnote/platform/read_deadline';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {serveRecallReadyRead} from '../../src/recall/ready_read_worker.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -232,6 +236,26 @@ describe('negative semantic preflight', () => {
     );
   }
 
+  effectIt.effect('caller semantic retrieval waits beyond its former gate and ignores only that gate cooldown', () =>
+    Effect.gen(function* () {
+      const gate = createMcpRecallSemanticRetrievalGate();
+      const runtime = {};
+      const bounded = yield* gate(runtime, Effect.never).pipe(Effect.forkScoped);
+      yield* TestClock.adjust(30_000);
+      expect((yield* Fiber.join(bounded)).status).toBe('timed-out');
+      expect((yield* gate(runtime, Effect.succeed('bounded'))).status).toBe('cooldown');
+      const release = yield* Deferred.make<void>();
+      const caller = yield* gate(runtime, Deferred.await(release).pipe(Effect.as('available'))).pipe(
+        Effect.provideService(CallerReadCancellation, true),
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust(600_001);
+      expect(caller.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(caller)).toEqual({status: 'completed', value: 'available'});
+    }),
+  );
+
   effectIt.effect('parent metadata timeout returns no hint and closes the acquired selection FD', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -280,6 +304,63 @@ describe('negative semantic preflight', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('caller metadata completion waits beyond prior limits and closes the selection FD', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.fs.makeDirectory(f.path.join(f.home, 'models'), {recursive: true});
+      yield* f.fs.writeFileString(
+        f.path.join(f.home, 'models/selection.json'),
+        JSON.stringify({version: 1, roles: {embedding: manifest.id}}),
+      );
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let finalized = 0;
+      let closedRead: (() => Effect.Effect<Option.Option<Uint8Array>, unknown>) | undefined;
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        open: (...args) =>
+          f.fs.open(...args).pipe(
+            Effect.flatMap(file =>
+              Effect.gen(function* () {
+                const original = file.readAlloc.bind(file);
+                closedRead = () => original(1);
+                const spy = vi
+                  .spyOn(file, 'readAlloc')
+                  .mockImplementation(count =>
+                    Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(original(count)),
+                    ),
+                  );
+                yield* Effect.addFinalizer(() =>
+                  Effect.sync(() => {
+                    finalized++;
+                    spy.mockRestore();
+                  }),
+                );
+                return file;
+              }),
+            ),
+          ),
+      });
+      const fiber = yield* prepareRecallSemanticPreflight(f.config).pipe(
+        Effect.provideService(FileSystem.FileSystem, observed),
+        Effect.provideService(RecallReadyReadBoundary, {read: () => Effect.die('No worker during parent preparation')}),
+        Effect.provideService(CallerReadCancellation, true),
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(600_001);
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(fiber))?.id).toBe(manifest.id);
+      expect(finalized).toBe(1);
+      if (!closedRead) return yield* Effect.die('Expected acquired selection FD');
+      expect((yield* closedRead().pipe(Effect.result))._tag).toBe('Failure');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('worker metadata timeout returns unknown and completes the original baseline proof', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -314,6 +395,52 @@ describe('negative semantic preflight', () => {
       const result = yield* decodeRecallReadySectionsResult(JSON.parse(JSON.stringify(response.value)));
       expect(result.semanticPreflight?.readiness).toBe('unknown');
       expect(recallPreflightSkipsSemanticRead(model, result.semanticPreflight)).toBe(false);
+      expect(EffectArray.some(result.ranked, hit => hit.uri === uri)).toBe(true);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('caller worker metadata waits beyond prior limits and still closes the original baseline proof', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const vectorFile = f.path.join(f.home, 'indexes', 'vectors', model.id, vectorIndexDatabaseFilename());
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let finalized = 0;
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        exists: filename =>
+          filename === vectorFile
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(f.fs.exists(filename)),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    finalized++;
+                  }),
+                ),
+              )
+            : f.fs.exists(filename),
+      });
+      const fiber = yield* serveRecallReadyRead({
+        operation: 'sections',
+        config: f.config,
+        options: {...options, semanticPreflightModel: model},
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, observed),
+        Effect.provideService(CallerReadCancellation, true),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(600_001);
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(release, undefined);
+      const response = yield* Fiber.join(fiber);
+      expect(finalized).toBe(1);
+      expect(response.outcome).toBe('success');
+      if (response.outcome !== 'success') return yield* Effect.die('Expected baseline after optional timeout');
+      const result = yield* decodeRecallReadySectionsResult(JSON.parse(JSON.stringify(response.value)));
+      expect(result.semanticPreflight?.readiness).toBe('missing');
+      expect(recallPreflightSkipsSemanticRead(model, result.semanticPreflight)).toBe(true);
       expect(EffectArray.some(result.ranked, hit => hit.uri === uri)).toBe(true);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
