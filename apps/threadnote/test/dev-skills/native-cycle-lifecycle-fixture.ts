@@ -236,7 +236,7 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
         selected: 'Continue after current PR and owned watch handoff.',
         alternatives: [],
         rationale: 'Pending CI is independent of local phase acceptance.',
-        affectedPhases: ['one', 'two'],
+        affectedPhases: EffectArray.filter(['one', 'two'], id => phaseIds.includes(id)),
         authority: 'orchestrator',
       },
     ],
