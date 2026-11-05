@@ -1,7 +1,6 @@
 import {Console, Effect} from 'effect';
 import * as SqlError from 'effect/sql/SqlError';
-// oxlint-disable-next-line threadnote/no-node-runtime -- Bun has no trap-free proxy test; this Node builtin is the safe guard before descriptor reads.
-import {types as nodeUtilTypes} from 'node:util';
+import {runtimeIsProxy} from '@threadnote/platform/system';
 import {CodeGraphWorksetCatalogError} from '@threadnote/graph/workset_catalog/types';
 
 type ManagerWorksetDiagnosticCauseTag =
@@ -43,7 +42,7 @@ const WORKSET_DIAGNOSTIC_CAUSE_PROTOTYPES: ReadonlyArray<readonly [object, Manag
 ];
 
 function ownDataValue(value: unknown, key: string): unknown {
-  if ((typeof value !== 'object' && typeof value !== 'function') || value === null || nodeUtilTypes.isProxy(value)) {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null || runtimeIsProxy(value)) {
     return undefined;
   }
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -57,7 +56,7 @@ function hasOnlyDataProperty(value: object, key: string): boolean {
 
 function managerWorksetDiagnosticTypedCauseTag(cause: unknown): ManagerWorksetDiagnosticCauseTag {
   try {
-    if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null || nodeUtilTypes.isProxy(cause)) {
+    if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null || runtimeIsProxy(cause)) {
       return 'unknown';
     }
     const tag = ownDataValue(cause, '_tag');
@@ -117,7 +116,7 @@ export function managerWorksetFailureDiagnostic(error: unknown): ManagerWorksetF
     if (
       (typeof error === 'object' || typeof error === 'function') &&
       error !== null &&
-      !nodeUtilTypes.isProxy(error) &&
+      !runtimeIsProxy(error) &&
       Object.getPrototypeOf(error) === CodeGraphWorksetCatalogError.prototype &&
       ownDataValue(error, '_tag') === 'CodeGraphWorksetCatalogError' &&
       hasOnlyDataProperty(error, 'cause')
