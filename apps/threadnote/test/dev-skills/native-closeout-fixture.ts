@@ -30,7 +30,7 @@ import {
 } from '../../src/workflow_automation/store.js';
 import {loadNativeCloseoutInputs} from '../../src/workflow_automation/closeout_inputs.js';
 import {nativeFixture} from './native-automation-fixture.js';
-import {observeCloseoutGraph, observeCloseoutStage} from './native-closeout-diagnostics.js';
+import {observeCloseoutGraph, observeCloseoutProfile, observeCloseoutStage} from './native-closeout-diagnostics.js';
 import * as EffectRecord from 'effect/Record';
 import * as Effect2 from 'effect';
 
@@ -152,6 +152,7 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   cycleDelivery: 'local' | 'pr' = 'local',
   planRootPolicy: 'v1' | 'missing-marker' | 'unknown-version' | 'mismatched-intent' | undefined = undefined,
 ) {
+  yield* observeCloseoutProfile(profile);
   const system = yield* SystemInfo;
   const environment = EffectRecord.fromEntries(
     EffectArray.filter(
