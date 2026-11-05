@@ -15,6 +15,7 @@ import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/c
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCycleValidationSchema, nextNativeCycle} from '@threadnote/workflow-automations/cycle';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
+import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
@@ -27,6 +28,7 @@ import {
   NativeCompactIntentSchema,
   NativeCompactSourceSnapshotSchema,
   projectNativeCompactIntent,
+  type NativeCompactIntent,
 } from '@threadnote/workflow-automations/authoring';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -42,6 +44,10 @@ import {readNativeTaskView} from './task.js';
 import {gitValue} from '../utils.js';
 import {makeWorkflowGitAdapter} from './cycle_git.js';
 import {nativeWorkflowError} from './memory.js';
+import {statusDevSkills} from '../dev_skills/index.js';
+import {inspectNativeSourcePaths} from './authoring.js';
+import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
+import {makeWorkflowGraphAdapter} from './graph.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -135,6 +141,252 @@ const requestSchema = Schema.Union([
     resume: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
+
+const taskStartSchema = Schema.Struct({
+  callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+  taskRef: Schema.optionalKey(id),
+  intent: NativeCompactIntentSchema,
+});
+
+const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknown): boolean => {
+  if (!Predicate.isObject(value) || value.kind !== 'plan' || !Predicate.isObject(value.compactOrigin)) return false;
+  const phases = value.phases;
+  const current = value.current;
+  const target = value.target;
+  const requirements = value.requirements;
+  if (
+    !EffectArray.isArray(phases) ||
+    phases.length !== 1 ||
+    !Predicate.isObject(phases[0]) ||
+    !Predicate.isObject(current) ||
+    !Predicate.isObject(target) ||
+    !EffectArray.isArray(requirements) ||
+    requirements.length !== 1 ||
+    !Predicate.isObject(requirements[0])
+  )
+    return false;
+  const phase = phases[0];
+  const acceptance = phase.acceptance;
+  return (
+    value.title === intent.title &&
+    current.summary === intent.currentBehavior &&
+    target.summary === intent.desiredChange &&
+    requirements[0].behavior === intent.desiredChange &&
+    EffectArray.isArray(phase.affectedPaths) &&
+    stableJson(phase.affectedPaths) === stableJson(intent.affectedPaths) &&
+    EffectArray.isArray(acceptance) &&
+    acceptance.length === 1 &&
+    Predicate.isObject(acceptance[0]) &&
+    acceptance[0].criterion === intent.acceptanceCriterion &&
+    acceptance[0].verification === intent.verification &&
+    Predicate.isObject(value.review) &&
+    value.review.required === intent.review.required &&
+    value.review.reason === intent.review.reason &&
+    value.compactOrigin.eligibilityRationale === intent.eligibilityRationale &&
+    intent.eligibility.status === 'eligible'
+  );
+};
+
+/** Start or resume one semantic compact task over the existing native run and P3 authoring path. */
+export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
+  Effect.gen(function* () {
+    const request = yield* Schema.decodeUnknownEffect(taskStartSchema, {onExcessProperty: 'error'})(input).pipe(
+      Effect.mapError(() =>
+        fail(
+          'invalid-request',
+          'Provide a feature name, absolute checkout path, bounded compact intent, and an optional installed target or task reference.',
+        ),
+      ),
+    );
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    if (!path.isAbsolute(request.callerCwd))
+      return yield* fail('invalid-request', 'callerCwd must be an absolute checkout path.');
+    const cwd = yield* fs
+      .realPath(request.callerCwd)
+      .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
+    const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], cwd);
+    if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const checkout = yield* fs
+      .realPath(reportedCheckout)
+      .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
+    const project = yield* Effect.try({
+      try: () => workflowTitleSlug(path.basename(checkout)),
+      catch: () => fail('invalid-project', 'The checkout directory cannot be used as a workflow project name.'),
+    });
+    const featureId = yield* Effect.try({
+      try: () => workflowTitleSlug(request.featureName),
+      catch: () => fail('invalid-feature', 'featureName must be a stable, nonblank task name.'),
+    });
+    const runId = request.taskRef ?? 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
+    const stored = yield* readNativeWorkflowState(config, runId);
+    const identity = {featureId, project};
+    const currentSystem = yield* SystemInfo;
+    const inCallerCheckout = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(Effect.provideService(SystemInfo, {...currentSystem, currentDirectory: () => checkout}));
+    const requireGraphReady = (
+      generation: string,
+      profile: 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal',
+      team?: string,
+    ) =>
+      Effect.gen(function* () {
+        const binding = yield* resolveWorkflowBinding(config, {
+          protocolVersion: 1,
+          action: 'bind',
+          workflowRunId: 'native-v1-' + runId,
+          project,
+          featureId,
+          generation,
+          profile,
+          ...(team === undefined ? {} : {team}),
+        });
+        const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false});
+        return yield* graph.ready(checkout);
+      }).pipe(inCallerCheckout);
+
+    if (stored) {
+      if (
+        stored.state.project !== project ||
+        stored.state.featureId !== featureId ||
+        (stored.state.title !== undefined && stored.state.title !== request.intent.title)
+      )
+        return yield* fail(
+          'task-identity-conflict',
+          'This task name already belongs to different canonical intent. Resume its current task card or choose a new feature name.',
+        );
+      const view = yield* readNativeTaskView(config, {runId, callerCwd: checkout, detail: 'packet'});
+      const root = EffectArray.findFirst(
+        [...stored.state.operations].reverse(),
+        operation =>
+          operation.status === 'verified' &&
+          operation.intent.artifactKey === 'author-root-plan' &&
+          operation.artifact !== undefined,
+      );
+      const reservation = stored.state.authoringSave;
+      if (root._tag === 'Some' && !reservation) {
+        const loaded = yield* inCallerCheckout(
+          runWorkflowAutomation(
+            config,
+            authoringRequest(stored, 'load', {uri: root.value.artifact!.uri, detail: 'document'}),
+          ).pipe(Effect.map(unwrapAuthoring)),
+        );
+        const document = yield* Effect.try({
+          try: () => decodeNativeAuthoringDocument(loaded.document),
+          catch: nativeWorkflowError,
+        });
+        if (!compactIntentMatchesDocument(request.intent, document))
+          return yield* fail(
+            'task-intent-conflict',
+            'The saved task has different business intent. Continue its current task or choose a new feature name; existing intent was not overwritten.',
+          );
+        return {status: 'resumed' as const, taskRef: runId, view};
+      }
+      // Only the original initial compact save may continue through this semantic entry point.
+      // Its complete document/save digest and deterministic receipt prefix are checked by the existing saver.
+      const pendingCompactSave = reservation?.operationStart === 0 && reservation.rootUri === null;
+      if ((stored.state.operations.length > 0 || reservation) && !pendingCompactSave)
+        return yield* fail(
+          'task-intent-missing',
+          'This task has unrelated workflow history; no replacement intent was written.',
+        );
+      if (request.intent.eligibility.status === 'needs-planning') {
+        if (pendingCompactSave)
+          return yield* fail(
+            'task-intent-conflict',
+            'Resume the admitted compact save with its original eligible business intent; no intent was changed.',
+          );
+        return {
+          status: 'needs-planning' as const,
+          missingDecision: request.intent.eligibility.missingDecision,
+          evidenceRefs: request.intent.eligibility.evidenceRefs,
+          eligibilityRationale: request.intent.eligibilityRationale,
+        };
+      }
+      const source = yield* inCallerCheckout(inspectNativeSourcePaths(checkout, request.intent.affectedPaths));
+      const projected = projectNativeCompactIntent(request.intent, identity, source);
+      if (projected.status !== 'eligible') return projected;
+      yield* requireGraphReady(stored.state.generation, stored.state.profile, stored.state.team);
+      const started = yield* runNativeTaskAction(config, {
+        command: 'compact-start',
+        runId,
+        callerCwd: checkout,
+        intent: request.intent,
+      });
+      return {...started, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
+    }
+
+    if (request.taskRef)
+      return yield* fail('run-not-found', 'The supplied task reference does not resolve to an existing native task.');
+    if (request.intent.eligibility.status === 'needs-planning')
+      return {
+        status: 'needs-planning' as const,
+        missingDecision: request.intent.eligibility.missingDecision,
+        evidenceRefs: request.intent.eligibility.evidenceRefs,
+        eligibilityRationale: request.intent.eligibilityRationale,
+      };
+    if (!request.installationTarget)
+      return yield* fail(
+        'needs-resources',
+        'Select an installed Threadnote skill target. The target must have the current verified workflow bundle before a task can start.',
+      );
+    const installed = yield* inCallerCheckout(
+      statusDevSkills(config, {agent: request.installationTarget}).pipe(
+        Effect.mapError(() =>
+          fail('needs-resources', 'The selected skill target could not verify an installed workflow bundle.'),
+        ),
+      ),
+    );
+    if (installed.targets.length !== 1)
+      return yield* fail('needs-selection', 'Select exactly one installed Threadnote skill target for this task.');
+    const target = installed.targets[0];
+    if (
+      !target.enrolled ||
+      !target.enabled ||
+      target.installationState !== 'current' ||
+      target.target.profile !== 'desktop' ||
+      target.installedDigest !== installed.bundle.digest ||
+      target.installed?.digest !== installed.bundle.digest
+    )
+      return yield* fail(
+        'needs-resources',
+        'The selected target does not have the current verified Threadnote workflow generation enabled. Update or repair that installation, then retry.',
+      );
+    const source = yield* inCallerCheckout(inspectNativeSourcePaths(checkout, request.intent.affectedPaths));
+    const projected = projectNativeCompactIntent(request.intent, identity, source);
+    if (projected.status !== 'eligible') return projected;
+    yield* requireGraphReady(target.installedDigest, target.target.profile);
+    const initialized = yield* inCallerCheckout(
+      runWorkflowAutomation(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'init',
+        runId,
+        project,
+        featureId,
+        generation: target.installedDigest,
+        profile: target.target.profile,
+        title: request.intent.title,
+      }),
+    );
+    const initResult: unknown = initialized;
+    if (Predicate.isObject(initResult) && initResult.status === 'error')
+      return yield* fail(
+        typeof initResult.code === 'string' ? initResult.code : 'task-start-failed',
+        typeof initResult.message === 'string' ? initResult.message : 'The native task could not be initialized.',
+      );
+    const started = yield* runNativeTaskAction(config, {
+      command: 'compact-start',
+      runId,
+      callerCwd: checkout,
+      intent: request.intent,
+    });
+    return {...started, taskRef: runId};
+  }).pipe(
+    Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
+    Effect.mapError(nativeWorkflowError),
+  );
 
 const inCheckout = <A, E, R>(program: Effect.Effect<A, E, R>, checkout: string) =>
   Effect.gen(function* () {
@@ -345,12 +597,20 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           });
         }
         const packet = yield* authoring('acceptance-packet', {document, detail: 'document'});
+        const initialSave =
+          stored.state.authoringSave?.operationStart === 0 && stored.state.authoringSave.rootUri === null;
         const saved = yield* authoring(
           'save',
           {
             document,
             ready: false,
-            ...(root ? {uri: root.uri, expectedRevision: root.revision} : {expectedRevision: null}),
+            // A verified root can still belong to the unfinished original draft save.
+            // Keep that save's runtime-owned CAS rather than inventing a second update.
+            ...(initialSave
+              ? {expectedRevision: null}
+              : root
+                ? {uri: root.uri, expectedRevision: root.revision}
+                : {expectedRevision: null}),
           },
           true,
         );

@@ -1,4 +1,4 @@
-import {Effect, Schema} from 'effect';
+import {Cause, Effect, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
@@ -20,6 +20,7 @@ const isReady = (status: CodeGraphStatus, repo: string) =>
 export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapter')(function* (
   config: RuntimeConfig,
   binding: WorkflowBinding,
+  options: {readonly prepare?: boolean} = {},
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
@@ -40,12 +41,33 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           });
         let status = yield* query.status(config.agentContextHome, repo, statusOptions);
         if (!isReady(status, repo)) {
-          yield* indexer.index({
-            cwd: repo,
-            threadnoteHome: config.agentContextHome,
-            ensureVectors: false,
-            ...(project ? {project} : {}),
-          });
+          if (options.prepare === false)
+            return yield* WorkflowAutomationError.make({
+              code: 'evidence-unavailable',
+              message:
+                'Code citations require an already-published ready graph; run `threadnote graph index --no-vectors` from callerCwd, then retry. No indexing was started.',
+              retryable: false,
+            });
+          yield* indexer
+            .index({
+              cwd: repo,
+              threadnoteHome: config.agentContextHome,
+              ensureVectors: false,
+              ...(project ? {project} : {}),
+            })
+            .pipe(
+              Effect.timeout('120 seconds'),
+              Effect.catchIf(Cause.isTimeoutError, () =>
+                Effect.fail(
+                  WorkflowAutomationError.make({
+                    code: 'evidence-busy',
+                    message:
+                      'Graph preparation exceeded its bounded wait. Keep this native run and retry when its owner finishes.',
+                    retryable: true,
+                  }),
+                ),
+              ),
+          );
           status = yield* query.status(config.agentContextHome, repo, statusOptions);
         }
         if (!isReady(status, repo))

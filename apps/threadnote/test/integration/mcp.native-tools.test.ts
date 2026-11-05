@@ -222,6 +222,7 @@ const CORE_TOOL_NAMES = [
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
+  'workflow_task_start',
   'workflow_task_compact_start',
   'workflow_task_compact_expand',
   'workflow_task_compact_confirm',
@@ -292,6 +293,7 @@ const LIFECYCLE_TOOL_NAMES = [
 ];
 
 const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
+  workflow_task_start: 3_200,
   workflow_task_compact_start: 2_500,
   workflow_task_compact_expand: 800,
   workflow_task_compact_confirm: 2_500,
@@ -718,8 +720,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
-        // Compact authoring adds three bounded task tools to the core catalog; keep this additive budget explicit.
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(52_000);
+        // Semantic task bootstrap adds one tool beyond compact authoring; keep the additive catalog budget explicit.
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(53_500);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
