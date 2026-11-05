@@ -13,6 +13,12 @@ import type {NativeWorkflowState} from './native.js';
 
 export type NativeTaskRole = 'implementation' | 'review' | 'delivery';
 
+/** Semantic task anchor input; the application derives the digest from admitted checkout bytes. */
+export const NativeTaskAnchorSchema = Schema.Struct({
+  path: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  pattern: Schema.String.check(Schema.isMaxLength(256)),
+});
+
 export interface NativeTaskView {
   readonly status: 'ready' | 'blocked' | 'complete' | 'uninitialized';
   readonly runId: string;
