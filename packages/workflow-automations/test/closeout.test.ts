@@ -276,7 +276,10 @@ describe('pure native closeout admission', () => {
     const {diagram: _diagram, ...proseArchitecture} = f.proposal.architecture;
     fc.assert(
       fc.property(
-        fc.stringMatching(/[A-Za-z][A-Za-z0-9 ]{0,60}/u).map(value => value.trim()).filter(Boolean),
+        fc
+          .stringMatching(/[A-Za-z][A-Za-z0-9 ]{0,60}/u)
+          .map(value => Effect.pipe(value, EffectString.trim))
+          .filter(Boolean),
         summary => {
           const proposal = {...f.proposal, architecture: {...proseArchitecture, summary}};
           const result = prepareNativeCloseout(f.state, f.plan, proposal);
