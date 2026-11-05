@@ -654,19 +654,19 @@ describe('ordinary merge native qualification', () => {
     {timeout: 60_000},
   );
 
-  effectIt.effect(
-    'fences base, HEAD, phase branch, working tree and prior pin drift after proof construction with no new snapshot, journal or pin writes',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* mergeFixture();
-        yield* f.git(['branch', 'alternate', f.head]);
-        const before = yield* f.fs.readFileString(f.statePath());
-        const stored = JSON.parse(before);
-        const journal = yield* f.fs.readFileString(f.journalPath(stored.bindingId));
-        const refs = (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout;
-        const executor = yield* CommandExecutor;
-        const originalSource = yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'));
-        for (const kind of ['base', 'head', 'branch', 'tree', 'prior-pin']) {
+  for (const kind of ['base', 'head', 'branch', 'tree', 'prior-pin']) {
+    effectIt.effect(
+      `fences ${kind} drift after proof construction with no new snapshot, journal or pin writes`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* mergeFixture();
+          yield* f.git(['branch', 'alternate', f.head]);
+          const before = yield* f.fs.readFileString(f.statePath());
+          const stored = JSON.parse(before);
+          const journal = yield* f.fs.readFileString(f.journalPath(stored.bindingId));
+          const refs = (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout;
+          const executor = yield* CommandExecutor;
+          const originalSource = yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'));
           let injected = false;
           const result = yield* f.capture().pipe(
             Effect.provideService(
@@ -710,9 +710,9 @@ describe('ordinary merge native qualification', () => {
           expect((yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout).toBe(
             refs,
           );
-        }
-        expect((yield* f.capture()).ordinaryMergeQualificationV1).toBeDefined();
-      }).pipe(run),
-    {timeout: 60_000},
-  );
+          expect((yield* f.capture()).ordinaryMergeQualificationV1).toBeDefined();
+        }).pipe(run),
+      {timeout: 60_000},
+    );
+  }
 });
