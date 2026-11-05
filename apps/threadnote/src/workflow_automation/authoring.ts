@@ -384,6 +384,13 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
   ];
 }
 
+/** Project canonical authoring data into the same semantic view envelopes used by rendering and persistence. */
+export function projectNativeAuthoringDocumentViews(
+  document: NativeAuthoringDocument,
+): readonly {id: string; document: NativeDocumentEnvelope}[] {
+  return documentViews(document);
+}
+
 function isWorkflowArtifact(value: unknown): value is WorkflowArtifact {
   return (
     isJsonObject(value) &&
@@ -1001,7 +1008,7 @@ export const runNativeAuthoring = <R>(
     if (request.command === 'render')
       return {
         documentHash: validation.documentHash,
-        documents: EffectArray.map(documentViews(document), item => ({
+        documents: EffectArray.map(projectNativeAuthoringDocumentViews(document), item => ({
           id: item.id,
           outline: outlineNativeDocument(item.document),
           ...(request.detail === 'document' ? {markdown: renderNativeDocument(item.document)} : {}),
