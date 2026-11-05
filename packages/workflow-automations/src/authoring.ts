@@ -139,9 +139,14 @@ const nativeSpecSchema = Schema.Struct({
 
 const architecture = Schema.Struct({
   summary: prose,
-  components: proseList(1, 128),
+  components: Schema.Array(prose).check(Schema.isMaxLength(128)),
   contracts: Schema.Array(prose).check(Schema.isMaxLength(128)),
   diagram: boundedText(8192),
+});
+const compactOrigin = Schema.Struct({
+  version: Schema.Literal(1),
+  eligibilityRationale: prose,
+  expanded: Schema.Boolean,
 });
 const acceptance = Schema.Struct({
   id: portableId,
@@ -212,12 +217,35 @@ const nativePlanSchema = Schema.Struct({
   openQuestions: Schema.Array(prose).check(Schema.isMaxLength(64)),
   review,
   spec: Schema.optionalKey(linkedSpec),
+  compactOrigin: Schema.optionalKey(compactOrigin),
+});
+
+const NativeCompactIntentInputSchema = Schema.Struct({
+  title: boundedText(256, true, true),
+  currentBehavior: prose,
+  desiredChange: prose,
+  affectedPaths: Schema.Array(relativePath).check(Schema.isBetweenLength(1, 16)),
+  acceptanceCriterion: prose,
+  verification: prose,
+  eligibilityRationale: prose,
+  eligibility: Schema.Union([
+    Schema.Struct({status: Schema.Literal('eligible')}),
+    Schema.Struct({
+      status: Schema.Literal('needs-planning'),
+      missingDecision: prose,
+      evidenceRefs: Schema.Array(memoryUri).check(Schema.isMaxLength(8)),
+    }),
+  ]),
+  review: Schema.Struct({required: Schema.Boolean, reason: prose}),
 });
 
 export const NativeAuthoringSpecDocumentSchema = nativeSpecSchema;
 export const NativeAuthoringPlanDocumentSchema = nativePlanSchema;
 export const NativeAuthoringDocumentSchema = Schema.Union([nativeSpecSchema, nativePlanSchema]);
 export type NativeAuthoringDocument = typeof NativeAuthoringDocumentSchema.Type;
+export const NativeCompactIntentSchema = NativeCompactIntentInputSchema;
+export type NativeCompactIntent = typeof NativeCompactIntentSchema.Type;
+export const NativeCompactSourceSnapshotSchema = source;
 
 export const NativePlanIntentPolicyVersion = 2 as const;
 export type NativePlanIntentPolicyVersion = 1 | typeof NativePlanIntentPolicyVersion;
@@ -308,6 +336,88 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
   return document;
 }
 
+export interface NativeCompactSourceSnapshot {
+  readonly head: string;
+  readonly files: readonly {readonly path: string; readonly sha256: string}[];
+}
+
+export type NativeCompactIntentProjection =
+  | {readonly status: 'eligible'; readonly document: NativeAuthoringDocument}
+  | {
+      readonly status: 'needs-planning';
+      readonly missingDecision: string;
+      readonly evidenceRefs: readonly string[];
+      readonly eligibilityRationale: string;
+    };
+
+/** Map one compact, caller-authored intent into the existing canonical plan once. */
+export function projectNativeCompactIntent(
+  input: unknown,
+  identity: {readonly featureId: string; readonly project: string},
+  sourceSnapshot: NativeCompactSourceSnapshot,
+): NativeCompactIntentProjection {
+  let compact: NativeCompactIntent;
+  try {
+    compact = Schema.decodeUnknownSync(NativeCompactIntentSchema)(input);
+  } catch {
+    throw invalid('The compact task intent is malformed or exceeds its bounded input limits.');
+  }
+  if (compact.eligibility.status === 'needs-planning')
+    return {
+      status: 'needs-planning',
+      missingDecision: compact.eligibility.missingDecision,
+      evidenceRefs: compact.eligibility.evidenceRefs,
+      eligibilityRationale: compact.eligibilityRationale,
+    };
+  if (Effect.pipe(compact.currentBehavior, EffectString.trim) === Effect.pipe(compact.desiredChange, EffectString.trim))
+    throw invalid('Compact intent must describe a desired change from the current behavior.');
+  const sourcePaths = EffectArray.map(sourceSnapshot.files, item => item.path);
+  if (
+    sourcePaths.length !== compact.affectedPaths.length ||
+    EffectArray.some(compact.affectedPaths, path => !sourcePaths.includes(path))
+  )
+    throw invalid('Every compact affected path must be included in the exact inspected source snapshot.');
+  const document = decodeNativeAuthoringDocument({
+    format: 'threadnote-native-authoring',
+    schemaVersion: 1,
+    kind: 'plan',
+    id: identity.featureId,
+    project: identity.project,
+    title: compact.title,
+    objective: `Implement the bounded change: ${compact.desiredChange}`,
+    requirements: [{id: 'behavior', behavior: compact.desiredChange}],
+    context: {codeRefs: sourcePaths, evidenceRefs: [], note: ''},
+    source: sourceSnapshot,
+    current: {summary: compact.currentBehavior, components: [], contracts: [], diagram: ''},
+    target: {summary: compact.desiredChange, components: [], contracts: [], diagram: ''},
+    phases: [
+      {
+        id: 'compact',
+        title: compact.title,
+        outcome: compact.desiredChange,
+        dependsOn: [],
+        affectedPaths: compact.affectedPaths,
+        newPaths: [],
+        contracts: [],
+        acceptance: [
+          {
+            id: 'acceptance',
+            criterion: compact.acceptanceCriterion,
+            verification: compact.verification,
+            requirementIds: ['behavior'],
+          },
+        ],
+        safeBoundary: 'Limit changes to the declared affected paths and approved behavior.',
+      },
+    ],
+    decisions: [],
+    openQuestions: [],
+    review: compact.review,
+    compactOrigin: {version: 1, eligibilityRationale: compact.eligibilityRationale, expanded: false},
+  });
+  return {status: 'eligible', document};
+}
+
 export function canonicalAuthoringJson(value: unknown): string {
   const serialized = JSON.stringify(sortJson(value, new Set()));
   if (serialized === undefined) throw invalid('The native authoring value is not JSON serializable.');
@@ -365,6 +475,7 @@ export function nativeSpecIntentDigest(
             },
           }
         : {}),
+      ...(decoded.compactOrigin ? {compactOrigin: decoded.compactOrigin} : {}),
     };
     return sha256HexSync(
       `threadnote.native-authoring.plan-intent.v${NativePlanIntentPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
@@ -656,6 +767,19 @@ export function validateNativeAuthoring(
 
   const documentHash = nativeAuthoringDigest(decoded);
   const intentHash = nativeSpecIntentDigest(decoded, options.planIntentPolicyVersion);
+  if (decoded.kind === 'plan' && !decoded.compactOrigin) {
+    for (const [label, architecture] of [
+      ['current', decoded.current],
+      ['target', decoded.target],
+    ] as const) {
+      if (architecture.components.length === 0)
+        add(
+          'architecture-components-required',
+          `${label}.components`,
+          'A standard plan needs at least one architecture component.',
+        );
+    }
+  }
   if (options.ready) {
     if (decoded.kind === 'spec') {
       EffectArray.forEach(decoded.questions, (item, index) => {
@@ -663,10 +787,29 @@ export function validateNativeAuthoring(
           add('open-question', `questions[${index}]`, 'Open behavioral questions must be resolved before readiness.');
       });
     } else {
+      if (decoded.compactOrigin && !decoded.compactOrigin.expanded) {
+        const compactPhase = decoded.phases[0];
+        if (
+          decoded.phases.length !== 1 ||
+          decoded.requirements.length !== 1 ||
+          decoded.decisions.length !== 0 ||
+          decoded.openQuestions.length !== 0 ||
+          compactPhase?.dependsOn.length !== 0 ||
+          compactPhase?.acceptance.length !== 1 ||
+          !decoded.source ||
+          compactPhase?.affectedPaths.length === 0 ||
+          compactPhase?.affectedPaths.length > 16
+        )
+          add(
+            'compact-shape-invalid',
+            'compactOrigin',
+            'An unexpanded compact plan must remain one source-bound behavior with one acceptance and no dependencies or unresolved decisions.',
+          );
+      }
       EffectArray.forEach(decoded.openQuestions, (_, index) =>
         add('open-question', `openQuestions[${index}]`, 'Open plan questions must be resolved before readiness.'),
       );
-      if (decoded.decisions.length === 0)
+      if (decoded.decisions.length === 0 && (!decoded.compactOrigin || decoded.compactOrigin.expanded))
         add(
           'decision-required',
           'decisions',
@@ -681,7 +824,7 @@ export function validateNativeAuthoring(
       }
     }
     if (
-      decoded.kind === 'spec' &&
+      (decoded.kind === 'spec' || decoded.compactOrigin !== undefined) &&
       (typeof options.confirmation?.response !== 'string' ||
         Effect.pipe(options.confirmation.response, EffectString.trim).length === 0 ||
         options.confirmation.decision !== 'approved' ||

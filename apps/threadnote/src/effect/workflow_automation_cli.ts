@@ -107,6 +107,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             callerCwd: options.callerCwd,
             ...(options.role === undefined ? {} : {role: options.role}),
             ...(options.cursor === undefined ? {} : {cursor: options.cursor}),
+            ...(options.detail === undefined ? {} : {detail: options.detail}),
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),
@@ -186,6 +187,48 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               ...(options.prepareRef === undefined ? {} : {prepareRef: options.prepareRef}),
               ...(options.finishRef === undefined ? {} : {finishRef: options.finishRef}),
               ...(options.resume ? {resume: true} : {}),
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'compact-start',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              intent: options.intent,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'compact-expand',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              document: options.document,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'compact-confirm',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              presentedIntentHash: options.presentedIntentHash,
+              ...(options.userResponse === undefined ? {} : {userResponse: options.userResponse}),
+              ...(options.userDecision === undefined ? {} : {userDecision: options.userDecision}),
+              ...(options.baseBranch === undefined ? {} : {baseBranch: options.baseBranch}),
+              ...(options.reconcileReason === undefined ? {} : {reconcileReason: options.reconcileReason}),
+              ...(options.bindings === undefined ? {} : {bindings: options.bindings}),
+              ...(options.review === undefined ? {} : {review: options.review}),
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),

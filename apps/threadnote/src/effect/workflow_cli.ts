@@ -64,6 +64,7 @@ export function makeNativeTaskViewCommand<E, R>(
     readonly callerCwd: string;
     readonly role?: string;
     readonly cursor?: string;
+    readonly detail?: 'summary' | 'packet';
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -73,6 +74,11 @@ export function makeNativeTaskViewCommand<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task context'),
       role: optionalChoice('role', ['implementation', 'review', 'delivery'], 'Optional task role'),
       cursor: optionalString('cursor', 'Opaque continuation returned by the previous task-view page'),
+      detail: optionalChoice(
+        'detail',
+        ['summary', 'packet'],
+        'Read the bounded summary or full current approval/review packet',
+      ),
     },
     handler,
   ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
@@ -113,6 +119,27 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly prepareRef?: string;
     readonly finishRef?: string;
     readonly resume?: boolean;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  compactStartHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly intent: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  compactExpandHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly document: unknown;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  compactConfirmHandler: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly presentedIntentHash: string;
+    readonly userResponse?: string;
+    readonly userDecision?: 'approve' | 'reject' | 'defer';
+    readonly baseBranch?: string;
+    readonly reconcileReason?: string;
+    readonly bindings?: unknown;
+    readonly review?: unknown;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const work = Command.make(
@@ -281,8 +308,93 @@ export function makeNativeTaskActionCommands<E, R>(
       );
     },
   ).pipe(Command.withDescription('Prepare and finish a completed single-phase local cycle through canonical jobs'));
+  const compactStart = Command.make(
+    'compact-start',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      intent: requiredString(
+        'intent',
+        'Compact intent JSON with current behavior, desired change, scope, acceptance and eligibility',
+      ),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.intent) as unknown,
+        catch: () =>
+          WorkflowAutomationError.make({code: 'invalid-request', message: 'Compact intent must be valid JSON.'}),
+      }).pipe(Effect.flatMap(intent => compactStartHandler({...options, intent}))),
+  ).pipe(Command.withDescription('Save a compact bounded intent as a draft and return its exact approval packet'));
+  const compactExpand = Command.make(
+    'compact-expand',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      document: requiredString(
+        'document',
+        'Complete expanded native plan JSON; compact origin is retained by the runtime',
+      ),
+    },
+    options =>
+      Effect.try({
+        try: () => JSON.parse(options.document) as unknown,
+        catch: () =>
+          WorkflowAutomationError.make({code: 'invalid-request', message: 'Expanded plan must be valid JSON.'}),
+      }).pipe(Effect.flatMap(document => compactExpandHandler({...options, document}))),
+  ).pipe(Command.withDescription('Prepare a material expansion on the same compact-origin authoring root'));
+  const compactConfirm = Command.make(
+    'compact-confirm',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      presentedIntentHash: requiredString('intent-hash', 'Exact intent hash from the complete approval packet'),
+      userResponse: optionalString('user-response', 'Actual user response to the displayed exact-intent packet'),
+      userDecision: optionalChoice('user-decision', ['approve', 'reject', 'defer'], 'Explicit user decision'),
+      baseBranch: optionalString('base-branch', 'Exact base branch for a new local cycle'),
+      reconcileReason: optionalString('reconcile-reason', 'Concrete reason for reconciling an existing cycle'),
+      bindings: optionalString('bindings', 'Exact phase-to-branch/base-branch map as JSON'),
+      review: optionalString('review', 'Accepted exact-document independent review as JSON, when required'),
+    },
+    options =>
+      Effect.all({
+        bindings:
+          options.bindings === undefined
+            ? Effect.void
+            : Effect.try({
+                try: () => JSON.parse(options.bindings!) as unknown,
+                catch: () =>
+                  WorkflowAutomationError.make({
+                    code: 'invalid-request',
+                    message: 'Branch bindings must be valid JSON.',
+                  }),
+              }),
+        review:
+          options.review === undefined
+            ? Effect.void
+            : Effect.try({
+                try: () => JSON.parse(options.review!) as unknown,
+                catch: () =>
+                  WorkflowAutomationError.make({
+                    code: 'invalid-request',
+                    message: 'Review evidence must be valid JSON.',
+                  }),
+              }),
+      }).pipe(Effect.flatMap(parsed => compactConfirmHandler({...options, ...parsed}))),
+  ).pipe(
+    Command.withDescription('Record a real exact-intent response, then admit or reconcile the same canonical run'),
+  );
   return Command.make('task-action', {}).pipe(
-    Command.withSubcommands([work, recordSnapshot, recordReview, recordValidation, deliverLocal, finish]),
+    Command.withSubcommands([
+      work,
+      recordSnapshot,
+      recordReview,
+      recordValidation,
+      deliverLocal,
+      finish,
+      compactStart,
+      compactExpand,
+      compactConfirm,
+    ]),
   );
 }
 

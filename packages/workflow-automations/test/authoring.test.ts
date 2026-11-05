@@ -6,6 +6,7 @@ import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
   NativeAuthoringPlanDocumentSchema,
+  projectNativeCompactIntent,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -143,6 +144,21 @@ const caught = (run: () => unknown): unknown => {
 };
 const issueCodes = (document: NativeAuthoringDocument) =>
   EffectArray.map(validateNativeAuthoring(document).issues, issue => issue.code);
+
+const compactInput = (changes: Record<string, unknown> = {}) => ({
+  title: 'Refresh stale cache entries',
+  currentBehavior: 'Expired cache entries are returned without a freshness check.',
+  desiredChange: 'Expired cache entries are refreshed before they are returned.',
+  affectedPaths: ['src/cache.ts'],
+  acceptanceCriterion: 'Expired entries are refreshed before return.',
+  verification: 'Exercise an expired entry and observe its refresh.',
+  eligibilityRationale: 'One behavior and one source path are explicit; no product decision or dependency is open.',
+  eligibility: {status: 'eligible'},
+  review: {required: false, reason: 'Routine local cache fix.'},
+  ...changes,
+});
+
+const compactSource = {head: Effect.pipe('c', EffectString.repeat(40)), files: [{path: 'src/cache.ts', sha256: hash}]};
 
 const alternativesPlan = (count: number, index = 0, marker = 'private-fixture') => {
   const plan = asPlan(validPlan());
@@ -679,5 +695,110 @@ describe('native authoring documents', () => {
       },
     });
     expect(issueCodes(proseDiagram)).not.toContain('diagram-invalid');
+  });
+
+  it('projects one compact intent into the canonical plan and requires exact intent confirmation', () => {
+    const result = projectNativeCompactIntent(
+      compactInput(),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      compactSource,
+    );
+    expect(result.status).toBe('eligible');
+    if (result.status !== 'eligible' || result.document.kind !== 'plan') throw new Error('Expected compact plan.');
+    const plan = result.document;
+    expect(plan).toMatchObject({
+      kind: 'plan',
+      compactOrigin: {version: 1, expanded: false},
+      current: {summary: compactInput().currentBehavior, components: []},
+      target: {summary: compactInput().desiredChange, components: []},
+      phases: [
+        {dependsOn: [], affectedPaths: ['src/cache.ts'], acceptance: [{criterion: compactInput().acceptanceCriterion}]},
+      ],
+      decisions: [],
+    });
+    expect(validateNativeAuthoring(plan, {ready: true})).toMatchObject({
+      ready: false,
+      issues: expect.arrayContaining([expect.objectContaining({code: 'confirmation-required'})]),
+    });
+    const validation = validateNativeAuthoring(plan, {
+      ready: true,
+      confirmation: {
+        intentHash: nativeSpecIntentDigest(plan),
+        decision: 'approved',
+        response: 'I approve this exact compact behavior and scope.',
+      },
+    });
+    expect(validation).toMatchObject({ready: true, issues: []});
+    expect(
+      validateNativeAuthoring(plan, {
+        ready: true,
+        confirmation: {
+          intentHash: nativeSpecIntentDigest({...plan, target: {...plan.target, summary: 'A changed intent.'}}),
+          decision: 'approved',
+          response: 'I approve this exact compact behavior and scope.',
+        },
+      }).ready,
+    ).toBe(false);
+  });
+
+  it('returns the exact planning decision for ineligible compact intent without constructing a plan', () => {
+    const result = projectNativeCompactIntent(
+      compactInput({
+        eligibility: {
+          status: 'needs-planning',
+          missingDecision: 'Choose whether expired cache entries should refresh synchronously or in the background.',
+          evidenceRefs: ['threadnote://user/me/memories/durable/projects/threadnote/cache.md'],
+        },
+      }),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      compactSource,
+    );
+    expect(result).toMatchObject({
+      status: 'needs-planning',
+      missingDecision: 'Choose whether expired cache entries should refresh synchronously or in the background.',
+      evidenceRefs: ['threadnote://user/me/memories/durable/projects/threadnote/cache.md'],
+    });
+  });
+
+  it('keeps compact projection deterministic, idempotent and nonmutating across bounded prose inputs', () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ]{0,32}$/u),
+        fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ]{0,32}$/u),
+        (currentBehavior, desiredChange) => {
+          fc.pre(EffectString.trim(currentBehavior) !== EffectString.trim(desiredChange));
+          const input = compactInput({currentBehavior, desiredChange});
+          const before = JSON.stringify(input);
+          const first = projectNativeCompactIntent(
+            input,
+            {featureId: 'cache-refresh', project: 'threadnote'},
+            compactSource,
+          );
+          const second = projectNativeCompactIntent(
+            input,
+            {featureId: 'cache-refresh', project: 'threadnote'},
+            compactSource,
+          );
+          expect(first.status).toBe('eligible');
+          expect(second.status).toBe('eligible');
+          if (first.status !== 'eligible' || second.status !== 'eligible') return;
+          expect(nativeAuthoringDigest(first.document)).toBe(nativeAuthoringDigest(second.document));
+          expect(nativeSpecIntentDigest(first.document)).toBe(nativeSpecIntentDigest(second.document));
+          if (first.document.kind !== 'plan' || !first.document.compactOrigin)
+            throw new Error('The compact marker must remain in the canonical plan.');
+          expect(
+            nativeSpecIntentDigest({
+              ...first.document,
+              compactOrigin: {
+                ...first.document.compactOrigin,
+                eligibilityRationale: first.document.compactOrigin.eligibilityRationale + ' Reclassified.',
+              },
+            }),
+          ).not.toBe(nativeSpecIntentDigest(first.document));
+          expect(JSON.stringify(input)).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
   });
 });

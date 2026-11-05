@@ -1,4 +1,14 @@
-import {Array as EffectArray, Effect, FileSystem, Option as EffectOption, Path, Predicate, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Option as EffectOption,
+  Path,
+  pipe as EffectPipe,
+  Predicate,
+  Schema,
+} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {SystemInfo} from '@threadnote/platform/system';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
@@ -11,6 +21,13 @@ import {
   NativeTaskAnchorSchema,
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
+import {
+  decodeNativeAuthoringDocument,
+  nativeSpecIntentDigest,
+  NativeCompactIntentSchema,
+  NativeCompactSourceSnapshotSchema,
+  projectNativeCompactIntent,
+} from '@threadnote/workflow-automations/authoring';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -20,10 +37,11 @@ import {decodeJournal} from './closeout_request_schema.js';
 import {nativeJobId} from './native_jobs.js';
 import {readNativeWorkflowState} from './store.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
-import {runWorkflowAutomation} from './index.js';
+import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {readNativeTaskView} from './task.js';
 import {gitValue} from '../utils.js';
 import {makeWorkflowGitAdapter} from './cycle_git.js';
+import {nativeWorkflowError} from './memory.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -45,7 +63,36 @@ const validationInputSchema = Schema.Struct({
   checks: NativeCycleValidationSchema.fields.checks,
   acceptance: NativeCycleValidationSchema.fields.acceptance,
 });
+const compactReviewSchema = Schema.Struct({
+  documentHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  outcome: Schema.Literals(['accepted', 'changes-requested']),
+  blockingIssueCount: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
 const requestSchema = Schema.Union([
+  Schema.Struct({
+    command: Schema.Literal('compact-start'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    intent: NativeCompactIntentSchema,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('compact-expand'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    document: Schema.Unknown,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('compact-confirm'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    presentedIntentHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+    userResponse: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
+    baseBranch: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    reconcileReason: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    bindings: Schema.optionalKey(Schema.Record(id, Schema.Struct({branch: Schema.String, baseBranch: Schema.String}))),
+    review: Schema.optionalKey(compactReviewSchema),
+  }),
   Schema.Struct({
     command: Schema.Literal('work'),
     runId: id,
@@ -107,6 +154,20 @@ const cycleRequest = (
   ...request,
 });
 
+const authoringRequest = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  command: string,
+  fields: object,
+) => ({
+  protocolVersion: 1,
+  executorVersion: 1,
+  action: 'authoring',
+  command,
+  runId: stored.state.runId,
+  generation: stored.state.generation,
+  ...fields,
+});
+
 const unwrapCycle = (result: unknown): Record<string, unknown> => {
   if (!Predicate.isObject(result) || result.status !== 'ok' || !Predicate.isObject(result.cycle))
     throw fail(
@@ -116,6 +177,17 @@ const unwrapCycle = (result: unknown): Record<string, unknown> => {
         : 'The native cycle action did not return an admitted result.',
     );
   return result.cycle;
+};
+
+const unwrapAuthoring = (result: unknown): Record<string, unknown> => {
+  if (!Predicate.isObject(result) || result.status !== 'ok' || !Predicate.isObject(result.authoring))
+    throw fail(
+      Predicate.isObject(result) && typeof result.code === 'string' ? result.code : 'task-action-failed',
+      Predicate.isObject(result) && Predicate.isObject(result.authoring) && typeof result.authoring.message === 'string'
+        ? result.authoring.message
+        : 'The native authoring action did not return a verified result.',
+    );
+  return result.authoring;
 };
 
 const requireEffectValue = <A>(value: A | undefined, message: string): A => {
@@ -191,13 +263,282 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
     const stored = yield* readNativeWorkflowState(config, request.runId);
-    if (!stored?.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
+    if (!stored) return yield* fail('run-not-found', 'Start a fresh native run before using task actions.');
     const journal = yield* inCheckout(
       withWorkflowLock(config, stored.state.bindingId, inspectWorkflowJournal(config, stored.state.bindingId)),
       checkout,
     );
     if (journal.state.binding.repo !== checkout)
       return yield* fail('wrong-checkout', 'Use the checkout bound to this native run.');
+
+    if (
+      request.command === 'compact-start' ||
+      request.command === 'compact-expand' ||
+      request.command === 'compact-confirm'
+    ) {
+      const authoring = (command: string, fields: object = {}, compactOriginCreation = false) =>
+        inCheckout(
+          (compactOriginCreation ? runCompactOriginAuthoringSave : runWorkflowAutomation)(
+            config,
+            authoringRequest(stored, command, fields),
+          ).pipe(Effect.map(unwrapAuthoring)),
+          checkout,
+        );
+      const rootOperation = EffectArray.findFirst(
+        [...stored.state.operations].reverse(),
+        operation =>
+          operation.status === 'verified' &&
+          operation.intent.artifactKey === 'author-root-plan' &&
+          operation.artifact !== undefined,
+      );
+      const root = rootOperation?._tag === 'Some' ? rootOperation.value.artifact : undefined;
+      const loadRoot = () =>
+        Effect.gen(function* () {
+          if (!root) return yield* fail('authoring-root-missing', 'Create a compact task draft before confirming it.');
+          const loaded = yield* authoring('load', {uri: root.uri, detail: 'document'});
+          const document = yield* Effect.try({
+            try: () => decodeNativeAuthoringDocument(loaded.document),
+            catch: nativeWorkflowError,
+          });
+          return {document, uri: root.uri, revision: root.revision, metadata: loaded};
+        });
+
+      if (request.command === 'compact-start') {
+        if (request.intent.eligibility.status === 'needs-planning')
+          return projectNativeCompactIntent(
+            request.intent,
+            {featureId: stored.state.featureId, project: stored.state.project},
+            {head: EffectPipe('0', EffectString.repeat(40)), files: []},
+          );
+        const inspected = yield* authoring('scope-inspect', {
+          paths: request.intent.affectedPaths,
+          literalOnly: true,
+        });
+        const sourceSnapshot = yield* Schema.decodeUnknownEffect(NativeCompactSourceSnapshotSchema)(
+          inspected.source,
+        ).pipe(Effect.mapError(nativeWorkflowError));
+        const projection = projectNativeCompactIntent(
+          request.intent,
+          {featureId: stored.state.featureId, project: stored.state.project},
+          sourceSnapshot,
+        );
+        if (projection.status !== 'eligible') return projection;
+        let document = projection.document;
+        if (root) {
+          const previous = yield* loadRoot();
+          if (previous.document.kind !== 'plan' || !previous.document.compactOrigin)
+            return yield* fail(
+              'compact-origin-required',
+              'This run already has a standard plan. Continue through its existing authoring flow.',
+            );
+          if (previous.document.compactOrigin.expanded)
+            return yield* fail(
+              'compact-already-expanded',
+              'Continue through the expanded plan flow; a new compact start cannot replace this run’s material design.',
+            );
+          document = decodeNativeAuthoringDocument({
+            ...document,
+            compactOrigin: {
+              ...previous.document.compactOrigin,
+              eligibilityRationale: request.intent.eligibilityRationale,
+            },
+          });
+        }
+        const packet = yield* authoring('acceptance-packet', {document, detail: 'document'});
+        const saved = yield* authoring(
+          'save',
+          {
+            document,
+            ready: false,
+            ...(root ? {uri: root.uri, expectedRevision: root.revision} : {expectedRevision: null}),
+          },
+          true,
+        );
+        return {
+          status: 'awaiting-user-confirmation',
+          packet,
+          root: saved.root,
+          documentHash: saved.documentHash,
+          intentHash: saved.intentHash,
+          readiness: saved.readiness,
+          next: 'Present the complete packet and collect a real user response for its exact intentHash.',
+        };
+      }
+
+      if (request.command === 'compact-expand') {
+        const previous = yield* loadRoot();
+        if (previous.document.kind !== 'plan' || !previous.document.compactOrigin)
+          return yield* fail('compact-origin-required', 'Only a compact-origin plan can be expanded in place.');
+        const supplied = yield* Effect.try({
+          try: () => decodeNativeAuthoringDocument(request.document),
+          catch: nativeWorkflowError,
+        });
+        if (
+          supplied.kind !== 'plan' ||
+          supplied.id !== stored.state.featureId ||
+          supplied.project !== stored.state.project
+        )
+          return yield* fail('binding-drift', 'The expanded plan must retain this run’s plan identity.');
+        if (supplied.openQuestions.length > 0 || supplied.decisions.length === 0)
+          return {
+            status: 'needs-planning',
+            missingDecision:
+              supplied.openQuestions[0] ?? 'Record the resolved product or design decision before expanding this run.',
+            evidenceRefs: [],
+          };
+        const document = decodeNativeAuthoringDocument({
+          ...supplied,
+          compactOrigin: {...previous.document.compactOrigin, expanded: true},
+        });
+        const packet = yield* authoring('acceptance-packet', {document, detail: 'document'});
+        const saved = yield* authoring('save', {
+          document,
+          ready: false,
+          uri: previous.uri,
+          expectedRevision: previous.revision,
+        });
+        return {
+          status: 'awaiting-user-confirmation',
+          packet,
+          root: saved.root,
+          documentHash: saved.documentHash,
+          intentHash: saved.intentHash,
+          readiness: saved.readiness,
+          previousRoot: previous.uri,
+          next: 'The earlier response does not approve this expanded intent; collect a response for this exact intentHash.',
+        };
+      }
+
+      const current = yield* loadRoot();
+      if (current.document.kind !== 'plan' || !current.document.compactOrigin)
+        return yield* fail('compact-origin-required', 'This plan has no compact-origin confirmation obligation.');
+      const intentHash = nativeSpecIntentDigest(current.document);
+      if (request.presentedIntentHash !== intentHash)
+        return yield* fail(
+          'stale-intent',
+          'The displayed compact intent changed. Run workflow_task_view for this run to retrieve the current packet, then present that packet before confirming.',
+        );
+      const existingCycle = stored.state.cycle?.state;
+      const currentBranch = yield* gitValue(['branch', '--show-current'], checkout);
+      if (!existingCycle && !request.baseBranch)
+        return {status: 'missing-input', intentHash, missingInputs: ['baseBranch for the one-phase local cycle']};
+      const priorBindings = new Map(
+        EffectArray.map(
+          existingCycle?.plan.phases ?? [],
+          phase => [phase.id, {branch: phase.branch, baseBranch: phase.baseBranch}] as const,
+        ),
+      );
+      const bindings =
+        request.bindings ??
+        EffectRecord.fromEntries(
+          EffectArray.map(current.document.phases, phase => {
+            const priorBinding = priorBindings.get(phase.id);
+            if (priorBinding) return [phase.id, priorBinding] as const;
+            return [phase.id, {branch: currentBranch ?? '', baseBranch: request.baseBranch ?? ''}] as const;
+          }),
+        );
+      if (
+        !currentBranch ||
+        EffectArray.some(
+          current.document.phases,
+          phase => !bindings[phase.id]?.branch || !bindings[phase.id]?.baseBranch,
+        ) ||
+        EffectRecord.keys(bindings).length !== current.document.phases.length
+      )
+        return {
+          status: 'missing-input',
+          intentHash,
+          missingInputs: ['An exact branch/base-branch binding for every phase'],
+        };
+      const existingConfirmation = Predicate.isObject(current.metadata.confirmation)
+        ? current.metadata.confirmation
+        : undefined;
+      const priorResponse =
+        existingConfirmation?.decision === 'approved' &&
+        existingConfirmation.intentHash === intentHash &&
+        typeof existingConfirmation.response === 'string'
+          ? existingConfirmation.response
+          : undefined;
+      // An implicit replay is valid only when the caller supplies no new response
+      // and the exact current intent already has a stored approval.
+      const implicitReplay = request.userDecision === undefined && request.userResponse === undefined;
+      const userDecision = request.userDecision ?? (implicitReplay && priorResponse ? 'approve' : undefined);
+      const userResponse = request.userResponse ?? (implicitReplay ? priorResponse : undefined);
+      if (!userDecision || !userResponse || (request.userDecision !== undefined && !request.userResponse))
+        return {
+          status: 'awaiting-user-confirmation',
+          intentHash,
+          missingDecision:
+            'Provide the user’s actual response and an explicit approve/reject/defer decision for the displayed compact-intent packet.',
+          actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+        };
+      const confirmationResult = yield* authoring('confirm', {
+        document: current.document,
+        presentedIntentHash: request.presentedIntentHash,
+        userResponse,
+        userDecision,
+      });
+      if (!Predicate.isObject(confirmationResult.confirmation))
+        return {
+          status: userDecision,
+          intentHash,
+          response: userResponse,
+          actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+        };
+
+      const saved = yield* authoring('save', {
+        document: current.document,
+        ready: true,
+        uri: current.uri,
+        expectedRevision: current.revision,
+        confirmation: confirmationResult.confirmation,
+        ...(request.review ? {review: request.review} : {}),
+      });
+      if (saved.readiness !== 'ready')
+        return {
+          status: 'awaiting-review',
+          intentHash,
+          root: saved.root,
+          blockers: saved.readinessBlockers ?? [],
+          confirmation: confirmationResult.confirmation,
+          actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+        };
+      const exportPacket = yield* authoring('export-dev-cycle', {
+        uri: current.uri,
+        delivery: 'local',
+        bindings,
+      });
+      const latest = yield* readNativeWorkflowState(config, request.runId);
+      if (!latest) return yield* fail('run-not-found', 'The compact task run disappeared before cycle admission.');
+      const cycle = unwrapCycle(
+        yield* inCheckout(
+          runWorkflowAutomation(
+            config,
+            cycleRequest(latest, {
+              command: existingCycle ? 'reconcile' : 'init',
+              expectedRevision: latest.revision,
+              plan: exportPacket,
+              ...(existingCycle
+                ? {reason: request.reconcileReason ?? 'Admit the newly confirmed compact-origin plan on this same run.'}
+                : {}),
+            }),
+          ),
+          checkout,
+        ),
+      );
+      const task = yield* inCheckout(readNativeTaskView(config, {runId: request.runId, callerCwd: checkout}), checkout);
+      return {
+        status: 'admitted',
+        intentHash,
+        root: saved.root,
+        cycle,
+        task,
+        taskReadiness: task.status,
+        actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+      };
+    }
+
+    if (!stored.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
     const runtime = stored.state.cycle;
     const state = runtime.state;
     if (state.plan.delivery !== 'local' || state.plan.phases.length !== 1)

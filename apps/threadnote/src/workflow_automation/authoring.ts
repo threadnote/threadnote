@@ -114,6 +114,7 @@ const NATIVE_AUTHORING_DOCUMENT_KEYS = [
   'decisions',
   'openQuestions',
   'spec',
+  'compactOrigin',
 ] as const;
 
 function isNativeAuthoringDocumentKey(value: string): boolean {
@@ -314,7 +315,9 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
                 bullets(EffectArray.map(document.decisions, item => item.id + ': ' + compact(item.selected, 120))),
                 2000,
               )
-            : 'Design decision remains unresolved; this is a durable draft.',
+            : document.compactOrigin
+              ? 'Compact eligibility: ' + compact(document.compactOrigin.eligibilityRationale, 1800)
+              : 'Design decision remains unresolved; this is a durable draft.',
         },
       }),
     },
@@ -388,9 +391,36 @@ const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
   documentHash: root.documentHash,
   intentHash: root.intentHash,
   readiness: root.readiness,
+  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
   data: root.data,
   documents: root.documents,
   previous: root.previous,
+});
+
+const acceptancePacket = (
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+  detail?: string,
+) => ({
+  documentHash: validation.documentHash,
+  intentHash: validation.intentHash,
+  summary: {
+    title: document.title,
+    objective: document.objective,
+    requirements: EffectArray.map(document.requirements, item => ({
+      id: item.id,
+      behavior: compact(item.behavior, 100),
+    })),
+  },
+  views: EffectArray.map(documentViews(document), item => ({
+    id: item.id,
+    outline: outlineNativeDocument(item.document),
+  })),
+  approvalInstruction:
+    document.kind === 'plan' && document.compactOrigin
+      ? 'Present the complete current behavior, desired change, bounded scope, acceptance, verification and eligibility rationale. Ask for an actual user response to this exact intent hash. The stored response is caller-asserted; actor identity is not independently verified.'
+      : 'Present all material behavior/scenario/domain/contract details before asking for approval; fetch explicit detail where needed.',
+  ...(detail === 'document' ? {document} : {}),
 });
 
 const ownedAuthoringUris = (state: NativeWorkflowState) =>
@@ -398,7 +428,12 @@ const ownedAuthoringUris = (state: NativeWorkflowState) =>
     operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
   );
 
-export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, call: NativeAuthoringCall<R>) =>
+export const runNativeAuthoring = <R>(
+  config: RuntimeConfig,
+  input: unknown,
+  call: NativeAuthoringCall<R>,
+  options: {readonly allowCompactOriginCreation?: boolean} = {},
+) =>
   Effect.gen(function* () {
     let request = yield* Schema.decodeUnknownEffect(nativeAuthoringRequestSchema, {onExcessProperty: 'error'})(
       input,
@@ -450,11 +485,13 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       evidenceRefs,
       ownedUris: ownedAuthoringUris(state),
     });
-    const load = (uri: string) =>
+    const load = (uri: string, verifiedArtifact?: WorkflowArtifact) =>
       Effect.gen(function* () {
-        const artifact = yield* call({...base('read'), uri, evidenceRefs}).pipe(
-          Effect.flatMap(value => Effect.try({try: () => asArtifact(value), catch: nativeWorkflowError})),
-        );
+        const artifact =
+          verifiedArtifact ??
+          (yield* call({...base('read'), uri, evidenceRefs}).pipe(
+            Effect.flatMap(value => Effect.try({try: () => asArtifact(value), catch: nativeWorkflowError})),
+          ));
         const root = yield* Effect.try({
           try: () => decodeAuthoringArtifact(artifact.body, AuthoringRootSchema),
           catch: nativeWorkflowError,
@@ -621,6 +658,78 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
           );
         return {root, artifact, document: linked};
       });
+    if (request.command === 'current-plan') {
+      // Native receipts, not operation IDs or inferred filenames, own the current root.
+      const operation = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...state.operations].reverse(),
+          entry =>
+            entry.status === 'verified' &&
+            entry.intent.role === 'authoring-root' &&
+            entry.intent.artifactKey === 'author-root-plan',
+        ),
+      );
+      if (!operation) return {currentPlan: null};
+      if (
+        !operation.artifact ||
+        operation.intent.bindingId !== state.bindingId ||
+        operation.intent.sourceRunId !== state.runId
+      )
+        return yield* fail('binding-drift', 'The current authoring root lacks its original native receipt.');
+      const artifact = yield* reader.read(artifactReference(operation.artifact));
+      if (artifact.body !== operation.artifact.body || artifact.body !== operation.intent.body)
+        return yield* fail('invalid-readback', 'The current authoring root differs from its verified write intent.');
+      const loaded = yield* load(artifact.uri, artifact);
+      if (loaded.root.kind !== 'plan')
+        return yield* fail('invalid-readback', 'The current plan receipt does not contain a plan root.');
+      const document = yield* loadDocument(loaded.root);
+      if (document.kind !== 'plan' || !document.compactOrigin) return {currentPlan: null};
+      const validation = yield* Effect.try({
+        try: () =>
+          validateNativeAuthoring(document, {
+            ready: true,
+            confirmation: loaded.root.confirmation,
+            review: loaded.root.review,
+            planIntentPolicyVersion: loaded.root.planIntentPolicyVersion ?? 1,
+          }),
+        catch: nativeWorkflowError,
+      });
+      const confirmed =
+        loaded.root.confirmation?.decision === 'approved' &&
+        loaded.root.confirmation.intentHash === loaded.root.intentHash &&
+        EffectString.trim(loaded.root.confirmation.response).length > 0;
+      const reviewed =
+        !document.review.required ||
+        (loaded.root.review?.documentHash === loaded.root.documentHash &&
+          loaded.root.review.outcome === 'accepted' &&
+          loaded.root.review.blockingIssueCount === 0);
+      const admitted =
+        state.cycle?.state.plan.source.documentHash === loaded.root.documentHash && loaded.root.readiness === 'ready';
+      const status = !confirmed
+        ? 'awaiting-user-confirmation'
+        : !reviewed
+          ? 'awaiting-review'
+          : admitted
+            ? 'admitted'
+            : 'awaiting-admission';
+      return {
+        currentPlan: {
+          ...rootSummary(loaded.root, artifact),
+          status,
+          next: {action: 'compact-confirm'},
+          packetDetail: {
+            action: 'workflow_task_view',
+            detail: 'packet',
+            runId: state.runId,
+            intentHash: loaded.root.intentHash,
+            documentHash: loaded.root.documentHash,
+          },
+          blockers: validation.issues,
+          packet: acceptancePacket(document, validation, request.detail),
+          actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+        },
+      };
+    }
     if (['load', 'read', 'recover', 'export-plan', 'export-dev-cycle', 'closeout-input'].includes(request.command)) {
       if (!request.uri) return yield* fail('invalid-request', 'Provide the saved native authoring root URI.');
       const loaded = yield* load(request.uri);
@@ -807,29 +916,11 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       try: () => validateNativeAuthoring(document, request),
       catch: nativeWorkflowError,
     });
-    if (request.command === 'acceptance-packet')
-      return {
-        documentHash: validation.documentHash,
-        intentHash: validation.intentHash,
-        summary: {
-          title: document.title,
-          objective: document.objective,
-          requirements: EffectArray.map(document.requirements, item => ({
-            id: item.id,
-            behavior: compact(item.behavior, 100),
-          })),
-        },
-        views: EffectArray.map(documentViews(document), item => ({
-          id: item.id,
-          outline: outlineNativeDocument(item.document),
-        })),
-        approvalInstruction:
-          'Present all material behavior/scenario/domain/contract details before asking for approval; fetch explicit detail where needed.',
-        ...(request.detail === 'document' ? {document} : {}),
-      };
+    if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
     if (request.command === 'confirm') {
       if (
-        document.kind !== 'spec' ||
+        (document.kind !== 'spec' && document.compactOrigin === undefined) ||
+        (document.kind === 'plan' && request.presentedIntentHash !== validation.intentHash) ||
         !Effect2.pipe(request.userResponse, effectOptionalString =>
           effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
         ) ||
@@ -837,7 +928,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       )
         return yield* fail(
           'confirmation-required',
-          'Record the actual human response to the displayed spec acceptance packet.',
+          'Record an actual user response to the displayed spec or exact compact-intent packet.',
         );
       if (request.userDecision !== 'approve')
         return {confirmation: null, decision: request.userDecision, intentHash: validation.intentHash};
@@ -898,6 +989,31 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
           ...(request.detail === 'document' ? {markdown: renderNativeDocument(item.document)} : {}),
         })),
       };
+    if (request.command === 'save' && document.kind === 'plan' && document.compactOrigin) {
+      if (!options.allowCompactOriginCreation) {
+        const priorRootOperation = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...state.operations].reverse(),
+            operation =>
+              operation.status === 'verified' &&
+              operation.intent.artifactKey === 'author-root-plan' &&
+              operation.artifact !== undefined,
+          ),
+        );
+        if (!priorRootOperation?.artifact)
+          return yield* fail(
+            'compact-origin-forbidden',
+            'Only the native compact task action can create compact-origin provenance; generic authoring saves remain standard plans.',
+          );
+        const prior = yield* load(priorRootOperation.artifact.uri);
+        const priorDocument = yield* loadDocument(prior.root);
+        if (priorDocument.kind !== 'plan' || !priorDocument.compactOrigin)
+          return yield* fail(
+            'compact-origin-forbidden',
+            'Only the native compact task action can create compact-origin provenance; generic authoring saves remain standard plans.',
+          );
+      }
+    }
     const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
     yield* verifySource(journal.state.binding.repo, document);
     const preview = {
@@ -1229,6 +1345,18 @@ const saveAuthoring = <R>(
             catch: nativeWorkflowError,
           })
         : undefined;
+      if (priorRoot?.kind === 'plan' && document.kind === 'plan') {
+        const priorDocumentText = yield* artifacts.readData(priorRoot.data);
+        const priorDocument = yield* Effect.try({
+          try: () => decodeNativeAuthoringDocument(JSON.parse(priorDocumentText)),
+          catch: nativeWorkflowError,
+        });
+        if (priorDocument.kind === 'plan' && priorDocument.compactOrigin && !document.compactOrigin)
+          return yield* fail(
+            'compact-confirmation-required',
+            'A compact-origin plan must retain its origin marker and exact-intent confirmation obligation through expansion.',
+          );
+      }
       if (
         prior &&
         priorRoot &&
