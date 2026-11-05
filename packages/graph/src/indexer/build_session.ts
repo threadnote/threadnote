@@ -6,7 +6,11 @@ import type {CodeGraphLayout} from '../layout.js';
 import type {CodeGraphRetiredSnapshotCleanupProgress} from '../store.js';
 import type {CodeGraphIndexOptions} from './types.js';
 import {CODE_GRAPH_LOCK_OPTIONS} from './materialization.js';
-import {codeGraphWriterResourceFactory, registerCodeGraphWriterCallbacks} from '../store/writer_gate_scope.js';
+import {
+  codeGraphWriterResourceFactory,
+  registerCodeGraphWriterCallbacks,
+  runCodeGraphWriterObservation,
+} from '../store/writer_gate_scope.js';
 
 export function withCodeGraphProcessLock<A, E, R>(
   fs: FileSystem.FileSystem,
@@ -58,7 +62,7 @@ export function writerSessionOptions(
       return {
         acquire: (gate?.acquire ?? Effect.void).pipe(
           Effect.orDie,
-          Effect.andThen(Effect.interruptible(Effect.suspend(resumeProgress))),
+          Effect.andThen(runCodeGraphWriterObservation(resumeProgress)),
           Effect.ignore,
         ),
         observeRelease: gate?.observeRelease ?? Effect.void,
@@ -72,8 +76,8 @@ export function writerSessionOptions(
       (resources?.assertWriterMayWait ?? Effect.void).pipe(
         Effect.orDie,
         Effect.andThen(
-          Effect.interruptible(
-            Effect.suspend(() => options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
+          runCodeGraphWriterObservation(
+            () => options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void,
           ),
         ),
         Effect.ignore,

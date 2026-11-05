@@ -52,7 +52,8 @@ describe('code graph disk capacity properties', () => {
     'keeps ordinary bounded Windows selections scalar and independent of TMPDIR or captured fallbacks',
     {components: fc.array(fc.stringMatching(/^[a-z]{1,8}$/), {minLength: 1, maxLength: 4})},
     ({components}) => {
-      const directory = 'C:\\p' + EffectArray.join(components, '\\p');
+      // Keep every generated component outside Windows device names.
+      const directory = 'C:\\p-' + EffectArray.join(components, '\\p-');
       const environment = {TMP: directory, TEMP: directory + '\\', TMPDIR: 'D:\\ignored'};
       const original = {...environment};
       expect(codeGraphCandidateWindowsTemporaryDirectory({environment, runtimeVersion: '1.4.4', path: win32})).toBe(
@@ -94,6 +95,7 @@ describe('code graph disk capacity properties', () => {
           [{TMP: 'C:\\temp\\\\'}, undefined],
           [{TMP: 'C:\\temp.'}, undefined],
           [{TMP: 'C:\\NUL'}, undefined],
+          [{TMP: 'C:\\prn', TEMP: 'C:\\prn\\', TMPDIR: 'D:\\ignored'}, undefined],
           [{TMP: 'C:\\temp\0'}, undefined],
           [{TMP: 'C:\\temp\ud800'}, undefined],
           [{TMPDIR: 'C:\\ignored'}, undefined],

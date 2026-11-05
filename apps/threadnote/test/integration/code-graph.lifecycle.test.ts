@@ -5944,6 +5944,8 @@ describe('native code graph lifecycle', () => {
       const progress: CodeGraphProgress[] = [];
       const measuredOperations: string[] = [];
       const indexerLayer = Layer.fresh(CodeGraphIndexer.layer).pipe(
+        // Keep the store and indexer on the same injected SystemInfo identity.
+        Layer.provide(Layer.fresh(CodeGraphStore.layer)),
         Layer.provide(
           Layer.succeed(SystemInfo, SystemInfo.of({...system, availableDiskBytes: () => Effect.succeed(0)})),
         ),

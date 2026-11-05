@@ -1,4 +1,16 @@
-import type {Effect, Scope} from 'effect';
+import {Context, Effect} from 'effect';
+import type {Scope} from 'effect';
+
+// Only mandatory owned cleanup suppresses notifications; this grants no writer authority.
+const MandatoryWriterCleanup = Context.Reference<boolean>('graph/MandatoryWriterCleanup', {defaultValue: () => false});
+
+export const withMandatoryCodeGraphWriterCleanup = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.provideService(MandatoryWriterCleanup, true));
+
+export const runCodeGraphWriterObservation = <E, R>(observe: () => Effect.Effect<void, E, R>) =>
+  Effect.flatMap(MandatoryWriterCleanup, cleanup =>
+    cleanup ? Effect.void : Effect.interruptible(Effect.suspend(observe)),
+  );
 
 type WriterCallback = () => Effect.Effect<void, never>;
 

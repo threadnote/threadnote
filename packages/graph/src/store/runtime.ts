@@ -17,7 +17,7 @@ import {
   useDatabaseDirect,
 } from './session.js';
 import {storeError} from './utilities.js';
-import {codeGraphWriterGateFactory} from './writer_gate_scope.js';
+import {codeGraphWriterGateFactory, runCodeGraphWriterObservation} from './writer_gate_scope.js';
 import {initializeSchema} from './schema/initialization.js';
 import {pruneRoutinePhysicalRowsPage} from './routine_cleanup.js';
 import {drainCompletedPersistentBuildRows} from './activation/persistent.js';
@@ -91,7 +91,7 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
                           Effect.andThen(
                             Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
                               ? Effect.void
-                              : Effect.interruptible(Effect.suspend(() => gate.observeRelease)),
+                              : runCodeGraphWriterObservation(() => gate.observeRelease),
                           ),
                         ),
                       ),

@@ -1,5 +1,5 @@
 import {Context, Effect, Ref, Schema, Scope} from 'effect';
-import {registerCodeGraphWriterResource} from '../store/writer_gate_scope.js';
+import {registerCodeGraphWriterResource, runCodeGraphWriterObservation} from '../store/writer_gate_scope.js';
 
 export const CODE_GRAPH_PREPARED_SPOOL_COUNT_LIMIT = 4;
 export const CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT = 32 * 1_024 * 1_024 * 1_024;
@@ -156,7 +156,7 @@ export const makeCodeGraphBuildResourceCoordinator = Effect.fn('codeGraph.buildR
     return {
       // Only strict state mutation and finalizer registration are masked; the observer factory stays cancellable.
       acquire: acquired.pipe(
-        Effect.flatMap(next => Effect.interruptible(Effect.suspend(() => observe(codeGraphBuildResource(next))))),
+        Effect.flatMap(next => runCodeGraphWriterObservation(() => observe(codeGraphBuildResource(next)))),
       ),
       observeRelease: Effect.suspend(() => released === undefined ? Effect.void : observe(released.resource)),
     };

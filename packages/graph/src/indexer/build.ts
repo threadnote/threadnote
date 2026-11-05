@@ -3,6 +3,7 @@ import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
+import {withMandatoryCodeGraphWriterCleanup} from '../store/writer_gate_scope.js';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {CodeGraphBuildOwnerIdentity} from '../build/owner.js';
@@ -139,7 +140,14 @@ export function settleInterruptedCodeGraphBuild(
 ) {
   return ownerToken === undefined
     ? Effect.void
-    : store.releasePersistentBuild(databasePath, snapshotId, CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY, ownerToken);
+    : withMandatoryCodeGraphWriterCleanup(
+        store.releasePersistentBuild(databasePath, snapshotId, CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY, ownerToken),
+      );
+}
+
+// Mandatory owned release must not reopen notifications, including after late cancellation.
+function releaseFinalizedCodeGraphSnapshotLease(store: CodeGraphStoreShape, databasePath: string, token: string) {
+  return withMandatoryCodeGraphWriterCleanup(store.releaseSnapshotLease(databasePath, token).pipe(Effect.ignore));
 }
 
 export {withCodeGraphProcessLock, writerSessionOptions, retiredSnapshotCleanupReporter} from './build_session.js';
@@ -546,7 +554,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
         );
         return Option.some<ReusableCleanSnapshotAttempt>({mode: 'complete', summary});
       }),
-    token => input.store.releaseSnapshotLease(input.layout.databasePath, token).pipe(Effect.ignore),
+    token => releaseFinalizedCodeGraphSnapshotLease(input.store, input.layout.databasePath, token),
   );
 });
 
@@ -845,7 +853,7 @@ export const ensureCommittedBase = Effect.fn('codeGraph.ensureCommittedBase')(fu
       .pipe(Effect.option);
     if (Option.isSome(lease)) {
       const leaseToken = yield* Effect.acquireRelease(Effect.succeed(lease.value), token =>
-        input.store.releaseSnapshotLease(input.layout.databasePath, token).pipe(Effect.ignore),
+        releaseFinalizedCodeGraphSnapshotLease(input.store, input.layout.databasePath, token),
       );
       const summary = {
         diagnostics: [],
@@ -1799,7 +1807,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     lease =>
       Option.match(lease, {
         onNone: () => Effect.void,
-        onSome: token => input.store.releaseSnapshotLease(input.layout.databasePath, token).pipe(Effect.ignore),
+        onSome: token => releaseFinalizedCodeGraphSnapshotLease(input.store, input.layout.databasePath, token),
       }),
   );
   if (input.store.stageResolutionCandidateIndex && input.store.finishResolutionCandidateIndex) {
