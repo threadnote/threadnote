@@ -219,6 +219,9 @@ export const NativeAuthoringPlanDocumentSchema = nativePlanSchema;
 export const NativeAuthoringDocumentSchema = Schema.Union([nativeSpecSchema, nativePlanSchema]);
 export type NativeAuthoringDocument = typeof NativeAuthoringDocumentSchema.Type;
 
+export const NativePlanIntentPolicyVersion = 2 as const;
+export type NativePlanIntentPolicyVersion = 1 | typeof NativePlanIntentPolicyVersion;
+
 const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
   if (
     path.length > 3 ||
@@ -332,9 +335,41 @@ export function isNativeMermaidDiagram(value: string): boolean {
   );
 }
 
-export function nativeSpecIntentDigest(document: NativeAuthoringDocument): string {
+export function nativeSpecIntentDigest(
+  document: NativeAuthoringDocument,
+  planPolicyVersion: NativePlanIntentPolicyVersion = NativePlanIntentPolicyVersion,
+): string {
   const decoded = decodeNativeAuthoringDocument(document);
-  if (decoded.kind === 'plan') return nativeAuthoringDigest(decoded);
+  if (decoded.kind === 'plan') {
+    if (planPolicyVersion === 1) return nativeAuthoringDigest(decoded);
+    const intent = {
+      kind: decoded.kind,
+      schemaVersion: decoded.schemaVersion,
+      format: decoded.format,
+      id: decoded.id,
+      project: decoded.project,
+      title: decoded.title,
+      objective: decoded.objective,
+      requirements: decoded.requirements,
+      current: decoded.current,
+      target: decoded.target,
+      phases: decoded.phases,
+      decisions: decoded.decisions,
+      reviewRequired: decoded.review.required,
+      ...(decoded.spec
+        ? {
+            spec: {
+              intentHash: decoded.spec.intentHash,
+              requirements: decoded.spec.requirements,
+              scenarios: decoded.spec.scenarios,
+            },
+          }
+        : {}),
+    };
+    return sha256HexSync(
+      `threadnote.native-authoring.plan-intent.v${NativePlanIntentPolicyVersion}\n${canonicalAuthoringJson(intent)}`,
+    );
+  }
   const intent = {
     kind: decoded.kind,
     schemaVersion: decoded.schemaVersion,
@@ -363,6 +398,7 @@ export interface NativeAuthoringIssue {
 }
 export interface NativeAuthoringValidationOptions {
   readonly ready?: boolean;
+  readonly planIntentPolicyVersion?: NativePlanIntentPolicyVersion;
   readonly confirmation?: {readonly intentHash: string; readonly decision: 'approved'; readonly response: string};
   readonly review?: {
     readonly documentHash: string;
@@ -619,7 +655,7 @@ export function validateNativeAuthoring(
   }
 
   const documentHash = nativeAuthoringDigest(decoded);
-  const intentHash = nativeSpecIntentDigest(decoded);
+  const intentHash = nativeSpecIntentDigest(decoded, options.planIntentPolicyVersion);
   if (options.ready) {
     if (decoded.kind === 'spec') {
       EffectArray.forEach(decoded.questions, (item, index) => {
