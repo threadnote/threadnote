@@ -1,6 +1,6 @@
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Console, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {Clock, Console, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import type {SecureRandom} from 'effect/crypto';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -31,6 +31,7 @@ import {
 } from '@threadnote/recall/index';
 import {
   rebuildVectorIndex,
+  loadRecallVectorAuthorizationKey,
   VectorCorpusGenerationChanged,
   vectorIndexMatchesGeneration,
   vectorIndexGenerationReadiness,
@@ -38,6 +39,14 @@ import {
 import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
 import {writeModelSelection} from '@threadnote/inference/models/selection';
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  ExternalSourcePolicy,
+  externalDocumentManifestUri,
+  externalResourceUri,
+  renderExternalResource,
+  serializeExternalDocumentManifest,
+} from '@threadnote/store/external-resource';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -327,7 +336,7 @@ describe('development installer repair isolation', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect.each(['inference', 'corpus', 'selection'] as const)(
+  effectIt.effect.each(['inference', 'corpus', 'selection', 'authorization'] as const)(
     'fails explicit repair on %s failure without claiming readiness',
     failure =>
       Effect.gen(function* () {
@@ -335,6 +344,52 @@ describe('development installer repair isolation', () => {
         const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
         yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
         yield* f.fs.writeFileString(memoryPath, '# Example\n\nInitial canonical body.');
+        let accessEnabled = false;
+        const policy = ExternalSourcePolicy.of({
+          current: () =>
+            Effect.succeed({
+              enabled: accessEnabled,
+              configFingerprint: EffectString.repeat(64)('a'),
+              project: 'demo',
+            }),
+        });
+        if (failure === 'authorization') {
+          const metadata = {
+            version: 1 as const,
+            sourceId: 'source',
+            documentId: 'doc',
+            pageId: 'page',
+            chunkId: 'chunk',
+            project: 'demo',
+            title: 'Synthetic external',
+            rendererVersion: '1',
+            scrubberVersion: '1',
+            coverage: 'canvas-plain-text' as const,
+          };
+          const uri = externalResourceUri(metadata);
+          const bytes = renderExternalResource(metadata, 'Synthetic external content.');
+          const manifest = serializeExternalDocumentManifest({
+            version: 1,
+            sourceId: 'source',
+            documentId: 'doc',
+            configFingerprint: EffectString.repeat(64)('a'),
+            status: 'active',
+            fetchedAt: yield* Clock.currentTimeMillis,
+            maxStaleMilliseconds: 60_000,
+            chunks: {[uri]: sha256HexSync(bytes)},
+          });
+          for (const [resourceUri, content] of [
+            [externalDocumentManifestUri('source', 'doc'), manifest],
+            [uri, bytes],
+          ]) {
+            const filename = f.path.join(f.home, 'data/local/resources', new URL(resourceUri).pathname);
+            yield* f.fs.makeDirectory(f.path.dirname(filename), {recursive: true});
+            yield* f.fs.writeFileString(filename, content);
+          }
+        }
+        const authorizationBefore = yield* loadRecallVectorAuthorizationKey(f.config).pipe(
+          Effect.provideService(ExternalSourcePolicy, policy),
+        );
         const runtime =
           failure === 'inference'
             ? LocalModelRuntime.of({
@@ -349,13 +404,19 @@ describe('development installer repair isolation', () => {
             : f.embeddingRuntime(() =>
                 failure === 'selection'
                   ? writeModelSelection(f.home, {version: 1, roles: {}})
-                  : f.fs
-                      .writeFileString(memoryPath, '# Changed\n\nConcurrent canonical body.')
-                      .pipe(
-                        Effect.andThen(
-                          expireRecallIndexValidation(f.home, false, ['threadnote://resources/repos/demo/document.md']),
+                  : failure === 'authorization'
+                    ? Effect.sync(() => {
+                        accessEnabled = true;
+                      })
+                    : f.fs
+                        .writeFileString(memoryPath, '# Changed\n\nConcurrent canonical body.')
+                        .pipe(
+                          Effect.andThen(
+                            expireRecallIndexValidation(f.home, false, [
+                              'threadnote://resources/repos/demo/document.md',
+                            ]),
+                          ),
                         ),
-                      ),
               );
         const result = yield* f.provideWithRuntime(
           captureConsole(
@@ -363,7 +424,7 @@ describe('development installer repair isolation', () => {
               coreOnly: true,
               postUpdate: false,
               skipReleaseLifecycle: true,
-            }).pipe(Effect.result),
+            }).pipe(Effect.provideService(ExternalSourcePolicy, policy), Effect.result),
           ),
           runtime,
         );
@@ -372,6 +433,16 @@ describe('development installer repair isolation', () => {
           expect(result.value.failure).toMatchObject({
             message: expect.stringContaining('Recall index repair failed'),
           });
+        if (failure === 'authorization') {
+          if (Result.isFailure(result.value))
+            expect(result.value.failure).toMatchObject({
+              message:
+                'Recall index repair failed: Recall inputs changed during preparation. Run `threadnote repair` again.',
+            });
+          expect(
+            yield* loadRecallVectorAuthorizationKey(f.config).pipe(Effect.provideService(ExternalSourcePolicy, policy)),
+          ).not.toBe(authorizationBefore);
+        }
         expect(result.output).not.toContain('indexes are ready');
         expect(result.output).not.toContain('Document embeddings queued');
         const lexical = yield* recallIndexStatus(f.config);
