@@ -7,28 +7,96 @@ import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-re
 import {NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {NativeTaskAnchorSchema} from '@threadnote/workflow-automations/task';
+import {NativeCompactIntentSchema} from '@threadnote/workflow-automations/authoring';
 import type {RuntimeConfig} from './common.js';
 import type {EffectMcpServerAdapter} from '../../effect/ai/mcp.js';
 
 export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
+    'workflow_task_compact_start',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false},
+      description: 'Save a bounded compact task intent as a draft and return its exact approval packet.',
+      inputSchema: {
+        runId: McpInput.requiredString('Existing native workflow run identifier'),
+        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
+        intent: NativeCompactIntentSchema,
+      },
+    },
+    Effect.fn('mcp_server.workflowTaskCompactStart')(function* ({runId, callerCwd, intent}) {
+      const result = yield* runNativeTaskAction(config, {command: 'compact-start', runId, callerCwd, intent});
+      const text = JSON.stringify(result);
+      return {content: [{type: 'text' as const, text}], structuredContent: result};
+    }),
+  );
+  server.registerTool(
+    'workflow_task_compact_expand',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false},
+      description: 'Prepare an expanded native plan on the same compact-origin authoring root.',
+      inputSchema: {
+        runId: McpInput.requiredString('Existing native workflow run identifier'),
+        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
+        document: Schema.Unknown,
+      },
+    },
+    Effect.fn('mcp_server.workflowTaskCompactExpand')(function* ({runId, callerCwd, document}) {
+      const result = yield* runNativeTaskAction(config, {command: 'compact-expand', runId, callerCwd, document});
+      const text = JSON.stringify(result);
+      return {content: [{type: 'text' as const, text}], structuredContent: result};
+    }),
+  );
+  server.registerTool(
+    'workflow_task_compact_confirm',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false},
+      description: 'Record an actual exact-intent user response, then admit or reconcile the same canonical run.',
+      inputSchema: {
+        runId: McpInput.requiredString('Existing native workflow run identifier'),
+        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
+        presentedIntentHash: McpInput.requiredString('Exact intent hash from the complete approval packet'),
+        userResponse: McpInput.string('Actual user response to the displayed exact-intent packet'),
+        userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
+        baseBranch: McpInput.string('Exact base branch for a new local cycle'),
+        reconcileReason: McpInput.string('Concrete reason for reconciling an existing cycle'),
+        bindings: Schema.optionalKey(
+          Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+        ),
+        review: Schema.optionalKey(
+          Schema.Struct({
+            documentHash: Schema.String,
+            outcome: Schema.Literals(['accepted', 'changes-requested']),
+            blockingIssueCount: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+          }),
+        ),
+      },
+    },
+    Effect.fn('mcp_server.workflowTaskCompactConfirm')(function* (input) {
+      const result = yield* runNativeTaskAction(config, {command: 'compact-confirm', ...input});
+      const text = JSON.stringify(result);
+      return {content: [{type: 'text' as const, text}], structuredContent: result};
+    }),
+  );
+  server.registerTool(
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: 'Read the next actionable task for an existing native workflow run.',
+      description: 'Read the next task; detail=packet returns its full approval/review content.',
       inputSchema: {
         runId: McpInput.string('Existing native workflow run identifier'),
-        callerCwd: McpInput.string('Absolute checkout path for this task context'),
-        role: McpInput.string('Optional role: implementation, review, or delivery'),
-        cursor: McpInput.string('Opaque continuation returned by the previous task-view page'),
+        callerCwd: McpInput.string('Absolute bound checkout path'),
+        role: McpInput.string('Role: implementation, review, or delivery'),
+        cursor: McpInput.string('Opaque continuation from the previous task-view page'),
+        detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
       },
     },
-    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor}) {
+    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, detail}) {
       const result = yield* readNativeTaskView(config, {
         runId,
         callerCwd,
         ...(role === undefined ? {} : {role}),
         ...(cursor === undefined ? {} : {cursor}),
+        ...(detail === undefined ? {} : {detail}),
       });
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};

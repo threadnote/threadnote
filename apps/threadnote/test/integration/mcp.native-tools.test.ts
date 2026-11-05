@@ -222,6 +222,9 @@ const CORE_TOOL_NAMES = [
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
+  'workflow_task_compact_start',
+  'workflow_task_compact_expand',
+  'workflow_task_compact_confirm',
   'workflow_task_view',
   'workflow_task_work',
   'workflow_task_record_snapshot',
@@ -289,6 +292,9 @@ const LIFECYCLE_TOOL_NAMES = [
 ];
 
 const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
+  workflow_task_compact_start: 2_500,
+  workflow_task_compact_expand: 800,
+  workflow_task_compact_confirm: 2_500,
   workflow_task_work: 1_800,
   workflow_task_record_snapshot: 700,
   workflow_task_record_review: 2_300,
@@ -673,6 +679,16 @@ describe('Threadnote MCP toolsets', () => {
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        expect(decodeJsonObject(decodeJsonObject(workflowTaskView?.inputSchema).properties).detail).toMatchObject({
+          enum: ['summary', 'packet'],
+        });
+        const compactConfirm = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_compact_confirm'),
+        );
+        expect(decodeJsonObject(decodeJsonObject(compactConfirm?.inputSchema).properties).userDecision).toMatchObject({
+          enum: ['approve', 'reject', 'defer'],
+        });
+
         for (const [name, maximumBytes] of EffectRecord.toEntries(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES)) {
           const tool = EffectOption.getOrUndefined(
             EffectArray.findFirst(tools.tools, candidate => candidate.name === name),
@@ -702,7 +718,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
         expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(47_206);
+        // Compact authoring adds three bounded task tools to the core catalog; keep this additive budget explicit.
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(52_000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

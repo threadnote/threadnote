@@ -1,23 +1,34 @@
-import {Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal, Tracer} from 'effect';
 import {ChildProcessSpawner} from 'effect/process';
 import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {describe, expect} from 'vitest';
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
+import {
+  NativeAuthoringPlanDocumentSchema,
+  NativeCompactSourceSnapshotSchema,
+  nativeAuthoringDigest,
+  nativeSpecIntentDigest,
+  projectNativeCompactIntent,
+} from '@threadnote/workflow-automations/authoring';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
-import {makeNativeTaskActionCommands} from '../../src/effect/workflow_cli.js';
+import {readNativeTaskView} from '../../src/workflow_automation/task.js';
+import {makeNativeTaskActionCommands, makeNativeTaskViewCommand} from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
+import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
 import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
 import {completeLocalPhase, fixture, object, run} from './native-cycle-lifecycle-fixture.js';
+import {nativeFixture} from './native-automation-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const cliTestLayer = Layer.mergeAll(
@@ -110,7 +121,659 @@ const completeDuringJournalRead = (f: Effect.Success<ReturnType<typeof fixture>>
     return {filesystem, wasCaptured: () => captured};
   });
 
+// Resource oracle on the real facade: one authoritative receipt inspection per read,
+// independent of whether a run has no root, a compact packet, or accumulated cycle history.
+const inspectTaskOnce = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const delegate = yield* Effect.tracer;
+    let inspections = 0;
+    const tracer = Tracer.make({
+      ...delegate,
+      span(options) {
+        if (options.name === 'workflowAutomation.inspectNative') inspections++;
+        return delegate.span.call(delegate, options);
+      },
+    });
+    const result = yield* program.pipe(Effect.withTracer(tracer));
+    expect(inspections).toBe(1);
+    return result;
+  });
+
 describe('native task actions', () => {
+  effectIt.effect('saves a compact draft, records exact user approval and initializes the same task facade', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Fixture source',
+      ]);
+      const emptyState = yield* f.fs.readFileString(f.statePath());
+      expect(
+        yield* inspectTaskOnce(readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})),
+      ).toMatchObject({status: 'uninitialized'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(emptyState);
+      const indexer = yield* CodeGraphIndexer;
+      const indexed = yield* indexer.index({cwd: f.repo, threadnoteHome: f.home});
+      expect(indexed.snapshot.state).toBe('ready');
+      const intent = {
+        title: 'Refresh expired fixture data',
+        currentBehavior: 'Expired fixture data is returned without a freshness check.',
+        desiredChange: 'Expired fixture data is refreshed before it is returned.',
+        affectedPaths: ['source.ts'],
+        acceptanceCriterion: 'Expired fixture data is refreshed before return.',
+        verification: 'Exercise expired fixture data and observe the refresh.',
+        eligibilityRationale:
+          'One behavior and one inspected file are explicit, with no unresolved product decision or dependency.',
+        eligibility: {status: 'eligible'},
+        review: {required: false, reason: 'Routine local fixture correction.'},
+      };
+      const inspectedSource = object(
+        yield* f.call({
+          ...f.base('authoring'),
+          command: 'scope-inspect',
+          paths: intent.affectedPaths,
+          literalOnly: true,
+        }),
+      );
+      const sourceSnapshot = yield* Schema.decodeUnknownEffect(NativeCompactSourceSnapshotSchema)(
+        object(inspectedSource.authoring).source,
+      );
+      const forgedCompact = projectNativeCompactIntent(
+        intent,
+        {featureId: 'feature', project: 'fixture'},
+        sourceSnapshot,
+      );
+      if (forgedCompact.status !== 'eligible') throw new Error('Expected eligible fixture compact intent.');
+      const beforeForgedSave = yield* f.fs.readFileString(f.statePath());
+      const forgedSave = yield* f
+        .call({
+          ...f.base('authoring'),
+          command: 'save',
+          document: forgedCompact.document,
+          ready: false,
+          expectedRevision: null,
+        })
+        .pipe(Effect.result);
+      expect(forgedSave).toMatchObject({failure: {code: 'compact-origin-forbidden'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeForgedSave);
+      let cliDraft: Record<string, unknown> | undefined;
+      const commands = makeNativeTaskActionCommands(
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        options =>
+          runNativeTaskAction(f.config, {command: 'compact-start', ...options}).pipe(
+            Effect.tap(value => Effect.sync(() => (cliDraft = object(value)))),
+            Effect.asVoid,
+          ),
+        () => Effect.void,
+        () => Effect.void,
+      );
+      const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([commands]));
+      const runCli = Command.runWith(cli, {version: 'fixture'});
+      const beforeStart = yield* f.fs.readFileString(f.statePath());
+      const malformed = yield* runCli([
+        'task-action',
+        'compact-start',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--intent',
+        '{invalid',
+      ]).pipe(Effect.result);
+      expect(malformed).toMatchObject({failure: {code: 'invalid-request'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStart);
+      yield* runCli([
+        'task-action',
+        'compact-start',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--intent',
+        JSON.stringify(intent),
+      ]);
+      const draft = object(cliDraft);
+      expect(draft.status).toBe('awaiting-user-confirmation');
+      expect(yield* f.fs.readFileString(f.statePath())).not.toBe(beforeStart);
+      const savedState = yield* f.fs.readFileString(f.statePath());
+      // The mutation response can be lost: recover the current root and packet through the read-only facade.
+      const initialState = yield* readNativeWorkflowState(f.config, 'native-run');
+      if (!initialState) throw new Error('Expected persisted compact run.');
+      const initialJournal = yield* f.fs.readFileString(f.journalPath(initialState.state.bindingId));
+      // Test oracle only: observe and decode the actual persisted document independently
+      // before discarding the mutation response. Keep this read outside the traced task-view scope.
+      const expectedInitialDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema, {
+        onExcessProperty: 'error',
+      })(
+        object(
+          object(
+            yield* f.call({...f.base('authoring'), command: 'load', uri: object(draft.root).uri, detail: 'document'}),
+          ).authoring,
+        ).document,
+      );
+
+      const resumedDraft = object(
+        yield* inspectTaskOnce(readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})),
+      );
+      expect(resumedDraft).toMatchObject({
+        status: 'blocked',
+        next: {action: 'compact-confirm'},
+        authoring: {
+          status: 'awaiting-user-confirmation',
+          root: draft.root,
+          intentHash: draft.intentHash,
+          documentHash: draft.documentHash,
+          packet: {intentHash: draft.intentHash, documentHash: draft.documentHash},
+        },
+      });
+      expect(object(resumedDraft.authoring).packet).not.toHaveProperty('document');
+      expect(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).toEqual(resumedDraft);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      expect(yield* f.fs.readFileString(f.journalPath(initialState.state.bindingId))).toBe(initialJournal);
+      let cliPacket: Record<string, unknown> | undefined;
+      const taskViewCommand = makeNativeTaskViewCommand(options =>
+        readNativeTaskView(f.config, {
+          runId: options.runId,
+          callerCwd: options.callerCwd,
+          ...(options.detail === undefined ? {} : {detail: options.detail}),
+        }).pipe(
+          Effect.tap(value =>
+            Effect.sync(() => {
+              cliPacket = object(value);
+            }),
+          ),
+          Effect.asVoid,
+        ),
+      );
+      const taskViewCli = Command.make('workflow-automation').pipe(Command.withSubcommands([taskViewCommand]));
+      yield* Command.runWith(taskViewCli, {version: 'fixture'})([
+        'task-view',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--detail',
+        'packet',
+      ]);
+      const recoveredDraft = object(object(object(cliPacket).authoring).packet);
+      expect(recoveredDraft.document).toEqual(expectedInitialDocument);
+      expect(recoveredDraft.documentHash).toBe(nativeAuthoringDigest(expectedInitialDocument));
+      expect(recoveredDraft.intentHash).toBe(nativeSpecIntentDigest(expectedInitialDocument));
+
+      expect(recoveredDraft).toMatchObject({
+        intentHash: draft.intentHash,
+        documentHash: draft.documentHash,
+        document: {
+          title: intent.title,
+          current: {summary: intent.currentBehavior},
+          target: {summary: intent.desiredChange},
+          phases: [
+            {
+              affectedPaths: intent.affectedPaths,
+              acceptance: [{criterion: intent.acceptanceCriterion, verification: intent.verification}],
+            },
+          ],
+          compactOrigin: {eligibilityRationale: intent.eligibilityRationale},
+        },
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      expect(yield* f.fs.readFileString(f.journalPath(initialState.state.bindingId))).toBe(initialJournal);
+      const draftPacket = object(draft.packet);
+      const draftDocument = object(draftPacket.document);
+      const documentWithoutCompactOrigin = {...draftDocument};
+      delete documentWithoutCompactOrigin.compactOrigin;
+      const root = object(draft.root);
+      const markerRemoval = yield* f
+        .call({
+          ...f.base('authoring'),
+          command: 'save',
+          document: documentWithoutCompactOrigin,
+          ready: false,
+          uri: root.uri,
+          expectedRevision: root.revision,
+        })
+        .pipe(Effect.result);
+      expect(markerRemoval).toMatchObject({failure: {code: 'compact-confirmation-required'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      const intentHash = String(draft.intentHash);
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, f.config);
+      const omittedDecision = object(
+        yield* mcp.invokeTool('workflow_task_compact_confirm', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: intentHash,
+          userResponse: 'I reject this exact intent because it changes too much.',
+          baseBranch: 'main',
+        }),
+      );
+      expect(omittedDecision.structuredContent).toMatchObject({status: 'awaiting-user-confirmation'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      const explicitRejection = object(
+        yield* mcp.invokeTool('workflow_task_compact_confirm', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: intentHash,
+          userDecision: 'reject',
+          userResponse: 'I reject this exact intent because it changes too much.',
+          baseBranch: 'main',
+        }),
+      );
+      expect(explicitRejection.structuredContent).toMatchObject({status: 'reject'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      const explicitDeferral = object(
+        yield* mcp.invokeTool('workflow_task_compact_confirm', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: intentHash,
+          userDecision: 'defer',
+          userResponse: 'Defer this exact intent until I decide.',
+          baseBranch: 'main',
+        }),
+      );
+      expect(explicitDeferral.structuredContent).toMatchObject({status: 'defer'});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(savedState);
+      const response = object(
+        yield* mcp.invokeTool('workflow_task_compact_confirm', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: intentHash,
+          userResponse: 'I approve this exact bounded fixture change.',
+          userDecision: 'approve',
+          baseBranch: 'main',
+        }),
+      );
+      expect(response.isError).not.toBe(true);
+      const approved = object(response.structuredContent);
+      expect(approved).toMatchObject({
+        status: 'admitted',
+        intentHash,
+        taskReadiness: 'ready',
+        task: {status: 'ready', next: {action: 'implement'}},
+      });
+      const initialPlan = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(draftDocument);
+      const work = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'work',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          packet,
+        }),
+      );
+      expect(work).toMatchObject({status: 'ready', phaseId: 'compact'});
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "worker result";\n');
+      yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Worker source result',
+      ]);
+      const reindexed = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      expect(reindexed.snapshot.state).toBe('ready');
+      const snapshot = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          workRef: String(work.workRef),
+        }),
+      );
+      expect(snapshot.status).toBe('recorded');
+      const snapshotRef = String(snapshot.snapshotRef);
+      const finding = {
+        id: 'compact-expansion-preserved-finding',
+        file: 'source.ts',
+        line: 1,
+        body: 'The implementation has not yet established the expanded behavior.',
+        trigger: 'The phase has an unreviewed source snapshot.',
+        impact: 'The expanded plan must retain this finding and its history.',
+        evidence: 'The finding is stored against the immutable compact phase snapshot.',
+        severity: 'important',
+        category: 'correctness',
+        confidence: 90,
+        state: 'new',
+      };
+      const recordedFinding = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          report: {
+            mode: 'full',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings: [finding],
+          },
+        }),
+      );
+      expect(recordedFinding).toMatchObject({status: 'recorded', replayed: false});
+      const beforeExpansion = yield* readNativeWorkflowState(f.config, 'native-run');
+      const preservedCycle = beforeExpansion?.state.cycle;
+      expect(preservedCycle?.attempts).toHaveLength(1);
+      expect(preservedCycle?.attempts[0]?.report).toContain('compact-expansion-preserved-finding');
+      expect(preservedCycle?.reviews).toHaveLength(1);
+      const sourceInspection = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring'),
+            command: 'scope-inspect',
+            paths: ['source.ts'],
+            literalOnly: true,
+          }),
+        ).authoring,
+      );
+      const refreshedSource = object(sourceInspection.source);
+      const compactPhase = initialPlan.phases[0];
+      const firstAcceptance = compactPhase?.acceptance[0];
+      if (!compactPhase || !firstAcceptance) throw new Error('The compact plan must have one accepted phase.');
+      const expandedDocument = {
+        ...initialPlan,
+        title: 'Refresh fixture data and verify the persisted result',
+        objective: 'Refresh stale fixture data and verify the persisted result on the same run.',
+        requirements: [{id: 'behavior', behavior: 'Stale fixture data is refreshed and verified before return.'}],
+        source: refreshedSource,
+        current: {...initialPlan.current, summary: 'Expired fixture data is returned without a freshness check.'},
+        target: {...initialPlan.target, summary: 'Expired fixture data is refreshed and then verified before return.'},
+        phases: [
+          {
+            ...compactPhase,
+            title: 'Refresh expired fixture data',
+            outcome: 'Expired fixture data is refreshed before return.',
+            acceptance: [
+              {
+                ...firstAcceptance,
+                criterion: 'Expired fixture data is refreshed before return.',
+                verification: 'Exercise expiration and observe the refreshed result.',
+              },
+            ],
+          },
+          {
+            ...compactPhase,
+            id: 'verify',
+            title: 'Verify persisted fixture data',
+            outcome: 'The refreshed fixture data remains available after reload.',
+            dependsOn: ['compact'],
+            acceptance: [
+              {
+                ...firstAcceptance,
+                id: 'persisted-result',
+                criterion: 'The refreshed fixture result remains available after reload.',
+                verification: 'Reload the fixture and observe the refreshed result.',
+              },
+            ],
+          },
+        ],
+        decisions: [
+          {
+            id: 'verify-after-refresh',
+            question: 'How should persistence be checked?',
+            selection: 'no-better-alternative',
+            selected: 'Use the existing readback path after the refresh.',
+            alternatives: [],
+            rationale: 'This adds one dependent verification phase while retaining the existing storage contract.',
+            affectedPhases: ['compact', 'verify'],
+            authority: 'orchestrator',
+          },
+        ],
+        review: {required: true, reason: 'The expanded scope adds a dependent persistence check.'},
+      };
+      const expanded = object(
+        yield* mcp.invokeTool('workflow_task_compact_expand', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          document: expandedDocument,
+        }),
+      );
+      expect(expanded.isError).not.toBe(true);
+      const expandedContent = object(expanded.structuredContent);
+      expect(expandedContent).toMatchObject({
+        status: 'awaiting-user-confirmation',
+        previousRoot: root.uri,
+        root: {uri: root.uri},
+      });
+      const expandedIntentHash = String(expandedContent.intentHash);
+      expect(expandedIntentHash).not.toBe(intentHash);
+      // Independently capture the complete persisted expansion as a test oracle, not a user recovery step.
+      const expectedExpandedDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema, {
+        onExcessProperty: 'error',
+      })(
+        object(
+          object(
+            yield* f.call({
+              ...f.base('authoring'),
+              command: 'load',
+              uri: object(expandedContent.root).uri,
+              detail: 'document',
+            }),
+          ).authoring,
+        ).document,
+      );
+      // Recover all authored material through the task MCP surface after discarding the expansion response.
+      const detailedExpanded = object(
+        yield* mcp.invokeTool('workflow_task_view', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          detail: 'packet',
+        }),
+      );
+      expect(detailedExpanded.isError).not.toBe(true);
+      const recoveredExpanded = object(object(object(detailedExpanded.structuredContent).authoring).packet);
+      expect(recoveredExpanded).toMatchObject({
+        intentHash: expandedIntentHash,
+        documentHash: expandedContent.documentHash,
+      });
+      const recoveredExpandedDocument = object(recoveredExpanded.document);
+      expect(recoveredExpandedDocument).toEqual(expectedExpandedDocument);
+      expect(recoveredExpanded.documentHash).toBe(nativeAuthoringDigest(expectedExpandedDocument));
+      expect(recoveredExpanded.intentHash).toBe(nativeSpecIntentDigest(expectedExpandedDocument));
+
+      expect(recoveredExpandedDocument.title).toBe(expandedDocument.title);
+      expect(recoveredExpandedDocument.current).toEqual(expandedDocument.current);
+      expect(recoveredExpandedDocument.target).toEqual(expandedDocument.target);
+      expect(recoveredExpandedDocument.phases).toEqual(expandedDocument.phases);
+      expect(recoveredExpandedDocument.decisions).toEqual(expandedDocument.decisions);
+      expect(recoveredExpandedDocument.requirements).toEqual(expandedDocument.requirements);
+      const expandedResume = object(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo}));
+      expect(expandedResume).toMatchObject({
+        status: 'blocked',
+        next: {action: 'compact-confirm'},
+        authoring: {
+          status: 'awaiting-user-confirmation',
+          intentHash: expandedIntentHash,
+          documentHash: expandedContent.documentHash,
+          root: expandedContent.root,
+        },
+        cycleTask: {status: 'blocked'},
+      });
+      expect(object(expandedResume.authoring).intentHash).not.toBe(intentHash);
+      const beforeStaleConfirmation = yield* f.fs.readFileString(f.statePath());
+      const staleConfirmation = yield* runNativeTaskAction(f.config, {
+        command: 'compact-confirm',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        presentedIntentHash: intentHash,
+        userResponse: 'I approve the original compact intent.',
+        baseBranch: 'main',
+      }).pipe(Effect.result);
+      expect(staleConfirmation).toMatchObject({failure: {code: 'stale-intent'}});
+      const afterStaleConfirmation = yield* f.fs.readFileString(f.statePath());
+      expect(afterStaleConfirmation).toBe(beforeStaleConfirmation);
+      const awaitingExpandedApproval = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'compact-confirm',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: expandedIntentHash,
+          baseBranch: 'main',
+        }),
+      );
+      expect(awaitingExpandedApproval.status).toBe('awaiting-user-confirmation');
+      expect(awaitingExpandedApproval.actorIdentity).toContain('caller-asserted');
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterStaleConfirmation);
+      const approvedWithoutReview = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'compact-confirm',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: expandedIntentHash,
+          userDecision: 'approve',
+          userResponse: 'I approve the expanded two-phase intent and its exact source scope.',
+          baseBranch: 'main',
+        }),
+      );
+      expect(approvedWithoutReview.status).toBe('awaiting-review');
+      const reviewState = yield* f.fs.readFileString(f.statePath());
+      const awaitingReview = object(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo}));
+      expect(awaitingReview).toMatchObject({
+        status: 'blocked',
+        next: {action: 'compact-confirm'},
+        authoring: {
+          status: 'awaiting-review',
+          intentHash: expandedIntentHash,
+          documentHash: expandedContent.documentHash,
+        },
+        cycleTask: {status: 'blocked'},
+      });
+      expect(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).toEqual(awaitingReview);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(reviewState);
+      const expandedApproval = object(
+        yield* mcp.invokeTool('workflow_task_compact_confirm', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: expandedIntentHash,
+          userDecision: 'approve',
+          userResponse: 'I approve the expanded two-phase intent and its exact source scope.',
+          baseBranch: 'main',
+          review: {
+            documentHash: String(expandedContent.documentHash),
+            outcome: 'accepted',
+            blockingIssueCount: 0,
+          },
+        }),
+      );
+      expect(expandedApproval.isError).not.toBe(true);
+      expect(expandedApproval.structuredContent).toMatchObject({
+        status: 'admitted',
+        intentHash: expandedIntentHash,
+        actorIdentity: expect.stringContaining('caller-asserted'),
+      });
+      const afterExpansion = yield* readNativeWorkflowState(f.config, 'native-run');
+      expect(afterExpansion?.state.cycle?.snapshots).toEqual(preservedCycle?.snapshots);
+      expect(afterExpansion?.state.cycle?.attempts).toEqual(preservedCycle?.attempts);
+      expect(afterExpansion?.state.cycle?.reviews).toEqual(preservedCycle?.reviews);
+      expect(afterExpansion?.state.cycle?.reviewLimits).toEqual(preservedCycle?.reviewLimits);
+      expect(afterExpansion?.state.cycle?.reviewExpansions).toEqual(preservedCycle?.reviewExpansions);
+      expect(afterExpansion?.state.cycle?.plans).toContainEqual(
+        expect.objectContaining({
+          source: expect.objectContaining({documentHash: preservedCycle?.state.plan.source.documentHash}),
+        }),
+      );
+      const taskView = yield* inspectTaskOnce(readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo}));
+      const repeatedTaskView = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      expect(taskView).toEqual(repeatedTaskView);
+      expect(taskView).toMatchObject({status: 'blocked', next: {action: 'blocked'}});
+      const stored = yield* f.fs.readFileString(f.statePath());
+      const replay = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'compact-confirm',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          presentedIntentHash: expandedIntentHash,
+          baseBranch: 'main',
+          review: {
+            documentHash: String(expandedContent.documentHash),
+            outcome: 'accepted',
+            blockingIssueCount: 0,
+          },
+        }),
+      );
+      expect(replay.status).toBe('admitted');
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(stored);
+      // A changed latest root must fail closed, never fall back to its valid historical root.
+      const currentRootUri = String(object(expandedContent.root).uri);
+      const originalRoot = yield* f.store.read(f.location, currentRootUri);
+      yield* Effect.acquireUseRelease(
+        f.store.write(f.location, currentRootUri, originalRoot + '\nUnexpected external edit.\n', {mode: 'replace'}),
+        () =>
+          Effect.gen(function* () {
+            const changedRoot = yield* f.store.read(f.location, currentRootUri);
+            const corruptedRead = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo}).pipe(
+              Effect.result,
+            );
+            expect(corruptedRead._tag).toBe('Failure');
+            expect(
+              (yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, detail: 'packet'}).pipe(
+                Effect.result,
+              ))._tag,
+            ).toBe('Failure');
+            expect(yield* f.fs.readFileString(f.statePath())).toBe(stored);
+            expect(yield* f.store.read(f.location, currentRootUri)).toBe(changedRoot);
+          }),
+        () => f.store.write(f.location, currentRootUri, originalRoot, {mode: 'replace'}),
+      );
+    }).pipe(run),
+  );
+
+  effectIt.effect('returns a missing planning decision without saving compact intent', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      const before = yield* f.fs.readFileString(f.statePath());
+      const result = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'compact-start',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          intent: {
+            title: 'Change fixture refresh behavior',
+            currentBehavior: 'Expired fixture entries are returned as current.',
+            desiredChange: 'Expired fixture entries are refreshed before return.',
+            affectedPaths: ['source.ts'],
+            acceptanceCriterion: 'Expired entries refresh before return.',
+            verification: 'Exercise expiration and observe the refreshed value.',
+            eligibilityRationale: 'An unresolved behavior choice remains.',
+            eligibility: {
+              status: 'needs-planning',
+              missingDecision: 'Choose synchronous refresh or queued refresh.',
+              evidenceRefs: ['threadnote://user/test/memories/durable/projects/fixture/cache.md'],
+            },
+            review: {required: false, reason: 'Not eligible until the decision is resolved.'},
+          },
+        }),
+      );
+      expect(result).toMatchObject({
+        status: 'needs-planning',
+        missingDecision: 'Choose synchronous refresh or queued refresh.',
+        evidenceRefs: ['threadnote://user/test/memories/durable/projects/fixture/cache.md'],
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(run),
+  );
+
   effectIt.effect('accepts the bound checkout when Git reports an alternate root spelling', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
@@ -653,6 +1316,9 @@ describe('native task actions', () => {
           () => Effect.void,
           () => Effect.void,
           () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
         );
         const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([commands]));
         const runCli = Command.runWith(cli, {version: 'fixture'});
@@ -710,6 +1376,9 @@ describe('native task actions', () => {
             Effect.tap(value => Effect.sync(() => (cliWork = object(value)))),
             Effect.asVoid,
           ),
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
         () => Effect.void,
         () => Effect.void,
         () => Effect.void,

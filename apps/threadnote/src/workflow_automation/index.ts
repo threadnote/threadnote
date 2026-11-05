@@ -421,6 +421,7 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
 const runBound = Effect.fn('workflowAutomation.bound')(function* (
   config: RuntimeConfig,
   request: Exclude<NativeWorkflowRequest, {readonly action: 'init' | 'capabilities' | 'graph-ready'}>,
+  taskDetail?: 'summary' | 'packet',
 ) {
   const stored = yield* load(config, request);
   return yield* withNativeWorkflowMemorySession(config, stored.state.bindingId, (admission, call) =>
@@ -439,6 +440,65 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
       )
         return yield* issue('binding-drift', 'Native run identity differs from its current journal admission.');
       const inspection = yield* inspectNative(config, stored.state, binding, admission);
+      if (taskDetail !== undefined) {
+        const memory = yield* makeWorkflowMemoryAdapter(config, binding, call);
+        // This closure is created only after actual admission and expires with the existing journal session.
+        // It admits reads only; caller JSON cannot supply or reuse an inspection capability.
+        const read = (input: unknown) =>
+          Effect.gen(function* () {
+            const child = yield* Effect.try({
+              try: () => decodeNativeWorkflowRequest(input),
+              catch: nativeWorkflowError,
+            });
+            if (
+              !('runId' in child) ||
+              child.runId !== stored.state.runId ||
+              child.generation !== stored.state.generation
+            )
+              return yield* issue('binding-drift', 'The task read belongs to another native run.');
+            if (child.action === 'inspect') return inspection;
+            if (child.action !== 'read')
+              return yield* issue('invalid-request', 'Task inspection only admits current artifact reads.');
+            return {
+              ...version,
+              status: 'ok' as const,
+              artifact: yield* memory.read(binding.bindingId, child.uri, child.evidenceRefs),
+            };
+          });
+        const source = stored.state.cycle?.state.plan.source;
+        const pinned = source ? yield* memory.read(binding.bindingId, source.root.uri) : undefined;
+        const planDrift =
+          source && (pinned?.memoryId !== source.root.memoryId || pinned.revision !== source.root.revision)
+            ? 'The approved plan root changed. Reconcile its current verified export before further delivery.'
+            : undefined;
+        const hasPlan = EffectArray.some(
+          stored.state.operations,
+          entry =>
+            entry.status === 'verified' &&
+            entry.intent.role === 'authoring-root' &&
+            entry.intent.artifactKey === 'author-root-plan',
+        );
+        const authoring = hasPlan
+          ? yield* runNativeAuthoring(
+              config,
+              {
+                ...version,
+                action: 'authoring',
+                command: 'current-plan',
+                runId: stored.state.runId,
+                generation: stored.state.generation,
+                detail: taskDetail === 'packet' ? 'document' : 'summary',
+              },
+              read,
+            )
+          : undefined;
+        return {
+          ...inspection,
+          revision: stored.revision,
+          taskAuthoring: authoring?.authoring,
+          ...(planDrift ? {planDrift} : {}),
+        };
+      }
       if (request.action === 'inspect') return inspection;
       const memory = yield* makeWorkflowMemoryAdapter(config, binding, call);
       if (request.action === 'read')
@@ -493,7 +553,11 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
   return yield* withNativeWorkflowLock(config, request.runId, false, runBound(config, request));
 });
 
-const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
+const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (
+  config: RuntimeConfig,
+  input: unknown,
+  allowCompactOriginCreation = false,
+) {
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'request-schema')
     return yield* Effect.try({try: () => nativeRequestSchema(input), catch: nativeWorkflowError});
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'job')
@@ -546,14 +610,61 @@ const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (confi
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'watch')
     return yield* runNativeWatch(config, input);
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'authoring')
-    return yield* runNativeAuthoring(config, input, request =>
-      runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+    return yield* runNativeAuthoring(
+      config,
+      input,
+      request => runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      {allowCompactOriginCreation: allowCompactOriginCreation && 'command' in input && input.command === 'save'},
     );
   return yield* runCoreNative(config, input);
 });
 
+const runWorkflowAutomationWithCompactCapability = (
+  config: RuntimeConfig,
+  input: unknown,
+  allowCompactOriginCreation: boolean,
+) =>
+  dispatchNative(config, input, allowCompactOriginCreation).pipe(
+    withNativeFileLockWaitBudget,
+    Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
+    Effect.mapError(nativeWorkflowError),
+  );
+
 export const runWorkflowAutomation = (config: RuntimeConfig, input: unknown) =>
-  dispatchNative(config, input).pipe(
+  runWorkflowAutomationWithCompactCapability(config, input, false);
+
+export const runCompactOriginAuthoringSave = (config: RuntimeConfig, input: unknown) => {
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    !('action' in input) ||
+    input.action !== 'authoring' ||
+    !('command' in input) ||
+    input.command !== 'save' ||
+    !('document' in input) ||
+    typeof input.document !== 'object' ||
+    input.document === null ||
+    !('compactOrigin' in input.document)
+  )
+    return Effect.fail(
+      issue('invalid-request', 'The internal compact-origin capability only admits compact plan saves.'),
+    );
+  return runWorkflowAutomationWithCompactCapability(config, input, true);
+};
+
+/** Internal task read: admission and canonical authoring reads share one live journal session. */
+export const readNativeTaskInspection = (
+  config: RuntimeConfig,
+  runId: string,
+  generation: string,
+  detail: 'summary' | 'packet',
+) =>
+  withNativeWorkflowLock(
+    config,
+    runId,
+    false,
+    runBound(config, {...version, action: 'inspect', runId, generation}, detail),
+  ).pipe(
     withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
