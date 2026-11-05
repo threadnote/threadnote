@@ -122,12 +122,14 @@ const fixture = Effect.gen(function* () {
 
 // Bundle the actual entry once before this example's read deadline. The setup
 // command owns Bun.build's lifetime because its Promise has no cancellation API.
-const bundledReadyWorker = (f: Effect.Success<typeof fixture>) =>
+const bundledReadyWorker = (
+  f: Effect.Success<typeof fixture>,
+  entrypoint = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url)),
+) =>
   Effect.gen(function* () {
     const system = yield* SystemInfo;
     const command = yield* CommandExecutor;
-    const entrypoint = Bun.fileURLToPath(new URL('../../src/recall/ready_read_entry.ts', import.meta.url));
-    const directory = f.path.join(f.home, 'ready-worker-bundle');
+    const directory = f.path.join(f.home, 'ready-worker-bundle', f.path.basename(entrypoint));
     const bundled = f.path.join(directory, 'ready-worker.js');
     const [duration] = yield* command
       .execute(
@@ -183,7 +185,6 @@ const installSynchronousScoringStall = (database: string, stall = true) =>
 // The shim only installs this fixture function; production worker/layer and SQL stay real.
 const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
   Effect.gen(function* () {
-    const system = yield* SystemInfo;
     const script = f.path.join(f.home, 'observed-vector-worker.ts');
     const entered = f.path.join(f.home, 'native-query-entered.pid');
     const timeoutFile = f.path.join(f.home, 'native-query-timeout.json');
@@ -237,7 +238,8 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 );
 `,
     );
-    return {system: {...system, developmentEntrypoint: script}, entered, timeoutFile};
+    const bundled = yield* bundledReadyWorker(f, script);
+    return {system: bundled.system, entered, timeoutFile};
   });
 
 const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
@@ -262,7 +264,10 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+        const bundled = yield* bundledReadyWorker(f);
+        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        );
         const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing closing-fence opening proof');
@@ -293,11 +298,14 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
+        const bundled = yield* bundledReadyWorker(f);
         // These are independent requests separated by explicit fixture writes.
         // Each keeps the production allowance; fixture publication is not read work.
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
-            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+            );
             return yield* boundary.read(request);
           });
         const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
@@ -392,18 +400,39 @@ describe('model-free native vector reads', () => {
           Effect.provideService(LocalModelStore, f.store),
         );
         const bundled = yield* bundledReadyWorker(f);
+        const command = yield* CommandExecutor;
+        const readMilliseconds: number[] = [];
+        let readOrdinal = 0;
         const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
           Effect.provideService(SystemInfo, bundled.system),
-        );
-        const readMilliseconds: number[] = [];
-        const read = (request: RecallReadyReadRequest) =>
-          boundary.read(request).pipe(
-            Effect.timed,
-            Effect.map(([duration, response]) => {
-              readMilliseconds.push(Duration.toMillis(duration));
-              return response;
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              ...command,
+              execute: (executable, arguments_, options) =>
+                command.execute(executable, arguments_, options).pipe(
+                  Effect.tapError(() =>
+                    Effect.logError('Vector revocation worker failed', {
+                      readOrdinal,
+                      timeoutMilliseconds: options?.timeoutMs,
+                      completedReadMilliseconds: [...readMilliseconds],
+                    }),
+                  ),
+                ),
             }),
-          );
+          ),
+        );
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.suspend(() => {
+            readOrdinal++;
+            return boundary.read(request).pipe(
+              Effect.timed,
+              Effect.map(([duration, response]) => {
+                readMilliseconds.push(Duration.toMillis(duration));
+                return response;
+              }),
+            );
+          });
         const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing authorized opening proof');
@@ -442,7 +471,10 @@ describe('model-free native vector reads', () => {
     ([project, selected]) =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+        const bundled = yield* bundledReadyWorker(f);
+        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        );
         const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing property opening proof');
@@ -542,7 +574,10 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+        const bundled = yield* bundledReadyWorker(f);
+        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        );
         const opened = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
         expect(opened.outcome).toBe('success');
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opened.value);
@@ -565,7 +600,9 @@ describe('model-free native vector reads', () => {
         expect(scores.outcome).toBe('success');
         expect(scores.value).toEqual([[f.uris[0], 1]]);
         expect(JSON.stringify(scores)).not.toContain('PRIVATE_VECTOR');
-        const wrong = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000))).read({
+        const wrong = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        )).read({
           ...request,
           config: {...f.config, user: 'other'},
         });
@@ -586,7 +623,9 @@ describe('model-free native vector reads', () => {
             'PRIVATE_CHANGED_SOURCE',
           ),
         );
-        const changed = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000))).read(request);
+        const changed = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        )).read(request);
         expect(changed.outcome).toBe('success');
         expect(changed.value).toEqual([]);
         expect(JSON.stringify(changed)).not.toContain('PRIVATE_CHANGED_SOURCE');
@@ -599,7 +638,10 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000))).read({
+        const bundled = yield* bundledReadyWorker(f);
+        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        )).read({
           operation: 'vector-state',
           config: f.config,
           options: {model},
@@ -607,8 +649,8 @@ describe('model-free native vector reads', () => {
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(proofReply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Vector opening proof unavailable.');
         yield* installSynchronousScoringStall(f.database);
-        const deadline = yield* makeReadDeadline(1800);
         const observed = yield* observedWorker(f);
+        const deadline = yield* makeReadDeadline(1800);
         const boundary = yield* makeReadyRecallReadBoundary(deadline).pipe(
           Effect.provideService(SystemInfo, observed.system),
         );
@@ -648,7 +690,10 @@ describe('model-free native vector reads', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000))).read({
+        const bundled = yield* bundledReadyWorker(f);
+        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, bundled.system),
+        )).read({
           operation: 'vector-state',
           config: f.config,
           options: {model},
