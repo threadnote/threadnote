@@ -2,15 +2,8 @@ import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
-import {currentRecallCorpusGeneration, loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
-import {
-  loadRecallVectorAuthorizationKey,
-  purgeVectorIndex,
-  rebuildVectorIndex,
-  vectorIndexGenerationReadiness,
-  vectorIndexStatus,
-} from '@threadnote/recall/vector-index';
-import {verifyRecallIndexMaintenanceReadiness} from '../lifecycle.js';
+import {loadRecallVectorAuthorizationKey, purgeVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {prepareRecallIndexes} from '../lifecycle.js';
 
 class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
   'SearchCommandError',
@@ -48,27 +41,7 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
       });
     }
   });
-  yield* Console.log('Preparing lexical recall from canonical documents.');
-  const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-  yield* verifyInputs;
-  yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
-  yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
-  const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
-    corpusGeneration: index.generation,
-    currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
-  });
-  yield* verifyRecallIndexMaintenanceReadiness({
-    manifestId: manifest.id,
-    readLexicalStatus: () => recallIndexStatus(config, false),
-    readVectorReadiness: () =>
-      vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
-    requestedGeneration: index.generation,
-  });
-  yield* verifyInputs;
-  yield* Console.log(
-    `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
-  );
-  yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+  yield* prepareRecallIndexes(config, manifest, authorizationKey, verifyInputs);
 });
 
 export const runIndexStatus = Effect.fn('index.command.status')(function* (config: RuntimeConfig) {
