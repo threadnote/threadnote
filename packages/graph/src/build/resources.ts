@@ -1,4 +1,5 @@
-import {Context, Effect, Ref, Schema} from 'effect';
+import {Context, Effect, Ref, Schema, Scope} from 'effect';
+import {registerCodeGraphWriterResource} from '../store/writer_gate_scope.js';
 
 export const CODE_GRAPH_PREPARED_SPOOL_COUNT_LIMIT = 4;
 export const CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT = 32 * 1_024 * 1_024 * 1_024;
@@ -118,7 +119,7 @@ export const makeCodeGraphBuildResourceCoordinator = Effect.fn('codeGraph.buildR
       const next = transitionCodeGraphBuildResourceState(current, event);
       return [next, next] as const;
     }).pipe(Effect.flatMap(next => observe(codeGraphBuildResource(next))));
-  return {
+  const coordinator = {
     acquireCandidateStage: transition({type:'acquire-candidate-stage'}),
     releaseCandidateStage: transition({type:'release-candidate-stage'}),
     acquireLegacyBuilder: transition({type: 'acquire-legacy-builder'}),
@@ -138,6 +139,29 @@ export const makeCodeGraphBuildResourceCoordinator = Effect.fn('codeGraph.buildR
     releasePreparedSpool: (bytes: number) => transition({bytes, type: 'release-prepared-spool'}),
     releaseWriter: transition({type: 'release-writer'}),
   } as const;
+  registerCodeGraphWriterResource(coordinator, scope => {
+    // Presence distinguishes a real release of the last resource from a rejected acquisition.
+    let released: {readonly resource: CodeGraphBuildResource | undefined} | undefined;
+    const commitWriter = (type: 'acquire-writer' | 'release-writer') =>
+      Ref.modify(state, current => {
+        const next = transitionCodeGraphBuildResourceState(current, {type});
+        return [next, next] as const;
+      });
+    const acquired = Effect.acquireRelease(
+      commitWriter('acquire-writer'),
+      () => commitWriter('release-writer').pipe(
+        Effect.tap(next => Effect.sync(() => { released = {resource: codeGraphBuildResource(next)}; })),
+      ),
+    ).pipe(Scope.provide(scope));
+    return {
+      // Only strict state mutation and finalizer registration are masked; the observer factory stays cancellable.
+      acquire: acquired.pipe(
+        Effect.flatMap(next => Effect.interruptible(Effect.suspend(() => observe(codeGraphBuildResource(next))))),
+      ),
+      observeRelease: Effect.suspend(() => released === undefined ? Effect.void : observe(released.resource)),
+    };
+  });
+  return coordinator;
 });
 
 export type CodeGraphBuildResourceCoordinator = Effect.Success<

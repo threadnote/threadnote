@@ -37,7 +37,7 @@ if (
   publicWork.CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES !== work.CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES ||
   publicClosure.PROJECT_INCREMENTAL_CLOSURE_MAX_CACHED_FACT_BYTES !== closure.PROJECT_INCREMENTAL_CLOSURE_MAX_CACHED_FACT_BYTES
 ) throw new Error('Incremental budget export compatibility changed.');
-console.log('incremental-module-initialization:ok');
+process.stdout.write('incremental-module-initialization:ok\\n');
 `,
           ],
           {

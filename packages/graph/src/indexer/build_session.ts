@@ -6,6 +6,7 @@ import type {CodeGraphLayout} from '../layout.js';
 import type {CodeGraphRetiredSnapshotCleanupProgress} from '../store.js';
 import type {CodeGraphIndexOptions} from './types.js';
 import {CODE_GRAPH_LOCK_OPTIONS} from './materialization.js';
+import {codeGraphWriterResourceFactory, registerCodeGraphWriterCallbacks} from '../store/writer_gate_scope.js';
 
 export function withCodeGraphProcessLock<A, E, R>(
   fs: FileSystem.FileSystem,
@@ -42,18 +43,43 @@ export function writerSessionOptions(
   resumeProgress: () => Effect.Effect<void, unknown>,
   resources?: CodeGraphBuildResourceCoordinator,
 ) {
+  const onWriterAcquired = () =>
+    (resources?.acquireWriter ?? Effect.void).pipe(
+      Effect.orDie,
+      Effect.andThen(Effect.suspend(resumeProgress)),
+      Effect.ignore,
+    );
+  const onWriterReleased = () => (resources?.releaseWriter ?? Effect.void).pipe(Effect.orDie);
+  const makeResourceGate = resources === undefined ? undefined : codeGraphWriterResourceFactory(resources);
+  // Arbitrary coordinator-like objects and overridden callback pairs retain the opaque legacy path.
+  if (resources === undefined || makeResourceGate !== undefined) {
+    registerCodeGraphWriterCallbacks(onWriterAcquired, onWriterReleased, scope => {
+      const gate = makeResourceGate?.(scope);
+      return {
+        acquire: (gate?.acquire ?? Effect.void).pipe(
+          Effect.orDie,
+          Effect.andThen(Effect.interruptible(Effect.suspend(resumeProgress))),
+          Effect.ignore,
+        ),
+        observeRelease: gate?.observeRelease ?? Effect.void,
+      };
+    });
+  }
   return {
     cleanupCompletedBuildRows: true,
     ...(options.onSqliteWriterConfigured ? {onSqliteWriterConfigured: options.onSqliteWriterConfigured} : {}),
     onWriterContention: () =>
       (resources?.assertWriterMayWait ?? Effect.void).pipe(
         Effect.orDie,
-        Effect.andThen(options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
+        Effect.andThen(
+          Effect.interruptible(
+            Effect.suspend(() => options.onProgress?.({phase: 'waiting', reason: 'database-writer'}) ?? Effect.void),
+          ),
+        ),
         Effect.ignore,
       ),
-    onWriterAcquired: () =>
-      (resources?.acquireWriter ?? Effect.void).pipe(Effect.orDie, Effect.andThen(resumeProgress()), Effect.ignore),
-    onWriterReleased: () => (resources?.releaseWriter ?? Effect.void).pipe(Effect.orDie),
+    onWriterAcquired,
+    onWriterReleased,
     sqliteWriterTuning: {
       reconstructibleBuildSynchronous: 'normal' as const,
       ...options.sqliteWriterTuning,

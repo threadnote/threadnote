@@ -1,5 +1,5 @@
 import {SecureRandom} from 'effect/crypto';
-import {Effect, FileSystem, Option, Path} from 'effect';
+import {Cause, Effect, Exit, FileSystem, Option, Path, Scope} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -17,6 +17,7 @@ import {
   useDatabaseDirect,
 } from './session.js';
 import {storeError} from './utilities.js';
+import {codeGraphWriterGateFactory} from './writer_gate_scope.js';
 import {initializeSchema} from './schema/initialization.js';
 import {pruneRoutinePhysicalRowsPage} from './routine_cleanup.js';
 import {drainCompletedPersistentBuildRows} from './activation/persistent.js';
@@ -72,14 +73,41 @@ export const makeCodeGraphStoreRuntime = Effect.gen(function* () {
           requestedWaitTimeout === 0 && detachedCleanupActive.has(databasePath)
             ? CODE_GRAPH_INTERNAL_CLEANUP_FOREGROUND_WAIT_MILLISECONDS
             : requestedWaitTimeout;
-        const guarded = options?.onWriterReleased ? effect.pipe(Effect.ensuring(options.onWriterReleased())) : effect;
+        const makeWriterGate = codeGraphWriterGateFactory(options);
+        const guarded =
+          makeWriterGate === undefined
+            ? options?.onWriterReleased
+              ? effect.pipe(Effect.ensuring(options.onWriterReleased()))
+              : effect
+            : Effect.acquireUseRelease(
+                Scope.make(),
+                scope =>
+                  Effect.suspend(() => {
+                    const gate = makeWriterGate(scope);
+                    return gate.acquire.pipe(
+                      Effect.andThen(effect),
+                      Effect.onExit(exit =>
+                        Scope.close(scope, exit).pipe(
+                          Effect.andThen(
+                            Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+                              ? Effect.void
+                              : Effect.interruptible(Effect.suspend(() => gate.observeRelease)),
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                // Cover internal hook construction too; closing an already closed gate is a no-op.
+                (scope, exit) => Scope.close(scope, exit),
+              );
         return withExclusiveFileLock(
           fs,
           writerLockPath,
           {
             ...CODE_GRAPH_SQL_WRITER_LOCK_OPTIONS,
             waitTimeoutMilliseconds: effectiveWaitTimeout,
-            onAcquired: () => options?.onWriterAcquired?.() ?? Effect.void,
+            onAcquired: () =>
+              makeWriterGate === undefined ? (options?.onWriterAcquired?.() ?? Effect.void) : Effect.void,
             onContention: () => options?.onWriterContention?.() ?? Effect.void,
           },
           guarded,
