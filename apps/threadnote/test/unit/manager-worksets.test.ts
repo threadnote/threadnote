@@ -3,13 +3,15 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Exit, FileSystem, Path, Result, Scope, Schema} from 'effect';
+import {Console, Deferred, Effect, Exit, FileSystem, Path, Result, Scope, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {codeGraphWorksetCatalogLayout} from '@threadnote/graph/workset_catalog/layout';
+import {CodeGraphWorksetCatalogError} from '@threadnote/graph/workset_catalog/types';
+import * as SqlError from 'effect/sql/SqlError';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -20,6 +22,7 @@ import {validateManagerProjectRoots} from '@threadnote/threadnote/manager/projec
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   handleManagerWorksetRequest,
+  managerWorksetFailureDiagnostic,
   managerWorksetJobSummary,
   managerWorksetRequestAllowedDuringMaintenance,
   mutateManagerManifestProject,
@@ -1709,6 +1712,224 @@ describe('Manager Worksets API and human labels', () => {
         });
         expect(nonObject).toEqual(failed);
         expect(JSON.stringify(failed)).not.toContain('/private');
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  it('projects typed catalog failures to a closed diagnostic without mutating the cause', () => {
+    const sqlFailure = SqlError.SqlError.make({reason: SqlError.UnknownError.make({cause: new Error('/private/sql')})});
+    const original = CodeGraphWorksetCatalogError.of('storage', '/private/catalog', {cause: sqlFailure});
+    expect(managerWorksetFailureDiagnostic(original)).toEqual({
+      boundary: 'catalog-status',
+      causeCode: 'unknown',
+      causeTag: 'SqlError',
+      catalogReason: 'storage',
+      marker: 'manager-workset-failure-v1',
+    });
+    expect(original.cause).toBe(sqlFailure);
+    expect(JSON.stringify(managerWorksetFailureDiagnostic(original))).not.toContain('/private');
+    let accessorReads = 0;
+    const accessorFailure = CodeGraphWorksetCatalogError.of('storage', 'secret');
+    Object.defineProperty(accessorFailure, 'reason', {
+      configurable: true,
+      get: () => {
+        accessorReads += 1;
+        return 'storage';
+      },
+    });
+    expect(managerWorksetFailureDiagnostic(accessorFailure)).toMatchObject({
+      causeTag: 'unknown',
+      catalogReason: 'unknown',
+    });
+    const causeAccessorFailure = CodeGraphWorksetCatalogError.of('storage', 'secret');
+    Object.defineProperty(causeAccessorFailure, 'cause', {
+      configurable: true,
+      get: () => {
+        accessorReads += 1;
+        return sqlFailure;
+      },
+    });
+    expect(managerWorksetFailureDiagnostic(causeAccessorFailure)).toMatchObject({
+      causeTag: 'unknown',
+      catalogReason: 'unknown',
+    });
+    const proxy = new Proxy(
+      {},
+      {
+        get: () => {
+          accessorReads += 1;
+          throw new Error('hostile getter');
+        },
+        getOwnPropertyDescriptor: () => {
+          accessorReads += 1;
+          throw new Error('hostile descriptor');
+        },
+        getPrototypeOf: () => {
+          accessorReads += 1;
+          throw new Error('hostile prototype');
+        },
+      },
+    );
+    expect(managerWorksetFailureDiagnostic(proxy)).toMatchObject({causeTag: 'unknown', catalogReason: 'unknown'});
+    const spoof = Object.create(CodeGraphWorksetCatalogError.prototype);
+    Object.defineProperties(spoof, {
+      _tag: {value: 'CodeGraphWorksetCatalogError'},
+      reason: {value: 'private-reason'},
+    });
+    expect(managerWorksetFailureDiagnostic(spoof)).toMatchObject({causeTag: 'unknown', catalogReason: 'unknown'});
+    expect(accessorReads).toBe(0);
+    fc.assert(
+      fc.property(fc.string(), fc.string(), (message, causeText) => {
+        const arbitraryFailure = CodeGraphWorksetCatalogError.of('storage', message, {
+          cause: SqlError.SqlError.make({reason: SqlError.UnknownError.make({cause: new Error(causeText)})}),
+        });
+        return (
+          JSON.stringify(managerWorksetFailureDiagnostic(arbitraryFailure)) ===
+          JSON.stringify(managerWorksetFailureDiagnostic(original))
+        );
+      }),
+      {numRuns: 24},
+    );
+  });
+
+  it('unwraps at most one SQL wrapper for cyclic and long nested reason data', () => {
+    const selfCycle = SqlError.SqlError.make({reason: SqlError.UnknownError.make({cause: new Error('private')})});
+    Object.defineProperty(selfCycle, 'reason', {value: selfCycle});
+    const selfCycleFailure = CodeGraphWorksetCatalogError.of('storage', 'private', {cause: selfCycle});
+    expect(managerWorksetFailureDiagnostic(selfCycleFailure)).toMatchObject({
+      causeTag: 'unknown',
+      catalogReason: 'storage',
+    });
+
+    const chain = Array.from({length: 96}, () =>
+      SqlError.SqlError.make({reason: SqlError.UnknownError.make({cause: new Error('private')})}),
+    );
+    for (let index = 0; index < chain.length - 1; index += 1) {
+      Object.defineProperty(chain[index], 'reason', {value: chain[index + 1]});
+    }
+    const chainSet = new Set(chain);
+    const originalDescriptor = Object.getOwnPropertyDescriptor;
+    let chainDescriptorReads = 0;
+    const descriptorSpy = vi.spyOn(Object, 'getOwnPropertyDescriptor').mockImplementation((target, key) => {
+      if (chainSet.has(target)) chainDescriptorReads += 1;
+      return originalDescriptor(target, key);
+    });
+    try {
+      const longChainFailure = CodeGraphWorksetCatalogError.of('storage', 'private', {cause: chain[0]});
+      expect(managerWorksetFailureDiagnostic(longChainFailure)).toMatchObject({
+        causeTag: 'unknown',
+        catalogReason: 'storage',
+      });
+      expect(chainDescriptorReads).toBeLessThanOrEqual(3);
+    } finally {
+      descriptorSpy.mockRestore();
+    }
+  });
+
+  effectIt.effect('captures typed status failures without inherited log context and preserves the HTTP response', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const current = yield* fixture(root =>
+          manifest(root, 'worksets:\n  - name: platform\n    description: Shared runtime\n    projects: [api]'),
+        );
+        const layout = codeGraphWorksetCatalogLayout(current.path, current.config.agentContextHome);
+        const jobScope = yield* Scope.Scope;
+        const events: string[] = [];
+        const captureConsole: Console.Console = new Proxy(console, {
+          get(target, property, receiver) {
+            if (property === 'error')
+              return (...args: ReadonlyArray<unknown>) =>
+                events.push(EffectArray.join(EffectArray.map(args, String), ' '));
+            return Reflect.get(target, property, receiver);
+          },
+        });
+        const request = {
+          body: Effect.void,
+          config: current.config,
+          contextKey: {},
+          jobScope,
+          method: 'GET',
+          url: new URL('http://127.0.0.1/api/worksets/status?workset=platform'),
+        };
+        const key = 'THREADNOTE_MANAGER_WORKSET_FAILURE_DIAGNOSTICS';
+        const success = yield* handleManagerWorksetRequest(request).pipe(
+          Effect.provideService(Console.Console, captureConsole),
+        );
+        if (success === undefined) return yield* Effect.die(new Error('Expected a workset status response.'));
+        expect(success.status).toBe(200);
+        expect(events).toEqual([]);
+        yield* current.fs.makeDirectory(current.path.dirname(layout.databasePath), {recursive: true});
+        yield* current.fs.writeFileString(layout.databasePath, 'not a sqlite catalog');
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            vi.stubEnv(key, '');
+          }),
+          () =>
+            Effect.gen(function* () {
+              const disabled = yield* handleManagerWorksetRequest(request).pipe(
+                Effect.provideService(Console.Console, captureConsole),
+              );
+              expect(events).toEqual([]);
+              vi.stubEnv(key, '1');
+              const enabled = yield* Effect.withLogSpan(
+                Effect.annotateLogs(
+                  handleManagerWorksetRequest(request).pipe(Effect.provideService(Console.Console, captureConsole)),
+                  {privateCause: 'cause-context-canary', privatePath: '/annotation-context-canary'},
+                ),
+                'private-span-context-canary',
+              );
+              if (enabled === undefined) return yield* Effect.die(new Error('Expected a workset status response.'));
+              expect(enabled).toEqual(disabled);
+              expect(enabled.status).toBe(500);
+              expect(events).toHaveLength(1);
+              const output = events[0] ?? '';
+              expect(output).toContain('manager-workset-failure-v1');
+              expect(output).not.toContain('cause-context-canary');
+              expect(output).not.toContain('annotation-context-canary');
+              expect(output).not.toContain('private-span-context-canary');
+              const payload = JSON.parse(EffectString.slice(1, -1)(output));
+              expect(payload).toMatchObject({
+                boundary: 'catalog-status',
+                causeCode: 'unknown',
+                marker: 'manager-workset-failure-v1',
+              });
+              expect([
+                'busy',
+                'capacity',
+                'corrupt',
+                'expired',
+                'incompatible',
+                'invalid-input',
+                'missing',
+                'stale',
+                'storage',
+              ]).toContain(payload.catalogReason);
+
+              events.length = 0;
+              const nonStatus = yield* handleManagerWorksetRequest({
+                ...request,
+                url: new URL('http://127.0.0.1/api/worksets'),
+              }).pipe(Effect.provideService(Console.Console, captureConsole));
+              if (nonStatus === undefined) return yield* Effect.die(new Error('Expected a workset catalog response.'));
+              expect(nonStatus.status).toBe(200);
+              expect(events).toEqual([]);
+
+              const failingConsole: Console.Console = new Proxy(console, {
+                get(target, property, receiver) {
+                  if (property === 'error')
+                    return () => {
+                      throw new Error('diagnostic sink failure');
+                    };
+                  return Reflect.get(target, property, receiver);
+                },
+              });
+              const sinkFailure = yield* handleManagerWorksetRequest(request).pipe(
+                Effect.provideService(Console.Console, failingConsole),
+              );
+              expect(sinkFailure).toEqual(enabled);
+            }),
+          () => Effect.sync(() => vi.unstubAllEnvs()),
+        );
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

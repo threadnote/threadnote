@@ -65,6 +65,16 @@ export const test = base.extend<ManagerFixtures>({
         const {configureSetup} = await import('./setup.js');
         await configureSetup(manager);
       }
+      if (
+        testInfo.title ===
+          'S07 S09 workset preparation publishes real repositories and converges after source changes' &&
+        testInfo.retry === 0 &&
+        manager.environment.THREADNOTE_E2E_ROOT === manager.root &&
+        manager.environment.THREADNOTE_HOME === manager.home &&
+        manager.environment.HOME === manager.home
+      ) {
+        manager.environment.THREADNOTE_MANAGER_WORKSET_FAILURE_DIAGNOSTICS = '1';
+      }
       await manager.start(managerMode);
       if (managerScenario === 'populated')
         await manager.remember(
