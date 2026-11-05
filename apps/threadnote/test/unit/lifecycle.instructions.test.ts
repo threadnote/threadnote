@@ -14,6 +14,12 @@ import {runInstall} from '@threadnote/threadnote/lifecycle';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {readModelSelection, writeModelSelection} from '@threadnote/inference/models/selection';
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {
+  ensureVectorIndex,
+  loadRecallVectorAuthorizationKey,
+  vectorIndexGenerationReadiness,
+} from '@threadnote/recall/vector-index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const embeddingManifest = EffectOption.getOrUndefined(
@@ -151,6 +157,41 @@ describe('agent instruction lifecycle', () => {
           );
           expect(yield* fs.readFileString(legacyCursorRule)).toBe(legacyCursorContent);
           expect(yield* fs.readFileString(legacyCursorMdcRule)).toBe(legacyCursorMdcContent);
+
+          const seededIndex = yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
+          yield* ensureVectorIndex(config, embeddingManifest, seededIndex.candidates, {
+            corpusGeneration: seededIndex.generation,
+          }).pipe(
+            Effect.provideService(LocalModelStore, modelStore),
+            Effect.provideService(LocalModelRuntime, modelRuntime),
+          );
+          const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+          expect(
+            yield* vectorIndexGenerationReadiness(
+              threadnoteHome,
+              embeddingManifest,
+              seededIndex.generation,
+              authorizationKey,
+            ),
+          ).toBe('current');
+          const qwenManifest = EffectOption.getOrUndefined(
+            EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'qwen3-embedding-0.6b-q8'),
+          )!;
+          expect(
+            yield* vectorIndexGenerationReadiness(
+              threadnoteHome,
+              qwenManifest,
+              seededIndex.generation,
+              authorizationKey,
+            ),
+          ).toBe('missing');
+          const reinstalled = yield* captureConsole(runInstall(config, {printNextSteps: false, start: false})).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+            Effect.provideService(LocalModelStore, modelStore),
+            Effect.provideService(LocalModelRuntime, modelRuntime),
+          );
+          expect(reinstalled.output).toContain('Document embeddings queued for idle background work.');
+          expect(reinstalled.output).toContain('Model: qwen3-embedding-0.6b-q8.');
 
           if (system.platform !== 'win32') {
             const missingTargetShim = path.join(root, 'missing-target-threadnote');

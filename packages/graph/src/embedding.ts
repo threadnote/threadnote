@@ -23,7 +23,11 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
-import {LocalModelCatalog, type LocalModelCatalogShape, type LocalModelManifest} from '@threadnote/inference/models/catalog';
+import {
+  LocalModelCatalog,
+  type LocalModelCatalogShape,
+  type LocalModelManifest,
+} from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {normalizeVector, searchExactVectors, type VectorSearchResult} from '@threadnote/inference/vector-search';
@@ -621,7 +625,9 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               forcedPrefix = rawPage.length > 1;
               rawPage = rawPage.slice(0, 1);
             }
-            let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => projectSymbol(symbol, selected.manifest));
+            let projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol =>
+              projectSymbol(symbol, selected.manifest),
+            );
             const existing =
               projectedPage.length === 0
                 ? []
@@ -661,7 +667,9 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
             const truncated = forcedPrefix || consumed < rawPage.length;
             rawPage = rawPage.slice(0, consumed);
             if (truncated) {
-              projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol => projectSymbol(symbol, selected.manifest));
+              projectedPage = EffectArray.map(selectGraphEmbeddingSymbols(rawPage), symbol =>
+                projectSymbol(symbol, selected.manifest),
+              );
               projected = EffectArray.filter(projectedPage, item => !inserted.has(item.id));
             }
             const rows: Array<readonly [string, string, string, Uint8Array]> = [];
@@ -685,10 +693,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                   yield* protect(1, 4096, lock(renewCodeGraphGenerationClaim(sql, generation, ownerToken)));
                   return yield* input.runtime.embedMany({
                     embeddingContextPoolSize: input.embeddingContextPoolSize ?? CODE_GRAPH_EMBEDDING_CONTEXT_CAP,
-                    inputs: EffectArray.map(
-                      batch,
-                      item => item.text,
-                    ),
+                    inputs: EffectArray.map(batch, item => item.text),
                     manifest: selected.manifest,
                     modelPath: selected.modelPath,
                   });
@@ -1035,9 +1040,7 @@ export function graphEmbeddingTemplateVersion(manifest: Pick<LocalModelManifest,
     : CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION;
 }
 
-export function graphEmbeddingQueryPrefix(
-  manifest: Pick<LocalModelManifest, 'id' | 'promptPrefixes'>,
-): string {
+export function graphEmbeddingQueryPrefix(manifest: Pick<LocalModelManifest, 'id' | 'promptPrefixes'>): string {
   return manifest.id === CODE_GRAPH_GEMMA_MODEL_ID
     ? CODE_GRAPH_GEMMA_QUERY_PREFIX
     : (manifest.promptPrefixes?.query ?? '');

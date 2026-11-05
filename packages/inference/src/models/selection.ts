@@ -62,7 +62,10 @@ export function selectedEmbeddingModelId(selection: ModelSelection, purpose: Emb
 /** Return every role and embedding purpose that still points at a model. */
 export function modelSelectionReferences(selection: ModelSelection, modelId: string): readonly string[] {
   return [
-    ...EffectArray.map(EffectArray.filter(MODEL_SELECTION_ROLES, role => selection.roles[role] === modelId), role => role),
+    ...EffectArray.map(
+      EffectArray.filter(MODEL_SELECTION_ROLES, role => selection.roles[role] === modelId),
+      role => role,
+    ),
     ...EffectArray.map(
       EffectArray.filter(EMBEDDING_PURPOSES, purpose => selection.purposes?.[purpose] === modelId),
       purpose => purpose,
@@ -133,7 +136,11 @@ export const clearLocalModelPurposeSelection = Effect.fn('models.clearPurposeSel
   const purposes = {...current.purposes};
   delete purposes[purpose];
   const hasPurposes = EffectArray.some(EMBEDDING_PURPOSES, key => purposes[key] !== undefined);
-  const selection: ModelSelection = {roles: current.roles, version: MODEL_SELECTION_VERSION, ...(hasPurposes ? {purposes} : {})};
+  const selection: ModelSelection = {
+    roles: current.roles,
+    version: MODEL_SELECTION_VERSION,
+    ...(hasPurposes ? {purposes} : {}),
+  };
   yield* writeModelSelection(home, selection);
   return selection;
 });
@@ -164,23 +171,24 @@ function isModelSelection(value: unknown): value is ModelSelection {
   ) {
     return false;
   }
-  return EffectArray.every(EffectRecord.keys(candidate.roles as Readonly<Record<string, unknown>>), role =>
-    EffectArray.some(MODEL_SELECTION_ROLES, allowedRole => role === allowedRole),
-  ) &&
+  return (
+    EffectArray.every(EffectRecord.keys(candidate.roles as Readonly<Record<string, unknown>>), role =>
+      EffectArray.some(MODEL_SELECTION_ROLES, allowedRole => role === allowedRole),
+    ) &&
     EffectArray.every(MODEL_SELECTION_ROLES, role => {
       const id = candidate.roles?.[role];
       return id === undefined || (typeof id === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(id));
     }) &&
-    (candidate.purposes === undefined || (
-      typeof candidate.purposes === 'object' &&
-      candidate.purposes !== null &&
-      !EffectArray.isArray(candidate.purposes) &&
-      EffectArray.every(EffectRecord.keys(candidate.purposes as Readonly<Record<string, unknown>>), purpose =>
-        EffectArray.some(EMBEDDING_PURPOSES, allowedPurpose => purpose === allowedPurpose),
-      ) &&
-      EffectArray.every(EMBEDDING_PURPOSES, purpose => {
-        const id = candidate.purposes?.[purpose];
-        return id === undefined || (typeof id === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(id));
-      })
-    ));
+    (candidate.purposes === undefined ||
+      (typeof candidate.purposes === 'object' &&
+        candidate.purposes !== null &&
+        !EffectArray.isArray(candidate.purposes) &&
+        EffectArray.every(EffectRecord.keys(candidate.purposes as Readonly<Record<string, unknown>>), purpose =>
+          EffectArray.some(EMBEDDING_PURPOSES, allowedPurpose => purpose === allowedPurpose),
+        ) &&
+        EffectArray.every(EMBEDDING_PURPOSES, purpose => {
+          const id = candidate.purposes?.[purpose];
+          return id === undefined || (typeof id === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(id));
+        })))
+  );
 }

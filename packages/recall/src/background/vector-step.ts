@@ -40,7 +40,8 @@ export const stepRecallVectorPreparation = Effect.fn('recall.stepVectorPreparati
   if (manifest.role !== 'embedding' || !manifest.dimensions) return yield* preparationChanged();
   const verify = Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
-    if (selectedEmbeddingModelId(selection, 'recall') !== manifest.id || !(yield* stillDesired)) return yield* preparationChanged();
+    if (selectedEmbeddingModelId(selection, 'recall') !== manifest.id || !(yield* stillDesired))
+      return yield* preparationChanged();
     const selected = yield* (yield* LocalModelCatalog).get(manifest.id);
     if (recallVectorStorage.recipe(selected) !== recallVectorStorage.recipe(manifest))
       return yield* preparationChanged();

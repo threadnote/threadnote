@@ -1,10 +1,16 @@
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {
+  BUILTIN_MODEL_MANIFESTS,
+  CORE_EMBEDDING_MODEL_ID,
+  CORE_GENERATION_MODEL_ID,
+} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {runModelClear, runModelList} from '@threadnote/threadnote/models/commands';
 import {
   readModelSelection,
   selectLocalModel,
@@ -17,6 +23,31 @@ import {
 } from '@threadnote/inference/models/selection';
 
 describe('model selection', () => {
+  effectIt.effect('shows the effective catalog default and restores it when a purpose override is cleared', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-model-command-'});
+        const config = {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'threadnote',
+          manifestPath: path.join(home, 'manifest.yaml'),
+          user: 'tester',
+        };
+        const listed = yield* captureConsole(runModelList(config));
+        expect(listed.output).toContain(`graph embedding: ${CORE_EMBEDDING_MODEL_ID} (default)`);
+        expect(listed.output).toContain(`recall embedding: ${CORE_EMBEDDING_MODEL_ID} (default)`);
+        expect(listed.output).toContain('selected(graph, recall)');
+        yield* writeModelSelection(home, {purposes: {graph: 'embeddinggemma-2-q8'}, roles: {}, version: 1});
+        const cleared = yield* captureConsole(runModelClear(config, 'graph'));
+        expect(cleared.output).toContain(`it now uses ${CORE_EMBEDDING_MODEL_ID} (default).`);
+        expect((yield* readModelSelection(home)).purposes?.graph).toBeUndefined();
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('atomically records role-aware selection and ignores a malformed receipt', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

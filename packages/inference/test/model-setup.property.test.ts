@@ -100,9 +100,9 @@ describe('model setup domain properties', () => {
   it('round-trips legacy role-only JSON and resolves each purpose independently with shared fallback', () => {
     FC.assert(
       FC.property(
-        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), { nil: undefined }),
-        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), { nil: undefined }),
-        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), { nil: undefined }),
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
         (shared, graph, recall) => {
           const legacy = {version: 1, roles: {embedding: shared ?? 'shared-model'}};
           const selection = {

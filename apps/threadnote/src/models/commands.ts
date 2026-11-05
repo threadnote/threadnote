@@ -1,4 +1,4 @@
-import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {CORE_EMBEDDING_MODEL_ID, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {stopModelSetup} from './setup.js';
 import {Array as EffectArray, Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -29,16 +29,18 @@ export const runModelList = Effect.fn('models.command.list')(function* (config: 
   const store = yield* LocalModelStore;
   const selection = yield* readModelSelection(config.agentContextHome);
   for (const purpose of ['graph', 'recall'] as const) {
-    const modelId = selectedEmbeddingModelId(selection, purpose);
-    yield* Console.log(
-      `${purpose} embedding: ${modelId ?? 'none'}${selection.purposes?.[purpose] ? '' : ' (shared fallback)'}`,
-    );
+    const modelId = (yield* catalog.get(selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID)).id;
+    const source = selection.purposes?.[purpose] ? '' : selection.roles.embedding ? ' (shared fallback)' : ' (default)';
+    yield* Console.log(`${purpose} embedding: ${modelId}${source}`);
   }
   for (const manifest of yield* catalog.list()) {
     const status = yield* store.status(config.agentContextHome, manifest);
     const purposes =
       manifest.role === 'embedding'
-        ? EffectArray.filter(['graph', 'recall'] as const, purpose => selectedEmbeddingModelId(selection, purpose) === manifest.id)
+        ? EffectArray.filter(
+            ['graph', 'recall'] as const,
+            purpose => (selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID) === manifest.id,
+          )
         : [];
     const selected = EffectArray.join(
       EffectArray.filter(
@@ -124,9 +126,11 @@ export const runModelClear = Effect.fn('models.command.clear')(function* (
   config: RuntimeConfig,
   purpose: EmbeddingPurpose,
 ) {
+  const catalog = yield* LocalModelCatalog;
   const selection = yield* clearLocalModelPurposeSelection(config.agentContextHome, purpose);
+  const modelId = (yield* catalog.get(selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID)).id;
   yield* Console.log(
-    `Cleared the ${purpose} embedding override; it now uses ${selectedEmbeddingModelId(selection, purpose) ?? 'no selected model'}${selection.roles.embedding ? ' (shared fallback)' : ''}.`,
+    `Cleared the ${purpose} embedding override; it now uses ${modelId}${selection.roles.embedding ? ' (shared fallback)' : ' (default)'}.`,
   );
 });
 
@@ -160,7 +164,8 @@ export const runModelSelect = Effect.fn('models.command.select')(function* (
   yield* Console.log(`Selected ${modelId} for ${role}.`);
   if (role === 'graph')
     yield* Console.log('Graph vectors use model-specific storage; rebuild graph vectors to prepare this choice.');
-  if (role === 'recall') yield* Console.log('Run `threadnote index rebuild` to prepare recall vectors for this choice.');
+  if (role === 'recall')
+    yield* Console.log('Run `threadnote index rebuild` to prepare recall vectors for this choice.');
 });
 
 export const runModelRuntimeStatus = Effect.fn('models.command.runtime')(function* () {

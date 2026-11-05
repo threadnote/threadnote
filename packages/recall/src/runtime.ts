@@ -28,7 +28,11 @@ import {
 } from '@threadnote/recall/results';
 import {rerankWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection, parseModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+import {
+  readModelSelection,
+  parseModelSelection,
+  selectedEmbeddingModelId,
+} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallFeedback} from './feedback.js';
