@@ -22,6 +22,7 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import * as Schema from 'effect/Schema';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
@@ -1395,7 +1396,7 @@ describe('built self-contained distribution', () => {
     await expect(runCli(['models', 'runtime'])).resolves.toMatch(/node-llama-cpp:\s+prebuilt/i);
   });
 
-  it('serves native core and full MCP toolsets over stdio', async () => {
+  it('serves native core and full MCP toolsets over stdio', async ({signal}) => {
     const vault = join(home, 'MCP Obsidian Vault');
     const manifestPath = join(home, 'seed-manifest.yaml');
     const projectionId = 'mcp-selected-memory';
@@ -1426,7 +1427,10 @@ describe('built self-contained distribution', () => {
       },
       stderr: 'pipe',
     });
+    const transportClose = observeStdioClientTransportClose(transport);
     const client = new Client({name: 'threadnote-e2e', version: '4.0.0'});
+    let operationFailed = false;
+    let operationFailure: unknown;
     try {
       await client.connect(transport);
       const names = EffectArray.map((await client.listTools()).tools, tool => tool.name);
@@ -1591,11 +1595,38 @@ describe('built self-contained distribution', () => {
           Effect.pipe(name, EffectString.startsWith('native-e2e--')),
         ),
       ).toBe(true);
-    } finally {
+    } catch (cause) {
+      operationFailed = true;
+      operationFailure = cause;
+    }
+
+    let cleanupFailed = false;
+    let cleanupFailure: unknown;
+    try {
       await client.close();
+    } catch (cause) {
+      cleanupFailed = true;
+      cleanupFailure = cause;
+    }
+    if (!cleanupFailed) {
+      try {
+        await transportClose.waitForCloseIfStarted(signal);
+      } catch (cause) {
+        cleanupFailed = true;
+        cleanupFailure = cause;
+      }
+    }
+    try {
       await runCli(['source', 'remove', sourceId, '--apply']);
       await runCli(['projection', 'remove', projectionId, '--apply']);
+    } catch (cause) {
+      if (!cleanupFailed) {
+        cleanupFailed = true;
+        cleanupFailure = cause;
+      }
     }
+    if (operationFailed) throw operationFailure;
+    if (cleanupFailed) throw cleanupFailure;
   });
 
   it('publishes a durable memory through a separate Git worktree into the remote', async () => {
