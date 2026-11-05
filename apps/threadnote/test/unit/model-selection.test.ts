@@ -23,7 +23,7 @@ import {
 } from '@threadnote/inference/models/selection';
 
 describe('model selection', () => {
-  effectIt.effect('shows the effective catalog default and restores it when a purpose override is cleared', () =>
+  effectIt.effect('distinguishes an unselected home from a provisioned shared embedding fallback', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -37,13 +37,23 @@ describe('model selection', () => {
           user: 'tester',
         };
         const listed = yield* captureConsole(runModelList(config));
-        expect(listed.output).toContain(`graph embedding: ${CORE_EMBEDDING_MODEL_ID} (default)`);
-        expect(listed.output).toContain(`recall embedding: ${CORE_EMBEDDING_MODEL_ID} (default)`);
-        expect(listed.output).toContain('selected(graph, recall)');
+        expect(listed.output).toContain(`graph embedding: unselected (setup default: ${CORE_EMBEDDING_MODEL_ID})`);
+        expect(listed.output).toContain(`recall embedding: unselected (setup default: ${CORE_EMBEDDING_MODEL_ID})`);
+        expect(listed.output).not.toContain('selected(graph, recall)');
         yield* writeModelSelection(home, {purposes: {graph: 'embeddinggemma-2-q8'}, roles: {}, version: 1});
         const cleared = yield* captureConsole(runModelClear(config, 'graph'));
-        expect(cleared.output).toContain(`it now uses ${CORE_EMBEDDING_MODEL_ID} (default).`);
+        expect(cleared.output).toContain(`it now uses no selected model (setup default: ${CORE_EMBEDDING_MODEL_ID}).`);
         expect((yield* readModelSelection(home)).purposes?.graph).toBeUndefined();
+        yield* writeModelSelection(home, {
+          purposes: {graph: 'embeddinggemma-2-q8'},
+          roles: {embedding: CORE_EMBEDDING_MODEL_ID},
+          version: 1,
+        });
+        const provisioned = yield* captureConsole(runModelList(config));
+        expect(provisioned.output).toContain(`recall embedding: ${CORE_EMBEDDING_MODEL_ID} (shared fallback)`);
+        expect(provisioned.output).toContain('selected(role, recall)');
+        const inherited = yield* captureConsole(runModelClear(config, 'graph'));
+        expect(inherited.output).toContain(`it now uses ${CORE_EMBEDDING_MODEL_ID} (shared fallback).`);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

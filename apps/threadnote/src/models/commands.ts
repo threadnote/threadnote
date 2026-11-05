@@ -28,10 +28,13 @@ export const runModelList = Effect.fn('models.command.list')(function* (config: 
   const catalog = yield* LocalModelCatalog;
   const store = yield* LocalModelStore;
   const selection = yield* readModelSelection(config.agentContextHome);
+  const setupDefault = (yield* catalog.get(CORE_EMBEDDING_MODEL_ID)).id;
   for (const purpose of ['graph', 'recall'] as const) {
-    const modelId = (yield* catalog.get(selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID)).id;
-    const source = selection.purposes?.[purpose] ? '' : selection.roles.embedding ? ' (shared fallback)' : ' (default)';
-    yield* Console.log(`${purpose} embedding: ${modelId}${source}`);
+    const modelId = selectedEmbeddingModelId(selection, purpose);
+    const source = selection.purposes?.[purpose] ? '' : ' (shared fallback)';
+    yield* Console.log(
+      `${purpose} embedding: ${modelId === undefined ? `unselected (setup default: ${setupDefault})` : `${modelId}${source}`}`,
+    );
   }
   for (const manifest of yield* catalog.list()) {
     const status = yield* store.status(config.agentContextHome, manifest);
@@ -39,7 +42,7 @@ export const runModelList = Effect.fn('models.command.list')(function* (config: 
       manifest.role === 'embedding'
         ? EffectArray.filter(
             ['graph', 'recall'] as const,
-            purpose => (selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID) === manifest.id,
+            purpose => selectedEmbeddingModelId(selection, purpose) === manifest.id,
           )
         : [];
     const selected = EffectArray.join(
@@ -128,9 +131,10 @@ export const runModelClear = Effect.fn('models.command.clear')(function* (
 ) {
   const catalog = yield* LocalModelCatalog;
   const selection = yield* clearLocalModelPurposeSelection(config.agentContextHome, purpose);
-  const modelId = (yield* catalog.get(selectedEmbeddingModelId(selection, purpose) ?? CORE_EMBEDDING_MODEL_ID)).id;
+  const modelId = selectedEmbeddingModelId(selection, purpose);
+  const setupDefault = (yield* catalog.get(CORE_EMBEDDING_MODEL_ID)).id;
   yield* Console.log(
-    `Cleared the ${purpose} embedding override; it now uses ${modelId}${selection.roles.embedding ? ' (shared fallback)' : ' (default)'}.`,
+    `Cleared the ${purpose} embedding override; it now uses ${modelId === undefined ? `no selected model (setup default: ${setupDefault})` : `${modelId} (shared fallback)`}.`,
   );
 });
 
