@@ -31,8 +31,20 @@ const stages = new Set([
   'status-after',
   'other',
 ]);
+const profiles = new Set(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']);
+type CloseoutProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
+const isCloseoutProfile = (value: unknown): value is CloseoutProfile =>
+  typeof value === 'string' && profiles.has(value);
 const bounded = (value: number) => Math.min(2_147_483_647, Math.max(0, Math.round(value)));
 type Entry = {sequence: number; stage: string; startedMs: number};
+type GraphOperation = {
+  readonly operation: 'status-before' | 'index' | 'status-after';
+  readonly ordinal: number;
+  readonly stage: 'graph-ready';
+  readonly startedMs: number;
+  inclusiveMs?: number;
+  outcome?: 'Active' | 'Success' | 'Failure';
+};
 
 /** Test-only observer: closed labels, no request values or error messages. */
 export const closeoutDiagnostics = (now = () => performance.now()) => {
@@ -57,9 +69,13 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
   let recentDropped = 0;
   let bodyEnteredMs: number | undefined;
   let bodyExitedMs: number | undefined;
+  let profile: CloseoutProfile = 'desktop';
   const active = new Map<number, Entry>();
   const recent: (Entry & {elapsedMs: number; outcome: 'Success' | 'Failure'})[] = [];
   const totals: Record<string, {count: number; elapsedMs: number}> = Object.create(null);
+  const graphOperationOrdinals: Record<string, number> = Object.create(null);
+  const graphOperationSamples: GraphOperation[] = [];
+  let graphOperationDropped = 0;
   const stage = <A, E, R>(label: unknown, program: Effect.Effect<A, E, R>) =>
     Effect.suspend(() => {
       const entry = {
@@ -91,6 +107,56 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
         ),
       );
     });
+  const graphOperation = <A, E, R>(operation: GraphOperation['operation'], program: Effect.Effect<A, E, R>) =>
+    Effect.suspend(() => {
+      const ordinal = (graphOperationOrdinals[operation] = bounded((graphOperationOrdinals[operation] ?? 0) + 1));
+      const startedMs = elapsed();
+      const retained = graphOperationSamples.length < 64;
+      const sample: GraphOperation | undefined = retained
+        ? {operation, ordinal, stage: 'graph-ready', startedMs, outcome: 'Active'}
+        : undefined;
+      if (sample) graphOperationSamples.push(sample);
+      else graphOperationDropped = bounded(graphOperationDropped + 1);
+      return stage(operation, program).pipe(
+        Effect.onExit(exit =>
+          Effect.sync(() => {
+            if (sample) {
+              sample.inclusiveMs = bounded(elapsed() - startedMs);
+              sample.outcome = exit._tag;
+            }
+          }),
+        ),
+      );
+    });
+  const snapshot = () => {
+    const at = elapsed();
+    return {
+      version: 2,
+      scope: 'native-closeout-lifecycle',
+      profile,
+      elapsedMs: at,
+      bodyEnteredMs,
+      bodyExitedMs,
+      layerAcquisitionMs: bodyEnteredMs ?? at,
+      cleanupMs: bodyExitedMs === undefined ? undefined : bounded(at - bodyExitedMs),
+      totals,
+      graphOperations: EffectArray.map(graphOperationSamples, sample => ({
+        ...sample,
+        inclusiveMs: sample.inclusiveMs ?? bounded(at - sample.startedMs),
+        outcome: sample.outcome ?? 'Active',
+      })),
+      graphOperationDropped,
+      activeCount,
+      unlistedActiveCount: activeCount - active.size,
+      active: EffectArray.map([...active.values()], entry => ({
+        ...entry,
+        elapsedMs: bounded(at - entry.startedMs),
+      })),
+      recent,
+      recentDropped,
+      spans: spans.snapshot(),
+    };
+  };
   return {
     tracer: spans.tracer,
     stage,
@@ -104,7 +170,8 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
             CodeGraphQueryService,
             CodeGraphQueryService.of({
               ...query,
-              status: (...args) => stage(indexStarted ? 'status-after' : 'status-before', query.status(...args)),
+              status: (...args) =>
+                graphOperation(indexStarted ? 'status-after' : 'status-before', query.status(...args)),
             }),
           ),
           Effect.provideService(
@@ -114,38 +181,19 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
               index: (...args) =>
                 Effect.suspend(() => {
                   indexStarted = true;
-                  return stage('index', indexer.index(...args));
+                  return graphOperation('index', indexer.index(...args));
                 }),
             }),
           ),
         );
       }),
+    setProfile: (value: unknown) => {
+      profile = isCloseoutProfile(value) ? value : 'desktop';
+    },
+    snapshot,
     report: () => {
       try {
-        const at = elapsed();
-        process.stderr.write(
-          'NATIVE_CLOSEOUT_DIAGNOSTICS ' +
-            JSON.stringify({
-              version: 1,
-              scope: 'native-closeout-lifecycle',
-              elapsedMs: at,
-              bodyEnteredMs,
-              bodyExitedMs,
-              layerAcquisitionMs: bodyEnteredMs ?? at,
-              cleanupMs: bodyExitedMs === undefined ? undefined : bounded(at - bodyExitedMs),
-              totals,
-              activeCount,
-              unlistedActiveCount: activeCount - active.size,
-              active: EffectArray.map([...active.values()], entry => ({
-                ...entry,
-                elapsedMs: bounded(at - entry.startedMs),
-              })),
-              recent,
-              recentDropped,
-              spans: spans.snapshot(),
-            }) +
-            '\n',
-        );
+        process.stderr.write('NATIVE_CLOSEOUT_DIAGNOSTICS ' + JSON.stringify(snapshot()) + '\n');
       } catch {
         // Diagnostic output must never replace the failure being investigated.
       }
@@ -159,6 +207,12 @@ class CloseoutDiagnostics extends Context.Service<CloseoutDiagnostics, ReturnTyp
 export const observeCloseoutStage = <A, E, R>(stage: unknown, program: Effect.Effect<A, E, R>) =>
   Effect.serviceOption(CloseoutDiagnostics).pipe(
     Effect.flatMap(observer => (Option.isSome(observer) ? observer.value.stage(stage, program) : program)),
+  );
+export const observeCloseoutProfile = (profile: CloseoutProfile) =>
+  Effect.serviceOption(CloseoutDiagnostics).pipe(
+    Effect.flatMap(observer =>
+      Option.isSome(observer) ? Effect.sync(() => observer.value.setProfile(profile)) : Effect.void,
+    ),
   );
 export const observeCloseoutGraph = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   Effect.serviceOption(CloseoutDiagnostics).pipe(
