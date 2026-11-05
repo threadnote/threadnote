@@ -281,6 +281,8 @@ describe('native task actions', () => {
         stage: 'prepare',
         job: {status: 'stopped-with-progress', nextAction: expect.stringContaining('resume:true')},
       });
+      expect(String(object(blockedPreparation.job).nextAction)).not.toContain(prepareJobId);
+      expect(String(object(blockedPreparation.job).nextAction)).not.toContain('operation IDs');
       expect(blockedPreparation.job).not.toHaveProperty('jobId');
       expect(blockedPreparation.job).not.toHaveProperty('generation');
       expect(object(yield* f.call({...f.base('job'), command: 'status', jobId: prepareJobId}))).toEqual(stoppedStatus);
@@ -325,16 +327,28 @@ describe('native task actions', () => {
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforeStalePrepareRef);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStaleNativeState);
       const replacementPrepareRef = String(replacementPrepare.prepareRef);
-      const finishing = object(
-        yield* runNativeTaskAction(f.config, {
-          command: 'finish',
-          runId: 'native-run',
-          callerCwd: f.repo,
-          prepareRef: replacementPrepareRef,
-        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+      let lostFinishAcknowledgment: Record<string, unknown> | undefined;
+      const lostFinish = yield* finishThroughMcp({
+        runId: 'native-run',
+        callerCwd: f.repo,
+        prepareRef: replacementPrepareRef,
+      }).pipe(
+        Effect.tap(value => Effect.sync(() => (lostFinishAcknowledgment = object(object(value).structuredContent)))),
+        Effect.andThen(
+          Effect.fail(
+            WorkflowAutomationError.make({code: 'test-lost-ack', message: 'Simulated lost MCP finish response.'}),
+          ),
+        ),
+        Effect.result,
       );
+      expect(lostFinish._tag).toBe('Failure');
+      const finishingEnvelope = object(
+        yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}),
+      );
+      const finishing = object(finishingEnvelope.structuredContent);
       expect(finishing).toMatchObject({status: 'pending', stage: 'finish'});
       const finishRef = String(finishing.finishRef);
+      expect(String(lostFinishAcknowledgment?.finishRef)).toBe(finishRef);
       const finishJobId = String(decodeNativeTaskActionRef(finishRef)?.jobId);
       const beforeConflictingFinish = yield* f.fs.readFileString(closeoutFile);
       const conflictingFinish = yield* runNativeTaskAction(f.config, {
@@ -347,6 +361,11 @@ describe('native task actions', () => {
       expect(conflictingFinish).toMatchObject({failure: {code: 'stale-closeout-ref'}});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(beforeConflictingFinish);
       expect(object(yield* runNativeJobWorker(f.config, 'native-run', finishJobId, f.call)).status).toBe('completed');
+      const lostFinishReplay = object(
+        object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, prepareRef: replacementPrepareRef}))
+          .structuredContent,
+      );
+      expect(lostFinishReplay).toMatchObject({status: 'complete', stage: 'finish', replayed: true, finishRef});
       const complete = object(
         yield* runNativeTaskAction(f.config, {
           command: 'finish',
