@@ -182,8 +182,14 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     const callerCwd = yield* fs
       .realPath(request.callerCwd)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
-    const checkout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
-    if (!checkout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
+    if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
+    // Git may report a Windows root with a different separator/casing form than
+    // realPath used when the native run binding was created. Compare filesystem
+    // canonical roots, not two textual renderings of the same checkout.
+    const checkout = yield* fs
+      .realPath(reportedCheckout)
+      .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored?.state.cycle) return yield* fail('cycle-not-found', 'This run has no admitted native cycle.');
     const journal = yield* inCheckout(
