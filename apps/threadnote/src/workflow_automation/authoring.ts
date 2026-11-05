@@ -222,21 +222,25 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
     );
 });
 
+/** Reuse the section's existing UTF-8-safe excerpt rule for independently visible prose. */
+function boundedViewText(body: string, limit: number): string {
+  const bytes = utf8.encode(body);
+  if (bytes.byteLength <= limit) return body;
+  let end = limit - 100;
+  while ((bytes[end] & 0xc0) === 0x80) end--;
+  return (
+    new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, end)) +
+    '\n\nComplete content is retained in the linked structured data.'
+  );
+}
+
 /** Small semantic views link to the complete separately indexed structured data. */
 function createViewDocument(input: Parameters<typeof createNativeDocument>[0]): NativeDocumentEnvelope {
   const sections = EffectRecord.fromEntries(
-    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => {
-      const bytes = utf8.encode(body);
-      const limit = id === 'diagram' ? 10000 : 2000;
-      if (bytes.byteLength <= limit) return [id, body];
-      let end = limit - 100;
-      while ((bytes[end] & 0xc0) === 0x80) end--;
-      return [
-        id,
-        new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, end)) +
-          '\n\nComplete content is retained in the linked structured data.',
-      ];
-    }),
+    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => [
+      id,
+      boundedViewText(body, id === 'diagram' ? 10000 : 2000),
+    ]),
   );
   return createNativeDocument({...input, sections});
 }
@@ -287,6 +291,7 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         diagram: isNativeMermaidDiagram(value.diagram) ? '```mermaid\n' + value.diagram + '\n```' : value.diagram,
       },
     });
+  const compactDraft = document.compactOrigin !== undefined && !document.compactOrigin.expanded;
   return [
     {
       id: 'plan',
@@ -294,7 +299,16 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         kind: 'plan',
         title: document.title,
         sections: {
-          summary: document.objective,
+          summary: compactDraft
+            ? EffectArray.join(
+                [
+                  'Objective: ' + boundedViewText(document.objective, 600),
+                  'Current behavior: ' + boundedViewText(document.current.summary, 600),
+                  'Desired change: ' + boundedViewText(document.target.summary, 600),
+                ],
+                '\n\n',
+              )
+            : document.objective,
           phases: compact(
             bullets(EffectArray.map(document.phases, item => item.id + ': ' + compact(item.outcome, 120))),
             3500,
@@ -321,8 +335,12 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         },
       }),
     },
-    {id: 'current', document: architecture('architecture-current', document.current)},
-    {id: 'target', document: architecture('architecture-target', document.target)},
+    ...(compactDraft
+      ? []
+      : [
+          {id: 'current', document: architecture('architecture-current', document.current)},
+          {id: 'target', document: architecture('architecture-target', document.target)},
+        ]),
     {
       id: 'decisions',
       document: createViewDocument({

@@ -496,8 +496,18 @@ describe('native task actions', () => {
         objective: 'Refresh stale fixture data and verify the persisted result on the same run.',
         requirements: [{id: 'behavior', behavior: 'Stale fixture data is refreshed and verified before return.'}],
         source: refreshedSource,
-        current: {...initialPlan.current, summary: 'Expired fixture data is returned without a freshness check.'},
-        target: {...initialPlan.target, summary: 'Expired fixture data is refreshed and then verified before return.'},
+        current: {
+          ...initialPlan.current,
+          summary: 'Expired fixture data is returned without a freshness check.',
+          components: ['source.ts exports the fixture value consumed by the reload check.'],
+        },
+        target: {
+          ...initialPlan.target,
+          summary: 'Expired fixture data is refreshed and then verified before return.',
+          components: [
+            'source.ts refreshes the fixture value and exposes the persisted result for reload verification.',
+          ],
+        },
         phases: [
           {
             ...compactPhase,
