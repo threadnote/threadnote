@@ -19,11 +19,12 @@ import {
   createRecallEmbeddingWorkerFixtureDrain,
   drainRecallEmbeddingWorkerFixture,
 } from '@threadnote/threadnote/recall/embedding_worker_process';
+import {BackgroundWorkerFixtureDrainUnavailable} from '@threadnote/inference/background/worker-control';
 import {fixturePipelineReceiptProvesExit} from '@threadnote/testing/fixture-pipeline-receipt';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {SecureRandom} from 'effect/crypto';
-import {Clock, Console, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import {Clock, Console, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import * as EffectRecord from 'effect/Record';
@@ -238,7 +239,13 @@ const smokeSelfContained = Effect.scoped(
         try: () => processes.closeAndObserve(monotonicDeadline),
         catch: cause => scriptError(cause),
       }),
-      drain: drainRecallEmbeddingWorkerFixture(capability, deadline),
+      drain: drainRecallEmbeddingWorkerFixture(capability, deadline).pipe(
+        Effect.tapError(error =>
+          Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)
+            ? Console.error(`Self-contained fixture drain unavailable: ${error.reason}`)
+            : Effect.void,
+        ),
+      ),
       remove: fs.remove(temporaryRoot, {recursive: true, force: true}),
       remaining,
     });
