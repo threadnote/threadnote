@@ -2,6 +2,7 @@ import {
   Array as EffectArray,
   Option as EffectOption,
   Record as EffectRecord,
+  Schema,
   String as EffectString,
   pipe as EffectPipe,
 } from 'effect';
@@ -66,6 +67,74 @@ export interface NativeTaskProjectionOptions {
   readonly role?: NativeTaskRole;
   readonly offset?: number;
   readonly planDrift?: string;
+}
+
+export const NativeTaskActionRefSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literals(['work', 'snapshot', 'validation', 'delivery', 'closeout-prepare', 'closeout-finish']),
+  runId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)),
+  generationHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  stateRevision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  phaseId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  phaseHash: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  baselineHead: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+  baselineTree: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+  baselineRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512))),
+  sourceHead: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+  sourceTree: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+  snapshotId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  attemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  previousAttemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+  payloadDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  closeoutRevision: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)))),
+  transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
+});
+export type NativeTaskActionRef = typeof NativeTaskActionRefSchema.Type;
+
+const encodeOpaqueRef = (value: string): string => {
+  const binary = EffectArray.join(
+    EffectArray.map(Array.from(new TextEncoder().encode(value)), byte => String.fromCharCode(byte)),
+    '',
+  );
+  return EffectPipe(
+    btoa(binary),
+    EffectString.replaceAll('+', '-'),
+    EffectString.replaceAll('/', '_'),
+    EffectString.replace(/=+$/u, ''),
+  );
+};
+
+const decodeOpaqueRef = (value: string): string | undefined => {
+  try {
+    const binary = atob(EffectPipe(value, EffectString.replaceAll('-', '+'), EffectString.replaceAll('_', '/')));
+    const bytes = Uint8Array.from(binary, character =>
+      EffectOption.getOrElse(EffectPipe(character, EffectString.charCodeAt(0)), () => 0),
+    );
+    return new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+  } catch {
+    return undefined;
+  }
+};
+
+export function encodeNativeTaskActionRef(input: NativeTaskActionRef): string {
+  const ref = Schema.decodeSync(NativeTaskActionRefSchema, {onExcessProperty: 'error'})(input);
+  return `taskref-v1.${encodeOpaqueRef(JSON.stringify(ref))}`;
+}
+
+export function decodeNativeTaskActionRef(input: string): NativeTaskActionRef | undefined {
+  if (!EffectString.startsWith('taskref-v1.')(input)) return undefined;
+  const decoded = decodeOpaqueRef(EffectString.slice('taskref-v1.'.length)(input));
+  if (decoded === undefined) return undefined;
+  try {
+    return Schema.decodeUnknownSync(NativeTaskActionRefSchema, {onExcessProperty: 'error'})(JSON.parse(decoded));
+  } catch {
+    return undefined;
+  }
+}
+
+export function nativeTaskSnapshotId(workRef: string): string {
+  return `task-${EffectString.slice(0, 48)(sha256HexSync(workRef))}`;
 }
 
 export interface NativeTaskCursor {

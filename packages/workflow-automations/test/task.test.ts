@@ -6,7 +6,13 @@ import fc from 'fast-check';
 import {initializeNativeCycle, type NativeCyclePlan} from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
-import {decodeNativeTaskCursor, nativeTaskCursorMatches, projectNativeTaskView} from '../src/task.js';
+import {
+  decodeNativeTaskActionRef,
+  decodeNativeTaskCursor,
+  encodeNativeTaskActionRef,
+  nativeTaskCursorMatches,
+  projectNativeTaskView,
+} from '../src/task.js';
 
 const plan: NativeCyclePlan = {
   format: 'threadnote-native-cycle-plan',
@@ -69,6 +75,31 @@ const state: NativeWorkflowState = {
 };
 
 describe('native task projection', () => {
+  it('round-trips opaque action references and rejects malformed or extended values', () => {
+    const reference = {
+      version: 1 as const,
+      kind: 'work' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      stateRevision: EffectString.repeat(64)('b'),
+      phaseId: 'phase-one',
+      phaseHash: EffectString.repeat(64)('c'),
+      baselineHead: EffectString.repeat(40)('d'),
+      baselineTree: EffectString.repeat(40)('e'),
+      baselineRef: 'refs/threadnote/cycle/baseline/phase-one',
+    };
+    const encoded = encodeNativeTaskActionRef(reference);
+    expect(encoded).toMatch(/^taskref-v1\./u);
+    expect(decodeNativeTaskActionRef(encoded)).toEqual(reference);
+    expect(decodeNativeTaskActionRef('taskref-v1.not-base64-json')).toBeUndefined();
+    const withUnknown = btoa(JSON.stringify({...reference, hidden: true}));
+    expect(
+      decodeNativeTaskActionRef(
+        `taskref-v1.${EffectString.replaceAll('=', '')(EffectString.replaceAll('/', '_')(EffectString.replaceAll('+', '-')(withUnknown)))}`,
+      ),
+    ).toBeUndefined();
+  });
+
   it('is deterministic, bounded, and returns only actionable fields', () => {
     const revision = Effect.pipe('f', EffectString.repeat(64));
     const view = projectNativeTaskView(state, revision);

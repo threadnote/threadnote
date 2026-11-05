@@ -7,8 +7,9 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {SystemInfo} from '@threadnote/platform/system';
 import {runNativeWatchCollector} from '../workflow_automation/watch.js';
 import {runNativeJobWorker} from '../workflow_automation/native_jobs.js';
-import {makeNativeTaskViewCommand} from './workflow_cli.js';
+import {makeNativeTaskActionCommands, makeNativeTaskViewCommand} from './workflow_cli.js';
 import {readNativeTaskView} from '../workflow_automation/task.js';
+import {runNativeTaskAction} from '../workflow_automation/task_actions.js';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
 
@@ -111,6 +112,84 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             Effect.mapError(nativeWorkflowError),
           ),
         ),
+      ),
+      makeNativeTaskActionCommands(
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'work',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              packet: options.packet,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'record-snapshot',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              workRef: options.workRef,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'record-review',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              snapshotRef: options.snapshotRef,
+              report: options.report,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'record-validation',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              snapshotRef: options.snapshotRef,
+              validation: options.validation,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'deliver-local',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              validationRef: options.validationRef,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {
+              command: 'finish',
+              runId: options.runId,
+              callerCwd: options.callerCwd,
+              ...(options.proposal === undefined ? {} : {proposal: options.proposal}),
+              ...(options.prepareRef === undefined ? {} : {prepareRef: options.prepareRef}),
+              ...(options.finishRef === undefined ? {} : {finishRef: options.finishRef}),
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
       ),
     ]),
   );
