@@ -172,7 +172,16 @@ export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(
   verifyInputs: Effect.Effect<void, E, R>,
 ) {
   yield* Console.log('Preparing lexical recall from canonical documents.');
-  const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+  const index = yield* Effect.acquireUseRelease(
+    startProgress('Rebuilding lexical recall index from canonical documents.'),
+    progress =>
+      loadRecallIndexData(config, {
+        forceRefresh: true,
+        includeInactive: false,
+        onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
+      }),
+    progress => progress.stop,
+  );
   yield* verifyInputs;
   yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
   yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);

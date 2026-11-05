@@ -23,6 +23,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {systemLayer} from '../../src/effect/runtime-bootstrap.js';
 import {runIndexRebuild} from '../../src/search/commands.js';
+import {CliOutput} from '../../src/effect/cli/output.js';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -78,6 +79,24 @@ const fixture = Effect.gen(function* () {
   let policyReads = 0;
   let changeAccessOnRead = 0;
   const output: string[] = [];
+  const cliOutput = CliOutput.of({
+    drain: Effect.void,
+    enqueueError: line => {
+      output.push(line);
+    },
+    enqueueOutput: line => {
+      output.push(line);
+    },
+    flush: Effect.void,
+    writeError: line =>
+      Effect.sync(() => {
+        output.push(line);
+      }),
+    writeFinal: line =>
+      Effect.sync(() => {
+        output.push(line);
+      }),
+  });
   const installation = {
     bytes: 1,
     installed: true,
@@ -124,6 +143,7 @@ const fixture = Effect.gen(function* () {
   const run = (options: {readonly model?: string} = {}) =>
     Console.consoleWith(parent =>
       runIndexRebuild(config, options).pipe(
+        Effect.provideService(CliOutput, cliOutput),
         Effect.provideService(LocalModelStore, store),
         Effect.provideService(LocalModelRuntime, runtime),
         Effect.provideService(ExternalSourcePolicy, policy),
