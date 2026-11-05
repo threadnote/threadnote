@@ -53,6 +53,147 @@ effectIt.effect.prop(
   {arbitrary: {runs: 20}},
 );
 
+effectIt.effect.prop(
+  'keeps bounded ordinal samples for approved Recall operations with private payloads omitted',
+  {
+    count: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 96})),
+    operation: Schema.Literals([
+      'recall.loadMemoryIdentities',
+      'recall.loadIndexDataInternal',
+      'recall.executeIndexQuery',
+    ]),
+  },
+  ({count, operation}) =>
+    Effect.sync(() => {
+      const observer = closeoutSpanDiagnostics(() => 0);
+      const parentOptions = {...options('closeout.stage.graph-ready'), startTime: 1_000_000n};
+      const parent = observer.tracer.span(parentOptions);
+      for (let index = 0; index < count; index++) {
+        const childOptions = {
+          ...options(operation, Option.some(parent)),
+          startTime: 3_000_000n,
+        };
+        const child = observer.tracer.span(childOptions);
+        child.attribute('private-query', 'must not appear');
+        child.end(6_000_000n, Exit.succeed('private-result'));
+      }
+      parent.end(10_000_000n, Exit.succeed(undefined));
+
+      const report = observer.snapshot();
+      const expectedSamples = Math.min(count, 64);
+      expect(report.samples).toHaveLength(expectedSamples);
+      expect(report.sampleLimit).toBe(64);
+      expect(report.sampleDropped).toBe(Math.max(0, count - 64));
+      expect(EffectArray.map(report.samples, item => item.ordinal)).toEqual(
+        Array.from({length: expectedSamples}, (_, index) => index + 1),
+      );
+      expect(report.samples).toMatchObject(
+        Array.from({length: expectedSamples}, () => ({
+          operation,
+          stage: 'closeout.stage.graph-ready',
+          parent: 'closeout.stage.graph-ready',
+          inclusiveMs: 3,
+          outcome: 'Success',
+        })),
+      );
+      expect(report.timing).toBe('inclusive-span-ms');
+      expect(report.totals['closeout.stage.graph-ready'].inclusiveMs).toBe(9);
+      if (count === 0) expect(report.totals[operation]).toBeUndefined();
+      else expect(report.totals[operation].inclusiveMs).toBe(count * 3);
+      expect(JSON.stringify(report)).not.toContain('private-query');
+      expect(JSON.stringify(report)).not.toContain('private-result');
+    }),
+  {arbitrary: {runs: 20}},
+);
+
+effectIt.effect('reserves first-started samples even when later Recall spans finish first', () =>
+  Effect.sync(() => {
+    const observer = closeoutSpanDiagnostics(() => 0);
+    const slow = observer.tracer.span({...options('recall.executeIndexQuery'), startTime: 1_000_000n});
+    for (let index = 0; index < 64; index++) {
+      const fast = observer.tracer.span({...options('recall.executeIndexQuery'), startTime: 2_000_000n});
+      fast.end(3_000_000n, Exit.succeed(undefined));
+    }
+    slow.end(101_000_000n, Exit.succeed(undefined));
+
+    const report = observer.snapshot();
+    expect(report.samples).toHaveLength(64);
+    expect(report.sampleDropped).toBe(1);
+    expect(report.samples[0]).toMatchObject({
+      operation: 'recall.executeIndexQuery',
+      ordinal: 1,
+      inclusiveMs: 100,
+      outcome: 'Success',
+    });
+    expect(report.samples[63]).toMatchObject({ordinal: 64, inclusiveMs: 1, outcome: 'Success'});
+    expect(report.totals['recall.executeIndexQuery']).toEqual({
+      started: 65,
+      ended: 65,
+      failures: 0,
+      inclusiveMs: 164,
+    });
+  }),
+);
+
+effectIt.effect('keeps per-label ordinals and selected hierarchy through an unknown span', () =>
+  Effect.sync(() => {
+    const observer = closeoutSpanDiagnostics(() => 0);
+    const stage = observer.tracer.span({...options('closeout.stage.graph-ready'), startTime: 1_000_000n});
+    const identity1 = observer.tracer.span({
+      ...options('recall.loadMemoryIdentities', Option.some(stage)),
+      startTime: 2_000_000n,
+    });
+    const unknown = observer.tracer.span({
+      ...options('private.unknown-middle', Option.some(identity1)),
+      startTime: 3_000_000n,
+    });
+    const query1 = observer.tracer.span({
+      ...options('recall.executeIndexQuery', Option.some(unknown)),
+      startTime: 4_000_000n,
+    });
+    query1.end(8_000_000n, Exit.succeed(undefined));
+    identity1.end(12_000_000n, Exit.succeed(undefined));
+    const indexData = observer.tracer.span({
+      ...options('recall.loadIndexDataInternal', Option.some(stage)),
+      startTime: 13_000_000n,
+    });
+    indexData.end(15_000_000n, Exit.succeed(undefined));
+    const identity2 = observer.tracer.span({
+      ...options('recall.loadMemoryIdentities', Option.some(stage)),
+      startTime: 16_000_000n,
+    });
+    identity2.end(18_000_000n, Exit.succeed(undefined));
+    const query2 = observer.tracer.span({
+      ...options('recall.executeIndexQuery', Option.some(stage)),
+      startTime: 19_000_000n,
+    });
+    query2.end(20_000_000n, Exit.succeed(undefined));
+    stage.end(30_000_000n, Exit.succeed(undefined));
+
+    const report = observer.snapshot();
+    expect(unknown).toBeInstanceOf(Tracer.NativeSpan);
+    expect(Option.getOrUndefined(query1.parent)).toBe(unknown);
+    expect(report.samples).toMatchObject([
+      {operation: 'recall.loadMemoryIdentities', ordinal: 1, parent: 'closeout.stage.graph-ready'},
+      {
+        operation: 'recall.executeIndexQuery',
+        ordinal: 1,
+        parent: 'recall.loadMemoryIdentities',
+        stage: 'closeout.stage.graph-ready',
+        inclusiveMs: 4,
+      },
+      {operation: 'recall.loadIndexDataInternal', ordinal: 1, parent: 'closeout.stage.graph-ready'},
+      {operation: 'recall.loadMemoryIdentities', ordinal: 2, parent: 'closeout.stage.graph-ready'},
+      {operation: 'recall.executeIndexQuery', ordinal: 2, parent: 'closeout.stage.graph-ready'},
+    ]);
+    expect(report.totals['recall.loadMemoryIdentities'].inclusiveMs).toBe(12);
+    expect(report.totals['recall.executeIndexQuery'].inclusiveMs).toBe(5);
+    expect(report.totals['closeout.stage.graph-ready'].inclusiveMs).toBe(29);
+    expect(report.timing).toBe('inclusive-span-ms');
+    expect(JSON.stringify(report)).not.toContain('private.unknown-middle');
+  }),
+);
+
 effectIt.effect('preserves native parent objects through unknown spans and returns the exact program value', () =>
   Effect.gen(function* () {
     const observer = closeoutSpanDiagnostics();
