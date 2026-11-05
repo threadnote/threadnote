@@ -17,6 +17,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeCloseoutJournal} from './closeout_store.js';
 import {decodeJournal} from './closeout_request_schema.js';
+import {nativeJobId} from './native_jobs.js';
 import {readNativeWorkflowState} from './store.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {runWorkflowAutomation} from './index.js';
@@ -124,25 +125,23 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
 
 const taskJobSummary = (value: unknown): Record<string, unknown> => {
   if (!Predicate.isObject(value) || typeof value.status !== 'string')
-    return {status: 'unknown', nextAction: 'Inspect the canonical closeout job using its continuation reference.'};
+    return {status: 'unknown', nextAction: 'Inspect this task action using its opaque continuation reference.'};
   return {
     status: value.status,
     ...(Predicate.isObject(value.progress) ? {progress: value.progress} : {}),
     ...(typeof value.code === 'string' ? {code: value.code} : {}),
-    ...(typeof value.nextAction === 'string'
-      ? {nextAction: value.nextAction}
-      : value.status === 'blocked-with-progress' ||
-          value.status === 'stopped-with-progress' ||
-          value.status === 'failed'
-        ? {
-            nextAction:
-              'Resolve the canonical job issue, then explicitly retry with resume:true and the same reference.',
-          }
-        : value.status === 'accepted'
-          ? {nextAction: 'Continue this accepted job with the same reference and resume:true.'}
-          : value.status === 'running'
-            ? {nextAction: 'Wait for this job, then query again with the same reference.'}
-            : {}),
+    ...(value.status === 'blocked-with-progress' ||
+    value.status === 'stopped-with-progress' ||
+    value.status === 'failed'
+      ? {
+          nextAction:
+            'Resolve the reported issue, then explicitly retry this task action with resume:true and the same reference.',
+        }
+      : value.status === 'accepted'
+        ? {nextAction: 'Continue this accepted task action with the same reference and resume:true.'}
+        : value.status === 'running'
+          ? {nextAction: 'Wait for this task action, then query again with the same reference.'}
+          : {}),
   };
 };
 
@@ -343,12 +342,73 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           typeof completedResult.closeout.revision === 'string'
             ? completedResult.closeout.revision
             : undefined;
+        const preparedAdmissionEpoch =
+          completedResult &&
+          Predicate.isObject(completedResult.closeout) &&
+          typeof completedResult.closeout.admissionEpoch === 'string'
+            ? completedResult.closeout.admissionEpoch
+            : undefined;
         if (!preparedRevision)
           return yield* fail(
             'closeout-result-unavailable',
             'The canonical prepare job lacks its journal revision readback.',
           );
         proposalDigest = ref.payloadDigest;
+        if (
+          preparedAdmissionEpoch &&
+          journal &&
+          journal.state.admissionEpoch === preparedAdmissionEpoch &&
+          ['prepared', 'archiving', 'complete'].includes(journal.state.status)
+        ) {
+          const admittedFinishWork = {
+            protocolVersion: 1,
+            executorVersion: 1,
+            action: 'closeout',
+            command: 'finish',
+            runId: request.runId,
+            generation: stored.state.generation,
+            expectedRevision: preparedRevision,
+          };
+          const admittedFinishJobId = nativeJobId(stored.state.bindingId, admittedFinishWork, preparedAdmissionEpoch);
+          const finishRef = encodeNativeTaskActionRef({
+            version: 1,
+            kind: 'closeout-finish',
+            runId: request.runId,
+            generationHash: sha256HexSync(stored.state.generation),
+            payloadDigest: proposalDigest,
+            closeoutRevision: preparedRevision,
+            transactionId: journal.state.transactionId,
+            jobId: admittedFinishJobId,
+          });
+          const admittedFinish = yield* Effect.result(inCheckout(jobRequest('result', admittedFinishJobId), checkout));
+          if (admittedFinish._tag === 'Success') {
+            const finishStatus =
+              Predicate.isObject(admittedFinish.success) && typeof admittedFinish.success.status === 'string'
+                ? admittedFinish.success.status
+                : 'unknown';
+            if (finishStatus === 'completed' && journal.state.status === 'complete')
+              return {
+                status: 'complete',
+                stage: 'finish',
+                replayed: true,
+                finishRef,
+                closeout: {
+                  transactionId: journal.state.transactionId,
+                  documentDigest: journal.state.documentDigest,
+                  outputs: journal.state.outputs,
+                  archives: journal.state.archives,
+                },
+              };
+            if (
+              finishStatus === 'blocked-with-progress' ||
+              finishStatus === 'stopped-with-progress' ||
+              finishStatus === 'failed'
+            )
+              return {status: 'blocked', stage: 'finish', finishRef, job: taskJobSummary(admittedFinish.success)};
+            if (finishStatus === 'accepted' || finishStatus === 'running')
+              return {status: 'pending', stage: 'finish', finishRef, job: taskJobSummary(admittedFinish.success)};
+          }
+        }
         const prepared = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
         if (
           !prepared ||
