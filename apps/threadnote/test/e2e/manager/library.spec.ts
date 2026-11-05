@@ -4,6 +4,7 @@ import {access, chmod, mkdir, readFile, readdir, writeFile} from '@threadnote/te
 import {join} from '@threadnote/testing/node-path';
 import {Array as EffectArray, pipe} from 'effect';
 import * as EffectString from 'effect/String';
+import {expectPendingConnections, withReadyConnections} from './fixtures/connections.js';
 
 async function openMemory(page: Page, title: string): Promise<void> {
   await page.getByRole('button', {name: 'Refresh manager', exact: true}).click();
@@ -483,6 +484,7 @@ test('S04 structured relations resolve stable identities, survive reload and can
   page,
   manager,
 }) => {
+  expectPendingConnections(manager);
   const first = await manager.remember('A relation-editor-anchor decision.', 'relation-editor-anchor');
   const second = await manager.remember('Neighbor relationship evidence.', 'relation-neighbor');
   const neighborId = /memory_id: (tn_\S+)/u.exec(await manager.cli(['read', second]))?.[1];
@@ -503,10 +505,12 @@ test('S04 structured relations resolve stable identities, survive reload and can
     .click();
   const reader = page.getByRole('complementary', {name: 'Canonical context reader'});
   await expect(reader).toContainText(first);
-  await reader.getByRole('tab', {name: 'Connections', exact: true}).click();
+  await withReadyConnections(page, manager, () => reader.getByRole('tab', {name: 'Connections', exact: true}).click());
   await reader.getByRole('button', {name: 'Add relation', exact: true}).click();
   await reader.getByRole('textbox', {name: 'Target memory', exact: true}).fill(second);
-  await reader.getByRole('button', {name: 'Save relations', exact: true}).click();
+  await withReadyConnections(page, manager, () =>
+    reader.getByRole('button', {name: 'Save relations', exact: true}).click(),
+  );
   await expect.poll(() => manager.cli(['read', first])).toContain('related_to');
   const saved = await manager.cli(['read', first]);
   expect(saved).toContain('memory_id: tn_');
@@ -526,10 +530,12 @@ test('S04 structured relations resolve stable identities, survive reload and can
     .getByRole('button')
     .first()
     .click();
-  await reader.getByRole('tab', {name: 'Connections', exact: true}).click();
+  await withReadyConnections(page, manager, () => reader.getByRole('tab', {name: 'Connections', exact: true}).click());
   await expect(reader.getByRole('textbox', {name: 'Target memory', exact: true})).toHaveValue(stableNeighbor);
   await reader.locator('.context-relation-editor').getByRole('button', {name: 'Remove', exact: true}).click();
-  await reader.getByRole('button', {name: 'Save relations', exact: true}).click();
+  await withReadyConnections(page, manager, () =>
+    reader.getByRole('button', {name: 'Save relations', exact: true}).click(),
+  );
   await expect.poll(() => manager.cli(['read', first])).not.toContain('related_to');
   expect(await manager.cli(['read', second])).toContain('Neighbor relationship evidence.');
 });

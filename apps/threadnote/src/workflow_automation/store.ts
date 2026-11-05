@@ -140,11 +140,9 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
 export const serializeNativeWorkflowState = (state: NativeWorkflowState, stringify = stableJson): string =>
   encodeBoundedWorkflowJson(stringify(state) + '\n', STATE_CODEC);
 
-/** Call only under the run lock. CAS and rename preserve the old file on every failed preparation. */
-export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState')(function* (
-  config: RuntimeConfig,
+/** Validate the complete candidate and encode the exact bounded bytes before any external mutation. */
+export const prepareNativeWorkflowStateWrite = Effect.fn('workflowAutomation.prepareStateWrite')(function* (
   state: NativeWorkflowState,
-  expectedRevision: string | null,
 ) {
   const cache = yield* CurrentWorkflowReadCache;
   const validated = yield* Effect.try({
@@ -159,13 +157,25 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
     catch: () =>
       issue('state-capacity', 'Native run state reached its byte limit. Existing receipts remain unchanged.'),
   });
-  const file = (yield* statePath(config, state.runId, true))!;
+  return Object.freeze({state: immutableWorkflowImage(validated), serialized, revision: sha256HexSync(serialized)});
+});
+export type PreparedNativeWorkflowStateWrite = Effect.Success<ReturnType<typeof prepareNativeWorkflowStateWrite>>;
+
+/** Call only under the run lock, with the exact image produced by the shared preflight. */
+export const writePreparedNativeWorkflowState = Effect.fn('workflowAutomation.writePreparedState')(function* (
+  config: RuntimeConfig,
+  prepared: PreparedNativeWorkflowStateWrite,
+  expectedRevision: string | null,
+) {
+  const {state: validated, serialized, revision} = prepared;
+  const cache = yield* CurrentWorkflowReadCache;
+  const file = (yield* statePath(config, validated.runId, true))!;
   const fs = yield* FileSystem.FileSystem;
   const temporary = file + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   return yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
     // Revalidate parent ownership and destination bytes immediately before commit.
-    yield* statePath(config, state.runId);
+    yield* statePath(config, validated.runId);
     const previous = yield* stateBytes(file);
     if ((previous === undefined ? null : sha256HexSync(previous)) !== expectedRevision)
       return yield* issue(
@@ -173,10 +183,20 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
         'Native run state changed after it was read. Retry from its current receipt.',
       );
     yield* fs.rename(temporary, file);
-    const result = {state: validated, revision: sha256HexSync(serialized)};
+    const result = {state: validated, revision};
     if (cache) cache.native = {file, bytes: serialized, ...result, state: immutableWorkflowImage(validated)};
     return result;
   }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
+});
+
+/** Call only under the run lock. CAS and rename preserve the old file on every failed preparation. */
+export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState')(function* (
+  config: RuntimeConfig,
+  state: NativeWorkflowState,
+  expectedRevision: string | null,
+) {
+  const prepared = yield* prepareNativeWorkflowStateWrite(state);
+  return yield* writePreparedNativeWorkflowState(config, prepared, expectedRevision);
 });
 
 /** Lock order is native run -> native memory binding -> memory targets. Graph preparation stays outside. */

@@ -1,5 +1,11 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {DateTime, Effect} from 'effect';
+import {DateTime, Effect, Schema} from 'effect';
+import {
+  makeReadDeadline,
+  ReadDeadlineExceeded,
+  withinReadDeadline,
+  type ReadDeadline,
+} from '@threadnote/platform/read_deadline';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import type {ContextBriefGraphReadBudget} from './graph/evidence.js';
 import type {VerifiedProcedureSelection} from './procedure/selection.js';
@@ -7,10 +13,12 @@ import {
   contextBriefResumeTaskAlignmentScore,
   contextBriefTaskGraphAnchors,
   unavailableContextBriefCodeLinkedMemoryEvidence,
+  unavailableContextBriefMemoryEvidence,
   mergeContextBriefMemoryEvidence,
 } from './memory-evidence.js';
 import {assembleContextBriefLogicalResult, planContextBrief} from './planner.js';
 import {projectContextBrief} from './projector.js';
+import {unavailableContextBriefGraphEvidence} from './graph/evidence.js';
 import type {
   ContextBriefGraphEvidenceV1,
   ContextBriefCitationValidationFenceV2,
@@ -35,17 +43,21 @@ export interface ContextBriefCompilerDependencies<
   ) => Effect.Effect<ContextBriefGraphEvidenceV1, unknown, GraphR>;
   readonly memoryEvidence: (
     plan: ContextBriefPlanV1['memory'],
+    deadline?: ReadDeadline,
   ) => Effect.Effect<ContextBriefMemoryRetrievalV1, unknown, MemoryR>;
   readonly procedureEvidence?: (
     plan: ContextBriefPlanV1,
+    deadline?: ReadDeadline,
   ) => Effect.Effect<VerifiedProcedureSelection, unknown, MemoryR>;
   readonly codeLinkedMemoryEvidence?: (
     plan: ContextBriefPlanV1['codeAnchors'],
+    deadline?: ReadDeadline,
   ) => Effect.Effect<ContextBriefMemoryRetrievalV1, unknown, MemoryR>;
   readonly citationValidation?: (
     scope: ContextBriefPlanV1['scope'],
     candidates: ContextBriefMemoryRetrievalV1['candidates'],
     fence: ContextBriefCitationValidationFenceV2 | undefined,
+    deadline?: ReadDeadline,
   ) => Effect.Effect<NonNullable<ContextBriefMemoryRetrievalV1['citationValidations']>, unknown, CitationR>;
   readonly projection?: (
     logical: ContextBriefLogicalResultV1,
@@ -69,21 +81,75 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     plan.scope.kind === 'repository' &&
     (plan.mode === 'brief' || plan.mode === 'explain') &&
     plan.graph.codeRefs.length === 0;
-  const readBudget = ordinaryTaskAnchors ? {remaining: 2, primaryRemaining: 17} : undefined;
-  const readGraph = (graphPlan: ContextBriefPlanV1['graph']) => dependencies.graphEvidence(graphPlan, readBudget);
+  const lexicalDeadline = yield* makeReadDeadline(2_000);
+  const graphDeadline = yield* makeReadDeadline(5_000);
+  const readBudget = {remaining: 2, primaryRemaining: 17, deadline: graphDeadline};
+  const readGraph = (graphPlan: ContextBriefPlanV1['graph']) =>
+    withinReadDeadline(
+      graphDeadline,
+      Effect.suspend(() => dependencies.graphEvidence(graphPlan, readBudget)),
+    ).pipe(
+      Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+        Effect.succeed(
+          unavailableContextBriefGraphEvidence('graph-read-budget-exhausted', plan.scope.kind === 'repository' ? 1 : 0),
+        ),
+      ),
+    );
+  const readCitations = (
+    candidates: ContextBriefMemoryRetrievalV1['candidates'],
+    fence: ContextBriefCitationValidationFenceV2 | undefined,
+  ) =>
+    dependencies.citationValidation === undefined
+      ? succeedUndefined
+      : withinReadDeadline(
+          graphDeadline,
+          Effect.suspend(() => dependencies.citationValidation!(plan.scope, candidates, fence, graphDeadline)),
+        ).pipe(
+          Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+            Effect.succeed(budgetExpiredCitationValidations(candidates, observedAt)),
+          ),
+        );
   const observedAt = DateTime.formatIso(yield* DateTime.now);
   const codeLinkedMemory =
     plan.codeAnchors.codeRefs.length === 0
       ? succeedUndefined
       : dependencies.codeLinkedMemoryEvidence === undefined
         ? Effect.succeed(unavailableContextBriefCodeLinkedMemoryEvidence(plan.codeAnchors.codeRefs.length))
-        : dependencies.codeLinkedMemoryEvidence(plan.codeAnchors);
+        : withinReadDeadline(
+            graphDeadline,
+            Effect.suspend(() => dependencies.codeLinkedMemoryEvidence!(plan.codeAnchors, graphDeadline)),
+          ).pipe(
+            Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+              Effect.succeed(
+                unavailableContextBriefCodeLinkedMemoryEvidence(
+                  plan.codeAnchors.codeRefs.length,
+                  'code-anchor-read-budget-exhausted',
+                ),
+              ),
+            ),
+          );
   const [eagerGraph, lexicalMemory, linkedMemory, procedureEvidence] = yield* Effect.all(
     [
       plan.mode === 'resume' ? succeedUndefined : readGraph(plan.graph),
-      dependencies.memoryEvidence(plan.memory),
+      withinReadDeadline(
+        lexicalDeadline,
+        Effect.suspend(() => dependencies.memoryEvidence(plan.memory, lexicalDeadline)),
+      ).pipe(
+        Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+          Effect.succeed({...unavailableContextBriefMemoryEvidence(), gaps: ['memory-recall-budget-exhausted']}),
+        ),
+      ),
       codeLinkedMemory,
-      dependencies.procedureEvidence?.(plan) ?? Effect.succeed({gaps: [], procedures: []}),
+      dependencies.procedureEvidence === undefined
+        ? Effect.succeed({gaps: [], procedures: []})
+        : withinReadDeadline(
+            graphDeadline,
+            Effect.suspend(() => dependencies.procedureEvidence!(plan, graphDeadline)),
+          ).pipe(
+            Effect.catchIf(Schema.is(ReadDeadlineExceeded), () =>
+              Effect.succeed({gaps: ['procedure-evidence-unavailable'] as const, procedures: []}),
+            ),
+          ),
     ],
     {concurrency: 4},
   );
@@ -97,7 +163,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     plan.codeAnchors.candidateLimit,
   );
   const initialValidations = dependencies.citationValidation
-    ? yield* dependencies.citationValidation(plan.scope, memory.candidates, initialGraph.citationValidationFence)
+    ? yield* readCitations(memory.candidates, initialGraph.citationValidationFence)
     : memory.citationValidations;
   let graph = initialGraph;
   let validatedMemory =
@@ -126,7 +192,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
         graph = anchored;
         if (!sameGraphValidationFence(initialGraph, graph)) {
           const validations = dependencies.citationValidation
-            ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
+            ? yield* readCitations(memory.candidates, graph.citationValidationFence)
             : undefined;
           validatedMemory = {...memory, citationValidations: validations};
         }
@@ -155,7 +221,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
       graph = yield* readGraph(selectedPlan);
       if (!sameGraphValidationFence(initialGraph, graph)) {
         const refreshedValidations = dependencies.citationValidation
-          ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
+          ? yield* readCitations(memory.candidates, graph.citationValidationFence)
           : undefined;
         validatedMemory =
           refreshedValidations === undefined
@@ -207,6 +273,35 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     ? dependencies.projection(logical, plan.outputBudgetTokens, plan.responseFormat)
     : Effect.sync(() => projectContextBrief(logical, plan.outputBudgetTokens, plan.responseFormat));
 });
+
+/** Budget expiry is missing proof, never a current/changed citation verdict. */
+function budgetExpiredCitationValidations(
+  candidates: ContextBriefMemoryRetrievalV1['candidates'],
+  observedAt: string,
+): NonNullable<ContextBriefMemoryRetrievalV1['citationValidations']> {
+  return EffectArray.flatMap(candidates, candidate =>
+    candidate.codeCitations.length === 0
+      ? []
+      : [
+          {
+            uri: candidate.uri,
+            receipts: EffectArray.map(candidate.codeCitations, citation => ({
+              candidateCount: 0,
+              citationId: citation.id,
+              coverage: 'incomplete' as const,
+              kind: citation.target.kind,
+              observedAt,
+              reason: 'citation-limit' as const,
+              repositoryId: citation.repositoryId,
+              sourcePath: citation.path,
+              status: 'unknown' as const,
+              strategy: 'none' as const,
+              validatorVersion: 1 as const,
+            })),
+          },
+        ],
+  );
+}
 
 function withResumeMemoryGraphAnchors(
   graphPlan: ContextBriefPlanV1['graph'],

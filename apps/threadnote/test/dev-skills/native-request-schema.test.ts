@@ -111,6 +111,9 @@ describe('native request schema discovery', () => {
         phaseId: expect.any(String),
         snapshotId: expect.stringContaining('fresh immutable'),
         baseRequalification: expect.stringContaining('Requires reason and explicit userAuthority.'),
+        ordinaryMergeQualificationV1: expect.stringContaining(
+          'Produces manifest version2; legacy readers must reject it.',
+        ),
       },
     ],
     [

@@ -118,6 +118,7 @@ effectIt.effect(
 
       const config = {account: 'local', agentContextHome: home, user: 'me'};
       const query = 'checkout retry contract';
+      yield* loadRecallIndexData(config, {includeInactive: false, memoryIds: []});
       const prepared = yield* prepareRecallSections(config, {
         allowExactRescue: true,
         exactMatches: [],

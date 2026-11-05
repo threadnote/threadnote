@@ -693,6 +693,25 @@ func TestCanonicalTelemetryPayloadAcceptsFrozenV1ThroughV5AndClosedV6(t *testing
 			}
 		}
 	}
+	for _, errorType := range []string{"CommandCleanupUnconfirmed", "ContextBriefNativeReadFailed", "ReadDeadlineExceeded", "RecallReadyReadBoundaryError", "UnknownError"} {
+		for _, version := range []int64{1, 2, 3, 4, 5, 6} {
+			request := telemetryRequestWithSchema(validTelemetryRequest(), version)
+			spanAttribute(request, "threadnote.outcome").Value = stringAnyValue("failure")
+			span := request.ResourceSpans[0].ScopeSpans[0].Spans[0]
+			span.Attributes = append(span.Attributes, stringKeyValue("error.type", errorType))
+			if errorType == "UnknownError" {
+				span.Attributes = append(span.Attributes, stringKeyValue("threadnote.failure.domain", "model-worker"), stringKeyValue("threadnote.failure.operation", "embed-many"), stringKeyValue("threadnote.failure.reason", "cleanup-unconfirmed"))
+			}
+			payload, marshalError := proto.Marshal(request)
+			if marshalError != nil {
+				t.Fatal(marshalError)
+			}
+			_, validationError := canonicalTelemetryPayload(payload, schemas)
+			if (validationError == nil) != (version == 6) {
+				t.Fatalf("v%d error %s validation = %v", version, errorType, validationError)
+			}
+		}
+	}
 }
 
 func telemetryRequestWithSchema(request *collectortracepb.ExportTraceServiceRequest, schemaVersion int64) *collectortracepb.ExportTraceServiceRequest {
@@ -1479,6 +1498,8 @@ func TestCanonicalTelemetryPayloadRejectsArbitraryPrivateV6Classifications(t *te
 		digest := sha256.Sum256([]byte(value))
 		private := "private-" + hex.EncodeToString(digest[:])
 		for _, key := range []string{
+			"error.type",
+			"threadnote.failure.reason",
 			"threadnote.context_brief.code_anchor_coverage",
 			"threadnote.context_brief.contract",
 			"threadnote.context_brief.gap_class",
@@ -1486,6 +1507,13 @@ func TestCanonicalTelemetryPayloadRejectsArbitraryPrivateV6Classifications(t *te
 			"threadnote.context_brief.returned_lane",
 		} {
 			request := validTelemetryV6AnchoredContextBriefRequest()
+			if key == "error.type" || key == "threadnote.failure.reason" {
+				request = telemetryRequestWithSchema(validTelemetryV4FailedQueryRequest(), 6)
+				if key == "threadnote.failure.reason" {
+					span := request.ResourceSpans[0].ScopeSpans[0].Spans[0]
+					span.Attributes = append(span.Attributes, stringKeyValue("threadnote.failure.domain", "model-worker"), stringKeyValue("threadnote.failure.operation", "embed-many"), stringKeyValue(key, "crash"))
+				}
+			}
 			spanAttribute(request, key).Value = stringAnyValue(private)
 			payload, marshalError := proto.Marshal(request)
 			if marshalError != nil {

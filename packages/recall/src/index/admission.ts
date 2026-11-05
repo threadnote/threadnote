@@ -19,7 +19,7 @@ import {
 } from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {SqlError} from 'effect/sql/SqlError';
-import {recallIndexForegroundRefreshRequired} from './freshness.js';
+import {recallIndexForegroundRefreshRequired, recallInventoryPolicyIsCurrent} from './freshness.js';
 import {recallIndexMetadataIsCurrent} from './identity.js';
 import {readRecallStaleMarker} from './stale_marker.js';
 
@@ -118,6 +118,7 @@ interface AdmissionLocation {
   readonly pointerPath: string;
   readonly fixedDatabasePath: string;
   readonly schemaVersion: number;
+  readonly logicalScope: string;
 }
 
 /** Read only bounded readiness metadata; no initialization, corpus scan, repair or SQLite busy wait. */
@@ -155,6 +156,9 @@ export function readRecallIdentityAdmissionCut(location: AdmissionLocation) {
     if (
       metadata.get('schema_version') !== String(location.schemaVersion) ||
       !metadata.get('content_generation') ||
+      !recallInventoryPolicyIsCurrent(metadata) ||
+      metadata.get('logical_scope') !== location.logicalScope ||
+      metadata.get('logical_scope_content_generation') !== metadata.get('content_generation') ||
       recallIndexForegroundRefreshRequired({
         forceRefresh: false,
         initialized: metadata.get('initialized') === 'true',

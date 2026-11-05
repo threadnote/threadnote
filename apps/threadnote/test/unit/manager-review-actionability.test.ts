@@ -13,6 +13,7 @@ import {
 } from '@threadnote/memory/topic-maintenance-draft';
 import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {loadRecallIndexData, readRecallIndexData} from '@threadnote/recall/index';
 import {advanceCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -291,6 +292,7 @@ describe('Manager review eligibility', () => {
           yield* saveCandidateReview(f.home, item.review);
           if (i >= 100) yield* f.fs.writeFileString(f.path.join(f.root, `target-${i}.md`), item.content);
         }
+        yield* loadRecallIndexData(f.config, {includeInactive: false});
         const original = draftController.readTopicMaintenanceDraft;
         let calls = 0;
         const checked: string[] = [];
@@ -356,6 +358,7 @@ describe('Manager review eligibility', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* storedFixture();
+        yield* loadRecallIndexData(f.config, {includeInactive: false});
         const initial = yield* readManagerReviewEligibility(f.config, [f.review]);
         expect(initial.pendingCount).toBe(1);
         yield* f.fs.remove(f.path.join(f.root, 'source.md'));
@@ -386,6 +389,7 @@ describe('Manager review eligibility', () => {
     () =>
       Effect.gen(function* () {
         const f = yield* storedFixture();
+        yield* loadRecallIndexData(f.config, {includeInactive: false});
         const started = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
         const interrupted = yield* Deferred.make<void>();
@@ -434,6 +438,7 @@ describe('Manager review eligibility', () => {
   effectIt.effect('does not reauthorize unchanged polls and cannot upgrade a replaced asynchronous revision', () =>
     Effect.gen(function* () {
       const f = yield* storedFixture();
+      yield* loadRecallIndexData(f.config, {includeInactive: false});
       const original = draftController.readTopicMaintenanceDraft;
       let calls = 0;
       yield* Effect.acquireUseRelease(
@@ -482,6 +487,7 @@ describe('Manager review eligibility', () => {
   effectIt.effect('refuses a successful asynchronous read when the canonical source epoch changes before closing', () =>
     Effect.gen(function* () {
       const f = yield* storedFixture();
+      yield* loadRecallIndexData(f.config, {includeInactive: false});
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       yield* Effect.acquireUseRelease(
@@ -504,6 +510,9 @@ describe('Manager review eligibility', () => {
           }),
         spy => Effect.sync(() => spy.mockRestore()),
       );
+      const stale = yield* readRecallIndexData(f.config, {includeInactive: false, memoryIds: []});
+      expect(stale.readState?.freshness).toBe('stale');
+      yield* loadRecallIndexData(f.config, {includeInactive: false, validateNow: true});
       expect((yield* readManagerReviewEligibility(f.config, [f.review])).pendingCount).toBe(1);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -511,6 +520,7 @@ describe('Manager review eligibility', () => {
   effectIt.effect('groups a timed-out source check and retries only after its finite readiness boundary', () =>
     Effect.gen(function* () {
       const f = yield* storedFixture();
+      yield* loadRecallIndexData(f.config, {includeInactive: false});
       const started = yield* Deferred.make<void>();
       yield* Effect.acquireUseRelease(
         Effect.sync(() =>

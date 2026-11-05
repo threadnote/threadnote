@@ -1,4 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {nativeRequestSchema} from './request_schema.js';
 import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
@@ -279,6 +280,10 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   );
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
+  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0)
+    yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+      withRecallIdentityPreparation,
+    );
   if (request.action === 'preflight' && existing) {
     if (existing.status !== 'verified' || !existing.artifact)
       return yield* issue(

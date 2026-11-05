@@ -1,3 +1,4 @@
+import {privateDeferredCodeAnchorRouteHasEntries} from './code_anchor_pending.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
@@ -579,6 +580,20 @@ export const finalizeDeferredCodeAnchors = Effect.fn('memoryCodeAnchor.finalize'
     type: 'threadnote-deferred-code-anchor-finalization',
     version: DEFERRED_CODE_ANCHOR_FINALIZATION_VERSION,
   } satisfies DeferredCodeAnchorFinalizationReceiptV1;
+});
+
+export const deferredCodeAnchorRouteHasPending = Effect.fn('memoryCodeAnchor.routeHasPending')(function* (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
+  route: DeferredCodeAnchorFinalizationRoute,
+) {
+  const root = yield* existingPrivateDeferredCodeAnchorRoot(config);
+  if (root === undefined) return false;
+  const digest = yield* deferredCodeAnchorRouteDigest(config, route);
+  return yield* privateDeferredCodeAnchorRouteHasEntries(
+    root,
+    deferredCodeAnchorRouteQueueKeys(route, digest, []),
+    DEFERRED_CODE_ANCHOR_ROUTE_LANE_COUNT,
+  );
 });
 
 /**

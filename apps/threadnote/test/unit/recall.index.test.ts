@@ -1,7 +1,10 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
+import {TestClock} from 'effect/testing';
+import fc from 'fast-check';
+import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {
   clearRecallIndexMemoryCache,
@@ -13,6 +16,7 @@ import {
   recallIndexDatabaseFilename,
   recallIndexStatus,
   recallUriMatchesScopes,
+  RecallIndexSourceChanged,
 } from '@threadnote/recall/index';
 import {recallWorkspaceScopeMatches} from '@threadnote/recall/index/scope';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
@@ -1061,29 +1065,99 @@ describe('local recall index', () => {
     await expect(run(recallIndexStatus(config()))).resolves.toMatchObject({documentCount: 1, ready: true});
   });
 
-  it('supports concurrent first opens without racing schema initialization', async () => {
-    const resourcePath = join(directory, 'data', 'local', 'resources', 'repos', 'threadnote', 'doc.md');
-    await mkdir(join(resourcePath, '..'), {recursive: true});
-    await writeFile(resourcePath, '# Concurrent\n\nfirst-open-anchor', 'utf8');
-
-    const results = await Promise.all(
-      Array.from({length: 4}, () =>
-        run(loadRecallIndex(config(), {includeInactive: false, query: 'first-open-anchor'})),
-      ),
-    );
-
-    expect(
-      EffectArray.every(results, candidates =>
-        Boolean(
-          Effect2.pipe(candidates[0]?.uri, effectOptionalString =>
-            effectOptionalString == null
-              ? undefined
-              : Effect2.pipe(effectOptionalString, EffectString.endsWith('/doc.md')),
-          ),
+  const concurrentFirstOpens = (publicationOrder: readonly number[]) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({directory, prefix: 'first-opens-'});
+      const runtime = {account: 'local', user: 'me', agentContextHome: home};
+      const resourcePath = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'doc.md');
+      const canonical = '# Concurrent\n\nfirst-open-anchor';
+      const uri = 'threadnote://resources/repos/threadnote/doc.md';
+      yield* fs.makeDirectory(path.dirname(resourcePath), {recursive: true});
+      yield* fs.writeFileString(resourcePath, canonical);
+      const callers = [0, 1, 2, 3];
+      const prepared = yield* Effect.forEach(callers, () => Deferred.make<void, unknown>());
+      const release = yield* Effect.forEach(callers, () => Deferred.make<void>());
+      const staged: number[] = [];
+      const fibers = yield* Effect.forEach(callers, index =>
+        loadRecallIndexData(runtime, {
+          includeInactive: false,
+          query: 'first-open-anchor',
+          onProgress: progress =>
+            progress.phase === 'writing' && progress.completed === 0
+              ? Effect.sync(() => staged.push(index)).pipe(
+                  Effect.andThen(Deferred.succeed(prepared[index], undefined)),
+                  Effect.andThen(Deferred.await(release[index])),
+                )
+              : Effect.void,
+        }).pipe(
+          // An initialization/preparation failure must fail the barrier, never become an allowed loser.
+          Effect.onError(cause => Deferred.failCause(prepared[index], cause)),
+          Effect.result,
+          Effect.forkScoped,
         ),
-      ),
-    ).toBe(true);
-  });
+      );
+      yield* Effect.forEach(prepared, gate => Deferred.await(gate), {concurrency: 4});
+      expect([...staged].sort()).toEqual(callers);
+      const winner = publicationOrder[0];
+      yield* Deferred.succeed(release[winner], undefined);
+      const published = yield* Fiber.join(fibers[winner]);
+      expect(published._tag).toBe('Success');
+      if (published._tag === 'Failure') return yield* Effect.fail(published.failure);
+      expect(published.success.candidates).toEqual([expect.objectContaining({uri, text: canonical})]);
+      for (const index of publicationOrder.slice(1)) {
+        yield* Deferred.succeed(release[index], undefined);
+        const superseded = yield* Fiber.join(fibers[index]);
+        expect(superseded._tag).toBe('Failure');
+        if (superseded._tag === 'Failure') expect(Schema.is(RecallIndexSourceChanged)(superseded.failure)).toBe(true);
+      }
+      const final = yield* loadRecallIndexData(runtime, {
+        includeInactive: false,
+        readyOnly: true,
+        query: 'first-open-anchor',
+      });
+      expect(final.candidates).toEqual([expect.objectContaining({uri, text: canonical})]);
+      expect(final.candidates).toEqual(published.success.candidates);
+      expect(final.generation).toBe(published.success.generation);
+      const status = yield* recallIndexStatus(runtime);
+      expect(status).toMatchObject({documentCount: 1, ready: true, generation: final.generation});
+      expect(final.generation).toBeTruthy();
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() => new Database(status.databasePath, {readonly: true})),
+        database =>
+          Effect.sync(() => {
+            expect(database.query('PRAGMA integrity_check').all()).toEqual([{integrity_check: 'ok'}]);
+            expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
+            const metadata = new Map(
+              EffectArray.map(
+                database.query<{key: string; value: string}, []>('SELECT key, value FROM metadata').all(),
+                row => [row.key, row.value] as const,
+              ),
+            );
+            expect(metadata.get('content_generation')).toBe(final.generation);
+            expect(metadata.get('inventory_policy_content_generation')).toBe(final.generation);
+            expect(metadata.get('logical_scope_content_generation')).toBe(final.generation);
+            expect(metadata.get('memory_identity_conflict_generation')).toBe(final.generation);
+            expect(metadata.get('integrity_sequence')).toBe(metadata.get('mutation_sequence'));
+            expect(metadata.get('document_count')).toBe('1');
+          }),
+        database => Effect.sync(() => database.close()),
+      );
+    });
+
+  effectIt.effect('supports concurrent first opens without racing schema initialization', () =>
+    concurrentFirstOpens([0, 1, 2, 3]).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'concurrent first opens preserve canonical publication across winner and loser release orders',
+    [fc.shuffledSubarray([0, 1, 2, 3], {minLength: 4, maxLength: 4})],
+    ([publicationOrder]) =>
+      concurrentFirstOpens(publicationOrder).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {fastCheck: {numRuns: 4, seed: 1008}, timeout: 15000},
+  );
 
   it('force-refreshes a same-size source even when its modification time is preserved', async () => {
     const resourcePath = join(directory, 'data', 'local', 'resources', 'repos', 'threadnote', 'doc.md');

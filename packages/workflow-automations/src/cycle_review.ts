@@ -4,10 +4,19 @@ import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeCycleHasControl} from './cycle.js';
+import {NativeCycleOrdinaryMergeReceiptSchema} from './cycle_merge.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Option as EffectOption} from 'effect';
+
+export {
+  NativeCycleOrdinaryMergeInputSchema,
+  nativeCycleMergeReceiptDigest,
+  validateNativeCycleMergeOwners,
+  validateNativeCycleMergeReceipt,
+} from './cycle_merge.js';
+export type {NativeCycleOrdinaryMergeInput, NativeCycleOrdinaryMergeReceipt} from './cycle_merge.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const text = (maximum = 4096) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum));
@@ -40,7 +49,7 @@ const baseRequalificationReceipt = Schema.Struct({
 
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
   snapshotId: id,
   phaseId: id,
   phaseHash: digest,
@@ -56,9 +65,17 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   previousTree: Schema.optionalKey(gitObject),
   acceptedHead: Schema.optionalKey(gitObject),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
+  ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
   files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
   pinnedRef: text(),
-});
+}).check(
+  Schema.makeFilter(snapshot =>
+    (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
+    (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
+      ? 'Version2 requires only the ordinary merge qualification.'
+      : undefined,
+  ),
+);
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
 
 export function nativeCycleBaseRequalificationReceiptDigest(
@@ -178,7 +195,10 @@ export function validateNativeCycleReviewHistory(
     review.snapshotId !== snapshot.snapshotId ||
     review.phaseHash !== snapshot.phaseHash ||
     review.snapshotTree !== snapshot.tree ||
-    review.mode !== (snapshot.previous && !snapshot.baseRequalification ? 'incremental' : 'full')
+    review.mode !==
+      (snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1
+        ? 'incremental'
+        : 'full')
   )
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),

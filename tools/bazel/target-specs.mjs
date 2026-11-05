@@ -541,6 +541,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
         // smoke-self-contained launches this path from a runtime-resolved root.
         'apps/threadnote/test/fixtures/cli-output-consumer.ts',
+        'scripts/fixtures/owned-pipeline-relay.ts',
       ],
       referencedInputRoots: applicationReferencedInputRoots,
       data: applicationTestData,

@@ -68,12 +68,12 @@ describe('recall index foreground freshness', () => {
 
   fcEffectProp(
     effectIt,
-    'allows canonical incremental refresh only for an exact end-to-end transition',
+    'allows tracked canonical incremental refresh only for an exact end-to-end transition',
     {
       markerCurrent: FC.string({maxLength: 48}),
       markerPrevious: FC.string({maxLength: 48}),
-      observed: FC.string({maxLength: 48}),
-      persisted: FC.string({maxLength: 48}),
+      observed: FC.string({minLength: 1, maxLength: 48}),
+      persisted: FC.string({minLength: 1, maxLength: 48}),
     },
     ({markerCurrent, markerPrevious, observed, persisted}) =>
       Effect.sync(() => {

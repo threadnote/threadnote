@@ -19,7 +19,7 @@ import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from
 import {CurrentResourceRecallInvalidationObserver} from '@threadnote/store/resource/recall-invalidation';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from '../../src/workflow_memory/evidence.js';
-import {verifyAuthoredMemoryRelationTargetIdentities} from '../../src/memory/relations.js';
+import {prepareAuthoredMemoryRelationTargetIdentities} from '../../src/memory/relations.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -169,7 +169,7 @@ describe('prepared workflow evidence admission', () => {
           const verify = Effect.gen(function* () {
             if (kind === 'evidence') yield* verifyWorkflowEvidence(f.config, bound.binding, refs);
             else
-              yield* verifyAuthoredMemoryRelationTargetIdentities(f.config, [{...prior, allowedUriScopes: [rootUri]}]);
+              yield* prepareAuthoredMemoryRelationTargetIdentities(f.config, [{...prior, allowedUriScopes: [rootUri]}]);
           });
           const database = f.path.join(f.home, 'indexes', 'lexical', recallIndexDatabaseFilename(false));
           const contended =
@@ -419,6 +419,8 @@ describe('workflow admitted evidence references', () => {
         evidence(prior.canonicalUri, prior.memoryId, prior.revision),
       ];
       const alias = `threadnote://memory/${handoff.memoryId}`;
+      // Alias reads consume an explicitly prepared snapshot; they do not maintain it themselves.
+      yield* loadRecallMemoryIdentities(f.config, {allowedUriScopes: [], memoryIds: []});
       expect(
         yield* failure(
           f.call({protocolVersion: 1, action: 'read', bindingId: second.binding.bindingId, uri: handoff.canonicalUri}),

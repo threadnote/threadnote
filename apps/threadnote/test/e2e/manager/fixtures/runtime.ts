@@ -43,6 +43,7 @@ export class ManagerRuntime {
     readonly status: number;
     readonly error: string;
     readonly code?: string;
+    readonly retryAfterMilliseconds?: number;
   }[] = [];
   readonly environment: NodeJS.ProcessEnv;
   readonly home: string;

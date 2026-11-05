@@ -231,11 +231,28 @@ describe('native cycle pure domain', () => {
     expect(checkNativeCycleScope(plan.phases[0], ['src/a.ts'])).toBe(false);
     expect(validateNativeCyclePhase(state, 'one', snapshot([]), validation).phases.one.status).toBe('validated');
     expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation)).toThrow();
-    expect(
-      withPaths(Array.from({length: 128}, (_, index) => `src/file-${index}.ts`)).phases[0].allowedPaths,
-    ).toHaveLength(128);
-    expect(() => withPaths(Array.from({length: 129}, (_, index) => `src/file-${index}.ts`))).toThrow();
+    for (const count of [129, 162, 256]) {
+      const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+      const phase = withPaths(allowedPaths).phases[0];
+      expect(phase.allowedPaths).toEqual(allowedPaths);
+      expect(checkNativeCycleScope(phase, allowedPaths)).toBe(true);
+      expect(checkNativeCycleScope(phase, ['src/outside.ts'])).toBe(false);
+    }
+    expect(() => withPaths(Array.from({length: 257}, (_, index) => `src/file-${index}.ts`))).toThrow();
     expect(() => withPaths([''])).toThrow();
+  });
+
+  it('preserves exact-path scope for every bounded authoring-sized path set', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 129, max: 256}), count => {
+        const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+        const phase = decodeNativeCyclePlan(makePlan([{...makePlan().phases[0], allowedPaths}])).phases[0];
+        expect(phase.allowedPaths).toEqual(allowedPaths);
+        expect(checkNativeCycleScope(phase, allowedPaths)).toBe(true);
+        expect(checkNativeCycleScope(phase, ['src/unlisted.ts'])).toBe(false);
+      }),
+      {numRuns: 24},
+    );
   });
 
   it('permits a change set under empty scope exactly when the change set is empty', () => {

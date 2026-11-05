@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {Effect, Result, Schedule, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {ReadDeadlineExceeded, readDeadlineRemaining, type ReadDeadline} from '@threadnote/platform/read_deadline';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {
   isCodeGraphStoreError,
@@ -49,6 +50,7 @@ class ContextBriefGraphBudgetExhausted extends Schema.TaggedError<
 export interface ContextBriefGraphReadBudget {
   remaining: number;
   primaryRemaining: number;
+  readonly deadline?: ReadDeadline;
 }
 
 /** Read only ready graph state. This boundary may borrow compatible shared evidence, but never builds or requests maintenance. */
@@ -61,16 +63,20 @@ export const retrieveContextBriefGraphEvidence = Effect.fn('contextBrief.retriev
   readBudget?: ContextBriefGraphReadBudget,
 ) {
   return plan.scope.kind === 'workset'
-    ? yield* retrieveWorksetGraphEvidence(config, plan)
+    ? yield* retrieveWorksetGraphEvidence(config, plan, readBudget)
     : yield* retrieveRepositoryGraphEvidence(config, plan, sourceEvidence, readBudget);
 });
 
 const retrieveWorksetGraphEvidence = Effect.fn('contextBrief.retrieveWorksetGraphEvidence')(function* (
   config: RuntimeConfig,
   plan: ContextBriefPlanV1['graph'],
+  readBudget?: ContextBriefGraphReadBudget,
 ) {
   if (plan.scope.kind !== 'workset') throw new Error('Context Brief workset graph plan has the wrong scope.');
+  const remaining = readBudget?.deadline === undefined ? undefined : yield* readDeadlineRemaining(readBudget.deadline);
+  if (remaining !== undefined && remaining <= 0) return yield* ReadDeadlineExceeded.make({});
   const options: QueryCodeGraphWorksetV2OptionsV1 = {
+    ...(remaining === undefined ? {} : {deadlineMilliseconds: remaining}),
     edgeLimit: plan.edgeLimit,
     evidenceCards: plan.evidenceCards,
     maximumEstimatedTokens: plan.maximumEstimatedTokens,

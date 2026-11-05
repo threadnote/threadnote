@@ -25,7 +25,14 @@ import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
-import {loadRecallIndex, loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {
+  loadRecallIndex,
+  loadRecallIndexData,
+  readRecallExactMatches,
+  recallIndexDatabaseFilename,
+} from '@threadnote/recall/index';
+import {RecallReadyReadBoundary, RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {formatMemoryDocument} from '@threadnote/memory/document';
 import {buildRecallTopicalCorpusStatistics} from '@threadnote/recall/rank';
 import {
   boundedRecallSemanticRetrieval,
@@ -42,7 +49,7 @@ import {
   recallCrossScopeLaneBudgets,
 } from '@threadnote/recall/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {buildRecallSections} from '@threadnote/recall/results';
+import {buildRecallSections, exactRecallTerms} from '@threadnote/recall/results';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -62,6 +69,96 @@ describe('recall runtime orchestration', () => {
       ),
     );
   });
+  fcEffectProp(
+    effectIt,
+    'closing proof retains fresh exact support and discards an archived selected record',
+    [FC.integer({min: 0, max: 1024}), FC.integer({min: 1, max: 4})],
+    ([suffix, count]) =>
+      Effect.gen(function* () {
+        const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-closing-exact-')));
+        homes.push(home);
+        const config = {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'fixture',
+          manifestPath: join(home, 'manifest.yaml'),
+          user: 'tester',
+        };
+        const needle = `closing-exact-support-${suffix}`;
+        const root = join(home, 'data/local/user/tester/memories/durable');
+        yield* Effect.promise(() => mkdir(root, {recursive: true}));
+        const timestamp = (yield* DateTime.nowAsDate).toISOString();
+        const documents = EffectArray.map(
+          Array.from({length: count}, (_, index) => index),
+          index => ({
+            file: join(root, `proof-${index}.md`),
+            uri: `threadnote://user/tester/memories/durable/proof-${index}.md`,
+            metadata: {
+              kind: 'durable' as const,
+              status: 'active' as const,
+              topic: needle,
+              memoryId: `tn_closing_exact_${suffix}_${index}`,
+              sourceAgentClient: 'test',
+              timestamp,
+            },
+            body: `${needle} canonical record ${index}.`,
+          }),
+        );
+        yield* Effect.forEach(documents, doc =>
+          Effect.promise(() => writeFile(doc.file, formatMemoryDocument('MEMORY', doc.metadata, doc.body))),
+        );
+        yield* loadRecallIndexData(config, {includeInactive: false});
+        const exactMatches = yield* readRecallExactMatches(config, {
+          includeInactive: false,
+          terms: exactRecallTerms(needle),
+          uriScopes: ['threadnote://user/tester/memories'],
+        });
+        const input = {
+          allowExactRescue: false,
+          allowReranker: false,
+          feedbackQuery: needle,
+          includeInactive: false,
+          limit: count,
+          passes: [],
+          query: needle,
+          readRecords: (uris: readonly string[]) => readMemoryRecordsByUri(config, uris),
+          semanticResult: Option.some({
+            corpusGeneration: Option.none<string>(),
+            scores: Option.none<ReadonlyMap<string, number>>(),
+            warning: Option.none<string>(),
+          }),
+        };
+        const before = yield* prepareRecallSections(config, {...input, exactMatches});
+        const selected = EffectArray.map(before.ranked, hit => hit.uri);
+        expect(selected).toHaveLength(count);
+        const closing = yield* prepareRecallSections(config, {
+          ...input,
+          exactMatches: [],
+          candidateUris: selected,
+          closingCandidateUris: selected,
+        });
+        expect(EffectArray.map(closing.ranked, hit => hit.uri)).toEqual(selected);
+        expect(EffectArray.every(closing.ranked, hit => (hit.rankSignals?.exact ?? 0) > 0)).toBe(true);
+        const archived = documents[0];
+        yield* Effect.promise(() =>
+          writeFile(
+            archived.file,
+            formatMemoryDocument('MEMORY', {...archived.metadata, status: 'archived'}, archived.body),
+          ),
+        );
+        const after = yield* prepareRecallSections(config, {
+          ...input,
+          exactMatches,
+          candidateUris: selected,
+          closingCandidateUris: selected,
+        });
+        expect(EffectArray.map(after.ranked, hit => hit.uri).sort()).toEqual(
+          EffectArray.filter(selected, uri => uri !== archived.uri).sort(),
+        );
+        expect(EffectArray.every(after.ranked, hit => (hit.rankSignals?.exact ?? 0) > 0)).toBe(true);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {fastCheck: {numRuns: 8}},
+  );
   it('preserves a global identity conflict when an earlier scoped lane retained the same URI', () => {
     const scoped = {
       fields: {project: 'threadnote', topic: 'identity-conflict'},
@@ -462,6 +559,7 @@ describe('recall runtime orchestration', () => {
         user: 'tester',
       };
       const rerankerCache = createRecallRerankerCache();
+      yield* loadRecallIndexData(config, {includeInactive: false}).pipe(provideTestLayer(ApplicationLayer));
       const prepare = () =>
         prepareRecallSections(config, {
           allowExactRescue: false,
@@ -588,6 +686,7 @@ describe('recall runtime orchestration', () => {
       );
       const recalled = yield* Effect.gen(function* () {
         const catalog = yield* LocalModelCatalog;
+        yield* loadRecallIndexData(config, {includeInactive: false});
         yield* selectLocalModel(home, catalog, 'embedding', embedding.id);
         return yield* captureConsole(
           runRecall(config, {
@@ -667,7 +766,7 @@ describe('recall runtime orchestration', () => {
       expect(prepared.operationalWarnings).toEqual([expect.objectContaining({code: 'lexical_index_unavailable'})]);
     }),
   );
-  effectIt.effect('distinguishes empty record hydration from a loaded set that omits a memory URI', () =>
+  effectIt.effect('rejects missing memories after empty or partial initial record hydration', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-empty-records-')));
       homes.push(home);
@@ -723,8 +822,20 @@ describe('recall runtime orchestration', () => {
         semanticResult: Option.none(),
       }).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(EffectArray.map(emptyHydration.ranked, ranked => ranked.uri)).toContain(presentUri);
+      expect(EffectArray.map(emptyHydration.ranked, ranked => ranked.uri)).not.toContain(presentUri);
       expect(EffectArray.map(loadedMissing.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
+      const deletedExact = yield* prepareRecallSections(config, {
+        allowExactRescue: true,
+        exactMatches: [{uri: ghostUri, terms: ['Present']}],
+        feedbackQuery: 'Present ranked memory body',
+        includeInactive: false,
+        limit: 5,
+        passes: [],
+        query: 'Present ranked memory body',
+        readRecords: () => Effect.succeed([]),
+        semanticResult: Option.none(),
+      }).pipe(provideTestLayer(ApplicationLayer));
+      expect(deletedExact.ranked).toEqual([]);
     }),
   );
   effectIt.effect('drops an indexed memory when extra record hydration misses an empty store', () =>
@@ -795,7 +906,7 @@ describe('recall runtime orchestration', () => {
       expect(EffectArray.map(prepared.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
     }),
   );
-  effectIt.effect('surfaces one CLI warning when exact and ranked lexical recovery both fail', () =>
+  effectIt.effect('surfaces one CLI warning when exact and ranked ready snapshots are unavailable', () =>
     Effect.gen(function* () {
       const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-recall-cli-index-warning-')));
       homes.push(home);
@@ -829,9 +940,35 @@ describe('recall runtime orchestration', () => {
           Effect2.Option.getOrElse(() => null),
         ),
       ).toHaveLength(1);
-      expect(recalled.output).toContain('could not be read or recovered');
-      expect(recalled.output).toContain('threadnote doctor --dry-run');
+      expect(recalled.output).toContain('no readable ready snapshot');
+      expect(recalled.output).toContain('threadnote repair');
     }),
+  );
+  effectIt.effect('keeps unexpected ready worker failure distinct from unavailable snapshots', () =>
+    Effect.gen(function* () {
+      const home = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-ready-operational-failure-')));
+      homes.push(home);
+      const recalled = yield* captureConsole(
+        runRecall(
+          {
+            account: 'local',
+            agentContextHome: home,
+            agentId: 'fixture',
+            manifestPath: join(home, 'manifest.yaml'),
+            user: 'tester',
+          },
+          {inferScope: false, query: 'operational failure anchor', threshold: '0.1'},
+        ),
+      ).pipe(
+        Effect.provideService(RecallReadyReadBoundary, {
+          read: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'worker-failed'})),
+        }),
+      );
+      expect(recalled.value.warnings).toEqual([expect.objectContaining({code: 'lexical_read_failed'})]);
+      expect(recalled.output).toContain('ready lexical read failed');
+      expect(recalled.output).toContain('threadnote doctor --dry-run');
+      expect(recalled.output).not.toContain('threadnote repair');
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('uses a complete ranked expansion vocabulary without opening the lexical index', () =>
     Effect.gen(function* () {

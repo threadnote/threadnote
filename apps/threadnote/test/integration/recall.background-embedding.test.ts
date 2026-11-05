@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Effect, Exit, FileSystem, Path, Predicate, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, Exit, FileSystem, Path, Predicate, Schema, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {makeBackgroundInferenceAdmission} from '@threadnote/inference/background/admission';
@@ -8,9 +8,15 @@ import {
   readRecallEmbeddingScope,
   requestRecallEmbeddings,
 } from '@threadnote/recall/background/demand';
+import {
+  requestRecallLexicalRefresh,
+  readRecallLexicalDemand,
+  RecallLexicalDemandUnavailable,
+} from '@threadnote/recall/background/lexical-demand';
 import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {vectorIndexGenerationReadiness} from '@threadnote/recall/vector-index';
 import {SystemInfo} from '@threadnote/platform/system';
+import {succeedUndefined} from '@threadnote/platform/optional';
 import {fixtureLayer, lanes, manifest, seed} from '../fixtures/code-graph-embedding-worker-child.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {
@@ -40,6 +46,25 @@ const until = <R>(condition: Effect.Effect<boolean, unknown, R>, label: string) 
     }
     return yield* Effect.die(new Error('Recall fixture did not reach ' + label));
   });
+
+// Concurrent atomic replacement can make a bounded queue read unavailable. Unknown is still pending.
+const lexicalDemandSettled = <E, R>(read: Effect.Effect<{readonly revision?: string} | undefined, E, R>) =>
+  read.pipe(
+    Effect.map(state => state?.revision === undefined),
+    Effect.catchIf(Schema.is(RecallLexicalDemandUnavailable), () => Effect.succeed(false)),
+  );
+
+effectIt.effect('does not observe unavailable lexical metadata as completed work', () =>
+  Effect.gen(function* () {
+    const unavailable = RecallLexicalDemandUnavailable.make({message: 'bounded metadata unavailable'});
+    expect(yield* lexicalDemandSettled(Effect.fail(unavailable))).toBe(false);
+    expect(yield* lexicalDemandSettled(Effect.succeed({revision: 'pending'}))).toBe(false);
+    expect(yield* lexicalDemandSettled(succeedUndefined)).toBe(true);
+    const defect = new Error('programming defect');
+    const exit = yield* lexicalDemandSettled(Effect.die(defect)).pipe(Effect.exit);
+    expect(Exit.isFailure(exit)).toBe(true);
+  }),
+);
 const producer = (filename: string, home: string) =>
   Effect.acquireUseRelease(
     Effect.sync(() =>
@@ -177,4 +202,75 @@ effectIt.effect(
       expect(yield* vectorIndexGenerationReadiness(home, manifest, lexical.generation)).toBe('current');
     }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive),
   30_000,
+);
+
+effectIt.effect(
+  'one home host resumes both lexical variants after independent producers exit, without a selected model',
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const system = yield* SystemInfo;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-lexical-home-worker-'});
+      const receipt = recallEmbeddingWorkerPaths(path, home).receiptPath;
+      yield* Effect.addFinalizer(() =>
+        Effect.gen(function* () {
+          const text = yield* fs.readFileString(receipt).pipe(Effect.orElseSucceed(() => ''));
+          if (!text) return;
+          const owner = JSON.parse(text);
+          if (owner.processId === process.pid || typeof owner.processId !== 'number') return;
+          if ((yield* system.processStartIdentity(owner.processId)) !== owner.processStartIdentity) return;
+          yield* Effect.sync(() => {
+            try {
+              process.kill(owner.processId, 'SIGKILL');
+            } catch {
+              /* Owned fixture process already exited. */
+            }
+          });
+          yield* until(
+            Effect.sync(() => !system.isProcessRunning(owner.processId)),
+            'owned lexical worker cleanup',
+          ).pipe(Effect.ignoreCause);
+        }),
+      );
+      const resource = path.join(home, 'data/local/resources/source.md');
+      yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+      yield* fs.writeFileString(resource, 'Model-independent lexical source.');
+      const scopes = EffectArray.map([false, true], includeInactive => ({
+        account: 'local',
+        agentContextHome: home,
+        user: 'one',
+        includeInactive,
+      }));
+      for (const scope of scopes) yield* requestRecallLexicalRefresh(scope);
+      const producers = yield* Effect.all([producer(recallChild, home), producer(recallChild, home)], {concurrency: 2});
+      for (const result of producers) {
+        expect(result.code).toBe(0);
+        expect(result.error).toBe('');
+      }
+      yield* until(
+        Effect.gen(function* () {
+          for (const scope of scopes) if (!(yield* lexicalDemandSettled(readRecallLexicalDemand(scope)))) return false;
+          return true;
+        }),
+        'both lexical variants',
+      );
+      for (const scope of scopes) expect((yield* recallIndexStatus(scope, scope.includeInactive)).ready).toBe(true);
+      yield* until(fs.exists(receipt).pipe(Effect.map(exists => !exists)), 'normal lexical host exit');
+      const first = yield* records(home);
+      expect(EffectArray.filter(first, row => row.event === 'recall-worker-start')).toHaveLength(1);
+      expect(
+        EffectArray.some(
+          first,
+          row => row.event === 'model-spawn' || row.event === 'download' || row.event === 'inference',
+        ),
+      ).toBe(false);
+      // A later producer discovers the same durable queue after the prior owner has exited.
+      yield* requestRecallLexicalRefresh(scopes[0]);
+      expect((yield* producer(recallChild, home)).code).toBe(0);
+      yield* until(lexicalDemandSettled(readRecallLexicalDemand(scopes[0])), 'restarted lexical owner');
+      yield* until(fs.exists(receipt).pipe(Effect.map(exists => !exists)), 'restarted lexical host exit');
+      expect(EffectArray.filter(yield* records(home), row => row.event === 'recall-worker-start')).toHaveLength(2);
+    }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive),
+  20_000,
 );

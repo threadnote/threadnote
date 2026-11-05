@@ -30,17 +30,21 @@
     "./memory/identity": "./src/memory/identity.ts",
     "./memory/links": "./src/memory/links.ts",
     "./rank": "./src/rank.ts",
+    "./read_boundary": "./src/read_boundary.ts",
     "./reranker-score": "./src/reranker-score.ts",
     "./resource-invalidation": "./src/resource-invalidation.ts",
     "./results": "./src/results.ts",
     "./runtime": "./src/runtime.ts",
     "./selection": "./src/selection.ts",
+    "./sections_read": "./src/sections_read.ts",
     "./threshold": "./src/threshold.ts",
     "./tokenize": "./src/tokenize.ts",
     "./vector-index": "./src/vector-index.ts",
+    "./vector/negative-readiness": "./src/vector/negative-readiness.ts",
     "./warning": "./src/warning.ts",
     "./background/demand": "./src/background/demand.ts",
-    "./background/vector-step": "./src/background/vector-step.ts"
+    "./background/vector-step": "./src/background/vector-step.ts",
+    "./background/lexical-demand": "./src/background/lexical-demand.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

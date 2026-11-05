@@ -14,7 +14,9 @@ import {
   parseRecallMemoryConnectionInput,
   retrieveRecallMemoryConnections,
 } from '@threadnote/recall/memory/connections';
-import {loadRecallIndexData, loadRecallMemoryLinks} from '@threadnote/recall/index';
+import {loadRecallIndexData, loadRecallMemoryLinks, recallIndexStatus} from '@threadnote/recall/index';
+import {readRecallLexicalDemand} from '@threadnote/recall/background/lexical-demand';
+import {runRecallLexicalWorkerUnit} from '../../src/recall/embedding_worker.js';
 import {rankRecallCandidates, type RecallCandidate} from '@threadnote/recall/rank';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -159,6 +161,7 @@ describe('recall memory connections', () => {
         ['outgoing', 'related_to', 'tn_target', 'tn_second_hop'],
       ]);
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed, 'tn_seed'],
@@ -227,7 +230,7 @@ describe('recall memory connections', () => {
         yield* writeMemory(fs, path, config, 'relocation-neighbor', neighborMemoryId, [
           {type: 'related_to', uri: alias},
         ]);
-        yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+        yield* prepareConnectionFixture(config);
 
         for (const memoryRef of [alias, currentUri, formerUri]) {
           const result = yield* retrieveRecallMemoryConnections(config, {
@@ -280,7 +283,7 @@ describe('recall memory connections', () => {
           EffectString.replace(`memory_id: ${memoryId}\n`, ''),
         );
         yield* store.write(location, currentUri, superseding, {mode: 'upsert'});
-        yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+        yield* prepareConnectionFixture(config);
         for (const memoryRef of [alias, currentUri, formerUri]) {
           const historical = yield* retrieveRecallMemoryConnections(config, {
             allowedUriScopes: [memoryRoot(config.user)],
@@ -312,7 +315,7 @@ describe('recall memory connections', () => {
           EffectString.replace(`memory_id: ${memoryId}\n`, 'memory_id: tn_other_live_identity\n'),
         );
         yield* store.write(location, currentUri, conflicting, {mode: 'upsert'});
-        yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+        yield* prepareConnectionFixture(config);
         const rejected = yield* retrieveRecallMemoryConnections(config, {
           allowedUriScopes: [memoryRoot(config.user)],
           memoryRefs: [alias],
@@ -396,6 +399,7 @@ describe('recall memory connections', () => {
       yield* writeMemory(fs, path, config, 'new', 'tn_new', [], {supersedes: 'threadnote://memory/tn_old'});
       yield* writeMemory(fs, path, runtimeConfig(home, 'foreign-user'), 'foreign', 'tn_foreign');
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
@@ -441,6 +445,7 @@ describe('recall memory connections', () => {
         supersedes: 'threadnote://memory/tn_currentness_abstention_seed',
       });
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
@@ -485,6 +490,7 @@ describe('recall memory connections', () => {
         supersedes: 'threadnote://memory/tn_currentness_milliseconds_seed',
       });
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
@@ -499,7 +505,7 @@ describe('recall memory connections', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('repairs stale indexed lifecycle before deciding a premise is current', () =>
+  effectIt.effect('defers stale lifecycle evidence and converges through background maintenance', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -511,6 +517,7 @@ describe('recall memory connections', () => {
         validFrom: '2027-08-31T12:00:00.000Z',
       });
 
+      yield* prepareConnectionFixture(config);
       const beforeMutation = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
@@ -544,6 +551,19 @@ describe('recall memory connections', () => {
       expect(rewrittenInfo.size).toBe(indexedInfo.size);
       yield* fs.utimes(supersederPath, indexedMtime, indexedMtime);
 
+      const scope = {...config, includeInactive: true};
+      const beforeRead = yield* recallIndexStatus(config, true);
+      const unavailable = yield* retrieveRecallMemoryConnections(config, {
+        allowedUriScopes: [memoryRoot(config.user)],
+        memoryRefs: [seed],
+        now: CURRENT,
+        readRecords: uris => readMemoryRecordsByUri(config, uris),
+        relationTypes: ['related_to'],
+      }).pipe(Effect.result);
+      expect(unavailable).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallReadyReadUnavailable'}});
+      expect(yield* recallIndexStatus(config, true)).toEqual(beforeRead);
+      expect(yield* readRecallLexicalDemand(scope)).toMatchObject({reconcile: true});
+      expect((yield* runRecallLexicalWorkerUnit(scope)).state).toBe('complete');
       const afterMutation = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         memoryRefs: [seed],
@@ -553,7 +573,7 @@ describe('recall memory connections', () => {
       });
 
       expect(afterMutation.premises[0]?.state).toBe('historical');
-      expect(afterMutation.diagnostics).toMatchObject({canonicalMismatches: 1, refreshRepairs: 1});
+      expect(afterMutation.diagnostics).toMatchObject({canonicalMismatches: 0, refreshRepairs: 0});
       expect(afterMutation.diagnostics.currentnessTruncatedMemoryIds).toBeUndefined();
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -580,6 +600,7 @@ describe('recall memory connections', () => {
         {concurrency: 8},
       );
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         limit: 8,
@@ -623,6 +644,7 @@ describe('recall memory connections', () => {
         {concurrency: 8},
       );
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         limit: 8,
@@ -668,6 +690,7 @@ describe('recall memory connections', () => {
         {concurrency: 8},
       );
 
+      yield* prepareConnectionFixture(config);
       const result = yield* retrieveRecallMemoryConnections(config, {
         allowedUriScopes: [memoryRoot(config.user)],
         limit: 8,
@@ -696,6 +719,7 @@ describe('recall memory connections', () => {
       ]);
       yield* writeMemory(fs, path, runtimeConfig(home, 'foreign-user'), 'foreign-premise', 'tn_foreign_premise');
 
+      yield* prepareConnectionFixture(config);
       for (const memoryRef of ['threadnote://memory/tn_missing_premise', 'threadnote://memory/tn_foreign_premise']) {
         const result = yield* retrieveRecallMemoryConnections(config, {
           allowedUriScopes: [memoryRoot(config.user)],
@@ -730,6 +754,7 @@ describe('recall memory connections', () => {
         {project: 'project-b'},
       );
 
+      yield* prepareConnectionFixture(config);
       const prepared = yield* prepareRecallSections(config, {
         allowExactRescue: false,
         exactMatches: [],
@@ -831,4 +856,13 @@ function writeMemory(
     );
     return uri;
   });
+}
+
+/** Explicit producer setup; the reads and mutation race windows below remain ready-only. */
+function prepareConnectionFixture(config: ReturnType<typeof runtimeConfig>) {
+  return Effect.forEach(
+    [false, true],
+    includeInactive => loadRecallIndexData(config, {forceRefresh: true, includeInactive}),
+    {concurrency: 1},
+  );
 }

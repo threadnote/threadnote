@@ -1,3 +1,26 @@
+export const RECALL_LOGICAL_SCOPE_CHANGED_REASON = 'logical scope changed; background lexical maintenance required';
+export const RECALL_INVENTORY_POLICY_CHANGED_REASON =
+  'inventory policy changed; background lexical maintenance required';
+export const RECALL_INVENTORY_POLICY_VERSION = '2';
+export const recallInventoryPolicyIsCurrent = (metadata: ReadonlyMap<string, string>) =>
+  metadata.get('inventory_policy_version') === RECALL_INVENTORY_POLICY_VERSION &&
+  metadata.get('inventory_policy_content_generation') === metadata.get('content_generation') &&
+  Boolean(metadata.get('content_generation'));
+import {sha256HexSync} from '@threadnote/platform/sha256';
+
+export const recallLogicalScope = (
+  config: {readonly account: string; readonly user: string; readonly manifestPath?: string},
+  includeInactive: boolean,
+) => sha256HexSync(JSON.stringify([config.account, config.user, config.manifestPath ?? null, includeInactive]));
+
+export const recallScopeIsCurrent = (
+  metadata: ReadonlyMap<string, string>,
+  config: {readonly account: string; readonly user: string; readonly manifestPath?: string},
+  includeInactive: boolean,
+) =>
+  metadata.get('logical_scope') === recallLogicalScope(config, includeInactive) &&
+  metadata.get('logical_scope_content_generation') === metadata.get('content_generation');
+
 export interface RecallIndexForegroundFreshness {
   readonly observedCanonicalMutationGeneration: string;
   readonly forceRefresh: boolean;
@@ -59,9 +82,11 @@ export function recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh(
   input: RecallIndexCanonicalMutationContinuity,
 ): boolean {
   return (
-    input.persistedGeneration === input.observedGeneration ||
-    (input.markerPreviousGeneration === input.persistedGeneration &&
-      input.markerCurrentGeneration === input.observedGeneration)
+    input.persistedGeneration.length > 0 &&
+    input.observedGeneration.length > 0 &&
+    (input.persistedGeneration === input.observedGeneration ||
+      (input.markerPreviousGeneration === input.persistedGeneration &&
+        input.markerCurrentGeneration === input.observedGeneration))
   );
 }
 

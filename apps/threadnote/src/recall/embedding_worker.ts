@@ -1,7 +1,13 @@
+import {RecallReadMaintenancePort} from './read_maintenance.js';
 import {SecureRandom} from 'effect/crypto';
 import {vectorIndexStatus, VectorIndexCorrupt} from '@threadnote/recall/vector-index';
 import {lexicalRefreshDisposition} from '@threadnote/recall/mcp/refresh';
-import {loadRecallIndexData, recallIndexStatus, RecallIndexCorrupt} from '@threadnote/recall/index';
+import {
+  loadRecallIndexData,
+  recallIndexStatus,
+  RecallIndexCorrupt,
+  RecallIndexSourceChanged,
+} from '@threadnote/recall/index';
 import {Array as EffectArray, Clock, Context, Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@threadnote/inference/background/admission';
@@ -17,6 +23,65 @@ import {
   type RecallEmbeddingScope,
 } from '@threadnote/recall/background/demand';
 import {RecallVectorSourceChanged, runRecallVectorPreparationBatch} from '@threadnote/recall/background/vector-step';
+
+import {
+  readRecallLexicalDemand,
+  completeRecallLexicalRefresh,
+  failRecallLexicalRefresh,
+  deferRecallLexicalRefresh,
+  requestRecallLexicalRefresh,
+  type RecallLexicalScope,
+} from '@threadnote/recall/background/lexical-demand';
+
+/** Lexical maintenance does not depend on model selection or native inference admission. */
+export const runRecallLexicalWorkerUnit = Effect.fn('recall.lexicalWorkerUnit')(function* (scope: RecallLexicalScope) {
+  const demand = yield* readRecallLexicalDemand(scope);
+  if (!demand?.revision || demand.failures >= 8) return {state: 'complete' as const, delay: 0};
+  if (demand.notBefore !== undefined && demand.notBefore > (yield* Clock.currentTimeMillis))
+    return {state: 'deferred' as const, reason: 'retry-backoff', delay: 1000};
+  const revision = demand.revision;
+  scope = {...scope, work: demand.work};
+  if (scope.work) {
+    const port = yield* RecallReadMaintenancePort;
+    if (!port) return {state: 'blocked' as const, reason: 'read-maintenance-unavailable', delay: 0};
+    const result = yield* port(scope).pipe(Effect.result);
+    if (result._tag === 'Failure') {
+      yield* failRecallLexicalRefresh(scope, revision);
+      return {state: 'deferred' as const, reason: 'read-maintenance-failed', delay: 1000};
+    }
+    if (result.success === 'pending') {
+      yield* deferRecallLexicalRefresh(scope, revision, 5000);
+      return {state: 'deferred' as const, reason: 'read-maintenance-pending', delay: 5000};
+    }
+    if (demand.reconcile || !(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
+      yield* requestRecallLexicalRefresh({...scope, work: undefined}, {reconcile: demand.reconcile});
+    return (yield* completeRecallLexicalRefresh(scope, revision))
+      ? {state: 'complete' as const, delay: 0}
+      : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
+  }
+  const status = yield* recallIndexStatus(scope, scope.includeInactive);
+  if (lexicalRefreshDisposition(status) === 'unsafe') {
+    yield* failRecallLexicalRefresh(scope, revision, true);
+    return {state: 'blocked' as const, reason: 'lexical-storage-requires-repair', delay: 0};
+  }
+  const result = yield* loadRecallIndexData(scope, {
+    includeInactive: scope.includeInactive,
+    memoryIds: [],
+    forceRefresh: demand.reconcile === true,
+  }).pipe(Effect.result);
+  if (result._tag === 'Failure') {
+    if (Schema.is(RecallIndexSourceChanged)(result.failure))
+      return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
+    yield* failRecallLexicalRefresh(scope, revision);
+    return {state: 'deferred' as const, reason: 'lexical-maintenance-failed', delay: 1000};
+  }
+  // A concurrent canonical mutation retains demand for another pass.
+  if (!(yield* recallIndexStatus(scope, scope.includeInactive)).ready)
+    return {state: 'checkpointed' as const, reason: 'source-changed', delay: 50};
+  return (yield* completeRecallLexicalRefresh(scope, revision))
+    ? {state: 'complete' as const, delay: 0}
+    : {state: 'checkpointed' as const, reason: 'newer-demand', delay: 50};
+});
 
 export interface RecallEmbeddingWorkerUnitResult {
   readonly state: 'complete' | 'checkpointed' | 'deferred' | 'blocked';

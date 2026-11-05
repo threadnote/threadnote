@@ -1,18 +1,13 @@
+import {indexCandidate} from './index/candidate.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {UtilityOperationError} from '@threadnote/platform/errors';
 import {Effect, Option} from 'effect';
-import {
-  boundedMemoryAuthority,
-  boundedMemoryTrust,
-  isSharedMemoryUri,
-  type MemoryRecord,
-  type MemoryRelation,
-} from '@threadnote/memory/document';
+import {isSharedMemoryUri, type MemoryRecord, type MemoryRelation} from '@threadnote/memory/document';
 import {
   deduplicateLogicalRecallCandidates,
   rankRecallCandidates,
-  recallMemoryContentHash,
+  recallCandidateLogicalCorpusKey,
   type RecallCandidate,
   type RecallConfidence,
   type RecallRankContext,
@@ -906,8 +901,8 @@ function hybridRankRecallHits(
     const indexed = indexedByUri.get(uri);
     return {
       ...indexed,
-      authority: indexed?.authority ?? (record ? boundedMemoryAuthority(uri, record.metadata) : recallAuthority(hit)),
-      contentHash: indexed?.contentHash ?? (record ? recallMemoryContentHash(record.body) : undefined),
+      authority: indexed?.authority ?? recallAuthority(hit),
+      contentHash: indexed?.contentHash,
       equivalentUris: indexed?.equivalentUris,
       exactTerms: hit.exactTerms,
       feedback: context.feedbackByUri?.get(uri),
@@ -934,13 +929,7 @@ function hybridRankRecallHits(
       timestamp: record?.metadata.timestamp ?? indexed?.timestamp,
       trust:
         indexed?.trust ??
-        (record
-          ? boundedMemoryTrust(uri, record.metadata)
-          : hit.category === 'resources'
-            ? 'untrusted'
-            : isSharedMemoryUri(hit.uri)
-              ? 'approved'
-              : 'inferred'),
+        (hit.category === 'resources' ? 'untrusted' : isSharedMemoryUri(hit.uri) ? 'approved' : 'inferred'),
       uri,
       validFrom: record?.metadata.validFrom ?? indexed?.validFrom,
       validTo: record?.metadata.validTo ?? indexed?.validTo,
@@ -951,18 +940,13 @@ function hybridRankRecallHits(
   // unless extra hydration already requested that URI and missed.
   const absentMemoryUris = new Set(EffectArray.map(context.absentMemoryUris ?? [], uri => stripAnchor(uri)));
   const liveRecordsProvided = (context.records?.length ?? 0) > 0;
-  const hasLiveMemoryRecord = (uri: string, equivalentUris?: readonly string[]) => {
-    const candidateUris = [uri, ...(equivalentUris ?? [])];
-    if (EffectArray.some(candidateUris, candidateUri => recordsByUri.has(stripAnchor(candidateUri)))) {
-      return true;
-    }
-    if (EffectArray.some(candidateUris, candidateUri => absentMemoryUris.has(stripAnchor(candidateUri)))) {
-      return false;
-    }
+  const hasLiveMemoryRecord = (uri: string) => {
+    if (recordsByUri.has(stripAnchor(uri))) return true;
+    if (absentMemoryUris.has(stripAnchor(uri))) return false;
     return !liveRecordsProvided || !Effect2.pipe(uri, EffectString.includes('/memories/'));
   };
   const hitUris = new Set(EffectArray.map(hitCandidates, candidate => candidate.uri));
-  const candidates = EffectArray.filter(
+  const candidates = EffectArray.flatMap(
     [
       ...hitCandidates,
       ...EffectArray.map(
@@ -974,8 +958,28 @@ function hybridRankRecallHits(
         }),
       ),
     ],
-    __effectArrayValue =>
-      !!(candidate => hasLiveMemoryRecord(candidate.uri, candidate.equivalentUris))(__effectArrayValue),
+    (candidate: RecallCandidate) => {
+      // An alias cannot prove that a missing representative is still live.
+      if (!hasLiveMemoryRecord(candidate.uri)) return [];
+      const record = recordsByUri.get(stripAnchor(candidate.uri));
+      const current = record
+        ? {
+            ...candidate,
+            ...indexCandidate(record.uri, record.content, false, record),
+            relations: recallRelations(record, context.seedUris ?? []),
+          }
+        : candidate;
+      const equivalentUris = EffectArray.filter(candidate.equivalentUris ?? [], uri => {
+        const alias = recordsByUri.get(stripAnchor(uri));
+        if (!alias) return !liveRecordsProvided && !absentMemoryUris.has(stripAnchor(uri));
+        const live = indexCandidate(alias.uri, alias.content, false, alias);
+        return (
+          (context.eligibility === undefined || recallRankCandidateIsEligible(context.eligibility, live)) &&
+          recallCandidateLogicalCorpusKey(live) === recallCandidateLogicalCorpusKey(current)
+        );
+      });
+      return [{...current, equivalentUris: equivalentUris.length > 0 ? equivalentUris : undefined}];
+    },
   );
   for (const candidate of candidates) {
     if (!byUri.has(candidate.uri)) {

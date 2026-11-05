@@ -9,6 +9,7 @@ import type {StoreMemoryOptions} from './store_contract.js';
 export const resolveLocalMemoryReplacementTarget = Effect.fn('memory.resolveLocalReplacement')(function* (
   config: RuntimeConfig,
   requestedUri: string,
+  options: {readonly prepare?: boolean} = {},
 ) {
   const target = yield* resolveMemoryReplacementTarget(
     config,
@@ -22,6 +23,7 @@ export const resolveLocalMemoryReplacementTarget = Effect.fn('memory.resolveLoca
         const record = content ? parseMemoryDocument(uri, content) : undefined;
         return record ? [record] : [];
       }),
+    options,
   );
   return {...target, memoryId: target.record?.metadata.memoryId ?? target.expectedMemoryId};
 });
@@ -31,7 +33,7 @@ export const resolveStoreMemoryReplacementOptions = Effect.fn('memory.resolveSto
   options: StoreMemoryOptions,
 ) {
   if (!options.replaceUri) return options;
-  const replacement = yield* resolveLocalMemoryReplacementTarget(config, options.replaceUri);
+  const replacement = yield* resolveLocalMemoryReplacementTarget(config, options.replaceUri, {prepare: true});
   const memoryId = options.expectedReplaceMemoryId ?? replacement.memoryId ?? options.metadata.memoryId;
   return {
     ...options,

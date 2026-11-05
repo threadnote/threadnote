@@ -125,10 +125,12 @@ describe('recall memory connection properties', () => {
         );
         yield* writeMemory(fs, path, home, 'topical-noise', 'tn_topical_noise');
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+        yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
         const incremental = yield* retrieve(config);
         yield* fs.remove(path.join(home, 'indexes', 'lexical'), {force: true, recursive: true});
         yield* clearRecallIndexMemoryCache();
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+        yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
         const rebuilt = yield* retrieve(config);
         const normalize = (result: typeof incremental) => ({
           connections: EffectArray.map(result.connections, connection => ({
@@ -202,6 +204,7 @@ describe('recall memory connection properties', () => {
             {mode: 'upsert'},
           );
           yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
+          yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
 
           const refs = [alias, currentUri, formerUri] as const;
           const orderedRefs = EffectArray.map(order, index => refs[index]);

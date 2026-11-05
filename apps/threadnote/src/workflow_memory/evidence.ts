@@ -3,14 +3,18 @@ import {Effect, FileSystem, Path, Schema} from 'effect';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {
+  prepareMemoryIdentityAliases,
+  resolveMemoryIdentityAliases,
+  verifyResolvedMemoryIdentity,
+} from '@threadnote/recall/memory/identity';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {RecallIdentityAdmissionBusy, withRecallIdentityAdmission} from '@threadnote/recall/index';
 import {
   verifyAuthoredMemoryRelationTargetBytes,
-  verifyAuthoredMemoryRelationTargetIdentities,
+  prepareAuthoredMemoryRelationTargetIdentities,
 } from '../memory/relations.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -99,12 +103,13 @@ export const verifyWorkflowEvidence = Effect.fn('workflowMemory.verifyEvidence')
   config: RuntimeConfig,
   binding: WorkflowBinding,
   refs: readonly WorkflowEvidenceReference[] = [],
+  options: {readonly readyOnly?: boolean} = {},
 ) {
   const scopes = yield* validateWorkflowInput(() => workflowEvidenceScopes(binding, refs));
   if (refs.length === 0) return scopes;
   return yield* Effect.gen(function* () {
     const store = yield* ResourceStore;
-    const resolved = yield* resolveMemoryIdentityAliases(
+    const resolved = yield* (options.readyOnly ? resolveMemoryIdentityAliases : prepareMemoryIdentityAliases)(
       config,
       EffectArray.map(refs, ref => memoryIdentityAlias(ref.memoryId)),
       scopes,
@@ -156,7 +161,7 @@ export function withWorkflowEvidenceAdmission<A, E, R>(
   config: RuntimeConfig,
   binding: WorkflowBinding,
   refs: readonly WorkflowEvidenceReference[],
-  targets: Parameters<typeof verifyAuthoredMemoryRelationTargetIdentities>[1],
+  targets: Parameters<typeof prepareAuthoredMemoryRelationTargetIdentities>[1],
   use: (
     check: Effect.Effect<void, unknown, ResourceStore | FileSystem.FileSystem | Path.Path>,
   ) => Effect.Effect<A, E, R>,
@@ -175,7 +180,7 @@ export function withWorkflowEvidenceAdmission<A, E, R>(
   )
     return use(bytes);
   const prepare = verifyWorkflowEvidence(config, binding, pinnedRefs).pipe(
-    Effect.andThen(verifyAuthoredMemoryRelationTargetIdentities(config, pinnedTargets)),
+    Effect.andThen(prepareAuthoredMemoryRelationTargetIdentities(config, pinnedTargets)),
     Effect.asVoid,
   );
   return withRecallIdentityAdmission(config, prepare, check => use(check.pipe(Effect.andThen(bytes))));

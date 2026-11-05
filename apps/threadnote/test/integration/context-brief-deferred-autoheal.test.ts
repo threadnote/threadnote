@@ -1,6 +1,6 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, String as EffectString} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
@@ -13,19 +13,22 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
   isDeferredCodeAnchorIntentFilename,
   stageDeferredCodeAnchorIntent,
-  type DeferredCodeAnchorRouteFinalizationReceiptV1,
 } from '@threadnote/threadnote/memory/deferred/code_anchor';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
+import {recallReadMaintenanceLayer} from '../../src/recall/read_maintenance.js';
+import {runRecallLexicalWorkerUnit} from '../../src/recall/embedding_worker.js';
+import {readRecallLexicalScope} from '@threadnote/recall/background/lexical-demand';
+
 describe('Context Brief deferred code-anchor recovery', () => {
   for (const interruptFirstAdmission of [false, true]) {
     effectIt.effect(
       interruptFirstAdmission
-        ? 'recovers a pre-write deadline in the first brief after direct graph publication'
-        : 'returns the backlink in the first brief after a direct graph publication bypassed the CLI hook',
+        ? 'retains original anchor intent after an interrupted background attempt and completes it on retry'
+        : 'returns deferred evidence promptly and heals backlinks through the owned background route',
       () =>
         Effect.scoped(
           Effect.gen(function* () {
@@ -43,8 +46,8 @@ describe('Context Brief deferred code-anchor recovery', () => {
             );
             yield* fs.writeFileString(path.join(repository, 'package.json'), '{"name":"autoheal-fixture"}\n');
             yield* fs.writeFileString(manifestPath, 'version: 1\nprojects: []\n');
-            yield* runCommandEffect('git', ['init', '--quiet'], {cwd: repository}).pipe(TestClock.withLive);
-            yield* runCommandEffect('git', ['add', '.'], {cwd: repository}).pipe(TestClock.withLive);
+            yield* runCommandEffect('git', ['init', '--quiet'], {cwd: repository});
+            yield* runCommandEffect('git', ['add', '.'], {cwd: repository});
             yield* runCommandEffect(
               'git',
               [
@@ -58,7 +61,7 @@ describe('Context Brief deferred code-anchor recovery', () => {
                 'fixture',
               ],
               {cwd: repository},
-            ).pipe(TestClock.withLive);
+            );
 
             const config: RuntimeConfig = {
               account: 'local',
@@ -86,11 +89,9 @@ describe('Context Brief deferred code-anchor recovery', () => {
             const indexer = yield* CodeGraphIndexer;
             // Index before staging so wrap-heal cannot consume the intent; this
             // example is the missed-wakeup path after a ready graph already exists.
-            yield* indexer
-              .index({cwd: repository, ensureVectors: false, threadnoteHome: home})
-              .pipe(TestClock.withLive);
+            yield* indexer.index({cwd: repository, ensureVectors: false, threadnoteHome: home});
             yield* store.write(location, memoryUri, content, {mode: 'create'});
-            yield* stageDeferredCodeAnchorIntent(config, {
+            const staged = {
               memoryContent: content,
               memoryMetadata: metadata,
               memoryUri,
@@ -110,11 +111,12 @@ describe('Context Brief deferred code-anchor recovery', () => {
                   recovery: 'prepare-current-graph',
                   retryCondition: 'after-current-graph-ready',
                   retryable: true,
-                  type: 'memory-code-citation-capture-recovery',
-                  version: 1,
+                  type: 'memory-code-citation-capture-recovery' as const,
+                  version: 1 as const,
                 },
               },
-            });
+            } as const;
+            yield* stageDeferredCodeAnchorIntent(config, staged);
             const pendingRoot = path.join(
               home,
               'data',
@@ -151,51 +153,38 @@ describe('Context Brief deferred code-anchor recovery', () => {
                   return store.read(location, uri);
                 }),
             });
-            const receipts: DeferredCodeAnchorRouteFinalizationReceiptV1[] = [];
             const query = yield* CodeGraphQueryService;
-            const liveQuery = CodeGraphQueryService.of({
-              ...query,
-              status: (...args) => query.status(...args).pipe(TestClock.withLive),
-            });
-            const firstRetrieve = retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors, {
-              onFinalizationReceipt: receipt => {
-                receipts.push(receipt);
-              },
-            }).pipe(
+            const liveQuery = query;
+            const firstRetrieve = retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors).pipe(
+              Effect.provideService(ResourceStore, contendedStore),
+              Effect.provideService(CodeGraphQueryService, liveQuery),
+              Effect.timeout('2 seconds'),
+            );
+            const first = yield* firstRetrieve;
+            expect(first.candidates).toEqual([]);
+            expect(first.gaps).toContain('code-anchor-recall-unavailable');
+            expect(interruptedAdmission).toBe(false);
+            const directory = path.join(home, 'recall', 'lexical-demand-v1');
+            const scopes = yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
+              readRecallLexicalScope(home, filename),
+            );
+            const scope = Option.getOrUndefined(
+              EffectArray.findFirst(scopes, scope => scope?.work?.kind === 'anchors'),
+            );
+            expect(scope).toBeDefined();
+            const port = yield* Layer.build(recallReadMaintenanceLayer).pipe(
               Effect.provideService(ResourceStore, contendedStore),
               Effect.provideService(CodeGraphQueryService, liveQuery),
             );
-            // Real repository observations need live Git/lease timing; route
-            // deadlines stay deterministic regardless of runner load.
-            const firstFiber = yield* firstRetrieve.pipe(Effect.forkScoped);
             if (interruptFirstAdmission) {
+              const worker = yield* runRecallLexicalWorkerUnit(scope!).pipe(Effect.provide(port), Effect.forkScoped);
               yield* Deferred.await(entered);
-              yield* TestClock.adjust('750 millis');
+              yield* Fiber.interrupt(worker);
             }
-            const first = yield* Fiber.join(firstFiber);
-            // Count/state-only receipts retain the failed boundary without exposing memory content or locators.
-            expect(first.codeAnchorCoverage, JSON.stringify(receipts)).toEqual({
-              complete: true,
-              matchedMemories: 1,
-              requested: 1,
-              resolved: 1,
-            });
-            const receiptStates = EffectArray.map(receipts, receipt => receipt.state);
-            if (interruptFirstAdmission) {
-              expect(receiptStates).toEqual(['contended', 'completed']);
-            } else {
-              // A busy CI runner can briefly contend on the route lock even
-              // without the injected interruption. Recovery in this first
-              // brief is the contract, with at most one bounded retry.
-              expect([['completed'], ['contended', 'completed']]).toContainEqual(receiptStates);
-            }
-            expect(first.gaps).not.toContain('code-anchor-recall-unavailable');
-            expect(first.candidates).toMatchObject([
-              {
-                codeLinkMatches: [{anchorOrdinal: 0, anchorPath: 'src/index.ts', matchKind: 'file-path'}],
-                uri: memoryUri,
-              },
-            ]);
+            const completed = yield* runRecallLexicalWorkerUnit(scope!).pipe(Effect.provide(port));
+            expect(completed.state).toBe('complete');
+            // The home host gives the newly enqueued lexical work its own turn.
+            yield* runRecallLexicalWorkerUnit({...config, includeInactive: false});
             expect(
               EffectArray.filter(
                 yield* fs.readDirectory(pendingRoot, {recursive: true}),
@@ -213,10 +202,9 @@ describe('Context Brief deferred code-anchor recovery', () => {
               visibility: metadata.visibility,
             });
 
-            const second = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors).pipe(
-              TestClock.withLive,
-            );
+            const second = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
             expect(EffectArray.map(second.candidates, candidate => candidate.uri)).toEqual([memoryUri]);
+            expect(second.gaps).not.toContain('code-anchor-recall-unavailable');
             expect(
               EffectArray.filter(
                 yield* fs.readDirectory(pendingRoot, {recursive: true}),
@@ -224,8 +212,36 @@ describe('Context Brief deferred code-anchor recovery', () => {
                   !!(name => isDeferredCodeAnchorIntentFilename(path.basename(name)))(__effectArrayValue),
               ),
             ).toEqual([]);
+            // A later intent in the same route must not be hidden by a completed
+            // demand or by the preceding empty-route read.
+            const laterUri = EffectString.replace('autoheal.md', 'autoheal-later.md')(memoryUri);
+            const laterMetadata = {...metadata, memoryId: 'tn_context_brief_autoheal_later'};
+            const laterContent = formatMemoryDocument('MEMORY', laterMetadata, body);
+            yield* store.write(location, laterUri, laterContent, {mode: 'create'});
+            yield* stageDeferredCodeAnchorIntent(config, {
+              ...staged,
+              memoryContent: laterContent,
+              memoryMetadata: laterMetadata,
+              memoryUri: laterUri,
+            });
+            const pendingAgain = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
+            expect(pendingAgain.gaps).toContain('code-anchor-recall-unavailable');
+            const laterScopes = yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
+              readRecallLexicalScope(home, filename),
+            );
+            expect(laterScopes).toHaveLength(scopes.length);
+            const laterScope = Option.getOrUndefined(
+              EffectArray.findFirst(laterScopes, scope => scope?.work?.kind === 'anchors'),
+            );
+            expect(yield* runRecallLexicalWorkerUnit(laterScope!).pipe(Effect.provide(port))).toMatchObject({
+              state: 'complete',
+            });
+            yield* runRecallLexicalWorkerUnit({...config, includeInactive: false});
+            const healedAgain = yield* retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors);
+            expect(EffectArray.map(healedAgain.candidates, candidate => candidate.uri)).toContain(laterUri);
+            expect(healedAgain.gaps).not.toContain('code-anchor-recall-unavailable');
           }),
-        ).pipe(provideTestLayer(ApplicationLayer)),
+        ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
       60_000,
     );
   }

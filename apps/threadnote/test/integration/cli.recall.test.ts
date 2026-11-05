@@ -1,3 +1,5 @@
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {runEffect} from '../helpers/effect-runtime.js';
 import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -50,6 +52,18 @@ describe('recall CLI explicit memory navigation', () => {
       memoryDocument('cli-target', 'tn_cli_target_only_journey', 'Explicit one-hop target.'),
     );
 
+    await runEffect(
+      loadRecallIndexData(
+        {account: 'local', user: 'local', agentContextHome: home, manifestPath: join(home, 'seed-manifest.yaml')},
+        {includeInactive: false},
+      ),
+    );
+    await runEffect(
+      loadRecallIndexData(
+        {account: 'local', user: 'local', agentContextHome: home, manifestPath: join(home, 'seed-manifest.yaml')},
+        {includeInactive: true},
+      ),
+    );
     const recalled = await runCli(
       [
         'recall',
@@ -106,6 +120,7 @@ function memoryDocument(topic: string, memoryId: string, body: string, relation?
 
 async function temporaryHome(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), 'threadnote-cli-recall-'));
+  await writeFile(join(home, 'seed-manifest.yaml'), 'version: 1\nprojects: []\n');
   temporaryHomes.push(home);
   return home;
 }

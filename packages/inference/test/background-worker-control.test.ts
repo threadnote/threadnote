@@ -2,7 +2,18 @@ import {cryptoLayer} from '@threadnote/platform/crypto';
 import {SecureRandom} from 'effect/crypto';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Deferred, Effect, FileSystem, Fiber, Layer, Path} from 'effect';
+import {
+  Clock,
+  Deferred,
+  Effect,
+  Exit,
+  FileSystem,
+  Fiber,
+  Layer,
+  Path,
+  PlatformError,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
@@ -17,6 +28,8 @@ import {
   inspectBackgroundWorkerControl,
   BACKGROUND_WORKER_LOCK_STALE_MILLISECONDS,
   wakeBackgroundWorker,
+  createBackgroundWorkerFixtureDrain,
+  drainBackgroundWorkerFixture,
   type BackgroundWorkerControlOptions,
 } from '../src/background/worker-control.js';
 
@@ -32,7 +45,7 @@ const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const actual = yield* SystemInfo;
-  const home = yield* fs.makeTempDirectoryScoped({prefix: 'background-worker-control-'});
+  const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'background-worker-control-'}));
   const identities = new Map<number, string | undefined>([[actual.processId, 'fixture-self']]);
   const system = SystemInfo.of({
     ...actual,
@@ -77,6 +90,379 @@ const fixture = Effect.gen(function* () {
   );
   const run = <A, E, R>(program: Effect.Effect<A, E, R>) => program.pipe(Effect.provideService(SystemInfo, system));
   return {fs, home, system, identities, options, owner, launches, withHomeLock, receipt, run};
+});
+
+const drainFixture = Effect.gen(function* () {
+  const f = yield* fixture;
+  const capability = yield* f.run(
+    createBackgroundWorkerFixtureDrain(f.options, {
+      fixtureRoot: f.home,
+      expectedExecutablePath: f.system.executablePath,
+    }),
+  );
+  const child = (nonce: string, pid = 1234567) =>
+    Effect.gen(function* () {
+      const owner = {...f.owner, processId: pid, processStartIdentity: `fixture-child-${pid}`};
+      f.identities.set(pid, owner.processStartIdentity);
+      const lifecycle = yield* makeBackgroundWorkerLifecycle(f.options, nonce).pipe(
+        Effect.provideService(SystemInfo, SystemInfo.of({...f.system, processId: pid})),
+      );
+      return {owner, lifecycle};
+    });
+  const closed = Effect.gen(function* () {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (
+        EffectString.includes('"phase":"closing"')(
+          yield* f.fs.readFileString(f.options.receiptPath + '.launch-v2.json'),
+        )
+      )
+        return;
+      yield* Effect.sleep(1);
+    }
+    return yield* Effect.die('Fixture did not close launch admission');
+  });
+  return {...f, capability, child, closed};
+});
+
+describe('owned fixture cooperative drain', () => {
+  for (const stillRunning of [false, true])
+    effectIt.effect(`observes positive process exit after missing birth (still running=${stillRunning})`, () =>
+      Effect.gen(function* () {
+        const f = yield* drainFixture;
+        yield* f.run(
+          Effect.gen(function* () {
+            yield* wakeBackgroundWorker(f.options);
+            const {owner, lifecycle} = yield* f.child(f.launches[0]);
+            expect(yield* lifecycle.register(owner)).toBe(true);
+            f.identities.set(owner.processId, undefined);
+            let livenessChecks = 0;
+            const raced = SystemInfo.of({
+              ...f.system,
+              isProcessRunning: pid =>
+                pid === owner.processId ? ++livenessChecks === 1 || stillRunning : f.system.isProcessRunning(pid),
+            });
+            const result = yield* drainBackgroundWorkerFixture(
+              f.capability,
+              (yield* Clock.currentTimeMillis) + 100,
+            ).pipe(Effect.provideService(SystemInfo, raced), Effect.result);
+            expect(livenessChecks).toBe(2);
+            if (stillRunning) expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
+            else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
+            expect(yield* f.fs.exists(f.home)).toBe(true);
+          }),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  for (const kind of ['control', 'receipt', 'lock'] as const)
+    effectIt.effect(`rejects dangling ${kind} evidence before minting a fixture capability`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const filename =
+          kind === 'control'
+            ? f.options.receiptPath + '.launch-v2.json'
+            : kind === 'receipt'
+              ? f.options.receiptPath
+              : f.options.lockPath;
+        yield* f.fs.symlink('missing-target', filename);
+        const before = yield* f.fs.readLink(filename);
+        const result = yield* f
+          .run(
+            createBackgroundWorkerFixtureDrain(f.options, {
+              fixtureRoot: f.home,
+              expectedExecutablePath: f.system.executablePath,
+            }),
+          )
+          .pipe(Effect.result);
+        expect(result).toMatchObject({_tag: 'Failure'});
+        expect(yield* f.fs.readLink(filename)).toBe(before);
+        expect(f.launches).toHaveLength(0);
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  for (const kind of ['receipt', 'lock'] as const)
+    effectIt.effect(`refuses dangling final ${kind} evidence instead of claiming drain completion`, () =>
+      Effect.gen(function* () {
+        const f = yield* drainFixture;
+        const filename = kind === 'receipt' ? f.options.receiptPath : f.options.lockPath;
+        yield* f.fs.symlink('missing-target', filename);
+        const before = yield* f.fs.readLink(filename);
+        expect(
+          yield* f
+            .run(drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000))
+            .pipe(Effect.result),
+        ).toMatchObject({_tag: 'Failure'});
+        expect(yield* f.fs.readLink(filename)).toBe(before);
+      }).pipe(provideFixtureLayer(platform)),
+    );
+
+  effectIt.effect('fails closed when entry inspection is unavailable rather than treating it as absent', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const guardedFs = FileSystem.FileSystem.of({
+        ...f.fs,
+        lstat: filename =>
+          filename === f.options.receiptPath
+            ? Effect.fail(PlatformError.systemError({_tag: 'PermissionDenied', module: 'FileSystem', method: 'lstat'}))
+            : f.fs.lstat(filename),
+      });
+      expect(
+        yield* f
+          .run(
+            createBackgroundWorkerFixtureDrain(f.options, {
+              fixtureRoot: f.home,
+              expectedExecutablePath: f.system.executablePath,
+            }),
+          )
+          .pipe(Effect.provideService(FileSystem.FileSystem, guardedFs), Effect.result),
+      ).toMatchObject({_tag: 'Failure'});
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('rejects an unrelated fixture root before creating control files or directories', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({prefix: 'unrelated-fixture-root-'});
+      const options = {...f.options, receiptPath: f.home + '/new/worker.json'};
+      expect(
+        yield* f
+          .run(
+            createBackgroundWorkerFixtureDrain(options, {
+              fixtureRoot: root,
+              expectedExecutablePath: f.system.executablePath,
+            }),
+          )
+          .pipe(Effect.result),
+      ).toMatchObject({_tag: 'Failure', failure: {reason: 'ownership'}});
+      expect(yield* f.fs.readDirectory(f.home)).toEqual([]);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('retains the owner after lock release and fences wakes and respawn until actual exit', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          expect(yield* lifecycle.register(owner)).toBe(true);
+          const activated = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const host = yield* f
+            .withHomeLock(
+              Effect.gen(function* () {
+                expect(yield* lifecycle.activate(owner)).toBe(true);
+                yield* f.fs.writeFileString(
+                  f.options.receiptPath,
+                  JSON.stringify({...owner, protocol: 2, version: f.options.version}),
+                );
+                yield* lifecycle.beforeScan;
+                yield* wakeBackgroundWorker(f.options);
+                yield* Deferred.succeed(activated, undefined);
+                yield* Deferred.await(release);
+              }),
+            )
+            .pipe(
+              Effect.onExit(exit => lifecycle.afterRelease(Exit.isSuccess(exit))),
+              Effect.forkScoped,
+            );
+          yield* Deferred.await(activated);
+          let finished = false;
+          const drain = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 2000).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                finished = true;
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          yield* f.closed;
+          expect(yield* lifecycle.shouldDrain).toBe(true);
+          expect(yield* wakeBackgroundWorker(f.options)).toMatchObject({state: 'deferred'});
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(host);
+          expect(yield* f.fs.exists(f.options.receiptPath)).toBe(false);
+          yield* Effect.sleep(30);
+          expect(finished).toBe(false);
+          expect(f.launches).toHaveLength(1);
+          f.identities.delete(owner.processId);
+          expect(yield* Fiber.join(drain)).toEqual({state: 'drained', generationCount: 1});
+        }),
+      );
+    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('acknowledges a delayed revoked child and never treats a missing receipt as exit', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const drain = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 2000).pipe(
+            Effect.forkScoped,
+          );
+          yield* f.closed;
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          expect(yield* lifecycle.register(owner)).toBe(false);
+          expect(yield* lifecycle.activate(owner)).toBe(false);
+          expect(yield* f.fs.exists(f.options.receiptPath)).toBe(false);
+          f.identities.delete(owner.processId);
+          expect(yield* Fiber.join(drain)).toEqual({state: 'drained', generationCount: 1});
+        }),
+      );
+    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('retains unacknowledged launches and never grants a fresh deadline on retry', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      yield* f.run(
+        Effect.gen(function* () {
+          const pending = f.home + '/pending-work';
+          yield* f.fs.writeFileString(pending, 'unchanged durable work');
+          yield* wakeBackgroundWorker(f.options);
+          expect(
+            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 40).pipe(
+              Effect.result,
+            ),
+          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          expect(
+            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
+              Effect.result,
+            ),
+          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          expect(yield* f.fs.readFileString(pending)).toBe('unchanged durable work');
+          expect(yield* f.fs.exists(f.home)).toBe(true);
+        }),
+      );
+    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('unknown process birth identity retains the fixture and desired work', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* f.fs.writeFileString(f.home + '/pending-work', 'unchanged durable work');
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          expect(yield* lifecycle.register(owner)).toBe(true);
+          f.identities.set(owner.processId, undefined);
+          expect(
+            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 100).pipe(
+              Effect.result,
+            ),
+          ).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
+          expect(yield* f.fs.readFileString(f.home + '/pending-work')).toBe('unchanged durable work');
+          expect(yield* f.fs.exists(f.home)).toBe(true);
+        }),
+      );
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'binding drift never grants drain or launches another generation',
+    {
+      field: fc.constantFrom('nonce', 'rootIdentity', 'homeIdentity', 'executable', 'creator', 'version'),
+    },
+    ({field}) =>
+      Effect.gen(function* () {
+        const f = yield* drainFixture;
+        yield* f.run(
+          Effect.gen(function* () {
+            const filename = f.options.receiptPath + '.launch-v2.json';
+            const text = yield* f.fs.readFileString(filename);
+            const changed =
+              field === 'nonce'
+                ? EffectString.replace(/"nonce":"[^"]+"/u, '"nonce":"00000000-0000-0000-0000-000000000000"')(text)
+                : field === 'version'
+                  ? EffectString.replace('fixture-v2', 'different-runtime')(text)
+                  : field === 'creator'
+                    ? EffectString.replace('fixture-self', 'different-creator')(text)
+                    : EffectString.replace(new RegExp(`("${field}":")[^"]+`, 'u'), '$1different-binding')(text);
+            yield* f.fs.writeFileString(filename, changed);
+            expect(
+              (yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 100).pipe(
+                Effect.result,
+              ))._tag,
+            ).toBe('Failure');
+            expect(f.launches).toHaveLength(0);
+            expect(yield* f.fs.exists(f.home)).toBe(true);
+          }),
+        );
+      }).pipe(provideFixtureLayer(platform)),
+    {fastCheck: {numRuns: 12}},
+  );
+
+  effectIt.effect('refuses an incompatible child executable and non-regular control evidence', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const alternate = f.home + '/other-executable';
+          yield* f.fs.writeFileString(alternate, 'not the expected runtime');
+          const owner = {...f.owner, processId: 1234567, processStartIdentity: 'other-runtime-child'};
+          f.identities.set(owner.processId, owner.processStartIdentity);
+          const lifecycle = yield* makeBackgroundWorkerLifecycle(f.options, f.launches[0]).pipe(
+            Effect.provideService(
+              SystemInfo,
+              SystemInfo.of({...f.system, processId: owner.processId, executablePath: alternate}),
+            ),
+          );
+          expect((yield* lifecycle.register(owner).pipe(Effect.result))._tag).toBe('Failure');
+          const deadline = (yield* Clock.currentTimeMillis) + 1000;
+          expect((yield* drainBackgroundWorkerFixture(f.capability, deadline).pipe(Effect.result))._tag).toBe(
+            'Failure',
+          );
+          const filename = f.options.receiptPath + '.launch-v2.json';
+          yield* f.fs.remove(filename);
+          yield* f.fs.makeDirectory(filename);
+          expect((yield* drainBackgroundWorkerFixture(f.capability, deadline).pipe(Effect.result))._tag).toBe(
+            'Failure',
+          );
+          expect(yield* f.fs.exists(f.home)).toBe(true);
+        }),
+      );
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'closing defeats wake/activate/afterRelease orderings while preserving queued work',
+    {
+      wakes: fc.integer({min: 0, max: 5}),
+      releaseFirst: fc.boolean(),
+    },
+    ({wakes, releaseFirst}) =>
+      Effect.gen(function* () {
+        const f = yield* drainFixture;
+        yield* f.run(
+          Effect.gen(function* () {
+            yield* wakeBackgroundWorker(f.options);
+            const {owner, lifecycle} = yield* f.child(f.launches[0]);
+            yield* lifecycle.register(owner);
+            expect(yield* lifecycle.activate(owner)).toBe(true);
+            yield* lifecycle.beforeScan;
+            if (releaseFirst) yield* lifecycle.afterRelease(false);
+            const drain = yield* drainBackgroundWorkerFixture(
+              f.capability,
+              (yield* Clock.currentTimeMillis) + 1000,
+            ).pipe(Effect.forkScoped);
+            yield* f.closed;
+            for (let i = 0; i < wakes; i++)
+              expect(yield* wakeBackgroundWorker(f.options)).toMatchObject({state: 'deferred'});
+            expect(yield* lifecycle.activate(owner)).toBe(false);
+            if (!releaseFirst) yield* lifecycle.afterRelease(true);
+            expect(f.launches).toHaveLength(1);
+            f.identities.set(owner.processId, 'reused-pid');
+            expect((yield* Fiber.join(drain)).state).toBe('drained');
+          }),
+        );
+      }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
+    {fastCheck: {numRuns: 12}},
+  );
 });
 
 describe('background launch and exit control', () => {

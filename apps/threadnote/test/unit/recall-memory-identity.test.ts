@@ -1,13 +1,19 @@
 import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
-import {loadRecallIndex, recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {
+  loadRecallIndex,
+  loadRecallMemoryIdentities,
+  recallIndexDatabaseFilename,
+  recallIndexStatus,
+  RecallReadyReadUnavailable,
+} from '@threadnote/recall/index';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -148,6 +154,8 @@ describe('stable memory identity resolution', () => {
         );
       for (const index of [0, 1, 2, 0, 1]) {
         const config = configs[index];
+        // Each positive read owns a distinct home/account/user lexical binding.
+        yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
         const scopes = [
           ...Array.from(
             {length: 200},
@@ -175,6 +183,14 @@ describe('stable memory identity resolution', () => {
       yield* store.write(location, conflictUri, memory('tn_same_id', 'active', 'New conflicting identity.'), {
         mode: 'create',
       });
+      const beforeConflictRead = yield* recallIndexStatus(config, false);
+      expect(
+        Schema.is(RecallReadyReadUnavailable)(
+          yield* Effect.flip(resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes)),
+        ),
+      ).toBe(true);
+      expect(yield* recallIndexStatus(config, false)).toEqual(beforeConflictRead);
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
       for (const options of [{}, {validateNow: true}]) {
         const conflict = yield* Effect.flip(
           resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes, options),
@@ -182,6 +198,12 @@ describe('stable memory identity resolution', () => {
         expect(conflict).toMatchObject({reason: 'ambiguous'});
       }
       yield* store.remove(location, conflictUri);
+      expect(
+        Schema.is(RecallReadyReadUnavailable)(
+          yield* Effect.flip(resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes)),
+        ),
+      ).toBe(true);
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
       const [restored] = yield* resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes);
       expect(restored.canonicalUri).toBe(uris[0]);
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -250,6 +272,14 @@ describe('stable memory identity resolution', () => {
         });
         yield* store.remove(location, secondSourceUri);
         yield* store.write(location, secondTargetUri, missingIdentity, {mode: 'upsert'});
+        const beforeRelocationRead = yield* recallIndexStatus(config, false);
+        expect(
+          Schema.is(RecallReadyReadUnavailable)(
+            yield* Effect.flip(resolveMemoryIdentityAliases(config, [alias], ['threadnote://user/me/memories'])),
+          ),
+        ).toBe(true);
+        expect(yield* recallIndexStatus(config, false)).toEqual(beforeRelocationRead);
+        yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
         const ambiguous = yield* Effect.flip(
           resolveMemoryIdentityAliases(config, [alias], ['threadnote://user/me/memories'], {validateNow: true}),
         );
@@ -259,6 +289,12 @@ describe('stable memory identity resolution', () => {
         yield* store.write(location, targetUri, memory('tn_other_identity', 'active', 'Other evidence.'), {
           mode: 'upsert',
         });
+        expect(
+          Schema.is(RecallReadyReadUnavailable)(
+            yield* Effect.flip(resolveMemoryIdentityAliases(config, [alias], ['threadnote://user/me/memories'])),
+          ),
+        ).toBe(true);
+        yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
         const mismatch = yield* Effect.flip(
           resolveMemoryIdentityAliases(config, [alias], ['threadnote://user/me/memories'], {validateNow: true}),
         );

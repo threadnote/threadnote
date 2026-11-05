@@ -150,17 +150,30 @@ const acceptance = Schema.Struct({
   requirementIds: idList(1, 128),
   scenarioIds: Schema.optionalKey(idList(0, 256)),
 });
+const maximumCombinedPhasePathEntries = 256;
+const phasePathListLimit = Schema.isMaxLength(maximumCombinedPhasePathEntries);
+const combinedPhasePathsLimit = Schema.makeFilter(
+  (phase: {readonly affectedPaths: readonly string[]; readonly newPaths: readonly string[]}) =>
+    phase.affectedPaths.length + phase.newPaths.length <= maximumCombinedPhasePathEntries,
+  {
+    expected: 'at most 256 affected and new path entries combined',
+    toJsonSchema: () => [
+      {description: 'Runtime validation requires affectedPaths and newPaths to contain at most 256 entries combined.'},
+      true,
+    ],
+  },
+);
 const phase = Schema.Struct({
   id: portableId,
   title: boundedText(256, true, true),
   outcome: prose,
   dependsOn: idList(0, 128),
-  affectedPaths: Schema.Array(relativePath).check(Schema.isMaxLength(128)),
-  newPaths: Schema.Array(relativePath).check(Schema.isMaxLength(128)),
+  affectedPaths: Schema.Array(relativePath).check(phasePathListLimit),
+  newPaths: Schema.Array(relativePath).check(phasePathListLimit),
   contracts: Schema.Array(prose).check(Schema.isMaxLength(128)),
   acceptance: Schema.Array(acceptance).check(Schema.isBetweenLength(1, 128)),
   safeBoundary: prose,
-});
+}).check(combinedPhasePathsLimit);
 const alternative = Schema.Struct({id: portableId, design: prose, tradeoffs: prose});
 const maximumDecisionAlternatives = 2;
 const decisionAlternativesLimit = Schema.isMaxLength(maximumDecisionAlternatives);
@@ -238,6 +251,39 @@ const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly Propert
   }
 };
 
+const combinedPhasePathsDiagnostic = (
+  issue: SchemaIssue.Issue,
+  path: readonly PropertyKey[] = [],
+): string | undefined => {
+  if (
+    path.length > 3 ||
+    (path.length > 0 && path[0] !== 'phases') ||
+    (path.length > 1 && (typeof path[1] !== 'number' || !Number.isSafeInteger(path[1]) || path[1] < 0)) ||
+    (path.length > 2 && path[2] !== 'affectedPaths' && path[2] !== 'newPaths')
+  )
+    return undefined;
+  switch (issue._tag) {
+    case 'Pointer':
+      return combinedPhasePathsDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'AnyOf':
+    case 'Composite':
+      for (const child of issue.issues) {
+        const diagnostic = combinedPhasePathsDiagnostic(child, path);
+        if (diagnostic !== undefined) return diagnostic;
+      }
+      return undefined;
+    case 'Filter':
+      if (
+        (path.length === 2 && issue.filter === combinedPhasePathsLimit) ||
+        (path.length === 3 && issue.filter === phasePathListLimit)
+      )
+        return 'A phase may contain at most 256 affectedPaths and newPaths entries combined.';
+      return undefined;
+    default:
+      return undefined;
+  }
+};
+
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
   let document: NativeAuthoringDocument;
   try {
@@ -247,7 +293,8 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
   } catch (error) {
     let message = 'The native authoring document is malformed or contains unsupported fields.';
     try {
-      if (Schema.isSchemaError(error)) message = alternativesDiagnostic(error.issue) ?? message;
+      if (Schema.isSchemaError(error))
+        message = alternativesDiagnostic(error.issue) ?? combinedPhasePathsDiagnostic(error.issue) ?? message;
     } catch {
       // Optional diagnostics must preserve the original rejection if projection fails.
     }

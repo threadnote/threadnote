@@ -31,7 +31,7 @@ import {buildTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenanc
 import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
-import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {prepareMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
 import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -485,7 +485,7 @@ describe('automatic private preparation', () => {
         const privateOnly = record('private_only');
         for (const source of [personal, teamA, teamB, privateOnly]) yield* f.write(source);
         const scopes = automaticMemorySourceUriScopes(f.config, teamA);
-        const [resolved] = yield* resolveMemoryIdentityAliases(
+        const [resolved] = yield* prepareMemoryIdentityAliases(
           f.config,
           [memoryIdentityAlias(personal.metadata.memoryId!)],
           scopes,
@@ -495,7 +495,7 @@ describe('automatic private preparation', () => {
         const live = yield* readContextMaintenanceCanonicalRecord(f.config, resolved.canonicalUri);
         yield* verifyResolvedMemoryIdentity(resolved, live.record.uri, live.record.content);
         expect(
-          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(privateOnly.metadata.memoryId!)], scopes, {
+          yield* prepareMemoryIdentityAliases(f.config, [memoryIdentityAlias(privateOnly.metadata.memoryId!)], scopes, {
             validateNow: true,
           }).pipe(Effect.flip),
         ).toMatchObject({reason: 'not-found'});
@@ -505,7 +505,7 @@ describe('automatic private preparation', () => {
         };
         yield* f.write(conflict);
         expect(
-          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(personal.metadata.memoryId!)], scopes, {
+          yield* prepareMemoryIdentityAliases(f.config, [memoryIdentityAlias(personal.metadata.memoryId!)], scopes, {
             validateNow: true,
           }).pipe(Effect.flip),
         ).toMatchObject({reason: 'ambiguous'});

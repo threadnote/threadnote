@@ -1,3 +1,4 @@
+import {VECTOR_SCOPE_MAPPING_VERSION} from './vector/negative-readiness.js';
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -36,6 +37,52 @@ import {
   recallVectorPreparationMatches,
 } from './vector/preparation-identity.js';
 export {loadRecallVectorAuthorizationKey};
+import {
+  RecallReadyReadBoundary,
+  RecallReadyReadBoundaryError,
+  recallReadyReadRequestSchema,
+  recallVectorQueryStateSchema,
+  type RecallReadyReadRequest,
+  type RecallVectorReadModel,
+  type RecallVectorReadState,
+} from './read_boundary.js';
+import {readRecallIndexData, type RecallIndexConfig} from './index.js';
+type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
+type VectorReadConfig = {
+  readonly agentContextHome: string;
+  readonly account?: string;
+  readonly user?: string;
+  readonly manifestPath?: string;
+};
+const wireVectorModel = (manifest: VectorReadModel): RecallVectorReadModel => ({
+  id: manifest.id,
+  sha256: manifest.sha256,
+  dimensions: manifest.dimensions ?? 0,
+  ...(manifest.promptPrefixes === undefined ? {} : {promptPrefixes: manifest.promptPrefixes}),
+});
+
+const throughVectorReadBoundary = Effect.fn('vectorIndex.throughReadyReadBoundary')(function* <A>(
+  boundary: ReturnType<typeof RecallReadyReadBoundary.of>,
+  request: RecallReadyReadRequest,
+  decode: (value: unknown) => A,
+) {
+  const checked = yield* Schema.decodeEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})({
+    ...request,
+    config: {
+      account: request.config.account,
+      user: request.config.user,
+      agentContextHome: request.config.agentContextHome,
+      ...(request.config.manifestPath === undefined ? {} : {manifestPath: request.config.manifestPath}),
+    },
+  });
+  const response = yield* boundary.read(checked);
+  if (response.operation !== request.operation || response.outcome !== 'success')
+    return yield* RecallReadyReadBoundaryError.make({reason: 'worker-failed'});
+  return yield* Effect.try({
+    try: () => decode(response.value),
+    catch: () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}),
+  });
+});
 
 class VectorIndexOperationError extends Schema.TaggedError<
   VectorIndexOperationError,
@@ -46,7 +93,7 @@ class VectorIndexOperationError extends Schema.TaggedError<
 }) {}
 
 const VECTOR_INDEX_DATABASE_VERSION = 5;
-const VECTOR_SCOPE_MAPPING_VERSION = 1;
+
 const VECTOR_INDEX_EMBED_BATCH_SIZE = 256;
 const VECTOR_INDEX_PAGE_SIZE = 400;
 const VECTOR_INDEX_INSERT_BATCH_SIZE = 100;
@@ -190,7 +237,7 @@ interface SemanticScoreOptions<R> extends VectorCorpusGenerationOptions<R> {
 }
 
 const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurrentCorpusGeneration')(function* <R = never>(
-  manifest: LocalModelManifest,
+  manifest: VectorReadModel,
   options: VectorCorpusGenerationOptions<R>,
 ) {
   if (options.currentCorpusGeneration === undefined) return;
@@ -211,7 +258,7 @@ const verifyCurrentCorpusGeneration = Effect.fn('vectorIndex.verifyCurrentCorpus
 
 const verifySelectedCorpusGeneration = Effect.fn('vectorIndex.verifySelectedCorpusGeneration')(function* <R = never>(
   active: VectorGenerationRow,
-  manifest: LocalModelManifest,
+  manifest: VectorReadModel,
   options: VectorCorpusGenerationOptions<R>,
 ) {
   const requestedGeneration = options.corpusGeneration;
@@ -278,8 +325,12 @@ export const vectorIndexMatchesGeneration = Effect.fn('vectorIndex.matchesGenera
   manifest: LocalModelManifest,
   corpusGeneration: string,
   authorizationKey?: string,
+  readConfig?: RecallIndexConfig,
 ) {
-  return (yield* vectorIndexGenerationReadiness(home, manifest, corpusGeneration, authorizationKey)) === 'current';
+  return (
+    (yield* vectorIndexGenerationReadiness(home, manifest, corpusGeneration, authorizationKey, readConfig)) ===
+    'current'
+  );
 });
 
 /**
@@ -290,10 +341,30 @@ export const vectorIndexMatchesGeneration = Effect.fn('vectorIndex.matchesGenera
  */
 export const vectorIndexGenerationReadiness = Effect.fn('vectorIndex.generationReadiness')(function* (
   home: string,
-  manifest: LocalModelManifest,
+  manifest: VectorReadModel,
   corpusGeneration: string,
   authorizationKey?: string,
+  readConfig?: RecallIndexConfig,
 ) {
+  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+  if (Option.isSome(boundary)) {
+    if (readConfig === undefined) return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+    if (readConfig.agentContextHome !== home)
+      return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+    return yield* throughVectorReadBoundary(
+      boundary.value,
+      {
+        operation: 'vector-readiness',
+        config: readConfig,
+        options: {
+          model: wireVectorModel(manifest),
+          corpusGeneration,
+          ...(authorizationKey === undefined ? {} : {authorizationKey}),
+        },
+      },
+      value => Schema.decodeUnknownSync(Schema.Literals(['current', 'missing', 'stale', 'corrupt']))(value),
+    );
+  }
   const active = yield* readActiveVectorGeneration(home, manifest).pipe(Effect.result);
   if (Result.isFailure(active)) return 'corrupt' as const;
   if (!active.success) return 'missing' as const;
@@ -539,11 +610,9 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   return status;
 });
 
-export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticScores')(function* <R = never>(
-  config: {readonly agentContextHome: string; readonly account?: string; readonly user?: string},
-  query: string,
-  options: SemanticScoreOptions<R> = {},
-) {
+export const selectedSemanticScoreSnapshot = Effect.fn('vectorIndex.selectedSemanticScoreSnapshot')(function* <
+  R = never,
+>(config: VectorReadConfig, query: string, options: SemanticScoreOptions<R> = {}) {
   const selection = yield* readModelSelection(config.agentContextHome);
   const modelId = selection.roles.embedding;
   if (!modelId) return undefined;
@@ -559,6 +628,97 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
   const status = yield* store.status(config.agentContextHome, manifest);
   if (!status.installed) return undefined;
 
+  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+  const wireConfig =
+    config.account !== undefined && config.user !== undefined
+      ? {
+          account: config.account,
+          user: config.user,
+          agentContextHome: config.agentContextHome,
+          manifestPath: config.manifestPath,
+        }
+      : undefined;
+  const nativeRead = Option.getOrUndefined(boundary);
+  if (nativeRead !== undefined && wireConfig === undefined)
+    return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+  const useBoundary = nativeRead !== undefined && wireConfig !== undefined;
+  const opening = useBoundary
+    ? yield* throughVectorReadBoundary(
+        nativeRead,
+        {
+          operation: 'vector-state',
+          config: wireConfig,
+          options: {
+            model: wireVectorModel(manifest),
+            ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
+          },
+        },
+        value => Schema.decodeUnknownSync(recallVectorQueryStateSchema)(value),
+      )
+    : undefined;
+  if (opening !== undefined && opening.readiness !== 'current')
+    return {readiness: opening.readiness, corpusGeneration: opening.corpusGeneration, scores: undefined};
+  const state =
+    opening === undefined ? yield* readSelectedSemanticVectorState(config, manifest, options) : opening.state;
+  if (state === undefined) return undefined;
+  // Custom parent callbacks remain authoritative in addition to the worker's production fence.
+  yield* verifyCurrentCorpusGeneration(manifest, options);
+  const normalizedQuery =
+    state.chunkCount === 0
+      ? Option.none<readonly number[]>()
+      : Option.some(
+          normalizeVector(
+            (yield* runtime.embedMany({
+              inputs: [`${manifest.promptPrefixes?.query ?? ''}${query}`],
+              manifest,
+              modelPath: status.path,
+            }))[0],
+          ),
+        );
+
+  const scores = useBoundary
+    ? yield* throughVectorReadBoundary(
+        nativeRead,
+        {
+          operation: 'vector-scores',
+          config: wireConfig,
+          options: {
+            model: wireVectorModel(manifest),
+            state,
+            ...(Option.isNone(normalizedQuery) ? {} : {queryVector: normalizedQuery.value}),
+            ...(options.corpusGeneration === undefined ? {} : {corpusGeneration: options.corpusGeneration}),
+            ...(options.eligibility === undefined ? {} : {eligibility: options.eligibility}),
+            ...(options.allowedUriScopes === undefined ? {} : {allowedUriScopes: options.allowedUriScopes}),
+            ...(options.limit === undefined ? {} : {limit: options.limit}),
+          },
+        },
+        value => {
+          const decoded = Schema.decodeUnknownSync(
+            Schema.UndefinedOr(Schema.Array(Schema.Tuple([Schema.String, Schema.Finite]))),
+          )(value);
+          return decoded === undefined ? undefined : new Map(decoded);
+        },
+      )
+    : yield* readSelectedSemanticVectorScores(config, manifest, state, normalizedQuery, options);
+  yield* verifyCurrentCorpusGeneration(manifest, options);
+  return {readiness: 'current' as const, corpusGeneration: state.corpusGeneration ?? options.corpusGeneration, scores};
+});
+
+/** Stable scores-only API; query inference remains in the caller's foreground runtime. */
+export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticScores')(function* <R = never>(
+  config: VectorReadConfig,
+  query: string,
+  options: SemanticScoreOptions<R> = {},
+) {
+  return (yield* selectedSemanticScoreSnapshot(config, query, options))?.scores;
+});
+
+/** Model-free opening proof; the child independently checks current authorization and corpus. */
+export const readSelectedSemanticVectorState = Effect.fn('vectorIndex.readSelectedState')(function* <R = never>(
+  config: VectorReadConfig,
+  manifest: VectorReadModel,
+  options: VectorCorpusGenerationOptions<R> = {},
+) {
   const externalLocation =
     config.account !== undefined && config.user !== undefined
       ? {home: config.agentContextHome, account: config.account, user: config.user}
@@ -580,22 +740,60 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
   if (!activeBeforeInference) return undefined;
   if (!matchesAuthorization(activeBeforeInference)) return undefined;
   yield* verifySelectedCorpusGeneration(activeBeforeInference, manifest, options);
-  const normalizedQuery =
-    activeBeforeInference.chunk_count === 0
-      ? Option.none<readonly number[]>()
-      : Option.some(
-          normalizeVector(
-            (yield* runtime.embedMany({
-              inputs: [`${manifest.promptPrefixes?.query ?? ''}${query}`],
-              manifest,
-              modelPath: status.path,
-            }))[0],
+  return {
+    chunkCount: activeBeforeInference.chunk_count,
+    generation: activeBeforeInference.generation,
+    authorizationKey,
+    ...(activeBeforeInference.corpus_generation === null
+      ? {}
+      : {corpusGeneration: activeBeforeInference.corpus_generation}),
+  } satisfies RecallVectorReadState;
+});
+
+/** Model-free scoring, authorization and closing proof; never starts inference or builds an index. */
+export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelectedScores')(function* <R = never>(
+  config: VectorReadConfig,
+  manifest: VectorReadModel,
+  state: RecallVectorReadState,
+  normalizedQuery: Option.Option<readonly number[]>,
+  options: SemanticScoreOptions<R> = {},
+  validateCanonicalScores = false,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
+  if (!(yield* fs.exists(databasePath))) return undefined;
+  const externalLocation =
+    config.account !== undefined && config.user !== undefined
+      ? {home: config.agentContextHome, account: config.account, user: config.user}
+      : undefined;
+  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
+  const authorizationKey = recallVectorAuthorizationKey(externalResources);
+  const matchesAuthorization = (active: VectorGenerationRow) =>
+    recallVectorPreparationMatches(
+      active.job_id,
+      recallVectorPreparationIdentity(
+        options.corpusGeneration ?? active.corpus_generation ?? '',
+        authorizationKey,
+        manifest.id,
+        embeddingRecipe(manifest),
+      ),
+    );
+
+  if (authorizationKey !== state.authorizationKey) return undefined;
+  const suppliedExternal = options.eligibility?.externalResources;
+  const effectiveExternal =
+    suppliedExternal === undefined
+      ? externalResources
+      : EffectRecord.fromEntries(
+          EffectArray.filter(
+            EffectRecord.toEntries(externalResources),
+            ([uri, fingerprint]) => suppliedExternal[uri] === fingerprint,
           ),
         );
-
   const eligibility: RecallEligibilityPolicy = {
     ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
-    externalResources,
+    externalResources: effectiveExternal,
   };
   const scores = yield* useVectorDatabaseReadOnly(
     databasePath,
@@ -603,9 +801,10 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
       const sql = yield* SqlClient.SqlClient;
       return yield* sql.withTransaction(
         Effect.gen(function* () {
-          yield* validateVectorDatabase(sql);
+          yield* validateVectorDatabase(sql, 50);
           const active = yield* selectActiveGeneration(sql);
-          if (!active || !generationIsCompatible(active, manifest)) return undefined;
+          if (!active || active.generation !== state.generation || !generationIsCompatible(active, manifest))
+            return undefined;
           if (!matchesAuthorization(active)) return undefined;
           yield* verifySelectedCorpusGeneration(active, manifest, options);
           if (active.chunk_count === 0) return new Map<string, number>();
@@ -691,6 +890,35 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
     recallVectorAuthorizationKey(yield* loadExternalResourceAccess(externalLocation)) !== authorizationKey
   )
     return undefined;
+  if (validateCanonicalScores && scores !== undefined) {
+    if (config.account === undefined || config.user === undefined) return undefined;
+    const current = yield* readRecallIndexData(
+      {
+        account: config.account,
+        user: config.user,
+        agentContextHome: config.agentContextHome,
+        manifestPath: config.manifestPath,
+      },
+      {
+        includeInactive: false,
+        requiredUris: [...scores.keys()],
+        query: '',
+        limit: Math.max(1, scores.size),
+        allowedUriScopes: options.allowedUriScopes,
+        eligibility: options.eligibility,
+      },
+    );
+    const currentUris = new Set(EffectArray.map(current.candidates, candidate => candidate.uri));
+    for (const uri of scores.keys()) if (!currentUris.has(uri)) scores.delete(uri);
+    yield* verifyCurrentCorpusGeneration(manifest, options);
+    const closing = yield* readActiveVectorGeneration(config.agentContextHome, manifest);
+    if (
+      closing?.generation !== state.generation ||
+      (externalLocation !== undefined &&
+        recallVectorAuthorizationKey(yield* loadExternalResourceAccess(externalLocation)) !== authorizationKey)
+    )
+      return undefined;
+  }
   return scores;
 });
 
@@ -774,7 +1002,7 @@ export function vectorIndexDatabaseFilename(): string {
 
 const readActiveVectorGeneration = Effect.fn('vectorIndex.readActive')(function* (
   home: string,
-  manifest: LocalModelManifest,
+  manifest: VectorReadModel,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -784,7 +1012,7 @@ const readActiveVectorGeneration = Effect.fn('vectorIndex.readActive')(function*
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* validateVectorDatabase(sql);
+      yield* validateVectorDatabase(sql, 50);
       const active = yield* selectActiveGeneration(sql);
       if (active && !generationIsCompatible(active, manifest)) {
         return yield* VectorIndexOperationError.make({
@@ -812,7 +1040,7 @@ const validateVectorGenerationRows = Effect.fn('vectorIndex.validateGenerationRo
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* validateVectorDatabase(sql);
+      yield* validateVectorDatabase(sql, 50);
       let cursor = '';
       for (;;) {
         const rows = yield* sql.unsafe<VectorRow>(
@@ -952,9 +1180,13 @@ const initializeVectorDatabase = Effect.fn('vectorIndex.initializeDatabase')(fun
   yield* validateVectorDatabaseStructure(sql);
 });
 
-const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(function* (sql: SqlClient.SqlClient) {
+const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(function* (
+  sql: SqlClient.SqlClient,
+  busyTimeoutMilliseconds = 5000,
+  requireMetadataKeys = false,
+) {
   yield* sql.unsafe('PRAGMA foreign_keys = ON');
-  yield* sql.unsafe('PRAGMA busy_timeout = 5000');
+  yield* sql.unsafe(`PRAGMA busy_timeout = ${busyTimeoutMilliseconds}`);
   const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
   const version = Number(versions[0]?.user_version ?? 0);
   if (version !== VECTOR_INDEX_DATABASE_VERSION) {
@@ -962,14 +1194,23 @@ const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(functio
       message: `Unsupported vector index schema ${version}; expected ${VECTOR_INDEX_DATABASE_VERSION}.`,
     });
   }
-  yield* validateVectorDatabaseStructure(sql);
+  yield* validateVectorDatabaseStructure(sql, requireMetadataKeys);
 });
 
 const validateVectorDatabaseStructure = Effect.fn('vectorIndex.validateDatabaseStructure')(function* (
   sql: SqlClient.SqlClient,
+  requireMetadataKeys = false,
 ) {
   for (const [table, expected] of EffectRecord.toEntries(VECTOR_INDEX_SCHEMA_COLUMNS)) {
-    const rows = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info('${table}')`);
+    const rows = yield* sql.unsafe<{readonly name: string; readonly pk: number}>(`PRAGMA table_info('${table}')`);
+    const key = table === 'vector_pointer' ? 'singleton' : table === 'vector_generations' ? 'generation' : undefined;
+    if (
+      requireMetadataKeys &&
+      key !== undefined &&
+      (EffectArray.filter(rows, row => row.pk > 0).length !== 1 ||
+        !EffectArray.some(rows, row => row.name === key && row.pk === 1))
+    )
+      return yield* VectorIndexOperationError.make({message: 'Vector metadata primary key is invalid.'});
     const actual = EffectArray.map(rows, row => row.name);
     const compatibleColumns =
       table === 'vector_generations' && !actual.includes('scope_mapping_version') ? expected.slice(0, -1) : expected;
@@ -1530,7 +1771,7 @@ function compareCodeUnits(left: string, right: string): number {
 
 function generationMatchesCorpus(
   generation: VectorGenerationRow,
-  manifest: LocalModelManifest,
+  manifest: VectorReadModel,
   corpusGeneration: string,
 ): boolean {
   return (
@@ -1540,7 +1781,7 @@ function generationMatchesCorpus(
   );
 }
 
-function generationIsCompatible(generation: VectorGenerationRow, manifest: LocalModelManifest): boolean {
+function generationIsCompatible(generation: VectorGenerationRow, manifest: VectorReadModel): boolean {
   return (
     generation.model_id === manifest.id &&
     generation.model_sha256 === manifest.sha256 &&
@@ -1602,7 +1843,7 @@ function vectorJobId(
   );
 }
 
-function embeddingRecipe(manifest: LocalModelManifest): string {
+function embeddingRecipe(manifest: VectorReadModel): string {
   // Native backend/offload policy is intentionally excluded: the frozen Darwin
   // compatibility fixture verifies that it preserves this embedding space.
   return sha256HexSync(
@@ -1680,6 +1921,7 @@ function useVectorDatabaseReadOnly<A, E, R>(
     Layer.build(
       SqliteClient.layer({
         create: false,
+        busyTimeout: 50,
         disableWAL: true,
         filename: databasePath,
         readonly: true,

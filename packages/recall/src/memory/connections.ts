@@ -1,6 +1,8 @@
+import {readLocalMemoryRecordsByUri} from '@threadnote/memory/local-path';
+import {RecallReadyReadBoundary, RecallReadyReadBoundaryError, recallReadyReadRequestSchema} from '../read_boundary.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {DateTime, Effect} from 'effect';
+import {DateTime, Effect, Option, Predicate, Schema} from 'effect';
 import {
   MEMORY_RELATION_TYPES,
   isMemoryRelationType,
@@ -18,10 +20,12 @@ import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/s
 import type {MemoryStatus} from '@threadnote/memory/types';
 import {recallCandidateIsEligible, type RecallEligibilityPolicy} from '../eligibility.js';
 import {
-  loadRecallIndexData,
-  loadRecallMemoryIdentities,
-  loadRecallMemoryLinks,
+  readRecallIndexData,
+  readRecallMemoryIdentities,
+  readRecallMemoryLinks,
   recallUriMatchesScopes,
+  RecallReadyReadUnavailable,
+  type RecallReadyReadState,
 } from '../index.js';
 import {classifyMemoryIdentityCandidates} from './identity.js';
 import type {RecallMemoryLinkMatch} from './links.js';
@@ -212,6 +216,99 @@ export function classifyRecallMemoryPremiseState(
   return 'current';
 }
 
+/** One owned native call preserves all internal canonical/currentness reads without repeated source-process startup. */
+export const readRecallMemoryConnections = Effect.fn('recall.readMemoryConnections')(function* (
+  config: RecallMemoryConnectionsConfig,
+  input: Omit<RetrieveRecallMemoryConnectionsInput<never>, 'readRecords'>,
+) {
+  parseRecallMemoryConnectionInput(input);
+  const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+  if (Option.isNone(boundary))
+    return yield* retrieveRecallMemoryConnections(config, {
+      ...input,
+      readRecords: uris => readLocalMemoryRecordsByUri(config, uris),
+    });
+  const invalid = () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
+  const now = input.now ?? (yield* DateTime.nowAsDate);
+  const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})({
+    operation: 'memory-connections',
+    config: {
+      account: config.account,
+      user: config.user,
+      agentContextHome: config.agentContextHome,
+      ...(config.manifestPath === undefined ? {} : {manifestPath: config.manifestPath}),
+    },
+    options: {...input, now: now.toISOString()},
+  }).pipe(Effect.mapError(invalid));
+  const response = yield* boundary.value.read(request).pipe(
+    Effect.mapError(error =>
+      error.reason === 'budget-exhausted'
+        ? RecallReadyReadUnavailable.make({
+            reason: 'budget-exhausted',
+            message: 'The lexical read budget is exhausted.',
+          })
+        : error,
+    ),
+  );
+  if (response.operation !== 'memory-connections') return yield* invalid();
+  if (response.outcome === 'unavailable')
+    return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+  if (response.outcome !== 'success') return yield* RecallReadyReadBoundaryError.make({reason: 'worker-failed'});
+  return yield* Effect.try({try: () => connectionResult(response.value), catch: invalid});
+});
+
+function connectionResult(value: unknown): RecallMemoryConnectionsResult {
+  if (!isConnectionResult(value)) throw new Error('Invalid connection result.');
+  return value;
+}
+export function isConnectionResult(value: unknown): value is RecallMemoryConnectionsResult {
+  const count = (n: unknown) => Number.isSafeInteger(n) && typeof n === 'number' && n >= 0;
+  const state = (s: unknown) => s === 'current' || s === 'historical' || s === 'unresolved' || s === 'conflicted';
+  return (
+    Predicate.isObject(value) &&
+    EffectArray.isArray(value.candidates) &&
+    value.candidates.length <= 4096 &&
+    EffectArray.every(
+      value.candidates,
+      c => Predicate.isObject(c) && typeof c.uri === 'string' && typeof c.text === 'string',
+    ) &&
+    EffectArray.isArray(value.premises) &&
+    value.premises.length <= 8 &&
+    EffectArray.every(
+      value.premises,
+      p => Predicate.isObject(p) && count(p.requestedOrdinal) && typeof p.requestedRef === 'string' && state(p.state),
+    ) &&
+    EffectArray.isArray(value.connections) &&
+    value.connections.length <= 32 &&
+    EffectArray.every(
+      value.connections,
+      c =>
+        Predicate.isObject(c) &&
+        count(c.requestedOrdinal) &&
+        count(c.relationOrdinal) &&
+        c.distance === 1 &&
+        (c.direction === 'incoming' || c.direction === 'outgoing') &&
+        state(c.currentness) &&
+        typeof c.relationType === 'string' &&
+        isMemoryRelationType(c.relationType) &&
+        (c.resolution === 'resolved' || c.resolution === 'unresolved' || c.resolution === 'conflicted') &&
+        (c.origin === 'evidence' || c.origin === 'references' || c.origin === 'relation' || c.origin === 'supersedes'),
+    ) &&
+    Predicate.isObject(value.coverage) &&
+    value.coverage.version === 1 &&
+    count(value.coverage.connectionCount) &&
+    count(value.coverage.premiseCount) &&
+    count(value.coverage.resultCount) &&
+    typeof value.coverage.truncated === 'boolean' &&
+    Predicate.isObject(value.diagnostics) &&
+    count(value.diagnostics.canonicalMismatches) &&
+    count(value.diagnostics.canonicalRereads) &&
+    count(value.diagnostics.rawLinkRows) &&
+    count(value.diagnostics.refreshRepairs) &&
+    EffectArray.isArray(value.diagnostics.truncatedSeedOrdinals)
+  );
+}
+
 /**
  * Resolve explicit premises and their verified, authorized, direct neighbors.
  * The index is only a selector: canonical records decide identity, edge
@@ -225,6 +322,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   if (input.allowedUriScopes.length === 0) {
     throw new Error('Recall memory connections require at least one authorized URI scope.');
   }
+  let unavailable = false;
+  const observeReadState = (state: RecallReadyReadState) => {
+    unavailable ||= state.freshness === 'stale';
+  };
   const now = input.now ?? (yield* DateTime.nowAsDate);
   const limit = boundedConnectionResultLimit(input.limit);
   const requestedCanonicalUris = EffectArray.filter(
@@ -252,9 +353,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const premiseIndex =
     requestedMemoryIds.length === 0
       ? undefined
-      : yield* loadRecallIndexData(config, {
+      : yield* readRecallIndexData(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
+          onReadState: observeReadState,
           includeInactive: true,
           memoryIds: requestedMemoryIds,
           validateNow: true,
@@ -299,9 +401,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const rawLinks =
     premiseSeeds.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
+          onReadState: observeReadState,
           includeInactive: true,
           // Preserve bounded canonical backfill within each selector lane.
           // Multi-premise global exhaustion remains explicit in coverage.
@@ -335,9 +438,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const index =
     allMemoryIds.length === 0
       ? undefined
-      : yield* loadRecallIndexData(config, {
+      : yield* readRecallIndexData(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
+          onReadState: observeReadState,
           includeInactive: true,
           memoryIds: allMemoryIds,
           validateNow: true,
@@ -388,10 +492,11 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const witnessedSupersederLinks =
     witnessedPremiseSources.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           directions: ['outgoing'],
           eligibility: input.eligibility,
+          onReadState: observeReadState,
           includeInactive: true,
           limit: witnessedPremiseSources.length * CONNECTION_CANDIDATE_LIMIT,
           limitPerSeed: CONNECTION_CANDIDATE_LIMIT,
@@ -422,9 +527,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
   const indexedSupersederLinks =
     currentnessIds.length === 0
       ? []
-      : yield* loadRecallMemoryLinks(config, {
+      : yield* readRecallMemoryLinks(config, {
           allowedUriScopes: input.allowedUriScopes,
           eligibility: input.eligibility,
+          onReadState: observeReadState,
           directions: ['incoming'],
           includeInactive: true,
           limit: currentnessIds.length * ACTIVE_SUPERSEDER_PROOF_LIMIT_PER_MEMORY,
@@ -480,9 +586,10 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     ),
   ];
   if (missingSupersederIds.length > 0) {
-    const supersederIndex = yield* loadRecallIndexData(config, {
+    const supersederIndex = yield* readRecallIndexData(config, {
       allowedUriScopes: input.allowedUriScopes,
       eligibility: input.eligibility,
+      onReadState: observeReadState,
       includeInactive: true,
       memoryIds: missingSupersederIds,
       validateNow: true,
@@ -523,6 +630,11 @@ export const retrieveRecallMemoryConnections = Effect.fn('recall.retrieveMemoryC
     sources.add(link.sourceMemoryId);
     activeSupersedersByTarget.set(link.targetMemoryId, sources);
   }
+  // A stale selector cannot prove the absence of an active superseder.
+  if (unavailable)
+    return yield* RecallReadyReadUnavailable.make({
+      message: 'Memory connection currentness requires a current lexical snapshot.',
+    });
   const stateForId = (memoryId: string | undefined): RecallMemoryPremiseState => {
     if (!memoryId) return 'unresolved';
     if (conflictIds.has(memoryId)) return 'conflicted';
@@ -683,7 +795,7 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
     const indexed =
       identityIds.length === 0
         ? []
-        : yield* loadRecallMemoryIdentities(config, {
+        : yield* readRecallMemoryIdentities(config, {
             allowedUriScopes: input.allowedUriScopes,
             memoryIds: identityIds,
             validateNow: true,
@@ -695,7 +807,7 @@ const resolveRequestedPremises = Effect.fn('recall.resolveRequestedConnectionPre
       ]),
     );
   } else if (aliasMemoryIds.size > 0) {
-    const indexed = yield* loadRecallMemoryIdentities(config, {
+    const indexed = yield* readRecallMemoryIdentities(config, {
       allowedUriScopes: input.allowedUriScopes,
       memoryIds: [...aliasMemoryIds],
       validateNow: true,

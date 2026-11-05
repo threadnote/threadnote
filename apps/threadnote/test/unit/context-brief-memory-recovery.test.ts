@@ -17,6 +17,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const mocks = vi.hoisted(() => ({
   captureMemoryCodeCitations: vi.fn(),
+  deferRecallReadMaintenance: vi.fn(),
   expireRecallIndexValidation: vi.fn(),
   finalizeDeferredCodeAnchorsForRoute: vi.fn(),
   loadRecallCodeLinks: vi.fn(),
@@ -36,9 +37,14 @@ vi.mock('@threadnote/threadnote/memory/index', () => ({readMemoryRecordsByUri: m
 
 vi.mock('@threadnote/recall/index', () => ({
   expireRecallIndexValidation: mocks.expireRecallIndexValidation,
-  loadRecallCodeLinks: mocks.loadRecallCodeLinks,
-  loadRecallIndexData: mocks.loadRecallIndexData,
-  loadRecallMemoryIdentities: mocks.loadRecallMemoryIdentities,
+  readRecallCodeLinks: mocks.loadRecallCodeLinks,
+  readRecallIndexData: mocks.loadRecallIndexData,
+  readRecallMemoryIdentities: mocks.loadRecallMemoryIdentities,
+}));
+
+vi.mock('../../src/recall/read_maintenance.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../src/recall/read_maintenance.js')>()),
+  deferRecallReadMaintenance: mocks.deferRecallReadMaintenance,
 }));
 
 vi.mock('@threadnote/graph/repository', () => ({
@@ -70,6 +76,7 @@ const CONFIG: RuntimeConfig = {
 describe('Context Brief code-linked memory recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.deferRecallReadMaintenance.mockReturnValue(Effect.succeed('current'));
     mocks.captureMemoryCodeCitations.mockImplementation(
       (_config: RuntimeConfig, input: {readonly refs?: readonly string[]}) =>
         Effect.succeed(EffectArray.map(input.refs ?? [], codeCitation)),
@@ -144,98 +151,31 @@ describe('Context Brief code-linked memory recovery', () => {
 
   fcEffectProp(
     effectIt,
-    'bounds contention recovery to two passes and four admissions while retaining unavailable evidence',
+    'defers canonical finalization for every bounded anchor set without foreground mutation',
     {
-      completedBeforeInterruption: fc.integer({min: 0, max: 4}),
-      interruptedAdmission: fc.boolean(),
-      stillContended: fc.boolean(),
+      count: fc.integer({min: 1, max: 8}),
+      state: fc.constantFrom('queued', 'current', 'unavailable'),
     },
-    ({completedBeforeInterruption, interruptedAdmission, stillContended}) =>
+    ({count, state}) =>
       Effect.gen(function* () {
-        mocks.resolveRepositoryIdentity.mockReturnValue(
-          Effect.succeed({
-            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
-            worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
-          }),
-        );
-        const limits: number[] = [];
-        let totalAdmissions = 0;
-        const firstAdmissions = Math.min(4, completedBeforeInterruption + Number(interruptedAdmission));
-        mocks.finalizeDeferredCodeAnchorsForRoute.mockImplementation(
-          (
-            _config: RuntimeConfig,
-            _route: unknown,
-            options: {readonly limit: number; readonly onAttemptedUri: (uri: string) => void},
-          ) =>
-            Effect.sync(() => {
-              limits.push(options.limit);
-              const admissions = limits.length === 1 ? firstAdmissions : options.limit;
-              for (let index = 0; index < admissions; index++) {
-                options.onAttemptedUri(MEMORY_URI);
-                totalAdmissions++;
-              }
-              return limits.length === 1
-                ? finalizationReceipt('contended', completedBeforeInterruption)
-                : finalizationReceipt(stillContended ? 'contended' : 'completed', admissions - Number(stillContended));
-            }),
-        );
-        const receipts: DeferredCodeAnchorRouteFinalizationReceiptV1[] = [];
+        mocks.deferRecallReadMaintenance.mockReturnValue(Effect.succeed(state));
+        const refs = Array.from({length: count}, (_, i) => `src/target-${i}.ts`);
         const result = yield* contextBriefRecoveryTestEffect(
-          retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts']), {
-            onFinalizationReceipt: receipt => {
-              receipts.push(receipt);
-            },
-          }),
+          retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(refs)),
         );
-        expect(limits).toEqual(firstAdmissions < 4 ? [4, 4 - firstAdmissions] : [4]);
-        expect(totalAdmissions).toBeLessThanOrEqual(4);
-        expect(EffectArray.reduce(receipts, 0, (count, receipt) => count + receipt.scannedCount)).toBeLessThanOrEqual(
-          4,
-        );
-        expect(result.codeAnchorCoverage).toMatchObject({requested: 1, resolved: 1});
-        expect(result.gaps.includes('code-anchor-recall-unavailable')).toBe(firstAdmissions === 4 || stillContended);
-        expect(mocks.loadRecallCodeLinks).toHaveBeenLastCalledWith(
-          CONFIG,
-          expect.objectContaining({
-            forceRefresh: true,
-          }),
-        );
+        expect(mocks.finalizeDeferredCodeAnchorsForRoute).not.toHaveBeenCalled();
+        expect(mocks.expireRecallIndexValidation).not.toHaveBeenCalled();
+        expect(mocks.deferRecallReadMaintenance).toHaveBeenLastCalledWith(CONFIG, {
+          kind: 'anchors',
+          callerCwd: '/workspace/threadnote',
+          repositoryId: EffectString.repeat(64)('a'),
+          worktreeId: EffectString.repeat(64)('b'),
+          codeRefs: refs,
+        });
+        expect(mocks.loadRecallCodeLinks.mock.lastCall?.[1].forceRefresh).toBeUndefined();
+        expect(result.gaps.includes('code-anchor-recall-unavailable')).toBe(state !== 'current');
       }),
     {fastCheck: {numRuns: 20}},
-  );
-
-  effectIt.effect('does not retry pending graph readiness or a failed finalization and preserves recall', () =>
-    Effect.gen(function* () {
-      mocks.resolveRepositoryIdentity.mockReturnValue(
-        Effect.succeed({
-          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
-          worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
-        }),
-      );
-      for (const field of ['pendingCount', 'failedCount'] as const) {
-        let passes = 0;
-        mocks.finalizeDeferredCodeAnchorsForRoute.mockImplementation(() =>
-          Effect.sync(() => {
-            passes++;
-            return {...finalizationReceipt('contended', 0), [field]: 1, scannedCount: 1};
-          }),
-        );
-        const result = yield* contextBriefRecoveryTestEffect(
-          retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts'])),
-        );
-        expect(passes).toBe(1);
-        expect(result.gaps).toContain('code-anchor-recall-unavailable');
-        expect(mocks.loadRecallCodeLinks).toHaveBeenLastCalledWith(
-          CONFIG,
-          expect.objectContaining({forceRefresh: true}),
-        );
-      }
-      mocks.finalizeDeferredCodeAnchorsForRoute.mockReturnValue(Effect.die('finalizer unavailable'));
-      const failed = yield* contextBriefRecoveryTestEffect(
-        retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts'])),
-      );
-      expect(failed.gaps).toContain('code-anchor-recall-unavailable');
-    }),
   );
 
   effectIt.effect(
@@ -248,7 +188,7 @@ describe('Context Brief code-linked memory recovery', () => {
             worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
           }),
         );
-        mocks.finalizeDeferredCodeAnchorsForRoute.mockReturnValue(Effect.succeed(finalizationReceipt('failed', 0)));
+        mocks.deferRecallReadMaintenance.mockReturnValue(Effect.succeed('unavailable'));
         const citation = codeCitation('src/first.ts');
         mocks.loadRecallCodeLinks.mockReturnValue(
           Effect.succeed([{anchorOrdinal: 0, citationId: citation.id, matchKind: 'file-path', uri: MEMORY_URI}]),
@@ -334,10 +274,30 @@ describe('Context Brief code-linked memory recovery', () => {
         retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(refs)),
       );
 
-      expect(result.codeAnchorCoverage).toEqual({complete: true, matchedMemories: 0, requested: 1, resolved: 1});
-      expect(result.gaps).toEqual(['code-anchor-recall-unavailable']);
+      expect(result.codeAnchorCoverage).toEqual({complete: true, matchedMemories: 1, requested: 1, resolved: 1});
+      expect(result.gaps).toContain('stable-memory-identity-unavailable');
+      expect(result.candidates[0]?.memoryId).toBeUndefined();
     }),
   );
+
+  for (const window of [{validFrom: '2050-01-01T00:00:00Z'}, {validTo: '1960-01-01T00:00:00Z'}])
+    effectIt.effect(`rejects a newly ineligible hydrated validity window ${JSON.stringify(window)}`, () =>
+      Effect.gen(function* () {
+        const citation = codeCitation('src/first.ts');
+        mocks.loadRecallCodeLinks.mockReturnValue(
+          Effect.succeed([{anchorOrdinal: 0, citationId: citation.id, matchKind: 'file-path', uri: MEMORY_URI}]),
+        );
+        const record = memoryRecord(citation);
+        mocks.readMemoryRecordsByUri.mockReturnValue(
+          Effect.succeed([{...record, metadata: {...record.metadata, ...window}}]),
+        );
+        const result = yield* contextBriefRecoveryTestEffect(
+          retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts'])),
+        );
+        expect(result.candidates).toEqual([]);
+        expect(mocks.loadRecallMemoryIdentities).not.toHaveBeenCalled();
+      }),
+    );
 
   effectIt.effect(
     'reports mixed resolved and unresolved anchors as partial without whole-phase resolution failure',

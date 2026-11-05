@@ -1,6 +1,10 @@
 import {Array as EffectArray} from 'effect';
 import {readdirSync} from '@threadnote/testing/node-fs';
-import {Clock, Effect, Fiber} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {Clock, Deferred, Effect, Fiber} from 'effect';
+import {TestClock} from 'effect/testing';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 const shareMocks = vi.hoisted(() => ({
@@ -212,90 +216,72 @@ describe('Effect share transaction', () => {
     expect(events).toEqual(['first:start', 'first:end', 'second:start']);
   });
 
-  it('quietly defers to a healthy process lease and retries auto-sync on the next read', async () => {
-    const agentContextHome = await mkdtemp('threadnote-effect-share-read-lock-');
-    homes.push(agentContextHome);
-    let markSyncStarted: (() => void) | undefined;
-    let releaseSync: (() => void) | undefined;
-    const syncStarted = new Promise<void>(resolve => {
-      markSyncStarted = resolve;
-    });
-    const syncBlocked = new Promise<void>(resolve => {
-      releaseSync = resolve;
-    });
-    let automaticReadEntered = false;
-    const config = {
-      account: 'local',
-      agentContextHome,
-      agentId: 'threadnote',
-      user: 'test-user',
-    };
+  effectIt.effect('quietly defers to a healthy process lease and retries auto-sync on the next read', () =>
+    Effect.gen(function* () {
+      const agentContextHome = yield* Effect.promise(() => mkdtemp('threadnote-effect-share-read-lock-'));
+      homes.push(agentContextHome);
+      const syncStarted = yield* Deferred.make<void>();
+      const syncBlocked = yield* Deferred.make<void>();
+      let automaticReadEntered = false;
+      const config = {account: 'local', agentContextHome, agentId: 'threadnote', user: 'test-user'};
+      shareMocks.runShareSync.mockImplementationOnce(() =>
+        Deferred.succeed(syncStarted, undefined).pipe(Effect.andThen(Deferred.await(syncBlocked))),
+      );
+      shareMocks.syncSharedReposBeforeAgentRead.mockImplementationOnce(() =>
+        Effect.sync(() => {
+          automaticReadEntered = true;
+          return {syncedTeams: ['default'], warnings: []};
+        }),
+      );
+      const explicitSync = yield* Effect.forkScoped(runShareSync(config, {}));
+      yield* Deferred.await(syncStarted);
+      const startedAt = yield* Clock.currentTimeMillis;
+      const automaticRead = yield* syncSharedReposBeforeAgentRead(config).pipe(
+        Effect.timeout('1 second'),
+        Effect.ensuring(Deferred.succeed(syncBlocked, undefined)),
+      );
+      const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
+      expect(automaticRead).toEqual({syncedTeams: [], warnings: [], deferred: true});
+      expect(elapsed).toBeLessThan(200);
+      expect(automaticReadEntered).toBe(false);
+      yield* Fiber.join(explicitSync);
+      const catchUpRead = yield* syncSharedReposBeforeAgentRead(config);
+      expect(catchUpRead).toEqual({syncedTeams: ['default'], warnings: []});
+      expect(automaticReadEntered).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
-    await runEffect(
-      Effect.gen(function* () {
-        shareMocks.runShareSync.mockImplementationOnce(() =>
-          Effect.gen(function* () {
-            markSyncStarted?.();
-            yield* Effect.promise(() => syncBlocked);
-          }),
-        );
-        shareMocks.syncSharedReposBeforeAgentRead.mockImplementationOnce(() =>
-          Effect.sync(() => {
-            automaticReadEntered = true;
-            return {syncedTeams: ['default'], warnings: []};
-          }),
-        );
-        const explicitSync = yield* Effect.forkChild(runShareSync(config, {}));
-        yield* Effect.promise(() => syncStarted);
-        const startedAt = yield* Clock.currentTimeMillis;
-        const automaticRead = yield* syncSharedReposBeforeAgentRead(config);
-        const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
-        expect(automaticRead).toEqual({syncedTeams: [], warnings: []});
-        expect(elapsed).toBeLessThan(200);
-        expect(automaticReadEntered).toBe(false);
-
-        releaseSync?.();
-        yield* Fiber.join(explicitSync);
-        const catchUpRead = yield* syncSharedReposBeforeAgentRead(config);
-
-        expect(catchUpRead).toEqual({syncedTeams: ['default'], warnings: []});
-        expect(automaticReadEntered).toBe(true);
-      }),
-    );
-  });
-
-  it('keeps an unverifiable repository lock visible as a bounded diagnostic', async () => {
-    const agentContextHome = await mkdtemp('threadnote-effect-share-unverified-lock-');
-    homes.push(agentContextHome);
-    const lockPath = join(agentContextHome, 'threadnote', 'shared-repository.lock');
-    await mkdir(join(agentContextHome, 'threadnote'), {recursive: true});
-    await writeFile(lockPath, 'not-a-threadnote-lock\n', {mode: 0o600});
-    let automaticReadEntered = false;
-    shareMocks.syncSharedReposBeforeAgentRead.mockReturnValue(
-      Effect.sync(() => {
-        automaticReadEntered = true;
-        return {syncedTeams: [], warnings: []};
-      }),
-    );
-
-    const result = await runEffect(
-      syncSharedReposBeforeAgentRead({
+  effectIt.effect('keeps an unverifiable repository lock visible as a bounded diagnostic', () =>
+    Effect.gen(function* () {
+      const agentContextHome = yield* Effect.promise(() => mkdtemp('threadnote-effect-share-unverified-lock-'));
+      homes.push(agentContextHome);
+      const lockPath = join(agentContextHome, 'threadnote', 'shared-repository.lock');
+      yield* Effect.promise(() => mkdir(join(agentContextHome, 'threadnote'), {recursive: true}));
+      yield* Effect.promise(() => writeFile(lockPath, 'not-a-threadnote-lock\n', {mode: 0o600}));
+      let automaticReadEntered = false;
+      shareMocks.syncSharedReposBeforeAgentRead.mockReturnValue(
+        Effect.sync(() => {
+          automaticReadEntered = true;
+          return {syncedTeams: [], warnings: []};
+        }),
+      );
+      const result = yield* syncSharedReposBeforeAgentRead({
         account: 'local',
         agentContextHome,
         agentId: 'threadnote',
         user: 'test-user',
-      }),
-    );
-
-    expect(result).toEqual({
-      syncedTeams: [],
-      warnings: [
-        'Shared repository auto-sync used the local snapshot because the repository lock was stale or unverifiable; run threadnote doctor --dry-run if this warning persists.',
-      ],
-    });
-    expect(result.warnings[0].length).toBeLessThan(200);
-    expect(automaticReadEntered).toBe(false);
-  });
+      });
+      expect(result).toEqual({
+        syncedTeams: [],
+        deferred: true,
+        warnings: [
+          'Shared repository auto-sync used the local snapshot because the repository lock was stale or unverifiable; run threadnote doctor --dry-run if this warning persists.',
+        ],
+      });
+      expect(result.warnings[0].length).toBeLessThan(200);
+      expect(automaticReadEntered).toBe(false);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   it('does not mistake a stale live-owner lease for healthy concurrent work', async () => {
     const agentContextHome = await mkdtemp('threadnote-effect-share-stale-lock-');

@@ -139,6 +139,7 @@ export const applyTopicEnrollment = Effect.fn('topicMaintenance.applyEnrollment'
   const target = yield* resolveLocalMemoryReplacementTarget(
     config,
     isMemoryId(options.uri) ? memoryIdentityAlias(options.uri) : options.uri,
+    {prepare: true},
   );
   if (!target.record) return conflict('target-missing', 'The topic target is not readable.');
   const fs = yield* FileSystem.FileSystem;

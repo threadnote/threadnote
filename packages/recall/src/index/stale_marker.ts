@@ -27,7 +27,10 @@ const CurrentPublicationFence = Context.Reference<PublicationFence | undefined>(
 export const recallPublicationFenceHeld = (lockPath: string) =>
   Effect.gen(function* () {
     const fence = yield* CurrentPublicationFence;
-    return fence?.active === true && fence.lockPath === lockPath;
+    if (!fence?.active) return false;
+    const fs = yield* FileSystem.FileSystem;
+    const canonicalLockPath = yield* fs.realPath(lockPath).pipe(Effect.option);
+    return Option.isSome(canonicalLockPath) && fence.lockPath === canonicalLockPath.value;
   });
 
 /** Mint only under the real lexical lock; descendants lose authority when its scope ends. */
@@ -43,7 +46,13 @@ export function withRecallPublicationLock<A, E, R>(
     lockPath,
     options,
     Effect.acquireUseRelease(
-      Effect.sync((): PublicationFence => ({lockPath, admissionAccount, active: true})),
+      fs.realPath(lockPath).pipe(
+        Effect.map((canonicalLockPath): PublicationFence => ({
+          lockPath: canonicalLockPath,
+          admissionAccount,
+          active: true,
+        })),
+      ),
       fence => effect.pipe(Effect.provideService(CurrentPublicationFence, fence)),
       fence =>
         Effect.sync(() => {
@@ -64,10 +73,11 @@ function withStaleMarkerPublication<A, E, R>(
     const home = path.dirname(path.dirname(path.dirname(databasePath)));
     const lockPath = path.join(home, 'locks', 'indexes', 'lexical', `${path.basename(databasePath)}.lock`);
     const fence = yield* CurrentPublicationFence;
-    const held = fence?.active === true && fence.lockPath === lockPath;
+    const held = yield* recallPublicationFenceHeld(lockPath);
     // Refresh owns the lexical lock already. Native commits additionally prove a real canonical mutation.
     if (
       held &&
+      fence !== undefined &&
       (fence.admissionAccount === undefined ||
         (yield* canonicalMutationInvalidationIsCurrent(home, fence.admissionAccount, transition)))
     )

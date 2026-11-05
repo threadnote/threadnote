@@ -12,6 +12,7 @@ import {
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
   nativeCycleBaseRequalificationReceiptDigest,
+  validateNativeCycleMergeReceipt,
 } from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -176,6 +177,37 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         receipt.receiptDigest !== nativeCycleBaseRequalificationReceiptDigest(snapshot, receipt)
       )
         fail('Base requalification lost its reviewed predecessor, approved plan transition or immutable witness.');
+    }
+    if (snapshot.ordinaryMergeQualificationV1) {
+      const predecessor = snapshot.previous ?? snapshot.supersedes;
+      const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
+      if (!prior || !capturedSnapshots.has(prior.snapshotId) || !reviews.has(prior.snapshotId))
+        fail('Ordinary merge qualification requires its retained reviewed predecessor.');
+      validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const proof = snapshot.ordinaryMergeQualificationV1;
+      const plan = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
+      )!;
+      const phase = EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.phases, item => item.id === snapshot.phaseId),
+      )!;
+      const expected = EffectArray.filter(proof.upstreamEvidence, item => !phase.allowedPaths.includes(item.path));
+      if (
+        incoming.length !== expected.length ||
+        EffectArray.some(incoming, (item, index) => {
+          const entry = expected[index];
+          return (
+            !entry ||
+            item.path !== entry.path ||
+            item.source !== 'upstream' ||
+            item.commit !== proof.currentBaseHead ||
+            item.tree !== proof.currentBaseTree ||
+            item.mode !== entry.head.mode ||
+            item.blob !== entry.head.blob
+          );
+        })
+      )
+        fail('Keep the exact per-phase upstream incoming subset separate from the complete merge proof.');
     }
     capturedSnapshots.add(snapshot.snapshotId);
     if (

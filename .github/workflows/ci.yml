@@ -233,6 +233,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Frozen v1 quality and indexed-recall smoke
         run: bun run eval:recall
+      - name: Preserve bounded recall quality diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recall-quality-production-10000
+          path: artifacts/recall-production-10000.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Frozen native code graph quality gate
         run: bun run eval:code-graph
       - name: Bounded cross-repository workset quality smoke

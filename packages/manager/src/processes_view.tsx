@@ -352,6 +352,8 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
       return 'Graph parser worker';
     case 'graph-query-worker':
       return 'Graph query worker';
+    case 'recall-read-worker':
+      return 'Recall read';
     case 'graph-waiter':
       return 'Graph waiter';
     case 'integration-sync-worker':

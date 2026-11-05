@@ -7,10 +7,25 @@ import {fileURLToPath} from '@threadnote/testing/node-url';
 import {describe, expect, it} from 'vitest';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import * as FC from 'fast-check';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const sourceRoot = join(repoRoot, 'apps', 'threadnote', 'src');
 const codeRoots = EffectArray.map(['scripts', 'tools', 'infra', 'packages', 'apps'], path => join(repoRoot, path));
+const workspaceManifests = new Bun.Glob('{apps,packages}/*/package.json');
+
+function runtimeSourceRoots(manifestPaths: readonly string[]): readonly string[] {
+  return EffectArray.map(
+    EffectArray.filter(
+      manifestPaths,
+      path =>
+        workspaceManifests.match(path) &&
+        path !== 'apps/website/package.json' &&
+        path !== 'packages/testing/package.json',
+    ),
+    path => join(repoRoot, dirname(path), 'src'),
+  ).sort();
+}
 
 async function codeFiles(path: string): Promise<readonly string[]> {
   const files: string[] = [];
@@ -26,21 +41,10 @@ async function codeFiles(path: string): Promise<readonly string[]> {
 }
 
 const sourceFiles = async () => {
-  const packagesRoot = join(repoRoot, 'packages');
-  const packageDirectories = EffectArrayPipe(await readdir(packagesRoot, {withFileTypes: true}), __effectArrayValues =>
-    EffectArray.filter(
-      __effectArrayValues,
-      (entry, __effectArrayIndex) =>
-        __effectArrayIndex in __effectArrayValues && entry.isDirectory() && entry.name !== 'testing',
-    ),
-  );
+  // Workspace manifests are authoritative; retired or generated directories are not workspaces.
+  const roots = runtimeSourceRoots([...workspaceManifests.scanSync(repoRoot)]);
   return EffectArray.filter(
-    (
-      await Promise.all([
-        codeFiles(sourceRoot),
-        ...EffectArray.map(packageDirectories, entry => codeFiles(join(packagesRoot, entry.name, 'src'))),
-      ])
-    ).flat(),
+    (await Promise.all(EffectArray.map(roots, root => codeFiles(root)))).flat(),
     path => !Effect.pipe(relative(repoRoot, path), EffectString.split(/[\\/]/)).includes('test'),
   );
 };
@@ -76,6 +80,30 @@ function isNodeBuiltinSpecifier(specifier: string): boolean {
 }
 
 describe('Effect architecture boundaries', () => {
+  it('covers every declared runtime workspace without treating artifacts, tests, or the website as runtime roots', () => {
+    FC.assert(
+      FC.property(FC.uniqueArray(FC.nat(1000), {maxLength: 12}), names => {
+        const packages = EffectArray.map(names, name => `packages/runtime-${name}`);
+        const applications = EffectArray.map(names, name => `apps/runtime-${name}`);
+        const runtimeDirectories = ['apps/threadnote', 'packages/inference', ...packages, ...applications];
+        const manifests = EffectArray.map(runtimeDirectories, directory => `${directory}/package.json`);
+        expect(
+          runtimeSourceRoots([
+            ...manifests,
+            'apps/website/package.json',
+            'packages/testing/package.json',
+            'packages/semantic',
+            'packages/semantic/src',
+            'packages/recall/test/fixture/package.json',
+            'apps/threadnote/test/fixture/package.json',
+            'artifacts/runtime/package.json',
+          ]),
+        ).toEqual(EffectArray.map(runtimeDirectories, directory => join(repoRoot, directory, 'src')).sort());
+      }),
+      {numRuns: 32},
+    );
+  });
+
   it('keeps the CLI free of generic Promise workflow bridges', async () => {
     const cli = await readFile(join(sourceRoot, 'effect', 'cli.ts'), 'utf8');
     expect(cli).not.toContain('withRuntimePromise');
@@ -231,6 +259,7 @@ describe('Effect architecture boundaries', () => {
       'apps/threadnote/src/effect/mcp_broker_process.ts',
       'packages/platform/src/system.ts',
       'apps/threadnote/src/standalone.ts',
+      'apps/threadnote/src/recall/ready_read_entry.ts',
     ]);
     for (const path of await sourceFiles()) {
       const relativePath = relative(repoRoot, path);

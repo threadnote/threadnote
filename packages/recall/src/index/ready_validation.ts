@@ -1,0 +1,164 @@
+import {Array as EffectArray, String as EffectString, Clock, Effect, FileSystem, Path} from 'effect';
+import {parseResourceId} from '@threadnote/store/resource-id';
+import {uriSegment} from '@threadnote/workspace/manifest';
+import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
+import {fromPromise} from '@threadnote/platform/errors';
+import {externalResourceAccess, isExternalResourceUri} from '@threadnote/store/external-resource';
+import {indexCandidate, recallIndexCandidateIsEligible} from './candidate.js';
+import {recallProjectMatches} from './selection.js';
+import {recallWorkspaceScopeMatches} from './scope.js';
+import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './canonical_resource.js';
+import type {RecallCandidate} from '../rank.js';
+import type {RecallEligibilityPolicy} from '../eligibility.js';
+
+export type RecallReadyEligibility = 'eligible' | 'ineligible' | 'stale' | 'unverified';
+const projectionKeys = [
+  'authority',
+  'contentHash',
+  'fields',
+  'kind',
+  'memoryId',
+  'relations',
+  'status',
+  'text',
+  'timestamp',
+  'trust',
+  'uri',
+  'validFrom',
+  'validTo',
+] as const satisfies readonly (keyof RecallCandidate)[];
+
+/** Read only selected canonical sources. A stale index can lose hits, never widen live eligibility. */
+export const makeRecallReadyValidator = Effect.fn('recall.makeReadyValidator')(function* (
+  config: {account: string; agentContextHome: string; user: string; manifestPath?: string},
+  selected: readonly RecallCandidate[],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = path.join(config.agentContextHome, 'data', config.account);
+  const boundary = yield* fs.realPath(root).pipe(Effect.orElseSucceed(() => undefined));
+  const canonicalUris = new Set<string>();
+  for (const candidate of selected) {
+    if (candidate.authority !== 'canonical_repo') continue;
+    for (const uri of [candidate.uri, ...(candidate.equivalentUris ?? [])]) canonicalUris.add(uri);
+  }
+  const policy =
+    canonicalUris.size > 0 ? yield* loadCanonicalResourcePolicy(config, cause => cause, canonicalUris) : undefined;
+  const readLive = (uri: string) =>
+    Effect.gen(function* () {
+      const id = yield* Effect.try(() => parseResourceId(uri));
+      if (
+        id.namespace !== 'resources' &&
+        !(id.namespace === 'user' && id.segments[0] === uriSegment(config.user) && id.segments[1] === 'memories')
+      )
+        return undefined;
+      const filename = path.join(root, id.namespace, ...id.segments);
+      if (!boundary) return undefined;
+      const relative = path.relative(boundary, yield* fs.realPath(filename));
+      if (relative === '..' || EffectString.startsWith('..' + path.sep)(relative) || path.isAbsolute(relative))
+        return undefined;
+      const bytes = yield* fromPromise('recall.readReadyCanonicalSource', () =>
+        runtimeReadBoundedStableRegularFile(filename, 512 * 1024),
+      );
+      const content = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+      const canonical = policy ? yield* verifyCanonicalResource(fs, uri, content, policy) : false;
+      return yield* Effect.try(() => indexCandidate(uri, content, canonical));
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  const cache = new Map(
+    yield* Effect.forEach(
+      [...new Set(EffectArray.flatMap(selected, candidate => [candidate.uri, ...(candidate.equivalentUris ?? [])]))],
+      uri => Effect.cached(readLive(uri)).pipe(Effect.map(read => [uri, read] as const)),
+    ),
+  );
+  const externalChecks = new Map(
+    yield* Effect.forEach(
+      EffectArray.filter(
+        EffectArray.flatMap(selected, candidate =>
+          EffectArray.map([candidate.uri, ...(candidate.equivalentUris ?? [])], uri => ({
+            uri,
+            hash: candidate.contentHash,
+          })),
+        ),
+        source => isExternalResourceUri(source.uri) && source.hash !== undefined,
+      ),
+      source =>
+        Effect.cached(
+          externalResourceAccess(
+            {home: config.agentContextHome, account: config.account, user: config.user},
+            source.uri,
+            undefined,
+            source.hash,
+          ),
+        ).pipe(Effect.map(check => [JSON.stringify([source.uri, source.hash]), check] as const)),
+    ),
+  );
+  const indexedByUri = new Map(EffectArray.map(selected, candidate => [candidate.uri, candidate] as const));
+  return (
+    candidate: RecallCandidate,
+    options: {
+      eligibility?: RecallEligibilityPolicy;
+      includeInactive: boolean;
+      project?: string;
+      workspaceScope?: string;
+      workspaceScopeMode?: 'hierarchy' | 'sibling';
+      query?: string;
+      memoryIds?: readonly string[];
+    },
+  ) =>
+    Effect.gen(function* () {
+      if (isExternalResourceUri(candidate.uri)) {
+        const indexed = indexedByUri.get(candidate.uri);
+        if (indexed?.authority !== 'external' || indexed.trust !== 'untrusted' || indexed.contentHash === undefined)
+          return 'unverified' as const;
+        const check = externalChecks.get(JSON.stringify([indexed.uri, indexed.contentHash]));
+        // This proof conflates revocation and changed/unverified content. Fail closed;
+        // do not infer a repairable index drift from its boolean failure.
+        if (check === undefined || !(yield* check)) return 'unverified' as const;
+        return recallIndexCandidateIsEligible(
+          {
+            ...(options.eligibility ?? {
+              kind: 'candidate-policy',
+              authority: 'any',
+              projects: {mode: 'unrestricted'},
+            }),
+            externalResources: {[indexed.uri]: indexed.contentHash},
+          },
+          indexed,
+        ) &&
+          recallProjectMatches(options.project, indexed.fields?.project) &&
+          recallWorkspaceScopeMatches(
+            options.workspaceScope,
+            indexed.fields?.workspaceScope,
+            options.workspaceScopeMode,
+          )
+          ? ('eligible' as const)
+          : ('ineligible' as const);
+      }
+      const read = cache.get(candidate.uri);
+      if (!read) return 'stale' as const;
+      const live = yield* read;
+      // Check the complete indexed projection before caller/clock eligibility.
+      if (
+        !live ||
+        !EffectArray.every(projectionKeys, key => JSON.stringify(live[key]) === JSON.stringify(candidate[key]))
+      )
+        return 'stale' as const;
+      if (!options.includeInactive && live.status !== undefined && live.status !== 'active')
+        return 'ineligible' as const;
+      const now = yield* Clock.currentTimeMillis;
+      if (
+        !options.includeInactive &&
+        !(options.query === undefined && options.memoryIds !== undefined) &&
+        ((live.validFrom !== undefined && Date.parse(live.validFrom) > now) ||
+          (live.validTo !== undefined && Date.parse(live.validTo) < now))
+      )
+        return 'ineligible' as const;
+      if (!options.includeInactive && /\/(archived|expired|superseded)\//u.test(candidate.uri))
+        return 'ineligible' as const;
+      return recallIndexCandidateIsEligible(options.eligibility, live) &&
+        recallProjectMatches(options.project, live.fields?.project) &&
+        recallWorkspaceScopeMatches(options.workspaceScope, live.fields?.workspaceScope, options.workspaceScopeMode)
+        ? ('eligible' as const)
+        : ('ineligible' as const);
+    });
+});

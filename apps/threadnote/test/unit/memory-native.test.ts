@@ -28,7 +28,7 @@ import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
-import {loadRecallIndex} from '@threadnote/recall/index';
+import {loadRecallIndex, loadRecallIndexData} from '@threadnote/recall/index';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
 import {
   createMemoryCodeCitation,
@@ -1518,6 +1518,9 @@ describe('native memory workflow', () => {
           manifestPath: path.join(home, 'seed-manifest.yaml'),
           user: 'tester',
         };
+
+        yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+        yield* loadRecallIndexData(config, {includeInactive: false});
 
         const result = yield* prepareRecallSections(config, {
           allowExactRescue: false,

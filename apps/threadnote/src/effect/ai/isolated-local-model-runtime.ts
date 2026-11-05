@@ -32,6 +32,7 @@ import {
 } from '@threadnote/inference/engine/local-model-runtime';
 import type {LlamaCppDiagnostics} from '@threadnote/inference/engine/llama-cpp-engine';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {ReadDeadlineContext, readDeadlineRemaining} from '@threadnote/platform/read_deadline';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {withThreadnoteProcessActivity} from '../../process/diagnostics.js';
 import {LOCAL_MODEL_WORKER_ARGUMENT} from '../../worker_protocol.js';
@@ -56,7 +57,10 @@ const WORKER_CRASH_PATTERN =
   /(?:bun has crashed|panic(?:\([^)]*\))?:|segmentation fault|fatal error:|reached heap limit|allocation failed)/i;
 
 type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'embedManyCapacityV2' | 'generate' | 'rerank';
-type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
+type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write' | 'cleanup-unconfirmed';
+interface OwnedReadCleanup {
+  readonly deadlineAtMilliseconds: number;
+}
 
 interface WorkerRequest {
   readonly id: string;
@@ -89,7 +93,7 @@ export class LocalModelWorkerTransportError extends Schema.TaggedError<
 >()('LocalModelWorkerTransportError', {
   message: Schema.String,
   operation: Schema.String,
-  reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write']),
+  reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write', 'cleanup-unconfirmed']),
 }) {}
 
 export interface LocalModelWorkerProcess {
@@ -159,20 +163,46 @@ export function isolatedLocalModelRuntimeLayer(
           operation: WorkerOperation,
           payload: unknown,
           decode: (result: unknown) => Option.Option<A>,
-        ): Effect.Effect<A, DecodedOperationError | LocalModelWorkerTransportError> => {
-          const send = (signal: AbortSignal) => pool.request(operation, payload, signal);
-          const decodeError = (cause: unknown): LocalModelWorkerTransportError =>
-            Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol');
-          const transmitted = options.background
-            ? fromPromiseInterruptibleAwaiting(send, decodeError)
-            : Effect.tryPromise({try: send, catch: decodeError});
-          return Effect.gen(function* () {
-            const response = yield* transmitted;
-            if (!response.ok) return yield* Effect.fail<DecodedOperationError>(response.error);
-            const result = decode(response.result);
-            return Option.isSome(result) ? result.value : yield* transportError(operation, 'protocol');
+        ): Effect.Effect<A, DecodedOperationError | LocalModelWorkerTransportError> =>
+          Effect.gen(function* () {
+            const readDeadline = yield* Effect.serviceOption(ReadDeadlineContext);
+            const remaining = Option.isNone(readDeadline)
+              ? undefined
+              : yield* readDeadlineRemaining(readDeadline.value);
+            if (remaining !== undefined && remaining <= 0) return yield* transportError(operation, 'timeout');
+            const cleanup = Option.isNone(readDeadline)
+              ? undefined
+              : {
+                  deadlineAtMilliseconds: performance.now() + (remaining ?? 0),
+                };
+            let cleanupFailure: LocalModelWorkerTransportError | undefined;
+            const send = (signal: AbortSignal) =>
+              pool.request(operation, payload, signal, cleanup).catch(cause => {
+                if (Schema.is(LocalModelWorkerTransportError)(cause) && cause.reason === 'cleanup-unconfirmed')
+                  cleanupFailure = cause;
+                throw cause;
+              });
+            const decodeError = (cause: unknown): LocalModelWorkerTransportError =>
+              Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol');
+            const transmitted =
+              options.background || cleanup !== undefined
+                ? fromPromiseInterruptibleAwaiting(send, decodeError)
+                : Effect.tryPromise({try: send, catch: decodeError});
+            return yield* Effect.gen(function* () {
+              const response = yield* transmitted;
+              if (!response.ok) return yield* Effect.fail<DecodedOperationError>(response.error);
+              const result = decode(response.result);
+              return Option.isSome(result) ? result.value : yield* transportError(operation, 'protocol');
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  // A scope finalizer defect is deliberately retained through timeout
+                  // interruption: optional inference cannot turn unknown exit into success.
+                  if (cleanupFailure !== undefined) throw withWorkerTransportDiagnostic(cleanupFailure, cleanupFailure);
+                }),
+              ),
+            );
           });
-        };
 
         const service: LocalModelRuntimeWithDiagnostics = {
           diagnostics: withAnonymousTelemetryPhase(
@@ -410,12 +440,19 @@ class LocalModelWorkerPool {
     await connection.close();
   }
 
-  async request(operation: WorkerOperation, payload: unknown, signal: AbortSignal): Promise<WorkerResponse> {
+  async request(
+    operation: WorkerOperation,
+    payload: unknown,
+    signal: AbortSignal,
+    cleanup?: OwnedReadCleanup,
+  ): Promise<WorkerResponse> {
     if (this.closed) throw transportError(operation, 'exit');
     this.activeRequests += 1;
     this.cancelIdleEviction();
     try {
       for (let attempt = 0; attempt < this.maximumRequestAttempts; attempt += 1) {
+        if (cleanup !== undefined && performance.now() >= cleanup.deadlineAtMilliseconds)
+          throw transportError(operation, 'timeout');
         let connection = Option.none<LocalModelWorkerConnection>();
         try {
           const activeConnection = await this.activeConnection(operation);
@@ -432,7 +469,7 @@ class LocalModelWorkerPool {
             signal,
           );
         } catch (cause: unknown) {
-          if (Option.isSome(connection)) await this.discard(connection.value);
+          if (Option.isSome(connection)) await this.discard(connection.value, cleanup, operation);
           if (
             !Schema.is(LocalModelWorkerTransportError)(cause) ||
             attempt + 1 === this.maximumRequestAttempts ||
@@ -486,9 +523,13 @@ class LocalModelWorkerPool {
     }
   }
 
-  private async discard(connection: LocalModelWorkerConnection): Promise<void> {
+  private async discard(
+    connection: LocalModelWorkerConnection,
+    cleanup?: OwnedReadCleanup,
+    operation: WorkerOperation = 'diagnostics',
+  ): Promise<void> {
     if (Option.isSome(this.connection) && this.connection.value === connection) this.connection = Option.none();
-    await connection.close();
+    await connection.close(cleanup, operation);
   }
 
   private cancelIdleEviction(): void {
@@ -534,6 +575,8 @@ class LocalModelWorkerConnection {
   private stdoutBufferBytes = 0;
   private readonly decoder = new TextDecoder();
   private readonly encoder = new TextEncoder();
+  private readonly stdoutClosed: Promise<void>;
+  private readonly stderrClosed: Promise<void>;
 
   constructor(
     private readonly process: LocalModelWorkerProcess,
@@ -541,8 +584,8 @@ class LocalModelWorkerConnection {
     private readonly responseLimitBytes: number,
     private readonly awaitExit = false,
   ) {
-    void this.consumeStdout();
-    void this.consumeStderr();
+    this.stdoutClosed = this.consumeStdout();
+    this.stderrClosed = this.consumeStderr();
     void process.exited.then(
       () => this.fail('exit'),
       () => this.fail('exit'),
@@ -553,7 +596,27 @@ class LocalModelWorkerConnection {
     return this.closed;
   }
 
-  async close(): Promise<void> {
+  async close(cleanup?: OwnedReadCleanup, operation: WorkerOperation = 'diagnostics'): Promise<void> {
+    if (cleanup !== undefined) {
+      this.closed = true;
+      this.rejectPending('exit');
+      this.kill();
+      const remaining = Math.max(
+        0,
+        Math.min(WORKER_SHUTDOWN_DEADLINE_MS, Math.floor(cleanup.deadlineAtMilliseconds - performance.now())),
+      );
+      const closed = Promise.all([
+        this.process.exited,
+        Promise.resolve()
+          .then(() => this.process.closeInput())
+          .catch(() => undefined),
+        this.stdoutClosed,
+        this.stderrClosed,
+      ]);
+      if (remaining <= 0 || !(await completesBeforeDeadline(closed, remaining)))
+        throw transportError(operation, 'cleanup-unconfirmed');
+      return;
+    }
     if (this.closed) {
       this.kill();
       void Promise.resolve()
@@ -1345,6 +1408,7 @@ function transportError(operation: WorkerOperation, reason: WorkerFailureReason)
 }
 
 function workerTransportMessage(operation: WorkerOperation, reason: WorkerFailureReason): string {
+  if (reason === 'cleanup-unconfirmed') return 'The isolated local AI worker cleanup could not be confirmed.';
   if (reason === 'timeout') return `The isolated local AI worker timed out during ${operation}.`;
   if (reason === 'crash') return `The isolated local AI worker crashed during ${operation}.`;
   if (reason === 'spawn') return `The isolated local AI worker could not start for ${operation}.`;

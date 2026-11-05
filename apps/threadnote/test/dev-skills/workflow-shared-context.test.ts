@@ -9,6 +9,7 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
@@ -151,6 +152,7 @@ describe('workflow configured shared context', () => {
         `${rootUri}/shared/default/durable/projects/fixture/prior.md`,
         'workflow-published-prior',
       );
+      yield* loadRecallMemoryIdentities(f.config, {allowedUriScopes: [], memoryIds: []});
       for (const uri of [source.uri, `threadnote://memory/${source.memoryId}`]) {
         expect(yield* f.read(uri)).toMatchObject({status: 'ok', memoryId: source.memoryId, body: source.body});
       }

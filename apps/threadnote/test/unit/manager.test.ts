@@ -68,6 +68,7 @@ import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {loadRecallIndexData} from '@threadnote/recall/index';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {Option as EffectOption} from 'effect';
 
@@ -714,6 +715,7 @@ describe('manager catalog', () => {
       ),
     );
 
+    await runEffect(loadRecallIndexData(config, {includeInactive: false}));
     const result = await runEffect(readManagedMemory(config, 'threadnote://memory/tn_manager_ui'));
 
     expect(result.node.uri).toBe('threadnote://user/denys/memories/durable/projects/threadnote/manager-ui.md');

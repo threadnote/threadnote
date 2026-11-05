@@ -1,3 +1,5 @@
+import {SourceSync} from '@threadnote/integration-core/source-sync';
+import {readRecallLexicalScope} from '@threadnote/recall/background/lexical-demand';
 import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -92,7 +94,6 @@ effectIt.effect(
       const registry = new EffectMcpServerRegistry();
       registerSearchTool(registry, config, 'recall_context', 'Recall', {
         heartbeatMilliseconds: 10_000,
-        sharedSyncDelayMilliseconds: 0,
       });
       const base = {callerCwd: component, query: 'orbital gearbox calibration', nodeLimit: '3'};
       for (const query of [
@@ -178,6 +179,18 @@ effectIt.effect(
       expect(globalMcp.structuredContent).toMatchObject({
         projectBoundary: {mode: 'unrestricted', reason: 'inference-disabled'},
       });
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      const pending = yield* Effect.forEach(
+        yield* fs.readDirectory(path.join(home, 'recall', 'lexical-demand-v1')),
+        filename => readRecallLexicalScope(home, filename),
+      );
+      expect(EffectArray.some(pending, scope => scope?.work?.kind === 'synchronize' && scope.work.sources)).toBe(true);
+    }).pipe(
+      Effect.provideService(
+        SourceSync,
+        SourceSync.of({beforeRecall: () => Effect.die('Automatic source sync ran on the reader.')}),
+      ),
+      provideTestLayer(ApplicationLayer),
+      TestClock.withLive,
+    ),
   30_000,
 );
