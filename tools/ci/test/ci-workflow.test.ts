@@ -239,6 +239,7 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
   expect(jobs.test?.if).toBe('always()');
   expect(jobs.test?.needs).toEqual([
     'native-workflow-stress',
+    'windows-identity-qualification',
     'bazel-plan',
     'bazel-plan-validation',
     'bazel-shards',
@@ -286,7 +287,7 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
       "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
     );
     expect(jobs['native-workflow-stress']?.if).toBe(
-      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
+      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && inputs.windows_identity_qualification != true",
     );
     expect(jobs['native-workflow-stress']?.uses).toBe('./.github/workflows/native-workflow-stress.yml');
     const aggregate = step(jobs.test, 'Require every selected lane');
@@ -547,4 +548,48 @@ it('preserves every prerequisite failure status and prevents shard execution', (
     }),
     {numRuns: 20},
   );
+});
+
+it.each(['success', 'failure', 'cancelled', 'skipped'])(
+  'keeps fixed identity qualification separate and requires its actual executor result %s',
+  identityResult => {
+    expect(jobs.test?.name).toContain("'Windows identity diagnostic result'");
+    expect(jobs['windows-identity-qualification']?.if).toBe(
+      "github.event_name == 'workflow_dispatch' && inputs.windows_identity_qualification == true",
+    );
+    const aggregate = step(jobs.test, 'Require every selected lane');
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
+      env: {
+        BASH_ENV: '',
+        PATH: '',
+        MANUAL_IDENTITY: 'true',
+        MANUAL_STRESS: 'false',
+        IDENTITY_RESULT: identityResult,
+        BAZEL_PLAN_RESULT: 'skipped',
+      },
+      timeout: 2_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(identityResult === 'success' ? 0 : 1);
+  },
+);
+it('rejects simultaneous identity and stress modes without selecting ordinary CI', () => {
+  expect(jobs['bazel-plan']?.if).toBe(
+    "github.event_name != 'workflow_dispatch' || (inputs.native_workflow_stress != true && inputs.windows_identity_qualification != true)",
+  );
+  expect(jobs['native-workflow-stress']?.if).toContain('inputs.windows_identity_qualification != true');
+  const aggregate = step(jobs.test, 'Require every selected lane');
+  const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
+    env: {
+      BASH_ENV: '',
+      PATH: '',
+      MANUAL_IDENTITY: 'true',
+      MANUAL_STRESS: 'true',
+      IDENTITY_RESULT: 'success',
+      NATIVE_WORKFLOW_STRESS_RESULT: 'success',
+    },
+    timeout: 2_000,
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(1);
 });

@@ -13,6 +13,17 @@ on:
         required: false
         default: false
 
+      windows_identity_qualification:
+        description: Run only the fixed Windows workflow identity diagnostic cases
+        type: boolean
+        required: false
+        default: false
+      windows_identity_expected_sha:
+        description: Exact reviewed 40-character lowercase commit SHA (diagnostic mode only)
+        type: string
+        required: false
+        default: ''
+
 permissions:
   contents: read
 
@@ -22,12 +33,57 @@ env:
 jobs:
   # Registered CI can dispatch a branch's same-commit manual tier before the new workflow reaches default.
   native-workflow-stress:
-    if: github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true
+    if: github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && inputs.windows_identity_qualification != true
     uses: ./.github/workflows/native-workflow-stress.yml
+
+  windows-identity-qualification:
+    name: Windows identity qualification
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_identity_qualification == true
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      THREADNOTE_QUALIFICATION_ENABLED: ${{ inputs.windows_identity_qualification }}
+      THREADNOTE_QUALIFICATION_STRESS: ${{ inputs.native_workflow_stress }}
+      THREADNOTE_QUALIFICATION_EXPECTED_SHA: ${{ inputs.windows_identity_expected_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Admit immutable diagnostic source
+        run: bun tools/ci/windows-identity-qualification.ts admit
+      - run: bun install --frozen-lockfile
+      - name: Install workflow inspection prerequisite
+        timeout-minutes: 5
+        run: bun tools/ci/windows-workflow-prerequisites.ts
+      - run: bun run typecheck
+      - name: Run fixed identity qualification
+        id: qualification
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun tools/ci/windows-identity-qualification.ts
+      - name: Preserve bounded attempt-bound diagnostics
+        if: always() && steps.qualification.outputs.safe_artifacts_ready == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.qualification.outputs.artifact_name }}
+          path: |
+            ${{ steps.qualification.outputs.artifact_directory }}/manifest.json
+            ${{ steps.qualification.outputs.artifact_directory }}/statuses.json
+            ${{ steps.qualification.outputs.artifact_directory }}/diagnostics.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
   bazel-plan:
     name: Plan affected Bazel checks
-    if: github.event_name != 'workflow_dispatch' || inputs.native_workflow_stress != true
+    if: github.event_name != 'workflow_dispatch' || (inputs.native_workflow_stress != true && inputs.windows_identity_qualification != true)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -358,11 +414,12 @@ jobs:
       target: ${{ matrix.target }}
 
   test:
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && 'Native workflow stress qualification' || 'Unit and integration tests' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_identity_qualification == true && 'Windows identity diagnostic result' || github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && 'Native workflow stress qualification' || 'Unit and integration tests' }}
     if: always()
     needs:
       [
         native-workflow-stress,
+        windows-identity-qualification,
         bazel-plan,
         bazel-plan-validation,
         bazel-shards,
@@ -377,6 +434,8 @@ jobs:
     steps:
       - name: Require every selected lane
         env:
+          MANUAL_IDENTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_identity_qualification == true }}
+          IDENTITY_RESULT: ${{ needs.windows-identity-qualification.result }}
           MANUAL_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true }}
           NATIVE_WORKFLOW_STRESS_RESULT: ${{ needs.native-workflow-stress.result }}
           BAZEL_EXECUTE: ${{ needs.bazel-plan.outputs.execute_bazel }}
@@ -394,6 +453,11 @@ jobs:
           STANDALONE_RESULT: ${{ needs.standalone-targets.result }}
           SELF_CONTAINED_RESULT: ${{ needs.self-contained-distribution.result }}
         run: |
+          if [ "$MANUAL_IDENTITY" = true ]; then
+            test "$MANUAL_STRESS" != true
+            test "$IDENTITY_RESULT" = success
+            exit 0
+          fi
           if [ "$MANUAL_STRESS" = true ]; then
             test "$NATIVE_WORKFLOW_STRESS_RESULT" = success
             exit 0
