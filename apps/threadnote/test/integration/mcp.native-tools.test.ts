@@ -1,4 +1,4 @@
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Record as EffectRecord} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {existsSync} from '@threadnote/testing/node-fs';
@@ -223,6 +223,12 @@ const CORE_TOOL_NAMES = [
   'apply_memory_candidates',
   'obsidian_publish',
   'workflow_task_view',
+  'workflow_task_work',
+  'workflow_task_record_snapshot',
+  'workflow_task_record_review',
+  'workflow_task_record_validation',
+  'workflow_task_deliver_local',
+  'workflow_task_finish',
   'context_health',
   'context_health_aggregate',
   'context_health_schedule',
@@ -281,6 +287,21 @@ const LIFECYCLE_TOOL_NAMES = [
   'procedure_publish_preview',
   'procedure_publish_apply',
 ];
+
+const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
+  workflow_task_work: 1_800,
+  workflow_task_record_snapshot: 700,
+  workflow_task_record_review: 2_300,
+  workflow_task_record_validation: 1_300,
+  workflow_task_deliver_local: 700,
+  workflow_task_finish: 3_200,
+} as const;
+
+const WORKFLOW_TASK_MUTATING_TOOL_NAMES = EffectRecord.keys(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES);
+
+function isWorkflowTaskMutatingTool(name: string): boolean {
+  return EffectArray.some(WORKFLOW_TASK_MUTATING_TOOL_NAMES, expectedName => expectedName === name);
+}
 
 interface McpFixture {
   readonly home: string;
@@ -652,17 +673,36 @@ describe('Threadnote MCP toolsets', () => {
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        for (const [name, maximumBytes] of EffectRecord.toEntries(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES)) {
+          const tool = EffectOption.getOrUndefined(
+            EffectArray.findFirst(tools.tools, candidate => candidate.name === name),
+          );
+          expect(tool).toBeDefined();
+          expect(tool?.annotations).toMatchObject({readOnlyHint: false, destructiveHint: false});
+          expect(Buffer.byteLength(JSON.stringify(tool))).toBeLessThanOrEqual(maximumBytes);
+        }
         const priorCore = EffectArray.filter(
           tools.tools,
-          tool => tool.name !== 'memory_write_status' && tool.name !== 'workflow_task_view',
+          tool =>
+            tool.name !== 'memory_write_status' &&
+            tool.name !== 'workflow_task_view' &&
+            !isWorkflowTaskMutatingTool(tool.name),
         );
-        const withoutWorkflowTaskView = EffectArray.filter(tools.tools, tool => tool.name !== 'workflow_task_view');
-        // Preserve the existing core and total catalog budgets; bound each required addition separately.
+        const withoutWorkflowTaskTools = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'workflow_task_view' && !isWorkflowTaskMutatingTool(tool.name),
+        );
+        const withoutMutatingWorkflowTaskTools = EffectArray.filter(
+          tools.tools,
+          tool => !isWorkflowTaskMutatingTool(tool.name),
+        );
+        // Preserve the P1 budgets for the catalog without the later workflow-task additions.
         expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
         expect(status).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(37_200);
+        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
+        expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
+        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(47_206);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
