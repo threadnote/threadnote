@@ -155,9 +155,9 @@ const RecallCompletionDiagnosticSchema = withRest(
 
 // Failure-only, bounded read of already emitted diagnostics. No invocation,
 // path, query, content, arbitrary error text or unknown field is rendered.
-async function recallFailureStages(component: 'cli' | 'mcp' = 'cli'): Promise<string> {
+async function recallFailureStages(component: 'cli' | 'mcp' = 'cli', targetHome = home): Promise<string> {
   try {
-    const handle = await open(join(home, 'logs', 'threadnote.log'), 'r');
+    const handle = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
     try {
       const size = (await handle.stat()).size;
       const bytes = new Uint8Array(Math.min(64 * 1024, size));
@@ -1171,7 +1171,7 @@ describe('built self-contained distribution', () => {
     expect(output).not.toContain('Recover canonical data into the final Threadnote 4 layout');
   });
 
-  it('streams lexical repair progress and leaves document inference to an explicit rebuild', async () => {
+  it('streams lexical repair progress and synchronously prepares vector recall', async () => {
     await runCli([
       'remember',
       '--kind',
@@ -1181,7 +1181,7 @@ describe('built self-contained distribution', () => {
       '--topic',
       'repair-e2e',
       '--text',
-      'QZ9 canonical change before lexical repair and explicit vector rebuild.',
+      'QZ9 canonical change before synchronous lexical and vector repair.',
     ]);
     const output = await runCli(['repair', '--mcp', 'none', '--no-post-update']);
 
@@ -1199,9 +1199,14 @@ describe('built self-contained distribution', () => {
       /Writing lexical recall postings: \d+\/\d+ changed document\(s\) \(\d+%\), \d+ stale document\(s\) removed\./,
     );
     expect(output).toMatch(/Activating lexical recall index with \d+ document\(s\)\./);
-    expect(output).toContain('Rebuilt lexical recall');
-    expect(output).toContain('Document embeddings queued for idle background work.');
-    expect(output).not.toContain('Preparing vector recall index');
+    expect(output).toMatch(/Lexical recall prepared: \d+ canonical document\(s\)\./);
+    expect(output).toMatch(/Embedding \d+ canonical document\(s\) with/);
+    expect(output).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
+    expect(output).toContain(`Lexical and vector recall indexes are ready for ${coreEmbeddingModelId}.`);
+    expect(output).not.toContain('Document embeddings queued for idle background work.');
+    expect(await runCli(['index', 'verify'])).toContain('Verified vector generation');
+    const status = await runCli(['index', 'status']);
+    expect(status).toMatch(new RegExp(`${coreEmbeddingModelId}\\tready\\t[1-9]\\d* chunks\\t.* selected`));
     const rebuilt = await runCli(['index', 'rebuild']);
     expect(rebuilt).toMatch(/Embedding \d+ canonical document\(s\) with/);
     expect(rebuilt).toMatch(/Activated vector generation .*: [1-9]\d* chunk\(s\)/);
@@ -1910,6 +1915,7 @@ async function runCliOutput(
           `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
           `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
           await cliFailureEvidence(targetHome, cause).catch(() => 'Packaged CLI failure evidence unavailable.'),
+          ...(args[0] === 'recall' ? [`Packaged recall stages: ${await recallFailureStages('cli', targetHome)}`] : []),
           ...(args[0] === 'source' && args[1] === 'sync'
             ? [await coordinatorFailureEvidence(targetHome, environment)]
             : []),
