@@ -155,9 +155,9 @@ const RecallCompletionDiagnosticSchema = withRest(
 
 // Failure-only, bounded read of already emitted diagnostics. No invocation,
 // path, query, content, arbitrary error text or unknown field is rendered.
-async function recallFailureStages(component: 'cli' | 'mcp' = 'cli'): Promise<string> {
+async function recallFailureStages(component: 'cli' | 'mcp' = 'cli', targetHome = home): Promise<string> {
   try {
-    const handle = await open(join(home, 'logs', 'threadnote.log'), 'r');
+    const handle = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
     try {
       const size = (await handle.stat()).size;
       const bytes = new Uint8Array(Math.min(64 * 1024, size));
@@ -1915,6 +1915,7 @@ async function runCliOutput(
           `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
           `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
           await cliFailureEvidence(targetHome, cause).catch(() => 'Packaged CLI failure evidence unavailable.'),
+          ...(args[0] === 'recall' ? [`Packaged recall stages: ${await recallFailureStages('cli', targetHome)}`] : []),
           ...(args[0] === 'source' && args[1] === 'sync'
             ? [await coordinatorFailureEvidence(targetHome, environment)]
             : []),
