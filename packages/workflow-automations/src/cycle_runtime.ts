@@ -6,6 +6,7 @@ import {
   decodeNativeCyclePlan,
   decodeNativeCycleState,
   nativeCyclePhaseHash,
+  nativeCycleCanonicalJson,
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
@@ -14,6 +15,7 @@ import {
   nativeCycleBaseRequalificationReceiptDigest,
   validateNativeCycleMergeReceipt,
 } from './cycle_review.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -35,44 +37,68 @@ export const NativeCycleStoredSnapshotSchema = Schema.Struct({
     }),
   ).check(Schema.isMaxLength(8192)),
 });
+export const NativeCycleBaselineSchema = Schema.Struct({
+  repo: Schema.String,
+  head: gitObject,
+  tree: gitObject,
+  preservedFiles: Schema.Array(Schema.String).check(Schema.isMaxLength(8192)),
+  pinnedRef: Schema.String,
+});
+export const NativeCycleReviewExpansionSchema = Schema.Struct({
+  phaseId: id,
+  from: Schema.Finite,
+  to: Schema.Finite,
+  authority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+});
+export const NativeCycleReviewAttemptSchema = Schema.Struct({
+  id,
+  snapshotId: id,
+  digest,
+  status: Schema.Literals(['accepted', 'invalid']),
+  message: Schema.String.check(Schema.isMaxLength(4096)),
+  // Retain bounded failed reports as evidence; never turn malformed coverage into an empty review.
+  report: Schema.String.check(Schema.isMaxLength(65_536)),
+  authority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+});
 export const NativeCycleRuntimeSchema = Schema.Struct({
   state: NativeCycleStateSchema,
   plans: Schema.Array(NativeCyclePlanSchema).check(Schema.isBetweenLength(1, 64)),
-  baselines: Schema.Record(
-    id,
-    Schema.Struct({
-      repo: Schema.String,
-      head: gitObject,
-      tree: gitObject,
-      preservedFiles: Schema.Array(Schema.String).check(Schema.isMaxLength(8192)),
-      pinnedRef: Schema.String,
-    }),
-  ),
+  baselines: Schema.Record(id, NativeCycleBaselineSchema),
   reviewLimits: Schema.Record(id, Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
-  reviewExpansions: Schema.Array(
-    Schema.Struct({
-      phaseId: id,
-      from: Schema.Finite,
-      to: Schema.Finite,
-      authority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    }),
-  ).check(Schema.isMaxLength(256)),
+  reviewExpansions: Schema.Array(NativeCycleReviewExpansionSchema).check(Schema.isMaxLength(256)),
   snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(Schema.isMaxLength(256)),
   reviews: Schema.Array(Schema.Struct({snapshotId: id, report: NativeCycleReviewSchema})).check(
     Schema.isMaxLength(256),
   ),
-  attempts: Schema.Array(
+  attempts: Schema.Array(NativeCycleReviewAttemptSchema).check(Schema.isMaxLength(512)),
+  historicalAdmission: Schema.optionalKey(
     Schema.Struct({
-      id,
-      snapshotId: id,
-      digest,
-      status: Schema.Literals(['accepted', 'invalid']),
-      message: Schema.String.check(Schema.isMaxLength(4096)),
-      // Retain bounded failed reports as evidence; never turn malformed coverage into an empty review.
-      report: Schema.String.check(Schema.isMaxLength(65_536)),
-      authority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+      version: Schema.Literal(1),
+      phaseCount: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 128})),
     }),
-  ).check(Schema.isMaxLength(512)),
+  ),
+  historicalAdmissions: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        phaseId: id,
+        phaseHash: digest,
+        snapshotId: id,
+        sourceBaseCommit: gitObject,
+        sourceBaseTree: gitObject,
+        evidenceDigest: digest,
+        history: Schema.Struct({
+          snapshotIds: Schema.Array(id).check(Schema.isBetweenLength(1, 256)),
+          attemptIds: Schema.Array(id).check(Schema.isBetweenLength(1, 512)),
+          planCount: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 64})),
+          expansionCount: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: 256})),
+          digest,
+        }),
+        evidenceRefs: Schema.Array(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))).check(
+          Schema.isBetweenLength(1, 32),
+        ),
+      }),
+    ).check(Schema.isMaxLength(128)),
+  ),
 });
 export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
 
@@ -123,6 +149,37 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     new Set(EffectArray.map(runtime.attempts, attempt => attempt.id)).size !== runtime.attempts.length
   )
     fail('Duplicate cycle evidence identity.');
+  const admissions = runtime.historicalAdmissions ?? [];
+  if (
+    (runtime.historicalAdmission === undefined) !== (runtime.historicalAdmissions === undefined) ||
+    (runtime.historicalAdmission !== undefined && runtime.historicalAdmission.phaseCount !== admissions.length)
+  )
+    fail(
+      'Marked historical runtimes require their complete admission provenance; ordinary legacy runtimes have neither field.',
+    );
+  if (new Set(EffectArray.map(admissions, item => item.phaseId)).size !== admissions.length)
+    fail('Duplicate historical phase admission.');
+  for (const [index, admission] of admissions.entries()) {
+    const phase = runtime.state.phases[admission.phaseId];
+    const stored = snapshots.get(admission.snapshotId);
+    if (
+      runtime.state.plan.phases[index]?.id !== admission.phaseId ||
+      !phase ||
+      phase.status !== 'merged' ||
+      phase.phaseHash !== admission.phaseHash ||
+      !stored ||
+      stored.snapshot.phaseId !== admission.phaseId ||
+      stored.snapshot.phaseHash !== admission.phaseHash ||
+      stored.snapshot.baseTree !== admission.sourceBaseTree ||
+      !phase.delivery ||
+      phase.delivery.pr?.state !== 'merged' ||
+      !reviews.has(admission.snapshotId) ||
+      !EffectRecord.has(runtime.baselines, admission.phaseId) ||
+      runtime.baselines[admission.phaseId]?.head !== admission.sourceBaseCommit ||
+      runtime.baselines[admission.phaseId]?.tree !== admission.sourceBaseTree
+    )
+      fail('Historical admission provenance does not match retained phase evidence and source base.');
+  }
   const limits: Record<string, number> = {};
   for (const expansion of runtime.reviewExpansions) {
     if (
@@ -271,5 +328,74 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
+  const checksums = makeNativeHistoricalDigests(runtime.plans);
+  for (const admission of admissions) {
+    const {history, ...metadata} = admission;
+    const {digest: _digest, ...witness} = history;
+    const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === admission.phaseId);
+    const phaseIds = new Set(EffectArray.map(phaseSnapshots, entry => entry.snapshot.snapshotId));
+    const phaseAttempts = EffectArray.filter(runtime.attempts, attempt => phaseIds.has(attempt.snapshotId));
+    if (
+      JSON.stringify(history.snapshotIds) !==
+        JSON.stringify(EffectArray.map(phaseSnapshots, entry => entry.snapshot.snapshotId)) ||
+      JSON.stringify(history.attemptIds) !== JSON.stringify(EffectArray.map(phaseAttempts, attempt => attempt.id)) ||
+      history.snapshotIds.at(-1) !== admission.snapshotId ||
+      history.planCount > runtime.plans.length ||
+      history.expansionCount >
+        EffectArray.filter(runtime.reviewExpansions, item => item.phaseId === admission.phaseId).length ||
+      history.digest !== checksums.history(runtime, metadata, witness)
+    )
+      fail('Historical admission lost its complete source, review, attempt, budget or phase proof lineage.');
+  }
   return runtime;
+}
+
+/** Request-local reuse of actual plan-prefix checksums; no caller-supplied or persisted hash authority. */
+export function makeNativeHistoricalDigests(plans: NativeCycleRuntime['plans']) {
+  const prefixes = new Map<number, string>();
+  const planLineage = (count: number) => {
+    if (!Number.isInteger(count) || count < 1 || count > plans.length)
+      throw WorkflowAutomationError.make({code: 'invalid-cycle-state', message: 'Historical plan prefix is missing.'});
+    let digest = prefixes.get(count);
+    if (digest === undefined) {
+      digest = sha256HexSync(
+        nativeCycleCanonicalJson(['threadnote-native-historical-plan-lineage-v1', count, plans.slice(0, count)]),
+      );
+      prefixes.set(count, digest);
+    }
+    return {count, digest};
+  };
+  const history = (
+    runtime: NativeCycleRuntime,
+    admission: Omit<NonNullable<NativeCycleRuntime['historicalAdmissions']>[number], 'history'>,
+    witness: Omit<NonNullable<NativeCycleRuntime['historicalAdmissions']>[number]['history'], 'digest'>,
+  ): string => {
+    if (runtime.plans !== plans)
+      throw WorkflowAutomationError.make({
+        code: 'invalid-cycle-state',
+        message: 'Historical checksum belongs to another plan lineage.',
+      });
+    const {phaseId} = admission;
+    const snapshots = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === phaseId);
+    const ids = new Set(EffectArray.map(snapshots, item => item.snapshot.snapshotId));
+    return sha256HexSync(
+      nativeCycleCanonicalJson({
+        format: 'threadnote-native-historical-history-v2',
+        historicalAdmission: runtime.historicalAdmission,
+        admission,
+        history: witness,
+        planLineage: planLineage(witness.planCount),
+        baseline: runtime.baselines[phaseId],
+        phase: runtime.state.phases[phaseId],
+        snapshots,
+        reviews: EffectArray.filter(runtime.reviews, item => ids.has(item.snapshotId)),
+        attempts: EffectArray.filter(runtime.attempts, item => ids.has(item.snapshotId)),
+        expansions: EffectArray.filter(runtime.reviewExpansions, item => item.phaseId === phaseId).slice(
+          0,
+          witness.expansionCount,
+        ),
+      }),
+    );
+  };
+  return {planLineage, history};
 }

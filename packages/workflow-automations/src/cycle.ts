@@ -163,7 +163,7 @@ function matchesPRBase(base: string, pr: typeof prSchema.Type): boolean {
     ? base !== pr.baseBranch && (base === `${proof.remote}/${pr.baseBranch}` || base === proof.ref)
     : base === pr.baseBranch;
 }
-const historySchema = Schema.Struct({
+export const NativeCyclePhaseProofSchema = Schema.Struct({
   phaseHash: digest,
   head: gitObject,
   tree: gitObject,
@@ -178,7 +178,7 @@ const phaseStateSchema = Schema.Struct({
   tree: Schema.optionalKey(gitObject),
   delivery: Schema.optionalKey(deliverySchema),
   reason: Schema.optionalKey(text()),
-  history: Schema.optionalKey(Schema.Array(historySchema).check(Schema.isMaxLength(64))),
+  history: Schema.optionalKey(Schema.Array(NativeCyclePhaseProofSchema).check(Schema.isMaxLength(64))),
 });
 const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
 const specAmendmentSchema = Schema.Struct({
@@ -198,6 +198,7 @@ export type NativeCycleState = typeof NativeCycleStateSchema.Type;
 function err(message: string): never {
   throw WorkflowAutomationError.make({code: 'invalid-cycle', message});
 }
+export {canonical as nativeCycleCanonicalJson};
 function canonical(v: unknown): string {
   if (v === null || typeof v === 'string' || typeof v === 'boolean') return JSON.stringify(v);
   if (typeof v === 'number' && Number.isFinite(v)) return JSON.stringify(v);
