@@ -752,9 +752,15 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...snapshotByCommand.keys()]).toEqual(['record', 'supersede-unreviewed']);
+        expect([...snapshotByCommand.keys()]).toEqual(['record', 'supersede-unreviewed', 'requalify-base']);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
+        expect(snapshotByCommand.get('requalify-base')?.required).toEqual([
+          'command',
+          'snapshotRef',
+          'reason',
+          'userAuthority',
+        ]);
 
         const workflowTaskDeliver = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_deliver'),
@@ -790,7 +796,7 @@ describe('Threadnote MCP toolsets', () => {
           );
           expect(tool).toBeDefined();
           expect(tool?.annotations).toMatchObject({readOnlyHint: false, destructiveHint: false});
-          expect(Buffer.byteLength(JSON.stringify(tool))).toBeLessThanOrEqual(maximumBytes);
+          expect(Buffer.byteLength(JSON.stringify(tool)), name).toBeLessThanOrEqual(maximumBytes);
         }
         const priorCore = EffectArray.filter(
           tools.tools,

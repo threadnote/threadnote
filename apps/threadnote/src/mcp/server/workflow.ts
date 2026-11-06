@@ -240,20 +240,20 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use the current task card to begin an eligible phase, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with a caller-provided human authority statement. Actor identity is not independently authenticated.',
+        'Use the current task card to begin eligible phases, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with caller-provided human authority. Actor identity is not independently authenticated.',
       inputSchema: {
-        runId: McpInput.requiredString('Existing native workflow run identifier'),
-        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
-        taskRef: McpInput.requiredString('Opaque current task card reference from workflow_task_view'),
+        runId: McpInput.requiredString('Existing workflow run ID'),
+        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        taskRef: McpInput.requiredString('Current task card reference from workflow_task_view'),
         control: Schema.Union([
           Schema.Struct({command: Schema.Literal('begin')}),
           Schema.Struct({
             command: Schema.Literal('resume'),
-            reason: McpInput.requiredString('Concrete recovery reason'),
+            reason: McpInput.requiredString('Recovery reason'),
           }),
           Schema.Struct({
             command: Schema.Literal('reconcile'),
-            reason: McpInput.requiredString('Concrete reason for reconciling the approved plan'),
+            reason: McpInput.requiredString('Reason for approved-plan reconciliation'),
             bindings: Schema.optionalKey(
               Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
             ),
@@ -261,9 +261,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
-            reason: McpInput.requiredString('Concrete reason for the review-budget increase'),
+            reason: McpInput.requiredString('Reason for review-budget increase'),
             userAuthority: McpInput.requiredString(
-              'Caller-provided human authority statement; actor identity is not independently authenticated',
+              'Caller-provided human authority; actor identity is not independently authenticated',
             ),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
@@ -302,7 +302,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record a source snapshot, supersede only an unreviewed predecessor, or requalify an exact reviewed predecessor after an approved base-branch transition. Requalification retains history and requires a new full review.',
+        'Record a source snapshot, supersede only the latest unreviewed snapshot, or requalify an exact reviewed predecessor after an approved base-branch transition. Requalification retains history and requires a new full review.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
