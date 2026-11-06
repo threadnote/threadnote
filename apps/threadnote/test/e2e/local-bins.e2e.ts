@@ -39,7 +39,6 @@ import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/infe
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {recallLexicalDemandKey, RECALL_LEXICAL_DEMAND_DIRECTORY} from '@threadnote/recall/background/lexical-demand';
 import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
-import {reportLocalBinsCleanupFailure, type LocalBinsCleanupFacts} from '../helpers/local-bins-cleanup-diagnostics.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -232,8 +231,6 @@ async function enrollPositiveWorkerHome(positiveHome: string, label: LocalBinsPo
     ...(await runLocalBinsWorkerDrain(createLocalBinsWorkerDrains(positiveHome, temporaryRoot, cli, label))),
   );
 }
-let stdioTransportCloseEvent: LocalBinsCleanupFacts['stdioTransportCloseEvent'] = 'not-attempted';
-
 function installedLauncher(
   mode: 'cli' | 'mcp' = 'cli',
   kind: 'cmd' | 'posix' = process.platform === 'win32' ? 'cmd' : 'posix',
@@ -303,70 +300,35 @@ beforeAll(async () => {
 afterAll(async () => {
   // Share the existing hook's original epoch deadline with both supported worker domains.
   const workerDeadline = Date.now() + e2eConfig.test!.hookTimeout!;
-  let endpointRead: LocalBinsCleanupFacts['endpointRead'] = 'absent-or-unreadable';
-  let coordinatorPid: number | null = null;
-  let coordinatorPidWasRunning: boolean | null = null;
-  let terminationOutcome: LocalBinsCleanupFacts['terminationOutcome'] = 'not-applicable';
-  let coordinatorExitWaitCompleted = false;
   await runLocalBinsE2eCleanup(
     async () => {
       const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
-        .then(text => {
-          endpointRead = 'present';
-          return Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text));
-        })
+        .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
         .catch(() => undefined);
       if (endpoint) {
-        coordinatorPid = endpoint.pid;
         expect(await realpath(endpoint.home)).toBe(await realpath(home));
         expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
         if (process.platform === 'win32') {
-          const wasRunning = isProcessRunning(endpoint.pid);
-          coordinatorPidWasRunning = wasRunning;
-          if (wasRunning) {
+          if (isProcessRunning(endpoint.pid)) {
             try {
               await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
-              terminationOutcome = 'tree-kill-returned';
             } catch (cause) {
-              terminationOutcome = 'tree-kill-failed-but-pid-exited';
               if (isProcessRunning(endpoint.pid)) throw cause;
             }
-          } else terminationOutcome = 'not-needed';
+          }
         } else {
           try {
             process.kill(endpoint.pid, 'SIGKILL');
-            terminationOutcome = 'signal-issued';
           } catch (cause) {
             if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
-            terminationOutcome = 'signal-failed-but-pid-exited';
           }
         }
         await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
-        coordinatorExitWaitCompleted = true;
       }
     },
     // This proves only enrolled recall/graph worker return, even when coordinator cleanup fails.
     () => runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline)),
-    async () => {
-      try {
-        await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
-      } catch (cause) {
-        reportLocalBinsCleanupFailure(
-          cause,
-          {
-            endpointRead,
-            coordinatorPid,
-            coordinatorPidWasRunning,
-            stdioTransportCloseEvent,
-            terminationOutcome,
-            coordinatorExitWaitCompleted,
-          },
-          line => {
-            process.stderr.write(line);
-          },
-        );
-      }
-    },
+    () => rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50}),
   );
 });
 
@@ -1506,7 +1468,6 @@ describe('built self-contained distribution', () => {
       stderr: 'pipe',
     });
     const transportClose = observeStdioClientTransportClose(transport);
-    stdioTransportCloseEvent = 'not-observed';
     const client = new Client({name: 'threadnote-e2e', version: '4.0.0'});
     let operationFailed = false;
     let operationFailure: unknown;
@@ -1689,7 +1650,6 @@ describe('built self-contained distribution', () => {
     if (!cleanupFailed) {
       try {
         await transportClose.waitForCloseIfStarted(signal);
-        if (transportClose.closeObserved) stdioTransportCloseEvent = 'observed';
       } catch (cause) {
         cleanupFailed = true;
         cleanupFailure = cause;
