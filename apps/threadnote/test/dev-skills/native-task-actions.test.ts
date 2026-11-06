@@ -3203,7 +3203,7 @@ describe('native task actions', () => {
       expect(p2Head).not.toBe(p1.headSha);
 
       // New resume scope: only the run/caller are known; discover P1 and its refs through typed views.
-      const recoveredP1 = yield* recoverHistoricalTaskWatch(f, 'native-run');
+      let recoveredP1 = yield* recoverHistoricalTaskWatch(f, 'native-run');
       expect(recoveredP1.phaseId).toBe('one');
       const p1WatchPath = f.path.join(
         f.config.agentContextHome,
@@ -3320,6 +3320,16 @@ describe('native task actions', () => {
       yield* writeNativeWatch(f.config, p1Terminal, p1AfterAck.revision);
       const p1TerminalReadback = yield* readNativeWatch(f.config, recoveredP1.watchId);
       if (!p1TerminalReadback) throw new Error('Expected the terminal P1 watch readback for join checks.');
+      const freshTerminalView = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      expect(freshTerminalView).toMatchObject({
+        status: 'ready',
+        next: {action: 'implement', phaseId: 'two'},
+        historicalWatches: [{phaseId: 'one', prUrl: publishedP1.pr.url}],
+      });
+      // Resume from only the run and caller after the collector is terminal; task-view must keep
+      // exposing the still-published canonical P1 continuation until native completion is recorded.
+      recoveredP1 = yield* recoverHistoricalTaskWatch(f, 'native-run');
+      expect(recoveredP1.phaseId).toBe('one');
       const refuseHistoricalCompletion = (label: string, code: string) =>
         Effect.gen(function* () {
           const workflowBytes = yield* f.fs.readFileString(f.statePath());
@@ -3423,6 +3433,9 @@ describe('native task actions', () => {
       const afterP1Merge = yield* readNativeWorkflowState(f.config, 'native-run');
       expect(afterP1Merge?.state.cycle?.state.phases.one?.status).toBe('merged');
       expect(afterP1Merge?.state.cycle?.state.phases.one?.delivery?.pr?.baseRefBinding).toEqual(p1CanonicalBaseBinding);
+      expect(
+        (yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).historicalWatches,
+      ).toBeUndefined();
       expect(EffectString.trim((yield* f.git(['branch', '--show-current'])).stdout)).toBe('feature/two');
       expect(EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout)).toBe(p2Head);
 
