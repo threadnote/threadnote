@@ -21,7 +21,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 
 import {recallReadMaintenanceLayer} from '../../src/recall/read_maintenance.js';
 import {runRecallLexicalWorkerUnit} from '../../src/recall/embedding_worker.js';
-import {readRecallLexicalScope} from '@threadnote/recall/background/lexical-demand';
+import {recallLexicalDemandKey, readRecallLexicalScope} from '@threadnote/recall/background/lexical-demand';
 
 describe('Context Brief deferred code-anchor recovery', () => {
   for (const interruptFirstAdmission of [false, true]) {
@@ -172,6 +172,20 @@ describe('Context Brief deferred code-anchor recovery', () => {
               EffectArray.findFirst(scopes, scope => scope?.work?.kind === 'anchors'),
             );
             expect(scope).toBeDefined();
+            const isSameAnchorRouteScope = (candidate: typeof scope) =>
+              candidate !== undefined &&
+              scope !== undefined &&
+              candidate.work?.kind === 'anchors' &&
+              scope.work?.kind === 'anchors' &&
+              candidate.account === scope.account &&
+              candidate.user === scope.user &&
+              candidate.includeInactive === scope.includeInactive &&
+              candidate.manifestPath === scope.manifestPath &&
+              candidate.work.repositoryId === scope.work.repositoryId &&
+              candidate.work.worktreeId === scope.work.worktreeId;
+            const initialRouteScopes = EffectArray.filter(scopes, isSameAnchorRouteScope);
+            expect(initialRouteScopes).toHaveLength(1);
+            expect(recallLexicalDemandKey(initialRouteScopes[0]!)).toBe(recallLexicalDemandKey(scope!));
             const port = yield* Layer.build(recallReadMaintenanceLayer).pipe(
               Effect.provideService(ResourceStore, contendedStore),
               Effect.provideService(CodeGraphQueryService, liveQuery),
@@ -229,10 +243,10 @@ describe('Context Brief deferred code-anchor recovery', () => {
             const laterScopes = yield* Effect.forEach(yield* fs.readDirectory(directory), filename =>
               readRecallLexicalScope(home, filename),
             );
-            expect(laterScopes).toHaveLength(scopes.length);
-            const laterScope = Option.getOrUndefined(
-              EffectArray.findFirst(laterScopes, scope => scope?.work?.kind === 'anchors'),
-            );
+            const laterRouteScopes = EffectArray.filter(laterScopes, isSameAnchorRouteScope);
+            expect(laterRouteScopes).toHaveLength(1);
+            const laterScope = laterRouteScopes[0];
+            expect(recallLexicalDemandKey(laterScope!)).toBe(recallLexicalDemandKey(scope!));
             expect(yield* runRecallLexicalWorkerUnit(laterScope!).pipe(Effect.provide(port))).toMatchObject({
               state: 'complete',
             });
