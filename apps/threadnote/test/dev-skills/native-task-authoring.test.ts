@@ -32,7 +32,8 @@ import {
   NativeAuthoringPlanDocumentSchema,
   nativeAuthoringDigest,
 } from '@threadnote/workflow-automations/authoring';
-import {applyDevSkills} from '../../src/dev_skills/index.js';
+import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
+import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {makeNativeTaskAuthoringCommand} from '../../src/effect/task_authoring_cli.js';
@@ -622,6 +623,114 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
     expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
     expect(yield* snapshotJobFiles()).toEqual(beforeJobs);
   }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect(
+  'refuses public authoring resume for a valid installed target from a different admitted generation',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const file = f.path.join(f.root, 'generation-job-spec.json');
+      yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+      const accepted = yield* f
+        .author({
+          command: 'start',
+          featureName: 'Resume generation binding',
+          kind: 'spec',
+          contentFile: file,
+          installationTarget: 'codex',
+          saveMode: 'background',
+        })
+        .pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+      const runId = String(accepted.runId);
+      const jobRef = String(accepted.jobRef);
+      const admitted = yield* readNativeWorkflowState(f.config, runId);
+      if (!admitted) throw new Error('The submitted job has no native run.');
+      const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
+      const snapshotJobFiles = () =>
+        Effect.gen(function* () {
+          const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
+          const contents: Array<readonly [string, string]> = [];
+          for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+          return contents;
+        });
+
+      const sourceRoot = f.path.join(f.root, 'updated-skill-source');
+      const currentSource = Bun.fileURLToPath(new URL('../../../../', import.meta.url));
+      const sourceBundle = yield* loadDevSkillsBundleAt(currentSource, '5.3.0-beta.7', false);
+      const changedSkillPath = 'dev-spec/SKILL.md';
+      for (const [key, encoded] of EffectRecord.toEntries(sourceBundle.files)) {
+        const destination = f.path.join(sourceRoot, 'config', 'agent-skills', key);
+        yield* f.fs.makeDirectory(f.path.dirname(destination), {recursive: true});
+        const content = Buffer.from(encoded, 'base64');
+        yield* f.fs.writeFile(
+          destination,
+          key === changedSkillPath ? Buffer.concat([content, Buffer.from('\nUpdated test generation.\n')]) : content,
+        );
+      }
+      const inventory = {
+        schemaVersion: sourceBundle.manifest.schemaVersion,
+        nativeRequirements: sourceBundle.manifest.nativeRequirements,
+        workflowProtocol: sourceBundle.manifest.workflowProtocol,
+        stateSchema: sourceBundle.manifest.stateSchema,
+        minimumRuntime: sourceBundle.manifest.minimumRuntime,
+        skills: sourceBundle.manifest.skills,
+      };
+      yield* f.fs.makeDirectory(f.path.join(sourceRoot, 'config'), {recursive: true});
+      yield* f.fs.writeFileString(f.path.join(sourceRoot, 'config', 'dev-skills.json'), JSON.stringify(inventory));
+      const updatedSource = {root: sourceRoot, runtimeVersion: sourceBundle.manifest.releaseVersion};
+      const updated = yield* applyDevSkills(f.config, 'update', {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, f.scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      expect(updated.applied).toBe(true);
+      const installed = yield* statusDevSkills(f.config, {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, f.scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      expect(installed.targets).toHaveLength(1);
+      expect(installed.targets[0]).toMatchObject({
+        enrolled: true,
+        enabled: true,
+        installationState: 'current',
+        installedDigest: installed.bundle.digest,
+      });
+      expect(installed.bundle.digest).not.toBe(admitted.state.generation);
+
+      expect(yield* f.author({command: 'job', jobRef, operation: 'status'})).toMatchObject({
+        status: 'accepted',
+        jobRef,
+      });
+      expect(yield* f.author({command: 'job', jobRef, operation: 'cancel'})).toMatchObject({
+        status: 'accepted',
+        jobRef,
+        job: expect.objectContaining({stopRequested: true}),
+      });
+
+      const beforeResumeRun = yield* f.fs.readFileString(f.statePath(runId));
+      const beforeResumeJobs = yield* snapshotJobFiles();
+      const executor = yield* CommandExecutor;
+      let spawnCalls = 0;
+      const observedExecutor = CommandExecutor.of({
+        ...executor,
+        spawnDetached: () =>
+          Effect.sync(() => {
+            spawnCalls += 1;
+            return false;
+          }),
+      });
+      const mismatch = yield* f
+        .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
+        .pipe(
+          Effect.provideService(DevSkillsSource, updatedSource),
+          Effect.provideService(CommandExecutor, observedExecutor),
+          Effect.result,
+        );
+      expect(mismatch).toMatchObject({failure: {code: 'binding-drift'}});
+      expect(spawnCalls).toBe(0);
+      expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeResumeRun);
+      expect(yield* snapshotJobFiles()).toEqual(beforeResumeJobs);
+    }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect(
