@@ -26,6 +26,7 @@ import e2eConfig from '../../../../vitest.e2e.config.js';
 import {
   createLocalBinsWorkerDrains,
   drainLocalBinsWorkers,
+  runLocalBinsE2eCleanup,
   runLocalBinsWorkerDrain,
   type LocalBinsPositiveHome,
   type LocalBinsWorkerDrain,
@@ -308,60 +309,66 @@ afterAll(async () => {
   let coordinatorPidWasRunning: boolean | null = null;
   let terminationOutcome: LocalBinsCleanupFacts['terminationOutcome'] = 'not-applicable';
   let coordinatorExitWaitCompleted = false;
-  const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
-    .then(text => {
-      endpointRead = 'present';
-      return Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text));
-    })
-    .catch(() => undefined);
-  if (endpoint) {
-    coordinatorPid = endpoint.pid;
-    expect(await realpath(endpoint.home)).toBe(await realpath(home));
-    expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
-    if (process.platform === 'win32') {
-      const wasRunning = isProcessRunning(endpoint.pid);
-      coordinatorPidWasRunning = wasRunning;
-      if (wasRunning) {
-        try {
-          await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
-          terminationOutcome = 'tree-kill-returned';
-        } catch (cause) {
-          terminationOutcome = 'tree-kill-failed-but-pid-exited';
-          if (isProcessRunning(endpoint.pid)) throw cause;
+  await runLocalBinsE2eCleanup(
+    async () => {
+      const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
+        .then(text => {
+          endpointRead = 'present';
+          return Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text));
+        })
+        .catch(() => undefined);
+      if (endpoint) {
+        coordinatorPid = endpoint.pid;
+        expect(await realpath(endpoint.home)).toBe(await realpath(home));
+        expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
+        if (process.platform === 'win32') {
+          const wasRunning = isProcessRunning(endpoint.pid);
+          coordinatorPidWasRunning = wasRunning;
+          if (wasRunning) {
+            try {
+              await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
+              terminationOutcome = 'tree-kill-returned';
+            } catch (cause) {
+              terminationOutcome = 'tree-kill-failed-but-pid-exited';
+              if (isProcessRunning(endpoint.pid)) throw cause;
+            }
+          } else terminationOutcome = 'not-needed';
+        } else {
+          try {
+            process.kill(endpoint.pid, 'SIGKILL');
+            terminationOutcome = 'signal-issued';
+          } catch (cause) {
+            if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
+            terminationOutcome = 'signal-failed-but-pid-exited';
+          }
         }
-      } else terminationOutcome = 'not-needed';
-    } else {
-      try {
-        process.kill(endpoint.pid, 'SIGKILL');
-        terminationOutcome = 'signal-issued';
-      } catch (cause) {
-        if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
-        terminationOutcome = 'signal-failed-but-pid-exited';
+        await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
+        coordinatorExitWaitCompleted = true;
       }
-    }
-    await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
-    coordinatorExitWaitCompleted = true;
-  }
-  // Coordinator handling above is unchanged; this proves only enrolled recall/graph worker return.
-  await runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline));
-  try {
-    await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
-  } catch (cause) {
-    reportLocalBinsCleanupFailure(
-      cause,
-      {
-        endpointRead,
-        coordinatorPid,
-        coordinatorPidWasRunning,
-        stdioTransportCloseEvent,
-        terminationOutcome,
-        coordinatorExitWaitCompleted,
-      },
-      line => {
-        process.stderr.write(line);
-      },
-    );
-  }
+    },
+    // This proves only enrolled recall/graph worker return, even when coordinator cleanup fails.
+    () => runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline)),
+    async () => {
+      try {
+        await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
+      } catch (cause) {
+        reportLocalBinsCleanupFailure(
+          cause,
+          {
+            endpointRead,
+            coordinatorPid,
+            coordinatorPidWasRunning,
+            stdioTransportCloseEvent,
+            terminationOutcome,
+            coordinatorExitWaitCompleted,
+          },
+          line => {
+            process.stderr.write(line);
+          },
+        );
+      }
+    },
+  );
 });
 
 function requiredMapValue(map: ReadonlyMap<string, string>, key: string): string {
