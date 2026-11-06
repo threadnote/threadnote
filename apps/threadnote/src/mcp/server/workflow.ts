@@ -185,7 +185,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                 guidance:
                   'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
               }
-            : undefined;
+            : result.next.action === 'complete'
+              ? {
+                  tool: 'workflow_task_finish',
+                  guidance:
+                    'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
+                }
+              : undefined;
       const response = nextTool ? {...result, next: {...result.next, ...nextTool}} : result;
       const text = JSON.stringify(response);
       return {content: [{type: 'text' as const, text}], structuredContent: response};
@@ -510,7 +516,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_finish',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Prepare and finish a completed local cycle through canonical closeout jobs.',
+      description: 'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),

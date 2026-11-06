@@ -666,7 +666,11 @@ export function makeNativeTaskActionCommands<E, R>(
         ),
       );
     },
-  ).pipe(Command.withDescription('Prepare and finish a completed local cycle through canonical jobs'));
+  ).pipe(
+    Command.withDescription(
+      'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch',
+    ),
+  );
   const compactStart = Command.make(
     'compact-start',
     {
