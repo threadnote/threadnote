@@ -542,6 +542,88 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('rejects same-basename foreign job continuations without changing canonical run or job bytes', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const file = f.path.join(f.root, 'foreign-job-spec.json');
+    yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+    const accepted = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Foreign job owner binding',
+        kind: 'spec',
+        contentFile: file,
+        installationTarget: 'codex',
+        saveMode: 'background',
+      })
+      .pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    const runId = String(accepted.runId);
+    const jobRef = String(accepted.jobRef);
+    const jobPayload = object(
+      JSON.parse(
+        Buffer.from(
+          EffectString.replaceAll(
+            '_',
+            '/',
+          )(EffectString.replaceAll('-', '+')(EffectString.slice('authorjob-v1.'.length)(jobRef))),
+          'base64',
+        ).toString('utf8'),
+      ),
+    );
+    const run = yield* readNativeWorkflowState(f.config, runId);
+    if (!run) throw new Error('The submitted job has no native run.');
+    const foreignRepo = f.path.join(f.root, 'foreign', 'repo');
+    yield* f.fs.makeDirectory(foreignRepo, {recursive: true});
+    yield* f.fs.writeFileString(f.path.join(foreignRepo, 'source.ts'), 'export const foreign = true;\n');
+    yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
+    const foreignSystem = {...f.scoped, currentDirectory: () => foreignRepo};
+    const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
+    const snapshotJobFiles = () =>
+      Effect.gen(function* () {
+        const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
+        const contents: Array<readonly [string, string]> = [];
+        for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+        return contents;
+      });
+    const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
+    const beforeJobs = yield* snapshotJobFiles();
+    const operations = ['status', 'result', 'cancel', 'resume'] as const;
+    for (const operation of operations) {
+      const foreignAttempt = yield* runNativeTaskAuthoring(f.config, {
+        command: 'job',
+        callerCwd: foreignRepo,
+        jobRef,
+        operation,
+      }).pipe(Effect.provideService(SystemInfo, foreignSystem), Effect.result);
+      expect(foreignAttempt).toMatchObject({failure: {code: 'binding-drift'}});
+      const lowLevelAttempt = yield* runNativeJob(
+        f.config,
+        {
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'job',
+          command: operation,
+          runId,
+          generation: run.state.generation,
+          jobId: jobPayload.jobId,
+        },
+        () => Effect.void,
+      ).pipe(Effect.provideService(SystemInfo, foreignSystem), Effect.result);
+      expect(lowLevelAttempt).toMatchObject({failure: {code: 'binding-drift'}});
+      expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
+      expect(yield* snapshotJobFiles()).toEqual(beforeJobs);
+    }
+    expect(yield* f.author({command: 'job', jobRef, operation: 'status'})).toMatchObject({
+      status: 'accepted',
+      jobRef,
+    });
+    const ownerResumeWithoutTarget = yield* f.author({command: 'job', jobRef, operation: 'resume'}).pipe(Effect.result);
+    expect(ownerResumeWithoutTarget).toMatchObject({failure: {code: 'needs-resources'}});
+    expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
+    expect(yield* snapshotJobFiles()).toEqual(beforeJobs);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect(
   'runs background semantic authoring in an owned real worker process and verifies its canonical readback',
   () =>
@@ -861,6 +943,7 @@ effectIt.effect(
           exactJobId,
         ]);
         expect(launch?.env?.THREADNOTE_HOME).toBe(f.home);
+        expect(launch?.env?.THREADNOTE_MANIFEST).toBe(f.config.manifestPath);
         expect(launch?.env?.THREADNOTE_ACCOUNT).toBe(f.config.account);
         expect(launch?.env?.THREADNOTE_USER).toBe(f.config.user);
         expect(launch?.env?.THREADNOTE_AGENT_ID).toBe(f.config.agentId);
@@ -991,7 +1074,14 @@ effectIt.effect(
           status: 'completed',
           jobRef: exactJobRef,
         });
-        expect(yield* author({command: 'job', jobRef: exactJobRef, operation: 'resume'})).toMatchObject({
+        expect(
+          yield* author({
+            command: 'job',
+            jobRef: exactJobRef,
+            operation: 'resume',
+            installationTarget: 'codex',
+          }),
+        ).toMatchObject({
           status: 'completed',
           jobRef: exactJobRef,
         });

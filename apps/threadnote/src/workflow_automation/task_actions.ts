@@ -1673,7 +1673,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!EffectString.trim(request.reason) || !EffectString.trim(request.userAuthority))
         return yield* fail(
           'invalid-base-requalification',
-          'Provide the concrete requalification reason and explicit human authority.',
+          'Provide the concrete requalification reason and caller-provided human authority statement; actor identity is not independently authenticated.',
         );
       const phaseEntries = EffectArray.filter(runtime.snapshots, item => item.snapshot.snapshotId === ref.snapshotId);
       const entry = phaseEntries[0];

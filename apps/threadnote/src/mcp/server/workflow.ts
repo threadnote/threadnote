@@ -23,7 +23,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record the actual human response and independent review; admit an approved local, commit, or PR plan. References come from this tool. Read is nonmutating; target/profile selectors do not authenticate actors.',
+        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan. References come from this tool. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
       inputSchema: {
         command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'job']),
         callerCwd: McpInput.requiredString('Absolute original checkout'),
@@ -31,14 +31,14 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
         contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
-        installationTarget: McpInput.string('Installed target selector for start'),
+        installationTarget: McpInput.string('Installed target selector for start or authoring job resume'),
         authoringRef: McpInput.string('Current authoring continuation'),
         jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
         operation: Schema.optionalKey(Schema.Literals(['status', 'result', 'cancel', 'resume'])),
         specRef: McpInput.string('Approved spec reference for plan start'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'document'])),
         userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
-        userResponse: McpInput.string('Actual human response to the full current document'),
+        userResponse: McpInput.string('Caller-provided response to the full current document'),
         delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
         review: Schema.optionalKey(
           Schema.Struct({
@@ -128,7 +128,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
         presentedIntentHash: McpInput.requiredString('Exact intent hash from the complete approval packet'),
-        userResponse: McpInput.string('Actual user response to the displayed exact-intent packet'),
+        userResponse: McpInput.string('Caller-provided response to the displayed exact-intent packet'),
         userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
         baseBranch: McpInput.string('Exact base branch for a new local cycle'),
         reconcileReason: McpInput.string('Concrete reason for reconciling an existing cycle'),
@@ -240,7 +240,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use the current task card to begin an eligible phase, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with human authority.',
+        'Use the current task card to begin an eligible phase, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with a caller-provided human authority statement. Actor identity is not independently authenticated.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -262,7 +262,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
             reason: McpInput.requiredString('Concrete reason for the review-budget increase'),
-            userAuthority: McpInput.requiredString('Actual human authority for the budget increase'),
+            userAuthority: McpInput.requiredString(
+              'Caller-provided human authority statement; actor identity is not independently authenticated',
+            ),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
@@ -319,7 +321,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             command: Schema.Literal('requalify-base'),
             snapshotRef: McpInput.requiredString('Exact reviewed predecessor reference from the current task view'),
             reason: McpInput.requiredString('Why the reviewed source is being requalified on the approved new base'),
-            userAuthority: McpInput.requiredString('Actual explicit human authority for this base change'),
+            userAuthority: McpInput.requiredString(
+              'Caller-provided human authority statement for this base change; actor identity is not independently authenticated',
+            ),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },

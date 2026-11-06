@@ -424,7 +424,10 @@ export function makeNativeTaskActionCommands<E, R>(
       taskRef: requiredString('task-ref', 'Opaque current exhausted-review task reference'),
       additionalReviews: integerFlag('additional-reviews'),
       reason: requiredString('reason', 'Concrete reason to add review attempts'),
-      userAuthority: requiredString('user-authority', 'Actual human authority for the budget increase'),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement; actor identity is not independently authenticated',
+      ),
     },
     options => lifecycle({command: 'extend-review-budget', ...options}),
   ).pipe(Command.withDescription('Extend an exhausted phase review budget with explicit authority'));
@@ -449,7 +452,10 @@ export function makeNativeTaskActionCommands<E, R>(
         ['reasoning-limit', 'new-complexity', 'user-request'],
         'Observed reason for escalation',
       ),
-      userAuthority: optionalString('user-authority', 'Explicit authority for an override or escalation'),
+      userAuthority: optionalString(
+        'user-authority',
+        'Caller-provided human authority statement; actor identity is not independently authenticated',
+      ),
       nearestSupportedEffort: optionalString('nearest-supported-effort', 'Nearest available lower effort'),
       anchorPaths: repeatedString('anchor-path', 'Repository-relative source anchor path', 128),
       anchorPatterns: repeatedString(
@@ -517,7 +523,10 @@ export function makeNativeTaskActionCommands<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       snapshotRef: requiredString('snapshot-ref', 'Exact reviewed predecessor reference from workflow task view'),
       reason: requiredString('reason', 'Why the reviewed source is being requalified on the approved new base'),
-      userAuthority: requiredString('user-authority', 'Actual explicit human authority for this base change'),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement for this base change; actor identity is not independently authenticated',
+      ),
     },
     options =>
       baseRequalificationHandler
@@ -672,8 +681,8 @@ export function makeNativeTaskActionCommands<E, R>(
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       presentedIntentHash: requiredString('intent-hash', 'Exact intent hash from the complete approval packet'),
-      userResponse: optionalString('user-response', 'Actual user response to the displayed exact-intent packet'),
-      userDecision: optionalChoice('user-decision', ['approve', 'reject', 'defer'], 'Explicit user decision'),
+      userResponse: optionalString('user-response', 'Caller-provided response to the displayed exact-intent packet'),
+      userDecision: optionalChoice('user-decision', ['approve', 'reject', 'defer'], 'Caller-provided user decision'),
       baseBranch: optionalString('base-branch', 'Exact base branch for a new local cycle'),
       reconcileReason: optionalString('reconcile-reason', 'Concrete reason for reconciling an existing cycle'),
       bindings: optionalString('bindings', 'Exact phase-to-branch/base-branch map as JSON'),
@@ -705,7 +714,9 @@ export function makeNativeTaskActionCommands<E, R>(
               }),
       }).pipe(Effect.flatMap(parsed => compactConfirmHandler({...options, ...parsed}))),
   ).pipe(
-    Command.withDescription('Record a real exact-intent response, then admit or reconcile the same canonical run'),
+    Command.withDescription(
+      'Record a caller-provided exact-intent response, then admit or reconcile the same canonical run; actor identity is not independently authenticated',
+    ),
   );
   return Command.make('task-action', {}).pipe(
     Command.withSubcommands([
