@@ -3899,6 +3899,7 @@ describe('native task actions', () => {
           project: 'repo',
         },
       );
+      yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
       const system = yield* SystemInfo;
       const repo = yield* f.fs.realPath(f.repo);
       const home = yield* f.fs.realPath(f.home);
@@ -4080,6 +4081,51 @@ describe('native task actions', () => {
       expect(startedWatch.envelope.state.consumer).toMatchObject({id: consumerId, wakeupId});
       expect(startedWatch.envelope.notification?.target).toEqual(wakeup);
       expect(startedWatch.envelope.collector).toMatchObject({status: 'running', pid: 77777});
+      const provisionalState = yield* readNativeWorkflowState(taskConfig, 'native-run');
+      expect(provisionalState?.state.cycle?.state.phases.one?.delivery).toBeUndefined();
+      const cutoverMcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(cutoverMcp, taskConfig);
+      const cutoverInput = {
+        callerCwd: repo,
+        featureName: 'feature',
+        installationTarget: 'codex',
+        taskRef: 'native-run',
+        intent: {
+          title: 'feature',
+          currentBehavior: 'The old run remains inspectable.',
+          desiredChange: 'The old run receives an explicit drain outcome.',
+          affectedPaths: ['source.ts'],
+          acceptanceCriterion: 'The old binding and canonical history remain unchanged.',
+          verification: 'Read the transition outcome and exact watch owner.',
+          eligibilityRationale: 'One fixture task validates a bounded safe cutover.',
+          eligibility: {status: 'eligible' as const},
+          review: {required: false, reason: 'Private cutover fixture.'},
+        },
+      };
+      const observeCutover = () =>
+        Effect.gen(function* () {
+          const response = object(
+            yield* cutoverMcp
+              .invokeTool('workflow_task_start', cutoverInput)
+              .pipe(Effect.provideService(SystemInfo, fakeSystem)),
+          );
+          if (response.isError === true) throw new Error('The typed task-start cutover read was refused.');
+          return object(response.structuredContent);
+        });
+      const provisionalRunBytes = yield* f.fs.readFileString(f.statePath());
+      const provisionalOwners = yield* observeCutover();
+      expect(provisionalOwners).toMatchObject({status: 'binding-transition', outcome: 'needs-drain'});
+      expect(provisionalOwners.owners).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            owner: 'watch',
+            watchId,
+            status: 'needs-drain',
+            reasons: expect.arrayContaining(['collector-still-owned-or-unverifiable']),
+          }),
+        ]),
+      );
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(provisionalRunBytes);
       const event = {
         sequence: 1,
         id: watchId + ':1',
@@ -4166,35 +4212,6 @@ describe('native task actions', () => {
       );
       expect(acceptedJob.status).toBe('accepted');
       const jobId = String(acceptedJob.jobId);
-      const cutoverMcp = new EffectMcpServerAdapter('test', '1', 'fixture');
-      registerWorkflowTaskTool(cutoverMcp, taskConfig);
-      const cutoverInput = {
-        callerCwd: repo,
-        featureName: 'feature',
-        installationTarget: 'codex',
-        taskRef: 'native-run',
-        intent: {
-          title: 'feature',
-          currentBehavior: 'The old run remains inspectable.',
-          desiredChange: 'The old run receives an explicit drain outcome.',
-          affectedPaths: ['source.ts'],
-          acceptanceCriterion: 'The old binding and history remain unchanged.',
-          verification: 'Read the task transition and owner receipts.',
-          eligibilityRationale: 'One bounded synthetic cutover fixture.',
-          eligibility: {status: 'eligible' as const},
-          review: {required: false, reason: 'Private cutover fixture.'},
-        },
-      };
-      const observeCutover = () =>
-        Effect.gen(function* () {
-          const response = object(
-            yield* cutoverMcp
-              .invokeTool('workflow_task_start', cutoverInput)
-              .pipe(Effect.provideService(SystemInfo, fakeSystem)),
-          );
-          if (response.isError === true) throw new Error('The typed task-start cutover read was refused.');
-          return object(response.structuredContent);
-        });
       const oldRunBytes = yield* f.fs.readFileString(f.statePath());
       const beforeOwnerDrain = yield* observeCutover();
       expect(beforeOwnerDrain).toMatchObject({

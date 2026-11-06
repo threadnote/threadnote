@@ -52,7 +52,6 @@ export const inspectOldBindingOwners = (
     ]);
     for (const phaseId of phaseIds) {
       const delivery = runtime?.phases[phaseId]?.delivery;
-      if (delivery?.delivery !== 'pr' || !delivery.pr?.url) continue;
       const identity = EffectString.slice(0, 48)(sha256HexSync(`${stored.state.runId}\n${phaseId}`));
       const watchId = `pr-${identity}`;
       const watchResult = yield* readNativeWatch(config, watchId).pipe(Effect.result);
@@ -64,8 +63,10 @@ export const inspectOldBindingOwners = (
       if (!observed) continue;
       const envelope = observed.envelope;
       const reasons: string[] = [];
-      if (envelope.state.pr !== delivery.pr.url) reasons.push('watch-pr-binding-mismatch');
-      if (envelope.state.head !== delivery.headSha) reasons.push('watch-source-head-mismatch');
+      if (delivery?.delivery === 'pr' && delivery.pr?.url && envelope.state.pr !== delivery.pr.url)
+        reasons.push('watch-pr-binding-mismatch');
+      if (delivery?.delivery === 'pr' && envelope.state.head !== delivery.headSha)
+        reasons.push('watch-source-head-mismatch');
       const collectorAlive = yield* nativeWatchCollectorAlive(envelope.collector).pipe(Effect.result);
       if (collectorAlive._tag === 'Failure' || collectorAlive.success)
         reasons.push('collector-still-owned-or-unverifiable');
