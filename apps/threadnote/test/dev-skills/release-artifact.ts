@@ -929,11 +929,17 @@ export async function execute(root: string, checkout: string, enforced: boolean,
     };
     for (const skill of manifest.skills) {
       const content = fs.readFileSync(join(skills, skill.id, 'SKILL.md'), 'utf8');
+      const template = fs.readFileSync(join(generation, skill.id, 'SKILL.md'), 'utf8');
+      const expected = Effect2.pipe(
+        template,
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', join(generation, skill.id)),
+        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', generation),
+      );
       requireCondition(
-        Effect2.pipe(content, EffectString.includes(generation)) &&
+        content === expected &&
           !Effect2.pipe(content, EffectString.includes(checkout)) &&
           !Effect2.pipe(content, EffectString.includes('{{THREADNOTE_')),
-        `Entrypoint does not resolve to its installed generation: ${skill.id}`,
+        `Entrypoint is not the canonical render of its installed generation: ${skill.id}`,
       );
     }
     for (const action of ['install', 'update'])
