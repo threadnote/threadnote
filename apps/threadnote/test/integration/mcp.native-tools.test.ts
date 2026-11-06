@@ -5557,7 +5557,24 @@ describe('Threadnote MCP toolsets', () => {
           client.callTool({arguments: {uri}, name: 'read'}),
         ]);
         expect(aliasRead.content).toEqual(primaryRead.content);
-        expect(aliasRead.structuredContent).toEqual(primaryRead.structuredContent);
+        if (!aliasRead.structuredContent || !primaryRead.structuredContent)
+          throw new Error('A successful canonical read must include structured content.');
+        const {warnings: aliasWarnings, ...aliasStableProjection} = aliasRead.structuredContent;
+        const {warnings: primaryWarnings, ...primaryStableProjection} = primaryRead.structuredContent;
+        expect(aliasStableProjection).toEqual(primaryStableProjection);
+        for (const warnings of [primaryWarnings, aliasWarnings]) {
+          if (!EffectArray.isArray(warnings)) throw new Error('A canonical read must retain warning diagnostics.');
+          expect(
+            EffectArray.every(
+              warnings,
+              (warning: unknown) =>
+                typeof warning === 'string' &&
+                /^Auto-sync warning: Automatic synchronization (?:is queued in the background|enqueue was not confirmed); read uses ready local data\.$/u.test(
+                  warning,
+                ),
+            ),
+          ).toBe(true);
+        }
         const aliasText = EffectString.trim(textContents(aliasRead.content)[0]?.text ?? '');
         expect(aliasText).toContain('TN-MEMORY/1');
         expect(aliasText).toContain(
