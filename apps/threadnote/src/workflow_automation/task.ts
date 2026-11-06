@@ -246,14 +246,16 @@ const baseRequalificationRoute = (
         entry.report.status === 'complete' &&
         entry.report.mode === 'full',
     );
+    if (completedReviews.length !== 1) return undefined;
+    const completedReviewDigest = sha256HexSync(stableJson(completedReviews[0].report));
     const acceptedAttempts = EffectArray.filter(
       runtime.attempts,
       attempt =>
         attempt.snapshotId === prior.snapshotId &&
         attempt.status === 'accepted' &&
-        attempt.digest === sha256HexSync(stableJson(completedReviews[0]?.report)),
+        attempt.digest === completedReviewDigest,
     );
-    if (completedReviews.length !== 1 || acceptedAttempts.length !== 1) return undefined;
+    if (acceptedAttempts.length !== 1) return undefined;
     const fromBranches = new Set<string>();
     for (const plan of runtime.plans) {
       const planPhase = EffectArray.findFirst(plan.phases, candidate => candidate.id === phaseId);

@@ -155,13 +155,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
       description:
-        'Read the current task; phaseId selects a discovered active historical PR watch, and detail=packet returns its full packet.',
+        'Read the current task; phaseId selects a listed active historical PR watch; detail=packet returns its full packet.',
       inputSchema: {
-        runId: McpInput.string('Existing native workflow run identifier'),
-        callerCwd: McpInput.string('Absolute bound checkout path'),
-        role: McpInput.string('Role: implementation, review, or delivery'),
-        cursor: McpInput.string('Opaque continuation from the previous task-view page'),
-        phaseId: McpInput.string('Select a phase listed in historicalWatches to recover its active PR watch refs'),
+        runId: McpInput.string('Bound run ID'),
+        callerCwd: McpInput.string('Bound checkout'),
+        role: McpInput.string('Task role'),
+        cursor: McpInput.string('Page cursor'),
+        phaseId: McpInput.string('Listed phase ID'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
       },
     },

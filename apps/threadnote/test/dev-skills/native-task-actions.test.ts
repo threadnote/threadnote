@@ -5674,6 +5674,8 @@ describe('native task actions', () => {
       const f = yield* nativeFixture();
       yield* f.init();
       yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', ['-C', f.repo, 'config', '--local', 'user.name', 'Fixture']);
+      yield* runCommandEffect('git', ['-C', f.repo, 'config', '--local', 'user.email', 'fixture@example.invalid']);
       yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Initialize reconcile fixture source']);
       const indexed = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
       expect(indexed.snapshot.state).toBe('ready');
