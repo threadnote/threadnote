@@ -525,7 +525,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     if (selectedCandidate._tag === 'None')
       return yield* fail(
         'historical-watch-not-eligible',
-        'The phase has no exact published PR and active incomplete watch with matching canonical source and consumer evidence.',
+        'The phase has no exact published PR and eligible open or merged watch with matching canonical source and consumer evidence.',
       );
     const latest = yield* readNativeWorkflowState(config, request.runId);
     if (!latest || latest.revision !== stored.revision)

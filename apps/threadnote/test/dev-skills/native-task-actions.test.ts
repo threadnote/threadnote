@@ -4942,15 +4942,55 @@ describe('native task actions', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStale);
       yield* f.git(['reset', '--hard', 'HEAD~1']);
 
-      const deliveredEnvelope = object(
-        yield* mcp.invokeTool('workflow_task_deliver', {
-          runId: 'native-run',
-          callerCwd: f.repo,
-          delivery: {command: 'commit', validationRef, commitEvidence: evidence},
-        }),
+      let cliDelivery: Record<string, unknown> | undefined;
+      const taskActions = makeNativeTaskActionCommands(
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        () => Effect.void,
+        options =>
+          runNativeTaskAction(f.config, {command: 'deliver-commit', ...options}).pipe(
+            Effect.tap(value => Effect.sync(() => (cliDelivery = object(value)))),
+            Effect.asVoid,
+          ),
       );
-      const delivered = object(deliveredEnvelope.structuredContent);
-      expect(deliveredEnvelope.isError).not.toBe(true);
+      const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([taskActions]));
+      const beforeMissingEvidence = yield* f.fs.readFileString(f.statePath());
+      const missingEvidence = yield* Command.runWith(cli, {version: 'fixture'})([
+        'task-action',
+        'deliver-commit',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--validation-ref',
+        validationRef,
+      ]).pipe(Effect.result);
+      expect(missingEvidence._tag).toBe('Failure');
+      expect(cliDelivery).toBeUndefined();
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeMissingEvidence);
+      yield* Command.runWith(cli, {version: 'fixture'})([
+        'task-action',
+        'deliver-commit',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--validation-ref',
+        validationRef,
+        '--commit-evidence',
+        evidence,
+      ]);
+      const delivered = cliDelivery;
+      if (!delivered) throw new Error('Expected the typed commit-delivery CLI result.');
       expect(delivered).toMatchObject({status: 'delivered', replayed: false, receipt: {delivery: 'commit'}});
       const afterDelivery = yield* f.fs.readFileString(f.statePath());
       const closeoutWithoutProposal = yield* runNativeTaskAction(f.config, {

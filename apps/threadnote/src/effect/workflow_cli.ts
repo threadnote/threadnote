@@ -369,6 +369,12 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly reason: string;
     readonly userAuthority: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  commitDeliveryHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly validationRef: string;
+    readonly commitEvidence: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
     lifecycleHandler
@@ -604,6 +610,21 @@ export function makeNativeTaskActionCommands<E, R>(
     },
     deliveryHandler,
   ).pipe(Command.withDescription('Record the canonical local delivery receipt for a validated local phase'));
+  const deliverCommit = Command.make(
+    'deliver-commit',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      validationRef: requiredString('validation-ref', 'Opaque current validation reference from the task flow'),
+      commitEvidence: requiredString('commit-evidence', 'Commit evidence to retain with the canonical receipt'),
+    },
+    options =>
+      commitDeliveryHandler
+        ? commitDeliveryHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({code: 'unsupported-action', message: 'This task action is unavailable.'}),
+          ),
+  ).pipe(Command.withDescription('Record the canonical commit delivery receipt for a validated commit phase'));
   const finish = Command.make(
     'finish',
     {
@@ -731,6 +752,7 @@ export function makeNativeTaskActionCommands<E, R>(
       recordReview,
       recordValidation,
       deliverLocal,
+      deliverCommit,
       finish,
       compactStart,
       compactExpand,
