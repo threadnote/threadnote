@@ -124,8 +124,9 @@ export function makeNativeTaskPrWatchCommand<E, R>(
   handler: (options: {
     readonly runId: string;
     readonly callerCwd: string;
-    readonly validationRef: string;
-    readonly deliveryRef: string;
+    readonly validationRef?: string;
+    readonly deliveryRef?: string;
+    readonly phaseId?: string;
     readonly operation:
       'start' | 'inspect' | 'relay' | 'disposition' | 'ack' | 'work' | 'work-disposition' | 'stop' | 'complete';
     readonly host?: 'codex' | 'cursor-cli';
@@ -149,8 +150,9 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     {
       runId: requiredString('run-id', 'Native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Bound checkout path'),
-      validationRef: requiredString('validation-ref', 'Current opaque validation reference'),
-      deliveryRef: requiredString('delivery-ref', 'Opaque open PR delivery reference'),
+      validationRef: optionalString('validation-ref', 'Current opaque validation reference'),
+      deliveryRef: optionalString('delivery-ref', 'Opaque open PR delivery reference'),
+      phaseId: optionalString('phase-id', 'Current phase for provisional inspect or stop'),
       operation: requiredChoice(
         'operation',
         ['start', 'inspect', 'relay', 'disposition', 'ack', 'work', 'work-disposition', 'stop', 'complete'],

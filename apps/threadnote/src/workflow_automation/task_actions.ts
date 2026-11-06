@@ -67,7 +67,6 @@ import {
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
 import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
-
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const packetInputSchema = Schema.Struct({
   capacity: NativeCyclePacketOptionsSchema.fields.capacity,
@@ -121,6 +120,7 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
     'stop',
     'complete',
   ]),
+  phaseId: Schema.optionalKey(id),
   wakeup: Schema.optionalKey(nativeWatchWakeupSchema),
   takeover: Schema.optionalKey(Schema.Boolean),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
@@ -269,8 +269,8 @@ const requestSchema = Schema.Union([
     command: Schema.Literal('watch-pr'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    validationRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-    deliveryRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192)),
+    validationRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    deliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
     ...NativeTaskPrWatchFieldsSchema.fields,
   }),
   Schema.Struct({

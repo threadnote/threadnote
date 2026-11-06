@@ -323,8 +323,124 @@ export const runNativeTaskPrWatch = (
   checkout: string,
 ) =>
   Effect.gen(function* () {
-    const validation = decodeNativeTaskActionRef(request.validationRef);
-    const deliveryAction = decodeNativeTaskActionRef(request.deliveryRef);
+    if (!request.validationRef && !request.deliveryRef) {
+      if ((request.operation !== 'inspect' && request.operation !== 'stop') || !request.phaseId)
+        return yield* fail(
+          'invalid-delivery-ref',
+          'Provisional watch recovery needs a phaseId and is limited to inspect or stop.',
+        );
+      const runtime = stored.state.cycle;
+      const cycle = runtime?.state;
+      const phases = EffectArray.filter(cycle?.plan.phases ?? [], item => item.id === request.phaseId);
+      const phase = cycle?.phases[request.phaseId];
+      const baseline = runtime?.baselines[request.phaseId];
+      if (
+        !runtime ||
+        !cycle ||
+        cycle.plan.delivery !== 'pr' ||
+        phases.length !== 1 ||
+        !phase ||
+        phase.status !== 'validated' ||
+        phase.delivery !== undefined ||
+        !phase.phaseHash ||
+        !phase.head ||
+        !phase.tree ||
+        !phase.validation ||
+        phase.validation.status !== 'passed' ||
+        phase.validation.productState !== 'working' ||
+        phase.validation.snapshotTree !== phase.tree ||
+        phase.validation.reviewTree !== phase.tree ||
+        (phase.validation.head !== undefined && phase.validation.head !== phase.head) ||
+        !baseline
+      )
+        return yield* fail(
+          'provisional-watch-not-eligible',
+          'No current validated provisional PR phase matches this run.',
+        );
+      const snapshots = EffectArray.filter(
+        runtime.snapshots,
+        item =>
+          item.snapshot.phaseId === request.phaseId &&
+          item.snapshot.phaseHash === phase.phaseHash &&
+          item.snapshot.head === phase.head &&
+          item.snapshot.tree === phase.tree &&
+          item.snapshot.repo === baseline.repo &&
+          item.snapshot.baseTree === baseline.tree,
+      );
+      const snapshot = snapshots[0]?.snapshot;
+      const reviews = snapshot
+        ? EffectArray.filter(
+            runtime.reviews,
+            item =>
+              item.snapshotId === snapshot.snapshotId &&
+              item.report.snapshotId === snapshot.snapshotId &&
+              item.report.phaseHash === phase.phaseHash &&
+              item.report.snapshotTree === phase.tree &&
+              item.report.status === 'complete',
+          )
+        : [];
+      if (snapshots.length !== 1 || reviews.length !== 1)
+        return yield* fail(
+          'provisional-watch-not-eligible',
+          'The current provisional phase lacks unique reviewed source proof.',
+        );
+      const identity = EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${request.phaseId}`));
+      const watchId = `pr-${identity}`;
+      const consumerId = `task-${identity}`;
+      const watch = yield* readNativeWatch(config, watchId);
+      if (
+        !watch ||
+        watch.envelope.state.watchId !== watchId ||
+        watch.envelope.state.consumer?.id !== consumerId ||
+        watch.envelope.state.consumer.wakeupId !== consumerId ||
+        (watch.envelope.state.head !== undefined && watch.envelope.state.head !== phase.head)
+      )
+        return yield* fail('watch-identity-conflict', 'No stored watch matches this exact provisional run and phase.');
+      const latest = yield* readNativeWorkflowState(config, request.runId);
+      if (!latest || latest.revision !== stored.revision)
+        return yield* fail('stale-task-state', 'The canonical task changed before provisional watch recovery.');
+      const result = yield* runNativeWatch(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: request.operation,
+        watchId,
+        consumerId,
+        wakeupId: consumerId,
+        expectedRevision: watch.revision,
+      });
+      const [after, latestAfter] = yield* Effect.all([
+        readNativeWatch(config, watchId),
+        readNativeWorkflowState(config, request.runId),
+      ]);
+      if (
+        !after ||
+        after.envelope.state.watchId !== watchId ||
+        after.envelope.state.pr !== watch.envelope.state.pr ||
+        after.envelope.state.consumer?.id !== consumerId ||
+        after.envelope.state.consumer.wakeupId !== consumerId ||
+        latestAfter?.revision !== stored.revision
+      )
+        return yield* fail(
+          'watch-readback-mismatch',
+          'The provisional watch or canonical task changed during recovery.',
+        );
+      return {
+        status: 'watch-updated',
+        operation: request.operation,
+        watchId,
+        prUrl: after.envelope.state.pr,
+        headSha: after.envelope.state.head,
+        revision: after.revision,
+        result,
+      };
+    }
+    if (!request.validationRef || !request.deliveryRef)
+      return yield* fail('invalid-delivery-ref', 'Use both exact current validation and PR delivery references.');
+    const validationRef = request.validationRef;
+    const deliveryRef = request.deliveryRef;
+    const validation = decodeNativeTaskActionRef(validationRef);
+    const deliveryAction = decodeNativeTaskActionRef(deliveryRef);
     const embeddedDelivery = deliveryAction?.delivery;
     if (
       !validation ||
@@ -405,7 +521,7 @@ export const runNativeTaskPrWatch = (
             command: 'deliver-pr',
             runId: request.runId,
             callerCwd: checkout,
-            validationRef: request.validationRef,
+            validationRef,
             commitEvidence: embeddedDelivery.commitEvidence,
             pr: embeddedDelivery.pr,
             publication: embeddedDelivery.publication,

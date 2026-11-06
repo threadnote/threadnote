@@ -489,8 +489,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         runId: McpInput.requiredString('Native run'),
         callerCwd: McpInput.requiredString('Bound checkout'),
-        validationRef: McpInput.requiredString('Current validation reference'),
-        deliveryRef: McpInput.requiredString('Opaque open PR delivery reference'),
+        validationRef: McpInput.string('Current validation reference; omit only for provisional inspect or stop'),
+        deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
         ...NativeTaskPrWatchFieldsSchema.fields,
       },
     },
@@ -499,8 +499,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         command: 'watch-pr',
         runId,
         callerCwd,
-        validationRef,
-        deliveryRef,
+        ...(validationRef === undefined ? {} : {validationRef}),
+        ...(deliveryRef === undefined ? {} : {deliveryRef}),
         ...watch,
       });
       const text = JSON.stringify(result);

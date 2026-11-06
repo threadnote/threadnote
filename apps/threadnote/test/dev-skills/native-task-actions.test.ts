@@ -4083,6 +4083,54 @@ describe('native task actions', () => {
       expect(startedWatch.envelope.collector).toMatchObject({status: 'running', pid: 77777});
       const provisionalState = yield* readNativeWorkflowState(taskConfig, 'native-run');
       expect(provisionalState?.state.cycle?.state.phases.one?.delivery).toBeUndefined();
+      const recoveryInput = {runId: 'native-run', callerCwd: repo, phaseId: 'one'};
+      const watchBytesBeforeRecovery = yield* f.fs.readFileString(watchFile);
+      const foreignRecovery = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(foreignRecovery, taskConfig);
+      const foreignResult = yield* foreignRecovery
+        .invokeTool('workflow_task_watch_pr', {
+          ...recoveryInput,
+          runId: 'foreign-run',
+          operation: 'inspect',
+        })
+        .pipe(Effect.result);
+      expect(foreignResult._tag).toBe('Failure');
+      expect(yield* f.fs.readFileString(watchFile)).toBe(watchBytesBeforeRecovery);
+      const wrongPhaseResult = yield* foreignRecovery
+        .invokeTool('workflow_task_watch_pr', {
+          ...recoveryInput,
+          phaseId: 'foreign-phase',
+          operation: 'stop',
+        })
+        .pipe(Effect.result);
+      expect(wrongPhaseResult._tag).toBe('Failure');
+      expect(yield* f.fs.readFileString(watchFile)).toBe(watchBytesBeforeRecovery);
+      const freshInspect = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(freshInspect, taskConfig);
+      const inspected = object(
+        object(
+          yield* freshInspect.invokeTool('workflow_task_watch_pr', {
+            ...recoveryInput,
+            operation: 'inspect',
+          }),
+        ).structuredContent,
+      );
+      expect(inspected).toMatchObject({status: 'watch-updated', operation: 'inspect', watchId});
+      expect(yield* f.fs.readFileString(watchFile)).toBe(watchBytesBeforeRecovery);
+      const freshStop = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(freshStop, taskConfig);
+      const stopped = object(
+        object(
+          yield* freshStop.invokeTool('workflow_task_watch_pr', {
+            ...recoveryInput,
+            operation: 'stop',
+          }),
+        ).structuredContent,
+      );
+      expect(stopped).toMatchObject({status: 'watch-updated', operation: 'stop', watchId});
+      startedWatch = yield* readNativeWatch(f.config, watchId);
+      expect(startedWatch?.envelope.stopRequested).toBe(true);
+      if (!startedWatch) throw new Error('The recovered provisional watch disappeared.');
       const cutoverMcp = new EffectMcpServerAdapter('test', '1', 'fixture');
       registerWorkflowTaskTool(cutoverMcp, taskConfig);
       const cutoverInput = {
