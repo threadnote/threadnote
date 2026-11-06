@@ -10,6 +10,7 @@ import type {NativeWorkflowState} from '../src/native.js';
 import {
   decodeNativeTaskActionRef,
   decodeNativeTaskCursor,
+  decodeNativeTaskStartReference,
   encodeNativeTaskActionRef,
   nativeTaskCursorMatches,
   projectNativeTaskView,
@@ -76,6 +77,29 @@ const state: NativeWorkflowState = {
 };
 
 describe('native task projection', () => {
+  it('accepts canonical run IDs and only task-view action references for task start', () => {
+    const taskViewRef = encodeNativeTaskActionRef({
+      version: 1,
+      kind: 'task',
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      stateRevision: EffectString.repeat(64)('b'),
+      taskAction: 'initialize-cycle',
+    });
+    const decodedTaskViewRef = decodeNativeTaskActionRef(taskViewRef);
+    if (!decodedTaskViewRef) throw new Error('Expected an encoded task-view reference to decode.');
+    expect(decodeNativeTaskStartReference('run')).toEqual({runId: 'run'});
+    expect(decodeNativeTaskStartReference(taskViewRef)).toEqual({
+      runId: 'run',
+      actionRef: decodeNativeTaskActionRef(taskViewRef),
+    });
+    expect(decodeNativeTaskStartReference('taskref-v1.invalid')).toBeUndefined();
+    expect(
+      decodeNativeTaskStartReference(encodeNativeTaskActionRef({...decodedTaskViewRef, kind: 'work'})),
+    ).toBeUndefined();
+    expect(decodeNativeTaskStartReference(EffectString.repeat(129)('r'))).toBeUndefined();
+  });
+
   it('round-trips opaque action references and rejects malformed or extended values', () => {
     const reference = {
       version: 1 as const,

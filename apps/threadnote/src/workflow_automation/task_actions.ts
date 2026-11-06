@@ -18,8 +18,12 @@ import {nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycl
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   decodeNativeTaskActionRef,
+  decodeNativeTaskStartReference,
   encodeNativeTaskActionRef,
+  nativeTaskStartReferenceIsCurrent,
+  nativeTaskStartRunId,
   NativeTaskAnchorSchema,
+  NativeTaskStartRequestSchema,
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -65,7 +69,6 @@ import {runNativeTaskFinish} from './task_closeout_action.js';
 import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
-
 const packetInputSchema = Schema.Struct({
   capacity: NativeCyclePacketOptionsSchema.fields.capacity,
   anchors: Schema.Array(NativeTaskAnchorSchema).check(Schema.isBetweenLength(1, 128)),
@@ -282,15 +285,6 @@ const requestSchema = Schema.Union([
 ]);
 
 export type NativeTaskActionRequest = typeof requestSchema.Type;
-
-const taskStartSchema = Schema.Struct({
-  callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
-  taskRef: Schema.optionalKey(id),
-  intent: NativeCompactIntentSchema,
-});
-
 const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknown): boolean => {
   if (!Predicate.isObject(value) || value.kind !== 'plan' || !Predicate.isObject(value.compactOrigin)) return false;
   const phases = value.phases;
@@ -369,10 +363,11 @@ export const readNativeTaskInstalledTarget = (
     return {...target, installedDigest: installed.bundle.digest};
   });
 
-/** Start or resume one semantic compact task over the existing native run and P3 authoring path. */
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
-    const request = yield* Schema.decodeUnknownEffect(taskStartSchema, {onExcessProperty: 'error'})(input).pipe(
+    const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
+      input,
+    ).pipe(
       Effect.mapError(() =>
         fail(
           'invalid-request',
@@ -380,6 +375,9 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         ),
       ),
     );
+    const taskStartReference = request.taskRef ? decodeNativeTaskStartReference(request.taskRef) : undefined;
+    if (request.taskRef && !taskStartReference)
+      return yield* fail('invalid-task-ref', 'Provide a canonical run ID or current task-view reference.');
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     if (!path.isAbsolute(request.callerCwd))
@@ -400,7 +398,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       try: () => workflowTitleSlug(request.featureName),
       catch: () => fail('invalid-feature', 'featureName must be a stable, nonblank task name.'),
     });
-    const runId = request.taskRef ?? 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
+    const runId = nativeTaskStartRunId(taskStartReference, project, featureId);
     const stored = yield* readNativeWorkflowState(config, runId);
     const identity = {featureId, project};
     const currentSystem = yield* SystemInfo;
@@ -441,6 +439,8 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         storedProfile,
       ]);
       const view = yield* readNativeTaskView(config, {runId, callerCwd: checkout, detail: 'packet'});
+      if (!nativeTaskStartReferenceIsCurrent(taskStartReference, stored, [request.taskRef, view.taskRef]))
+        return yield* fail('stale-task-ref', 'Read the current task card before starting or resuming this task.');
       if (selectedTarget.installedDigest !== stored.state.generation) {
         const owners = yield* inspectOldBindingOwners(config, stored);
         const repeatedOwners = yield* inspectOldBindingOwners(config, stored);
