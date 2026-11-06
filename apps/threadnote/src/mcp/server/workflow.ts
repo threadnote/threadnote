@@ -65,7 +65,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
         featureName: McpInput.requiredString('Stable feature name used to resume this task'),
-        installationTarget: McpInput.string('Installed Threadnote host target, required only for a new task'),
+        installationTarget: McpInput.string(
+          'Installed Threadnote host target, required to verify the current bundle on start or resume',
+        ),
         taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
         intent: NativeCompactIntentSchema,
       },
@@ -152,21 +154,24 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: 'Read the current task; detail=packet returns its full packet.',
+      description:
+        'Read the current task; phaseId selects a discovered active historical PR watch, and detail=packet returns its full packet.',
       inputSchema: {
         runId: McpInput.string('Existing native workflow run identifier'),
         callerCwd: McpInput.string('Absolute bound checkout path'),
         role: McpInput.string('Role: implementation, review, or delivery'),
         cursor: McpInput.string('Opaque continuation from the previous task-view page'),
+        phaseId: McpInput.string('Select a phase listed in historicalWatches to recover its active PR watch refs'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
       },
     },
-    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, detail}) {
+    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail}) {
       const result = yield* readNativeTaskView(config, {
         runId,
         callerCwd,
         ...(role === undefined ? {} : {role}),
         ...(cursor === undefined ? {} : {cursor}),
+        ...(phaseId === undefined ? {} : {phaseId}),
         ...(detail === undefined ? {} : {detail}),
       });
       const nextTool =
@@ -295,7 +300,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record the current worker source as an immutable implementation snapshot, or preserve and supersede only the latest unreviewed snapshot after a corrected source change. Supersession retains prior attempts and requires a full review.',
+        'Record a source snapshot, supersede only an unreviewed predecessor, or requalify an exact reviewed predecessor after an approved base-branch transition. Requalification retains history and requires a new full review.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -310,6 +315,12 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             snapshotRef: McpInput.requiredString('Exact immutable reference for the unreviewed source snapshot'),
             reason: McpInput.requiredString('Why corrected source supersedes the unreviewed snapshot'),
           }),
+          Schema.Struct({
+            command: Schema.Literal('requalify-base'),
+            snapshotRef: McpInput.requiredString('Exact reviewed predecessor reference from the current task view'),
+            reason: McpInput.requiredString('Why the reviewed source is being requalified on the approved new base'),
+            userAuthority: McpInput.requiredString('Actual explicit human authority for this base change'),
+          }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
     },
@@ -323,13 +334,22 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
               workRef: snapshot.workRef,
               ...(snapshot.reason === undefined ? {} : {reason: snapshot.reason}),
             }
-          : {
-              command: 'supersede-unreviewed-snapshot',
-              runId,
-              callerCwd,
-              snapshotRef: snapshot.snapshotRef,
-              reason: snapshot.reason,
-            };
+          : snapshot.command === 'supersede-unreviewed'
+            ? {
+                command: 'supersede-unreviewed-snapshot',
+                runId,
+                callerCwd,
+                snapshotRef: snapshot.snapshotRef,
+                reason: snapshot.reason,
+              }
+            : {
+                command: 'requalify-base-snapshot',
+                runId,
+                callerCwd,
+                snapshotRef: snapshot.snapshotRef,
+                reason: snapshot.reason,
+                userAuthority: snapshot.userAuthority,
+              };
       const result = yield* runNativeTaskAction(config, request);
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};

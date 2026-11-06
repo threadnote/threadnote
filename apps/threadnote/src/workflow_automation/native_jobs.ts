@@ -453,6 +453,73 @@ const read = Effect.fn('nativeJobs.read')(function* (config: RuntimeConfig, runI
   const file = yield* jobPath(config, runId, jobId);
   return file === undefined ? undefined : yield* readAt(file);
 });
+
+/** Read only one canonical run's bounded job directory; used by controlled binding cutover inspection. */
+export const inspectNativeJobsForRun = Effect.fn('nativeJobs.inspectRun')(function* (
+  config: RuntimeConfig,
+  runId: string,
+  generation: string,
+  bindingId: string,
+) {
+  if (!Schema.is(id)(runId) || Effect2.pipe(runId, EffectString.includes('..')))
+    return yield* fail('invalid-request', 'Use a bounded native run identifier.');
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  let directory = yield* fs.realPath(config.agentContextHome);
+  for (const part of ['workflow-automations', 'native-v1', 'jobs', runId]) {
+    directory = path.join(directory, part);
+    if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+      return yield* fail('unsafe-job-state', 'Job state directories cannot be symbolic links.');
+    if (!(yield* fs.exists(directory))) return [];
+    if ((yield* fs.stat(directory)).type !== 'Directory' || (yield* fs.realPath(directory)) !== directory)
+      return yield* fail('unsafe-job-state', 'Job state must remain in its original private directory.');
+  }
+  const names = yield* fs.readDirectory(directory);
+  const receipts = EffectArray.filter(
+    names,
+    name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/u.test(name) && !EffectString.endsWith('.input.json')(name),
+  ).sort();
+  if (receipts.length > 128)
+    return yield* fail(
+      'job-inventory-overflow',
+      'This run has more job receipts than the bounded cutover inspection can verify.',
+    );
+  const observed: Array<{
+    readonly jobId: string;
+    readonly generation: string;
+    readonly bindingId: string;
+    readonly status: Envelope['status'];
+    readonly stopRequested: boolean;
+    readonly revision: string;
+    readonly settled: boolean;
+    readonly resultDigest?: string;
+  }> = [];
+  for (const name of receipts) {
+    const jobId = EffectString.slice(0, -'.json'.length)(name);
+    if (!Schema.is(id)(jobId) || Effect2.pipe(jobId, EffectString.includes('..')))
+      return yield* fail('invalid-job-state', 'A run-scoped job receipt has an invalid identity.');
+    const receipt = yield* read(config, runId, jobId);
+    if (!receipt) return yield* fail('invalid-job-state', 'A run-scoped job receipt disappeared during inspection.');
+    if (
+      receipt.state.runId !== runId ||
+      receipt.state.generation !== generation ||
+      receipt.state.bindingId !== bindingId
+    )
+      return yield* fail('binding-drift', 'A run-scoped job belongs to a different immutable run binding.');
+    yield* readInput(config, receipt.state);
+    observed.push({
+      jobId,
+      generation: receipt.state.generation,
+      bindingId: receipt.state.bindingId,
+      status: receipt.state.status,
+      stopRequested: receipt.state.stopRequested,
+      revision: receipt.revision,
+      settled: receipt.state.status === 'completed' && receipt.state.result !== undefined,
+      ...(receipt.state.result === undefined ? {} : {resultDigest: sha256HexSync(stableJson(receipt.state.result))}),
+    });
+  }
+  return observed;
+});
 const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeConfig, receipt: Envelope) {
   const file = yield* jobPath(config, receipt.runId, receipt.jobId);
   if (!file) return yield* fail('job-not-found', 'The original job input is missing.');
@@ -769,6 +836,10 @@ export const assertNativeJobLiveSource = Effect.fn('nativeJobs.assertLiveSource'
     );
 });
 const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, runId: string, jobId: string) {
+  const accepted = yield* read(config, runId, jobId);
+  if (!accepted) return yield* fail('job-not-found', 'No accepted job has this identity.');
+  const input = yield* readInput(config, accepted.state);
+  const witness = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness);
   const system = yield* SystemInfo;
   const executable = system.executablePath;
   const name = EffectString.toLowerCase(
@@ -784,7 +855,15 @@ const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, 
     jobId,
   ];
   const started = yield* runDetachedCommandEffect(executable, args, {
-    env: {...system.environment(), THREADNOTE_HOME: config.agentContextHome, THREADNOTE_MANIFEST: config.manifestPath},
+    cwd: witness.repo,
+    env: {
+      ...system.environment(),
+      THREADNOTE_HOME: config.agentContextHome,
+      THREADNOTE_MANIFEST: config.manifestPath,
+      THREADNOTE_ACCOUNT: config.account,
+      THREADNOTE_USER: config.user,
+      THREADNOTE_AGENT_ID: config.agentId,
+    },
   });
   if (!started)
     return yield* fail(

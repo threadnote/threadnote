@@ -14,6 +14,8 @@ import {
   recordNativeCycleDelivery,
   invalidateNativeCycle,
   reconcileNativeCyclePlan,
+  type NativeCycleDelivery,
+  NativeCycleDeliverySchema,
   type NativeCycleState,
 } from '@threadnote/workflow-automations/cycle';
 import {
@@ -930,6 +932,26 @@ export const runNativeCycle = <R>(
           const updated: NativeCycleRuntime = {
             ...runtime,
             snapshots: [...runtime.snapshots, {snapshot, incoming: scope.incoming}],
+            ...(baseRequalification
+              ? {
+                  state: {
+                    ...state,
+                    phases: {
+                      ...state.phases,
+                      [selected.id]: {
+                        ...state.phases[selected.id],
+                        status: 'active' as const,
+                        phaseHash: snapshot.phaseHash,
+                        head: snapshot.head,
+                        tree: snapshot.tree,
+                        validation: undefined,
+                        delivery: undefined,
+                        reason: undefined,
+                      },
+                    },
+                  },
+                }
+              : {}),
           };
           if (merge) {
             // Validate everything before touching Git refs; the final fence is the last source read before persistence.
@@ -1315,40 +1337,145 @@ export const runNativeCycle = <R>(
             return yield* fail('delivery-pending', 'Finish the outstanding delivery first.');
           if (!proof.validation || !proof.tree)
             return yield* fail('not-ready', 'Current phase validation is required.');
-          const current = yield* captureNativeCycleSource(repo, 'HEAD');
-          if (
-            current.tree !== proof.tree ||
-            Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree
-          )
-            return yield* fail('source-drift', 'Publish the clean exact validated tree.');
-          if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
-            return yield* fail('branch-drift', 'Publish from the declared phase branch.');
+          const priorDelivery = proof.delivery;
+          const historicalMergeCandidate =
+            request.command === 'record-delivery' &&
+            proof.status === 'published' &&
+            priorDelivery?.delivery === 'pr' &&
+            priorDelivery.pr?.state === 'open';
+          let currentHead: string;
+          let currentTree: string;
+          let incomingDelivery: NativeCycleDelivery | undefined;
+          if (historicalMergeCandidate) {
+            if (priorDelivery?.delivery !== 'pr' || priorDelivery.pr?.state !== 'open' || !priorDelivery.pr)
+              return yield* fail(
+                'delivery-conflict',
+                'Historical PR completion needs its prior canonical open receipt.',
+              );
+            incomingDelivery = yield* Schema.decodeUnknownEffect(NativeCycleDeliverySchema, {
+              onExcessProperty: 'error',
+            })(request.delivery).pipe(
+              Effect.mapError(() => fail('invalid-cycle', 'Invalid historical PR completion receipt.')),
+            );
+            const priorPr = priorDelivery.pr;
+            const incomingPr = incomingDelivery.pr;
+            if (!incomingPr || incomingDelivery.delivery !== 'pr' || incomingPr.state !== 'merged')
+              return yield* fail('delivery-conflict', 'A published PR can only advance with its exact merged receipt.');
+            const priorIdentity = {
+              ...priorDelivery,
+              pr: {...priorPr, state: 'open' as const},
+              watch: undefined,
+            };
+            const incomingIdentity = {
+              ...incomingDelivery,
+              pr: {...incomingPr, state: 'open' as const},
+              watch: undefined,
+            };
+            if (
+              stableJson(priorIdentity) !== stableJson(incomingIdentity) ||
+              priorDelivery.watch?.state !== 'active' ||
+              incomingDelivery.watch?.state !== 'terminal' ||
+              priorDelivery.watch.prUrl !== priorPr.url ||
+              priorDelivery.watch.headSha !== proof.head ||
+              incomingDelivery.watch.prUrl !== priorPr.url ||
+              incomingDelivery.watch.headSha !== proof.head ||
+              incomingDelivery.watch.consumerId !== priorDelivery.watch.consumerId ||
+              incomingDelivery.watch.stateDir !== priorDelivery.watch.stateDir ||
+              incomingDelivery.watch.consumerKind !== priorDelivery.watch.consumerKind
+            )
+              return yield* fail(
+                'delivery-conflict',
+                'Historical PR completion must preserve the exact published source, authority, and watch consumer.',
+              );
+            currentHead = Effect2.pipe(
+              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{commit}`]),
+              EffectString.trim,
+            );
+            currentTree = Effect2.pipe(
+              yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
+              EffectString.trim,
+            );
+            if (currentHead !== proof.head || currentTree !== proof.tree)
+              return yield* fail('source-drift', 'The published phase branch no longer matches its reviewed source.');
+            const {baseRefBinding: _baseRefBinding, ...unboundIncomingPr} = incomingPr;
+            const unboundDelivery: NativeCycleDelivery = {
+              ...incomingDelivery,
+              pr: unboundIncomingPr,
+            };
+            const checkedHistoricalBase = yield* bindNativeCycleDeliveryBase(
+              repo,
+              selected.baseBranch,
+              unboundDelivery,
+            );
+            if (stableJson(checkedHistoricalBase.pr?.baseRefBinding) !== stableJson(priorPr.baseRefBinding))
+              return yield* fail(
+                'base-ref-unverified',
+                'The historical PR base no longer matches its canonical receipt.',
+              );
+            incomingDelivery = checkedHistoricalBase;
+          } else {
+            const current = yield* captureNativeCycleSource(repo, 'HEAD');
+            if (
+              current.tree !== proof.tree ||
+              Effect2.pipe(yield* git(repo, ['rev-parse', 'HEAD^{tree}']), EffectString.trim) !== proof.tree
+            )
+              return yield* fail('source-drift', 'Publish the clean exact validated tree.');
+            if (Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch)
+              return yield* fail('branch-drift', 'Publish from the declared phase branch.');
+            currentHead = current.head;
+            currentTree = current.tree;
+          }
           if (state.plan.delivery === 'pr')
             yield* from(() =>
               validateNativeCycleFeaturePublication(request.publication, {
-                currentHead: current.head,
+                currentHead,
                 team: stored.state.team ?? 'default',
               }),
             );
           if (request.command === 'publication-ready')
-            return {status: 'ok', revision: stored.revision, head: current.head, tree: current.tree};
+            return {status: 'ok', revision: stored.revision, head: currentHead, tree: currentTree};
           // A clean normal commit advances HEAD while retaining the reviewed tree.
           const accepted = {
             ...state,
             phases: {
               ...state.phases,
-              [selected.id]: {...proof, head: current.head, validation: {...proof.validation, head: current.head}},
+              [selected.id]: {...proof, head: currentHead, validation: {...proof.validation, head: currentHead}},
             },
           };
-          const delivery = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, request.delivery);
+          let delivery: NativeCycleDelivery;
+          if (historicalMergeCandidate) {
+            if (!incomingDelivery)
+              return yield* fail('delivery-conflict', 'The historical PR completion receipt was not verified.');
+            delivery = incomingDelivery;
+          } else {
+            delivery = yield* bindNativeCycleDeliveryBase(repo, selected.baseBranch, request.delivery);
+          }
           if (delivery.pr?.baseRefBinding) {
-            const after = yield* captureNativeCycleSource(repo, 'HEAD');
-            if (
-              after.head !== current.head ||
-              after.tree !== current.tree ||
-              Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
-            )
-              return yield* fail('source-drift', 'Source changed during delivery base verification.');
+            if (historicalMergeCandidate) {
+              const afterHead = Effect2.pipe(
+                yield* git(repo, [
+                  'rev-parse',
+                  '--verify',
+                  '--end-of-options',
+                  `refs/heads/${selected.branch}^{commit}`,
+                ]),
+                EffectString.trim,
+              );
+              const afterTree = Effect2.pipe(
+                yield* git(repo, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${selected.branch}^{tree}`]),
+                EffectString.trim,
+              );
+              if (afterHead !== currentHead || afterTree !== currentTree)
+                return yield* fail('source-drift', 'The published phase branch changed during base verification.');
+            } else {
+              const after = yield* captureNativeCycleSource(repo, 'HEAD');
+              if (
+                after.head !== currentHead ||
+                after.tree !== currentTree ||
+                Effect2.pipe(yield* git(repo, ['branch', '--show-current']), EffectString.trim) !== selected.branch
+              )
+                return yield* fail('source-drift', 'Source changed during delivery base verification.');
+            }
           }
           const updated = yield* from(() => recordNativeCycleDelivery(accepted, selected.id, delivery));
           return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};

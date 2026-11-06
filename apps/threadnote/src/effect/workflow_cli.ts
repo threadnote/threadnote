@@ -64,6 +64,7 @@ export function makeNativeTaskViewCommand<E, R>(
     readonly callerCwd: string;
     readonly role?: string;
     readonly cursor?: string;
+    readonly phaseId?: string;
     readonly detail?: 'summary' | 'packet';
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
@@ -74,6 +75,7 @@ export function makeNativeTaskViewCommand<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task context'),
       role: optionalChoice('role', ['implementation', 'review', 'delivery'], 'Optional task role'),
       cursor: optionalString('cursor', 'Opaque continuation returned by the previous task-view page'),
+      phaseId: optionalString('phase-id', 'Select an active historical PR watch from task-view history'),
       detail: optionalChoice(
         'detail',
         ['summary', 'packet'],
@@ -81,7 +83,7 @@ export function makeNativeTaskViewCommand<E, R>(
       ),
     },
     handler,
-  ).pipe(Command.withDescription('Read the next actionable task for an existing native workflow run'));
+  ).pipe(Command.withDescription('Read the next task or select a discovered active historical PR watch'));
 }
 
 export function makeNativeTaskPrDeliveryCommand<E, R>(
@@ -264,7 +266,10 @@ export function makeNativeTaskStartCommand<E, R>(
     {
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task'),
       featureName: requiredString('feature-name', 'Stable feature name used to resume this task'),
-      installationTarget: optionalString('installation-target', 'Installed Threadnote host target for a new task'),
+      installationTarget: optionalString(
+        'installation-target',
+        'Installed Threadnote host target verified on start or resume',
+      ),
       taskRef: optionalString('task-ref', 'Opaque task reference returned by a previous start'),
       title: requiredString('title', 'Task title'),
       currentBehavior: requiredString('current-behavior', 'Current behavior'),
@@ -356,6 +361,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly bindings?: unknown;
     readonly additionalReviews?: number;
     readonly userAuthority?: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  baseRequalificationHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
@@ -498,6 +510,25 @@ export function makeNativeTaskActionCommands<E, R>(
     },
     snapshotHandler,
   ).pipe(Command.withDescription('Record the current worker source for an admitted implementation packet'));
+  const requalifyBaseSnapshot = Command.make(
+    'requalify-base-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact reviewed predecessor reference from workflow task view'),
+      reason: requiredString('reason', 'Why the reviewed source is being requalified on the approved new base'),
+      userAuthority: requiredString('user-authority', 'Actual explicit human authority for this base change'),
+    },
+    options =>
+      baseRequalificationHandler
+        ? baseRequalificationHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'This task-action command has no base-requalification handler.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Requalify an exact reviewed predecessor against a newly approved base'));
   const supersedeUnreviewedSnapshot = Command.make(
     'supersede-unreviewed-snapshot',
     {
@@ -684,6 +715,7 @@ export function makeNativeTaskActionCommands<E, R>(
       reconcile,
       extendReviewBudget,
       recordSnapshot,
+      requalifyBaseSnapshot,
       supersedeUnreviewedSnapshot,
       recordReview,
       recordValidation,

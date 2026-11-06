@@ -3,6 +3,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {initializeNativeCycle, type NativeCyclePlan} from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
@@ -212,6 +213,36 @@ describe('native task projection', () => {
     ).toBe(false);
     expect(nativeTaskCursorMatches(cursor!, projectNativeTaskView(input, 'revision-one', {role: 'delivery'}))).toBe(
       false,
+    );
+  });
+
+  it('stales a continuation when the refreshed external candidate set changes at the same native revision', () => {
+    const expanded = {
+      ...plan,
+      phases: [{...plan.phases[0], allowedPaths: Array.from({length: 20}, (_, index) => `src/${index}.ts`)}],
+    } satisfies NativeCyclePlan;
+    const input: NativeWorkflowState = {
+      ...state,
+      cycle: {...state.cycle!, state: initializeNativeCycle(expanded), plans: [expanded]},
+    };
+    const revision = 'same-native-revision';
+
+    fc.assert(
+      fc.property(fc.array(fc.stringMatching(/^phase-[a-z]{1,8}$/u), {minLength: 2, maxLength: 16}), candidateIds => {
+        const pageOneCandidates = candidateIds;
+        const refreshedCandidates = candidateIds.slice(1);
+        const fingerprint = (ids: readonly string[]) => sha256HexSync(JSON.stringify(ids));
+        const pageOne = projectNativeTaskView(input, revision, {candidateHash: fingerprint(pageOneCandidates)});
+        const cursor = decodeNativeTaskCursor(pageOne.page.nextCursor!);
+
+        expect(cursor).toBeDefined();
+        expect(cursor?.candidateHash).toBe(fingerprint(pageOneCandidates));
+        expect(nativeTaskCursorMatches(cursor!, pageOne, fingerprint(pageOneCandidates))).toBe(true);
+        // A formerly eligible earlier candidate dropped from the refreshed external set.
+        expect(nativeTaskCursorMatches(cursor!, pageOne, fingerprint(refreshedCandidates))).toBe(false);
+        expect(pageOne.revision).toBe(revision);
+      }),
+      {numRuns: 40},
     );
   });
 

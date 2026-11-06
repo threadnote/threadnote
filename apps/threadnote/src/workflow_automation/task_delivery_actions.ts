@@ -1,6 +1,7 @@
 import {NativeCycleDeliverySchema, nextNativeCycle} from '@threadnote/workflow-automations/cycle';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {runCommandEffect} from '@threadnote/platform/command';
 import {Effect, Array as EffectArray, FileSystem, Path, Predicate, Schema} from 'effect';
 import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
@@ -11,7 +12,7 @@ import {runWorkflowAutomation} from './index.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
-import {readNativeWatch} from './watch_store.js';
+import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {cycleRequest, fail, inCheckout, unwrapCycle} from './task_action_helpers.js';
@@ -163,12 +164,12 @@ export const runNativeTaskPrDelivery = (
       return yield* fail('invalid-validation-ref', 'Use the current canonical validation reference for PR delivery.');
     if (state.plan.delivery !== 'pr')
       return yield* fail('delivery-scope', 'This task action supports PR delivery only.');
-    const phase = state.plan.phases[0];
+    const matchingPhases = EffectArray.filter(state.plan.phases, item => item.id === ref.phaseId);
+    const phase = matchingPhases.length === 1 ? matchingPhases[0] : undefined;
     const proof = state.phases[ref.phaseId];
     const validationDigest = proof?.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
     if (
       !phase ||
-      phase.id !== ref.phaseId ||
       !proof?.validation ||
       proof.phaseHash !== ref.phaseHash ||
       proof.head !== ref.sourceHead ||
@@ -331,6 +332,8 @@ export const runNativeTaskPrWatch = (
       validation.kind !== 'validation' ||
       validation.generationHash !== sha256HexSync(stored.state.generation) ||
       !validation.phaseId ||
+      !validation.phaseHash ||
+      !validation.snapshotId ||
       !validation.sourceHead ||
       !validation.sourceTree ||
       !deliveryAction ||
@@ -351,6 +354,17 @@ export const runNativeTaskPrWatch = (
         'Use the exact current open-PR delivery reference returned by the task card.',
       );
     const phase = stored.state.cycle?.state.phases[validation.phaseId];
+    const matchingSnapshots = EffectArray.filter(
+      stored.state.cycle?.snapshots ?? [],
+      item =>
+        item.snapshot.snapshotId === validation.snapshotId &&
+        item.snapshot.phaseId === validation.phaseId &&
+        item.snapshot.phaseHash === validation.phaseHash &&
+        item.snapshot.head === validation.sourceHead &&
+        item.snapshot.tree === validation.sourceTree,
+    );
+    if (matchingSnapshots.length !== 1)
+      return yield* fail('snapshot-ambiguous', 'The watch reference needs one unique canonical reviewed snapshot.');
     if (
       !phase ||
       phase.head !== validation.sourceHead ||
@@ -470,11 +484,59 @@ export const runNativeTaskPrWatch = (
           'watch-not-ready',
           'Exact PR source-complete watch state and its actual host receipt are required before delivery.',
         );
+      const current = yield* readNativeWorkflowState(config, request.runId);
+      if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
+      const cycleState = current.state.cycle.state;
+      const currentProof = cycleState.phases[validation.phaseId];
+      const planPhases = EffectArray.filter(cycleState.plan.phases, item => item.id === validation.phaseId);
+      if (
+        planPhases.length !== 1 ||
+        !currentProof ||
+        currentProof.phaseHash !== validation.phaseHash ||
+        currentProof.head !== validation.sourceHead ||
+        currentProof.tree !== validation.sourceTree ||
+        currentProof.validation?.snapshotTree !== validation.sourceTree
+      )
+        return yield* fail(
+          'stale-delivery-ref',
+          'The historical PR reference no longer matches canonical phase proof.',
+        );
+      const planPhase = planPhases[0];
+      const canonicalReceipt = currentProof.delivery;
+      const canonicalPr = canonicalReceipt?.delivery === 'pr' ? canonicalReceipt.pr : undefined;
+      if (canonicalReceipt?.delivery === 'pr') {
+        const canonicalIdentity = {
+          ...canonicalReceipt,
+          pr: canonicalPr ? {...canonicalPr, state: 'open' as const, baseRefBinding: undefined} : undefined,
+          watch: undefined,
+        };
+        const suppliedIdentity = {
+          ...embeddedDelivery,
+          pr: embeddedDelivery.pr
+            ? {...embeddedDelivery.pr, state: 'open' as const, baseRefBinding: undefined}
+            : undefined,
+          watch: undefined,
+        };
+        if (stableJson(canonicalIdentity) !== stableJson(suppliedIdentity))
+          return yield* fail(
+            'stale-delivery-ref',
+            'The open PR receipt does not match this exact historical delivery reference.',
+          );
+        if (
+          canonicalPr?.state === 'open' &&
+          (canonicalReceipt.watch?.state !== 'active' ||
+            canonicalReceipt.watch.prUrl !== embeddedDelivery.pr.url ||
+            canonicalReceipt.watch.headSha !== validation.sourceHead ||
+            canonicalReceipt.watch.consumerId !== consumer.id)
+        )
+          return yield* fail('stale-delivery-ref', 'The published phase is bound to another PR watch consumer.');
+      }
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.realPath(config.agentContextHome);
       const stateDir = path.join(home, 'workflow-automations', 'native-watch-v1');
-      const evidence = `native-watch-revision:${watch.revision};host-receipt:${notification.lastReceipt?.receipt ?? notification.outbox?.receipt}`;
+      const hostReceipt = notification.lastReceipt?.receipt ?? notification.outbox?.receipt;
+      const evidence = `native-watch-revision:${watch.revision};host-receipt:${hostReceipt}`;
       const watchEvidence = {
         prUrl: embeddedDelivery.pr.url,
         headSha: embeddedDelivery.headSha,
@@ -484,70 +546,157 @@ export const runNativeTaskPrWatch = (
         consumerId: consumer.id,
         evidence,
       };
+      const receiptBase = canonicalReceipt?.delivery === 'pr' ? canonicalReceipt : embeddedDelivery;
+      const receiptPr = receiptBase.pr;
+      if (!receiptPr) return yield* fail('invalid-watch-receipt', 'The task delivery reference has no PR identity.');
       const finalReceipt = yield* Schema.decodeEffect(NativeCycleDeliverySchema, {onExcessProperty: 'error'})({
-        ...embeddedDelivery,
-        pr: {...embeddedDelivery.pr, state: terminal ? 'merged' : 'open'},
+        ...receiptBase,
+        pr: {...receiptPr, state: terminal ? 'merged' : 'open'},
         watch: watchEvidence,
       }).pipe(Effect.mapError(() => fail('invalid-watch-receipt', 'The canonical watch evidence is malformed.')));
-      if (phase.delivery?.pr?.state === 'merged' && stableJson(phase.delivery) !== stableJson(finalReceipt))
-        return yield* fail(
-          'delivery-conflict',
-          'A merged PR receipt cannot be replaced by changed watch or publication evidence.',
+      if (canonicalPr?.state === 'merged') {
+        if (stableJson(canonicalReceipt) !== stableJson(finalReceipt))
+          return yield* fail(
+            'delivery-conflict',
+            'The merged PR watch receipt is immutable and does not match this terminal readback.',
+          );
+        return {
+          status: 'delivered',
+          replayed: true,
+          deliveryRef: encodeNativeTaskActionRef({
+            ...deliveryAction,
+            kind: 'delivery',
+            payloadDigest: sha256HexSync(stableJson(canonicalReceipt)),
+            delivery: canonicalReceipt,
+          }),
+          receipt: canonicalReceipt,
+          next: nextNativeCycle(cycleState),
+        };
+      }
+      const previouslyPublished = canonicalReceipt?.delivery === 'pr' && canonicalPr?.state === 'open';
+      if (previouslyPublished) {
+        const branchHead = yield* runCommandEffect(
+          'git',
+          [
+            '--no-optional-locks',
+            '-C',
+            checkout,
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            `refs/heads/${planPhase.branch}^{commit}`,
+          ],
+          {timeoutMs: 30_000, maxOutputBytes: 4096},
+        ).pipe(Effect.mapError(() => fail('source-drift', 'The published phase branch reference is unavailable.')));
+        const branchTree = yield* runCommandEffect(
+          'git',
+          [
+            '--no-optional-locks',
+            '-C',
+            checkout,
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            `refs/heads/${planPhase.branch}^{tree}`,
+          ],
+          {timeoutMs: 30_000, maxOutputBytes: 4096},
+        ).pipe(Effect.mapError(() => fail('source-drift', 'The published phase tree reference is unavailable.')));
+        if (
+          EffectString.trim(branchHead.stderr) ||
+          EffectString.trim(branchTree.stderr) ||
+          EffectString.trim(branchHead.stdout) !== validation.sourceHead ||
+          EffectString.trim(branchTree.stdout) !== validation.sourceTree
+        )
+          return yield* fail(
+            'source-drift',
+            'The immutable published phase branch no longer matches its reviewed source.',
+          );
+      } else {
+        const ready = unwrapCycle(
+          yield* inCheckout(
+            runWorkflowAutomation(
+              config,
+              cycleRequest(current, {
+                command: 'publication-ready',
+                phaseId: validation.phaseId,
+                publication: embeddedDelivery.publication,
+              }),
+            ),
+            checkout,
+          ),
         );
-      const current = yield* readNativeWorkflowState(config, request.runId);
-      if (!current?.state.cycle) return yield* fail('cycle-not-found', 'This run no longer has its canonical cycle.');
-      const ready = unwrapCycle(
-        yield* inCheckout(
-          runWorkflowAutomation(
-            config,
-            cycleRequest(current, {
-              command: 'publication-ready',
-              phaseId: validation.phaseId,
-              publication: embeddedDelivery.publication,
-            }),
-          ),
-          checkout,
-        ),
+        if (ready.head !== validation.sourceHead || ready.tree !== validation.sourceTree)
+          return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
+      }
+      const finalReceiptPr = finalReceipt.pr;
+      if (!finalReceiptPr) return yield* fail('invalid-watch-receipt', 'The canonical watch PR identity is missing.');
+      const {baseRefBinding: _baseRefBinding, ...unboundReceiptPr} = finalReceiptPr;
+      const baseRefReceipt =
+        canonicalReceipt?.delivery === 'pr' ? {...finalReceipt, pr: unboundReceiptPr} : finalReceipt;
+      const checkedBaseReceipt = yield* bindNativeCycleDeliveryBase(checkout, planPhase.baseBranch, baseRefReceipt);
+      if (
+        canonicalPr?.baseRefBinding &&
+        stableJson(checkedBaseReceipt.pr?.baseRefBinding) !== stableJson(canonicalPr.baseRefBinding)
+      )
+        return yield* fail(
+          'base-ref-unverified',
+          'The historical PR base binding no longer matches its canonical receipt.',
+        );
+      const recorded = yield* withNativeWatchControlLock(
+        config,
+        watchId,
+        Effect.gen(function* () {
+          const latestWatch = yield* readNativeWatch(config, watchId);
+          if (!latestWatch || latestWatch.revision !== watch.revision)
+            return yield* fail('watch-state-conflict', 'The exact watch readback changed before phase delivery.');
+          const latest = yield* readNativeWorkflowState(config, request.runId);
+          if (!latest?.state.cycle || latest.revision !== current.revision)
+            return yield* fail(
+              'stale-delivery-ref',
+              'Canonical phase state changed before the watch receipt was recorded.',
+            );
+          const result = unwrapCycle(
+            yield* inCheckout(
+              runWorkflowAutomation(
+                config,
+                cycleRequest(latest, {
+                  command: 'record-delivery',
+                  phaseId: validation.phaseId,
+                  delivery: finalReceipt,
+                  publication: embeddedDelivery.publication,
+                  expectedRevision: latest.revision,
+                }),
+              ),
+              checkout,
+            ),
+          );
+          const persistedState = yield* readNativeWorkflowState(config, request.runId);
+          const persisted =
+            validation.phaseId === undefined
+              ? undefined
+              : persistedState?.state.cycle?.state.phases[validation.phaseId]?.delivery;
+          if (
+            !persisted ||
+            !persisted.pr ||
+            stableJson({...persisted, pr: {...persisted.pr, baseRefBinding: undefined}}) !==
+              stableJson({...finalReceipt, pr: {...finalReceipt.pr, baseRefBinding: undefined}}) ||
+            stableJson(persisted.pr.baseRefBinding) !== stableJson(checkedBaseReceipt.pr?.baseRefBinding)
+          )
+            return yield* fail('delivery-not-recorded', 'The exact watched PR receipt was not persisted.');
+          return {result, persisted};
+        }),
       );
-      if (ready.head !== validation.sourceHead || ready.tree !== validation.sourceTree)
-        return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
-      const planPhase = EffectArray.findFirst(
-        current.state.cycle.state.plan.phases,
-        item => item.id === validation.phaseId,
-      );
-      if (planPhase._tag === 'None')
-        return yield* fail('phase-not-found', 'The validated phase is no longer in the approved plan.');
-      yield* bindNativeCycleDeliveryBase(checkout, planPhase.value.baseBranch, finalReceipt);
-      const recorded = unwrapCycle(
-        yield* inCheckout(
-          runWorkflowAutomation(
-            config,
-            cycleRequest(current, {
-              command: 'record-delivery',
-              phaseId: validation.phaseId,
-              delivery: finalReceipt,
-              publication: embeddedDelivery.publication,
-              expectedRevision: current.revision,
-            }),
-          ),
-          checkout,
-        ),
-      );
-      const latest = yield* readNativeWorkflowState(config, request.runId);
-      const persisted = latest?.state.cycle?.state.phases[validation.phaseId]?.delivery;
-      if (!persisted || stableJson(persisted) !== stableJson(finalReceipt))
-        return yield* fail('delivery-not-recorded', 'The exact watched PR receipt was not persisted.');
       return {
         status: 'delivered',
         replayed: false,
         deliveryRef: encodeNativeTaskActionRef({
           ...deliveryAction,
           kind: 'delivery',
-          payloadDigest: sha256HexSync(stableJson(persisted)),
-          delivery: persisted,
+          payloadDigest: sha256HexSync(stableJson(recorded.persisted)),
+          delivery: recorded.persisted,
         }),
-        receipt: persisted,
-        next: recorded.next,
+        receipt: recorded.persisted,
+        next: recorded.result.next,
       };
     }
     const notice = request.noticeRef ? decodeNativeTaskActionRef(request.noticeRef) : undefined;

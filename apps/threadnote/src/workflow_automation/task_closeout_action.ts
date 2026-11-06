@@ -63,52 +63,74 @@ export const runNativeTaskFinish = (
       )
         return yield* fail('finish-scope', 'Commit closeout requires every phase’s exact canonical commit receipt.');
     } else {
-      const pr = phaseReceipt?.pr;
-      const watchId = phase ? `pr-${EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${phase.id}`))}` : '';
-      const watch = phase ? yield* readNativeWatch(config, watchId) : undefined;
-      const notification = watch?.envelope.notification;
+      if (state.plan.delivery !== 'pr')
+        return yield* fail('finish-scope', 'PR closeout requires a canonical PR delivery plan.');
       const requiredSources = ['comments', 'reviews', 'threads', 'checks', 'statuses'];
-      const completeSources =
-        watch &&
-        watch.envelope.state.sources.length === requiredSources.length &&
-        EffectArray.every(requiredSources, source =>
-          EffectArray.some(
-            watch.envelope.state.sources,
-            item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+      const watchWork: Array<NonNullable<NativeCloseoutProposal['watchWork']>[number]> = [];
+      for (const planPhase of state.plan.phases) {
+        const proof = state.phases[planPhase.id];
+        const receipt = proof?.delivery;
+        const pr = receipt?.pr;
+        const watchId = `pr-${EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${planPhase.id}`))}`;
+        const watch = yield* readNativeWatch(config, watchId);
+        const notification = watch?.envelope.notification;
+        const consumer = watch?.envelope.state.consumer;
+        const hostReceipt = notification?.lastReceipt?.receipt ?? notification?.outbox?.receipt;
+        const completeSources =
+          watch &&
+          watch.envelope.state.sources.length === requiredSources.length &&
+          EffectArray.every(requiredSources, source =>
+            EffectArray.some(
+              watch.envelope.state.sources,
+              item => item.source === source && item.lastCompleteAt !== undefined && item.error === undefined,
+            ),
+          );
+        if (
+          !proof ||
+          !receipt ||
+          receipt.delivery !== 'pr' ||
+          receipt.phaseId !== planPhase.id ||
+          receipt.phaseHash !== proof.phaseHash ||
+          receipt.headSha !== proof.head ||
+          receipt.validatedTree !== proof.tree ||
+          pr?.state !== 'merged' ||
+          receipt.watch?.state !== 'terminal' ||
+          receipt.watch.prUrl !== pr.url ||
+          receipt.watch.headSha !== pr.headSha ||
+          !watch ||
+          watch.envelope.state.pr !== pr.url ||
+          watch.envelope.state.prState !== 'merged' ||
+          watch.envelope.state.head !== pr.headSha ||
+          watch.envelope.collector?.status !== 'terminal' ||
+          !completeSources ||
+          !notification ||
+          !consumer ||
+          receipt.watch.consumerId !== consumer.id ||
+          notification.consumerId !== consumer.id ||
+          notification.wakeupId !== consumer.wakeupId ||
+          !hostReceipt ||
+          !EffectString.startsWith('native-watch-revision:')(receipt.watch.evidence) ||
+          !EffectString.endsWith(`;host-receipt:${hostReceipt}`)(receipt.watch.evidence)
+        )
+          return yield* fail(
+            'finish-scope',
+            'PR closeout requires each exact merged PR, terminal source-complete watch, live consumer record, and host receipt.',
+          );
+        watchWork.push(
+          ...EffectArray.map(
+            EffectArray.filter(watch.envelope.state.work, item => item.status === 'open' || item.status === 'blocked'),
+            item => ({
+              eventId: item.eventId,
+              status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
+              reason: item.reason,
+              evidence: item.evidence,
+              event: item.event,
+              at: item.at,
+            }),
           ),
         );
-      if (
-        state.plan.delivery !== 'pr' ||
-        !phase ||
-        phaseReceipt?.delivery !== 'pr' ||
-        pr?.state !== 'merged' ||
-        phaseReceipt.watch?.state !== 'terminal' ||
-        !watch ||
-        watch.envelope.state.pr !== pr.url ||
-        watch.envelope.state.prState !== 'merged' ||
-        watch.envelope.state.head !== pr.headSha ||
-        watch.envelope.collector?.status !== 'terminal' ||
-        !completeSources ||
-        !notification ||
-        notification.consumerId !== watch.envelope.state.consumer?.id ||
-        notification.wakeupId !== watch.envelope.state.consumer?.wakeupId ||
-        !(notification.lastReceipt || notification.outbox?.receipt)
-      )
-        return yield* fail(
-          'finish-scope',
-          'PR closeout requires the exact merged PR, terminal source-complete watch, live consumer record, and host receipt.',
-        );
-      closeoutWatchWork = EffectArray.map(
-        EffectArray.filter(watch.envelope.state.work, item => item.status === 'open' || item.status === 'blocked'),
-        item => ({
-          eventId: item.eventId,
-          status: item.status === 'blocked' ? ('blocked' as const) : ('open' as const),
-          reason: item.reason,
-          evidence: item.evidence,
-          event: item.event,
-          at: item.at,
-        }),
-      );
+      }
+      closeoutWatchWork = watchWork;
     }
     const closeoutProposal =
       request.proposal === undefined
