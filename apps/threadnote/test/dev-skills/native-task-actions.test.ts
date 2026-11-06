@@ -4710,9 +4710,7 @@ describe('native task actions', () => {
           snapshotRef,
           validation: {
             checks: [{command: 'commit fixture check', result: 'passed', evidence: 'The exact committed tree passed.'}],
-            acceptance: [
-              {criterion: 'commit is ready', result: 'passed', evidence: 'The accepted source is committed.'},
-            ],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'The accepted source is committed.'}],
           },
         }),
       );
@@ -4746,14 +4744,14 @@ describe('native task actions', () => {
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'Commit after validation']);
       const beforeStale = yield* f.fs.readFileString(f.statePath());
-      const stale = object(
-        yield* mcp.invokeTool('workflow_task_deliver', {
+      const stale = yield* mcp
+        .invokeTool('workflow_task_deliver', {
           runId: 'native-run',
           callerCwd: f.repo,
           delivery: {command: 'commit', validationRef, commitEvidence: evidence},
-        }),
-      );
-      expect(stale.isError).toBe(true);
+        })
+        .pipe(Effect.result);
+      expect(stale).toMatchObject({failure: {code: 'source-drift'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeStale);
       yield* f.git(['reset', '--hard', 'HEAD~1']);
 
@@ -4788,8 +4786,8 @@ describe('native task actions', () => {
         receipt: delivered.receipt,
       });
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
-      const changedEvidence = object(
-        yield* mcp.invokeTool('workflow_task_deliver', {
+      const changedEvidence = yield* mcp
+        .invokeTool('workflow_task_deliver', {
           runId: 'native-run',
           callerCwd: f.repo,
           delivery: {
@@ -4797,9 +4795,9 @@ describe('native task actions', () => {
             validationRef: String(delivered.deliveryRef),
             commitEvidence: 'different commit',
           },
-        }),
-      );
-      expect(changedEvidence.isError).toBe(true);
+        })
+        .pipe(Effect.result);
+      expect(changedEvidence).toMatchObject({failure: {code: 'delivery-conflict'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
     }).pipe(run),
   );
