@@ -4664,6 +4664,29 @@ describe('native task actions', () => {
       );
       expect(exactFinish).toMatchObject({status: 'complete', replayed: true});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
+      const terminalView = object(
+        yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, detail: 'packet'}),
+      );
+      expect(terminalView).toMatchObject({
+        status: 'complete',
+        closeout: {
+          status: 'complete',
+          transactionId: completedCloseout?.state.transactionId,
+          outputs: expect.arrayContaining([
+            expect.objectContaining({
+              uri: expect.any(String),
+              memoryId: expect.any(String),
+              revision: expect.any(String),
+            }),
+          ]),
+        },
+      });
+      const terminalViewReplay = object(
+        yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, detail: 'packet'}),
+      );
+      expect(terminalViewReplay).toEqual(terminalView);
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
     }).pipe(run),
   );
 
