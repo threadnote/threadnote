@@ -18,6 +18,7 @@ import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
+import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
 
 const requestSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
@@ -276,18 +277,12 @@ const baseRequalificationRoute = (
     if (fromBranches.size !== 1) return undefined;
     const fromBaseBranch = [...fromBranches][0];
     if (!fromBaseBranch) return undefined;
-    const oldBaseResult = yield* gitValue(
-      ['rev-parse', '--verify', '--end-of-options', `refs/heads/${fromBaseBranch}^{commit}`],
-      checkout,
-    ).pipe(Effect.result);
+    const oldBaseResult = yield* resolveNativeTaskBaseRef(checkout, fromBaseBranch).pipe(Effect.result);
     const headResult = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout).pipe(
       Effect.result,
     );
     const branchResult = yield* gitValue(['branch', '--show-current'], checkout).pipe(Effect.result);
-    const newBaseResult = yield* gitValue(
-      ['rev-parse', '--verify', '--end-of-options', `refs/heads/${phase.baseBranch}^{commit}`],
-      checkout,
-    ).pipe(Effect.result);
+    const newBaseResult = yield* resolveNativeTaskBaseRef(checkout, phase.baseBranch).pipe(Effect.result);
     if (
       oldBaseResult._tag === 'Failure' ||
       headResult._tag === 'Failure' ||
@@ -302,10 +297,10 @@ const baseRequalificationRoute = (
       newBaseResult.success === undefined
     )
       return undefined;
-    const priorBaseHead = EffectString.trim(oldBaseResult.success);
+    const priorBaseHead = oldBaseResult.success.commit;
     const currentHead = EffectString.trim(headResult.success);
     const currentBranch = EffectString.trim(branchResult.success);
-    const newBaseHead = EffectString.trim(newBaseResult.success);
+    const newBaseHead = newBaseResult.success.commit;
     if (
       priorBaseHead !== prior.declaredBaseHead ||
       currentBranch !== phase.branch ||

@@ -687,9 +687,18 @@ describe('Threadnote MCP toolsets', () => {
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        const taskViewSchema = decodeJsonObject(workflowTaskView?.inputSchema);
+        expect(taskViewSchema.required).toEqual(expect.arrayContaining(['runId', 'callerCwd']));
         expect(decodeJsonObject(decodeJsonObject(workflowTaskView?.inputSchema).properties).detail).toMatchObject({
           enum: ['summary', 'packet'],
         });
+        const workflowTaskStart = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_start'),
+        );
+        expect(workflowTaskStart).toBeDefined();
+        expect(decodeJsonObject(workflowTaskStart?.inputSchema).required).toEqual(
+          expect.arrayContaining(['installationTarget']),
+        );
         const compactConfirm = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_compact_confirm'),
         );

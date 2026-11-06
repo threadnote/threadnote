@@ -1,6 +1,7 @@
 import {SystemInfo} from '@threadnote/platform/system';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
-import {Array as EffectArray, Effect, Predicate} from 'effect';
+import {Array as EffectArray, Effect, Option, Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations/cycle-runtime';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -12,6 +13,55 @@ import type {readNativeWorkflowState} from './store.js';
 export type NativeTaskStoredState = NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>;
 export type NativeTaskCycleRuntime = NonNullable<NativeTaskStoredState['state']['cycle']>;
 export const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+
+const gitObjectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
+
+/** Resolve only canonical local or remote-tracking branch refs, as cycle merge qualification does. */
+export const resolveNativeTaskBaseRef = Effect.fn('workflowAutomation.task.resolveBaseRef')(function* (
+  checkout: string,
+  baseBranch: string,
+) {
+  if (
+    !baseBranch ||
+    baseBranch.length > 256 ||
+    EffectArray.some([...baseBranch], character =>
+      Option.exists(EffectString.codePointAt(character, 0), code => code < 32 || (code >= 127 && code <= 159)),
+    )
+  )
+    return undefined;
+  const ref = yield* gitValue(
+    [
+      '-c',
+      'core.warnAmbiguousRefs=true',
+      'rev-parse',
+      '--symbolic-full-name',
+      '--verify',
+      '--end-of-options',
+      baseBranch,
+    ],
+    checkout,
+  );
+  if (!ref || !/^refs\/(?:heads|remotes)\/[^\s]+$/u.test(ref)) return undefined;
+  const commit = yield* gitValue(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], checkout);
+  if (!commit || !gitObjectId.test(commit)) return undefined;
+  return {ref, commit};
+});
+
+export const nativeTaskBindingsCanReconcile = Effect.fn('workflowAutomation.task.validateReconcileBindings')(function* (
+  checkout: string,
+  phases: readonly {readonly id: string; readonly branch: string; readonly baseBranch: string}[],
+  suppliedBindings: Readonly<Record<string, {readonly branch: string; readonly baseBranch: string}>>,
+  replay: boolean,
+) {
+  for (const [phaseId, supplied] of EffectRecord.toEntries(suppliedBindings)) {
+    const current = Option.getOrUndefined(EffectArray.findFirst(phases, phase => phase.id === phaseId));
+    if (current && (supplied.branch !== current.branch || (replay && supplied.baseBranch !== current.baseBranch)))
+      return false;
+    if (!current || supplied.baseBranch === current.baseBranch) continue;
+    if (!(yield* resolveNativeTaskBaseRef(checkout, supplied.baseBranch))) return false;
+  }
+  return true;
+});
 
 export const inCheckout = <A, E, R>(program: Effect.Effect<A, E, R>, checkout: string) =>
   Effect.gen(function* () {
@@ -95,24 +145,21 @@ export const verifyRequalificationWitness = (
   Effect.gen(function* () {
     const head = yield* gitValue(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], checkout);
     const branchValue = yield* gitValue(['branch', '--show-current'], checkout);
-    const ontoHead = yield* gitValue(
-      ['rev-parse', '--verify', '--end-of-options', `refs/heads/${baseBranch}^{commit}`],
-      checkout,
-    );
-    if (!head || !branchValue || !ontoHead)
+    const onto = yield* resolveNativeTaskBaseRef(checkout, baseBranch);
+    if (!head || !branchValue || !onto)
       return yield* fail(
         'invalid-base-requalification',
         'The reviewed source, phase branch and new base must resolve to exact commits.',
       );
     const branch = EffectString.trim(branchValue);
-    if (branch !== branchName || head === priorHead || ontoHead === priorBaseHead)
+    if (branch !== branchName || head === priorHead || onto.commit === priorBaseHead)
       return yield* fail(
         'invalid-base-requalification',
         'The exact current phase branch, rewritten HEAD and changed declared base are required.',
       );
     const witness = {
       preRebaseHead: priorHead,
-      ontoHead: EffectString.trim(ontoHead),
+      ontoHead: onto.commit,
       rebasedHead: EffectString.trim(head),
       fromBaseBranch,
     };

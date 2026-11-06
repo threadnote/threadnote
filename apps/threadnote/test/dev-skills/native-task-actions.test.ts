@@ -1065,6 +1065,9 @@ describe('native task actions', () => {
         );
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, config);
+        const missingTargetMcpCall = yield* mcp.invokeTool('workflow_task_start', withoutTarget).pipe(Effect.result);
+        expect(missingTargetMcpCall._tag).toBe('Failure');
+        expect(yield* readNativeWorkflowState(config, expectedRunId)).toBeUndefined();
         const testFs = yield* FileSystem.FileSystem;
         const testPath = yield* Path.Path;
         let injectedPreparedRoot = false;
@@ -1180,7 +1183,9 @@ describe('native task actions', () => {
         expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
 
         let cliResult: Record<string, unknown> | undefined;
+        let cliHandlerCalls = 0;
         const taskStart = makeNativeTaskStartCommand(options => {
+          cliHandlerCalls++;
           const {eligibility, missingDecision, evidenceRefs, reviewRequired, reviewReason, ...fields} = options;
           const cliIntent = {
             title: fields.title,
@@ -1199,7 +1204,7 @@ describe('native task actions', () => {
           return runNativeTaskStart(config, {
             callerCwd: fields.callerCwd,
             featureName: fields.featureName,
-            ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
+            installationTarget: fields.installationTarget,
             ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
             intent: cliIntent,
           }).pipe(
@@ -1210,14 +1215,11 @@ describe('native task actions', () => {
         });
         const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([taskStart]));
         const runCli = Command.runWith(cli, {version: 'fixture'});
-        yield* runCli([
-          'task-start',
+        const taskStartArgs = [
           '--caller-cwd',
           f.repo,
           '--feature-name',
           'Fixture refresh',
-          '--installation-target',
-          'codex',
           '--title',
           intent.title,
           '--current-behavior',
@@ -1236,7 +1238,16 @@ describe('native task actions', () => {
           'eligible',
           '--review-reason',
           intent.review.reason,
-        ]).pipe(Effect.provideService(SystemInfo, testSystem));
+        ];
+        const missingTargetCli = yield* runCli(['task-start', ...taskStartArgs]).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        );
+        expect(missingTargetCli._tag).toBe('Failure');
+        expect(cliHandlerCalls).toBe(0);
+        yield* runCli(['task-start', '--installation-target', 'codex', ...taskStartArgs]).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
         expect(cliResult).toMatchObject({status: 'resumed', taskRef: runId});
         expect(yield* f.fs.readFileString(statePath)).toBe(savedState);
 
@@ -1496,18 +1507,33 @@ describe('native task actions', () => {
         yield* f.git(['add', 'incoming.ts']);
         yield* f.git(['commit', '-m', 'Divergent reviewed new base']);
         const ontoHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+        yield* f.git(['config', '--local', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+        yield* f.git(['update-ref', 'refs/remotes/origin/main', ontoHead]);
         yield* f.git(['checkout', '-b', 'feature/main']);
         yield* f.git(['cherry-pick', featureHead]);
         const rebasedHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         expect(rebasedHead).not.toBe(featureHead);
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'local-main-only.ts'), 'export const localMain = true;\n');
+        yield* f.git(['add', 'local-main-only.ts']);
+        yield* f.git(['commit', '-m', 'Advance the local base independently']);
+        const localMainHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        expect(localMainHead).not.toBe(ontoHead);
+        yield* f.git(['checkout', 'feature/main']);
 
-        const amendedPlan = yield* f.revise({}, {one: {branch: 'feature/main', baseBranch: 'main'}});
+        const amendedPlan = yield* f.revise({}, {one: {branch: 'feature/main', baseBranch: 'origin/main'}});
         yield* f.mutate('reconcile', {
           plan: amendedPlan,
           reason: 'Test-only explicit approval to use main as the declared phase base.',
         });
         const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
         registerWorkflowTaskTool(mcp, f.config);
+        for (const incompleteRequest of [{callerCwd: f.repo}, {runId: 'native-run'}]) {
+          expect(yield* readNativeTaskView(f.config, incompleteRequest).pipe(Effect.result)).toMatchObject({
+            failure: {code: 'invalid-request'},
+          });
+        }
         const taskViewResult = object(
           yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}),
         );
@@ -1520,7 +1546,7 @@ describe('native task actions', () => {
           phaseId: 'one',
           predecessorRef,
           fromBaseBranch: 'prerelease',
-          toBaseBranch: 'main',
+          toBaseBranch: 'origin/main',
         });
         const stateBeforeReviewOmission = yield* f.fs.readFileString(f.statePath());
         const currentStored = yield* readNativeWorkflowState(f.config, 'native-run');
@@ -1587,9 +1613,9 @@ describe('native task actions', () => {
         yield* f.git(['update-ref', 'refs/heads/prerelease', ontoHead]);
         yield* refuseWithoutMutation(request, 'stale-snapshot-ref');
         yield* f.git(['update-ref', 'refs/heads/prerelease', String(prior.declaredBaseHead)]);
-        yield* f.git(['update-ref', 'refs/heads/main', String(prior.declaredBaseHead)]);
+        yield* f.git(['update-ref', 'refs/remotes/origin/main', String(prior.declaredBaseHead)]);
         yield* refuseWithoutMutation(request, 'stale-snapshot-ref');
-        yield* f.git(['update-ref', 'refs/heads/main', ontoHead]);
+        yield* f.git(['update-ref', 'refs/remotes/origin/main', ontoHead]);
         yield* f.git(['checkout', 'feature/one']);
         yield* refuseWithoutMutation(request, 'stale-snapshot-ref');
         yield* f.git(['checkout', 'feature/main']);
@@ -1612,6 +1638,10 @@ describe('native task actions', () => {
         const applied = object(appliedResponse.structuredContent);
         expect(applied).toMatchObject({status: 'recorded', replayed: false});
         const requalified = object(object(applied.snapshot).snapshot);
+        const remoteBaseTree = EffectString.trim((yield* f.git(['rev-parse', 'origin/main^{tree}'])).stdout);
+        expect(requalified.declaredBaseHead).toBe(ontoHead);
+        expect(requalified.declaredBaseHead).not.toBe(localMainHead);
+        expect(requalified.scopeBase).toBe(remoteBaseTree);
         expect(requalified).toMatchObject({
           snapshotId: expect.stringMatching(/^base-requalified-/u),
           previous: prior.snapshotId,
@@ -1623,7 +1653,7 @@ describe('native task actions', () => {
             ontoHead,
             rebasedHead,
             fromBaseBranch: 'prerelease',
-            toBaseBranch: 'main',
+            toBaseBranch: 'origin/main',
             priorDeclaredBaseHead: prior.declaredBaseHead,
             reason: request.reason,
             authority: request.userAuthority,
@@ -5695,9 +5725,22 @@ describe('native task actions', () => {
       const f = yield* nativeFixture();
       yield* f.init();
       yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
+      yield* runCommandEffect('git', ['-C', f.repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        'config',
+        '--local',
+        'remote.origin.fetch',
+        '+refs/heads/*:refs/remotes/origin/*',
+      ]);
       yield* runCommandEffect('git', ['-C', f.repo, 'config', '--local', 'user.name', 'Fixture']);
       yield* runCommandEffect('git', ['-C', f.repo, 'config', '--local', 'user.email', 'fixture@example.invalid']);
       yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Initialize reconcile fixture source']);
+      const localMainHead = EffectString.trim(
+        (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'refs/heads/main'])).stdout,
+      );
+      yield* runCommandEffect('git', ['-C', f.repo, 'update-ref', 'refs/remotes/origin/main', localMainHead]);
       const indexed = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
       expect(indexed.snapshot.state).toBe('ready');
       const intent = {
@@ -5846,6 +5889,8 @@ describe('native task actions', () => {
       ]);
       const priorRuntime = initialCycleState?.state.cycle;
       if (!initialCycleState || !priorRuntime) throw new Error('The original cycle evidence must exist.');
+      const compactBinding = EffectArray.findFirst(priorRuntime.state.plan.phases, phase => phase.id === 'compact');
+      if (compactBinding._tag === 'None') throw new Error('The original compact phase binding must exist.');
       expect(priorRuntime.snapshots).toHaveLength(2);
       expect(priorRuntime.reviews).toHaveLength(2);
       expect(priorRuntime.attempts).toHaveLength(2);
@@ -5997,6 +6042,10 @@ describe('native task actions', () => {
         'p4-followup': {branch: 'feature/p4-followup', baseBranch: 'main'},
         'p4-closeout-check': {branch: 'feature/p4-closeout-check', baseBranch: 'main'},
       };
+      const transitionBindings = {
+        ...newBindings,
+        compact: {branch: compactBinding.value.branch, baseBranch: 'origin/main'},
+      };
       const confirmResult = object(
         object(
           yield* f.call({
@@ -6068,6 +6117,16 @@ describe('native task actions', () => {
         }).pipe(Effect.result),
       ).toMatchObject({failure: {code: 'invalid-request'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRebinding);
+      const invalidBaseTransition = yield* runNativeTaskAction(f.config, {
+        command: 'reconcile',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        taskRef,
+        reason: 'An unresolvable ref is not an approved comparison base.',
+        bindings: {...transitionBindings, compact: {branch: compactBinding.value.branch, baseBranch: 'refs/tags/v1'}},
+      }).pipe(Effect.result);
+      expect(invalidBaseTransition).toMatchObject({failure: {code: 'invalid-request'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRebinding);
       const beforeMissingBindings = yield* f.fs.readFileString(f.statePath());
       const missingBindings = yield* runNativeTaskAction(f.config, {
         command: 'reconcile',
@@ -6081,7 +6140,7 @@ describe('native task actions', () => {
       const beforeReconcile = yield* f.fs.readFileString(f.statePath());
       const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
       registerWorkflowTaskTool(mcp, f.config);
-      const invokeControl = () =>
+      const invokeControl = (bindings: typeof newBindings | typeof transitionBindings) =>
         mcp.invokeTool('workflow_task_control', {
           runId: 'native-run',
           callerCwd: f.repo,
@@ -6089,10 +6148,10 @@ describe('native task actions', () => {
           control: {
             command: 'reconcile',
             reason: 'Reconcile the user-approved verification phase.',
-            bindings: newBindings,
+            bindings,
           },
         });
-      const reconciled = object(object(yield* invokeControl()).structuredContent);
+      const reconciled = object(object(yield* invokeControl(transitionBindings)).structuredContent);
       expect(reconciled).toMatchObject({status: 'reconciled', replayed: false});
       expect(yield* f.fs.readFileString(f.statePath())).not.toBe(beforeReconcile);
       const reconciledState = yield* readNativeWorkflowState(f.config, 'native-run');
@@ -6101,7 +6160,7 @@ describe('native task actions', () => {
       expect(nextRuntime.plans).toHaveLength(priorRuntime.plans.length + 1);
       expect(nextRuntime.state.plan.phases).toHaveLength(3);
       expect(nextRuntime.state.plan.phases[0]?.branch).toBe(priorRuntime.state.plan.phases[0]?.branch);
-      expect(nextRuntime.state.plan.phases[0]?.baseBranch).toBe(priorRuntime.state.plan.phases[0]?.baseBranch);
+      expect(nextRuntime.state.plan.phases[0]?.baseBranch).toBe('origin/main');
       expect(nextRuntime.snapshots).toEqual(priorRuntime.snapshots);
       expect(nextRuntime.reviews).toEqual(priorRuntime.reviews);
       expect(nextRuntime.attempts).toEqual(priorRuntime.attempts);
@@ -6130,14 +6189,19 @@ describe('native task actions', () => {
         expect(nextRuntime.state.phases[id]?.delivery).toBeUndefined();
       }
       const afterReconcile = yield* f.fs.readFileString(f.statePath());
-      expect(object(object(yield* invokeControl()).structuredContent)).toMatchObject({
+      expect(object(object(yield* invokeControl(transitionBindings)).structuredContent)).toMatchObject({
+        status: 'reconciled',
+        replayed: true,
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReconcile);
+      expect(object(object(yield* invokeControl(newBindings)).structuredContent)).toMatchObject({
         status: 'reconciled',
         replayed: true,
       });
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterReconcile);
       for (const bindings of [
         {...newBindings, 'p4-followup': {branch: 'feature/changed-choice', baseBranch: 'main'}},
-        {...newBindings, compact: {branch: 'main', baseBranch: 'main'}},
+        {...newBindings, compact: {branch: compactBinding.value.branch, baseBranch: 'main'}},
       ]) {
         expect(
           yield* runNativeTaskAction(f.config, {
