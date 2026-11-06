@@ -61,6 +61,7 @@ import {
   hasExactAcceptedFullReview,
   inCheckout,
   isCurrentTaskTargetForRequalification,
+  nativeTaskBindingsCanReconcile,
   requalificationSnapshotId,
   unwrapCycle,
   verifyRequalificationWitness,
@@ -1118,36 +1119,35 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (document.kind !== 'plan' || document.openQuestions.length > 0 || document.decisions.length === 0)
         return {status: 'needs-planning', missingInputs: ['Resolved plan questions and a recorded design decision']};
       const suppliedBindings = request.bindings ?? {};
-      const currentIds = new Set(EffectArray.map(state.plan.phases, phase => phase.id));
-      // An admitted exact replay may repeat only the business bindings introduced
-      // by that retained plan transition. Older bindings remain runtime-owned.
+      // An admitted replay must reproduce the reconciled plan exactly. This also
+      // lets an ambiguous retry repeat a base transition already accepted by the
+      // native cycle; any changed binding remains runtime-owned.
       const replayPredecessor =
         currentPlan.status === 'admitted' && stableJson(runtime.plans.at(-1)) === stableJson(state.plan)
           ? runtime.plans.at(-2)
           : undefined;
       if (
-        EffectArray.some(EffectRecord.keys(suppliedBindings), phaseId => {
-          if (!currentIds.has(phaseId)) return false;
-          const current = EffectOption.getOrUndefined(
-            EffectArray.findFirst(state.plan.phases, phase => phase.id === phaseId),
-          );
-          const supplied = suppliedBindings[phaseId];
-          return (
-            !replayPredecessor ||
-            EffectArray.some(replayPredecessor.phases, phase => phase.id === phaseId) ||
-            supplied.branch !== current?.branch ||
-            supplied.baseBranch !== current?.baseBranch
-          );
-        })
+        !(yield* nativeTaskBindingsCanReconcile(
+          checkout,
+          state.plan.phases,
+          suppliedBindings,
+          replayPredecessor !== undefined,
+        ))
       )
-        return yield* fail('invalid-request', 'Existing phase bindings are runtime-owned and cannot be replaced here.');
+        return yield* fail(
+          'invalid-request',
+          'An existing phase base can change only during plan reconciliation while its branch remains unchanged.',
+        );
       const bindings = EffectRecord.fromEntries(
         EffectArray.map(document.phases, phase => {
           const prior = EffectOption.getOrUndefined(
             EffectArray.findFirst(state.plan.phases, item => item.id === phase.id),
           );
           const supplied = suppliedBindings[phase.id];
-          return [phase.id, prior ? {branch: prior.branch, baseBranch: prior.baseBranch} : supplied] as const;
+          return [
+            phase.id,
+            prior ? {branch: prior.branch, baseBranch: supplied?.baseBranch ?? prior.baseBranch} : supplied,
+          ] as const;
         }),
       );
       if (

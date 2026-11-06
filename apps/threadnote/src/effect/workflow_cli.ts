@@ -247,7 +247,7 @@ export function makeNativeTaskStartCommand<E, R>(
   handler: (options: {
     readonly callerCwd: string;
     readonly featureName: string;
-    readonly installationTarget?: string;
+    readonly installationTarget: string;
     readonly taskRef?: string;
     readonly title: string;
     readonly currentBehavior: string;
@@ -268,7 +268,7 @@ export function makeNativeTaskStartCommand<E, R>(
     {
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task'),
       featureName: requiredString('feature-name', 'Stable feature name used to resume this task'),
-      installationTarget: optionalString(
+      installationTarget: requiredString(
         'installation-target',
         'Installed Threadnote host target verified on start or resume',
       ),

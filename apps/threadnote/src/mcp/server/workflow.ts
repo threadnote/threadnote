@@ -65,7 +65,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
         featureName: McpInput.requiredString('Stable feature name used to resume this task'),
-        installationTarget: McpInput.string(
+        installationTarget: McpInput.requiredString(
           'Installed Threadnote host target, required to verify the current bundle on start or resume',
         ),
         taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
@@ -154,14 +154,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description:
-        'Read the current task; phaseId selects a listed active historical PR watch; detail=packet returns its full packet.',
+      description: 'Read task; phaseId selects a listed active historical PR watch; detail=packet returns packet.',
       inputSchema: {
-        runId: McpInput.string('Bound run ID'),
-        callerCwd: McpInput.string('Bound checkout'),
-        role: McpInput.string('Task role'),
-        cursor: McpInput.string('Page cursor'),
-        phaseId: McpInput.string('Listed phase ID'),
+        runId: McpInput.requiredString('Run ID'),
+        callerCwd: McpInput.requiredString('Absolute path'),
+        role: McpInput.string('Role'),
+        cursor: McpInput.string('Cursor'),
+        phaseId: McpInput.string('Listed ID'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
       },
     },
