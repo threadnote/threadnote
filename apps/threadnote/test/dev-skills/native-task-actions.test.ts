@@ -561,11 +561,20 @@ describe('native task actions', () => {
         expect(before.state.generation).toBe(priorDigest);
         expect(before.state.bindingId).toBe(bindingId);
         expect(before.state.operations).toHaveLength(1);
+        const currentTaskCard = yield* readNativeTaskView(config, {runId, callerCwd: repo});
+        const issuedTaskRef = String(currentTaskCard.taskRef);
+        const decodedTaskRef = decodeNativeTaskActionRef(issuedTaskRef);
+        expect(decodedTaskRef).toMatchObject({
+          kind: 'task',
+          runId,
+          generationHash: sha256HexSync(priorDigest),
+          stateRevision: before.revision,
+        });
         const base = {
           callerCwd: repo,
           featureName: 'Controlled cutover',
           installationTarget: 'codex',
-          taskRef: runId,
+          taskRef: issuedTaskRef,
           intent,
         };
         const first = object(
@@ -588,6 +597,40 @@ describe('native task actions', () => {
         expect(after?.state.generation).toBe(priorDigest);
         expect(after?.state.bindingId).toBe(bindingId);
         expect(after?.state.operations).toEqual(before.state.operations);
+        if (!decodedTaskRef) throw new Error('Expected the issued task reference to decode.');
+        const byCanonicalRunId = object(
+          yield* runNativeTaskStart(config, {...base, taskRef: runId}).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+          ),
+        );
+        expect(byCanonicalRunId).toEqual(first);
+        const malformedRef = yield* runNativeTaskStart(config, {...base, taskRef: 'taskref-v1.invalid'}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        );
+        expect(malformedRef).toMatchObject({failure: {code: 'invalid-task-ref'}});
+        const wrongKindRef = yield* runNativeTaskStart(config, {
+          ...base,
+          taskRef: encodeNativeTaskActionRef({...decodedTaskRef, kind: 'work'}),
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+        expect(wrongKindRef).toMatchObject({failure: {code: 'invalid-task-ref'}});
+        const wrongScope = yield* runNativeTaskStart(config, {...base, featureName: 'Different feature'}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        );
+        expect(wrongScope).toMatchObject({failure: {code: 'task-identity-conflict'}});
+        const staleGeneration = yield* runNativeTaskStart(config, {
+          ...base,
+          taskRef: encodeNativeTaskActionRef({...decodedTaskRef, generationHash: EffectString.repeat(64)('f')}),
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+        expect(staleGeneration).toMatchObject({failure: {code: 'stale-task-ref'}});
+        const staleRevision = yield* runNativeTaskStart(config, {
+          ...base,
+          taskRef: encodeNativeTaskActionRef({...decodedTaskRef, stateRevision: EffectString.repeat(64)('0')}),
+        }).pipe(Effect.provideService(SystemInfo, testSystem), Effect.result);
+        expect(staleRevision).toMatchObject({failure: {code: 'stale-task-ref'}});
+        expect(yield* f.fs.readFileString(statePath)).toBe(beforeBytes);
+        expect(yield* f.fs.readFileString(journalPath)).toBe(beforeJournal);
 
         const foreignRepo = f.path.join(f.root, 'foreign-cutover');
         yield* f.fs.makeDirectory(foreignRepo);

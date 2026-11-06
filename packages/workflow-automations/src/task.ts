@@ -4,6 +4,15 @@ import {NativeCycleDeliverySchema} from './cycle.js';
 import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
+import {NativeCompactIntentSchema} from './authoring.js';
+
+export const NativeTaskStartRequestSchema = Schema.Struct({
+  callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+  taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  intent: NativeCompactIntentSchema,
+});
 
 export type NativeTaskRole = 'implementation' | 'review' | 'delivery';
 
@@ -130,6 +139,12 @@ export const NativeTaskActionRefSchema = Schema.Struct({
 });
 export type NativeTaskActionRef = typeof NativeTaskActionRefSchema.Type;
 
+const nativeTaskStartRunIdSchema = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
+export interface NativeTaskStartReference {
+  readonly runId: string;
+  readonly actionRef?: NativeTaskActionRef;
+}
+
 export function nativeTaskCardRef(
   state: NativeWorkflowState,
   revision: string,
@@ -192,6 +207,31 @@ export function decodeNativeTaskActionRef(input: string): NativeTaskActionRef | 
     return undefined;
   }
 }
+
+/** Decode either the legacy canonical run ID or a current task-view card reference. */
+export function decodeNativeTaskStartReference(input: string): NativeTaskStartReference | undefined {
+  if (EffectString.startsWith('taskref-v1.')(input)) {
+    const actionRef = decodeNativeTaskActionRef(input);
+    return actionRef?.kind === 'task' ? {runId: actionRef.runId, actionRef} : undefined;
+  }
+  return Schema.is(nativeTaskStartRunIdSchema)(input) ? {runId: input} : undefined;
+}
+
+export const nativeTaskStartRunId = (
+  reference: NativeTaskStartReference | undefined,
+  project: string,
+  featureId: string,
+) => reference?.runId ?? 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
+
+export const nativeTaskStartReferenceIsCurrent = (
+  reference: NativeTaskStartReference | undefined,
+  current: {readonly state: {readonly generation: string}; readonly revision: string},
+  refs: readonly [requested: string | undefined, current: string | undefined],
+) =>
+  !reference?.actionRef ||
+  (reference.actionRef.generationHash === sha256HexSync(current.state.generation) &&
+    reference.actionRef.stateRevision === current.revision &&
+    refs[1] === refs[0]);
 
 export function nativeTaskSnapshotId(workRef: string): string {
   return `task-${EffectString.slice(0, 48)(sha256HexSync(workRef))}`;
