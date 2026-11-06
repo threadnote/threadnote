@@ -410,7 +410,10 @@ export function makeNativeTaskActionCommands<E, R>(
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       taskRef: requiredString('task-ref', 'Opaque current approved-plan reconciliation reference'),
       reason: requiredString('reason', 'Concrete reason for reconciling the approved plan'),
-      bindings: optionalString('bindings', 'Branch bindings for new approved phases as JSON'),
+      bindings: optionalString(
+        'bindings',
+        'Bindings for new phases or existing phase bases (branch stays fixed), as JSON',
+      ),
     },
     options =>
       (options.bindings === undefined

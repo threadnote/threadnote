@@ -6044,7 +6044,7 @@ describe('native task actions', () => {
       };
       const transitionBindings = {
         ...newBindings,
-        compact: {branch: compactBinding.value.branch, baseBranch: 'origin/main'},
+        compact: {branch: compactBinding.value.branch, baseBranch: 'refs/remotes/origin/main'},
       };
       const confirmResult = object(
         object(
@@ -6160,7 +6160,7 @@ describe('native task actions', () => {
       expect(nextRuntime.plans).toHaveLength(priorRuntime.plans.length + 1);
       expect(nextRuntime.state.plan.phases).toHaveLength(3);
       expect(nextRuntime.state.plan.phases[0]?.branch).toBe(priorRuntime.state.plan.phases[0]?.branch);
-      expect(nextRuntime.state.plan.phases[0]?.baseBranch).toBe('origin/main');
+      expect(nextRuntime.state.plan.phases[0]?.baseBranch).toBe('refs/remotes/origin/main');
       expect(nextRuntime.snapshots).toEqual(priorRuntime.snapshots);
       expect(nextRuntime.reviews).toEqual(priorRuntime.reviews);
       expect(nextRuntime.attempts).toEqual(priorRuntime.attempts);
