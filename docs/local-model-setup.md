@@ -14,6 +14,19 @@ An explicit generation model or provider selection is preserved, including a pro
 
 Older selection files do not distinguish an explicit disabled generation choice from an unset generation role. If you want to keep generation unconfigured, turn automatic model setup off explicitly.
 
+## Embedding choices for graph and recall
+
+Embedding models can be selected independently for code graph vectors and memory recall vectors. The existing shared `embedding` selection remains the fallback for both purposes, including in older selection files:
+
+```sh
+threadnote models select embeddinggemma-2-q8 graph
+threadnote models select qwen3-embedding-0.6b-q8 recall
+threadnote models list
+threadnote models clear graph
+```
+
+`models list` shows the effective graph and recall model and marks when a purpose inherits the shared choice. Selecting a purpose-specific model requires that model to be installed and verified. An unavailable explicit choice remains unavailable until you select another model or clear that purpose override; Threadnote will not silently switch models. Removing a model that is selected for a role or purpose is refused until those selections are changed. Graph vectors are stored per model; run `threadnote graph index` after changing the graph model and `threadnote index rebuild` after changing the recall model.
+
 ## Progress and controls
 
 Manager shows local model readiness and offers setup controls. The same controls are available through the CLI:

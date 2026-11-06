@@ -15,6 +15,8 @@ import {
   readCodeGraphEmbeddingDemandPage,
   validateCodeGraphEmbeddingDemandClaim,
 } from '../../src/vector/demand.js';
+import {codeGraphEmbeddingDemandSameModel} from '../../src/vector/demand_scheduler.js';
+import {graphEmbeddingTemplateVersion} from '../../src/embedding.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -229,6 +231,44 @@ effectIt.layer(citationPlatformLayer)(it => {
         now: 3,
       });
       expect(newClaim).toMatchObject({model: modelB, snapshotId: snapshot(1), activatedAt: epoch(0)});
+    }),
+  );
+  it.effect('rebinds a Gemma lane when its graph recipe changes while retaining BGE recipe identity', () =>
+    Effect.gen(function* () {
+      const {sql, enqueue} = yield* fixture;
+      const gemmaV1 = {...model, id: 'embeddinggemma-2-q8'};
+      const gemmaV2 = {...gemmaV1, templateVersion: graphEmbeddingTemplateVersion({id: gemmaV1.id})};
+      const bgeV1 = {...model, id: 'bge-small-en-v1.5-q8'};
+      expect(gemmaV1.templateVersion).toBe(1);
+      expect(gemmaV2.templateVersion).toBe(2);
+      expect(codeGraphEmbeddingDemandSameModel(gemmaV1, gemmaV2)).toBe(false);
+      expect(
+        codeGraphEmbeddingDemandSameModel(bgeV1, {
+          ...bgeV1,
+          templateVersion: graphEmbeddingTemplateVersion({id: bgeV1.id}),
+        }),
+      ).toBe(true);
+      yield* enqueue(1, 0);
+      const oldClaim = yield* claimCodeGraphEmbeddingDemand(sql, {
+        worktreeId,
+        owner: owner('gemma-recipe-v1'),
+        model: gemmaV1,
+        now: 0,
+      });
+      expect(oldClaim).toBeDefined();
+      const rebound = yield* acknowledgeCodeGraphEmbeddingDemand(sql, oldClaim!, {
+        kind: 'rebind',
+        reason: 'model-changed',
+        now: 1,
+      });
+      expect(rebound?.active).toBeUndefined();
+      const newClaim = yield* claimCodeGraphEmbeddingDemand(sql, {
+        worktreeId,
+        owner: owner('gemma-recipe-v2'),
+        model: gemmaV2,
+        now: 2,
+      });
+      expect(newClaim?.model).toEqual(gemmaV2);
     }),
   );
   it.effect('pages an entire demand catalog in bounded pages without truncating later lanes', () =>

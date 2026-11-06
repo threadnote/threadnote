@@ -4,7 +4,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import type {CodeGraphEmbeddingIndexShape, CodeGraphVectorPublication} from '../embedding.js';
 import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from '../layout.js';
 import {
@@ -47,12 +47,12 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
       message: 'Code graph vector publication target is no longer active.',
     });
   }
-  const selectedModelId = (yield* readModelSelection(threadnoteHome)).roles.embedding;
+  const selectedModelId = selectedEmbeddingModelId(yield* readModelSelection(threadnoteHome), 'graph');
   const validateInSession = Effect.gen(function* () {
     yield* input.validateClaimInSession ?? Effect.void;
     const current = yield* selectActiveViewFence(layout.worktreeId, layout.scopeId);
     const ready = yield* store.readySnapshot(layout.databasePath, layout.worktreeId, layout.scopeId);
-    const modelId = (yield* readModelSelection(threadnoteHome)).roles.embedding;
+    const modelId = selectedEmbeddingModelId(yield* readModelSelection(threadnoteHome), 'graph');
     if (
       !current ||
       current.snapshotId !== fence.snapshotId ||

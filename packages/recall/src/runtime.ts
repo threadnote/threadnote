@@ -29,7 +29,11 @@ import {
 } from '@threadnote/recall/results';
 import {rerankWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection, parseModelSelection} from '@threadnote/inference/models/selection';
+import {
+  readModelSelection,
+  parseModelSelection,
+  selectedEmbeddingModelId,
+} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallFeedback} from './feedback.js';
@@ -154,7 +158,7 @@ export const prepareRecallSemanticPreflight = Effect.fn('recall.prepareSemanticP
       const raw = yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes.value));
       const selected = parseModelSelection(raw);
       if (selected.status !== 'valid') return undefined;
-      const id = selected.selection.roles.embedding;
+      const id = selectedEmbeddingModelId(selected.selection, 'recall');
       if (id === undefined) return undefined;
       const catalog = yield* LocalModelCatalog;
       const manifest = yield* catalog.get(id);
@@ -919,7 +923,7 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   preflight?: RecallSemanticPreflight,
 ) {
   const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = selection.roles.embedding;
+  const modelId = selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) return {state: 'unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(modelId);
@@ -1023,7 +1027,7 @@ export const loadRecallSemanticScoresResult = Effect.fn('recall.loadSemanticScor
 ) {
   return yield* Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'recall');
     if (!modelId) return undefined;
     const catalog = yield* LocalModelCatalog;
     const manifest = yield* catalog.get(modelId);

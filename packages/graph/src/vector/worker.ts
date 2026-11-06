@@ -10,7 +10,7 @@ import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/fil
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {CodeGraphStore} from '../store.js';
 import {
@@ -22,6 +22,7 @@ import {
 import {withCodeGraphDatabaseWriteLock} from '../maintenance/gate.js';
 import {
   executeCodeGraphVectorGeneration,
+  graphEmbeddingTemplateVersion,
   releaseCodeGraphVectorOwner,
   type CodeGraphEmbeddingStatus,
 } from '../embedding.js';
@@ -164,7 +165,8 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     });
   const manifest = yield* Effect.gen(function* () {
     const selection = yield* readModelSelection(home);
-    return selection.roles.embedding ? yield* catalog.get(selection.roles.embedding) : undefined;
+    const modelId = selectedEmbeddingModelId(selection, 'graph');
+    return modelId ? yield* catalog.get(modelId) : undefined;
   }).pipe(Effect.orElseSucceed(() => undefined));
   if (!manifest || manifest.role !== 'embedding' || !manifest.dimensions) {
     yield* mutate(
@@ -177,7 +179,12 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     );
     return {state: 'unavailable' as const};
   }
-  const model = {id: manifest.id, sha256: manifest.sha256, dimensions: manifest.dimensions, templateVersion: 1};
+  const model = {
+    id: manifest.id,
+    sha256: manifest.sha256,
+    dimensions: manifest.dimensions,
+    templateVersion: graphEmbeddingTemplateVersion(manifest),
+  };
   let abandonedOwnerToken: string | undefined = expiredOwner?.owner.token;
   if (
     lane.active &&
@@ -198,7 +205,10 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       : undefined;
   if (
     claim &&
-    (claim.model.id !== model.id || claim.model.sha256 !== model.sha256 || claim.model.dimensions !== model.dimensions)
+    (claim.model.id !== model.id ||
+      claim.model.sha256 !== model.sha256 ||
+      claim.model.dimensions !== model.dimensions ||
+      claim.model.templateVersion !== model.templateVersion)
   ) {
     abandonedOwnerToken = claim.owner.token;
     claim = undefined;
@@ -242,12 +252,13 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       pinned,
       yield* Clock.currentTimeMillis,
     );
-    const current = (yield* readModelSelection(home)).roles.embedding;
+    const current = selectedEmbeddingModelId(yield* readModelSelection(home), 'graph');
     const currentManifest = current ? yield* catalog.get(current) : undefined;
     if (
       currentManifest?.id !== pinned.model.id ||
       currentManifest.sha256 !== pinned.model.sha256 ||
-      currentManifest.dimensions !== pinned.model.dimensions
+      currentManifest.dimensions !== pinned.model.dimensions ||
+      graphEmbeddingTemplateVersion(currentManifest) !== pinned.model.templateVersion
     )
       return yield* CodeGraphEmbeddingWorkerModelInvalidated.make({message: 'Embedding model selection changed.'});
     if (!valid)
@@ -370,13 +381,14 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
         const publicationModelChanged =
           tag === 'CodeGraphVectorPublicationSuperseded'
             ? yield* Effect.gen(function* () {
-                const selectedId = (yield* readModelSelection(home)).roles.embedding;
+                const selectedId = selectedEmbeddingModelId(yield* readModelSelection(home), 'graph');
                 if (!selectedId) return true;
                 const selected = yield* catalog.get(selectedId);
                 return (
                   selected.id !== pinned.model.id ||
                   selected.sha256 !== pinned.model.sha256 ||
-                  selected.dimensions !== pinned.model.dimensions
+                  selected.dimensions !== pinned.model.dimensions ||
+                  graphEmbeddingTemplateVersion(selected) !== pinned.model.templateVersion
                 );
               }).pipe(Effect.orElseSucceed(() => false))
             : false;
