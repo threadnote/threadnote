@@ -387,41 +387,45 @@ export const runNativeTaskPrWatch = (
     // This is an internal lease owner key, never an authenticated person or provider identity.
     const consumerId = `task-${watchIdentity}`;
     const wakeupId = `task-${watchIdentity}`;
-    if (request.operation === 'start' && phase.delivery === undefined) {
-      if (
-        embeddedDelivery.pr?.state !== 'open' ||
-        typeof embeddedDelivery.commitEvidence !== 'string' ||
-        !embeddedDelivery.publication
-      )
-        return yield* fail(
-          'invalid-delivery-ref',
-          'A provisional task watch needs the exact current open-PR delivery evidence.',
+    const admitProvisionalWatch = () =>
+      Effect.gen(function* () {
+        if (phase.delivery !== undefined) return;
+        if (
+          embeddedDelivery.pr?.state !== 'open' ||
+          typeof embeddedDelivery.commitEvidence !== 'string' ||
+          !embeddedDelivery.publication
+        )
+          return yield* fail(
+            'invalid-delivery-ref',
+            'A provisional task watch needs the exact current open-PR delivery evidence.',
+          );
+        const admitted = yield* runNativeTaskPrDelivery(
+          config,
+          {
+            command: 'deliver-pr',
+            runId: request.runId,
+            callerCwd: checkout,
+            validationRef: request.validationRef,
+            commitEvidence: embeddedDelivery.commitEvidence,
+            pr: embeddedDelivery.pr,
+            publication: embeddedDelivery.publication,
+          },
+          stored,
+          checkout,
+          stored.state.cycle!,
         );
-      const admitted = yield* runNativeTaskPrDelivery(
-        config,
-        {
-          command: 'deliver-pr',
-          runId: request.runId,
-          callerCwd: checkout,
-          validationRef: request.validationRef,
-          commitEvidence: embeddedDelivery.commitEvidence,
-          pr: embeddedDelivery.pr,
-          publication: embeddedDelivery.publication,
-        },
-        stored,
-        checkout,
-        stored.state.cycle!,
-      );
-      const admittedAction = decodeNativeTaskActionRef(admitted.deliveryRef);
-      const deliveryMatches =
-        admittedAction?.delivery !== undefined && stableJson(admittedAction.delivery) === stableJson(embeddedDelivery);
-      if (admitted.status !== 'watch-required' || admitted.phaseId !== validation.phaseId || !deliveryMatches)
-        return yield* fail(
-          'stale-delivery-ref',
-          `Provisional delivery mismatch: status=${admitted.status}; phase=${admitted.phaseId}; deliveryMatches=${deliveryMatches}.`,
-        );
-      yield* verifyNativeCycleDeliveryRepository(checkout, admittedAction.delivery);
-    }
+        const admittedAction = decodeNativeTaskActionRef(admitted.deliveryRef);
+        const deliveryMatches =
+          admittedAction?.delivery !== undefined &&
+          stableJson(admittedAction.delivery) === stableJson(embeddedDelivery);
+        if (admitted.status !== 'watch-required' || admitted.phaseId !== validation.phaseId || !deliveryMatches)
+          return yield* fail(
+            'stale-delivery-ref',
+            'The provisional PR watch reference no longer matches independently revalidated delivery evidence.',
+          );
+        yield* verifyNativeCycleDeliveryRepository(checkout, admittedAction.delivery);
+      });
+    if (request.operation === 'start') yield* admitProvisionalWatch();
     if (request.operation === 'start') {
       if (!request.wakeup)
         return yield* fail('host-registration-required', 'Start needs the actual host registration configuration.');
@@ -494,6 +498,13 @@ export const runNativeTaskPrWatch = (
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')
     )
       return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
+    if (
+      request.operation === 'relay' ||
+      request.operation === 'disposition' ||
+      request.operation === 'ack' ||
+      request.operation === 'work-disposition'
+    )
+      yield* admitProvisionalWatch();
     if (request.operation === 'complete') {
       const notification = watch.envelope.notification;
       const now = yield* Clock.currentTimeMillis;

@@ -3349,6 +3349,31 @@ describe('native task actions', () => {
         publishedP1.pr.url,
       );
       yield* writeSimulatedTaskWatch(f, p1Watch.startedWatch, p1Watch, publishedP1.pr.url, publishedP1.headSha, false);
+      const provisionalWatchPath = f.path.join(
+        f.config.agentContextHome,
+        'workflow-automations',
+        'native-watch-v1',
+        p1Watch.watchId + '.json',
+      );
+      const provisionalWatchBytes = yield* f.fs.readFileString(provisionalWatchPath);
+      const provisionalWorkflowBytes = yield* f.fs.readFileString(f.statePath());
+      const originalSource = yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'));
+      yield* f.fs.writeFileString(
+        f.path.join(f.repo, 'source.ts'),
+        `${originalSource}\n// provisional source was revoked before canonical delivery\n`,
+      );
+      const refusedProvisionalRelay = yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'relay',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef: publishedP1.validationRef,
+        deliveryRef: publishedP1.deliveryRef,
+      }).pipe(Effect.result);
+      expect(refusedProvisionalRelay).toMatchObject({failure: {code: 'source-drift'}});
+      expect(yield* f.fs.readFileString(provisionalWatchPath)).toBe(provisionalWatchBytes);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(provisionalWorkflowBytes);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), originalSource);
       const p1Open = object(
         yield* runNativeTaskAction(f.config, {
           command: 'watch-pr',
