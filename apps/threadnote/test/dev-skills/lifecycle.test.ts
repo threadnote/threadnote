@@ -172,12 +172,19 @@ describe('development skills lifecycle', () => {
   effectIt.effect('installs complete copied generations, renders only entrypoints and repeats without changes', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
+      const devCycleTemplate = yield* f.fs.readFileString(
+        f.path.join(process.cwd(), 'config/agent-skills/dev-cycle/SKILL.md'),
+      );
+      yield* f.fs.writeFileString(f.path.join(f.source, 'config/agent-skills/dev-cycle/SKILL.md'), devCycleTemplate);
       const result = yield* f.run(applyDevSkills(f.config, 'install', selector));
       expect(result.applied).toBe(true);
       const bundle = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
       const root = generationRoot(f.path, result.target.skillRoot, bundle.manifest.digest);
       for (const [file, content] of EffectRecord.toEntries(bundle.files))
         expect(Buffer.from(yield* f.fs.readFile(f.path.join(root, file))).toString('base64')).toBe(content);
+      const entrypoints = renderEntrypoints(f.path, result.target, bundle);
+      for (const [relative, content] of EffectRecord.toEntries(entrypoints))
+        expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, relative))).toBe(content);
       expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(root);
       const before = yield* snapshot(f.root);
       expect((yield* f.run(applyDevSkills(f.config, 'install', selector))).applied).toBe(false);
