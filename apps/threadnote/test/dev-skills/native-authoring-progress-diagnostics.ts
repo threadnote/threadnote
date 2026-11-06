@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Context, Effect, Exit, type FileSystem, Option, Tracer} from 'effect';
+import {Context, Effect, Exit, type FileSystem, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
 import * as EffectRecord from 'effect/Record';
 
@@ -47,7 +47,6 @@ export const nativeProgressSpanLabels = [
   'external.loadAccess',
   'runCommandEffect',
   'CommandExecutor.execute',
-  'fixture.realPath',
 ] as const;
 const selectedLabels = new Set<string>(nativeProgressSpanLabels);
 const ceiling = 2_147_483_647;
@@ -138,32 +137,6 @@ export const makeNativeProgressDiagnostics = (
   let bodyStartedMs = 0;
   let bodyEndedMs = 0;
   let reported = false;
-  let qualification: {caseId: string; evaluation: number; occurrence: number; kind: 'native' | 'property'} | undefined;
-  type Initialization = {
-    connection: null;
-    acquisition: number | null;
-    incarnation: null;
-    state: 'unknown';
-    lifecycle: 'incomplete';
-    outcome: Outcome | 'unknown';
-    durationMs: number | null;
-    statements: {count: number; failed: number; totalMs: number; recentMs: number[]};
-  };
-  const initializations: Initialization[] = [];
-  const queryAcquisitions = new WeakMap<Tracer.Span, number>();
-  const initializationSpans = new WeakMap<Tracer.Span, Initialization>();
-  let acquisitions = 0;
-  let initializationDropped = 0;
-  const ancestor = (parent: Option.Option<Tracer.AnySpan>, name: string): Tracer.Span | undefined => {
-    let current = parent;
-    for (let depth = 0; depth < 64 && Option.isSome(current); depth++) {
-      const candidate = current.value;
-      if (candidate._tag !== 'Span') return undefined;
-      if (candidate.name === name) return candidate;
-      current = candidate.parent;
-    }
-    return undefined;
-  };
   const progress = () => ({
     counters: EffectRecord.fromEntries(
       EffectArray.map(nativeProgressBoundaries, label => [label, {...counters[label]}]),
@@ -180,41 +153,11 @@ export const makeNativeProgressDiagnostics = (
     span(spanOptions) {
       // Preserve the active backend and any observer already wrapping this exact span.
       const span = delegate.span.call(delegate, spanOptions);
-      let initialization: Initialization | undefined;
-      let statement: Initialization | undefined;
-      if (qualification)
-        safely(() => {
-          const query = ancestor(spanOptions.parent, 'recall.executeIndexQuery');
-          if (spanOptions.name === 'recall.acquireDatabase' && query) queryAcquisitions.set(query, ++acquisitions);
-          if (spanOptions.name === 'recall.initializeDatabase') {
-            initialization = {
-              connection: null,
-              acquisition: query ? (queryAcquisitions.get(query) ?? null) : null,
-              incarnation: null,
-              state: 'unknown',
-              lifecycle: 'incomplete',
-              outcome: 'unknown',
-              durationMs: null,
-              statements: {count: 0, failed: 0, totalMs: 0, recentMs: []},
-            };
-            initializationSpans.set(span, initialization);
-            initializations.push(initialization);
-            if (initializations.length > 16) {
-              initializations.shift();
-              initializationDropped++;
-            }
-          }
-          if (spanOptions.name === 'sqlite') {
-            const parent = ancestor(spanOptions.parent, 'recall.initializeDatabase');
-            if (parent) statement = initializationSpans.get(parent);
-          }
-        });
-      if (!selectedLabels.has(spanOptions.name) && !statement) return span;
+      if (!selectedLabels.has(spanOptions.name)) return span;
       safely(() => {
-        const label = statement ? 'sqlite' : spanOptions.name;
-        const total = (totals[label] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0});
+        const total = (totals[spanOptions.name] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0});
         total.started = bounded(total.started + 1);
-        const entry = {label, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()};
+        const entry = {label: spanOptions.name, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()};
         activeCount = bounded(activeCount + 1);
         if (active.size < 8) active.set(span, entry);
         const end = span.end.bind(span);
@@ -231,19 +174,8 @@ export const makeNativeProgressDiagnostics = (
             if (Exit.isFailure(exit)) total.failed = bounded(total.failed + 1);
             const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1_000_000);
             total.inclusiveMs = bounded(total.inclusiveMs + inclusiveMs);
-            if (initialization) {
-              initialization.durationMs = inclusiveMs;
-              initialization.outcome = exit._tag;
-            }
-            if (statement) {
-              statement.statements.count = bounded(statement.statements.count + 1);
-              if (Exit.isFailure(exit)) statement.statements.failed = bounded(statement.statements.failed + 1);
-              statement.statements.totalMs = bounded(statement.statements.totalMs + inclusiveMs);
-              statement.statements.recentMs.push(inclusiveMs);
-              if (statement.statements.recentMs.length > 16) statement.statements.recentMs.shift();
-            }
             recent.push({...entry, inclusiveMs, outcome: exit._tag});
-            if (recent.length > (qualification ? 16 : 32)) {
+            if (recent.length > 32) {
               recent.shift();
               recentDropped = bounded(recentDropped + 1);
             }
@@ -253,60 +185,8 @@ export const makeNativeProgressDiagnostics = (
       return span;
     },
   });
-  const stage = (label: string) => {
-    const total = totals[label];
-    const started = total?.started ?? 0;
-    const ended = total?.ended ?? 0;
-    return {
-      started,
-      ended,
-      failed: total?.failed ?? 0,
-      // Missing and partial histories are unknown, including when a completed prefix summed to zero.
-      inclusiveMs: total && started > 0 && started === ended ? total.inclusiveMs : null,
-    };
-  };
   const observer = {
     tracer,
-    qualify(identity: NonNullable<typeof qualification>) {
-      qualification = {...identity};
-    },
-    qualificationSnapshot(outcome: Outcome) {
-      const snapshot = observer.snapshot();
-      return {
-        ...qualification,
-        outcome,
-        complete: false,
-        elapsedMs: snapshot.elapsedMs,
-        bodyMs: snapshot.bodyMs ?? null,
-        cleanupMs: snapshot.cleanupObservedMs ?? null,
-        // An acquisition span is NOT proof of a physical connection or database incarnation.
-        initializations: EffectArray.map(initializations, value => ({
-          ...value,
-          statements: {...value.statements, recentMs: [...value.statements.recentMs]},
-        })),
-        dropped: initializationDropped,
-        stages: {
-          schema: stage('recall.initializeDatabase'),
-          identity: stage('recall.loadMemoryIdentities'),
-          refresh: stage('recall.refreshDerivedIndexesAfterCanonicalMutation'),
-          acquire: stage('recall.acquireDatabase'),
-          realPath: stage('fixture.realPath'),
-        },
-      };
-    },
-    reportQualification(outcome: Outcome) {
-      if (!qualification) return;
-      safely(() => {
-        const packet = observer.qualificationSnapshot(outcome);
-        let json = serialize(packet);
-        while (Buffer.byteLength(json) > 16_384 && packet.initializations.length) {
-          packet.initializations.shift();
-          packet.dropped++;
-          json = serialize(packet);
-        }
-        if (Buffer.byteLength(json) <= 16_384) sink('WINDOWS_IDENTITY_DIAGNOSTIC ' + json);
-      });
-    },
     start(label: NativeProgressBoundary) {
       counters[label].started = bounded(counters[label].started + 1);
       const entry: BoundaryRecord = {
@@ -446,7 +326,6 @@ export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, ob
   program.pipe(
     Effect.onExit(exit =>
       Effect.sync(() => {
-        safely(() => observer.reportQualification(exit._tag));
         if (Exit.isFailure(exit)) safely(() => observer.reportFailure());
       }),
     ),

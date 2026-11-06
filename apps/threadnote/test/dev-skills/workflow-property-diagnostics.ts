@@ -1,12 +1,5 @@
 import {Array as EffectArray} from 'effect';
 import {Effect, Exit} from 'effect';
-import {expect} from 'vitest';
-import {qualificationCaseId, windowsQualificationEnabled} from '../../../../tools/ci/windows-identity-qualification.js';
-import {
-  makeNativeProgressDiagnostics,
-  observeNativeBody,
-  reportNativeFailure,
-} from './native-authoring-progress-diagnostics.js';
 
 type Property = 'setup-opt-out' | 'workflow-retirement' | 'shared-context-namespace';
 type Phase =
@@ -98,15 +91,7 @@ export const workflowDiagnostics = (property: Property, now = () => performance.
         active = evaluation;
         phase = 'provisioning';
         loopIndex = null;
-        const observed =
-          windowsQualificationEnabled && property === 'shared-context-namespace'
-            ? observeWorkflowQualification(
-                program,
-                qualificationCaseId(expect.getState().currentTestName ?? ''),
-                evaluation.ordinal,
-              )
-            : program;
-        return observed.pipe(
+        return program.pipe(
           Effect.onExit(exit =>
             Effect.sync(() => {
               const finishedAt = elapsed();
@@ -175,28 +160,6 @@ export const workflowPropertyDiagnostics = (
   const report = (event: 'aborted' | 'finished') => {
     try {
       write('WORKFLOW_PROPERTY_DIAGNOSTICS ' + JSON.stringify({event, ...diagnostics.snapshot()}) + '\n');
-      if (windowsQualificationEnabled && property === 'shared-context-namespace') {
-        const caseId = qualificationCaseId(expect.getState().currentTestName ?? '');
-        if (caseId) {
-          const state = diagnostics.snapshot();
-          write(
-            'WINDOWS_IDENTITY_DIAGNOSTIC ' +
-              JSON.stringify({
-                caseId,
-                kind: event,
-                complete: false,
-                elapsedMs: state.elapsedMs,
-                phase: state.phase,
-                phaseElapsedMs: state.phaseElapsedMs,
-                evaluation: state.activeEvaluation?.ordinal ?? state.completedEvaluations,
-                startedEvaluations: state.startedEvaluations,
-                completedEvaluations: state.completedEvaluations,
-                successfulEvaluations: state.successfulEvaluations,
-              }) +
-              '\n',
-          );
-        }
-      }
     } catch {
       // A closed diagnostic sink must never replace the property's result or interruption.
     }
@@ -217,18 +180,3 @@ export const workflowPropertyDiagnostics = (
   if (context.signal.aborted) aborted();
   return diagnostics;
 };
-
-// Only the namespace property exposes this existing Effect boundary; the other six shared cases remain unobserved.
-export const observeWorkflowQualification = <A, E, R>(
-  program: Effect.Effect<A, E, R>,
-  caseId: string | undefined,
-  evaluation: number,
-) =>
-  Effect.gen(function* () {
-    const observer = makeNativeProgressDiagnostics(yield* Effect.tracer);
-    if (caseId) observer.qualify({caseId, evaluation, occurrence: 1, kind: 'property'});
-    return yield* reportNativeFailure(
-      observeNativeBody(program, observer).pipe(Effect.withTracer(observer.tracer)),
-      observer,
-    );
-  });

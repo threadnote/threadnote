@@ -1,6 +1,4 @@
 import {Effect, FileSystem, Path} from 'effect';
-import {expect, onTestFinished} from 'vitest';
-import {qualificationCaseId, windowsQualificationEnabled} from '../../../../tools/ci/windows-identity-qualification.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -20,33 +18,7 @@ import {
 export const provideNative = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const observer = makeNativeProgressDiagnostics(yield* Effect.tracer);
-    const caseId = windowsQualificationEnabled
-      ? qualificationCaseId(expect.getState().currentTestName ?? '')
-      : undefined;
-    if (caseId) {
-      observer.qualify({caseId, evaluation: 0, occurrence: 1, kind: 'native'});
-      onTestFinished(() => {
-        try {
-          process.stderr.write(
-            'WINDOWS_IDENTITY_DIAGNOSTIC ' + JSON.stringify({caseId, kind: 'finished', complete: false}) + '\n',
-          );
-        } catch {
-          /* A diagnostic sink never changes the test outcome. */
-        }
-      });
-    }
-    const body = observeNativeBody(program, observer).pipe(Effect.provideService(CurrentNativeProgress, observer));
-    const inner: Effect.Effect<A, E, R | FileSystem.FileSystem> = caseId
-      ? Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          return yield* body.pipe(
-            Effect.provideService(FileSystem.FileSystem, {
-              ...fs,
-              realPath: (...args) => fs.realPath(...args).pipe(Effect.withSpan('fixture.realPath')),
-            }),
-          );
-        })
-      : body;
+    const inner = observeNativeBody(program, observer).pipe(Effect.provideService(CurrentNativeProgress, observer));
     return yield* reportNativeFailure(
       inner.pipe(provideTestLayer(ApplicationLayer), Effect.withTracer(observer.tracer)),
       observer,

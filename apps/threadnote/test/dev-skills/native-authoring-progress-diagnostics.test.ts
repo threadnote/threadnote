@@ -17,7 +17,6 @@ import {
   type NativeProgressBoundary,
 } from './native-authoring-progress-diagnostics.js';
 import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
-import {makeQualificationCollector} from '../../../../tools/ci/windows-identity-qualification.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -615,7 +614,6 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
           sink: broken === 'sink' ? crash : () => {},
           serialize: broken === 'serialize' ? crash : JSON.stringify,
         });
-        observer.qualify({caseId: 'ordinary-1', evaluation: 0, occurrence: 1, kind: 'native'});
         if (broken === 'snapshot') observer.snapshot = crash;
         if (broken === 'start') observer.start = crash;
         if (broken === 'end') observer.end = crash;
@@ -671,166 +669,4 @@ effectIt.effect('preserves existing layer ownership wiring', () =>
     expect(fixture).toContain('fs: returned.fs');
     expect(fixture).toContain('store: returned.store');
   }),
-);
-
-effectIt.effect(
-  'associates anonymous sqlite statements with each initialization without inventing physical lifecycle proof',
-  () =>
-    Effect.sync(() => {
-      const observer = make();
-      observer.qualify({caseId: 'ordinary-1', evaluation: 0, occurrence: 1, kind: 'native'});
-      for (let i = 0; i < 2; i++) {
-        const query = observer.tracer.span(spanOptions('recall.executeIndexQuery'));
-        const acquisition = observer.tracer.span(spanOptions('recall.acquireDatabase', Option.some(query)));
-        acquisition.end(2_000_000n, Exit.void);
-        const init = observer.tracer.span(spanOptions('recall.initializeDatabase', Option.some(query)));
-        const statement = observer.tracer.span(spanOptions('sqlite', Option.some(init)));
-        statement.attribute('db.query.text', 'PRIVATE SQL');
-        statement.end(4_000_000n, Exit.succeed('PRIVATE result'));
-        init.end(5_000_000n, Exit.void);
-        query.end(6_000_000n, Exit.void);
-      }
-      const packet = observer.qualificationSnapshot('Success');
-      expect(packet.complete).toBe(false);
-      expect(packet.initializations).toHaveLength(2);
-      expect(EffectArray.map(packet.initializations, init => init.acquisition)).toEqual([1, 2]);
-      for (const init of packet.initializations) {
-        expect(init).toMatchObject({
-          connection: null,
-          incarnation: null,
-          state: 'unknown',
-          lifecycle: 'incomplete',
-          durationMs: 4,
-          statements: {count: 1, totalMs: 3, recentMs: [3]},
-        });
-      }
-      const distinct = make();
-      distinct.qualify({caseId: 'ordinary-2', evaluation: 0, occurrence: 1, kind: 'native'});
-      const unrelated = distinct.tracer.span(spanOptions('recall.initializeDatabase'));
-      unrelated.end(2_000_000n, Exit.void);
-      expect(distinct.qualificationSnapshot('Success').initializations[0]).toMatchObject({
-        acquisition: null,
-        incarnation: null,
-        state: 'unknown',
-      });
-      expect(JSON.stringify(packet)).not.toContain('PRIVATE');
-    }),
-);
-
-effectIt.effect.prop(
-  'qualification preserves each generated exit and bounds anonymous statement histories',
-  {
-    count: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 40})),
-    success: Schema.Boolean,
-  },
-  ({count, success}) =>
-    Effect.gen(function* () {
-      const lines: string[] = [];
-      const observer = make({sink: line => lines.push(line)});
-      observer.qualify({caseId: 'ordinary-1', evaluation: 0, occurrence: 1, kind: 'native'});
-      const original = success ? Effect.succeed('PRIVATE') : Effect.fail('PRIVATE');
-      const exit = yield* reportNativeFailure(observeNativeBody(original, observer), observer).pipe(Effect.exit);
-      expect(Exit.isSuccess(exit)).toBe(success);
-      for (let i = 0; i < count; i++) {
-        const init = observer.tracer.span(spanOptions('recall.initializeDatabase'));
-        for (let j = 0; j < count; j++) {
-          const statement = observer.tracer.span(spanOptions('sqlite', Option.some(init)));
-          statement.end(2_000_000n, Exit.void);
-        }
-        init.end(3_000_000n, Exit.void);
-      }
-      const packet = observer.qualificationSnapshot('Success');
-      expect(packet.initializations.length).toBe(Math.min(16, count));
-      expect(packet.dropped).toBe(Math.max(0, count - 16));
-      expect(
-        EffectArray.every(
-          packet.initializations,
-          init => init.statements.count === count && init.statements.recentMs.length <= 16,
-        ),
-      ).toBe(true);
-      expect(observer.snapshot().recent.length).toBeLessThanOrEqual(16);
-      observer.reportQualification('Success');
-      expect(EffectArray.every(lines, line => Buffer.byteLength(line) <= 16_384)).toBe(true);
-      expect(EffectArray.join(lines, '')).not.toContain('PRIVATE');
-    }),
-  {arbitrary: {runs: 20}},
-);
-
-effectIt.effect('distinguishes missing and unfinished stage history from a measured zero-duration completion', () =>
-  Effect.sync(() => {
-    const observer = make();
-    observer.qualify({caseId: 'ordinary-1', evaluation: 0, occurrence: 1, kind: 'native'});
-    expect(observer.qualificationSnapshot('Success').stages.schema).toEqual({
-      started: 0,
-      ended: 0,
-      failed: 0,
-      inclusiveMs: null,
-    });
-    const first = observer.tracer.span(spanOptions('recall.initializeDatabase'));
-    expect(observer.qualificationSnapshot('Success').stages.schema).toEqual({
-      started: 1,
-      ended: 0,
-      failed: 0,
-      inclusiveMs: null,
-    });
-    expect(observer.qualificationSnapshot('Success').initializations[0]).toMatchObject({
-      outcome: 'unknown',
-      durationMs: null,
-    });
-    first.end(1_000_000n, Exit.void);
-    expect(observer.qualificationSnapshot('Success').stages.schema).toEqual({
-      started: 1,
-      ended: 1,
-      failed: 0,
-      inclusiveMs: 0,
-    });
-    const second = observer.tracer.span(spanOptions('recall.initializeDatabase'));
-    expect(observer.qualificationSnapshot('Success').stages.schema).toEqual({
-      started: 2,
-      ended: 1,
-      failed: 0,
-      inclusiveMs: null,
-    });
-    second.end(4_000_000n, Exit.fail('PRIVATE'));
-    expect(observer.qualificationSnapshot('Failure').stages.schema).toEqual({
-      started: 2,
-      ended: 2,
-      failed: 1,
-      inclusiveMs: 3,
-    });
-    expect(observer.qualificationSnapshot('Failure').stages.identity).toEqual({
-      started: 0,
-      ended: 0,
-      failed: 0,
-      inclusiveMs: null,
-    });
-  }),
-);
-
-effectIt.effect.prop(
-  'marks each generated partial stage history unknown independently of its completed prefix',
-  {
-    completed: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8})),
-    pending: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8})),
-    milliseconds: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3})),
-  },
-  ({completed, pending, milliseconds}) =>
-    Effect.sync(() => {
-      const observer = make();
-      observer.qualify({caseId: 'ordinary-1', evaluation: 0, occurrence: 1, kind: 'native'});
-      const spans = Array.from({length: completed + pending}, () =>
-        observer.tracer.span(spanOptions('recall.loadMemoryIdentities')),
-      );
-      for (let i = 0; i < completed; i++) spans[i].end(1_000_000n + BigInt(milliseconds) * 1_000_000n, Exit.void);
-      const observed = observer.qualificationSnapshot('Success').stages.identity;
-      expect(observed.started).toBe(completed + pending);
-      expect(observed.ended).toBe(completed);
-      expect(observed.inclusiveMs).toBe(pending === 0 && completed > 0 ? completed * milliseconds : null);
-      const collector = makeQualificationCollector();
-      collector.add(JSON.stringify(observer.qualificationSnapshot('Success')));
-      expect(collector.snapshot()).toMatchObject({complete: false, structurallyComplete: true, rejectedRecords: 0});
-      expect(collector.snapshot().records).toHaveLength(1);
-      for (let i = completed; i < spans.length; i++) spans[i].end(1_000_000n, Exit.void);
-    }),
-  {arbitrary: {runs: 30}},
 );

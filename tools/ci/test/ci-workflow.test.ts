@@ -5,7 +5,6 @@ import {spawnSync} from '@threadnote/testing/node-child-process';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
-import {qualificationCommand} from '../windows-identity-qualification.js';
 import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -240,7 +239,6 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
   expect(jobs.test?.if).toBe('always()');
   expect(jobs.test?.needs).toEqual([
     'native-workflow-stress',
-    'windows-identity-qualification',
     'bazel-plan',
     'bazel-plan-validation',
     'bazel-shards',
@@ -288,7 +286,7 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
       "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
     );
     expect(jobs['native-workflow-stress']?.if).toBe(
-      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true && inputs.windows_identity_qualification != true",
+      "github.event_name == 'workflow_dispatch' && inputs.native_workflow_stress == true",
     );
     expect(jobs['native-workflow-stress']?.uses).toBe('./.github/workflows/native-workflow-stress.yml');
     const aggregate = step(jobs.test, 'Require every selected lane');
@@ -359,24 +357,30 @@ it('partitions the complete serialized Windows inventory with four balanced shar
             Effect.pipe(candidate.run, effectOptionalString =>
               effectOptionalString == null
                 ? undefined
-                : Effect.pipe(
-                    effectOptionalString,
-                    EffectString.includes('windows-identity-qualification.ts full-shard'),
-                  ),
+                : Effect.pipe(effectOptionalString, EffectString.includes('vitest run --no-file-parallelism')),
             ),
           ),
       )
     : undefined;
   expect(runs).toHaveLength(1);
-  expect(runs?.[0].run).toBe('bun tools/ci/windows-identity-qualification.ts full-shard ${{ matrix.shard }}');
-  expect(qualificationCommand('bun', '.context/windows-smoke/results.json', '1/4')).toEqual([
+  expect(
+    Effect.pipe(
+      runs?.[0].run,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.split(/\s+/u)),
+    ),
+  ).toEqual([
     'bun',
     '--bun',
     'vitest',
     'run',
     '--no-file-parallelism',
     '--testTimeout=120000',
-    '--shard=1/4',
+    '--shard=${{',
+    'matrix.shard',
+    '}}',
     '--config=tools/ci/windows-smoke.config.ts',
     '--reporter=default',
     '--reporter=json',
@@ -543,60 +547,4 @@ it('preserves every prerequisite failure status and prevents shard execution', (
     }),
     {numRuns: 20},
   );
-});
-
-it.each(['success', 'failure', 'cancelled', 'skipped'])(
-  'keeps fixed identity qualification separate and requires its actual executor result %s',
-  identityResult => {
-    expect(jobs.test?.name).toContain("'Windows identity diagnostic result'");
-    expect(jobs['windows-identity-qualification']?.if).toBe(
-      "github.event_name == 'workflow_dispatch' && inputs.windows_identity_qualification == true",
-    );
-    const aggregate = step(jobs.test, 'Require every selected lane');
-    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
-      env: {
-        BASH_ENV: '',
-        PATH: '',
-        MANUAL_IDENTITY: 'true',
-        MANUAL_STRESS: 'false',
-        IDENTITY_RESULT: identityResult,
-        BAZEL_PLAN_RESULT: 'skipped',
-      },
-      timeout: 2_000,
-    });
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(identityResult === 'success' ? 0 : 1);
-  },
-);
-it('rejects simultaneous identity and stress modes without selecting ordinary CI', () => {
-  expect(jobs['bazel-plan']?.if).toBe(
-    "github.event_name != 'workflow_dispatch' || (inputs.native_workflow_stress != true && inputs.windows_identity_qualification != true)",
-  );
-  expect(jobs['native-workflow-stress']?.if).toContain('inputs.windows_identity_qualification != true');
-  const aggregate = step(jobs.test, 'Require every selected lane');
-  const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
-    env: {
-      BASH_ENV: '',
-      PATH: '',
-      MANUAL_IDENTITY: 'true',
-      MANUAL_STRESS: 'true',
-      IDENTITY_RESULT: 'success',
-      NATIVE_WORKFLOW_STRESS_RESULT: 'success',
-    },
-    timeout: 2_000,
-  });
-  expect(result.error).toBeUndefined();
-  expect(result.status).toBe(1);
-});
-
-it('uploads full-shard selected diagnostics only after safe readiness, with exactly three owned files', () => {
-  const upload = step(jobs['windows-smoke'], 'Preserve bounded full-shard identity diagnostics');
-  expect(upload?.if).toBe("always() && steps.qualification.outputs.safe_artifacts_ready == 'true'");
-  expect(upload?.uses).toBe('actions/upload-artifact@v7');
-  expect(upload?.with?.path).toBe(
-    '${{ steps.qualification.outputs.artifact_directory }}/manifest.json\n${{ steps.qualification.outputs.artifact_directory }}/statuses.json\n${{ steps.qualification.outputs.artifact_directory }}/diagnostics.json\n',
-  );
-  expect(upload?.with?.['if-no-files-found']).toBe('error');
-  expect(readFileSync('.github/workflows/ci.yml', 'utf8')).not.toContain('continue-on-error');
-  expect(step(jobs['windows-smoke'], 'Preserve Windows smoke timings')?.with?.path).toBe('.context/windows-smoke/');
 });

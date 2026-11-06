@@ -4,11 +4,7 @@ import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} f
 import fc from 'fast-check';
 import {describe, expect, it, vi} from 'vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {
-  observeWorkflowQualification,
-  workflowDiagnostics,
-  workflowPropertyDiagnostics,
-} from './workflow-property-diagnostics.js';
+import {workflowDiagnostics, workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
 import {
   createWorkflowExecutionDiagnostics,
   executionDiagnosticPhase,
@@ -983,42 +979,3 @@ describe('workflow execution diagnostics', () => {
     {fastCheck: {numRuns: 20}},
   );
 });
-
-effectIt.effect('namespace qualification preserves genuine exits and delegates anonymous initialization spans', () =>
-  Effect.gen(function* () {
-    const lines: string[] = [];
-    const sink = vi.spyOn(process.stderr, 'write').mockImplementation((line: string | Uint8Array) => {
-      lines.push(String(line));
-      return true;
-    });
-    yield* Effect.addFinalizer(() => Effect.sync(() => sink.mockRestore()));
-    const payload = {PRIVATE: true};
-    for (const success of [true, false]) {
-      const original = (success ? Effect.succeed(payload) : Effect.fail(payload)).pipe(
-        Effect.withSpan('sqlite'),
-        Effect.withSpan('recall.initializeDatabase'),
-      );
-      const exit = yield* observeWorkflowQualification(original, 'shared-7', success ? 1 : 2).pipe(Effect.exit);
-      expect(Exit.isSuccess(exit)).toBe(success);
-      if (Exit.isSuccess(exit)) expect(exit.value).toBe(payload);
-      else expect(Cause.squash(exit.cause)).toBe(payload);
-    }
-    const records = EffectArray.map(
-      EffectArray.filter(lines, line => EffectString.startsWith('WINDOWS_IDENTITY_DIAGNOSTIC ')(line)),
-      line => JSON.parse(EffectString.slice('WINDOWS_IDENTITY_DIAGNOSTIC '.length)(line)),
-    );
-    expect(records).toHaveLength(2);
-    expect(EffectArray.map(records, record => record.evaluation)).toEqual([1, 2]);
-    for (const record of records) {
-      expect(record.complete).toBe(false);
-      expect(record.initializations[0]).toMatchObject({
-        acquisition: null,
-        connection: null,
-        incarnation: null,
-        state: 'unknown',
-        statements: {count: 1},
-      });
-    }
-    expect(JSON.stringify(records)).not.toContain('PRIVATE');
-  }),
-);
