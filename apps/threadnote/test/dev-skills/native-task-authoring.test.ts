@@ -1647,3 +1647,71 @@ fcEffectProp(
     }),
   {fastCheck: {numRuns: 32}},
 );
+
+fcEffectProp(
+  effectIt,
+  'foreign same-basename roots cannot mutate authoring job state for any generated cancel or resume attempt',
+  {
+    operation: fc.constantFrom('cancel' as const, 'resume' as const),
+    suffix: asciiId,
+  },
+  value =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const file = f.path.join(f.root, 'foreign-property-spec.json');
+      yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+      const accepted = yield* f
+        .author({
+          command: 'start',
+          featureName: 'Generated foreign job owner binding',
+          kind: 'spec',
+          contentFile: file,
+          installationTarget: 'codex',
+          saveMode: 'background',
+        })
+        .pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+      const runId = String(accepted.runId);
+      const jobRef = String(accepted.jobRef);
+      const jobPayload = object(
+        JSON.parse(
+          Buffer.from(
+            EffectString.replaceAll(
+              '_',
+              '/',
+            )(EffectString.replaceAll('-', '+')(EffectString.slice('authorjob-v1.'.length)(jobRef))),
+            'base64',
+          ).toString('utf8'),
+        ),
+      );
+      const run = yield* readNativeWorkflowState(f.config, runId);
+      if (!run) throw new Error('The submitted job has no native run.');
+      const foreignRepo = f.path.join(f.root, 'generated-' + value.suffix, 'repo');
+      yield* f.fs.makeDirectory(foreignRepo, {recursive: true});
+      yield* f.fs.writeFileString(f.path.join(foreignRepo, 'source.ts'), 'export const foreign = true;\n');
+      yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
+      const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
+      const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
+      const jobNames = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
+      const beforeJobs: Array<readonly [string, string]> = [];
+      for (const name of jobNames) beforeJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      const result = yield* runNativeJob(
+        f.config,
+        {
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'job',
+          command: value.operation,
+          runId,
+          generation: run.state.generation,
+          jobId: jobPayload.jobId,
+        },
+        () => Effect.void,
+      ).pipe(Effect.provideService(SystemInfo, {...f.scoped, currentDirectory: () => foreignRepo}), Effect.result);
+      expect(result).toMatchObject({failure: {code: 'binding-drift'}});
+      expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
+      const afterJobs: Array<readonly [string, string]> = [];
+      for (const name of jobNames) afterJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      expect(afterJobs).toEqual(beforeJobs);
+    }).pipe(TestClock.withLive, provideNative),
+  {fastCheck: {numRuns: 4}},
+);
