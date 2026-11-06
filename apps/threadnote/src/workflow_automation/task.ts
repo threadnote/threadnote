@@ -141,17 +141,22 @@ const discoverHistoricalWatches = (
       const watch = yield* readNativeWatch(config, candidate.watchId);
       const consumer = watch?.envelope.state.consumer;
       const notification = watch?.envelope.notification;
+      const activeOpenWatch =
+        watch?.envelope.state.prState === 'open' && watch.envelope.collector?.status === 'running';
+      const terminalMergedWatch =
+        watch?.envelope.state.prState === 'merged' &&
+        watch.envelope.collector?.status === 'terminal' &&
+        watch.envelope.collector.reason === 'merged';
       if (
         !watch ||
         watch.envelope.state.pr !== candidate.prUrl ||
-        watch.envelope.state.prState !== 'open' ||
+        (!activeOpenWatch && !terminalMergedWatch) ||
         watch.envelope.state.head !== candidate.sourceHead ||
         !consumer ||
         consumer.id !== candidate.consumerId ||
         !notification ||
         notification.consumerId !== consumer.id ||
-        notification.wakeupId !== consumer.wakeupId ||
-        watch.envelope.collector?.status !== 'running'
+        notification.wakeupId !== consumer.wakeupId
       )
         continue;
       if (candidate.delivery.watch?.stateDir !== expectedStateDir) continue;
