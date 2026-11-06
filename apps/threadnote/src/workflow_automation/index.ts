@@ -34,6 +34,8 @@ import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
 import {runNativeWatch} from './watch.js';
 import {runNativeCloseout} from './closeout.js';
+import {decodeJournal} from './closeout_request_schema.js';
+import {readNativeCloseoutJournal} from './closeout_store.js';
 import {CurrentNativeJobBoundary, CurrentNativeJobProgress, runNativeJob} from './native_jobs.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
@@ -465,19 +467,59 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
               artifact: yield* memory.read(binding.bindingId, child.uri, child.evidenceRefs),
             };
           });
+        const completedCloseout = yield* readNativeCloseoutJournal(config, stored.state.runId, decodeJournal);
+        const terminalCloseout =
+          completedCloseout?.state.status === 'complete' &&
+          completedCloseout.state.runId === stored.state.runId &&
+          completedCloseout.state.generation === stored.state.generation &&
+          completedCloseout.state.bindingId === stored.state.bindingId &&
+          EffectRecord.keys(completedCloseout.state.outputs).length > 0
+            ? completedCloseout.state
+            : undefined;
         const source = stored.state.cycle?.state.plan.source;
-        const pinned = source ? yield* memory.read(binding.bindingId, source.root.uri) : undefined;
+        const pinned = source && !terminalCloseout ? yield* memory.read(binding.bindingId, source.root.uri) : undefined;
         const planDrift =
-          source && (pinned?.memoryId !== source.root.memoryId || pinned.revision !== source.root.revision)
+          source &&
+          !terminalCloseout &&
+          (pinned?.memoryId !== source.root.memoryId || pinned.revision !== source.root.revision)
             ? 'The approved plan root changed. Reconcile its current verified export before further delivery.'
             : undefined;
-        const hasPlan = EffectArray.some(
-          stored.state.operations,
-          entry =>
-            entry.status === 'verified' &&
-            entry.intent.role === 'authoring-root' &&
-            entry.intent.artifactKey === 'author-root-plan',
-        );
+        const verifiedCloseoutOutputs = terminalCloseout
+          ? yield* Effect.forEach(EffectRecord.toEntries(terminalCloseout.outputs), ([key, reference]) =>
+              Effect.gen(function* () {
+                const artifact = yield* memory.read(binding.bindingId, reference.uri);
+                if (
+                  artifact.uri !== reference.uri ||
+                  artifact.memoryId !== reference.memoryId ||
+                  artifact.revision !== reference.revision ||
+                  artifact.storageKind !== 'durable' ||
+                  artifact.state !== 'active'
+                )
+                  return yield* issue(
+                    'invalid-readback',
+                    'A completed closeout output no longer matches its verified durable receipt.',
+                  );
+                return {key, uri: artifact.uri, memoryId: artifact.memoryId, revision: artifact.revision};
+              }),
+            )
+          : undefined;
+        if (terminalCloseout) {
+          const afterCloseoutRead = yield* readNativeCloseoutJournal(config, stored.state.runId, decodeJournal);
+          if (afterCloseoutRead?.revision !== completedCloseout?.revision)
+            return yield* issue(
+              'inspection-failed',
+              'The completed closeout changed while reading its durable outputs.',
+            );
+        }
+        const hasPlan =
+          !terminalCloseout &&
+          EffectArray.some(
+            stored.state.operations,
+            entry =>
+              entry.status === 'verified' &&
+              entry.intent.role === 'authoring-root' &&
+              entry.intent.artifactKey === 'author-root-plan',
+          );
         const authoring = hasPlan
           ? yield* runNativeAuthoring(
               config,
@@ -496,6 +538,15 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           ...inspection,
           revision: stored.revision,
           taskAuthoring: authoring?.authoring,
+          ...(terminalCloseout && verifiedCloseoutOutputs
+            ? {
+                taskCloseout: {
+                  status: 'complete' as const,
+                  transactionId: terminalCloseout.transactionId,
+                  outputs: verifiedCloseoutOutputs,
+                },
+              }
+            : {}),
           ...(planDrift ? {planDrift} : {}),
         };
       }

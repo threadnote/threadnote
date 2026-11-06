@@ -380,6 +380,9 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     if (afterRead?.revision !== stored.revision)
       return yield* fail('inspection-failed', 'The native run changed while reading its current authoring root.');
     const continueAuthoring = (view: ReturnType<typeof projectNativeTaskView>) => {
+      const closeout =
+        'taskCloseout' in inspected && Predicate.isObject(inspected.taskCloseout) ? inspected.taskCloseout : undefined;
+      if (closeout?.status === 'complete') return {...view, closeout};
       if (!authoring) return view;
       const currentRoot = Predicate.isObject(authoring.root) ? authoring.root : undefined;
       if (authoring.status === 'admitted')
