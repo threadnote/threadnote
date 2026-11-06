@@ -1,5 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {readSeedManifest, requireWorkset} from '@threadnote/workspace/manifest';
 import type {ProjectManifest, ResolvedWorkset, RuntimeConfig, SeedManifest} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
@@ -500,6 +502,8 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
     const recordsByRef = new Map(EffectArray.map(records, record => [record.ref, record]));
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const random = yield* SecureRandom.SecureRandom;
+    const system = yield* SystemInfo;
     const queryService = yield* CodeGraphQueryService;
     const manifest = yield* readSeedManifest(config.manifestPath);
     const caller = callerCwd === undefined ? undefined : yield* expandPath(callerCwd);
@@ -507,9 +511,9 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
     const publishedRoutes = yield* Effect.forEach(
       resolveManifestWorksets(manifest),
       workset =>
-        Effect.option(readPublishedQualifiedRefRoute(config.agentContextHome, workset.name, fs, path)).pipe(
-          Effect.map(published => ({published: Option.getOrUndefined(published), workset})),
-        ),
+        Effect.option(
+          readPublishedQualifiedRefRoute(config.agentContextHome, workset.name, fs, path, random, system),
+        ).pipe(Effect.map(published => ({published: Option.getOrUndefined(published), workset}))),
       {concurrency: 4},
     );
     const publishedPaths = EffectArray.flatMap(publishedRoutes, ({published, workset}) => {
@@ -619,10 +623,14 @@ function readPublishedQualifiedRefRoute(
   worksetName: string,
   fs: FileSystem.FileSystem,
   path: Path.Path,
+  random: SecureRandom.SecureRandom['Service'],
+  system: SystemInfoShape,
 ): Effect.Effect<CodeGraphWorksetCatalogPublishedGenerationV1 | undefined, unknown> {
   const captured = readPublishedCodeGraphWorksetCatalogGeneration(threadnoteHome, worksetName).pipe(
     Effect.provideService(FileSystem.FileSystem, fs),
     Effect.provideService(Path.Path, path),
+    Effect.provideService(SecureRandom.SecureRandom, random),
+    Effect.provideService(SystemInfo, system),
   );
   // The catalog reader's inferred generic environment is intentionally broad;
   // this adapter has captured the only concrete services used by that read.

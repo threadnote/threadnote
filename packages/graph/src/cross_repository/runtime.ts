@@ -1,5 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
+import {SystemInfo} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {requireWorkset} from '@threadnote/workspace/manifest';
 import type {ResolvedWorkset, RuntimeConfig} from '@threadnote/workspace/config';
@@ -357,6 +359,8 @@ function traversalDependencies(config: RuntimeConfig, runtime: PreparedRuntime) 
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const random = yield* SecureRandom.SecureRandom;
+    const system = yield* SystemInfo;
     const store = yield* CodeGraphStore;
     const qualifiedRefs = new Map<string, {readonly nodeId: string; readonly repositoryId: string}>();
     const resolveNodeId = (endpoint: CodeGraphCrossRepositoryTraversalEndpointV1) =>
@@ -367,7 +371,12 @@ function traversalDependencies(config: RuntimeConfig, runtime: PreparedRuntime) 
         const record = yield* resolveCodeGraphQualifiedRef(config.agentContextHome, {
           ref: endpoint.reference.ref,
           repositoryId: endpoint.repositoryId,
-        }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path));
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(SecureRandom.SecureRandom, random),
+          Effect.provideService(SystemInfo, system),
+        );
         qualifiedRefs.set(record.ref, {nodeId: record.nodeId, repositoryId: record.repositoryId});
         return record.nodeId;
       });
@@ -376,6 +385,8 @@ function traversalDependencies(config: RuntimeConfig, runtime: PreparedRuntime) 
         readCodeGraphWorksetCatalogBridgePage(config.agentContextHome, input).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
+          Effect.provideService(SecureRandom.SecureRandom, random),
+          Effect.provideService(SystemInfo, system),
         ),
       readLocalPage: (input: {
         readonly after?: string;
