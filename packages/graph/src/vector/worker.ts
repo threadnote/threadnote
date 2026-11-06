@@ -450,6 +450,8 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
   };
   if (!owner.processStartIdentity)
     return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Cannot identify embedding worker process.'});
+  if (options.lifecycle && !(yield* options.lifecycle.register(owner))) return;
+  const shouldDrain = options.lifecycle?.shouldDrain ?? Effect.succeed(false);
   const receiptPath = codeGraphEmbeddingWorkerReceiptPath(path, canonicalHome);
   // Immutable snapshot counts and page-size hints only; no symbol/vector payloads.
   const memo = new Map<string, WorkerMemo>();
@@ -474,16 +476,19 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
       yield* options.onReady ?? Effect.void;
       let idleSince = yield* Clock.currentTimeMillis;
       do {
+        if (yield* shouldDrain) return;
         yield* options.lifecycle?.beforeScan ?? Effect.void;
         let catalogAfter: string | undefined;
         let runnable = false;
         do {
+          if (yield* shouldDrain) return;
           const page = yield* options.catalogPage(catalogAfter);
           if (page.checkoutIds.length > 64)
             return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Embedding catalog page exceeds bound.'});
           for (const checkoutId of page.checkoutIds) {
             let after: {worktreeId: string; scopeId: string} | undefined;
             do {
+              if (yield* shouldDrain) return;
               const catalogLayout = codeGraphLayout(
                 path,
                 canonicalHome,
@@ -501,6 +506,7 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
                 )
                 .pipe(Effect.catchIf(expectedWorkerFailure, () => Effect.succeed([])));
               for (const lane of lanes) {
+                if (yield* shouldDrain) return;
                 after = lane;
                 if (lane.state === 'ready' || lane.state === 'cancelled') continue;
                 if (lane.notBefore > (yield* Clock.currentTimeMillis)) {
