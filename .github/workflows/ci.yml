@@ -319,6 +319,9 @@ jobs:
     if: needs.bazel-plan.outputs.windows_smoke == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -335,22 +338,24 @@ jobs:
         timeout-minutes: 5
         run: bun tools/ci/windows-workflow-prerequisites.ts
       - run: bun run typecheck
-      - run: >-
-          bun --bun vitest run --no-file-parallelism --testTimeout=120000 --shard=${{ matrix.shard }}
-          --config=tools/ci/windows-smoke.config.ts
-          --reporter=default --reporter=json --outputFile=.context/windows-smoke/results.json
-          apps/threadnote/test/unit/windows-support.test.ts
-          apps/threadnote/test/unit/command-shim.test.ts
-          apps/threadnote/test/unit/effect-command.test.ts
-          apps/threadnote/test/unit/effect-system.test.ts
-          apps/threadnote/test/unit/standalone-process-lease.test.ts
-          apps/threadnote/test/unit/process-diagnostics.test.ts
-          apps/threadnote/test/unit/local-ai.test.ts
-          apps/threadnote/test/unit/update.test.ts
-          apps/threadnote/test/unit/mcp.test.ts
-          apps/threadnote/test/dev-skills/
-          apps/threadnote/test/integration/cli.dev-skills.test.ts
-          packages/integrations/test/dev-skills-catalog.test.ts
+      - name: Run complete Windows shard with bounded identity diagnostics
+        id: qualification
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bun tools/ci/windows-identity-qualification.ts full-shard ${{ matrix.shard }}
+      - name: Preserve bounded full-shard identity diagnostics
+        if: always() && steps.qualification.outputs.safe_artifacts_ready == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.qualification.outputs.artifact_name }}
+          path: |
+            ${{ steps.qualification.outputs.artifact_directory }}/manifest.json
+            ${{ steps.qualification.outputs.artifact_directory }}/statuses.json
+            ${{ steps.qualification.outputs.artifact_directory }}/diagnostics.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Graph repair quarantine smoke
         if: matrix.shard == '1/4'
         run: >-

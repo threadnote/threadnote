@@ -4,6 +4,7 @@ import * as Effect2 from 'effect';
 import fc from 'fast-check';
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
   writeFileSync,
   readFileSync,
@@ -16,6 +17,12 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {describe, expect, it} from 'vitest';
 import {
   admitQualification,
+  readQualificationResults,
+  admitFullShard,
+  cancelledChildExit,
+  qualificationCommand,
+  windowsSmokeFiles,
+  windowsShard,
   createQualificationWorkspace,
   finalizeQualificationArtifacts,
   publishQualificationReady,
@@ -480,4 +487,183 @@ it('rejects non-string outcome values at both enum boundaries while retaining va
     }),
     {numRuns: 40},
   );
+});
+
+it('runs the complete fixed original Windows inventory for each unchanged shard, without a case-name filter', () => {
+  for (const shard of ['1/4', '2/4', '3/4', '4/4']) {
+    const args = qualificationCommand('bun', '.context/windows-smoke/results.json', shard);
+    expect(args).toEqual([
+      'bun',
+      '--bun',
+      'vitest',
+      'run',
+      '--no-file-parallelism',
+      '--testTimeout=120000',
+      `--shard=${shard}`,
+      '--config=tools/ci/windows-smoke.config.ts',
+      '--reporter=default',
+      '--reporter=json',
+      '--outputFile=.context/windows-smoke/results.json',
+      ...windowsSmokeFiles,
+    ]);
+    expect(args).not.toContain('--testNamePattern');
+    expect(args).not.toContain('-t');
+    expect(args).toContain('apps/threadnote/test/unit/local-ai.test.ts');
+  }
+  expect(() => windowsShard('1/1')).toThrow();
+  expect(() => windowsShard('1/4 --testNamePattern unsafe')).toThrow();
+});
+it('binds full-shard checkout source independently of provider head, preserving manual source restrictions', () => {
+  const merge = EffectString.repeat(40)('a');
+  const full = {...env, GITHUB_SHA: merge, THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA: qualificationBase};
+  expect(admitFullShard(full, {head: merge, clean: true}, '1/4').expected).toBe(merge);
+  expect(() => admitFullShard(full, {head: qualificationBase, clean: true}, '1/4')).toThrow();
+  expect(() => admitFullShard(full, {head: merge, clean: false}, '1/4')).toThrow();
+  expect(() => admitQualification(env, {...actual, changed: ['production.ts']})).toThrow();
+  expect(
+    resolveQualificationJob(
+      {jobs: [{...job, name: 'Bun unit smoke · Windows · 1/4'}]},
+      {
+        runId: '123',
+        attempt: '2',
+        sha: qualificationBase,
+        observedAt: '2026-11-05T21:01:00Z',
+        jobName: 'Bun unit smoke · Windows · 1/4',
+      },
+    ),
+  ).toEqual({id: '456', startedAt: job.started_at});
+});
+it('retains non-selected workload failures while exporting only fixed selected case identities', () => {
+  fc.assert(
+    fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 40}), flags => {
+      const raw = rawResults();
+      raw.testResults[0].assertionResults.push(
+        ...EffectArray.map(flags, passed => ({
+          fullName: 'PRIVATE other test',
+          status: passed ? 'passed' : 'failed',
+          duration: 1,
+          failureMessages: [],
+        })),
+      );
+      const summary = summarizeQualification(raw, true);
+      expect(summary.cases).toHaveLength(21);
+      expect(summary.workload.total).toBe(21 + flags.length);
+      expect(summary.workload.failed).toBe(EffectArray.filter(flags, passed => !passed).length);
+      expect(JSON.stringify(summary)).not.toContain('PRIVATE');
+      expect(qualificationExitCode(7, true)).toBe(7);
+      expect(qualificationExitCode(7, false)).toBe(7);
+      expect(() => summarizeQualification(raw)).toThrow();
+    }),
+    {numRuns: 40},
+  );
+  const raw = rawResults();
+  raw.testResults[0].assertionResults = raw.testResults[0].assertionResults.slice(0, 2);
+  expect(summarizeQualification(raw, true)).toMatchObject({complete: false, workload: {total: 2}});
+});
+
+it('retains genuine child failure under cancellation and never relabels cancelled success as a pass', () => {
+  fc.assert(
+    fc.property(fc.integer({min: 1, max: 255}), code => {
+      for (const signal of [undefined, 'SIGINT', 'SIGTERM'] as const) {
+        expect(cancelledChildExit(code, signal)).toBe(code);
+        expect(qualificationExitCode(cancelledChildExit(code, signal), false)).toBe(code);
+      }
+    }),
+    {numRuns: 40},
+  );
+  expect(cancelledChildExit(0, undefined)).toBe(0);
+  expect(cancelledChildExit(0, 'SIGINT')).toBe(130);
+  expect(cancelledChildExit(0, 'SIGTERM')).toBe(143);
+});
+
+it('marks missing, invalid and oversized reporter files unavailable, without inventing zero workload counts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'threadnote-reporter-'));
+  const file = join(root, 'report.json');
+  try {
+    expect(await readQualificationResults(file, true)).toMatchObject({
+      workload: null,
+      reporter: {status: 'unavailable', reason: 'missing'},
+    });
+    for (const contents of ['{', '{}', JSON.stringify({testResults: [{assertionResults: [{}]}]})]) {
+      writeFileSync(file, contents);
+      expect(await readQualificationResults(file, true)).toMatchObject({
+        workload: null,
+        reporter: {status: 'unavailable', reason: 'invalid'},
+      });
+    }
+    const duplicate = rawResults();
+    duplicate.testResults[0].assertionResults.push(duplicate.testResults[0].assertionResults[0]);
+    writeFileSync(file, JSON.stringify(duplicate));
+    expect(await readQualificationResults(file, true)).toMatchObject({workload: null, reporter: {reason: 'invalid'}});
+    writeFileSync(file, EffectString.repeat(4 * 1024 * 1024 + 1)(' '));
+    expect(await readQualificationResults(file, true)).toMatchObject({workload: null, reporter: {reason: 'oversized'}});
+    writeFileSync(file, JSON.stringify({testResults: []}));
+    expect(await readQualificationResults(file, true)).toMatchObject({
+      workload: {total: 0},
+      reporter: {status: 'available', reason: null},
+    });
+    const subset = rawResults();
+    subset.testResults[0].assertionResults = subset.testResults[0].assertionResults.slice(0, 2);
+    writeFileSync(file, JSON.stringify(subset));
+    expect(await readQualificationResults(file, true)).toMatchObject({
+      complete: false,
+      workload: {total: 2},
+      reporter: {status: 'available'},
+    });
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
+it('drains a real child after a closed console without replacing child0, child7 or cancellation outcome', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'threadnote-console-'));
+  const home = join(root, 'home'),
+    repository = join(root, 'repo'),
+    installation = join(root, 'installation');
+  for (const dir of [home, repository, installation]) mkdirSync(dir);
+  const moduleUrl = new URL('../windows-identity-qualification.ts', import.meta.url).href;
+  try {
+    for (const [childExit, signal, expected] of [
+      [0, null, 0],
+      [7, null, 7],
+      [0, 'SIGTERM', 143],
+    ] as const) {
+      const source = `import {drainQualificationStream, makeQualificationCollector, cancelledChildExit} from ${JSON.stringify(moduleUrl)};
+        await Bun.stdin.text();
+        const before=process.stdout.listenerCount('error');
+        const collector=makeQualificationCollector();
+        const child=Bun.spawn([process.execPath,'-e',${JSON.stringify('process.stdout.write(' + JSON.stringify('WINDOWS_IDENTITY_DIAGNOSTIC ' + JSON.stringify(validNativeRecord()) + '\n') + ');process.exit(' + childExit + ');')}],{stdout:'pipe',stderr:'ignore'});
+        await drainQualificationStream(child.stdout,collector,process.stdout);
+        const code=await child.exited;
+        process.stderr.write(JSON.stringify({code,records:collector.snapshot().records.length,listenersRetired:process.stdout.listenerCount('error')===before}));
+        process.exitCode=cancelledChildExit(code,${JSON.stringify(signal)}??undefined);`;
+      const wrapper = Bun.spawn([process.execPath, '-e', source], {
+        cwd: repository,
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          LOCALAPPDATA: home,
+          THREADNOTE_HOME: home,
+          THREADNOTE_INSTALL_ROOT: installation,
+        },
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      try {
+        await wrapper.stdout.cancel();
+        await wrapper.stdin.write('go');
+        await wrapper.stdin.end();
+        const stderr = await new Response(wrapper.stderr).text();
+        expect(await wrapper.exited).toBe(expected);
+        expect(JSON.parse(stderr)).toEqual({code: childExit, records: 1, listenersRetired: true});
+      } finally {
+        wrapper.kill();
+        await wrapper.exited;
+      }
+    }
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });

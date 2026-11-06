@@ -19,6 +19,42 @@ export const qualificationEdits = [
   'tools/ci/test/windows-identity-qualification.test.ts',
   'tools/ci/test/ci-workflow.test.ts',
 ] as const;
+/** The existing Windows smoke inventory; selection remains owned by its unchanged sequencer. */
+export const windowsSmokeFiles = [
+  'apps/threadnote/test/unit/windows-support.test.ts',
+  'apps/threadnote/test/unit/command-shim.test.ts',
+  'apps/threadnote/test/unit/effect-command.test.ts',
+  'apps/threadnote/test/unit/effect-system.test.ts',
+  'apps/threadnote/test/unit/standalone-process-lease.test.ts',
+  'apps/threadnote/test/unit/process-diagnostics.test.ts',
+  'apps/threadnote/test/unit/local-ai.test.ts',
+  'apps/threadnote/test/unit/update.test.ts',
+  'apps/threadnote/test/unit/mcp.test.ts',
+  'apps/threadnote/test/dev-skills/',
+  'apps/threadnote/test/integration/cli.dev-skills.test.ts',
+  'packages/integrations/test/dev-skills-catalog.test.ts',
+] as const;
+export function windowsShard(value: string): '1/4' | '2/4' | '3/4' | '4/4' {
+  if (value !== '1/4' && value !== '2/4' && value !== '3/4' && value !== '4/4')
+    throw new QualificationGateError('unexpected-arguments');
+  return value;
+}
+export function qualificationCommand(executable: string, output: string, shard?: string) {
+  return [
+    executable,
+    '--bun',
+    'vitest',
+    'run',
+    '--no-file-parallelism',
+    '--testTimeout=120000',
+    ...(shard === undefined ? [] : [`--shard=${windowsShard(shard)}`]),
+    '--config=tools/ci/windows-smoke.config.ts',
+    ...(shard === undefined ? [] : ['--reporter=default']),
+    '--reporter=json',
+    `--outputFile=${output}`,
+    ...(shard === undefined ? qualificationFiles : windowsSmokeFiles),
+  ];
+}
 const ordinaryNames = [
   'preflights the complete state at the real logical codec boundary before creating any pins',
   'uses the same whole-state preflight for the fixed stored-byte codec ceiling',
@@ -166,7 +202,7 @@ export function admitQualification(
     attempt: positiveId(env.GITHUB_RUN_ATTEMPT),
   };
 }
-export function summarizeQualification(raw: unknown) {
+export function summarizeQualification(raw: unknown, fullShard = false) {
   const root = object(raw);
   if (!Array.isArray(root.testResults)) throw new Error('invalid-results');
   const found = new Map<
@@ -178,12 +214,19 @@ export function summarizeQualification(raw: unknown) {
       durationMs: number;
     }
   >();
+  const workload = {total: 0, passed: 0, failed: 0, incomplete: 0};
   for (const suite of root.testResults) {
     const assertions = object(suite).assertionResults;
     if (!Array.isArray(assertions)) throw new Error('invalid-assertions');
     for (const value of assertions) {
       const test = object(value);
+      if (typeof test.fullName !== 'string' || typeof test.status !== 'string') throw new Error('invalid-assertions');
+      workload.total++;
+      if (test.status === 'passed') workload.passed++;
+      else if (test.status === 'failed') workload.failed++;
+      else workload.incomplete++;
       const id = typeof test.fullName === 'string' ? qualificationCaseId(test.fullName) : undefined;
+      if (!id && fullShard) continue;
       if (!id || found.has(id)) throw new Error('unexpected-or-duplicate-case');
       const status = test.status === 'passed' ? 'passed' : test.status === 'failed' ? 'failed' : 'incomplete';
       const timeout =
@@ -211,7 +254,82 @@ export function summarizeQualification(raw: unknown) {
   return {
     complete: found.size === 21 && [...found.values()].every(test => test.status !== 'incomplete'),
     cases: [...found.values()],
+    workload,
   };
+}
+
+/** Reporter availability is separate from an observed empty or partial selected subset. */
+export async function readQualificationResults(filename: string, fullShard = false) {
+  const unavailable = (reason: 'missing' | 'invalid' | 'oversized' | 'unreadable') => ({
+    complete: false,
+    cases: [],
+    workload: null,
+    reporter: {status: 'unavailable', reason},
+  });
+  try {
+    const raw = Bun.file(filename);
+    if (!(await raw.exists())) return unavailable('missing');
+    if (raw.size > 4 * 1024 * 1024) return unavailable('oversized');
+    const text = await raw.text();
+    if (Buffer.byteLength(text) > 4 * 1024 * 1024) return unavailable('oversized');
+    try {
+      return {...summarizeQualification(JSON.parse(text), fullShard), reporter: {status: 'available', reason: null}};
+    } catch {
+      return unavailable('invalid');
+    }
+  } catch {
+    return unavailable('unreadable');
+  }
+}
+/** Error/close may arrive asynchronously after a write callback; neither owns the test outcome. */
+export async function drainQualificationStream(
+  stream: ReadableStream<Uint8Array>,
+  collector: ReturnType<typeof makeQualificationCollector>,
+  sink?: NodeJS.WritableStream,
+) {
+  let failed = false;
+  let waiting: (() => void) | undefined;
+  const stop = () => {
+    failed = true;
+    waiting?.();
+  };
+  sink?.on('error', stop);
+  sink?.on('close', stop);
+  const reader = stream.getReader();
+  let pending = '';
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      if (sink && !failed) {
+        try {
+          await new Promise<void>(resolve => {
+            waiting = resolve;
+            sink.write(part.value, error => {
+              if (error) failed = true;
+              resolve();
+            });
+          });
+        } catch {
+          failed = true;
+        }
+        waiting = undefined;
+      }
+      for (const char of Buffer.from(part.value).toString('utf8')) {
+        if (char === '\n') {
+          if (pending.startsWith('WINDOWS_IDENTITY_DIAGNOSTIC '))
+            collector.add(pending.slice('WINDOWS_IDENTITY_DIAGNOSTIC '.length));
+          pending = '';
+        } else if (pending.length < qualificationLimits.recordBytes + 100) pending += char;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+    // Drain the Writable callback/error event turn before retiring its listeners; no elapsed timer.
+    await new Promise<void>(resolve => globalThis.setImmediate(resolve));
+    sink?.off('error', stop);
+    sink?.off('close', stop);
+  }
 }
 
 const boundedInteger = (value: unknown): value is number =>
@@ -406,7 +524,7 @@ export function makeQualificationCollector() {
 
 export function resolveQualificationJob(
   raw: unknown,
-  expected: {runId: string; attempt: string; sha: string; observedAt: string},
+  expected: {runId: string; attempt: string; sha: string; observedAt: string; jobName?: string},
 ) {
   const jobs = object(raw).jobs;
   if (!Array.isArray(jobs)) throw new QualificationGateError('invalid-jobs');
@@ -414,7 +532,7 @@ export function resolveQualificationJob(
     .map(object)
     .filter(
       job =>
-        job.name === qualificationJob &&
+        job.name === (expected.jobName ?? qualificationJob) &&
         String(job.run_id) === expected.runId &&
         String(job.run_attempt) === expected.attempt &&
         job.head_sha === expected.sha &&
@@ -653,37 +771,62 @@ export async function publishQualificationReady(
   }
 }
 
-function sourceAdmission() {
+export function admitFullShard(env: NodeJS.ProcessEnv, actual: {head: string; clean: boolean}, shard: string) {
+  windowsShard(shard);
+  if (!env.THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA || !/^[a-f0-9]{40}$/u.test(env.THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA))
+    throw new QualificationGateError('invalid-expected-sha');
+  // Full PR CI intentionally includes the complete current source, including provider merge commits.
+  // The manual diagnostic's narrow changed-path/base policy remains separate.
+  return admitQualification(
+    {
+      ...env,
+      THREADNOTE_QUALIFICATION_ENABLED: 'true',
+      THREADNOTE_QUALIFICATION_STRESS: 'false',
+      THREADNOTE_QUALIFICATION_EXPECTED_SHA: env.GITHUB_SHA,
+    },
+    {...actual, ancestor: true, changed: []},
+  );
+}
+function sourceAdmission(shard?: string) {
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(['git', ...args], {stdout: 'pipe', stderr: 'ignore', maxBuffer: 1024 * 1024});
     if (result.exitCode !== 0 || result.stdout.byteLength > 1024 * 1024)
       throw new QualificationGateError('git-admission-failed');
     return new TextDecoder().decode(result.stdout).trim();
   };
-  const admission = admitQualification(process.env, {
-    head: git('rev-parse', 'HEAD'),
-    ancestor: (() => {
-      try {
-        git('merge-base', '--is-ancestor', qualificationBase, 'HEAD');
-        return true;
-      } catch {
-        return false;
-      }
-    })(),
-    changed: git('diff', '--name-only', qualificationBase, 'HEAD').split('\n').filter(Boolean),
-    clean: git('status', '--porcelain').length === 0,
-  });
+  const admission =
+    shard === undefined
+      ? admitQualification(process.env, {
+          head: git('rev-parse', 'HEAD'),
+          ancestor: (() => {
+            try {
+              git('merge-base', '--is-ancestor', qualificationBase, 'HEAD');
+              return true;
+            } catch {
+              return false;
+            }
+          })(),
+          changed: git('diff', '--name-only', qualificationBase, 'HEAD').split('\n').filter(Boolean),
+          clean: git('status', '--porcelain').length === 0,
+        })
+      : admitFullShard(
+          process.env,
+          {head: git('rev-parse', 'HEAD'), clean: git('status', '--porcelain').length === 0},
+          shard,
+        );
   if (Bun.version !== '1.4.4') throw new QualificationGateError('wrong-bun');
   return {git, admission};
 }
 
+export const cancelledChildExit = (exited: number, signal: 'SIGINT' | 'SIGTERM' | undefined) =>
+  exited !== 0 || signal === undefined ? exited : signal === 'SIGINT' ? 130 : 143;
 export const qualificationExitCode = (childExit: number | undefined, safelyFinalized: boolean) =>
   childExit === undefined ? 1 : childExit !== 0 ? childExit : safelyFinalized ? 0 : 1;
 let actualChildExit: number | undefined;
 let executorStage: 'admission' | 'provenance' | 'execution' | 'finalization' = 'admission';
 
-async function runQualification() {
-  const {git, admission} = sourceAdmission();
+async function runQualification(shard?: string) {
+  const {git, admission} = sourceAdmission(shard);
   executorStage = 'provenance';
   const startedAt = new Date().toISOString();
   const response = await fetch(
@@ -712,8 +855,9 @@ async function runQualification() {
   }
   const job = resolveQualificationJob(JSON.parse(Buffer.concat(chunks).toString('utf8')), {
     ...admission,
-    sha: admission.expected,
+    sha: shard === undefined ? admission.expected : process.env.THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA!,
     observedAt: startedAt,
+    ...(shard === undefined ? {} : {jobName: `Bun unit smoke · Windows · ${shard}`}),
   });
   const jobId = job.id;
   const artifactName = `windows-identity-${admission.runId}-${admission.attempt}-${jobId}-${admission.expected}`;
@@ -733,35 +877,13 @@ async function runQualification() {
     await Promise.all(sourcePaths.map(async path => [path, sha(await Bun.file(path).bytes())] as const)),
   );
   const collector = makeQualificationCollector();
-  const consume = async (stream: ReadableStream<Uint8Array>) => {
-    const streamReader = stream.getReader();
-    let pending = '';
-    while (true) {
-      const part = await streamReader.read();
-      if (part.done) break;
-      for (const char of Buffer.from(part.value).toString('utf8')) {
-        if (char === '\n') {
-          if (pending.startsWith('WINDOWS_IDENTITY_DIAGNOSTIC '))
-            collector.add(pending.slice('WINDOWS_IDENTITY_DIAGNOSTIC '.length));
-          pending = '';
-        } else if (pending.length < qualificationLimits.recordBytes + 100) pending += char;
-      }
-    }
-  };
   executorStage = 'execution';
   const child = Bun.spawn(
-    [
+    qualificationCommand(
       process.execPath,
-      '--bun',
-      'vitest',
-      'run',
-      '--no-file-parallelism',
-      '--testTimeout=120000',
-      '--config=tools/ci/windows-smoke.config.ts',
-      '--reporter=json',
-      `--outputFile=${workspace.work}/raw-results.json`,
-      ...qualificationFiles,
-    ],
+      shard === undefined ? `${workspace.work}/raw-results.json` : '.context/windows-smoke/results.json',
+      shard,
+    ),
     {
       env: {...process.env, THREADNOTE_WINDOWS_IDENTITY_QUALIFICATION: '1'},
       stdin: 'ignore',
@@ -769,26 +891,40 @@ async function runQualification() {
       stderr: 'pipe',
     },
   );
+  let cancelled: 'SIGINT' | 'SIGTERM' | undefined;
+  const interrupt = () => {
+    cancelled ??= 'SIGINT';
+    child.kill('SIGINT');
+  };
+  const terminate = () => {
+    cancelled ??= 'SIGTERM';
+    child.kill('SIGTERM');
+  };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
   let streamIncomplete = false;
   const readers = Promise.all(
-    [consume(child.stdout), consume(child.stderr)].map(read =>
+    [
+      drainQualificationStream(child.stdout, collector, shard === undefined ? undefined : process.stdout),
+      drainQualificationStream(child.stderr, collector, shard === undefined ? undefined : process.stderr),
+    ].map(read =>
       read.catch(() => {
         streamIncomplete = true;
       }),
     ),
   );
-  const code = await child.exited;
+  const exited = await child.exited;
+  process.off('SIGINT', interrupt);
+  process.off('SIGTERM', terminate);
+  const code = cancelledChildExit(exited, cancelled);
   actualChildExit = code;
   process.exitCode = code;
   await readers;
   executorStage = 'finalization';
-  let results: ReturnType<typeof summarizeQualification> = {complete: false, cases: []};
-  try {
-    const raw = Bun.file(`${workspace.work}/raw-results.json`);
-    if (raw.size <= 4 * 1024 * 1024) results = summarizeQualification(await raw.json());
-  } catch {
-    /* Missing/invalid raw results cannot qualify. No raw data leaves this local intermediate. */
-  }
+  const results = await readQualificationResults(
+    shard === undefined ? `${workspace.work}/raw-results.json` : '.context/windows-smoke/results.json',
+    shard !== undefined,
+  );
   const captured = collector.snapshot();
   const diagnostic = {...captured, complete: captured.complete && !streamIncomplete, streamIncomplete};
   const files = {'statuses.json': JSON.stringify(results), 'diagnostics.json': JSON.stringify(diagnostic)};
@@ -798,6 +934,7 @@ async function runQualification() {
     attempt: admission.attempt,
     jobId,
     sha: admission.expected,
+    providerHeadSha: shard === undefined ? admission.expected : process.env.THREADNOTE_WINDOWS_PROVIDER_HEAD_SHA,
     tree: git('rev-parse', 'HEAD^{tree}'),
     base: qualificationBase,
     bun: Bun.version,
@@ -808,7 +945,8 @@ async function runQualification() {
     endedAt: new Date().toISOString(),
     artifactName,
     source,
-    childExit: code,
+    childExit: exited,
+    cancellationSignal: cancelled ?? null,
     childSignalled: child.signalCode !== null,
     clocks: {
       spanDurations: 'inclusive-overlapping-native-nanoseconds-to-rounded-ms',
@@ -823,7 +961,9 @@ async function runQualification() {
       attributionComplete: false,
     },
     complete: results.complete && diagnostic.complete,
-    scope: 'targeted-only-not-full-ci',
+    scope: shard === undefined ? 'targeted-only-not-full-ci' : 'full-windows-shard-selected-diagnostics',
+    shard: shard ?? null,
+    selectedCaseStatusesOnly: true,
     files: Object.fromEntries(
       Object.entries(files).map(([name, data]) => [name, {bytes: Buffer.byteLength(data), sha256: sha(data)}] as const),
     ),
@@ -841,6 +981,8 @@ async function runQualification() {
 if (import.meta.main) {
   try {
     if (process.argv.length === 3 && process.argv[2] === 'admit') sourceAdmission();
+    else if (process.argv.length === 4 && process.argv[2] === 'full-shard')
+      await runQualification(windowsShard(process.argv[3]));
     else if (process.argv.length !== 2) throw new QualificationGateError('unexpected-arguments');
     else await runQualification();
   } catch (error) {
