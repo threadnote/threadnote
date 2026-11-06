@@ -188,7 +188,10 @@ describe('native cycle approved base requalification', () => {
         expect(runtime.attempts).toEqual(f.old.attempts);
         expect(runtime.reviewLimits).toEqual(f.old.reviewLimits);
         expect(runtime.reviewExpansions).toEqual(f.old.reviewExpansions);
-        expect(runtime.state.phases.one.status).toBe('stale');
+        expect(runtime.state.phases.one.status).toBe('active');
+        expect(runtime.state.phases.one.validation).toBeUndefined();
+        expect(runtime.state.phases.one.delivery).toBeUndefined();
+        expect(object(yield* f.mutate('next')).next).toEqual({action: 'implement', phaseId: 'one'});
         const detail = yield* f.call({
           ...f.base('cycle'),
           command: 'detail',

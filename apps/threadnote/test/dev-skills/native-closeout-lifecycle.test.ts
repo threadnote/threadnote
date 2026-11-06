@@ -214,25 +214,23 @@ describe('native closeout lifecycle', () => {
         const original = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!original?.state.cycle) throw new Error('Expected original published phase.');
         const owner = original.state.cycle.state.phases.one;
-        if (!owner.head || !owner.tree) throw new Error('Expected initial source proof.');
+        if (
+          !owner.head ||
+          !owner.tree ||
+          owner.delivery?.delivery !== 'pr' ||
+          !owner.delivery.pr ||
+          !owner.delivery.watch
+        )
+          throw new Error('Expected the canonical open PR receipt and source proof.');
+        const mergedDelivery = {
+          ...owner.delivery,
+          pr: {...owner.delivery.pr, state: 'merged' as const},
+          watch: {...owner.delivery.watch, state: 'terminal' as const, evidence: 'The owned watch observed merge.'},
+        };
         yield* mutateCycle('record-delivery', {
           phaseId: 'one',
           publication: {exemption: 'maintenance', reason: 'Private merged predecessor fixture.'},
-          delivery: {
-            phaseId: 'one',
-            phaseHash: owner.phaseHash,
-            delivery: 'pr',
-            headSha: owner.head,
-            validatedTree: owner.tree,
-            commitEvidence: 'Private merged predecessor commit.',
-            pr: {
-              url: 'https://github.com/example/private-fixture/pull/1',
-              headSha: owner.head,
-              branch: 'fixture/reader',
-              baseBranch: 'main',
-              state: 'merged',
-            },
-          },
+          delivery: mergedDelivery,
         });
         expect(
           (yield* readNativeWorkflowState(f.config, f.controllerRunId))?.state.cycle?.state.phases.one.status,
