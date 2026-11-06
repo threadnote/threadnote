@@ -9,7 +9,6 @@ import {
   Option,
   Path,
   PlatformError,
-  Predicate,
   Schema,
 } from 'effect';
 import * as Effect2 from 'effect';
@@ -21,7 +20,6 @@ import {
 } from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
-import {statusDevSkills} from '../dev_skills/index.js';
 import {codeGraphFileContentHashMatchesBytes} from '@threadnote/graph/content_identity';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {decodeNativeAuthoringDocument, validateNativeAuthoring} from '@threadnote/workflow-automations/authoring';
@@ -70,7 +68,6 @@ export const nativeJobRequestSchema = Schema.Struct({
   runId: id,
   generation: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   jobId: Schema.optionalKey(id),
-  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
   work: Schema.optionalKey(Schema.Unknown),
 });
 type Work = Readonly<Record<string, unknown>> & {
@@ -1227,7 +1224,6 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   const run = yield* readNativeWorkflowState(config, request.runId);
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
-  const system = yield* SystemInfo;
   const callerBinding = yield* resolveWorkflowBinding(config, {
     protocolVersion: 1,
     action: 'bind',
@@ -1239,11 +1235,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     ...(run.state.team === undefined ? {} : {team: run.state.team}),
     ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
   });
-  const canonicalJournal = yield* withWorkflowLock(
-    config,
-    run.state.bindingId,
-    inspectWorkflowJournal(config, run.state.bindingId),
-  );
+  const canonicalJournal = yield* inspectWorkflowJournal(config, run.state.bindingId);
   if (
     callerBinding.bindingId !== run.state.bindingId ||
     canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
@@ -1277,26 +1269,6 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       state.status === 'completed' ? state : {...state, stopRequested: true, updatedAt: Date.now()},
     );
     return nativeJobStatus(changed.state);
-  }
-  if (request.command === 'resume' && Predicate.isObject(admitted.work) && admitted.work.action === 'authoring') {
-    if (!request.installationTarget)
-      return yield* fail('needs-resources', 'Select the installed workflow target before resuming this job.');
-    const targetStatus = yield* statusDevSkills(config, {agent: request.installationTarget}).pipe(
-      Effect.provideService(SystemInfo, {...system, currentDirectory: () => callerBinding.repo}),
-      Effect.mapError(() => fail('needs-resources', 'The selected workflow target could not be verified.')),
-    );
-    const target = targetStatus.targets[0];
-    if (
-      targetStatus.targets.length !== 1 ||
-      !target?.enrolled ||
-      !target.enabled ||
-      target.installationState !== 'current' ||
-      target.target.profile !== (run.state.profile ?? 'desktop') ||
-      target.installedDigest !== targetStatus.bundle.digest ||
-      target.installed?.digest !== targetStatus.bundle.digest ||
-      target.installedDigest !== run.state.generation
-    )
-      return yield* fail('binding-drift', 'Resume only after the original job generation is current on this target.');
   }
   if (request.work !== undefined)
     return yield* fail('invalid-request', 'Resume uses the original durably admitted request.');
