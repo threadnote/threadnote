@@ -44,6 +44,7 @@ import {
   withWorkflowReadCache,
 } from '../workflow_memory/read_cache.js';
 import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -476,10 +477,25 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
             ? completedCloseout.state
             : undefined;
         // Documents can repeat a key when closeout replaces an earlier draft; the last value is the final output.
-        const finalDocuments = completedJournal
-          ? new Map(EffectArray.map(completedJournal.documents, document => [document.key, document] as const))
-          : undefined;
-        const expectedOutputKeys = finalDocuments ? [...finalDocuments.keys()] : [];
+        const finalDocuments = new Map<
+          string,
+          {readonly document: NonNullable<typeof completedJournal>['documents'][number]; readonly operationId: string}
+        >();
+        if (completedJournal) {
+          for (const document of completedJournal.documents) {
+            const repeated = finalDocuments.has(document.key);
+            finalDocuments.set(document.key, {
+              document,
+              operationId:
+                'closeout-' +
+                EffectString.slice(0, 24)(completedJournal.transactionId) +
+                '-' +
+                document.key +
+                (repeated ? '-final' : ''),
+            });
+          }
+        }
+        const expectedOutputKeys = [...finalDocuments.keys()];
         const actualOutputKeys = completedJournal ? new Set(EffectRecord.keys(completedJournal.outputs)) : undefined;
         if (
           completedJournal &&
@@ -504,9 +520,33 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           ? yield* Effect.forEach(EffectRecord.toEntries(terminalCloseout.outputs), ([key, reference]) =>
               Effect.gen(function* () {
                 const artifact = yield* memory.read(binding.bindingId, reference.uri);
-                const document = finalDocuments?.get(key);
+                const finalDocument = finalDocuments.get(key);
+                const document = finalDocument?.document;
+                const operation = finalDocument
+                  ? EffectOption.getOrUndefined(
+                      EffectArray.findFirst(
+                        stored.state.operations,
+                        entry => entry.intent.operationId === finalDocument.operationId,
+                      ),
+                    )
+                  : undefined;
                 if (
                   !document ||
+                  !operation ||
+                  operation.status !== 'verified' ||
+                  !operation.artifact ||
+                  operation.intent.bindingId !== stored.state.bindingId ||
+                  operation.intent.sourceRunId !== stored.state.runId ||
+                  operation.intent.artifactKey !==
+                    'closeout-' + EffectString.slice(0, 24)(terminalCloseout.transactionId) + '-' + key ||
+                  operation.intent.role !== 'closeout-' + key ||
+                  operation.intent.body !== document.body ||
+                  operation.artifact.uri !== document.uri ||
+                  operation.artifact.body !== document.body ||
+                  operation.artifact.storageKind !== (terminalCloseout.profile === 'desktop' ? 'durable' : 'handoff') ||
+                  operation.artifact.state !== 'active' ||
+                  operation.artifact.memoryId !== reference.memoryId ||
+                  operation.artifact.revision !== reference.revision ||
                   reference.uri !== document.uri ||
                   artifact.uri !== reference.uri ||
                   artifact.memoryId !== reference.memoryId ||
@@ -517,7 +557,7 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
                 )
                   return yield* issue(
                     'invalid-readback',
-                    'A completed closeout output no longer matches its verified durable receipt.',
+                    'A completed closeout output no longer matches its verified native receipt.',
                   );
                 return {key, uri: artifact.uri, memoryId: artifact.memoryId, revision: artifact.revision};
               }),
