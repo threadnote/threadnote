@@ -131,6 +131,7 @@ const inputSchema = Schema.Union([
     command: Schema.Literal('job'),
     jobRef: text,
     operation: Schema.Literals(['status', 'result', 'cancel', 'resume']),
+    installationTarget: Schema.optionalKey(text),
   }),
   Schema.Struct({
     ...scope,
@@ -387,7 +388,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     });
     if (request.command === 'job') {
       if (!suppliedJob) return yield* fail('job-not-found', 'Read the current authoring job continuation.');
-      const response = object(yield* callJob(request.operation));
+      const response = object(
+        yield* callJob(request.operation, {
+          ...(request.operation === 'resume' && request.installationTarget
+            ? {installationTarget: request.installationTarget}
+            : {}),
+        }),
+      );
       if (request.operation !== 'result' || response.status !== 'completed')
         return {status: response.status, jobRef: request.jobRef, job: response};
       const completed = yield* current();

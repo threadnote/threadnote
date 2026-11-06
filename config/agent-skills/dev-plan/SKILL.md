@@ -5,7 +5,7 @@ description: Turn approved feature intent into a code-grounded architecture and 
 
 # Dev Plan
 
-Use Threadnote's current task authoring contract. Prefer MCP `workflow_task_author`; installed CLI `task-author` is equivalent. Read only the registered operation guidance needed now. Do not use raw workflow-automation JSON or invent fields. Supply substantive plan content; runtime owns metadata and receipts, while returned opaque references carry continuations.
+Use Threadnote's current task authoring contract. Prefer MCP `workflow_task_author`; the CLI equivalent is `threadnote workflow-automation task-author`. Check `threadnote workflow-automation task-author --help` for the current operation options. Do not use raw workflow-automation JSON or invent fields. Supply substantive plan content; runtime owns metadata and receipts, while returned opaque references carry continuations.
 
 Read the exact approved spec revision and current relevant source. Preserve requirements, acceptance, constraints, decisions, and exclusions. Describe current and target architecture, dependencies, phase outcomes, owned scope, acceptance, and checks. Keep routine implementation choices open; record material alternatives and rationale. Use the design challenge when risk warrants it, capturing the evidence-based judgment. Diagrams are optional.
 
