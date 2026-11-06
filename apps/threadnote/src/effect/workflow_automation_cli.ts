@@ -115,6 +115,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             callerCwd: options.callerCwd,
             ...(options.role === undefined ? {} : {role: options.role}),
             ...(options.cursor === undefined ? {} : {cursor: options.cursor}),
+            ...(options.phaseId === undefined ? {} : {phaseId: options.phaseId}),
             ...(options.detail === undefined ? {} : {detail: options.detail}),
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
@@ -325,6 +326,13 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         options =>
           withRuntime(config =>
             runNativeTaskAction(config, options).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            ),
+          ),
+        options =>
+          withRuntime(config =>
+            runNativeTaskAction(config, {command: 'requalify-base-snapshot', ...options}).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
               Effect.mapError(nativeWorkflowError),
             ),

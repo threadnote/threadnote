@@ -1,11 +1,4 @@
-import {
-  Array as EffectArray,
-  Option as EffectOption,
-  Record as EffectRecord,
-  Schema,
-  String as EffectString,
-  pipe as EffectPipe,
-} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
@@ -67,14 +60,38 @@ export interface NativeTaskView {
     readonly acceptanceRefs: number;
     readonly snapshotFiles: number;
     readonly snapshotScopeFiles: number;
+    readonly historicalWatches?: number;
   };
   readonly missingInputs: readonly string[];
+  readonly historicalWatches?: readonly {
+    readonly phaseId: string;
+    readonly title: string;
+    readonly prUrl: string;
+  }[];
+  readonly baseRequalification?: {
+    readonly action: 'requalify-base';
+    readonly phaseId: string;
+    readonly predecessorRef: string;
+    readonly fromBaseBranch: string;
+    readonly toBaseBranch: string;
+  };
+  readonly historicalWatch?: {
+    readonly action: 'watch-pr';
+    readonly phaseId: string;
+    readonly prUrl: string;
+    readonly consumerId: string;
+    readonly validationRef: string;
+    readonly deliveryRef: string;
+  };
 }
 
 export interface NativeTaskProjectionOptions {
   readonly role?: NativeTaskRole;
   readonly offset?: number;
   readonly planDrift?: string;
+  readonly historicalWatchCount?: number;
+  /** Digest of the refreshed external candidate set used by the caller's paged projection. */
+  readonly candidateHash?: string;
 }
 
 export const NativeTaskActionRefSchema = Schema.Struct({
@@ -189,6 +206,7 @@ export interface NativeTaskCursor {
   readonly phaseId: string | null;
   readonly snapshotId: string | null;
   readonly role: NativeTaskRole | null;
+  readonly candidateHash?: string;
   readonly offset: number;
 }
 
@@ -214,6 +232,8 @@ export function decodeNativeTaskCursor(value: string): NativeTaskCursor | undefi
       EffectOption.getOrElse(EffectPipe(character, EffectString.charCodeAt(0)), () => 0),
     );
     const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    const candidateHash =
+      typeof parsed === 'object' && parsed !== null && 'candidateHash' in parsed ? parsed.candidateHash : undefined;
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
@@ -237,6 +257,7 @@ export function decodeNativeTaskCursor(value: string): NativeTaskCursor | undefi
         parsed.role !== 'implementation' &&
         parsed.role !== 'review' &&
         parsed.role !== 'delivery') ||
+      (candidateHash !== undefined && (typeof candidateHash !== 'string' || !/^[a-f0-9]{64}$/u.test(candidateHash))) ||
       !('offset' in parsed) ||
       typeof parsed.offset !== 'number' ||
       !Number.isInteger(parsed.offset) ||
@@ -254,6 +275,7 @@ export function decodeNativeTaskCursor(value: string): NativeTaskCursor | undefi
       phaseId: parsed.phaseId,
       snapshotId: parsed.snapshotId,
       role: parsed.role,
+      ...(typeof candidateHash === 'string' ? {candidateHash} : {}),
       offset: parsed.offset,
     };
   } catch {
@@ -261,7 +283,11 @@ export function decodeNativeTaskCursor(value: string): NativeTaskCursor | undefi
   }
 }
 
-export function nativeTaskCursorMatches(cursor: NativeTaskCursor, view: NativeTaskView): boolean {
+export function nativeTaskCursorMatches(
+  cursor: NativeTaskCursor,
+  view: NativeTaskView,
+  candidateHash?: string,
+): boolean {
   return (
     cursor.runId === view.runId &&
     cursor.generationHash === sha256HexSync(view.generation) &&
@@ -269,12 +295,14 @@ export function nativeTaskCursorMatches(cursor: NativeTaskCursor, view: NativeTa
     cursor.action === view.next.action &&
     cursor.phaseId === (view.next.phaseId ?? null) &&
     cursor.snapshotId === (view.next.snapshotId ?? null) &&
-    cursor.role === (view.role ?? null)
+    cursor.role === (view.role ?? null) &&
+    (cursor.candidateHash ?? null) === (candidateHash ?? null)
   );
 }
 
 const taskCursor = (
-  view: Pick<NativeTaskView, 'runId' | 'generation' | 'revision' | 'next' | 'role'>,
+  view: Pick<NativeTaskView, 'runId' | 'generation' | 'revision' | 'next' | 'role'> &
+    Pick<NativeTaskProjectionOptions, 'candidateHash'>,
   offset: number,
 ): string =>
   encodeCursor({
@@ -286,6 +314,7 @@ const taskCursor = (
     phaseId: view.next.phaseId ?? null,
     snapshotId: view.next.snapshotId ?? null,
     role: view.role ?? null,
+    ...(view.candidateHash ? {candidateHash: view.candidateHash} : {}),
     offset,
   });
 
@@ -391,9 +420,22 @@ export function projectNativeTaskView(
     acceptanceRefs: acceptanceRefs.length,
     snapshotFiles: snapshotFiles.length,
     snapshotScopeFiles: snapshotScopeFiles.length,
+    ...(options.historicalWatchCount && options.historicalWatchCount > 0
+      ? {historicalWatches: options.historicalWatchCount}
+      : {}),
   };
   const nextOffset = offset + pageSize;
-  const more = EffectArray.some(EffectRecord.values(counts), count => count > nextOffset);
+  const more = EffectArray.some(
+    [
+      counts.scope,
+      counts.acceptance,
+      counts.acceptanceRefs,
+      counts.snapshotFiles,
+      counts.snapshotScopeFiles,
+      counts.historicalWatches ?? 0,
+    ],
+    count => count > nextOffset,
+  );
   const missingInputs = reviewWork
     ? reviewBlocked
       ? ['Explicit human authority to resolve repeated invalid review attempts']
@@ -486,6 +528,7 @@ export function projectNativeTaskView(
                     : next.action === 'deliver' || next.action === 'implement'
                       ? {role: next.action === 'deliver' ? ('delivery' as const) : ('implementation' as const)}
                       : undefined),
+                ...(options.candidateHash ? {candidateHash: options.candidateHash} : {}),
               },
               nextOffset,
             ),

@@ -48,9 +48,19 @@ import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
+import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
-
-import {cycleRequest, fail, inCheckout, unwrapCycle} from './task_action_helpers.js';
+import {
+  cycleRequest,
+  fail,
+  hasApprovedBasePlanTransition,
+  hasExactAcceptedFullReview,
+  inCheckout,
+  isCurrentTaskTargetForRequalification,
+  requalificationSnapshotId,
+  unwrapCycle,
+  verifyRequalificationWitness,
+} from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
 import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
 
@@ -211,6 +221,14 @@ const requestSchema = Schema.Union([
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
+    command: Schema.Literal('requalify-base-snapshot'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    snapshotRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
     command: Schema.Literal('record-review'),
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -312,7 +330,7 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
   );
 };
 
-/** The installed selector is configuration, never actor/publication authority. */
+/** The installed selector is checked for start and resume, never treated as actor/publication authority. */
 export const readNativeTaskInstalledTarget = (
   config: RuntimeConfig,
   installationTarget: string | undefined,
@@ -323,7 +341,7 @@ export const readNativeTaskInstalledTarget = (
     if (!installationTarget)
       return yield* fail(
         'needs-resources',
-        'Select an installed Threadnote skill target. The target must have the current verified workflow bundle before a task can start.',
+        'Select an installed Threadnote skill target. It must have the current verified workflow bundle before a task can start or resume.',
       );
     const installed = yield* inCheckout(
       statusDevSkills(config, {agent: installationTarget}).pipe(
@@ -418,7 +436,44 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           'task-identity-conflict',
           'This task name already belongs to different canonical intent. Resume its current task card or choose a new feature name.',
         );
+      const storedProfile = stored.state.profile ?? 'desktop';
+      const selectedTarget = yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout, [
+        storedProfile,
+      ]);
       const view = yield* readNativeTaskView(config, {runId, callerCwd: checkout, detail: 'packet'});
+      if (selectedTarget.installedDigest !== stored.state.generation) {
+        const owners = yield* inspectOldBindingOwners(config, stored);
+        const repeatedOwners = yield* inspectOldBindingOwners(config, stored);
+        const latest = yield* readNativeWorkflowState(config, runId).pipe(Effect.result);
+        const unresolved = [...owners.unresolved];
+        if (stableJson(owners) !== stableJson(repeatedOwners))
+          unresolved.push({owner: 'readback', status: 'changed', reason: 'run-owned-owner-readback-changed'});
+        if (latest._tag !== 'Success' || latest.success?.revision !== stored.revision)
+          unresolved.push({
+            owner: 'canonical-run',
+            status: 'changed',
+            reason: 'run-revision-changed-during-cutover-inspection',
+          });
+        const outcome = unresolved.length === 0 ? 'drained' : 'needs-drain';
+        return {
+          status: 'binding-transition' as const,
+          outcome,
+          taskRef: runId,
+          binding: {
+            runId: stored.state.runId,
+            generation: stored.state.generation,
+            bindingId: stored.state.bindingId,
+            profile: storedProfile,
+          },
+          selectedTarget: {
+            surfaceId: selectedTarget.target.surfaceId,
+            profile: selectedTarget.target.profile,
+            installedDigest: selectedTarget.installedDigest,
+          },
+          owners: unresolved.length > 0 ? unresolved : [],
+          view,
+        };
+      }
       const root = EffectArray.findFirst(
         [...stored.state.operations].reverse(),
         operation =>
@@ -1595,6 +1650,183 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         payloadDigest: sha256HexSync(JSON.stringify(request.packet)),
       });
       return {status: 'ready', phaseId, workRef, packet};
+    }
+
+    if (request.command === 'requalify-base-snapshot') {
+      const ref = decodeNativeTaskActionRef(request.snapshotRef);
+      const generationHash = sha256HexSync(stored.state.generation);
+      if (
+        !ref ||
+        ref.kind !== 'snapshot' ||
+        ref.runId !== request.runId ||
+        ref.generationHash !== generationHash ||
+        !ref.phaseId ||
+        !ref.phaseHash ||
+        !ref.snapshotId ||
+        !ref.sourceHead ||
+        !ref.sourceTree ||
+        !ref.baselineHead ||
+        !ref.baselineTree ||
+        !ref.baselineRef
+      )
+        return yield* fail('invalid-snapshot-ref', 'Select the exact reviewed predecessor from the current task view.');
+      if (!EffectString.trim(request.reason) || !EffectString.trim(request.userAuthority))
+        return yield* fail(
+          'invalid-base-requalification',
+          'Provide the concrete requalification reason and explicit human authority.',
+        );
+      const phaseEntries = EffectArray.filter(runtime.snapshots, item => item.snapshot.snapshotId === ref.snapshotId);
+      const entry = phaseEntries[0];
+      const baseline = runtime.baselines[ref.phaseId];
+      if (
+        phaseEntries.length !== 1 ||
+        !entry ||
+        !baseline ||
+        entry.snapshot.phaseId !== ref.phaseId ||
+        entry.snapshot.phaseHash !== ref.phaseHash ||
+        entry.snapshot.head !== ref.sourceHead ||
+        entry.snapshot.tree !== ref.sourceTree ||
+        baseline.head !== ref.baselineHead ||
+        baseline.tree !== ref.baselineTree ||
+        baseline.pinnedRef !== ref.baselineRef
+      )
+        return yield* fail(
+          'stale-snapshot-ref',
+          'The predecessor reference does not match one canonical snapshot and baseline.',
+        );
+      const existingId = requalificationSnapshotId(
+        request.runId,
+        generationHash,
+        ref.phaseId,
+        ref.snapshotId,
+        request.reason,
+        request.userAuthority,
+      );
+      const existing = EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === existingId);
+      if (existing._tag === 'Some') {
+        const admitted = existing.value;
+        const qualification = admitted.snapshot.baseRequalification;
+        if (
+          admitted.snapshot.phaseId !== ref.phaseId ||
+          (admitted.snapshot.previous ?? admitted.snapshot.supersedes) !== ref.snapshotId ||
+          !qualification ||
+          qualification.reason !== request.reason ||
+          qualification.authority !== request.userAuthority ||
+          qualification.preRebaseHead !== entry.snapshot.head ||
+          qualification.priorDeclaredBaseHead !== entry.snapshot.declaredBaseHead ||
+          qualification.ontoHead !== admitted.snapshot.declaredBaseHead ||
+          qualification.rebasedHead !== admitted.snapshot.head ||
+          admitted.snapshot.acceptedHead !== admitted.snapshot.head
+        )
+          return yield* fail(
+            'snapshot-conflict',
+            'The deterministic requalification identity is bound to different evidence.',
+          );
+        return {
+          status: 'recorded',
+          replayed: true,
+          snapshot: admitted,
+          snapshotRef: snapshotRef(
+            {
+              version: 1,
+              kind: 'work',
+              runId: request.runId,
+              generationHash,
+              phaseId: ref.phaseId,
+              phaseHash: admitted.snapshot.phaseHash,
+              baselineHead: baseline.head,
+              baselineTree: baseline.tree,
+              baselineRef: baseline.pinnedRef,
+            },
+            admitted,
+          ),
+        };
+      }
+      const view = yield* taskView();
+      if (
+        view.revision !== stored.revision ||
+        !isCurrentTaskTargetForRequalification(view, ref.phaseId) ||
+        view.baseRequalification?.phaseId !== ref.phaseId ||
+        view.baseRequalification.predecessorRef !== request.snapshotRef
+      )
+        return yield* fail(
+          'stale-snapshot-ref',
+          'Requalification requires the exact reviewed predecessor on the current eligible task view.',
+        );
+      if (!hasExactAcceptedFullReview(runtime, ref.phaseId, ref.snapshotId))
+        return yield* fail(
+          'review-history',
+          'Base requalification requires the latest exact predecessor with an accepted full review.',
+        );
+      const planPhases = EffectArray.filter(state.plan.phases, phase => phase.id === ref.phaseId);
+      const selected = planPhases[0];
+      if (
+        planPhases.length !== 1 ||
+        !selected ||
+        !hasApprovedBasePlanTransition(
+          runtime,
+          entry.snapshot,
+          view.baseRequalification.fromBaseBranch,
+          selected.baseBranch,
+        )
+      )
+        return yield* fail(
+          'invalid-base-requalification',
+          'The canonical plans do not contain this reviewed-base transition.',
+        );
+      const witness = yield* verifyRequalificationWitness(
+        checkout,
+        selected.branch,
+        selected.baseBranch,
+        entry.snapshot.head,
+        entry.snapshot.declaredBaseHead,
+        view.baseRequalification.fromBaseBranch,
+      );
+      const result = unwrapCycle(
+        yield* inCheckout(
+          runWorkflowAutomation(
+            config,
+            cycleRequest(stored, {
+              command: 'snapshot',
+              phaseId: ref.phaseId,
+              snapshotId: existingId,
+              previous: ref.snapshotId,
+              acceptedHead: witness.rebasedHead,
+              reason: request.reason,
+              userAuthority: request.userAuthority,
+              baseRequalification: witness,
+              expectedRevision: stored.revision,
+            }),
+          ),
+          checkout,
+        ),
+      );
+      const latest = yield* readNativeWorkflowState(config, request.runId);
+      const admitted = EffectOption.getOrUndefined(
+        EffectArray.findFirst(latest?.state.cycle?.snapshots ?? [], item => item.snapshot.snapshotId === existingId),
+      );
+      if (!admitted || latest?.revision === stored.revision)
+        return yield* fail('snapshot-not-recorded', 'The canonical requalified snapshot was not persisted.');
+      return {
+        status: 'recorded',
+        replayed: false,
+        snapshot: admitted,
+        snapshotRef: snapshotRef(
+          {
+            version: 1,
+            kind: 'work',
+            runId: request.runId,
+            generationHash,
+            phaseId: ref.phaseId,
+            phaseHash: admitted.snapshot.phaseHash,
+            baselineHead: baseline.head,
+            baselineTree: baseline.tree,
+            baselineRef: baseline.pinnedRef,
+          },
+          admitted,
+        ),
+        cycle: result,
+      };
     }
 
     if (request.command === 'supersede-unreviewed-snapshot') {

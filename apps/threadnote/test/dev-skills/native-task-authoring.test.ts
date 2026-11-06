@@ -1,5 +1,9 @@
 import {
   Array as A,
+  Array as EffectArray,
+  Record as EffectRecord,
+  Clock,
+  Cause,
   String as EffectString,
   Effect,
   FileSystem,
@@ -20,6 +24,9 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {CommandExecutor, commandEnvironment, runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {SecureRandom} from 'effect/crypto';
 import {
   NativeAuthoringSpecDocumentSchema,
   NativeAuthoringPlanDocumentSchema,
@@ -41,7 +48,7 @@ import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
-import {CurrentNativeJobAutoLaunch} from '../../src/workflow_automation/native_jobs.js';
+import {CurrentNativeJobAutoLaunch, runNativeJob} from '../../src/workflow_automation/native_jobs.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestClock} from 'effect/testing';
 import {object} from './native-cycle-lifecycle-fixture.js';
@@ -541,6 +548,7 @@ effectIt.effect(
     Effect.gen(function* () {
       const f = yield* setup;
       const system = yield* SystemInfo;
+      const expectedWorkerCwd = yield* f.fs.realPath(f.repo);
       const executor = yield* CommandExecutor;
       const environmentPolicy = yield* ChildEnvironmentPolicy;
       const executablePath = yield* f.fs.realPath(system.executablePath);
@@ -557,6 +565,7 @@ effectIt.effect(
         readonly child: ReturnType<typeof Bun.spawn>;
         readonly executable: string;
         readonly args: readonly string[];
+        readonly cwd: string | undefined;
         readonly env: NodeJS.ProcessEnv | undefined;
         readonly processStartIdentity: string | undefined;
       };
@@ -587,7 +596,14 @@ effectIt.effect(
                   stderr: 'ignore',
                 }),
               );
-              const entry: OwnedWorker = {child, executable, args: [...args], env, processStartIdentity: undefined};
+              const entry: OwnedWorker = {
+                child,
+                executable,
+                args: [...args],
+                cwd: options?.cwd,
+                env,
+                processStartIdentity: undefined,
+              };
               yield* Ref.update(ownedWorkers, current => [...current, entry]);
               const childIdentity = yield* processStartIdentity(child.pid, 20);
               const updated: OwnedWorker = {...entry, processStartIdentity: childIdentity};
@@ -599,6 +615,29 @@ effectIt.effect(
           ),
       });
       const author = (input: object) => f.author(input).pipe(Effect.provideService(CommandExecutor, adapter));
+      const finalDiagnostic = yield* Ref.make<
+        | (() => Effect.Effect<
+            void,
+            never,
+            | CodeGraphQueryService
+            | CodeGraphStore
+            | CommandExecutor
+            | FileSystem.FileSystem
+            | Path.Path
+            | ResourceStore
+            | SecureRandom.SecureRandom
+            | SystemInfo
+          >)
+        | undefined
+      >(undefined);
+      const safeWrite = (line: string) =>
+        Effect.sync(() => {
+          try {
+            process.stdout.write(`${line}\n`);
+          } catch {
+            // Diagnostic output must not replace the primary worker outcome.
+          }
+        });
 
       const file = f.path.join(f.root, 'spawned-background-spec.json');
       yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
@@ -613,24 +652,218 @@ effectIt.effect(
       const useWorker = Effect.gen(function* () {
         // CurrentNativeJobAutoLaunch defaults to true; the wrapper observes and owns its real OS child.
         const accepted = yield* author(start);
-        expect(accepted.status).toBe('accepted');
-        expect(String(accepted.jobRef)).toMatch(/^authorjob-v1\./u);
-        const runId = String(accepted.runId);
-        const jobId = String(object(accepted.job).jobId);
+        const acceptedJob = object(accepted.job);
+        const runId = typeof accepted.runId === 'string' ? accepted.runId : undefined;
+        const jobId = typeof acceptedJob.jobId === 'string' ? acceptedJob.jobId : undefined;
+        const jobRef = typeof accepted.jobRef === 'string' ? accepted.jobRef : undefined;
+        const generation = typeof acceptedJob.generation === 'string' ? acceptedJob.generation : undefined;
+        const safeId = (value: string | undefined) =>
+          value !== undefined &&
+          /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value) &&
+          !EffectString.includes('..')(value);
+        const knownIdentity = safeId(runId) && safeId(jobId);
         const launch = (yield* Ref.get(ownedWorkers))[0];
+        const statePath = knownIdentity && runId ? f.statePath(runId) : undefined;
+        const jobPath =
+          knownIdentity && runId && jobId
+            ? f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId, `${jobId}.json`)
+            : undefined;
+        const inputPath = jobPath ? `${jobPath}.input.json` : undefined;
+        const lockPath = jobPath ? `${jobPath}.worker.lock` : undefined;
+        const lastResult = yield* Ref.make<Record<string, unknown>>(accepted);
+        const primaryFailureCode = yield* Ref.make<string | undefined>(undefined);
+        const failureReason = yield* Ref.make('worker-test-failed-or-interrupted');
+        const asRecord = (value: unknown): Record<string, unknown> =>
+          typeof value === 'object' && value !== null && !EffectArray.isArray(value)
+            ? EffectRecord.fromEntries(EffectRecord.toEntries(value))
+            : {};
+        const parseRecord = (value: string | undefined) => {
+          try {
+            return value ? asRecord(JSON.parse(value)) : {};
+          } catch {
+            return {};
+          }
+        };
+        const finiteJobStatus = (value: unknown) =>
+          value === 'accepted' ||
+          value === 'running' ||
+          value === 'completed' ||
+          value === 'failed' ||
+          value === 'blocked-with-progress' ||
+          value === 'stopped-with-progress'
+            ? value
+            : undefined;
+        // Project the durable worker error into a closed, non-text diagnostic.
+        // Never emit the receipt's arbitrary code or any free-form receipt field.
+        const finiteFailure = (value: unknown) => {
+          if (typeof value !== 'string') return {code: 'unknown', stage: 'unknown'};
+          const stages: Record<string, string> = {
+            'job-controller-drift': 'controller-check',
+            'job-target-drift': 'target-check',
+            'job-closeout-drift': 'closeout-check',
+            'job-source-drift': 'source-check',
+            'source-drift': 'source-check',
+            'job-capability': 'admission-or-witness-check',
+            'invalid-job-state': 'input-or-request-check',
+            'job-busy': 'lock-acquisition',
+            'job-stopped': 'cancellation-boundary',
+            'binding-drift': 'authoring-dispatch',
+            'revision-conflict': 'authoring-dispatch',
+            'not-ready': 'authoring-dispatch',
+            'job-failed': 'untyped-dispatch-failure',
+          };
+          const stage = stages[value];
+          return stage ? {code: value, stage} : {code: 'other-known-or-unknown', stage: 'unknown'};
+        };
+        const captureAfterExit = () =>
+          Effect.gen(function* () {
+            if (!knownIdentity || !jobPath || !inputPath || !lockPath || !runId || !jobId) {
+              yield* safeWrite(
+                `THREADNOTE_P4_REAL_JOB_DIAGNOSTIC ${JSON.stringify({version: 2, reason: 'job-identity-unavailable', fileCapture: 'skipped'})}`,
+              );
+              return;
+            }
+            const last = yield* Ref.get(lastResult);
+            const failureCode = yield* Ref.get(primaryFailureCode);
+            const reason = yield* Ref.get(failureReason);
+            const lowerStatus = generation
+              ? yield* Effect.result(
+                  runNativeJob(
+                    f.config,
+                    {
+                      protocolVersion: 1,
+                      executorVersion: 1,
+                      action: 'job',
+                      command: 'status',
+                      runId,
+                      jobId,
+                      generation,
+                    },
+                    () => Effect.void,
+                  ),
+                )
+              : undefined;
+            const typedStatus = lowerStatus
+              ? lowerStatus._tag === 'Success'
+                ? asRecord(lowerStatus.success)
+                : {
+                    code: 'job-status-unavailable',
+                  }
+              : undefined;
+            const [receiptBytes, inputBytes, lockBytes, lockExists] = yield* Effect.all([
+              f.fs.readFileString(jobPath).pipe(Effect.option),
+              f.fs.readFileString(inputPath).pipe(Effect.option),
+              f.fs.readFileString(lockPath).pipe(Effect.option),
+              f.fs.exists(lockPath).pipe(Effect.option),
+            ]);
+            const receiptText = Option.getOrUndefined(receiptBytes);
+            const inputText = Option.getOrUndefined(inputBytes);
+            const lockText = Option.getOrUndefined(lockBytes);
+            const receipt = parseRecord(receiptText);
+            const failure = finiteFailure(receipt.code);
+            const admittedInput = parseRecord(inputText);
+            const admittedDocument = asRecord(asRecord(admittedInput.work).document);
+            const controller = yield* readNativeWorkflowState(f.config, runId).pipe(Effect.option);
+            const controllerState = Option.getOrUndefined(controller)?.state;
+            const documentIdMatches =
+              typeof admittedDocument.id === 'string' &&
+              controllerState !== undefined &&
+              admittedDocument.id === controllerState.featureId;
+            const documentProjectMatches =
+              typeof admittedDocument.project === 'string' &&
+              controllerState !== undefined &&
+              admittedDocument.project === controllerState.project;
+            const bindingPredicate =
+              failure.code === 'binding-drift'
+                ? documentIdMatches && documentProjectMatches
+                  ? 'document-identity-matches'
+                  : documentIdMatches
+                    ? 'document-project-mismatch'
+                    : documentProjectMatches
+                      ? 'document-feature-id-mismatch'
+                      : controllerState &&
+                          typeof admittedDocument.id === 'string' &&
+                          typeof admittedDocument.project === 'string'
+                        ? 'document-feature-id-and-project-mismatch'
+                        : 'identity-comparison-unavailable'
+                : undefined;
+            const responseJob = asRecord(last.job);
+            const typedStatusJob = asRecord(typedStatus);
+            const body = {
+              version: 2,
+              reason,
+              runId,
+              jobId,
+              privateHome: f.home,
+              privateManifest: launch?.env?.THREADNOTE_MANIFEST,
+              primaryFailureCode: failureCode ? 'typed-failure' : undefined,
+              lastResult: {
+                status: finiteJobStatus(last.status),
+                jobStatus: finiteJobStatus(responseJob.status),
+                stopRequested: responseJob.stopRequested === true,
+                progress: responseJob.progress,
+              },
+              typedStatus: {
+                status: finiteJobStatus(typedStatusJob.status),
+                progress: typedStatusJob.progress,
+              },
+              receipt: receiptText
+                ? {
+                    sha256: sha256HexSync(receiptText),
+                    status: finiteJobStatus(receipt.status),
+                    failure,
+                    bindingPredicate,
+                    started: receipt.started === true,
+                    stopRequested: receipt.stopRequested === true,
+                  }
+                : {available: false},
+              input: inputText ? {sha256: sha256HexSync(inputText)} : {available: false},
+              workerLock: {
+                checked: Option.isSome(lockExists),
+                exists: Option.getOrUndefined(lockExists),
+                sha256: lockText ? sha256HexSync(lockText) : undefined,
+              },
+            };
+            yield* safeWrite(`THREADNOTE_P4_REAL_JOB_DIAGNOSTIC ${JSON.stringify(body)}`);
+          }).pipe(
+            Effect.timeoutOption('3 seconds'),
+            Effect.flatMap(result =>
+              Option.isSome(result)
+                ? Effect.void
+                : safeWrite(
+                    `THREADNOTE_P4_REAL_JOB_DIAGNOSTIC ${JSON.stringify({version: 2, capture: 'timed-out', fileCapture: 'incomplete'})}`,
+                  ),
+            ),
+            Effect.catchCauseIf(
+              cause => !Cause.hasInterrupts(cause),
+              () => safeWrite(`THREADNOTE_P4_REAL_JOB_DIAGNOSTIC ${JSON.stringify({version: 2, capture: 'failed'})}`),
+            ),
+          );
+        if (knownIdentity) yield* Ref.set(finalDiagnostic, captureAfterExit);
+        expect(accepted.status).toBe('accepted');
+        expect(jobRef).toMatch(/^authorjob-v1\./u);
+        expect(knownIdentity).toBe(true);
+        const exactRunId = runId!;
+        const exactJobId = jobId!;
+        const exactJobRef = jobRef!;
+        const exactStatePath = statePath!;
         expect(launch).toBeDefined();
         expect(yield* Ref.get(ownedWorkers)).toHaveLength(1);
         expect(launch?.executable).toBe(system.executablePath);
+        expect(launch?.cwd).toBe(expectedWorkerCwd);
         expect(launch?.args).toEqual([
           system.developmentEntrypoint,
           'workflow-automation',
           'job-worker',
           '--run-id',
-          runId,
+          exactRunId,
           '--job-id',
-          jobId,
+          exactJobId,
         ]);
         expect(launch?.env?.THREADNOTE_HOME).toBe(f.home);
+        expect(launch?.env?.THREADNOTE_ACCOUNT).toBe(f.config.account);
+        expect(launch?.env?.THREADNOTE_USER).toBe(f.config.user);
+        expect(launch?.env?.THREADNOTE_AGENT_ID).toBe(f.config.agentId);
         expect(launch?.processStartIdentity).toBeDefined();
         process.stdout.write(
           `THREADNOTE_P4_REAL_JOB_LAUNCH ${JSON.stringify({
@@ -640,6 +873,7 @@ effectIt.effect(
             entrypointSha256: entrypointDigest,
             args: launch?.args,
             privateHome: f.home,
+            privateManifest: launch?.env?.THREADNOTE_MANIFEST,
             runId,
             jobId,
             pid: launch?.child.pid,
@@ -649,57 +883,130 @@ effectIt.effect(
           })}\n`,
         );
 
-        const statePath = f.statePath(runId);
-        const waitForCanonicalResult = (remaining: number): ReturnType<typeof author> =>
-          author({command: 'job', jobRef: accepted.jobRef, operation: 'result'}).pipe(
+        const pollStartedAt = Number(yield* Clock.monotonicTimeNanos);
+        const waitForCanonicalResult = (): ReturnType<typeof author> =>
+          author({command: 'job', jobRef: exactJobRef, operation: 'result'}).pipe(
+            // The worker may advance the run between the public read's two revisions.
+            // Retry only its typed optimistic-read conflict, with the same continuation
+            // and the existing overall polling deadline; every other failure stays fatal.
+            Effect.catchIf(
+              error => Schema.is(WorkflowAutomationError)(error) && error.code === 'state-conflict',
+              error =>
+                Clock.monotonicTimeNanos.pipe(
+                  Effect.flatMap(now =>
+                    Number(now) - pollStartedAt < 10_000_000_000
+                      ? safeWrite('THREADNOTE_P4_REAL_JOB_RETRY {"code":"state-conflict"}').pipe(
+                          Effect.andThen(Effect.sleep('100 millis')),
+                          Effect.flatMap(waitForCanonicalResult),
+                        )
+                      : Effect.fail(error),
+                  ),
+                ),
+            ),
+            Effect.tap(result => Ref.set(lastResult, result)),
+            Effect.tapCause(cause => {
+              if (Cause.hasInterrupts(cause)) return Effect.void;
+              const typedError = Option.getOrUndefined(Cause.findErrorOption(cause));
+              return Ref.set(primaryFailureCode, typedError ? 'typed-failure' : 'mcp-result-error').pipe(
+                Effect.andThen(Ref.set(failureReason, 'mcp-result-error')),
+              );
+            }),
             Effect.flatMap(result => {
               if (result.status === 'completed' && result.authoring) return Effect.succeed(result);
-              if (remaining <= 0)
-                return Effect.fail(
-                  WorkflowAutomationError.make({
-                    code: 'test-worker-incomplete',
-                    message: `Spawned authoring worker did not complete: ${JSON.stringify(result)}`,
-                  }),
+              const jobStatus = finiteJobStatus(asRecord(result.job).status);
+              if (
+                jobStatus === 'failed' ||
+                jobStatus === 'blocked-with-progress' ||
+                jobStatus === 'stopped-with-progress' ||
+                jobStatus === 'completed'
+              ) {
+                const terminalReason = `terminal-${jobStatus}`;
+                return Ref.set(failureReason, terminalReason).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      WorkflowAutomationError.make({
+                        code: 'test-worker-terminal',
+                        message: `Spawned authoring worker returned ${terminalReason}.`,
+                      }),
+                    ),
+                  ),
                 );
-              return Effect.sleep('100 millis').pipe(Effect.flatMap(() => waitForCanonicalResult(remaining - 1)));
+              }
+              return Clock.monotonicTimeNanos.pipe(
+                Effect.flatMap(now =>
+                  Number(now) - pollStartedAt >= 10_000_000_000
+                    ? Ref.set(failureReason, 'bounded-result-deadline').pipe(
+                        Effect.andThen(
+                          Effect.fail(
+                            WorkflowAutomationError.make({
+                              code: 'test-worker-incomplete',
+                              message:
+                                'Spawned authoring worker remained nonterminal past the fixture diagnostic deadline.',
+                            }),
+                          ),
+                        ),
+                      )
+                    : Effect.sleep('100 millis').pipe(Effect.flatMap(waitForCanonicalResult)),
+                ),
+              );
             }),
           );
-        const completed = yield* waitForCanonicalResult(1200);
-        expect(completed.jobRef).toBe(accepted.jobRef);
+        const completed = yield* waitForCanonicalResult();
+        expect(completed.jobRef).toBe(exactJobRef);
         const authoring = object(completed.authoring);
         expect(authoring.status).toBe('draft');
         const canonical = yield* Schema.decodeUnknownEffect(NativeAuthoringSpecDocumentSchema)(authoring.document);
         expect(canonical.title).toBe(specBusiness.title);
         expect(canonical.objective).toBe(specBusiness.objective);
         expect(canonical.scenarios).toEqual(specBusiness.scenarios);
-        expect(object(authoring.root).documentHash).toBe(nativeAuthoringDigest(canonical));
+        expect(authoring.documentHash).toBe(nativeAuthoringDigest(canonical));
 
-        const completedState = yield* f.fs.readFileString(statePath);
+        const completedState = yield* f.fs.readFileString(exactStatePath);
+        const completedReceipt = yield* f.fs.readFileString(jobPath!);
+        const completedInput = yield* f.fs.readFileString(inputPath!);
+        const completedController = yield* readNativeWorkflowState(f.config, exactRunId);
+        expect(
+          A.filter(
+            completedController?.state.operations ?? [],
+            operation => operation.intent.role === 'authoring-root',
+          ),
+        ).toHaveLength(1);
         const replay = yield* author(start);
-        expect(replay.jobRef).toBe(accepted.jobRef);
-        expect(yield* f.fs.readFileString(statePath)).toBe(completedState);
-        const resultReplay = yield* author({command: 'job', jobRef: accepted.jobRef, operation: 'result'});
-        expect(resultReplay.status).toBe('completed');
-        expect(resultReplay.jobRef).toBe(accepted.jobRef);
-        expect(object(resultReplay.authoring).document).toEqual(authoring.document);
-        const status = yield* author({command: 'job', jobRef: accepted.jobRef, operation: 'status'});
-        expect(status).toMatchObject({status: 'completed', jobRef: accepted.jobRef});
-        expect(yield* author({command: 'job', jobRef: accepted.jobRef, operation: 'cancel'})).toMatchObject({
-          status: 'completed',
-          jobRef: accepted.jobRef,
+        expect(replay).toMatchObject({
+          status: 'draft',
+          runId: exactRunId,
+          replayed: true,
+          authoringRef: authoring.authoringRef,
+          documentHash: nativeAuthoringDigest(canonical),
         });
-        expect(yield* author({command: 'job', jobRef: accepted.jobRef, operation: 'resume'})).toMatchObject({
+        expect(yield* f.fs.readFileString(exactStatePath)).toBe(completedState);
+        const resultReplay = yield* author({command: 'job', jobRef: exactJobRef, operation: 'result'});
+        expect(resultReplay.status).toBe('completed');
+        expect(resultReplay.jobRef).toBe(exactJobRef);
+        expect(object(resultReplay.job).jobId).toBe(exactJobId);
+        expect(object(resultReplay.authoring).document).toEqual(authoring.document);
+        const status = yield* author({command: 'job', jobRef: exactJobRef, operation: 'status'});
+        expect(status).toMatchObject({status: 'completed', jobRef: exactJobRef});
+        expect(yield* author({command: 'job', jobRef: exactJobRef, operation: 'cancel'})).toMatchObject({
           status: 'completed',
-          jobRef: accepted.jobRef,
+          jobRef: exactJobRef,
+        });
+        expect(yield* author({command: 'job', jobRef: exactJobRef, operation: 'resume'})).toMatchObject({
+          status: 'completed',
+          jobRef: exactJobRef,
         });
         const readback = yield* author({command: 'read', authoringRef: authoring.authoringRef, detail: 'document'});
         expect(readback.document).toEqual(authoring.document);
-        expect(yield* f.fs.readFileString(statePath)).toBe(completedState);
+        expect(yield* f.fs.readFileString(exactStatePath)).toBe(completedState);
+        expect(yield* f.fs.readFileString(jobPath!)).toBe(completedReceipt);
+        expect(yield* f.fs.readFileString(inputPath!)).toBe(completedInput);
+        expect(yield* Ref.get(ownedWorkers)).toHaveLength(1);
         yield* Ref.set(bodySucceeded, true);
       });
       const cleanup = Effect.gen(function* () {
         const workers = yield* Ref.get(ownedWorkers);
         let cleanupFailed = false;
+        let allOwnedExitsObserved = workers.length > 0;
         for (const worker of workers) {
           const exited = Effect.tryPromise({
             try: () => worker.child.exited,
@@ -728,11 +1035,28 @@ effectIt.effect(
             );
           }
           const exitEvidence = {pid: worker.child.pid, exitCode, forced: forced ?? null};
-          process.stdout.write(`THREADNOTE_P4_REAL_JOB_EXIT ${JSON.stringify(exitEvidence)}\n`);
+          yield* safeWrite(`THREADNOTE_P4_REAL_JOB_EXIT ${JSON.stringify(exitEvidence)}`);
           const succeeded = yield* Ref.get(bodySucceeded);
+          if (exitCode === undefined) allOwnedExitsObserved = false;
           if (exitCode === undefined || (succeeded && (forced !== undefined || exitCode !== 0))) cleanupFailed = true;
         }
-        if (cleanupFailed)
+        const succeeded = yield* Ref.get(bodySucceeded);
+        const captureAfterExit = yield* Ref.get(finalDiagnostic);
+        if (!succeeded || cleanupFailed) {
+          if (captureAfterExit && allOwnedExitsObserved) yield* captureAfterExit();
+          else {
+            const skippedReason =
+              workers.length === 0
+                ? 'owned-child-unavailable'
+                : allOwnedExitsObserved
+                  ? 'job-identity-unavailable'
+                  : 'owned-exit-unobserved';
+            yield* safeWrite(
+              `THREADNOTE_P4_REAL_JOB_DIAGNOSTIC ${JSON.stringify({version: 2, reason: skippedReason, stateCapture: 'skipped'})}`,
+            );
+          }
+        }
+        if (cleanupFailed && succeeded)
           return yield* WorkflowAutomationError.make({
             code: 'test-worker-cleanup',
             message: 'Owned native job worker exit was not cleanly observed.',

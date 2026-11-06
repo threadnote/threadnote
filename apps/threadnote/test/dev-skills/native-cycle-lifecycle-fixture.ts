@@ -162,12 +162,17 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   stacked = true,
   initialBindings?: Record<string, {branch: string; baseBranch: string}>,
   beforeInit?: (repo: string) => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | CommandExecutor>,
+  additionalAffectedPaths: Readonly<Record<string, readonly string[]>> = {},
+  binding: {readonly generation?: string; readonly project?: string} = {},
 ) {
   const diagnostics = yield* CycleDiagnostics;
   const graph = yield* GraphDiagnostics;
   const original = yield* diagnostics.action('provisioning', nativeFixture());
+  const generation = binding.generation ?? 'skill-generation-v1';
   const f = {
     ...original,
+    base: (action: string, runId = 'native-run', selectedGeneration = generation) =>
+      original.base(action, runId, selectedGeneration),
     init: (...args: Parameters<typeof original.init>) => diagnostics.action('init', original.init(...args)),
     call: (input: unknown) => {
       const request = Predicate.isObject(input) ? input : {};
@@ -185,13 +190,14 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   yield* git(['commit', '-m', 'Fixture']);
   yield* git(['checkout', '-b', 'feature/' + phaseIds[0]]);
   if (beforeInit) yield* beforeInit(f.repo);
-  yield* f.init();
+  const project = binding.project ?? 'fixture';
+  yield* f.init('native-run', generation, project);
   const document = decodeNativeAuthoringDocument({
     format: 'threadnote-native-authoring',
     schemaVersion: 1,
     kind: 'plan',
     id: 'feature',
-    project: 'fixture',
+    project,
     title: 'Cycle fixture',
     objective: 'Deliver each safe phase and continue without waiting for merge.',
     requirements: [{id: 'req', behavior: 'Each phase is delivered before the next starts.'}],
@@ -215,7 +221,7 @@ export const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
       title: id,
       outcome: 'Phase works.',
       dependsOn: id === 'two' && !stackOnly ? ['one'] : [],
-      affectedPaths: ['source.ts'],
+      affectedPaths: ['source.ts', ...(additionalAffectedPaths[id] ?? [])],
       newPaths: [],
       contracts: ['Preserve unrelated source.'],
       acceptance: [
