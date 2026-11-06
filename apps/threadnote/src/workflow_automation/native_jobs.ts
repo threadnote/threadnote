@@ -1224,35 +1224,42 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   const run = yield* readNativeWorkflowState(config, request.runId);
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
-  const callerBinding = yield* resolveWorkflowBinding(config, {
-    protocolVersion: 1,
-    action: 'bind',
-    workflowRunId: 'native-v1-' + run.state.runId,
-    project: run.state.project,
-    featureId: run.state.featureId,
-    generation: run.state.generation,
-    profile: run.state.profile ?? 'desktop',
-    ...(run.state.team === undefined ? {} : {team: run.state.team}),
-    ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
-  });
-  const canonicalJournal = yield* inspectWorkflowJournal(config, run.state.bindingId);
-  if (
-    callerBinding.bindingId !== run.state.bindingId ||
-    canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
-    canonicalJournal.state.binding.repo !== callerBinding.repo
-  )
-    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
-  const stored = yield* read(config, request.runId, request.jobId);
+  const runId = run.state.runId;
+  yield* withWorkflowLock(
+    config,
+    run.state.bindingId,
+    Effect.gen(function* () {
+      const callerBinding = yield* resolveWorkflowBinding(config, {
+        protocolVersion: 1,
+        action: 'bind',
+        workflowRunId: 'native-v1-' + runId,
+        project: run.state.project,
+        featureId: run.state.featureId,
+        generation: run.state.generation,
+        profile: run.state.profile ?? 'desktop',
+        ...(run.state.team === undefined ? {} : {team: run.state.team}),
+        ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
+      });
+      const canonicalJournal = yield* inspectWorkflowJournal(config, run.state.bindingId);
+      if (
+        callerBinding.bindingId !== run.state.bindingId ||
+        canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
+        canonicalJournal.state.binding.repo !== callerBinding.repo
+      )
+        return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
+    }),
+  );
+  const stored = yield* read(config, runId, request.jobId);
   if (
     !stored ||
-    stored.state.runId !== run.state.runId ||
+    stored.state.runId !== runId ||
     stored.state.generation !== run.state.generation ||
     stored.state.bindingId !== run.state.bindingId
   )
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
   const admitted = yield* readInput(config, stored.state);
   if (
-    admitted.runId !== run.state.runId ||
+    admitted.runId !== runId ||
     admitted.generation !== run.state.generation ||
     admitted.bindingId !== run.state.bindingId
   )
@@ -1265,7 +1272,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     };
   }
   if (request.command === 'cancel') {
-    const changed = yield* transition(config, request.runId, request.jobId, state =>
+    const changed = yield* transition(config, runId, request.jobId, state =>
       state.status === 'completed' ? state : {...state, stopRequested: true, updatedAt: Date.now()},
     );
     return nativeJobStatus(changed.state);
@@ -1273,21 +1280,21 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (request.work !== undefined)
     return yield* fail('invalid-request', 'Resume uses the original durably admitted request.');
   const jobId = request.jobId;
-  const file = yield* jobPath(config, request.runId, jobId);
+  const file = yield* jobPath(config, runId, jobId);
   if (!file) return yield* fail('job-not-found', 'No accepted job has this identity.');
   const fs = yield* FileSystem.FileSystem;
   const resumed = yield* withExclusiveFileLock(
     fs,
     file + '.worker.lock',
     workerLockOptions,
-    transition(config, request.runId, jobId, state =>
+    transition(config, runId, jobId, state =>
       state.status === 'completed'
         ? state
         : {...state, stopRequested: false, status: 'accepted', updatedAt: Date.now()},
     ).pipe(Effect.map(reopened => ({reopened, active: false}))),
   ).pipe(
     Effect.catchIf(Schema.is(FileLockTimeout), () =>
-      read(config, request.runId, jobId).pipe(
+      read(config, runId, jobId).pipe(
         Effect.flatMap(current =>
           current
             ? Effect.succeed({reopened: current, active: true})
@@ -1298,5 +1305,5 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   );
   const reopened = resumed.reopened;
   if (resumed.active || reopened.state.status === 'completed') return nativeJobStatus(reopened.state);
-  return yield* launchOrReport(config, request.runId, jobId, reopened.state);
+  return yield* launchOrReport(config, runId, jobId, reopened.state);
 });
