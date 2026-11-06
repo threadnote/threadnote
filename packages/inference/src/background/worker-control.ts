@@ -10,7 +10,7 @@ import {
   Schema,
   String as EffectString,
 } from 'effect';
-import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {
   readPathFileSystemAuthority,
@@ -511,7 +511,7 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
             return true;
           }),
           Math.min(100, remaining),
-        ).pipe(Effect.catchIf(isFileLockTimeout, () => Effect.succeed(false))),
+        ),
       ),
       Effect.timeoutOption(remaining),
     );

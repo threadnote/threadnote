@@ -292,37 +292,6 @@ describe('owned fixture cooperative drain', () => {
     }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
   );
 
-  effectIt.effect('waits through control-lock contention within the original fixture deadline', () =>
-    Effect.gen(function* () {
-      const f = yield* drainFixture;
-      yield* f.run(
-        Effect.gen(function* () {
-          const acquired = yield* Deferred.make<void>();
-          const release = yield* Deferred.make<void>();
-          const holder = yield* withExclusiveFileLock(
-            f.fs,
-            f.options.receiptPath + '.launch-v2.lock',
-            {
-              createParentDirectory: false,
-              retryIntervalMilliseconds: 1,
-              staleAfterMilliseconds: 5000,
-              waitTimeoutMilliseconds: 0,
-              useCanonicalProcessStartIdentity: true,
-            },
-            Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
-          ).pipe(Effect.forkScoped);
-          yield* Deferred.await(acquired);
-          const deadline = (yield* Clock.currentTimeMillis) + 2000;
-          const drain = yield* drainBackgroundWorkerFixture(f.capability, deadline).pipe(Effect.forkScoped);
-          yield* Effect.sleep(150);
-          yield* Deferred.succeed(release, undefined);
-          yield* Fiber.join(holder);
-          expect(yield* Fiber.join(drain)).toEqual({state: 'drained', generationCount: 0});
-        }),
-      );
-    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
-  );
-
   effectIt.effect('acknowledges a delayed revoked child and never treats a missing receipt as exit', () =>
     Effect.gen(function* () {
       const f = yield* drainFixture;
