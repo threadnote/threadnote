@@ -1225,30 +1225,35 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
   const runId = run.state.runId;
-  yield* withWorkflowLock(
-    config,
-    run.state.bindingId,
-    Effect.gen(function* () {
-      const callerBinding = yield* resolveWorkflowBinding(config, {
-        protocolVersion: 1,
-        action: 'bind',
-        workflowRunId: 'native-v1-' + runId,
-        project: run.state.project,
-        featureId: run.state.featureId,
-        generation: run.state.generation,
-        profile: run.state.profile ?? 'desktop',
-        ...(run.state.team === undefined ? {} : {team: run.state.team}),
-        ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
-      });
-      const canonicalJournal = yield* inspectWorkflowJournal(config, run.state.bindingId);
-      if (
-        callerBinding.bindingId !== run.state.bindingId ||
-        canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
-        canonicalJournal.state.binding.repo !== callerBinding.repo
-      )
-        return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
-    }),
-  );
+  const callerBinding = yield* resolveWorkflowBinding(config, {
+    protocolVersion: 1,
+    action: 'bind',
+    workflowRunId: 'native-v1-' + runId,
+    project: run.state.project,
+    featureId: run.state.featureId,
+    generation: run.state.generation,
+    profile: run.state.profile ?? 'desktop',
+    ...(run.state.team === undefined ? {} : {team: run.state.team}),
+    ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
+  });
+  if (callerBinding.bindingId !== run.state.bindingId)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
+  // Read-only status/result still serialize against the journal. Stop/resume
+  // must remain available while a writer owns that lock; their immutable job
+  // input, run binding and current checkout are verified below, while resumed
+  // authoring work re-enters the canonical journal transaction before writing.
+  if (request.command === 'status' || request.command === 'result') {
+    const canonicalJournal = yield* withWorkflowLock(
+      config,
+      run.state.bindingId,
+      inspectWorkflowJournal(config, run.state.bindingId),
+    );
+    if (
+      canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
+      canonicalJournal.state.binding.repo !== callerBinding.repo
+    )
+      return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
+  }
   const stored = yield* read(config, runId, request.jobId);
   if (
     !stored ||
@@ -1264,6 +1269,9 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     admitted.bindingId !== run.state.bindingId
   )
     return yield* fail('invalid-job-state', 'The immutable job input is outside its canonical run binding.');
+  const witness = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(admitted.witness);
+  if (witness.bindingId !== callerBinding.bindingId || witness.repo !== callerBinding.repo)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   if (request.command === 'status') return nativeJobStatus(stored.state);
   if (request.command === 'result') {
     return {
