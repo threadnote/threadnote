@@ -7,7 +7,7 @@ import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
-import {bindNativeCycleDeliveryBase} from './cycle_delivery.js';
+import {bindNativeCycleDeliveryBase, verifyNativeCycleDeliveryRepository} from './cycle_delivery.js';
 import {runWorkflowAutomation} from './index.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
@@ -353,9 +353,11 @@ export const runNativeTaskPrWatch = (
         'invalid-delivery-ref',
         'Use the exact current open-PR delivery reference returned by the task card.',
       );
-    const phase = stored.state.cycle?.state.phases[validation.phaseId];
+    const runtime = stored.state.cycle;
+    if (!runtime) return yield* fail('cycle-not-found', 'This task has no admitted native cycle.');
+    const phase = runtime.state.phases[validation.phaseId];
     const matchingSnapshots = EffectArray.filter(
-      stored.state.cycle?.snapshots ?? [],
+      runtime.snapshots,
       item =>
         item.snapshot.snapshotId === validation.snapshotId &&
         item.snapshot.phaseId === validation.phaseId &&
@@ -385,6 +387,41 @@ export const runNativeTaskPrWatch = (
     // This is an internal lease owner key, never an authenticated person or provider identity.
     const consumerId = `task-${watchIdentity}`;
     const wakeupId = `task-${watchIdentity}`;
+    if (request.operation === 'start' && phase.delivery === undefined) {
+      if (
+        embeddedDelivery.pr?.state !== 'open' ||
+        typeof embeddedDelivery.commitEvidence !== 'string' ||
+        !embeddedDelivery.publication
+      )
+        return yield* fail(
+          'invalid-delivery-ref',
+          'A provisional task watch needs the exact current open-PR delivery evidence.',
+        );
+      const admitted = yield* runNativeTaskPrDelivery(
+        config,
+        {
+          command: 'deliver-pr',
+          runId: request.runId,
+          callerCwd: checkout,
+          validationRef: request.validationRef,
+          commitEvidence: embeddedDelivery.commitEvidence,
+          pr: embeddedDelivery.pr,
+          publication: embeddedDelivery.publication,
+        },
+        stored,
+        checkout,
+        stored.state.cycle!,
+      );
+      const admittedAction = decodeNativeTaskActionRef(admitted.deliveryRef);
+      const deliveryMatches =
+        admittedAction?.delivery !== undefined && stableJson(admittedAction.delivery) === stableJson(embeddedDelivery);
+      if (admitted.status !== 'watch-required' || admitted.phaseId !== validation.phaseId || !deliveryMatches)
+        return yield* fail(
+          'stale-delivery-ref',
+          `Provisional delivery mismatch: status=${admitted.status}; phase=${admitted.phaseId}; deliveryMatches=${deliveryMatches}.`,
+        );
+      yield* verifyNativeCycleDeliveryRepository(checkout, admittedAction.delivery);
+    }
     if (request.operation === 'start') {
       if (!request.wakeup)
         return yield* fail('host-registration-required', 'Start needs the actual host registration configuration.');

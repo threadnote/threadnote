@@ -174,7 +174,7 @@ const inspectTaskOnce = <A, E, R>(program: Effect.Effect<A, E, R>) =>
     return result;
   });
 
-const startSimulatedTaskWatch = (
+const attemptSimulatedTaskWatch = (
   f: Effect.Success<ReturnType<typeof fixture>>,
   runId: string,
   phaseId: string,
@@ -197,6 +197,7 @@ const startSimulatedTaskWatch = (
     const processAdapterContext = yield* Effect.context<
       FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom
     >();
+    let collectorSpawns = 0;
     const fakeCommands = CommandExecutor.of({
       ...commands,
       execute: (executable, args, options) => {
@@ -211,6 +212,7 @@ const startSimulatedTaskWatch = (
       },
       spawnDetached: () =>
         Effect.gen(function* () {
+          collectorSpawns += 1;
           const starting = yield* readNativeWatch(f.config, watchId);
           if (!starting?.envelope.collector) return false;
           yield* writeNativeWatch(
@@ -238,21 +240,47 @@ const startSimulatedTaskWatch = (
       processStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
       canonicalProcessStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
     });
-    const started = object(
-      yield* runNativeTaskAction(f.config, {
-        command: 'watch-pr',
-        operation: 'start',
-        runId,
-        callerCwd: f.repo,
-        validationRef,
-        deliveryRef,
-        wakeup,
-      }).pipe(Effect.provideService(CommandExecutor, fakeCommands), Effect.provideService(SystemInfo, fakeSystem)),
+    const result = yield* runNativeTaskAction(f.config, {
+      command: 'watch-pr',
+      operation: 'start',
+      runId,
+      callerCwd: f.repo,
+      validationRef,
+      deliveryRef,
+      wakeup,
+    }).pipe(
+      Effect.match({
+        onFailure: failure => ({ok: false as const, failure}),
+        onSuccess: value => ({ok: true as const, value}),
+      }),
+      Effect.provideService(CommandExecutor, fakeCommands),
+      Effect.provideService(SystemInfo, fakeSystem),
     );
     const startedWatch = yield* readNativeWatch(f.config, watchId);
+    return {watchId, consumerId, wakeupId, wakeup, prUrl, result, startedWatch, collectorSpawns};
+  });
+
+const startSimulatedTaskWatch = (
+  f: Effect.Success<ReturnType<typeof fixture>>,
+  runId: string,
+  phaseId: string,
+  validationRef: string,
+  deliveryRef: string,
+  prUrl: string,
+) =>
+  Effect.gen(function* () {
+    const attempt = yield* attemptSimulatedTaskWatch(f, runId, phaseId, validationRef, deliveryRef, prUrl);
+    if (!attempt.result.ok) return yield* Effect.fail(attempt.result.failure);
+    const started = object(attempt.result.value);
+    const startedWatch = attempt.startedWatch;
     if (!startedWatch) throw new Error('Expected the simulated task watch to persist.');
-    expect(started).toMatchObject({status: 'watching', watchId, prUrl, consumerId});
-    return {watchId, consumerId, wakeupId, wakeup, startedWatch};
+    expect(started).toMatchObject({
+      status: 'watching',
+      watchId: attempt.watchId,
+      prUrl,
+      consumerId: attempt.consumerId,
+    });
+    return {...attempt, startedWatch};
   });
 
 const recoverHistoricalTaskWatch = (f: Effect.Success<ReturnType<typeof fixture>>, runId: string) =>
@@ -2785,6 +2813,38 @@ describe('native task actions', () => {
         next: {action: 'watch-pr', prUrl: openPr.url, headSha},
       });
       expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
+      const provisionalRef = decodeNativeTaskActionRef(String(watchCard.deliveryRef));
+      if (!provisionalRef?.delivery?.pr) throw new Error('Expected the provisional PR delivery locator.');
+      const forgedDelivery = {
+        ...provisionalRef.delivery,
+        pr: {...provisionalRef.delivery.pr, url: 'https://github.com/other-owner/other-repo/pull/99'},
+      };
+      const forgedDeliveryRef = encodeNativeTaskActionRef({
+        ...provisionalRef,
+        kind: 'delivery',
+        delivery: forgedDelivery,
+        payloadDigest: sha256HexSync(stableJson(forgedDelivery)),
+      });
+      const watchId = `pr-${EffectString.slice(0, 48)(sha256HexSync('native-run\none'))}`;
+      const watchPath = f.path.join(
+        f.config.agentContextHome,
+        'workflow-automations',
+        'native-watch-v1',
+        watchId + '.json',
+      );
+      const forgedStart = yield* attemptSimulatedTaskWatch(
+        f,
+        'native-run',
+        'one',
+        validationRef,
+        forgedDeliveryRef,
+        forgedDelivery.pr.url,
+      );
+      expect(forgedStart.result).toMatchObject({ok: false, failure: {code: 'base-ref-unverified'}});
+      expect(forgedStart.collectorSpawns).toBe(0);
+      expect(forgedStart.startedWatch).toBeUndefined();
+      expect(yield* f.fs.exists(watchPath)).toBe(false);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeOpen);
       expect(
         yield* runNativeTaskAction(f.config, {
           command: 'finish',
@@ -2857,6 +2917,130 @@ describe('native task actions', () => {
       }).pipe(Effect.result);
       expect(changedAuthority).toMatchObject({failure: {code: 'delivery-conflict'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
+    }).pipe(run),
+  );
+
+  effectIt.effect('refuses provisional watches for a local plan or a phase without validation', () =>
+    Effect.gen(function* () {
+      for (const scenario of [
+        {delivery: 'local' as const, reviewed: true, code: 'delivery-scope'},
+        {delivery: 'pr' as const, reviewed: false},
+      ]) {
+        const f = yield* fixture(['one'], scenario.delivery);
+        yield* f.mutate('begin-phase', {phaseId: 'one'});
+        const work = object(
+          yield* runNativeTaskAction(f.config, {command: 'work', runId: 'native-run', callerCwd: f.repo, packet}),
+        );
+        yield* f.fs.writeFileString(
+          f.path.join(f.repo, 'source.ts'),
+          `export const fixture = "${scenario.delivery}";\n`,
+        );
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', `${scenario.delivery} provisional watch fixture`]);
+        const snapshot = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: String(work.workRef),
+          }),
+        );
+        const snapshotRef = String(snapshot.snapshotRef);
+        let validationRef: string;
+        if (scenario.reviewed) {
+          const report = {
+            mode: 'full',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings: [],
+          };
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            report,
+          });
+          const validation = object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'record-validation',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              snapshotRef,
+              validation: {
+                checks: [{command: 'fixture check', result: 'passed', evidence: 'Private test evidence.'}],
+                acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Committed fixture source.'}],
+              },
+            }),
+          );
+          validationRef = String(validation.validationRef);
+        } else {
+          const snapshotAction = decodeNativeTaskActionRef(snapshotRef);
+          if (!snapshotAction) throw new Error('Expected the pre-validation snapshot reference.');
+          validationRef = encodeNativeTaskActionRef({
+            ...snapshotAction,
+            kind: 'validation',
+            payloadDigest: sha256HexSync('forged missing validation'),
+          });
+        }
+        const validationAction = decodeNativeTaskActionRef(validationRef);
+        if (!validationAction?.sourceHead || !validationAction.sourceTree || !validationAction.phaseHash)
+          throw new Error('Expected the task reference to bind the fixture source.');
+        const delivery = {
+          phaseId: 'one',
+          phaseHash: validationAction.phaseHash,
+          delivery: 'pr' as const,
+          headSha: validationAction.sourceHead,
+          validatedTree: validationAction.sourceTree,
+          commitEvidence: 'Private fixture commit.',
+          pr: {
+            url: 'https://github.com/example/repo/pull/88',
+            headSha: validationAction.sourceHead,
+            branch: 'feature/one',
+            baseBranch: 'main',
+            state: 'open' as const,
+          },
+          publication: {exemption: 'small-fix' as const, reason: 'Private fixture authority.'},
+        };
+        const deliveryRef = encodeNativeTaskActionRef({
+          ...validationAction,
+          kind: 'delivery',
+          delivery,
+          payloadDigest: sha256HexSync(stableJson(delivery)),
+        });
+        const before = yield* f.fs.readFileString(f.statePath());
+        if (!scenario.reviewed) {
+          const unvalidated = (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.cycle?.state.phases.one;
+          expect(unvalidated?.validation).toBeUndefined();
+        }
+        const attempt = yield* attemptSimulatedTaskWatch(
+          f,
+          'native-run',
+          'one',
+          validationRef,
+          deliveryRef,
+          delivery.pr.url,
+        );
+        expect(attempt.result.ok, `${scenario.delivery} reviewed=${scenario.reviewed}`).toBe(false);
+        if (!attempt.result.ok && 'code' in scenario)
+          expect(attempt.result.failure).toMatchObject({code: scenario.code});
+        expect(attempt.collectorSpawns).toBe(0);
+        expect(attempt.startedWatch).toBeUndefined();
+        expect(
+          yield* f.fs.exists(
+            f.path.join(
+              f.config.agentContextHome,
+              'workflow-automations',
+              'native-watch-v1',
+              attempt.watchId + '.json',
+            ),
+          ),
+        ).toBe(false);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      }
     }).pipe(run),
   );
 
@@ -4992,6 +5176,22 @@ describe('native task actions', () => {
       const delivered = cliDelivery;
       if (!delivered) throw new Error('Expected the typed commit-delivery CLI result.');
       expect(delivered).toMatchObject({status: 'delivered', replayed: false, receipt: {delivery: 'commit'}});
+      const canonicalDeliveryRef = decodeNativeTaskActionRef(String(delivered.deliveryRef));
+      if (!canonicalDeliveryRef) throw new Error('Expected the canonical commit-delivery reference.');
+      const tamperedDigestRef = encodeNativeTaskActionRef({
+        ...canonicalDeliveryRef,
+        payloadDigest: sha256HexSync('valid-form-but-mismatched-delivery-digest'),
+      });
+      const beforeTamperedDigest = yield* f.fs.readFileString(f.statePath());
+      const tamperedDigestReplay = yield* runNativeTaskAction(f.config, {
+        command: 'deliver-commit',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        validationRef: tamperedDigestRef,
+        commitEvidence: evidence,
+      }).pipe(Effect.result);
+      expect(tamperedDigestReplay).toMatchObject({failure: {code: 'delivery-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeTamperedDigest);
       const afterDelivery = yield* f.fs.readFileString(f.statePath());
       const closeoutWithoutProposal = yield* runNativeTaskAction(f.config, {
         command: 'finish',
