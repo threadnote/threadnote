@@ -1,4 +1,15 @@
-import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema, Stdio, Terminal, Tracer} from 'effect';
+import {
+  Array as EffectArray,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+  Record as EffectRecord,
+  Schema,
+  Stdio,
+  Terminal,
+  Tracer,
+} from 'effect';
 import * as Clock from 'effect/Clock';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
@@ -48,8 +59,9 @@ import {
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow_automation/native_jobs.js';
-import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
+import {readNativeCloseoutJournal, writeNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
+import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {completeLocalPhase, fixture, object, run} from './native-cycle-lifecycle-fixture.js';
 import {nativeFixture} from './native-automation-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -4650,6 +4662,102 @@ describe('native task actions', () => {
         outputs: completedCloseout?.state.outputs,
         archives: completedCloseout?.state.archives,
       });
+      if (!completedCloseout || EffectRecord.keys(completedCloseout.state.outputs).length < 2)
+        throw new Error('Expected multiple independently admitted closeout outputs for negative coverage tests.');
+      const outputKeys = EffectRecord.keys(completedCloseout.state.outputs);
+      const incompleteOutputs = EffectRecord.remove(completedCloseout.state.outputs, outputKeys[0]);
+      const incompleteJournal = yield* writeNativeCloseoutJournal(
+        f.config,
+        'native-run',
+        {...completedCloseout.state, outputs: incompleteOutputs},
+        completedCloseout.revision,
+        decodeJournal,
+      );
+      const incompleteView = yield* readNativeTaskView(f.config, {
+        runId: 'native-run',
+        callerCwd: f.repo,
+        detail: 'packet',
+      }).pipe(Effect.result);
+      expect(incompleteView).toMatchObject({failure: {code: 'invalid-closeout-state'}});
+      const restoredJournal = yield* writeNativeCloseoutJournal(
+        f.config,
+        'native-run',
+        completedCloseout.state,
+        incompleteJournal.revision,
+        decodeJournal,
+      );
+      const changedDocuments = [...completedCloseout.state.documents];
+      changedDocuments[0] = {...changedDocuments[0], body: changedDocuments[0].body + '\nEdited after admission.'};
+      const editedBodyJournal = yield* writeNativeCloseoutJournal(
+        f.config,
+        'native-run',
+        {
+          ...completedCloseout.state,
+          documents: changedDocuments,
+          documentDigest: sha256HexSync(stableJson(changedDocuments)),
+        },
+        restoredJournal.revision,
+        decodeJournal,
+      );
+      const editedBodyView = yield* readNativeTaskView(f.config, {
+        runId: 'native-run',
+        callerCwd: f.repo,
+        detail: 'packet',
+      }).pipe(Effect.result);
+      expect(editedBodyView).toMatchObject({failure: {code: 'invalid-readback'}});
+      yield* writeNativeCloseoutJournal(
+        f.config,
+        'native-run',
+        completedCloseout.state,
+        editedBodyJournal.revision,
+        decodeJournal,
+      );
+      const restoredOutputs = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
+      if (!restoredOutputs) throw new Error('Expected restored complete closeout journal.');
+      const fs = yield* FileSystem.FileSystem;
+      const closeoutWriteContext =
+        yield* Effect.context<Effect.Services<ReturnType<typeof writeNativeCloseoutJournal>>>();
+      const closeoutJournalPath = yield* fs.realPath(f.statePath() + '.closeout.json');
+      let changedDuringRead = false;
+      const racingFilesystem = FileSystem.FileSystem.of({
+        ...fs,
+        readFile: file =>
+          fs.readFile(file).pipe(
+            Effect.tap(() =>
+              file === closeoutJournalPath && !changedDuringRead
+                ? Effect.gen(function* () {
+                    changedDuringRead = true;
+                    yield* writeNativeCloseoutJournal(
+                      f.config,
+                      'native-run',
+                      {
+                        ...restoredOutputs.state,
+                        outputs: EffectRecord.remove(restoredOutputs.state.outputs, outputKeys[0]),
+                      },
+                      restoredOutputs.revision,
+                      decodeJournal,
+                    ).pipe(Effect.provideContext(closeoutWriteContext), Effect.orDie);
+                  })
+                : Effect.void,
+            ),
+          ),
+      });
+      const racedView = yield* readNativeTaskView(f.config, {
+        runId: 'native-run',
+        callerCwd: f.repo,
+        detail: 'packet',
+      }).pipe(Effect.provideService(FileSystem.FileSystem, racingFilesystem), Effect.result);
+      expect(changedDuringRead).toBe(true);
+      expect(racedView).toMatchObject({failure: {code: 'inspection-failed'}});
+      const changedJournal = yield* readNativeCloseoutJournal(f.config, 'native-run', decodeJournal);
+      if (!changedJournal) throw new Error('Expected concurrent closeout journal update.');
+      yield* writeNativeCloseoutJournal(
+        f.config,
+        'native-run',
+        completedCloseout.state,
+        changedJournal.revision,
+        decodeJournal,
+      );
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "post-validation drift";\n',

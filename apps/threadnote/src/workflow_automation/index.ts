@@ -468,14 +468,30 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
             };
           });
         const completedCloseout = yield* readNativeCloseoutJournal(config, stored.state.runId, decodeJournal);
-        const terminalCloseout =
+        const completedJournal =
           completedCloseout?.state.status === 'complete' &&
           completedCloseout.state.runId === stored.state.runId &&
           completedCloseout.state.generation === stored.state.generation &&
-          completedCloseout.state.bindingId === stored.state.bindingId &&
-          EffectRecord.keys(completedCloseout.state.outputs).length > 0
+          completedCloseout.state.bindingId === stored.state.bindingId
             ? completedCloseout.state
             : undefined;
+        // Documents can repeat a key when closeout replaces an earlier draft; the last value is the final output.
+        const finalDocuments = completedJournal
+          ? new Map(EffectArray.map(completedJournal.documents, document => [document.key, document] as const))
+          : undefined;
+        const expectedOutputKeys = finalDocuments ? [...finalDocuments.keys()] : [];
+        const actualOutputKeys = completedJournal ? new Set(EffectRecord.keys(completedJournal.outputs)) : undefined;
+        if (
+          completedJournal &&
+          (expectedOutputKeys.length === 0 ||
+            expectedOutputKeys.length !== actualOutputKeys?.size ||
+            EffectArray.some(expectedOutputKeys, key => !actualOutputKeys?.has(key)))
+        )
+          return yield* issue(
+            'invalid-closeout-state',
+            'Completed closeout output receipts do not cover every admitted final document.',
+          );
+        const terminalCloseout = completedJournal;
         const source = stored.state.cycle?.state.plan.source;
         const pinned = source && !terminalCloseout ? yield* memory.read(binding.bindingId, source.root.uri) : undefined;
         const planDrift =
@@ -488,11 +504,15 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
           ? yield* Effect.forEach(EffectRecord.toEntries(terminalCloseout.outputs), ([key, reference]) =>
               Effect.gen(function* () {
                 const artifact = yield* memory.read(binding.bindingId, reference.uri);
+                const document = finalDocuments?.get(key);
                 if (
+                  !document ||
+                  reference.uri !== document.uri ||
                   artifact.uri !== reference.uri ||
                   artifact.memoryId !== reference.memoryId ||
                   artifact.revision !== reference.revision ||
-                  artifact.storageKind !== 'durable' ||
+                  artifact.body !== document.body ||
+                  artifact.storageKind !== (terminalCloseout.profile === 'desktop' ? 'durable' : 'handoff') ||
                   artifact.state !== 'active'
                 )
                   return yield* issue(
