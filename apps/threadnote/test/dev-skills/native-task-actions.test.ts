@@ -5485,13 +5485,17 @@ describe('native task actions', () => {
           acceptance: [{criterion: `${phaseId} works`, evidence: `${phaseId} delivered`}],
         });
       }
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, f.config);
       expect(yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).toMatchObject({
         status: 'complete',
         next: {action: 'complete'},
       });
+      const completedView = object(
+        object(yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo})).structuredContent,
+      );
+      expect(completedView.next).toMatchObject({action: 'complete', tool: 'workflow_task_finish'});
       const multiPhaseProposal = {...proposal, phaseEvidence};
-      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
-      registerWorkflowTaskTool(mcp, f.config);
       const submittedEnvelope = object(
         yield* mcp
           .invokeTool('workflow_task_finish', {
