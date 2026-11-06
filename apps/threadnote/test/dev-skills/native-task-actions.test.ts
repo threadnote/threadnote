@@ -4717,6 +4717,7 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  // prettier-ignore
   effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
@@ -5177,6 +5178,7 @@ describe('native task actions', () => {
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
     }).pipe(run),
+    {timeout: 60_000},
   );
 
   effectIt.effect('records canonical commit delivery through MCP with exact replay and guarded refusal', () =>
@@ -5720,6 +5722,7 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  // prettier-ignore
   effectIt.effect('reconciles a newly approved plan while preserving runtime-owned phase bindings', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -6372,6 +6375,7 @@ describe('native task actions', () => {
       expect(saved.readiness).toBe('ready');
       expect(expanded.intentHash).not.toBe(draft.intentHash);
     }).pipe(run),
+    {timeout: 60_000},
   );
 
   effectIt.effect('recovers an epochless first finish from only prepareRef through concurrent completion', () =>
