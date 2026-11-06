@@ -410,6 +410,11 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
             }
           : {...view, authoring};
       const reconcileReady = authoring.status === 'awaiting-admission';
+      if (reconcileReady && !stored.state.cycle) return {...view, authoring};
+      const authoringAction =
+        Predicate.isObject(authoring.next) && typeof authoring.next.action === 'string'
+          ? authoring.next.action
+          : 'compact-confirm';
       const taskRef = reconcileReady
         ? nativeTaskCardRef(
             stored.state,
@@ -433,14 +438,20 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
         ...view,
         status: 'blocked' as const,
         ...(taskRef ? {taskRef} : {}),
-        next: {action: reconcileReady ? 'reconcile-plan' : 'compact-confirm'},
+        next: {action: reconcileReady ? 'reconcile-plan' : authoringAction},
         missingInputs: [
           ...view.missingInputs,
-          authoring.status === 'awaiting-user-confirmation'
-            ? 'An actual user response and explicit approve/reject/defer decision for the current intent hash'
-            : authoring.status === 'awaiting-review'
-              ? 'An accepted review of the exact current document'
-              : 'Admission of the confirmed current plan',
+          ...(reconcileReady && view.next.action === 'reconcile-plan'
+            ? []
+            : [
+                authoring.status === 'awaiting-user-confirmation'
+                  ? 'An actual user response and explicit approve/reject/defer decision for the current intent hash'
+                  : authoring.status === 'awaiting-review'
+                    ? 'An accepted review of the exact current document'
+                    : authoring.status === 'awaiting-readiness'
+                      ? 'A ready current plan with its authoring blockers resolved'
+                      : 'Admission of the ready current plan',
+              ]),
         ],
         authoring,
         ...(stored.state.cycle ? {cycleTask: view} : {}),

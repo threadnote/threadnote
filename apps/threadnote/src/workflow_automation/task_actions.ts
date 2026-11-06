@@ -1166,7 +1166,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           config,
           authoringRequest(stored, 'export-dev-cycle', {
             uri: currentPlan.root.uri,
-            delivery: 'local',
+            delivery: state.plan.delivery,
             bindings,
           }),
         ),

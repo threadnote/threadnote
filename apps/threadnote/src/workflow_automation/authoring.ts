@@ -717,8 +717,6 @@ export const runNativeAuthoring = <R>(
       const document = yield* loadDocument(loaded.root);
       if (document.kind !== kind)
         return yield* fail('invalid-readback', 'The current authoring kind differs from its receipt.');
-      if (request.command === 'current-plan' && (document.kind !== 'plan' || !document.compactOrigin))
-        return {currentPlan: null};
       const validation = yield* Effect.try({
         try: () =>
           validateNativeAuthoring(document, {
@@ -738,10 +736,14 @@ export const runNativeAuthoring = <R>(
             blockers: validation.issues,
           },
         };
+      // Standard plans use the existing authoring readiness policy; compact
+      // plans additionally require the explicit confirmation of their intent.
       const confirmed =
-        loaded.root.confirmation?.decision === 'approved' &&
-        loaded.root.confirmation.intentHash === loaded.root.intentHash &&
-        EffectString.trim(loaded.root.confirmation.response).length > 0;
+        document.kind === 'plan' &&
+        (!document.compactOrigin ||
+          (loaded.root.confirmation?.decision === 'approved' &&
+            loaded.root.confirmation.intentHash === loaded.root.intentHash &&
+            EffectString.trim(loaded.root.confirmation.response).length > 0));
       const reviewed =
         !document.review.required ||
         (loaded.root.review?.documentHash === loaded.root.documentHash &&
@@ -753,14 +755,18 @@ export const runNativeAuthoring = <R>(
         ? 'awaiting-user-confirmation'
         : !reviewed
           ? 'awaiting-review'
-          : admitted
-            ? 'admitted'
-            : 'awaiting-admission';
+          : loaded.root.readiness !== 'ready' || !validation.ready
+            ? 'awaiting-readiness'
+            : admitted
+              ? 'admitted'
+              : 'awaiting-admission';
       return {
         currentPlan: {
           ...rootSummary(loaded.root, artifact),
           status,
-          next: {action: 'compact-confirm'},
+          next: {
+            action: document.kind === 'plan' && document.compactOrigin ? 'compact-confirm' : 'workflow_task_author',
+          },
           packetDetail: {
             action: 'workflow_task_view',
             detail: 'packet',
