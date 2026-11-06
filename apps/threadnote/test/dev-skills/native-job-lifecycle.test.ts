@@ -652,9 +652,10 @@ describe('native private job lifecycle', () => {
         }),
       ).pipe(Effect.forkChild);
       yield* Deferred.await(acquired);
-      const status = yield* f
-        .call({...f.base('job'), command: 'status', jobId})
-        .pipe(Effect.tap(() => Deferred.succeed(completed, undefined)), Effect.forkChild);
+      const status = yield* f.call({...f.base('job'), command: 'status', jobId}).pipe(
+        Effect.tap(() => Deferred.succeed(completed, undefined)),
+        Effect.forkChild,
+      );
       yield* Effect.sleep('100 millis');
       expect(Option.isNone(yield* Deferred.poll(completed))).toBe(true);
       yield* Deferred.succeed(release, undefined);

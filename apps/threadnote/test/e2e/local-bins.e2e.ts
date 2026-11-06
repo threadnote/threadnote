@@ -40,7 +40,6 @@ import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {recallLexicalDemandKey, RECALL_LEXICAL_DEMAND_DIRECTORY} from '@threadnote/recall/background/lexical-demand';
 import {vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
 import {reportLocalBinsCleanupFailure, type LocalBinsCleanupFacts} from '../helpers/local-bins-cleanup-diagnostics.js';
-import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
