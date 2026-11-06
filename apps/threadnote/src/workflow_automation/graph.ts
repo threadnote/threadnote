@@ -1,4 +1,4 @@
-import {Cause, Effect, Schema} from 'effect';
+import {Effect, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
@@ -48,26 +48,12 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
                 'Code citations require an already-published ready graph; run `threadnote graph index --no-vectors` from callerCwd, then retry. No indexing was started.',
               retryable: false,
             });
-          yield* indexer
-            .index({
-              cwd: repo,
-              threadnoteHome: config.agentContextHome,
-              ensureVectors: false,
-              ...(project ? {project} : {}),
-            })
-            .pipe(
-              Effect.timeout('120 seconds'),
-              Effect.catchIf(Cause.isTimeoutError, () =>
-                Effect.fail(
-                  WorkflowAutomationError.make({
-                    code: 'evidence-busy',
-                    message:
-                      'Graph preparation exceeded its bounded wait. Keep this native run and retry when its owner finishes.',
-                    retryable: true,
-                  }),
-                ),
-              ),
-          );
+          yield* indexer.index({
+            cwd: repo,
+            threadnoteHome: config.agentContextHome,
+            ensureVectors: false,
+            ...(project ? {project} : {}),
+          });
           status = yield* query.status(config.agentContextHome, repo, statusOptions);
         }
         if (!isReady(status, repo))
