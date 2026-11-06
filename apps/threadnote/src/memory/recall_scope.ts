@@ -1,3 +1,4 @@
+import {CallerReadCancellation} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {inferProjectFromManifest, readSeedManifest, requireManifestWorkset} from '@threadnote/workspace/manifest';
@@ -155,7 +156,9 @@ const resolveCheckoutProjects = Effect.fn('memory.resolveCheckoutProjects')(func
         ),
       ),
     {concurrency: 4},
-  ).pipe(Effect.timeout('10 seconds'));
+  ).pipe(work =>
+    Effect.flatMap(CallerReadCancellation, caller => (caller ? work : work.pipe(Effect.timeout('10 seconds')))),
+  );
   return normalizeRecallProjectNames([...projects.flat(), ...(repoName ? [repoName] : [])]);
 });
 

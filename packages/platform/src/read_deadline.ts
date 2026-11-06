@@ -20,6 +20,12 @@ export interface ReadDeadline {
   readonly expiresAtNanos: bigint;
 }
 
+/** Foreground recall waits for its caller; explicit caller deadlines remain independent. */
+export const CallerReadCancellation = Context.Reference<boolean>(
+  '@threadnote/platform/read_deadline/CallerReadCancellation',
+  {defaultValue: () => false},
+);
+
 /** Existing owned read deadline supplied by the application, never a fresh budget. */
 export class ReadDeadlineContext extends Context.Service<ReadDeadlineContext, ReadDeadline>()(
   '@threadnote/platform/read_deadline/ReadDeadlineContext',

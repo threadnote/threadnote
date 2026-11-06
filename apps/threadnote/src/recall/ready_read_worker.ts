@@ -53,7 +53,7 @@ import {
 import {negativeSemanticReadinessHint} from '@threadnote/recall/vector/negative-readiness';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {RecallIndexQueryDiagnostics, RecallReadyReadState} from '@threadnote/recall/index';
-import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {CallerReadCancellation, hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {RECALL_PREFLIGHT_METADATA_MILLISECONDS} from '@threadnote/recall/runtime';
 import type {RecallSemanticPreflight} from '@threadnote/recall/read_boundary';
 
@@ -98,6 +98,7 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
     switch (request.operation) {
       case 'sections': {
         const model = request.options.mode === 'baseline' ? request.options.semanticPreflightModel : undefined;
+        const callerCancelled = yield* CallerReadCancellation;
         const semanticPreflight =
           model === undefined
             ? undefined
@@ -109,10 +110,15 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
                   cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
                   () => Effect.succeed({model, readiness: 'unknown' as const}),
                 ),
-                Effect.timeoutOrElse({
-                  duration: RECALL_PREFLIGHT_METADATA_MILLISECONDS,
-                  orElse: () => Effect.succeed({model, readiness: 'unknown' as const}),
-                }),
+                work =>
+                  callerCancelled
+                    ? work
+                    : work.pipe(
+                        Effect.timeoutOrElse({
+                          duration: RECALL_PREFLIGHT_METADATA_MILLISECONDS,
+                          orElse: () => Effect.succeed({model, readiness: 'unknown' as const}),
+                        }),
+                      ),
               );
         // Read-only preflight precedes the baseline's final canonical and permission proof.
         const sections = yield* serveRecallSections(request.config, request.options);

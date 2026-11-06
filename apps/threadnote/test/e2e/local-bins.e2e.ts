@@ -22,6 +22,14 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import e2eConfig from '../../../../vitest.e2e.config.js';
+import {
+  createLocalBinsWorkerDrains,
+  drainLocalBinsWorkers,
+  runLocalBinsWorkerDrain,
+  type LocalBinsPositiveHome,
+  type LocalBinsWorkerDrain,
+} from '../helpers/local-bins-worker-drain.js';
 import {observeStdioClientTransportClose} from '../helpers/stdio-client-transport-close.js';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import * as Schema from 'effect/Schema';
@@ -216,6 +224,12 @@ let installedModelModifiedAt: number;
 let initialVectorRevision: string;
 let installOutput: string;
 let installedFiles: string[];
+const workerDrains: LocalBinsWorkerDrain[] = [];
+async function enrollPositiveWorkerHome(positiveHome: string, label: LocalBinsPositiveHome) {
+  workerDrains.push(
+    ...(await runLocalBinsWorkerDrain(createLocalBinsWorkerDrains(positiveHome, temporaryRoot, cli, label))),
+  );
+}
 
 function installedLauncher(
   mode: 'cli' | 'mcp' = 'cli',
@@ -251,6 +265,7 @@ beforeAll(async () => {
   await runGit(['commit', '-m', 'code graph fixture'], graphRepository);
   await seedCoreEmbeddingFixture();
   await writeFile(join(home, 'cache', 'recall-index-v6.json'), '{"legacy":true}\n', 'utf8');
+  await enrollPositiveWorkerHome(home, 'main');
   installOutput = await runCli(['install']);
   installedFiles = await readdir(home, {recursive: true});
   const selection = Schema.decodeUnknownSync(SelectionSchema)(
@@ -283,6 +298,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Share the existing hook's original epoch deadline with both supported worker domains.
+  const workerDeadline = Date.now() + e2eConfig.test!.hookTimeout!;
   const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
     .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
     .catch(() => undefined);
@@ -306,6 +323,8 @@ afterAll(async () => {
     }
     await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
   }
+  // Coordinator handling above is unchanged; this proves only enrolled recall/graph worker return.
+  await runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline));
   await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
 });
 
@@ -789,6 +808,7 @@ describe('built self-contained distribution', () => {
     const logPath = join(previewHome, 'logs', 'threadnote.log');
     await mkdir(dirname(logPath), {recursive: true});
     await copyFile(join(home, 'layout.json'), join(previewHome, 'layout.json'));
+    await enrollPositiveWorkerHome(previewHome, 'report-preview');
     await runCli(['--log-level', 'info', 'logs'], {}, previewHome);
     const logBeforePreview = await readFile(logPath, 'utf8');
     const output = await runCli(
@@ -989,6 +1009,7 @@ describe('built self-contained distribution', () => {
     );
     await writeFile(join(migrationHome, 'layout.json'), '{"createdBy":"threadnote","version":2}\n', 'utf8');
 
+    await enrollPositiveWorkerHome(migrationHome, 'migration-current');
     const migration = await execute(cli, ['--home', migrationHome, 'migrate', '--apply', '--legacy-home', legacyHome], {
       cwd: root,
       env: {
@@ -1110,6 +1131,7 @@ describe('built self-contained distribution', () => {
     await writeFile(join(currentGitdir, 'FETCH_HEAD'), 'different current transient fetch state\n', 'utf8');
     await writeFile(join(migrationHome, 'layout.json'), '{"createdBy":"threadnote","version":2}\n', 'utf8');
 
+    await enrollPositiveWorkerHome(migrationHome, 'migration-partial-share');
     const migration = await execute(cli, ['--home', migrationHome, 'migrate', '--apply', '--legacy-home', legacyHome], {
       cwd: root,
       env: {

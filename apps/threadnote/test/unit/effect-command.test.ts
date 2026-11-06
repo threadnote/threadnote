@@ -88,6 +88,15 @@ describe('Effect CommandExecutor', () => {
     }
   });
 
+  effectIt.effect('explicit zero selects caller-owned command execution while still returning captured data', () =>
+    runCommandEffect(process.execPath, ['-e', 'process.stdout.write("caller-owned")'], {timeoutMs: 0}).pipe(
+      Effect.tap(result =>
+        Effect.sync(() => expect(result).toEqual({exitCode: 0, stderr: '', stdout: 'caller-owned'})),
+      ),
+      provideTestLayer(ApplicationLayer),
+    ),
+  );
+
   it('preserves allowFailure compatibility for callers that inspect exit codes', async () => {
     const result = await run(
       runCommandEffect(process.execPath, ['-e', 'process.stderr.write("bad"); process.exit(3)'], {

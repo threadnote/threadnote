@@ -6,14 +6,17 @@ function isExternalTreePath(relativePath: string): boolean {
   return relativePath === 'external' || Effect2.pipe(relativePath, EffectString.startsWith('external/'));
 }
 
+function externalResourceTreeEntryNameVisible(relativePath: string, name: string): boolean {
+  return !isExternalTreePath(relativePath) || !Effect2.pipe(name, EffectString.startsWith('.'));
+}
+
 function externalResourceTreeEntryVisible(
   relativePath: string,
   entry: {readonly name: string; readonly isDirectory: () => boolean},
 ): boolean {
   return (
-    !isExternalTreePath(relativePath) ||
-    (!Effect2.pipe(entry.name, EffectString.startsWith('.')) &&
-      (entry.isDirectory() || Effect2.pipe(entry.name, EffectString.endsWith('.md'))))
+    externalResourceTreeEntryNameVisible(relativePath, entry.name) &&
+    (!isExternalTreePath(relativePath) || entry.isDirectory() || Effect2.pipe(entry.name, EffectString.endsWith('.md')))
   );
 }
 
@@ -26,6 +29,7 @@ function externalResourceTreeNodeVisible(node: {
 }
 
 export const externalResourceTree = {
+  entryNameVisible: externalResourceTreeEntryNameVisible,
   entryVisible: externalResourceTreeEntryVisible,
   nodeVisible: externalResourceTreeNodeVisible,
 };

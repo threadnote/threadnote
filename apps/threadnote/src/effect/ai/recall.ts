@@ -1,3 +1,4 @@
+import {CallerReadCancellation} from '@threadnote/platform/read_deadline';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {
@@ -208,10 +209,17 @@ export const runEffectAiRecallExpansion = Effect.fn('RecallQueryExpander.run')(f
       Effect.flatMap(context =>
         expandRecallQueryEffect(input).pipe(
           Effect.provide(context),
-          Effect.timeoutOrElse({
-            duration: RECALL_EXPANSION_TIMEOUT_MILLISECONDS,
-            orElse: () => Effect.succeed([]),
-          }),
+          work =>
+            Effect.flatMap(CallerReadCancellation, caller =>
+              caller
+                ? work
+                : work.pipe(
+                    Effect.timeoutOrElse({
+                      duration: RECALL_EXPANSION_TIMEOUT_MILLISECONDS,
+                      orElse: () => Effect.succeed([]),
+                    }),
+                  ),
+            ),
           Effect.orElseSucceed(() => []),
         ),
       ),
@@ -233,12 +241,17 @@ export const expandWeakRecallQueryEffect = Effect.fn('RecallQueryExpander.expand
 ) {
   if (!shouldExpandRecall(input.confidence)) return [];
   if (!resolved) return [];
-  const ready = yield* ensureEffectAiReady(runtimeConfig, resolved).pipe(
-    Effect.as(true),
-    Effect.timeoutOrElse({
-      duration: RECALL_EXPANSION_TIMEOUT_MILLISECONDS,
-      orElse: () => Effect.succeed(false),
-    }),
+  const ready = yield* ensureEffectAiReady(runtimeConfig, resolved).pipe(Effect.as(true), work =>
+    Effect.flatMap(CallerReadCancellation, caller =>
+      caller
+        ? work
+        : work.pipe(
+            Effect.timeoutOrElse({
+              duration: RECALL_EXPANSION_TIMEOUT_MILLISECONDS,
+              orElse: () => Effect.succeed(false),
+            }),
+          ),
+    ),
   );
   if (!ready) return [];
   const config = resolved.configuration;
@@ -300,11 +313,20 @@ export function selectRecallCandidatesWithJev(
     const result = yield* runJevSelection(input, jev);
     return yield* report(result.receipt).pipe(Effect.as(mergeJevRecallSelection(completedBaseline, result, jev.mode)));
   }).pipe(
-    Effect.timeoutOrElse({
-      duration: RECALL_SELECTION_TIMEOUT_MILLISECONDS,
-      orElse: () =>
-        report(jevRecallFailureReceipt(jev, input.candidates.length, 'timeout')).pipe(Effect.as(completedBaseline)),
-    }),
+    work =>
+      Effect.flatMap(CallerReadCancellation, caller =>
+        caller
+          ? work
+          : work.pipe(
+              Effect.timeoutOrElse({
+                duration: RECALL_SELECTION_TIMEOUT_MILLISECONDS,
+                orElse: () =>
+                  report(jevRecallFailureReceipt(jev, input.candidates.length, 'timeout')).pipe(
+                    Effect.as(completedBaseline),
+                  ),
+              }),
+            ),
+      ),
     Effect.catchTag('JevDecisionFailed', () =>
       report(jevRecallFailureReceipt(jev, input.candidates.length, 'provider-failure')).pipe(
         Effect.as(completedBaseline),
@@ -318,10 +340,17 @@ export function boundedRecallCandidateSelection<A, E, R>(
 ): Effect.Effect<A | undefined, never, R> {
   return selection.pipe(
     Effect.map(selected => selected as A | undefined),
-    Effect.timeoutOrElse({
-      duration: RECALL_SELECTION_TIMEOUT_MILLISECONDS,
-      orElse: () => succeedUndefined,
-    }),
+    work =>
+      Effect.flatMap(CallerReadCancellation, caller =>
+        caller
+          ? work
+          : work.pipe(
+              Effect.timeoutOrElse({
+                duration: RECALL_SELECTION_TIMEOUT_MILLISECONDS,
+                orElse: () => succeedUndefined,
+              }),
+            ),
+      ),
     Effect.orElseSucceed(() => undefined),
   );
 }

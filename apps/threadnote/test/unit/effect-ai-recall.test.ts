@@ -1,10 +1,11 @@
+import {CallerReadCancellation} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
-import {Cause, Effect, Exit, Fiber, Layer} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -335,6 +336,20 @@ describe('Effect AI recall expansion', () => {
       yield* Fiber.interrupt(fiber);
       const exit = yield* Fiber.await(fiber);
       expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+    }),
+  );
+
+  it.effect('caller mode waits for healthy selection beyond its former cutoff', () =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>();
+      const selection = yield* boundedRecallCandidateSelection(Deferred.await(ready).pipe(Effect.as(['c1']))).pipe(
+        Effect.provideService(CallerReadCancellation, true),
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust(600_001);
+      expect(selection.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(ready, undefined);
+      expect(yield* Fiber.join(selection)).toEqual(['c1']);
     }),
   );
 
