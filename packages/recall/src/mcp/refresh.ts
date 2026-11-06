@@ -7,7 +7,7 @@ import {
   type ResourceRecallInvalidationReceipt,
 } from '@threadnote/store/resource/recall-invalidation';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {vectorIndexGenerationReadiness} from '../vector-index.js';
 import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus, type RecallIndexStatus} from '../index.js';
@@ -75,7 +75,7 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
     if (onStage) yield* onStage('recall-demand');
     return yield* Effect.gen(function* () {
       const selection = yield* readModelSelection(config.agentContextHome);
-      const modelId = selection.roles.embedding;
+      const modelId = selectedEmbeddingModelId(selection, 'recall');
       if (modelId === undefined) return {state: 'unavailable' as const};
       const catalog = yield* LocalModelCatalog;
       const manifest = yield* catalog.get(modelId);

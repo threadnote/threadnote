@@ -14,7 +14,7 @@ import {BackgroundInferenceAdmission, BackgroundInferenceDeferred} from '@thread
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {
   completeRecallEmbeddingDemand,
   observeRecallEmbeddingDemand,
@@ -121,7 +121,7 @@ export const makeRecallEmbeddingWorker = Effect.fn('recall.makeEmbeddingWorker')
     const desired = demand.desired;
     const config = {...scope, manifestPath: desired.manifestPath};
     const selection = yield* readModelSelection(scope.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'recall');
     const manifest = modelId ? yield* catalog.get(modelId).pipe(Effect.option) : undefined;
     const selected = manifest?._tag === 'Some' ? manifest.value : undefined;
     const model = selected ? selected.id + ':' + selected.sha256 + ':' + String(selected.dimensions) : undefined;
