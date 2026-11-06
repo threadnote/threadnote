@@ -16,7 +16,9 @@ import {
 import {stableJson} from '../../src/workflow_memory/protocol.js';
 import {workflowJournalLimits} from '../../src/workflow_memory/journal_codec.js';
 import {pinNativeCycleTree} from '../../src/workflow_automation/cycle_git.js';
-import {fixture, object, run} from './native-cycle-lifecycle-fixture.js';
+import {fixture, object, run, windowsCycleFixtureTimeout} from './native-cycle-lifecycle-fixture.js';
+
+const ordinaryMergeFixtureTimeout = windowsCycleFixtureTimeout ?? {timeout: 60_000};
 
 const report = (snapshot: NativeCycleSnapshot, mode: 'full' | 'incremental' = 'full') => ({
   snapshotId: snapshot.snapshotId,
@@ -184,7 +186,7 @@ describe('ordinary merge native qualification', () => {
         expect(yield* f.fs.readFileString(f.journalPath(stored.state.bindingId))).toBe(journal);
         expect(yield* retentionRefs(f)).toBe(refs);
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -215,7 +217,7 @@ describe('ordinary merge native qualification', () => {
         expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
         expect(yield* retentionRefs(f)).toBe(refs);
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -259,7 +261,7 @@ describe('ordinary merge native qualification', () => {
         }
         expect((yield* f.capture()).snapshotId).toBe(f.fields.snapshotId);
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -294,7 +296,7 @@ describe('ordinary merge native qualification', () => {
           expect(yield* retentionRefs(f)).toContain(ref);
         expect((yield* f.read()).snapshots.at(-1)!.snapshot).toEqual(snapshot);
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -356,7 +358,7 @@ describe('ordinary merge native qualification', () => {
           );
         }
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -396,7 +398,7 @@ describe('ordinary merge native qualification', () => {
           child => Deferred.succeed(release, undefined).pipe(Effect.andThen(Fiber.interrupt(child))),
         );
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -479,7 +481,7 @@ describe('ordinary merge native qualification', () => {
             expect(EffectString.trim((yield* f.git(['rev-parse', changedRef])).stdout)).toBe(f.prior.head);
         }
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -577,7 +579,7 @@ describe('ordinary merge native qualification', () => {
           expect(EffectString.trim((yield* f.git(['rev-parse', ref + '^{commit}'])).stdout)).toBe(commit);
         expect(yield* f.capture()).toEqual(snapshot);
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   effectIt.effect(
@@ -651,7 +653,7 @@ describe('ordinary merge native qualification', () => {
           refs,
         );
       }).pipe(run),
-    {timeout: 60_000},
+    ordinaryMergeFixtureTimeout,
   );
 
   for (const kind of ['base', 'head', 'branch', 'tree', 'prior-pin']) {
@@ -712,7 +714,7 @@ describe('ordinary merge native qualification', () => {
           );
           expect((yield* f.capture()).ordinaryMergeQualificationV1).toBeDefined();
         }).pipe(run),
-      {timeout: 60_000},
+      ordinaryMergeFixtureTimeout,
     );
   }
 });
