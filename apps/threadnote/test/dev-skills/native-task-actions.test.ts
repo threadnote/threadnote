@@ -1522,6 +1522,27 @@ describe('native task actions', () => {
           fromBaseBranch: 'prerelease',
           toBaseBranch: 'main',
         });
+        const stateBeforeReviewOmission = yield* f.fs.readFileString(f.statePath());
+        const currentStored = yield* readNativeWorkflowState(f.config, 'native-run');
+        if (!currentStored?.state.cycle) throw new Error('Expected the stale reviewed-base runtime.');
+        const noReviewState = serializeNativeWorkflowState({
+          ...currentStored.state,
+          cycle: {...currentStored.state.cycle, reviews: [], attempts: []},
+        });
+        yield* Effect.acquireUseRelease(
+          f.fs.writeFileString(f.statePath(), noReviewState),
+          () =>
+            Effect.gen(function* () {
+              const noReviewViewResult = object(
+                yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}),
+              );
+              expect(noReviewViewResult.isError).not.toBe(true);
+              const noReviewView = object(noReviewViewResult.structuredContent);
+              expect(noReviewView.next).toMatchObject({action: 'blocked', phaseId: 'one'});
+              expect(noReviewView.baseRequalification).toBeUndefined();
+            }),
+          () => f.fs.writeFileString(f.statePath(), stateBeforeReviewOmission),
+        );
 
         const request = {
           command: 'requalify-base-snapshot',
