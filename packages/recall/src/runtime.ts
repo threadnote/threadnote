@@ -5,6 +5,7 @@ import {
   type RecallSemanticPreflight,
 } from './read_boundary.js';
 import {
+  CallerReadCancellation,
   hasReadCleanupUnconfirmed,
   isReadCleanupUnconfirmed,
   ReadDeadlineContext,
@@ -126,19 +127,20 @@ export interface PrepareRecallSectionsInput<R> {
   readonly workspaceScope?: string;
 }
 
-/** Small optional metadata allowance inside the original read deadline, never a new request budget. */
+/** Bounded consumers keep a metadata allowance; foreground recall waits for metadata or its caller. */
 export const RECALL_PREFLIGHT_METADATA_MILLISECONDS = 25;
 export const prepareRecallSemanticPreflight = Effect.fn('recall.prepareSemanticPreflight')(function* (
   config: RecallRuntimeConfig,
 ) {
   if (Option.isNone(yield* Effect.serviceOption(RecallReadyReadBoundary))) return undefined;
   const deadline = yield* Effect.serviceOption(ReadDeadlineContext);
-  if (Option.isNone(deadline)) return undefined;
-  const allowance = Math.min(
-    RECALL_PREFLIGHT_METADATA_MILLISECONDS,
-    yield* readDeadlineRemaining(deadline.value, 1100),
-  );
-  if (allowance <= 0) return undefined;
+  const callerCancelled = yield* CallerReadCancellation;
+  if (!callerCancelled && Option.isNone(deadline)) return undefined;
+  const allowance =
+    callerCancelled || Option.isNone(deadline)
+      ? undefined
+      : Math.min(RECALL_PREFLIGHT_METADATA_MILLISECONDS, yield* readDeadlineRemaining(deadline.value, 1100));
+  if (allowance !== undefined && allowance <= 0) return undefined;
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -175,7 +177,10 @@ export const prepareRecallSemanticPreflight = Effect.fn('recall.prepareSemanticP
       cause => !Cause.hasInterrupts(cause) && !hasReadCleanupUnconfirmed(cause),
       () => Effect.void,
     ),
-    Effect.timeoutOrElse({duration: allowance, orElse: () => Effect.void}),
+    work =>
+      allowance === undefined
+        ? work
+        : work.pipe(Effect.timeoutOrElse({duration: allowance, orElse: () => Effect.void})),
   );
 });
 
@@ -805,10 +810,17 @@ export function boundedRecallSemanticRetrieval<A, E, R>(
       cause => Effect.succeed({cause: cause, status: 'failed' as const}),
     ),
     Effect.catchCause(cause => Effect.failCause(cause)),
-    Effect.timeoutOrElse({
-      duration: MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
-      orElse: () => Effect.succeed({status: 'timed-out' as const}),
-    }),
+    work =>
+      Effect.flatMap(CallerReadCancellation, caller =>
+        caller
+          ? work
+          : work.pipe(
+              Effect.timeoutOrElse({
+                duration: MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
+                orElse: () => Effect.succeed({status: 'timed-out' as const}),
+              }),
+            ),
+      ),
   );
 }
 
@@ -820,6 +832,7 @@ export function createMcpRecallSemanticRetrievalGate() {
     retrieval: Effect.Effect<A, E, R>,
   ): Effect.Effect<GatedRecallSemanticRetrieval<A>, E, R> =>
     Effect.gen(function* () {
+      if (yield* CallerReadCancellation) return yield* boundedRecallSemanticRetrieval(retrieval);
       const now = yield* Clock.monotonicTimeNanos;
       const previousCooldown = retryAfterByRuntime.get(runtime);
       if (previousCooldown && previousCooldown.deadline > now) return {status: 'cooldown'} as const;

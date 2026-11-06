@@ -1,7 +1,7 @@
 import {SecureRandom} from 'effect/crypto';
 import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
-import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
-import {fromPromise} from '@threadnote/platform/errors';
+import {runtimeReadBoundedRegularFileAttempt} from '@threadnote/platform/system';
+import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
@@ -80,14 +80,30 @@ const location = (path: Path.Path, scope: RecallLexicalScope) => {
   const key = recallLexicalDemandKey(scope);
   return {directory, state: path.join(directory, key + '.json'), lock: path.join(directory, key + '.lock')};
 };
-const readFile = (filename: string) =>
-  fromPromise('recall.readLexicalDemand', () => runtimeReadBoundedStableRegularFile(filename, 8192)).pipe(
-    Effect.flatMap(bytes =>
-      Effect.try({try: () => new TextDecoder('utf-8', {fatal: true}).decode(bytes), catch: unavailable}),
-    ),
-    Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(demandSchema))),
-    Effect.mapError(unavailable),
-  );
+const readFile = (filename: string, replacement: 'classify' | 'reject' = 'classify') =>
+  Effect.gen(function* () {
+    let initial = true;
+    for (;;) {
+      const attempt = yield* fromPromiseInterruptibleAwaiting(
+        signal => runtimeReadBoundedRegularFileAttempt(filename, 8192, {signal, replacement}),
+        unavailable,
+      );
+      if (attempt.status === 'missing') {
+        if (initial) return undefined;
+        return yield* unavailable();
+      }
+      initial = false;
+      if (attempt.status === 'replaced') {
+        yield* Effect.yieldNow;
+        continue;
+      }
+      const text = yield* Effect.try({
+        try: () => new TextDecoder('utf-8', {fatal: true}).decode(attempt.bytes),
+        catch: unavailable,
+      });
+      return yield* Schema.decodeEffect(Schema.fromJsonString(demandSchema))(text).pipe(Effect.mapError(unavailable));
+    }
+  });
 export const recallLexicalScopeIsValid = (path: Path.Path, scope: Omit<RecallLexicalScope, 'agentContextHome'>) =>
   EffectArray.every(
     [scope.account, scope.user],
@@ -96,21 +112,28 @@ export const recallLexicalScopeIsValid = (path: Path.Path, scope: Omit<RecallLex
   (scope.manifestPath === undefined || path.isAbsolute(scope.manifestPath)) &&
   (scope.work?.kind !== 'anchors' || path.isAbsolute(scope.work.callerCwd));
 
-export const readRecallLexicalDemand = Effect.fn('recall.readLexicalDemand')(function* (scope: RecallLexicalScope) {
+const readScopedDemand = Effect.fn('recall.readLexicalDemand')(function* (
+  scope: RecallLexicalScope,
+  replacement: 'classify' | 'reject',
+) {
   const path = yield* Path.Path;
-  const fs = yield* FileSystem.FileSystem;
   if (!recallLexicalScopeIsValid(path, scope)) return yield* unavailable();
   const file = location(path, scope).state;
-  if (!(yield* fs.exists(file))) return undefined;
-  const state = yield* readFile(file);
+  const state = yield* readFile(file, replacement);
+  if (state === undefined) return undefined;
   if (recallLexicalDemandKey(state) !== recallLexicalDemandKey(scope)) return yield* unavailable();
   return state;
 });
+export const readRecallLexicalDemand = (scope: RecallLexicalScope) => readScopedDemand(scope, 'classify');
 export const readRecallLexicalScope = Effect.fn('recall.readLexicalScope')(function* (home: string, filename: string) {
   if (!/^[a-f0-9]{64}\.json$/u.test(filename)) return undefined;
   const path = yield* Path.Path;
   const state = yield* readFile(path.join(home, 'recall', RECALL_LEXICAL_DEMAND_DIRECTORY, filename));
-  if (!recallLexicalScopeIsValid(path, state) || filename !== recallLexicalDemandKey(state) + '.json')
+  if (
+    state === undefined ||
+    !recallLexicalScopeIsValid(path, state) ||
+    filename !== recallLexicalDemandKey(state) + '.json'
+  )
     return yield* unavailable();
   return state.revision && state.failures < 8 ? {...state, agentContextHome: home} : undefined;
 });
@@ -151,7 +174,7 @@ const update = <A>(
         useCanonicalProcessStartIdentity: true,
       },
       Effect.gen(function* () {
-        const previous = yield* readRecallLexicalDemand(scope);
+        const previous = yield* readScopedDemand(scope, 'reject');
         const result = f(
           previous ?? {
             version: 2,

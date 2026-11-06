@@ -234,61 +234,139 @@ export function runtimeLstat(path: string): Promise<RuntimeBigIntStats> {
   return nativeFileSystemPromises.lstat(path, {bigint: true});
 }
 
+export type RuntimeRegularFileReadAttempt =
+  {readonly status: 'read'; readonly bytes: Uint8Array} | {readonly status: 'replaced'} | {readonly status: 'missing'};
+
+/** One physical attempt; replacement evidence never carries accepted bytes. */
+export function runtimeReadBoundedRegularFileAttempt(
+  path: string,
+  maximumBytes: number,
+  options: {readonly signal?: AbortSignal; readonly replacement?: 'classify' | 'reject'} = {},
+): Promise<RuntimeRegularFileReadAttempt> {
+  return readBoundedRegularFile(path, maximumBytes, undefined, {
+    ...options,
+    allowInitialMissing: true,
+  });
+}
+
 /** Read one regular file without following a stable symbolic-link target and reject path/file races. */
 export async function runtimeReadBoundedStableRegularFile(
   path: string,
   maximumBytes: number,
   expected?: RuntimeBigIntStats,
 ): Promise<Uint8Array> {
+  const result = await readBoundedRegularFile(path, maximumBytes, expected, {replacement: 'reject'});
+  if (result.status !== 'read') throw SystemOperationError.make({message: 'Target changed during bounded read.'});
+  return result.bytes;
+}
+
+async function readBoundedRegularFile(
+  path: string,
+  maximumBytes: number,
+  expected: RuntimeBigIntStats | undefined,
+  options: {
+    readonly signal?: AbortSignal;
+    readonly replacement?: 'classify' | 'reject';
+    readonly allowInitialMissing?: boolean;
+  },
+): Promise<RuntimeRegularFileReadAttempt> {
+  const checkCancellation = () => options.signal?.throwIfAborted();
+  checkCancellation();
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes >= Number.MAX_SAFE_INTEGER) {
     throw SystemOperationError.make({message: 'Invalid read bound.'});
   }
-  const pathBefore = await nativeFileSystemPromises.lstat(path, {bigint: true});
+  let pathBefore: RuntimeBigIntStats;
+  try {
+    pathBefore = await nativeFileSystemPromises.lstat(path, {bigint: true});
+  } catch (error) {
+    checkCancellation();
+    if (options.allowInitialMissing && Predicate.isObject(error) && error.code === 'ENOENT') return {status: 'missing'};
+    throw error;
+  }
+  checkCancellation();
   if (expected !== undefined && !sameStableRegularFile(expected, pathBefore)) {
     throw SystemOperationError.make({message: 'Target changed since preparation.'});
   }
-  if (!stableRegularFile(pathBefore) || pathBefore.size > BigInt(maximumBytes)) {
+  if (!boundedRegularFile(pathBefore, maximumBytes)) {
     throw SystemOperationError.make({message: 'Target is not a bounded stable regular file.'});
   }
   const flags =
     nativeFileSystemModule.constants.O_RDONLY |
     (nativeFileSystemModule.constants.O_NONBLOCK ?? 0) |
     (runtimePlatform === 'win32' ? 0 : (nativeFileSystemModule.constants.O_NOFOLLOW ?? 0));
+  checkCancellation();
   const opened = await nativeFileSystemPromises.open(path, flags);
   try {
-    const [openedBefore, pathOpened] = await Promise.all([
-      opened.stat({bigint: true}),
-      nativeFileSystemPromises.lstat(path, {bigint: true}),
-    ]);
+    // Sequential probes ensure every issued operation settles before close,
+    // including interruption and a failing metadata probe.
+    checkCancellation();
+    const openedBefore = await opened.stat({bigint: true});
+    checkCancellation();
+    const pathOpened = await nativeFileSystemPromises.lstat(path, {bigint: true});
+    checkCancellation();
     if (!sameStableRegularFile(pathBefore, openedBefore) || !sameStableRegularFile(pathBefore, pathOpened)) {
+      if (
+        options.replacement !== 'reject' &&
+        safeRegularFileReplacement([pathBefore, pathOpened], [openedBefore], maximumBytes)
+      )
+        return {status: 'replaced'};
       throw SystemOperationError.make({message: 'Target changed while opening.'});
     }
     const bytes = new Uint8Array(maximumBytes + 1);
     let offset = 0;
     while (offset < bytes.length) {
+      checkCancellation();
       const {bytesRead} = await opened.read(bytes, offset, bytes.length - offset, null);
+      checkCancellation();
       if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > bytes.length - offset) {
         throw SystemOperationError.make({message: 'Target returned an invalid read size.'});
       }
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    const [openedAfter, pathAfter] = await Promise.all([
-      opened.stat({bigint: true}),
-      nativeFileSystemPromises.lstat(path, {bigint: true}),
-    ]);
+    checkCancellation();
+    const openedAfter = await opened.stat({bigint: true});
+    checkCancellation();
+    const pathAfter = await nativeFileSystemPromises.lstat(path, {bigint: true});
+    checkCancellation();
     if (
       !sameStableRegularFile(pathBefore, openedAfter) ||
       !sameStableRegularFile(pathBefore, pathAfter) ||
       offset > maximumBytes ||
       BigInt(offset) !== pathBefore.size
     ) {
+      if (
+        offset <= maximumBytes &&
+        options.replacement !== 'reject' &&
+        safeRegularFileReplacement([pathBefore, pathOpened, pathAfter], [openedBefore, openedAfter], maximumBytes)
+      )
+        return {status: 'replaced'};
       throw SystemOperationError.make({message: 'Target changed during bounded read.'});
     }
-    return bytes.slice(0, offset);
+    return {status: 'read', bytes: bytes.slice(0, offset)};
   } finally {
     await opened.close();
+    checkCancellation();
   }
+}
+
+function boundedRegularFile(info: RuntimeBigIntStats, maximumBytes: number): boolean {
+  return stableRegularFile(info) && info.size >= 0n && info.size <= BigInt(maximumBytes);
+}
+
+function safeRegularFileReplacement(
+  paths: readonly RuntimeBigIntStats[],
+  descriptors: readonly RuntimeBigIntStats[],
+  maximumBytes: number,
+): boolean {
+  const observations = [...paths, ...descriptors];
+  const first = observations[0];
+  return (
+    first !== undefined &&
+    EffectArray.every(observations, info => boundedRegularFile(info, maximumBytes) && info.dev === first.dev) &&
+    EffectArray.every(descriptors, info => info.ino === descriptors[0]?.ino) &&
+    EffectArray.some(observations, info => info.ino !== first.ino)
+  );
 }
 
 /**

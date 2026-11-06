@@ -1,8 +1,14 @@
 import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as EffectString from 'effect/String';
 import {SecureRandom} from 'effect/crypto';
-import {CommandCleanupUnconfirmed, CommandExecutor, CommandTimedOut} from '@threadnote/platform/command';
 import {
+  CommandCleanupUnconfirmed,
+  CommandExecutor,
+  CommandTimedOut,
+  type CommandOptions,
+} from '@threadnote/platform/command';
+import {
+  CallerReadCancellation,
   makeReadDeadline,
   isReadCleanupUnconfirmed,
   hasReadCleanupUnconfirmed,
@@ -27,7 +33,7 @@ import {
   RECALL_READY_READ_OUTPUT_BYTES,
   recallReadyReadBinding,
 } from './ready_read_worker.js';
-import {RECALL_READY_READ_WORKER_ARGUMENT} from '../worker_protocol.js';
+import {RECALL_READY_READ_WORKER_ARGUMENT, RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT} from '../worker_protocol.js';
 
 export const RECALL_READY_READ_MILLISECONDS = 2_000;
 /** Actual CLI/MCP composition opts in; injected services and explicit writers keep direct semantics. */
@@ -61,7 +67,7 @@ export function readyReadWorkerInvocation(executable: string, entrypoint: string
 }
 
 export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBoundary')(function* (
-  deadline: ReadDeadline,
+  deadline: ReadDeadline | undefined,
 ) {
   const command = yield* CommandExecutor;
   const system = yield* SystemInfo;
@@ -78,36 +84,38 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
         ['status', 'generation', 'vector-readiness', 'vector-state', 'vector-scores'].includes(request.operation))
     )
       return Effect.void;
-    return withinReadDeadline(
-      deadline,
-      Effect.gen(function* () {
-        // A worker interrupted after durable enqueue may not have returned its wake bit.
-        // Read only this request's bounded demand receipt; never enqueue a new revision here.
-        if (requested === undefined) {
-          const variants =
-            request.operation === 'memory-connections'
-              ? [false, true]
-              : ['includeInactive' in request.options ? request.options.includeInactive : false];
-          const demands = yield* Effect.forEach(variants, includeInactive =>
-            readRecallLexicalDemand({
-              ...request.config,
-              includeInactive,
-            }),
-          );
-          if (!EffectArray.some(demands, demand => demand?.revision !== undefined)) return;
-        }
-        yield* wake(request.config.agentContextHome);
-      }),
-    ).pipe(
+    const work = Effect.gen(function* () {
+      // A worker interrupted after durable enqueue may not have returned its wake bit.
+      // Read only this request's bounded demand receipt; never enqueue a new revision here.
+      if (requested === undefined) {
+        const variants =
+          request.operation === 'memory-connections'
+            ? [false, true]
+            : ['includeInactive' in request.options ? request.options.includeInactive : false];
+        const demands = yield* Effect.forEach(variants, includeInactive =>
+          readRecallLexicalDemand({
+            ...request.config,
+            includeInactive,
+          }),
+        );
+        if (!EffectArray.some(demands, demand => demand?.revision !== undefined)) return;
+      }
+      yield* wake(request.config.agentContextHome);
+    });
+    return (deadline === undefined ? work : withinReadDeadline(deadline, work)).pipe(
       Effect.timeout('50 millis'),
       Effect.catchCause(cause => (Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.void)),
       Effect.provide(maintenanceContext),
+      Effect.provideService(CallerReadCancellation, false),
     );
   };
   return RecallReadyReadBoundary.of({
     read: request =>
       Effect.gen(function* () {
-        if ((yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS)) <= 0)
+        if (
+          deadline !== undefined &&
+          (yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS)) <= 0
+        )
           return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
         const input = yield* Effect.try({
           try: () => new TextEncoder().encode(JSON.stringify(request)),
@@ -131,27 +139,32 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
           );
           if (checked.operation !== 'sections')
             return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
-          const allowance = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
-          if (allowance <= 0) return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
+          const allowance =
+            deadline === undefined
+              ? undefined
+              : yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
+          if (allowance !== undefined && allowance <= 0)
+            return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
           let maintenanceRequested = false;
-          const absent = yield* requestMissingRecallReadyDirectory(
-            checked.config,
-            checked.options.includeInactive,
-          ).pipe(
+          const checkMissing = requestMissingRecallReadyDirectory(checked.config, checked.options.includeInactive).pipe(
             Effect.provideService(RecallEmbeddingWakePort, () =>
               Effect.sync(() => {
                 maintenanceRequested = true;
               }),
             ),
             Effect.provide(maintenanceContext),
-            Effect.timeoutOrElse({
-              duration: allowance,
-              orElse: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'})),
-            }),
           );
+          const absent = yield* allowance === undefined
+            ? checkMissing
+            : checkMissing.pipe(
+                Effect.timeoutOrElse({
+                  duration: allowance,
+                  orElse: () => Effect.fail(RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'})),
+                }),
+              );
           if (absent) {
             yield* wakeQueuedMaintenance(request, maintenanceRequested);
-            if ((yield* readDeadlineRemaining(deadline)) <= 0)
+            if (deadline !== undefined && (yield* readDeadlineRemaining(deadline)) <= 0)
               return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
             return {
               protocol: 1 as const,
@@ -163,18 +176,26 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
             };
           }
         }
-        const timeoutMs = yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
-        if (timeoutMs <= 0) return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
+        const timeoutMs =
+          deadline === undefined ? 0 : yield* readDeadlineRemaining(deadline, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
+        if (deadline !== undefined && timeoutMs <= 0)
+          return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
         const result = yield* command
-          .execute(invocation.executable, invocation.arguments, {
-            env: {...system.environment(), THREADNOTE_HOME: request.config.agentContextHome},
-            input,
-            maxOutputBytes: RECALL_READY_READ_OUTPUT_BYTES,
-            timeoutMs,
-            forceKillAfterMilliseconds: 0,
-            sensitiveOutput: true,
-            verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
-          })
+          .execute(
+            invocation.executable,
+            deadline === undefined
+              ? [...invocation.arguments, RECALL_READY_READ_CALLER_CANCELLATION_ARGUMENT]
+              : invocation.arguments,
+            {
+              env: {...system.environment(), THREADNOTE_HOME: request.config.agentContextHome},
+              input,
+              maxOutputBytes: RECALL_READY_READ_OUTPUT_BYTES,
+              timeoutMs,
+              forceKillAfterMilliseconds: 0,
+              sensitiveOutput: true,
+              verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+            },
+          )
           .pipe(
             Effect.mapError(error =>
               RecallReadyReadBoundaryError.make({
@@ -193,7 +214,7 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
         if (response.binding !== recallReadyReadBinding(request) || response.operation !== request.operation)
           return yield* RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'});
         yield* wakeQueuedMaintenance(request, response.maintenanceRequested);
-        if ((yield* readDeadlineRemaining(deadline)) <= 0)
+        if (deadline !== undefined && (yield* readDeadlineRemaining(deadline)) <= 0)
           return yield* RecallReadyReadBoundaryError.make({reason: 'budget-exhausted'});
         return response;
       }).pipe(
@@ -208,24 +229,59 @@ export const makeReadyRecallReadBoundary = Effect.fn('recall.makeReadyReadBounda
   });
 });
 
-/** One inclusive request deadline, reused by exact lookup, ranking, and every fallback read. */
+/** Owned reads use an explicit bounded policy or foreground caller cancellation. */
 export function withReadyRecallReadBoundary<A, E, R>(
   effect: Effect.Effect<A, E, R>,
-  options: {readonly boundProgram?: boolean} = {},
+  options: {readonly boundProgram?: boolean; readonly callerCancellation?: boolean} = {},
 ) {
-  return Effect.gen(function* () {
+  const program = Effect.gen(function* () {
     if (Option.isSome(yield* Effect.serviceOption(RecallReadyReadBoundary))) return yield* effect;
     if (Option.isNone(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))) return yield* effect;
-    const deadline = yield* makeReadDeadline(RECALL_READY_READ_MILLISECONDS);
+    const deadline = (yield* CallerReadCancellation)
+      ? undefined
+      : yield* makeReadDeadline(RECALL_READY_READ_MILLISECONDS);
     const boundary = yield* makeReadyRecallReadBoundary(deadline);
-    return yield* (options.boundProgram ? withinReadDeadline(deadline, effect) : effect).pipe(
+    return yield* (options.boundProgram && deadline !== undefined ? withinReadDeadline(deadline, effect) : effect).pipe(
       Effect.provideService(RecallReadyReadBoundary, boundary),
-      Effect.provideService(ReadyRecallReadDeadline, deadline),
+      effect =>
+        deadline === undefined ? effect : effect.pipe(Effect.provideService(ReadyRecallReadDeadline, deadline)),
     );
   });
+  if (!options.callerCancellation) return program;
+  return Effect.gen(function* () {
+    const external = yield* Effect.serviceOption(ReadyRecallReadDeadline);
+    const command = yield* CommandExecutor;
+    // These metadata-only Git children belong to this foreground query. Preserve
+    // other commands (including background launches) and every executor method.
+    const queryOptions = (executable: string, args: readonly string[], settings?: CommandOptions) => {
+      const name = EffectString.split('/')(EffectString.replaceAll('\\', '/')(executable)).at(-1);
+      const offset = args[0] === '-C' ? 2 : 0;
+      const verb = args[offset];
+      const metadataQuery =
+        verb === 'rev-parse' ||
+        (verb === 'remote' && (args.length === offset + 1 || args[offset + 1] === 'get-url')) ||
+        (verb === 'branch' && args[offset + 1] === '--show-current');
+      return (name === 'git' || name === 'git.exe') && metadataQuery ? {...settings, timeoutMs: 0} : settings;
+    };
+    const executeBytes = command.executeBytes;
+    const queryCommands = CommandExecutor.of({
+      ...command,
+      execute: (executable, args, settings) =>
+        command.execute(executable, args, queryOptions(executable, args, settings)),
+      ...(executeBytes === undefined
+        ? {}
+        : {
+            executeBytes: (executable: string, args: readonly string[], settings?: CommandOptions) =>
+              executeBytes(executable, args, queryOptions(executable, args, settings)),
+          }),
+    });
+    return yield* (Option.isSome(external) ? withinReadDeadline(external.value, program) : program).pipe(
+      Effect.provideService(CommandExecutor, queryCommands),
+    );
+  }).pipe(Effect.provideService(CallerReadCancellation, true));
 }
 
-/** Optional inference/refinement cannot consume the reserve needed to return completed evidence. */
+/** Bounded consumers reserve closing proof; foreground recall waits for its caller. */
 export function optionalReadyRecallRead<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   options: {readonly closingReadMilliseconds?: number} = {},
@@ -239,7 +295,7 @@ export function optionalReadyRecallRead<A, E, R>(
           onFailure: error => (isReadCleanupUnconfirmed(error) ? Effect.fail(error) : Effect.succeed(Option.none<B>())),
         }),
       );
-    if (Option.isNone(deadline)) return yield* optional(effect);
+    if ((yield* CallerReadCancellation) || Option.isNone(deadline)) return yield* optional(effect);
     const available = yield* readDeadlineRemaining(deadline.value, CLEANUP_AND_DECODE_RESERVE_MILLISECONDS);
     // Reserve the observed model-free read cost before admitting optional refinement.
     // This consumes the existing compute allowance; neither deadline nor cleanup reserve changes.

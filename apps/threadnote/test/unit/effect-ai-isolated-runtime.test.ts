@@ -1,3 +1,4 @@
+import {CallerReadCancellation, hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -50,6 +51,203 @@ const backgroundAuthority = {
 };
 
 describe('isolated local model runtime', () => {
+  effectIt.effect('bounded transport timeout remains effective after response arrival while write is unsettled', () => {
+    const written = Promise.withResolvers<void>();
+    const writing = Promise.withResolvers<void>();
+    const worker = new FakeWorkerProcess(
+      request => {
+        worker.respond(request, {backend: 'pending-write', buildType: 'prebuilt', cpuMathCores: 1});
+        written.resolve();
+      },
+      () => writing.promise,
+    );
+    return Effect.acquireUseRelease(
+      Effect.sync(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})),
+      () =>
+        Effect.gen(function* () {
+          const runtime = yield* LocalModelRuntime;
+          const reader = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+          yield* Effect.promise(() => written.promise);
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(9));
+          expect(reader.pollUnsafe()).toBeUndefined();
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1));
+          expect(Exit.isFailure(yield* Fiber.await(reader))).toBe(true);
+          expect(worker.killed).toBe(true);
+          writing.resolve();
+        }).pipe(provideTestLayer(runtimeLayer(() => worker, 10))),
+      () =>
+        Effect.sync(() => {
+          writing.resolve();
+          vi.useRealTimers();
+        }),
+    );
+  });
+
+  effectIt.effect('cancelling a caller waiting for the permit does not cancel the active owner', () => {
+    const received = Promise.withResolvers<FakeRequest>();
+    let calls = 0;
+    const worker = new FakeWorkerProcess(request => {
+      calls++;
+      if (calls === 1) received.resolve(request);
+      else worker.respond(request, {backend: 'next', buildType: 'prebuilt', cpuMathCores: 1});
+    });
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const active = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+      const request = yield* Effect.promise(() => received.promise);
+      const waiting = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(waiting);
+      expect(Exit.isFailure(yield* Fiber.await(waiting))).toBe(true);
+      expect(active.pollUnsafe()).toBeUndefined();
+      expect(worker.killed).toBe(false);
+      expect(worker.writes).toHaveLength(1);
+      worker.respond(request, {backend: 'active', buildType: 'prebuilt', cpuMathCores: 1});
+      expect((yield* Fiber.join(active)).backend).toBe('active');
+      expect((yield* runtime.diagnostics).backend).toBe('next');
+    }).pipe(
+      provideTestLayer(runtimeLayer(() => worker, 1000, 1024, 60_000)),
+      Effect.provideService(CallerReadCancellation, true),
+    );
+  });
+
+  effectIt.effect('caller mode has no transport stopwatch even after former command and model limits', () => {
+    const received = Promise.withResolvers<FakeRequest>();
+    const worker = new FakeWorkerProcess(request => received.resolve(request));
+    return Effect.acquireUseRelease(
+      Effect.sync(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})),
+      () =>
+        Effect.gen(function* () {
+          const runtime = yield* LocalModelRuntime;
+          const reader = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+          const request = yield* Effect.promise(() => received.promise);
+          yield* Effect.promise(() => vi.advanceTimersByTimeAsync(600_001));
+          expect(reader.pollUnsafe()).toBeUndefined();
+          expect(worker.killed).toBe(false);
+          worker.respond(request, {backend: 'fake', buildType: 'prebuilt', cpuMathCores: 1});
+          expect((yield* Fiber.join(reader)).backend).toBe('fake');
+        }).pipe(provideTestLayer(runtimeLayer(() => worker)), Effect.provideService(CallerReadCancellation, true)),
+      () => Effect.sync(() => vi.useRealTimers()),
+    );
+  });
+
+  effectIt.effect(
+    'caller cancellation retires an asynchronous acquisition before any write and permits the next request',
+    () => {
+      const spawning = Promise.withResolvers<void>();
+      const acquired = Promise.withResolvers<LocalModelWorkerProcess>();
+      const late = new FakeWorkerProcess(() => {});
+      let starts = 0;
+      const spawn = () => {
+        starts++;
+        if (starts === 1) {
+          spawning.resolve();
+          return acquired.promise;
+        }
+        const worker = new FakeWorkerProcess(request =>
+          worker.respond(request, {backend: 'next', buildType: 'prebuilt', cpuMathCores: 1}),
+        );
+        return worker;
+      };
+      return Effect.gen(function* () {
+        const runtime = yield* LocalModelRuntime;
+        const reader = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+        yield* Effect.promise(() => spawning.promise);
+        const cancellation = yield* Fiber.interrupt(reader).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        expect(cancellation.pollUnsafe()).toBeUndefined();
+        acquired.resolve(late);
+        yield* Fiber.join(cancellation);
+        expect(Exit.isFailure(yield* Fiber.await(reader))).toBe(true);
+        expect(late.writes).toEqual([]);
+        expect(late.killed).toBe(true);
+        expect(late.inputClosed).toBe(true);
+        expect((yield* runtime.diagnostics).backend).toBe('next');
+        expect(starts).toBe(2);
+      }).pipe(provideTestLayer(runtimeLayer(spawn)), Effect.provideService(CallerReadCancellation, true));
+    },
+  );
+
+  effectIt.effect(
+    'unsettled caller acquisition reports cleanup-unconfirmed and retires a subsequently returned process',
+    () => {
+      const spawning = Promise.withResolvers<void>();
+      const acquired = Promise.withResolvers<LocalModelWorkerProcess>();
+      const late = new FakeWorkerProcess(() => {});
+      return Effect.acquireUseRelease(
+        Effect.sync(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})),
+        () =>
+          Effect.gen(function* () {
+            const runtime = yield* LocalModelRuntime;
+            const reader = yield* runtime.diagnostics.pipe(Effect.forkScoped);
+            yield* Effect.promise(() => spawning.promise);
+            const cancellation = yield* Fiber.interrupt(reader).pipe(Effect.forkScoped);
+            yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1000));
+            yield* Fiber.join(cancellation);
+            const exit = yield* Fiber.await(reader);
+            expect(Exit.isFailure(exit) && hasReadCleanupUnconfirmed(exit.cause)).toBe(true);
+            acquired.resolve(late);
+            yield* Effect.promise(() => late.exited);
+            expect(late.killed).toBe(true);
+            expect(late.writes).toEqual([]);
+          }).pipe(
+            provideTestLayer(
+              runtimeLayer(() => {
+                spawning.resolve();
+                return acquired.promise;
+              }),
+            ),
+            Effect.provideService(CallerReadCancellation, true),
+          ),
+        () => Effect.sync(() => vi.useRealTimers()),
+      );
+    },
+  );
+
+  for (const confirmsWrite of [true, false])
+    effectIt.effect(
+      `caller cancellation ${confirmsWrite ? 'awaits' : 'reports unconfirmed'} pending write even after response arrival`,
+      () => {
+        const written = Promise.withResolvers<void>();
+        const writing = Promise.withResolvers<void>();
+        const worker = new FakeWorkerProcess(
+          request => {
+            worker.respond(request, {backend: 'late', buildType: 'prebuilt', cpuMathCores: 1});
+            written.resolve();
+          },
+          () => writing.promise,
+        );
+        return Effect.acquireUseRelease(
+          Effect.sync(() => vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']})),
+          () =>
+            Effect.gen(function* () {
+              const runtime = yield* LocalModelRuntime;
+              let returned = false;
+              const reader = yield* runtime.diagnostics.pipe(
+                Effect.tap(() => Effect.sync(() => (returned = true))),
+                Effect.forkScoped,
+              );
+              yield* Effect.promise(() => written.promise);
+              yield* Effect.promise(() => vi.advanceTimersByTimeAsync(600_001));
+              expect(reader.pollUnsafe()).toBeUndefined();
+              const cancellation = yield* Fiber.interrupt(reader).pipe(Effect.forkScoped);
+              yield* Effect.yieldNow;
+              if (confirmsWrite) writing.resolve();
+              else yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1000));
+              yield* Fiber.join(cancellation);
+              const exit = yield* Fiber.await(reader);
+              expect(Exit.isFailure(exit)).toBe(true);
+              if (Exit.isFailure(exit)) expect(hasReadCleanupUnconfirmed(exit.cause)).toBe(!confirmsWrite);
+              expect(returned).toBe(false);
+              expect(worker.killed).toBe(true);
+              expect(worker.inputClosed).toBe(true);
+              writing.resolve();
+            }).pipe(provideTestLayer(runtimeLayer(() => worker)), Effect.provideService(CallerReadCancellation, true)),
+          () => Effect.sync(() => vi.useRealTimers()),
+        );
+      },
+    );
+
   effectIt.effect('enforces the production background deadline when a caller asks for a longer one', () => {
     const requested = Promise.withResolvers<void>();
     const worker = new FakeWorkerProcess(() => requested.resolve());

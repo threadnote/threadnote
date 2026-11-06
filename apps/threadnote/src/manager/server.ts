@@ -193,11 +193,6 @@ import {isRawMemoryDocument} from '../memory/parse.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
-interface ManagerDirectoryEntry {
-  readonly name: string;
-  readonly isDirectory: () => boolean;
-  readonly isFile: () => boolean;
-}
 function managerOperationError(cause: unknown): ManagerOperationError {
   return Schema.is(ManagerOperationError)(cause)
     ? cause
@@ -240,21 +235,16 @@ function readFile(
   });
 }
 
-function readdir(
-  target: string,
-  _options: {readonly withFileTypes: true},
-): Effect.Effect<ManagerDirectoryEntry[], unknown, FileSystem.FileSystem | Path.Path> {
-  return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const names = yield* fs.readDirectory(target);
-    return yield* Effect.forEach(names, name =>
-      lstat(path.join(target, name)).pipe(
-        Effect.map(info => ({name, isDirectory: info.isDirectory, isFile: info.isFile})),
-      ),
-    );
-  });
-}
+const readdir = Effect.fn('manager.readdir')(function* (target: string, includeName?: (name: string) => boolean) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const names = yield* fs.readDirectory(target);
+  return yield* Effect.forEach(includeName ? EffectArray.filter(names, includeName) : names, name =>
+    lstat(path.join(target, name)).pipe(
+      Effect.map(info => ({name, isDirectory: info.isDirectory, isFile: info.isFile})),
+    ),
+  );
+});
 
 const rm = Effect.fn('manager.rm')(function* (
   target: string,
@@ -1125,7 +1115,10 @@ const readTree: (
         uri,
       };
     }
-    const entries = yield* readdir(path, {withFileTypes: true});
+    const entries = yield* readdir(
+      path,
+      options.externalContentOnly ? name => externalResourceTree.entryNameVisible(relativePath, name) : undefined,
+    );
     const children = yield* Effect.forEach(
       EffectArray.filter(
         EffectArray.filter(
@@ -1392,7 +1385,7 @@ const fileUrisUnderFolder: (
 ) => Effect.Effect<readonly string[], unknown, FileSystem.FileSystem | Path.Path> = Effect.fn(
   'manager.fileUrisUnderFolder',
 )(function* (config: RuntimeConfig, folderPath: string) {
-  const entries = yield* readdir(folderPath, {withFileTypes: true});
+  const entries = yield* readdir(folderPath);
   const uris: string[] = [];
   for (const entry of entries.sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)))) {
     const path = yield* pathJoin(folderPath, entry.name);

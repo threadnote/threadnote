@@ -7,7 +7,7 @@ import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
-import {Clock, DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
 import {
   activePersonalMemoryUrisFromText,
   existingReferencedUris,
@@ -1236,13 +1236,7 @@ function runRecallTool(
             progressTiming.heartbeatMilliseconds,
           );
         };
-        const baselineStarted = yield* Clock.monotonicTimeNanos;
         let recallSections = yield* prepareSections();
-        // Consolidation removed a startup from the measured baseline. Keep a second
-        // observed window for closing variance, within the same original deadline.
-        // Workspace resolution already consumed that deadline but is not repeated by closing.
-        const closingReadMilliseconds =
-          2 * Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
         const baselineSections = recallSections;
         const baselineNoticeCount = sections.length;
         // Rejected admission performs no optional work, so its completed lexical proof can stand.
@@ -1387,7 +1381,6 @@ function runRecallTool(
                   }
                   return recallSections;
                 }),
-                {closingReadMilliseconds},
               );
               if (!refinementStarted && !navigationOnly)
                 yield* recordUnavailableProductionPhase('recall.semantic-retrieval');
@@ -1481,7 +1474,7 @@ function runRecallTool(
             : {}),
         };
       }),
-      {boundProgram: true},
+      {boundProgram: true, callerCancellation: true},
     );
   });
 }

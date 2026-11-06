@@ -12,7 +12,7 @@ import {Array as EffectArray} from 'effect';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
-import {Clock, Console, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Console, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   expandWeakRecallQueryEffect,
   limitRecallRewritesForConfidence,
@@ -512,7 +512,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
 
   const eligibility = scope.eligibility;
 
-  const baselineStarted = yield* Clock.monotonicTimeNanos;
   const exactRead =
     dryRun || navigationOnly
       ? undefined
@@ -601,10 +600,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
     );
   let recallSections = yield* prepareSections();
-  // Baseline now has one owned startup. Reserve two observed windows for a later
-  // closing startup and its final proof; this stays inside the original compute allowance.
-  const closingReadMilliseconds =
-    2 * Math.ceil(Number((yield* Clock.monotonicTimeNanos) - baselineStarted) / 1_000_000);
   // Finish and retain the useful lexical baseline before querying optional models.
   const baselineSections = recallSections;
   // Rejected admission performs no optional work, so its completed lexical proof can stand.
@@ -745,7 +740,6 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
       }
       return recallSections;
     }),
-    {closingReadMilliseconds},
   );
   if (refinementStarted) {
     const selectedSections = Option.getOrElse(refined, () => baselineSections);
@@ -797,7 +791,7 @@ const runRecallProgram = Effect.fn('runRecall')(function* (config: RuntimeConfig
   } satisfies RecallResult;
 });
 
-/** All ordinary lexical passes share the same owned read deadline. */
+/** Foreground recall waits for its caller while every owned read proves currentness. */
 export const runRecall = (config: RuntimeConfig, options: RecallOptions) =>
   Effect.gen(function* () {
     if (options.dryRun !== true) {
@@ -809,7 +803,10 @@ export const runRecall = (config: RuntimeConfig, options: RecallOptions) =>
             : 'Automatic synchronization enqueue was not confirmed; recall uses ready local data.',
         );
     }
-    return yield* withReadyRecallReadBoundary(runRecallProgram(config, options), {boundProgram: true});
+    return yield* withReadyRecallReadBoundary(runRecallProgram(config, options), {
+      boundProgram: true,
+      callerCancellation: true,
+    });
   });
 
 export function stripAdvancedSearchFlags(args: readonly string[]): readonly string[] {
