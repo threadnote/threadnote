@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
@@ -140,6 +140,68 @@ describe('native workflow graph adapter', () => {
       expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 2});
       expect(optionsSeen).toMatchObject({cwd: f.repo, threadnoteHome: f.home, ensureVectors: false});
     }).pipe(run),
+  );
+
+  effectIt.effect('awaits owned preparation beyond the former cutoff before checking current evidence', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture().pipe(TestClock.withLive);
+      const stale = graphStatus(f.repo, {stale: true});
+      const current = graphStatus(f.repo);
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let optionsSeen: unknown;
+      const fixture = yield* makeReady(f, [stale, current], options =>
+        Effect.gen(function* () {
+          optionsSeen = options;
+          yield* Deferred.succeed(started, undefined);
+          yield* Deferred.await(release);
+          return completedIndex(stale);
+        }),
+      );
+      const preparation = yield* fixture.adapter.ready(f.repo).pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(175_001);
+      expect(preparation.pollUnsafe()).toBeUndefined();
+      expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 1});
+      expect(optionsSeen).toMatchObject({cwd: f.repo, threadnoteHome: f.home, ensureVectors: false});
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(preparation)).toMatchObject({state: 'ready', snapshotId: 'snapshot-fixture'});
+      expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 2});
+    }).pipe(provideNative),
+  );
+
+  effectIt.effect('caller interruption finalizes held preparation without a late ready result', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture().pipe(TestClock.withLive);
+      const stale = graphStatus(f.repo, {stale: true});
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let finalized = 0;
+      let readyResults = 0;
+      const fixture = yield* makeReady(f, [stale, graphStatus(f.repo)], () =>
+        Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.as(completedIndex(stale)),
+          Effect.ensuring(Effect.sync(() => finalized++)),
+        ),
+      );
+      const preparation = yield* fixture.adapter.ready(f.repo).pipe(
+        Effect.tap(() => Effect.sync(() => readyResults++)),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(175_001);
+      yield* Fiber.interrupt(preparation);
+      const exit = yield* Fiber.await(preparation);
+      expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+      expect(finalized).toBe(1);
+      expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 1});
+      yield* Deferred.succeed(release, undefined);
+      yield* TestClock.adjust(175_001);
+      expect(readyResults).toBe(0);
+      expect(finalized).toBe(1);
+      expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 1});
+    }).pipe(provideNative),
   );
 
   effectIt.effect('fails closed after one preparation when the recheck has stale or mismatched source identity', () =>
