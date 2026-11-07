@@ -474,7 +474,147 @@ function ordinaryContinuation(baseline = entry('a'), head = entry('b')) {
   };
 }
 
+function repeatedOrdinaryContinuation(f: ReturnType<typeof ordinaryContinuation>) {
+  const prior = f.snapshot;
+  const snapshot: NativeCycleSnapshot = {
+    ...prior,
+    snapshotId: 'continued-again',
+    head: object('7'),
+    tree: object('8'),
+    declaredBaseHead: object('9'),
+    scopeBase: object('6'),
+    acceptedHead: object('7'),
+    previous: prior.snapshotId,
+    previousTree: prior.tree,
+  };
+  const receipt: NativeCycleOrdinaryMergeReceipt = {
+    ...f.receipt,
+    priorSnapshotId: prior.snapshotId,
+    priorHead: prior.head,
+    priorTree: prior.tree,
+    priorDeclaredBaseHead: prior.declaredBaseHead,
+    priorDeclaredBaseTree: prior.scopeBase,
+    currentBaseHead: snapshot.declaredBaseHead,
+    currentBaseTree: snapshot.scopeBase,
+    currentHead: snapshot.head,
+    mergeBases: {bases: prior.declaredBaseHead, prior: prior.head, current: snapshot.declaredBaseHead},
+    upstreamEvidence: EffectArray.map(f.receipt.upstreamEvidence, item => ({...item, oldBase: item.currentBase})),
+  };
+  const seal = (value = receipt): NativeCycleSnapshot => ({
+    ...snapshot,
+    ordinaryMergeQualificationV1: {...value, receiptDigest: nativeCycleMergeReceiptDigest(snapshot, value)},
+  });
+  const runtime: NativeCycleRuntime = {
+    ...f.runtime,
+    snapshots: [
+      ...f.runtime.snapshots,
+      {
+        snapshot: seal(),
+        incoming: EffectArray.map(f.runtime.snapshots[2].incoming, item => ({
+          ...item,
+          tree: snapshot.scopeBase,
+          commit: snapshot.declaredBaseHead,
+        })),
+      },
+    ],
+    reviews: [
+      ...f.runtime.reviews,
+      {
+        snapshotId: prior.snapshotId,
+        report: {...f.priorReview, snapshotId: prior.snapshotId, snapshotTree: prior.tree},
+      },
+    ],
+  };
+  return {
+    prior,
+    snapshot: seal(),
+    receipt,
+    seal,
+    runtime,
+    validate: (value = seal(), predecessor = prior, plans = [f.plan]) =>
+      validateNativeCycleMergeReceipt(value, predecessor, plans, object('4')),
+  };
+}
+
 describe('same-label rewritten-base qualification contract', () => {
+  it.each([
+    {kind: 'existing', baseline: entry('a'), head: entry('b')},
+    {kind: 'added', baseline: entry('0', '000000'), head: entry('b')},
+    {kind: 'deleted', baseline: entry('a'), head: entry('0', '000000')},
+  ])('continues validated ordinary $kind inheritance through repeated advances', ({baseline, head}) => {
+    const f = ordinaryContinuation(baseline, head);
+    expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(f.runtime)))).not.toThrow();
+    const repeated = repeatedOrdinaryContinuation(f);
+    expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(repeated.runtime)))).not.toThrow();
+    expect(() => repeated.validate()).not.toThrow();
+  });
+
+  it('refuses malformed or foreign immediate ordinary evidence without falling back to older inheritance', () => {
+    const f = ordinaryContinuation();
+    const repeated = repeatedOrdinaryContinuation(f);
+    const prior = repeated.prior;
+    const proof = f.receipt;
+    const runtimeWithPrior = (snapshot: NativeCycleSnapshot) => ({
+      ...repeated.runtime,
+      snapshots: EffectArray.map(repeated.runtime.snapshots, item =>
+        item.snapshot.snapshotId === prior.snapshotId ? {...item, snapshot} : item,
+      ),
+    });
+    for (const patch of [
+      {upstreamEvidence: []},
+      {
+        upstreamEvidence: [...proof.upstreamEvidence, ...proof.upstreamEvidence],
+        inheritedUpstreamOnlyPaths: [...proof.inheritedUpstreamOnlyPaths, ...proof.inheritedUpstreamOnlyPaths],
+      },
+      {upstreamEvidence: [], inheritedUpstreamOnlyPaths: []},
+      {baselineHead: object('f')},
+      {currentHead: object('f')},
+      {currentBaseHead: object('f')},
+      {currentBaseTree: object('5')},
+      {planDocumentHash: hash('f')},
+      {
+        upstreamEvidence: EffectArray.map(proof.upstreamEvidence, item => ({
+          ...item,
+          currentBase: entry('d'),
+          head: entry('d'),
+        })),
+      },
+      {
+        upstreamEvidence: EffectArray.map(proof.upstreamEvidence, item => ({
+          ...item,
+          currentBase: entry('b', '100755'),
+          head: entry('b', '100755'),
+        })),
+      },
+    ]) {
+      const changed = {...proof, ...patch};
+      const predecessor = {
+        ...prior,
+        ordinaryMergeQualificationV1: {...changed, receiptDigest: nativeCycleMergeReceiptDigest(prior, changed)},
+      };
+      expect(() => repeated.validate(repeated.snapshot, predecessor)).toThrow();
+      expect(() => decodeNativeCycleRuntime(runtimeWithPrior(predecessor))).toThrow();
+    }
+    for (const predecessor of [
+      {...prior, ordinaryMergeQualificationV1: undefined},
+      {...prior, ordinaryMergeQualificationV1: {...proof, receiptDigest: hash('f')}},
+    ])
+      expect(() => decodeNativeCycleRuntime(runtimeWithPrior(predecessor))).toThrow();
+    for (const binding of [
+      {...f.plan.source.binding, runId: 'other'},
+      {...f.plan.source.binding, generation: 'other'},
+      {...f.plan.source.binding, bindingId: hash('f')},
+    ]) {
+      const plan = {...f.plan, source: {...f.plan.source, documentHash: hash('c'), binding}};
+      expect(() =>
+        repeated.validate(repeated.seal({...repeated.receipt, planDocumentHash: plan.source.documentHash}), prior, [
+          f.plan,
+          plan,
+        ]),
+      ).toThrow();
+    }
+  });
+
   it('carries unchanged validated manifest3 inherited existing, added and deleted entries into an ordinary advance', () => {
     for (const [baseline, head] of [
       [entry('a'), entry('b')],

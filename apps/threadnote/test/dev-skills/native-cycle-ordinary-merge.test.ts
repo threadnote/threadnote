@@ -22,7 +22,7 @@ import {
 } from '../../src/workflow_automation/cycle_merge.js';
 import {describe, expect} from 'vitest';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
-import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
+import {decodeNativeCycleRuntime, nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycle-runtime';
 import {NativeCycleSnapshotSchema, type NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
 import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -1302,6 +1302,79 @@ describe('same-label rewritten-base native qualification', () => {
             report: report(ordinary, 'incremental'),
           })).status,
         ).toBe('error');
+        const carriedFindings = EffectArray.map(blockedReport.findings, finding => ({...finding, state: 'carried'}));
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: ordinary.snapshotId,
+            attemptId: 'ordinary-full',
+            report: {...report(ordinary), findings: carriedFindings},
+          })).status,
+        ).toBe('ok');
+        const beforeSecondOrdinary = yield* f.read();
+        const usedBudget = nativeCyclePhaseReviewUsage(beforeSecondOrdinary, 'one');
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'latest-upstream.ts'), 'export const latest = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Advance upstream again after an ordinary qualification']);
+        const latestBase = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.git(['checkout', 'feature/one']);
+        yield* f.git(['merge', '--no-ff', 'main', '-m', 'Repeat ordinary continuation']);
+        const latestHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.mutate('snapshot', {
+          protocolVersion: 2,
+          phaseId: 'one',
+          snapshotId: 'ordinary-after-ordinary',
+          previous: ordinary.snapshotId,
+          acceptedHead: latestHead,
+          reason: 'Continue inherited history through another ordinary advance',
+          userAuthority: 'Retain exact immediate predecessor evidence and existing owners',
+          ordinaryMergeQualificationV1: {
+            priorHead: ordinary.head,
+            currentBaseHead: latestBase,
+            currentHead: latestHead,
+            fromBaseBranch: 'main',
+            planDocumentHash: f.fields.sameLabelRebasedBaseIntegrationV1.planDocumentHash,
+            phaseOwnedPaths: proof.phaseOwnedPaths,
+          },
+        });
+        const advanced = yield* f.read();
+        const latest = advanced.snapshots.at(-1)!.snapshot;
+        expect(latest.version).toBe(2);
+        expect(latest.ordinaryMergeQualificationV1!.priorSnapshotId).toBe(ordinary.snapshotId);
+        expect(latest.ordinaryMergeQualificationV1!.inheritedUpstreamOnlyPaths).toEqual(
+          [...ordinary.ordinaryMergeQualificationV1!.inheritedUpstreamOnlyPaths, 'latest-upstream.ts'].sort(),
+        );
+        expect(advanced.snapshots.slice(0, -1)).toEqual(beforeSecondOrdinary.snapshots);
+        for (const key of ['baselines', 'reviews', 'attempts', 'reviewLimits', 'reviewExpansions', 'plans'] as const)
+          expect(advanced[key]).toEqual(beforeSecondOrdinary[key]);
+        expect(nativeCyclePhaseReviewUsage(advanced, 'one')).toEqual(usedBudget);
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: latest.snapshotId,
+            attemptId: 'second-ordinary-incremental',
+            report: {...report(latest, 'incremental'), findings: carriedFindings},
+          })).status,
+        ).toBe('error');
+        const rejectedIncremental = yield* f.read();
+        expect(rejectedIncremental.attempts.slice(0, -1)).toEqual(advanced.attempts);
+        expect(rejectedIncremental.attempts.at(-1)).toMatchObject({
+          id: 'second-ordinary-incremental',
+          snapshotId: latest.snapshotId,
+          status: 'invalid',
+        });
+        expect(rejectedIncremental.reviews).toEqual(advanced.reviews);
+        expect(nativeCyclePhaseReviewUsage(rejectedIncremental, 'one')).toEqual(usedBudget);
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: latest.snapshotId,
+            attemptId: 'second-ordinary-full',
+            report: {...report(latest), findings: carriedFindings},
+          })).status,
+        ).toBe('ok');
+        expect(nativeCyclePhaseReviewUsage(yield* f.read(), 'one')).toEqual({
+          ...usedBudget,
+          count: usedBudget.count + 1,
+        });
       }).pipe(run),
     ordinaryMergeFixtureTimeout,
   );
