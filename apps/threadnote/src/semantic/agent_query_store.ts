@@ -36,7 +36,41 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     coordinator.observe(observation, milliseconds),
   );
   const root = yield* path.fromFileUrl(new URL(worktree));
-  const query = Effect.fn('semantic.agentDiskQuery')(function* (request: SemanticAgentEndpointQuery) {
+  const attachDisk = Effect.fn('semantic.attachAgentDisk')(function* (
+    request: SemanticAgentEndpointQuery,
+    file: string,
+  ) {
+    const bytes = yield* readBounded(file, 4 * 1024 * 1024);
+    const text = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+      catch: () => LspFault.make({code: 'protocol'}),
+    });
+    const provider = semanticHostSelection[request.language].provider;
+    const seed: Observation = {
+      version: 1,
+      repository: sha256HexSync(worktree),
+      worktree,
+      project: request.project,
+      configuration: EffectString.repeat(64)('0'),
+      toolchain: EffectString.repeat(64)('0'),
+      provider: {id: provider, version: 'host-unbound', generation: 0},
+      view: {
+        kind: 'disk',
+        id: sha256HexSync(JSON.stringify([request.project, request.language, request.environment ?? null])),
+        owner: 'agent-disk:' + sha256HexSync(namespace),
+        epoch: 0,
+      },
+      uri: request.uri,
+      content: sha256HexSync(bytes),
+      documentVersion: null,
+      projectEpoch: 0,
+    };
+    return yield* coordinator.attach(seed, text, request.language, request.environment);
+  });
+  const query = Effect.fn('semantic.agentDiskQuery')(function* (
+    request: SemanticAgentEndpointQuery,
+    buffer?: {readonly observation: Observation},
+  ) {
     if (
       request.worktree !== worktree ||
       request.query !== semanticAgentQueryKey(runtimeIdentity, request.profile, request)
@@ -65,32 +99,7 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
         reason: 'Source is outside this canonical project or uses an unsupported link',
         evidence: null,
       };
-    const bytes = yield* readBounded(file, 4 * 1024 * 1024);
-    const text = yield* Effect.try({
-      try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
-      catch: () => LspFault.make({code: 'protocol'}),
-    });
-    const provider = semanticHostSelection[request.language].provider;
-    const seed: Observation = {
-      version: 1,
-      repository: sha256HexSync(worktree),
-      worktree,
-      project: request.project,
-      configuration: EffectString.repeat(64)('0'),
-      toolchain: EffectString.repeat(64)('0'),
-      provider: {id: provider, version: 'host-unbound', generation: 0},
-      view: {
-        kind: 'disk',
-        id: sha256HexSync(JSON.stringify([request.project, request.language, request.environment ?? null])),
-        owner: 'agent-disk:' + sha256HexSync(namespace),
-        epoch: 0,
-      },
-      uri: request.uri,
-      content: sha256HexSync(bytes),
-      documentVersion: null,
-      projectEpoch: 0,
-    };
-    const attached = yield* coordinator.attach(seed, text, request.language, request.environment);
+    const attached = buffer ?? (yield* attachDisk(request, file));
     const outcome = yield* coordinator.use(attached.observation, request.milliseconds, api =>
       request.operation === 'diagnostics'
         ? Effect.gen(function* () {
@@ -149,8 +158,8 @@ export const makeSemanticAgentDiskQueries = Effect.fn('semantic.agentDiskQueries
     return yield* store.page(request.query, snapshot.id, budget, request.milliseconds);
   });
   return {
-    query: (request: SemanticAgentEndpointQuery) =>
-      query(request).pipe(
+    query: (request: SemanticAgentEndpointQuery, buffer?: {readonly observation: Observation}) =>
+      query(request, buffer).pipe(
         Effect.timeoutOption(request.milliseconds),
         Effect.map(result =>
           result._tag === 'Some'

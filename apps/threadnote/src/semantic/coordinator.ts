@@ -14,7 +14,12 @@ export {
   type PythonHostCandidate,
   type JavaHostCandidate,
 } from './host_catalog.js';
-import {SemanticAgentEndpointQuery} from './agent_query_protocol.js';
+import {
+  SemanticAgentEndpointQuery,
+  SemanticAgentEndpointView,
+  SemanticAgentBufferHandle,
+  semanticAgentBufferLimits,
+} from './agent_query_protocol.js';
 import {makeSemanticAgentDiskQueries} from './agent_query_store.js';
 import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectArray from 'effect/Array';
@@ -34,6 +39,7 @@ import {
   FileUri,
   Identifier,
   Observation,
+  observationKey,
   Position,
   type QueryOutcome,
 } from '@threadnote/semantic/contracts';
@@ -862,9 +868,11 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   };
 });
 const Request = Schema.Union([
+  Schema.Struct({operation: Schema.Literal('agent-view'), request: SemanticAgentEndpointView}),
   Schema.Struct({operation: Schema.Literal('agent-query'), request: SemanticAgentEndpointQuery}),
   Schema.Struct({
     operation: Schema.Literal('agent-observe'),
+    handle: Schema.optionalKey(SemanticAgentBufferHandle),
     observation: Observation,
     milliseconds: Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(45000)),
   }),
@@ -934,8 +942,206 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       token: string;
       lastUsed: number;
       gate: Semaphore.Semaphore;
+      public?: {
+        id: string;
+        observation: Observation;
+        language: SemanticLanguage;
+        environment?: string;
+        profile: string;
+        bytes: number;
+        expiresAt: number;
+      };
     }
   >();
+  const lifecycle = Semaphore.makeUnsafe(1);
+  const publicGrant = (handle: typeof SemanticAgentBufferHandle.Type) => {
+    const entry = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...grants], ([, grant]) => grant.public?.id === handle.id),
+    );
+    if (!entry) return undefined;
+    if (entry[1].token !== handle.capability) throw SemanticSessionFault.make({reason: 'conflict'});
+    return entry;
+  };
+  const checkPublic = Effect.fn('semantic.checkPublicView')(function* (
+    handle: typeof SemanticAgentBufferHandle.Type,
+    profile?: string,
+  ) {
+    const found = yield* Effect.try({
+      try: () => publicGrant(handle),
+      catch: () => SemanticSessionFault.make({reason: 'conflict'}),
+    });
+    if (!found || !found[1].public) return yield* SemanticSessionFault.make({reason: 'stale'});
+    const now = yield* Clock.currentTimeMillis;
+    if (
+      now >= found[1].public.expiresAt ||
+      now < found[1].public.expiresAt - semanticAgentBufferLimits.ttlMilliseconds ||
+      (profile !== undefined && found[1].public.profile !== profile)
+    )
+      return yield* SemanticSessionFault.make({reason: 'stale'});
+    return {id: found[0], grant: found[1], binding: found[1].public};
+  });
+  const agentView = (body: SemanticAgentEndpointView) =>
+    lifecycle
+      .withPermit(
+        Effect.gen(function* () {
+          if (body.worktree !== options.worktree || !options.runtimeIdentity || !observe)
+            return yield* LspFault.make({code: 'rejected'});
+          if (new TextEncoder().encode(JSON.stringify(body)).length > semanticAgentBufferLimits.maxRequestBytes)
+            return yield* LspFault.make({code: 'capacity'});
+          const bytes = new TextEncoder().encode(body.text ?? '').length;
+          const publicEntries = EffectArray.filter([...grants.values()], grant => grant.public !== undefined);
+          const total = EffectArray.reduce(publicEntries, 0, (sum, grant) => sum + (grant.public?.bytes ?? 0));
+          if (
+            bytes > semanticAgentBufferLimits.maxTextBytes ||
+            (body.text !== undefined &&
+              /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body.text))
+          )
+            return yield* LspFault.make({code: 'capacity'});
+          if (body.action === 'open') {
+            if (
+              !body.project ||
+              !body.uri ||
+              !body.language ||
+              body.text === undefined ||
+              body.handle ||
+              body.expectedVersion !== undefined
+            )
+              return yield* LspFault.make({code: 'protocol'});
+            if (
+              publicEntries.length >= semanticAgentBufferLimits.maxGrants ||
+              grants.size >= 256 ||
+              total + bytes > semanticAgentBufferLimits.maxRetainedBytes
+            )
+              return yield* LspFault.make({code: 'capacity'});
+            const root = yield* path.fromFileUrl(new URL(options.worktree));
+            const project = yield* path.fromFileUrl(new URL(body.project));
+            const file = yield* path.fromFileUrl(new URL(body.uri));
+            if (
+              !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
+              !EffectString.startsWith(project + path.sep)(file) ||
+              EffectString.split(path.sep)(file).includes('.git') ||
+              (yield* fs.realPath(project)) !== project ||
+              (yield* fs.realPath(file)) !== file ||
+              (yield* fs.stat(file)).type !== 'File'
+            )
+              return yield* LspFault.make({code: 'rejected'});
+            const identity = sha256HexSync(yield* crypto.randomBytes(32));
+            const token = sha256HexSync(yield* crypto.randomBytes(32));
+            const seed: Observation = {
+              version: 1,
+              repository: sha256HexSync(options.worktree),
+              worktree: options.worktree,
+              project: body.project,
+              configuration: EffectString.repeat(64)('0'),
+              toolchain: EffectString.repeat(64)('0'),
+              provider: {id: semanticHostSelection[body.language].provider, version: 'host-unbound', generation: 0},
+              view: {kind: 'overlay', id: identity, owner: 'agent-buffer:' + identity, epoch: 0},
+              uri: body.uri,
+              content: sha256HexSync(body.text),
+              documentVersion: 1,
+              projectEpoch: 0,
+            };
+            const id = sessionIdentity(seed);
+            const expiresAt = (yield* Clock.currentTimeMillis) + semanticAgentBufferLimits.ttlMilliseconds;
+            const grant = {
+              token,
+              lastUsed: expiresAt - semanticAgentBufferLimits.ttlMilliseconds,
+              gate: Semaphore.makeUnsafe(1),
+              public: {
+                id: identity,
+                observation: seed,
+                language: body.language,
+                ...(body.environment ? {environment: body.environment} : {}),
+                profile: body.profile,
+                bytes,
+                expiresAt,
+              },
+            };
+            grants.set(id, grant);
+            return yield* Effect.gen(function* () {
+              const attached = yield* coordinator.attach(seed, body.text!, body.language!, body.environment);
+              grant.public.observation = attached.observation;
+              yield* checkPublic({id: identity, capability: token}, body.profile);
+              return {
+                version: 1,
+                status: 'ok',
+                action: 'open',
+                handle: {id: identity, capability: token},
+                observation: attached.observation,
+                expiresAt,
+              };
+            }).pipe(
+              Effect.onExit(exit =>
+                Exit.isFailure(exit)
+                  ? coordinator
+                      .closeView(grant.public.observation)
+                      .pipe(Effect.ignore, Effect.ensuring(Effect.sync(() => grants.delete(id))))
+                  : Effect.void,
+              ),
+            );
+          }
+          if (!body.handle || body.project || body.uri || body.language || body.environment)
+            return yield* LspFault.make({code: 'protocol'});
+          const owned = yield* checkPublic(body.handle, body.profile);
+          return yield* owned.grant.gate.withPermit(
+            Effect.gen(function* () {
+              const current = yield* checkPublic(body.handle!, body.profile);
+              if (current.grant !== owned.grant) return yield* SemanticSessionFault.make({reason: 'stale'});
+              if (body.action === 'close') {
+                yield* coordinator.closeView(current.binding.observation);
+                grants.delete(current.id);
+                return {version: 1, status: 'ok', action: 'close'};
+              }
+              const before = current.binding.observation;
+              if (body.expectedVersion !== before.documentVersion)
+                return yield* SemanticSessionFault.make({reason: 'conflict'});
+              if (
+                body.text === undefined ||
+                before.documentVersion === null ||
+                before.documentVersion >= Number.MAX_SAFE_INTEGER
+              )
+                return yield* LspFault.make({code: 'protocol'});
+              if (total - current.binding.bytes + bytes > semanticAgentBufferLimits.maxRetainedBytes)
+                return yield* LspFault.make({code: 'capacity'});
+              const verified = yield* coordinator.observe!(before, body.milliseconds);
+              if (!verified || observationKey(verified) !== observationKey(before))
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              return yield* Effect.gen(function* () {
+                const attached = yield* coordinator.attach(
+                  {...before, content: sha256HexSync(body.text!), documentVersion: before.documentVersion! + 1},
+                  body.text!,
+                  current.binding.language,
+                  current.binding.environment,
+                );
+                current.binding.observation = attached.observation;
+                current.binding.bytes = bytes;
+                yield* checkPublic(body.handle!, body.profile);
+                return {
+                  version: 1,
+                  status: 'ok',
+                  action: 'update',
+                  observation: attached.observation,
+                  expiresAt: current.binding.expiresAt,
+                };
+              }).pipe(
+                Effect.onExit(exit =>
+                  Exit.isFailure(exit)
+                    ? coordinator
+                        .closeView(current.binding.observation)
+                        .pipe(Effect.ignore, Effect.ensuring(Effect.sync(() => grants.delete(current.id))))
+                    : Effect.void,
+                ),
+              );
+            }),
+          );
+        }),
+      )
+      .pipe(
+        Effect.timeoutOption(body.milliseconds),
+        Effect.flatMap(result =>
+          result._tag === 'Some' ? Effect.succeed(result.value) : Effect.fail(LspFault.make({code: 'timeout'})),
+        ),
+      );
   let requests = 0;
   let shutdown = false;
   let lastUsed = yield* Clock.currentTimeMillis;
@@ -957,19 +1163,52 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
         shutdown = true;
         return {status: 'shutting-down'};
       }
-      if (body.operation === 'agent-observe')
-        return agentQueries
-          ? yield* agentQueries.observe(body.observation, body.milliseconds)
-          : yield* LspFault.make({code: 'prerequisite'});
-      if (body.operation === 'agent-query')
-        return agentQueries
-          ? yield* agentQueries.query(body.request)
-          : {
-              version: 1,
-              status: 'unavailable',
-              reason: 'Public read binding is not configured for this endpoint',
-              evidence: null,
-            };
+      if (body.operation === 'agent-view') return yield* agentView(body.request);
+      if (body.operation === 'agent-observe') {
+        if (!agentQueries) return yield* LspFault.make({code: 'prerequisite'});
+        if (body.observation.view.kind === 'disk')
+          return yield* agentQueries.observe(body.observation, body.milliseconds);
+        if (!body.handle) return yield* SemanticSessionFault.make({reason: 'conflict'});
+        const owned = yield* checkPublic(body.handle);
+        return yield* owned.grant.gate.withPermit(
+          Effect.gen(function* () {
+            if (observationKey(owned.binding.observation) !== observationKey(body.observation))
+              return yield* SemanticSessionFault.make({reason: 'stale'});
+            const observed = yield* coordinator.observe!(body.observation, body.milliseconds);
+            yield* checkPublic(body.handle!);
+            return observed;
+          }),
+        );
+      }
+      if (body.operation === 'agent-query') {
+        if (!agentQueries) return yield* LspFault.make({code: 'prerequisite'});
+        if (!body.request.view) return yield* agentQueries.query(body.request);
+        const selector = body.request.view;
+        const owned = yield* checkPublic(selector.handle, body.request.profile);
+        return yield* owned.grant.gate.withPermit(
+          Effect.gen(function* () {
+            yield* checkPublic(selector.handle, body.request.profile);
+            const observed = owned.binding.observation;
+            if (
+              body.request.worktree !== observed.worktree ||
+              body.request.project !== observed.project ||
+              body.request.uri !== observed.uri ||
+              body.request.language !== owned.binding.language ||
+              body.request.environment !== owned.binding.environment ||
+              selector.documentVersion !== observed.documentVersion
+            )
+              return yield* SemanticSessionFault.make({reason: 'conflict'});
+            const result = yield* agentQueries.query(body.request, {observation: observed});
+            yield* checkPublic(selector.handle, body.request.profile);
+            if (
+              grants.get(owned.id) !== owned.grant ||
+              observationKey(owned.binding.observation) !== observationKey(observed)
+            )
+              return yield* SemanticSessionFault.make({reason: 'stale'});
+            return result;
+          }),
+        );
+      }
       if (body.observation.worktree !== options.worktree) return yield* LspFault.make({code: 'rejected'});
       const id = sessionIdentity(body.observation);
       let grant = grants.get(id);
@@ -985,6 +1224,7 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
           created = true;
         }
       }
+      if (grant?.public) return yield* SemanticSessionFault.make({reason: 'conflict'});
       if (grant && !created && grant.token !== request.headers['x-threadnote-view'])
         return yield* SemanticSessionFault.make({reason: 'conflict'});
       if (!grant) return yield* LspFault.make({code: 'rejected'});
@@ -1103,8 +1343,16 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       agentQueries?.prune(now);
       for (const [id, grant] of grants) {
         yield* grant.gate.withPermitsIfAvailable(1)(
-          Effect.sync(() => {
-            if (grants.get(id) === grant && now - grant.lastUsed >= 600000) grants.delete(id);
+          Effect.gen(function* () {
+            if (
+              grants.get(id) === grant &&
+              (grant.public
+                ? now >= grant.public.expiresAt || now < grant.public.expiresAt - 600000
+                : now - grant.lastUsed >= 600000)
+            ) {
+              if (grant.public) yield* coordinator.closeView(grant.public.observation);
+              grants.delete(id);
+            }
           }),
         );
       }

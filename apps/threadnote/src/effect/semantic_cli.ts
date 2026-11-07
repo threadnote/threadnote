@@ -1,6 +1,10 @@
 import type {CliRuntimeRunner} from './cli_runtime_contract.js';
-import {runSemanticAgentQuery} from '../semantic/agent_queries.js';
-import {formatSemanticAgentQuery, SemanticAgentReadOperation} from '../semantic/agent_query_protocol.js';
+import {runSemanticAgentQuery, runSemanticAgentView} from '../semantic/agent_queries.js';
+import {
+  formatSemanticAgentQuery,
+  SemanticAgentReadOperation,
+  semanticAgentBufferLimits,
+} from '../semantic/agent_query_protocol.js';
 import {LspFault} from '../semantic/lsp_transport.js';
 import {Array as EffectArray, Console, Effect, Schema, Stdio, Stream} from 'effect';
 import {Command} from 'effect/cli';
@@ -55,8 +59,10 @@ export function semanticCapabilities(input: unknown = {}) {
       scope: 'api-operations' as const,
       operations: [...SemanticAgentReadOperation.literals, 'context'],
       view: 'disk' as const,
+      views: ['disk', 'buffer'] as const,
+      bufferLimits: semanticAgentBufferLimits,
       providerCapabilities: 'assessed-per-project' as const,
-      pending: ['owned-overlays', 'changes'],
+      pending: ['changes'],
     },
     providers,
     reason: deferred
@@ -65,7 +71,7 @@ export function semanticCapabilities(input: unknown = {}) {
         ? 'No selected provider for this language'
         : null,
     nextAction:
-      'Saved-disk navigation, diagnostics and document-linked context require an enabled private host profile and standalone runtime. Context requires task and position. Owned overlays remain pending; graph and memory remain available.',
+      'Saved-disk navigation, diagnostics and document-linked context require an enabled private host profile and standalone runtime. Context requires task and position. Owned buffers require an explicit capability and documentVersion; graph and memory remain available.',
   });
 }
 
@@ -87,32 +93,35 @@ export function formatSemanticCapabilities(result: SemanticCapabilities): string
   );
 }
 
-export const readSemanticAgentQueryInput = Effect.gen(function* () {
-  const stdio = yield* Stdio.Stdio;
-  const decoder = new TextDecoder('utf-8', {fatal: true});
-  const raw = yield* stdio.stdin.pipe(
-    Stream.runFoldEffect(
-      () => ({bytes: 0, text: ''}),
-      (previous, chunk) =>
-        Effect.try({
-          try: () => {
-            const bytes = previous.bytes + chunk.byteLength;
-            if (bytes > 65536) throw LspFault.make({code: 'protocol'});
-            return {bytes, text: previous.text + decoder.decode(chunk, {stream: true})};
-          },
-          catch: () => LspFault.make({code: 'protocol'}),
-        }),
-    ),
+export const readSemanticAgentQueryInputWithLimit = (maxBytes: number) =>
+  Effect.gen(function* () {
+    const stdio = yield* Stdio.Stdio;
+    const decoder = new TextDecoder('utf-8', {fatal: true});
+    const raw = yield* stdio.stdin.pipe(
+      Stream.runFoldEffect(
+        () => ({bytes: 0, text: ''}),
+        (previous, chunk) =>
+          Effect.try({
+            try: () => {
+              const bytes = previous.bytes + chunk.byteLength;
+              if (bytes > maxBytes) throw LspFault.make({code: 'protocol'});
+              return {bytes, text: previous.text + decoder.decode(chunk, {stream: true})};
+            },
+            catch: () => LspFault.make({code: 'protocol'}),
+          }),
+      ),
+    );
+    return yield* Effect.try({
+      try: (): unknown => JSON.parse(raw.text + decoder.decode()),
+      catch: () => LspFault.make({code: 'protocol'}),
+    });
+  }).pipe(
+    Effect.timeoutOption(5000),
+    Effect.map(result => (result._tag === 'Some' ? result.value : null)),
+    Effect.orElseSucceed(() => null),
   );
-  return yield* Effect.try({
-    try: (): unknown => JSON.parse(raw.text + decoder.decode()),
-    catch: () => LspFault.make({code: 'protocol'}),
-  });
-}).pipe(
-  Effect.timeoutOption(5000),
-  Effect.map(result => (result._tag === 'Some' ? result.value : null)),
-  Effect.orElseSucceed(() => null),
-);
+
+export const readSemanticAgentQueryInput = readSemanticAgentQueryInputWithLimit(65536);
 
 export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
   const capabilities = Command.make(
@@ -135,7 +144,30 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
       }),
     ),
   ).pipe(
-    Command.withDescription('Read saved-disk semantic evidence; provide a bounded request JSON document on stdin'),
+    Command.withDescription(
+      'Read saved-disk or explicitly owned buffer evidence; provide bounded request JSON on stdin',
+    ),
   );
-  return Command.make('semantic').pipe(Command.withSubcommands([capabilities, query]));
+  const view = Command.make('view', {json: boolean('json', 'Print versioned owned-view JSON')}, () =>
+    withRuntime(config =>
+      Effect.gen(function* () {
+        const result = yield* runSemanticAgentView(
+          config,
+          yield* readSemanticAgentQueryInputWithLimit(2 * 1024 * 1024),
+        );
+        return yield* Console.log(JSON.stringify(result));
+      }),
+    ),
+  );
+  return Command.make('semantic').pipe(
+    Command.withSubcommands([
+      capabilities,
+      query,
+      view.pipe(
+        Command.withDescription(
+          'Manage volatile owned buffers: open, update or close using JSON on stdin; no disk writes',
+        ),
+      ),
+    ]),
+  );
 }

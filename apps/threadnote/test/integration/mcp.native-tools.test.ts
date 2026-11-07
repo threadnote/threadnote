@@ -185,6 +185,7 @@ const CORE_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_view',
   'semantic_query',
   'context_brief',
   'read_context',
@@ -659,18 +660,21 @@ describe('Threadnote MCP toolsets', () => {
             tool.name !== 'memory_write_status' &&
             tool.name !== 'workflow_task_view' &&
             tool.name !== 'semantic_capabilities' &&
-            tool.name !== 'semantic_query',
+            tool.name !== 'semantic_query' &&
+            tool.name !== 'semantic_view',
         );
         const mainCore = EffectArray.filter(
           tools.tools,
-          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
+          tool =>
+            tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query' && tool.name !== 'semantic_view',
         );
         const mainCoreWithoutWorkflowTaskView = EffectArray.filter(
           tools.tools,
           tool =>
             tool.name !== 'workflow_task_view' &&
             tool.name !== 'semantic_capabilities' &&
-            tool.name !== 'semantic_query',
+            tool.name !== 'semantic_query' &&
+            tool.name !== 'semantic_view',
         );
         // Keep the legacy base, main's expanded core, and each additive descriptor budget distinct.
         expect(Buffer.byteLength(JSON.stringify(legacyCore))).toBeLessThanOrEqual(36_000);
@@ -688,7 +692,11 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(mainCore))).toBeLessThanOrEqual(37_200);
         expect(Buffer.byteLength(JSON.stringify(discoveryTool))).toBeLessThanOrEqual(512);
         expect(Buffer.byteLength(JSON.stringify(queryTool))).toBeLessThanOrEqual(1024);
-        expect(serializedToolsBytes).toBeLessThanOrEqual(38_738); // Main core + two bounded descriptors + two commas.
+        const viewTool = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_view'),
+        )!;
+        expect(Buffer.byteLength(JSON.stringify(viewTool))).toBeLessThanOrEqual(768);
+        expect(serializedToolsBytes).toBeLessThanOrEqual(38_738 + 768 + 1); // Preserve the prior aggregate cap, adding only the bounded view descriptor and separator.
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

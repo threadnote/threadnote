@@ -1,5 +1,5 @@
 import {Schema} from 'effect';
-import {Counter, Digest, Evidence, FileUri, Identifier, Position} from '@threadnote/semantic/contracts';
+import {Counter, Digest, Evidence, Observation, FileUri, Identifier, Position} from '@threadnote/semantic/contracts';
 import {Continuation} from '@threadnote/semantic/views';
 import {SemanticLanguage, SemanticQuery} from './provider.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -14,6 +14,55 @@ const MaxBytes = Counter.check(Schema.isGreaterThanOrEqualTo(1024), Schema.isLes
 const Milliseconds = Counter.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(45000));
 const ContextBudget = Counter.check(Schema.isGreaterThanOrEqualTo(800), Schema.isLessThanOrEqualTo(1500));
 const Cursor = Schema.Struct({...Continuation.fields, observation: Schema.String.check(Schema.isMaxLength(32768))});
+export const SemanticAgentBufferHandle = Schema.Struct({id: Digest, capability: Digest});
+export const SemanticAgentBufferView = Schema.Struct({
+  kind: Schema.Literal('buffer'),
+  handle: SemanticAgentBufferHandle,
+  documentVersion: Counter.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+const BufferText = Schema.String.check(Schema.isMaxLength(1024 * 1024));
+const ViewScope = {callerCwd: PathText, milliseconds: Schema.optionalKey(Milliseconds)};
+export const SemanticAgentViewRequest = Schema.Union([
+  Schema.Struct({
+    ...ViewScope,
+    action: Schema.Literal('open'),
+    project: Schema.optionalKey(PathText),
+    file: PathText,
+    language: Identifier,
+    environment: Schema.optionalKey(Identifier),
+    text: BufferText,
+  }),
+  Schema.Struct({
+    ...ViewScope,
+    action: Schema.Literal('update'),
+    handle: SemanticAgentBufferHandle,
+    expectedVersion: Counter.check(Schema.isGreaterThanOrEqualTo(1)),
+    text: BufferText,
+  }),
+  Schema.Struct({...ViewScope, action: Schema.Literal('close'), handle: SemanticAgentBufferHandle}),
+]);
+export type SemanticAgentViewRequest = typeof SemanticAgentViewRequest.Type;
+export const SemanticAgentEndpointView = Schema.Struct({
+  worktree: FileUri,
+  profile: Digest,
+  action: Schema.Literals(['open', 'update', 'close']),
+  project: Schema.optionalKey(FileUri),
+  uri: Schema.optionalKey(FileUri),
+  language: Schema.optionalKey(SemanticLanguage),
+  environment: Schema.optionalKey(Identifier),
+  text: Schema.optionalKey(BufferText),
+  handle: Schema.optionalKey(SemanticAgentBufferHandle),
+  expectedVersion: Schema.optionalKey(Counter),
+  milliseconds: Milliseconds,
+});
+export type SemanticAgentEndpointView = typeof SemanticAgentEndpointView.Type;
+export const semanticAgentBufferLimits = {
+  maxTextBytes: 1024 * 1024,
+  maxGrants: 16,
+  maxRetainedBytes: 8 * 1024 * 1024,
+  ttlMilliseconds: 600000,
+  maxRequestBytes: 2 * 1024 * 1024,
+} as const;
 export const SemanticAgentReadOperation = Schema.Literals([...SemanticQuery.literals, 'diagnostics']);
 
 /** Transport-neutral public input. There are deliberately no executable, setup or arbitrary command fields. */
@@ -25,7 +74,7 @@ export const SemanticAgentQuery = Schema.Struct({
   operation: Identifier,
   position: Schema.optionalKey(Position),
   environment: Schema.optionalKey(Identifier),
-  view: Schema.optionalKey(Schema.Literal('disk')),
+  view: Schema.optionalKey(Schema.Union([Schema.Literal('disk'), SemanticAgentBufferView])),
   maxItems: Schema.optionalKey(MaxItems),
   maxBytes: Schema.optionalKey(MaxBytes),
   milliseconds: Schema.optionalKey(Milliseconds),
@@ -45,6 +94,7 @@ export const SemanticAgentEndpointQuery = Schema.Struct({
   position: Schema.optionalKey(Position),
   environment: Schema.optionalKey(Identifier),
   profile: Digest,
+  view: Schema.optionalKey(SemanticAgentBufferView),
   query: Digest,
   maxItems: MaxItems,
   maxBytes: MaxBytes,
@@ -63,6 +113,7 @@ export function semanticAgentQueryKey(
     readonly operation: string;
     readonly position?: {readonly line: number; readonly character: number};
     readonly environment?: string;
+    readonly view?: {readonly kind: 'buffer'; readonly handle: {readonly id: string}; readonly documentVersion: number};
   },
 ) {
   return sha256HexSync(
@@ -76,6 +127,7 @@ export function semanticAgentQueryKey(
       request.operation,
       request.position ?? null,
       request.environment ?? null,
+      ...(request.view ? [[request.view.handle.id, request.view.documentVersion]] : []),
     ]),
   );
 }
@@ -105,6 +157,24 @@ export const SemanticAgentQueryResult = Schema.Union([
     reason: Identifier,
     evidence: Schema.NullOr(Evidence),
   }),
+]);
+export const SemanticAgentViewSuccess = Schema.Union([
+  Schema.Struct({
+    version: Schema.Literal(1),
+    status: Schema.Literal('ok'),
+    action: Schema.Literal('open'),
+    handle: SemanticAgentBufferHandle,
+    observation: Observation,
+    expiresAt: Counter,
+  }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    status: Schema.Literal('ok'),
+    action: Schema.Literal('update'),
+    observation: Observation,
+    expiresAt: Counter,
+  }),
+  Schema.Struct({version: Schema.Literal(1), status: Schema.Literal('ok'), action: Schema.Literal('close')}),
 ]);
 export type SemanticAgentQueryResult = typeof SemanticAgentQueryResult.Type;
 

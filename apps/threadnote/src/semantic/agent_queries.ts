@@ -20,6 +20,9 @@ import {SemanticLanguage, SemanticSessionFault} from './provider.js';
 import {readSemanticHostProfile, SemanticHostProfileFault} from './host_profile.js';
 import {
   SemanticAgentQuery,
+  SemanticAgentViewRequest,
+  SemanticAgentViewSuccess,
+  semanticAgentBufferLimits,
   SemanticAgentQueryResult,
   SemanticAgentReadOperation,
   semanticAgentQueryKey,
@@ -77,6 +80,7 @@ const compiledRuntimeIdentity = Effect.gen(function* () {
 /** Host-only injectable ports. Public JSON cannot supply these dependencies or their authority. */
 export interface SemanticAgentQueryHost<ContextR = never> {
   readonly runtimeIdentity: typeof compiledRuntimeIdentity;
+  readonly knowledgeAuthorized?: boolean;
   readonly connect: typeof ensureSemanticEndpoint;
   readonly context?: (
     config: RuntimeConfig,
@@ -187,6 +191,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
     operation,
     ...(request.position ? {position: request.position} : {}),
     ...(request.environment ? {environment: request.environment} : {}),
+    ...(typeof request.view === 'object' ? {view: request.view} : {}),
   });
   if (request.cursor && request.cursor.query !== query)
     return fail('stale', 'Continuation belongs to a different query, configuration or runtime');
@@ -209,6 +214,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       profile: selected.digest,
       ...(request.position ? {position: request.position} : {}),
       ...(request.environment ? {environment: request.environment} : {}),
+      ...(typeof request.view === 'object' ? {view: request.view} : {}),
       maxItems: request.maxItems ?? 20,
       maxBytes: limit,
       milliseconds: yield* remaining,
@@ -227,7 +233,11 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       observed.worktree !== worktree ||
       observed.project !== project ||
       observed.uri !== uri ||
-      observed.view.kind !== 'disk' ||
+      (typeof request.view === 'object'
+        ? observed.view.kind !== 'overlay' ||
+          observed.view.id !== request.view.handle.id ||
+          observed.documentVersion !== request.view.documentVersion
+        : observed.view.kind !== 'disk') ||
       observed.provider.id !== semanticHostSelection[language].provider
     )
       return fail('conflict', 'Coordinator returned evidence for a different source scope');
@@ -259,7 +269,7 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
     );
   }
   if (contextQuery && result.status === 'ok') {
-    if (result.next !== null || !services.context)
+    if (result.next !== null || (!services.context && typeof request.view !== 'object'))
       return fail('unavailable', 'Complete document evidence and context composition are required');
     // A second, bounded compiler query identifies the actual reference target. Never use
     // the hover payload or lexical caret container as symbol identity.
@@ -271,20 +281,24 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
       operation: 'definition' as const,
       ...(request.position ? {position: request.position} : {}),
       ...(request.environment ? {environment: request.environment} : {}),
+      ...(typeof request.view === 'object' ? {view: request.view} : {}),
     };
-    const definition = yield* endpoint
-      .request({
-        operation: 'agent-query',
-        request: {
-          ...definitionRequest,
-          profile: selected.digest,
-          query: semanticAgentQueryKey(runtimeIdentity, selected.digest, definitionRequest),
-          maxItems: 2,
-          maxBytes: limit,
-          milliseconds: yield* remaining,
-        },
-      })
-      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentQueryResult)), Effect.result);
+    const definition =
+      typeof request.view === 'object'
+        ? {_tag: 'Failure' as const, failure: null}
+        : yield* endpoint
+            .request({
+              operation: 'agent-query',
+              request: {
+                ...definitionRequest,
+                profile: selected.digest,
+                query: semanticAgentQueryKey(runtimeIdentity, selected.digest, definitionRequest),
+                maxItems: 2,
+                maxBytes: limit,
+                milliseconds: yield* remaining,
+              },
+            })
+            .pipe(Effect.flatMap(Schema.decodeUnknownEffect(SemanticAgentQueryResult)), Effect.result);
     let target: SemanticContextSymbolTarget | null = null;
     let definitionGap: SemanticContextDefinitionGap | undefined;
     if (definition._tag === 'Failure') {
@@ -355,33 +369,44 @@ const executeSemanticAgentQueryWith = Effect.fn('semantic.agentQueryWith')(funct
         ),
       ),
     );
-    let knowledge = yield* services
-      .context(
-        config,
-        {
-          task: request.task!,
-          scope: {kind: 'repository', callerCwd: worktreePath},
-          codeRefs: [EffectArray.join(EffectString.split(path.sep)(path.relative(worktreePath, filePath)), '/')],
-          mode: 'explain',
-          budgetTokens,
-        },
-        result.evidence,
-        target,
-      )
-      .pipe(
-        Effect.orElseSucceed((): SemanticContextKnowledgeV1 => ({
-          scope: 'document',
-          binding: null,
-          brief: null,
-          gaps: ['knowledge-unavailable'],
-        })),
-      );
-    if (definitionGap && !knowledge.gaps.includes('knowledge-not-authorized')) {
+    let knowledge: SemanticContextKnowledgeV1 =
+      typeof request.view === 'object'
+        ? {
+            scope: 'document',
+            binding: null,
+            brief: null,
+            memorySelection: null,
+            gaps: [
+              'semantic-graph-source-unbound',
+              ...(services.knowledgeAuthorized === false ? ['knowledge-not-authorized'] : []),
+            ],
+          }
+        : yield* services.context!(
+            config,
+            {
+              task: request.task!,
+              scope: {kind: 'repository', callerCwd: worktreePath},
+              codeRefs: [EffectArray.join(EffectString.split(path.sep)(path.relative(worktreePath, filePath)), '/')],
+              mode: 'explain',
+              budgetTokens,
+            },
+            result.evidence,
+            target,
+          ).pipe(
+            Effect.orElseSucceed((): SemanticContextKnowledgeV1 => ({
+              scope: 'document',
+              binding: null,
+              brief: null,
+              gaps: ['knowledge-unavailable'],
+            })),
+          );
+    if (typeof request.view !== 'object' && definitionGap && !knowledge.gaps.includes('knowledge-not-authorized')) {
       knowledge = {...knowledge, memorySelection: null, gaps: [...new Set([...knowledge.gaps, definitionGap])]};
     }
     const closing = yield* endpoint
       .request({
         operation: 'agent-observe',
+        ...(typeof request.view === 'object' ? {handle: request.view.handle} : {}),
         observation: result.evidence.observation,
         milliseconds: yield* remaining,
       })
@@ -458,6 +483,7 @@ export const runSemanticAgentQuery = (config: RuntimeConfig, input: unknown, kno
       ? host
       : {
           ...host,
+          knowledgeAuthorized: false,
           context: () =>
             Effect.succeed<SemanticContextKnowledgeV1>({
               scope: 'document',
@@ -469,3 +495,120 @@ export const runSemanticAgentQuery = (config: RuntimeConfig, input: unknown, kno
     config,
     input,
   );
+
+/** Volatile owned-view lifecycle shared by CLI and MCP. Source and capabilities stay in the authorized request channel. */
+export const runSemanticAgentViewWith = <ContextR = never>(
+  services: SemanticAgentQueryHost<ContextR>,
+  config: RuntimeConfig,
+  input: unknown,
+) =>
+  Effect.gen(function* () {
+    const parsed = yield* Effect.try({
+      try: () => new TextEncoder().encode(JSON.stringify(input)).length,
+      catch: () => LspFault.make({code: 'protocol'}),
+    }).pipe(
+      Effect.flatMap(bytes =>
+        bytes <= semanticAgentBufferLimits.maxRequestBytes
+          ? Schema.decodeUnknownEffect(SemanticAgentViewRequest, {onExcessProperty: 'error'})(input).pipe(
+              Effect.mapError(() => LspFault.make({code: 'protocol'})),
+            )
+          : Effect.fail(LspFault.make({code: 'capacity'})),
+      ),
+    );
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    if (!path.isAbsolute(parsed.callerCwd))
+      return fail('invalid-request', 'callerCwd must identify an absolute worktree root');
+    const root = yield* fs.realPath(parsed.callerCwd);
+    const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
+    const selected = yield* readSemanticHostProfile(config, worktree);
+    const runtimeIdentity = yield* services.runtimeIdentity;
+    let scope: {project?: string; uri?: string; language?: SemanticLanguage; environment?: string} = {};
+    if (parsed.action === 'open') {
+      if (!Schema.is(SemanticLanguage)(parsed.language))
+        return fail('unsupported', 'No semantic provider is selected for this language');
+      if (!selected.profile.catalog[semanticHostSelection[parsed.language].slot])
+        return fail('unavailable', 'The selected provider is not configured');
+      const project = path.resolve(root, parsed.project ?? '.');
+      const file = EffectString.startsWith('file:')(parsed.file)
+        ? yield* Effect.try({try: () => new URL(parsed.file), catch: () => LspFault.make({code: 'protocol'})}).pipe(
+            Effect.flatMap(url => path.fromFileUrl(url)),
+          )
+        : path.resolve(project, parsed.file);
+      if (
+        !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
+        !EffectString.startsWith(project + path.sep)(file) ||
+        EffectString.split(path.sep)(file).includes('.git') ||
+        (yield* fs.realPath(project)) !== project ||
+        (yield* fs.realPath(file)) !== file ||
+        (yield* fs.stat(file)).type !== 'File'
+      )
+        return fail('invalid-request', 'Source must remain inside the canonical project');
+      scope = {
+        project: canonicalFileUri((yield* path.toFileUrl(project)).href),
+        uri: canonicalFileUri((yield* path.toFileUrl(file)).href),
+        language: parsed.language,
+        ...(parsed.environment ? {environment: parsed.environment} : {}),
+      };
+    }
+    const endpoint = yield* services.connect({
+      enabled: true,
+      dataHome: selected.home,
+      worktree,
+      runtimeIdentity,
+      ...selected.profile.catalog,
+    });
+    const result = yield* endpoint.request({
+      operation: 'agent-view',
+      request: {
+        worktree,
+        profile: selected.digest,
+        action: parsed.action,
+        ...scope,
+        ...('text' in parsed ? {text: parsed.text} : {}),
+        ...('handle' in parsed ? {handle: parsed.handle} : {}),
+        ...('expectedVersion' in parsed ? {expectedVersion: parsed.expectedVersion} : {}),
+        milliseconds: parsed.milliseconds ?? 10000,
+      },
+    });
+    if (Schema.is(EndpointRefusal)(result)) return endpointFailure(result.reason);
+    const current = yield* readSemanticHostProfile(config, worktree);
+    if (current.digest !== selected.digest) return fail('stale', 'Host configuration changed before view publication');
+    const success = yield* Schema.decodeUnknownEffect(SemanticAgentViewSuccess)(result);
+    if (success.action !== parsed.action)
+      return fail('conflict', 'Coordinator returned a different view lifecycle result');
+    if (
+      'observation' in success &&
+      (success.observation.worktree !== worktree ||
+        success.observation.view.kind !== 'overlay' ||
+        (parsed.action === 'open'
+          ? success.observation.project !== scope.project ||
+            success.observation.uri !== scope.uri ||
+            success.observation.documentVersion !== 1
+          : parsed.action === 'update' &&
+            (success.observation.view.id !== parsed.handle.id ||
+              success.observation.documentVersion !== parsed.expectedVersion + 1)))
+    )
+      return fail('conflict', 'Coordinator returned a different owned source view');
+    if (success.action === 'open' && success.handle.id !== success.observation.view.id)
+      return fail('conflict', 'Coordinator returned an incompatible view handle');
+    return success;
+  }).pipe(
+    Effect.timeoutOption(Schema.is(SemanticAgentViewRequest)(input) ? (input.milliseconds ?? 10000) : 45000),
+    Effect.map(result => (result._tag === 'Some' ? result.value : fail('timeout', 'Semantic view deadline expired'))),
+    Effect.catch(error =>
+      Effect.succeed(
+        Schema.is(SemanticSessionFault)(error)
+          ? endpointFailure(error.reason)
+          : Schema.is(SemanticHostProfileFault)(error)
+            ? endpointFailure('prerequisite')
+            : Schema.is(LspFault)(error)
+              ? error.code === 'protocol'
+                ? fail('invalid-request', 'Provide a bounded owned-view lifecycle request')
+                : endpointFailure(error.code)
+              : fail('invalid-request', 'Provide a bounded owned-view lifecycle request'),
+      ),
+    ),
+  );
+export const runSemanticAgentView = (config: RuntimeConfig, input: unknown) =>
+  runSemanticAgentViewWith(host, config, input);

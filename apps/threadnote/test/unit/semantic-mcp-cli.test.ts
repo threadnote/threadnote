@@ -782,6 +782,34 @@ describe('semantic capability discovery', () => {
       expect(dual.structuredContent).toEqual(canonical);
     }),
   );
+  effectIt.effect('CLI and MCP share the owned-view lifecycle and reject malformed scope identically', () =>
+    Effect.gen(function* () {
+      const request = {
+        action: 'close',
+        callerCwd: 'relative',
+        handle: {id: sha256HexSync('id'), capability: sha256HexSync('secret')},
+      };
+      const cli = yield* captureConsole(
+        Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'view', '--json']),
+      ).pipe(
+        provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(request)))})),
+        provideTestLayer(ApplicationLayer),
+      );
+      const registry = new EffectMcpServerRegistry();
+      registerSemanticQueryTool(registry, {
+        account: 'local',
+        user: 'test',
+        agentId: 'test',
+        agentContextHome: '/unused',
+        manifestPath: '/unused/manifest.json',
+      });
+      const result = yield* registry.invokeTool('semantic_view', {request}).pipe(provideTestLayer(ApplicationLayer));
+      const canonical = JSON.parse(cli.output);
+      expect(canonical).toMatchObject({version: 1, status: 'invalid-request', evidence: null});
+      expect(result.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
+      expect(JSON.stringify(result)).not.toContain(request.handle.capability);
+    }),
+  );
   effectIt.effect(
     'stdin rejects oversized, malformed UTF-8 and incomplete JSON while preserving split codepoints',
     () =>
