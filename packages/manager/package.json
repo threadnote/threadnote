@@ -89,7 +89,7 @@
     "react-dom": "^19.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "three": "^0.186.1"
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@effect/vitest": "4.1.2",
