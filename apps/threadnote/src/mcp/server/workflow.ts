@@ -333,9 +333,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('integrate-same-label-base'),
             snapshotRef: McpInput.requiredString('Reviewed predecessor from task view.'),
-            reason: McpInput.requiredString(
-              'Reason to integrate this rewritten same-label base.',
-            ),
+            reason: McpInput.requiredString('Reason to integrate this rewritten same-label base.'),
             userAuthority: McpInput.requiredString('Caller-asserted human approval; identity unverified.'),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
