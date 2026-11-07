@@ -1,4 +1,4 @@
-import {makeSemanticAgentChanges} from '../../src/semantic/agent_changes.js';
+import {makeSemanticAgentChanges, runSemanticAgentChangeWith} from '../../src/semantic/agent_changes.js';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -34,6 +34,9 @@ import {
   requestSemanticEndpoint,
 } from '../../src/semantic/coordinator.js';
 import {typeScriptConfigurationHasExtendsCycle} from '../../src/semantic/fingerprint.js';
+import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
+import type {SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 const observation = (text: string, overrides: Partial<Observation> = {}): Observation => ({
   version: 1,
@@ -1427,7 +1430,7 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source c
         const project = (yield* path.toFileUrl(root)).href;
         const texts = new Map([
           ['a.ts', 'export function target() { return 1; }\n'],
-          ['b.ts', '\ufeffimport {target} from "./a"; target();\r\n'],
+          ['b.ts', '\ufeffimport {target, target as unused} from "./a"; target();\r\n'],
           ['c.ts', 'import {target} from "./a"; export const value = target();\r\n'],
         ]);
         for (const [name, text] of texts) yield* fs.writeFileString(path.join(root, name), text);
@@ -1483,7 +1486,41 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source c
               };
             }),
         });
-        const attached = yield* session.upsert(basis, texts.get('a.ts')!, 'typescript', 15000);
+        yield* session.upsert(basis, texts.get('a.ts')!, 'typescript', 15000);
+        const actionBasis = {...basis, uri: project + '/b.ts', content: sha256HexSync(texts.get('b.ts')!)};
+        const actionObserved = yield* session.upsert(actionBasis, texts.get('b.ts')!, 'typescript', 15000);
+        const actionQuery = {
+          range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+          only: ['source.removeUnusedImports.ts'],
+        };
+        const listed = yield* session.actions(actionObserved, actionQuery, 15000);
+        expect(listed.status).toBe('ok');
+        if (listed.status !== 'ok') throw new Error('Pinned action list failed');
+        const choices = yield* Schema.decodeUnknownEffect(
+          Schema.Array(
+            Schema.Struct({
+              selector: Schema.String,
+              queryDigest: Schema.String,
+              qualified: Schema.Boolean,
+              actionKind: Schema.String,
+            }),
+          ),
+        )(listed.items);
+        const selected = EffectArray.filter(choices, choice => choice.actionKind === 'source.removeUnusedImports.ts');
+        expect(selected).toHaveLength(1);
+        expect(selected[0].qualified).toBe(true);
+        const actionPrepared = yield* session.actions(actionObserved, actionQuery, 15000, selected[0]);
+        expect(actionPrepared).toMatchObject({
+          status: 'ok',
+          items: [{operation: 'code-action', sourceBasis: 'pre-request-synchronized-text-v1'}],
+        });
+        if (actionPrepared.status !== 'ok') throw new Error('Pinned action prepare failed');
+        expect(JSON.stringify(actionPrepared.items)).toContain('unused');
+        for (const [name, text] of texts)
+          expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
+            Array.from(new TextEncoder().encode(text)),
+          );
+        const attached = (yield* session.observation(basis.uri))!;
         const result = yield* session.prepare('rename', attached, {line: 0, character: 18}, 'renamed', 15000);
         expect(result.status).toBe('ok');
         if (result.status !== 'ok') throw new Error('Pinned rename did not prepare');
@@ -1519,6 +1556,35 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source c
             Array.from(new TextEncoder().encode(original)),
           );
         }
+        const config: RuntimeConfig = {
+          account: 'local',
+          user: 'rename-test',
+          agentId: 'test',
+          agentContextHome: privateHome,
+          manifestPath: path.join(privateHome, 'manifest.json'),
+        };
+        const profileText = JSON.stringify({
+          version: 1,
+          enabled: true,
+          worktree: project,
+          catalog: {
+            candidate: {
+              runtime: '/fixture/node',
+              runtimeDigest: sha256HexSync('node'),
+              runtimeVersion: '24.19.0',
+              sdkDirectory: '/fixture/typescript',
+              sdkTreeDigest: sha256HexSync('sdk'),
+              serverDirectory: '/fixture/server',
+              serverTreeDigest: sha256HexSync('server'),
+            },
+          },
+        });
+        yield* fs.makeDirectory(path.join(privateHome, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+        yield* fs.writeFileString(
+          path.join(privateHome, 'semantic', 'profiles', semanticHostProfileName(config, project)),
+          profileText,
+          {mode: 0o600},
+        );
         const changes = yield* makeSemanticAgentChanges(
           {
             attach: (seed, text) =>
@@ -1534,15 +1600,76 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source c
               }),
             observe: observed => session.observation(observed.uri),
           },
-          {directory: privateHome, worktree: project, runtimeIdentity: sha256HexSync('pinned-test-runtime')},
+          {
+            directory: privateHome,
+            profileHome: privateHome,
+            worktree: project,
+            runtimeIdentity: sha256HexSync('pinned-test-runtime'),
+          },
         );
+        const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
+        const publicHost: SemanticAgentQueryHost = {
+          runtimeIdentity: Effect.succeed(sha256HexSync('pinned-test-runtime')),
+          connect: () =>
+            Effect.succeed({
+              request: (body: import('../../src/semantic/coordinator.js').SemanticRequest) =>
+                body.operation === 'agent-change'
+                  ? changes.execute(body.request).pipe(
+                      Effect.provideContext(changeContext),
+                      Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
+                      Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                    )
+                  : Effect.die('Unexpected public request'),
+            }),
+        };
+        const publicAction = {
+          version: 1,
+          callerCwd: root,
+          action: 'prepare',
+          operation: 'code-action',
+          file: 'b.ts',
+          language: 'typescript',
+          range: actionQuery.range,
+          only: actionQuery.only,
+          milliseconds: 15000,
+          maxBytes: 32768,
+        };
+        const publicChoices = yield* runSemanticAgentChangeWith(publicHost, config, publicAction);
+        const choiceList = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            status: Schema.Literal('choices'),
+            choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String, kind: Schema.String})),
+          }),
+        )(publicChoices);
+        const importChoice = EffectArray.filter(
+          choiceList.choices,
+          choice => choice.kind === 'source.removeUnusedImports.ts',
+        );
+        expect(importChoice).toHaveLength(1);
+        const publicPreview = yield* runSemanticAgentChangeWith(publicHost, config, {
+          ...publicAction,
+          choiceHandle: importChoice[0].choiceHandle,
+        });
+        expect(publicPreview).toMatchObject({
+          status: 'ok',
+          applicable: false,
+          writerAuthorityRequired: true,
+          qualification: 'qualified-text-only',
+          operationCount: 1,
+          targetCount: 1,
+        });
+        for (const [name, text] of texts)
+          expect(Array.from(yield* fs.readFile(path.join(root, name)))).toEqual(
+            Array.from(new TextEncoder().encode(text)),
+          );
         const request = {
           version: 1 as const,
           worktree: project,
           project,
           uri: basis.uri,
           language: 'typescript' as const,
-          profile: sha256HexSync('test-profile'),
+          profile: sha256HexSync(profileText),
+          principal: EffectString.slice(0, -5)(semanticHostProfileName(config, project)),
           action: 'prepare' as const,
           operation: 'rename' as const,
           position: {line: 0, character: 18},
@@ -1597,6 +1724,7 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source c
       }).pipe(
         // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped real process/filesystem boundary test.
         Effect.provide(coordinatorIo),
+        Effect.provideService(CommandExecutor, versionProbe),
         Effect.provideService(ChildEnvironmentPolicy, {
           sanitizeExternal: env => env,
           preserveIntendedChild: env => env,
@@ -1683,6 +1811,152 @@ describe('rename closure project barriers', () => {
           expect(result._tag === 'Failure' || result.success.status !== 'ok').toBe(true);
         }
       }
+    }),
+  );
+});
+
+describe('qualified TypeScript action selection', () => {
+  effectIt.effect('keeps disabled and command choices visible and rejects ambiguous or unqualified selection', () =>
+    Effect.gen(function* () {
+      const text = 'const value = 1;';
+      const basis = observation(text);
+      let actions: Schema.Json[] = [
+        {title: 'Opaque shell', command: 'shell.exec', arguments: ['danger']},
+        {title: 'Disabled', disabled: {reason: 'Unavailable here'}, kind: 'quickfix'},
+        {title: 'Unknown family', kind: 'quickfix', edit: {changes: {}}},
+        {
+          title: 'Sort Imports',
+          kind: 'source.sortImports.ts',
+          edit: {
+            documentChanges: [
+              {
+                textDocument: {uri: basis.uri, version: 1},
+                edits: [{range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}, newText: 'x'}],
+              },
+            ],
+          },
+        },
+        {
+          title: 'Sort Imports',
+          kind: 'source.sortImports.ts',
+          edit: {
+            documentChanges: [
+              {
+                textDocument: {uri: basis.uri, version: 1},
+                edits: [{range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}, newText: 'x'}],
+              },
+            ],
+          },
+        },
+      ];
+      const client = fakeClient(method => {
+        if (method === 'textDocument/codeAction') return Effect.succeed(actions);
+        if (method === 'workspace/executeCommand') return Effect.succeed({success: true, body: []});
+        return Effect.die('Unexpected action side effect: ' + method);
+      });
+      const session = yield* makeTypeScriptSession(client, {
+        ...options(basis),
+        captureEditSource: () => Effect.die('No denied selection can capture source'),
+      });
+      const attached = yield* session.upsert(basis, text, 'typescript', 1000);
+      const query = {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}};
+      const listed = yield* session.actions(attached, query, 1000);
+      expect(listed.status).toBe('ok');
+      if (listed.status !== 'ok') throw new Error('Action listing failed');
+      const choices = yield* Schema.decodeUnknownEffect(
+        Schema.Array(
+          Schema.Struct({
+            selector: Schema.String,
+            queryDigest: Schema.String,
+            qualified: Schema.Boolean,
+            blocker: Schema.NullOr(Schema.String),
+          }),
+        ),
+      )(listed.items);
+      expect(EffectArray.map(choices, choice => choice.blocker)).toEqual([
+        'command',
+        'disabled',
+        'unqualified-action-family',
+        null,
+        null,
+      ]);
+      for (const index of [0, 1, 2]) {
+        expect(yield* session.actions(attached, query, 1000, choices[index])).toMatchObject({
+          status: 'ok',
+          items: expect.arrayContaining([expect.objectContaining({kind: 'action-result', status: 'unsupported'})]),
+        });
+      }
+      expect(yield* session.actions(attached, query, 1000, choices[3])).toMatchObject({
+        status: 'ok',
+        items: expect.arrayContaining([expect.objectContaining({kind: 'action-result', status: 'ambiguous'})]),
+      });
+      actions = [];
+      expect(yield* session.actions(attached, query, 1000, choices[3])).toMatchObject({
+        status: 'ok',
+        items: expect.arrayContaining([expect.objectContaining({kind: 'action-result', status: 'no-match'})]),
+      });
+      expect(
+        yield* session.actions(attached, query, 1000, {...choices[3], queryDigest: sha256HexSync('changed')}),
+      ).toMatchObject({
+        status: 'ok',
+        items: expect.arrayContaining([expect.objectContaining({kind: 'action-result', status: 'changed-selection'})]),
+      });
+      const rawEdits = [{range: query.range, newText: 'x', annotationId: 'a'}];
+      const rawChanges: Schema.Json[] = [
+        {textDocument: {uri: basis.uri, version: 1}, edits: rawEdits},
+        {
+          kind: 'rename',
+          oldUri: basis.uri,
+          newUri: 'file:///test/moved.ts',
+          options: {overwrite: false},
+          annotationId: 'a',
+        },
+        {kind: 'delete', uri: 'file:///test/moved.ts', options: {ignoreIfNotExists: false}},
+      ];
+      const raw = {
+        title: 'Move resource',
+        kind: 'refactor',
+        edit: {
+          documentChanges: rawChanges,
+          changeAnnotations: {a: {label: 'Review resource effect', needsConfirmation: true}},
+        },
+      };
+      actions = [raw];
+      const rawList = yield* session.actions(attached, query, 1000);
+      if (rawList.status !== 'ok') throw new Error('Raw action list failed');
+      const rawChoice = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({selector: Schema.String, queryDigest: Schema.String}),
+      )(rawList.items[0]);
+      const rawPreview = yield* session.actions(attached, query, 1000, rawChoice);
+      expect(rawPreview).toMatchObject({
+        status: 'ok',
+        items: [
+          {
+            kind: 'prepared-edit',
+            sourceBasis: 'unqualified-operation-sequence-v1',
+            qualification: 'unsupported-operation-sequence',
+            files: [],
+            changeAnnotations: raw.edit.changeAnnotations,
+            operations: [
+              {kind: 'text', uri: basis.uri, version: 1, edits: rawEdits, target: null},
+              raw.edit.documentChanges[1],
+              raw.edit.documentChanges[2],
+            ],
+          },
+        ],
+      });
+      actions = [
+        {...raw, edit: {...raw.edit, documentChanges: [raw.edit.documentChanges[0], raw.edit.documentChanges[2]]}},
+      ];
+      expect(yield* session.actions(attached, query, 1000, rawChoice)).toMatchObject({
+        status: 'ok',
+        items: expect.arrayContaining([expect.objectContaining({kind: 'action-result', status: 'no-match'})]),
+      });
+      expect(
+        (yield* session
+          .actions(attached, {...query, diagnosticIds: [sha256HexSync('unknown')]}, 1000)
+          .pipe(Effect.exit))._tag,
+      ).toBe('Failure');
     }),
   );
 });
