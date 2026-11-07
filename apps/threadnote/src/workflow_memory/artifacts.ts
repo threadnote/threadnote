@@ -25,6 +25,7 @@ import {refreshWorkflowRecall, trackPotentialWorkflowMutation} from './recall_re
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {workflowGraphProjectHint} from './graph_scope.js';
 import {
   assertNativeJobLiveSource,
   CurrentNativeJobReadyPromotion,
@@ -243,11 +244,22 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
 });
 export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJournal, request: WorkflowRequest) =>
   prepareWorkflowOperationWithCapture(config, state, request, () =>
-    captureMemoryCodeCitationsForMcp(
-      config,
-      {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
-      'workflow-memory',
-    ),
+    Effect.gen(function* () {
+      return yield* captureMemoryCodeCitationsForMcp(
+        config,
+        {
+          callerCwd: state.binding.repo,
+          project: yield* workflowGraphProjectHint(config, state.binding),
+          ...(state.binding.graphProject === undefined
+            ? {}
+            : {
+                expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject},
+              }),
+          refs: request.codeRefs ?? [],
+        },
+        'workflow-memory',
+      );
+    }),
   );
 const workflowCitationCaptureError = (failure: unknown) =>
   Schema.is(MemoryCodeCitationCaptureError)(failure) && failure.retryable
@@ -276,7 +288,16 @@ export function withWorkflowProjectionCitations<A, E, R>(
     let active = true;
     return yield* withLocalMemoryCodeCitations(
       config,
-      {callerCwd: binding.repo, project: binding.project, refs},
+      {
+        callerCwd: binding.repo,
+        project: yield* workflowGraphProjectHint(config, binding),
+        refs,
+        ...(binding.graphProject === undefined
+          ? {}
+          : {
+              expectedProjectScope: {kind: 'selected-project' as const, project: binding.graphProject},
+            }),
+      },
       citations =>
         Effect.gen(function* () {
           const owner = yield* Effect.fiberId;
@@ -310,7 +331,11 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
   config: RuntimeConfig,
   state: WorkflowJournal,
   request: WorkflowRequest,
-  capture: () => ReturnType<typeof captureMemoryCodeCitationsForMcp>,
+  capture: () => Effect.Effect<
+    Effect.Success<ReturnType<typeof captureMemoryCodeCitationsForMcp>>,
+    ReturnType<typeof workflowError>,
+    Effect.Services<ReturnType<typeof captureMemoryCodeCitationsForMcp>>
+  >,
 ) {
   const resourceIds = makeResourceIdScopeChecker();
   const action = request.action === 'preflight' ? request.mutation : request.action;
@@ -462,6 +487,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
       if (
+        state.binding.graphProject !== undefined ||
         request.citationPolicy !== 'defer' ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
         !captured.failure.recovery

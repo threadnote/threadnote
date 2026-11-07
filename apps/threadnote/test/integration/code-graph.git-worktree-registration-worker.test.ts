@@ -1,32 +1,29 @@
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {it as effectIt} from '@effect/vitest';
+import {layer as effectLayer} from '@effect/vitest';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {Deferred, Effect, Fiber, FileSystem, Layer} from 'effect';
-import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect, it} from 'vitest';
 import {
   CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS,
   codeGraphGitWorktreeAdminNameKeys,
   observeCodeGraphGitWorktreeRegistry,
+  scanCodeGraphGitWorktreeRegistry,
+  validCodeGraphGitWorktreeRegistryRequest,
   type CodeGraphGitWorktreeRegistryObservation,
 } from '@threadnote/graph/git/worktree/registration';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {CODE_GRAPH_GIT_WORKTREE_REGISTRATION_WORKER_ARGUMENT} from '@threadnote/threadnote/worker_protocol';
 import {runEffect} from '../helpers/effect-runtime.js';
-import {provideTestLayer} from '../helpers/effect-layer.js';
-import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const roots: string[] = [];
 const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
-const registrationLayer = TestCommandExecutorLayer.pipe(
-  Layer.provideMerge(Layer.merge(BunServices.layer, TestSystemInfoLayer)),
-);
 
 afterEach(() => {
   for (const root of roots.splice(0).reverse()) rmSync(root, {force: true, recursive: true});
@@ -81,41 +78,62 @@ describe('code graph Git worktree registration worker', () => {
     expect(JSON.stringify(result)).not.toContain(adminName);
   });
 
-  effectIt.effect('keeps concurrent helper observations bounded and deterministic under registry load', () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const common = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registration-worker-'}));
-      yield* fs.makeDirectory(join(common, 'worktrees'));
-      const adminName = 'concurrent-target';
-      for (let index = 0; index < 256; index += 1) {
-        yield* fs.writeFileString(join(common, 'worktrees', `registration-${index}`), '');
-      }
-      yield* fs.writeFileString(join(common, 'worktrees', adminName), 'partial');
-      const registration = {
-        adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
-        kind: 'linked',
-      } as const;
-      const observations = yield* Effect.all(
-        Array.from({length: 8}, () =>
-          observeCodeGraphGitWorktreeRegistry(
-            {checkoutId: CHECKOUT_ID, gitCommonDirectory: common},
-            registration,
-            // Eight source-mode workers share CI CPU; deadline behavior has its own test below.
-            {timeoutMilliseconds: 10_000},
+  effectLayer(Layer.merge(BunServices.layer, TestSystemInfoLayer))('concurrent registry scans', effectIt => {
+    effectIt.effect('keeps concurrent helper observations bounded and deterministic under registry load', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const common = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registration-worker-'}),
+        );
+        yield* fs.makeDirectory(join(common, 'worktrees'));
+        const adminName = 'concurrent-target';
+        for (let index = 0; index < 256; index += 1) {
+          yield* fs.writeFileString(join(common, 'worktrees', `registration-${index}`), '');
+        }
+        yield* fs.writeFileString(join(common, 'worktrees', adminName), 'partial');
+        const registration = {
+          adminNameKeys: codeGraphGitWorktreeAdminNameKeys(CHECKOUT_ID, adminName),
+          kind: 'linked',
+        } as const;
+        let executions = 0;
+        const command = CommandExecutor.of({
+          execute: () => Effect.die('Unexpected text command'),
+          executeStreaming: () => Effect.die('Unexpected streaming command'),
+          // Exercise real concurrent scans and the parent decoder without making
+          // successful registry observations depend on eight cold process starts.
+          executeBytes: (_executable, _args, options) =>
+            Effect.gen(function* () {
+              executions++;
+              const request: unknown = JSON.parse(new TextDecoder().decode(options?.input));
+              if (!validCodeGraphGitWorktreeRegistryRequest(request))
+                return yield* Effect.die('Invalid worker request');
+              const observation = yield* Effect.promise(() => scanCodeGraphGitWorktreeRegistry(request));
+              const stdout = new TextEncoder().encode(`${JSON.stringify(observation)}\n`);
+              expect(stdout.byteLength).toBeLessThanOrEqual(
+                CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.workerOutputBytes,
+              );
+              return {exitCode: 0, stderr: '', stdout};
+            }),
+        });
+        const observations = yield* Effect.all(
+          Array.from({length: 8}, () =>
+            observeCodeGraphGitWorktreeRegistry({checkoutId: CHECKOUT_ID, gitCommonDirectory: common}, registration),
           ),
-        ),
-        {concurrency: 'unbounded'},
-      );
+          {concurrency: 'unbounded'},
+        ).pipe(Effect.provideService(CommandExecutor, command));
 
-      expect(observations).toHaveLength(8);
-      expect(
-        EffectArray.map(observations, observation =>
-          observation.state === 'unknown' ? observation.reason : observation.state,
-        ),
-      ).toEqual(Array.from({length: 8}, () => 'present'));
-      expect(new Set(EffectArray.map(observations, observation => JSON.stringify(observation)))).toHaveLength(1);
-    }).pipe(provideTestLayer(registrationLayer), TestClock.withLive),
-  );
+        expect(executions).toBe(8);
+        expect(observations).toHaveLength(8);
+        expect(
+          EffectArray.every(
+            observations,
+            observation => observation.state === 'present' && observation.entryCount === 257,
+          ),
+        ).toBe(true);
+        expect(new Set(EffectArray.map(observations, observation => JSON.stringify(observation)))).toHaveLength(1);
+      }),
+    );
+  });
 
   it('rejects oversized worker input with one bounded path-free response', () => {
     const privateMarker = '/private/oversized/common-gitdir';

@@ -1,3 +1,4 @@
+import {NATIVE_PERFORMANCE_CONTRACT} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -512,6 +513,9 @@ export function codeGraphHeavyTailRatchetArtifact(
     },
     measurements,
     metadata: {
+      nativePerformanceContract: JSON.stringify(NATIVE_PERFORMANCE_CONTRACT),
+      nativePerformanceAttribution:
+        'parseMilliseconds is the worker-reported complete extractor (parse/query/fact construction combined); parent request includes worker scheduling and JSON IPC; persistence is separate. Pure IPC and parser sub-stages are unavailable; no subtraction is isolated CPU time.',
       automaticParserWorkers: artifact.profile.parallelWorkers,
       candidateCommit: artifact.environment.commit,
       evidenceClass,

@@ -93,6 +93,30 @@ describe('code graph analysis properties', () => {
         expect(isSorted(first.surprisingLinks, compareSurpriseOrder)).toBe(true);
 
         const membership = new Map(EffectArray.map(first.memberships, item => [item.node.id, item]));
+        // Independent reachability oracle also rejects accidental merges of disconnected nodes.
+        for (const origin of symbols) {
+          const reachable = new Set([origin.id]);
+          const pending = [origin.id];
+          for (let cursor = 0; cursor < pending.length; cursor += 1) {
+            for (const edge of edges) {
+              const next =
+                edge.sourceId === pending[cursor]
+                  ? edge.targetId
+                  : edge.targetId === pending[cursor]
+                    ? edge.sourceId
+                    : undefined;
+              if (next !== undefined && !reachable.has(next)) {
+                reachable.add(next);
+                pending.push(next);
+              }
+            }
+          }
+          for (const target of symbols) {
+            expect(membership.get(origin.id)?.componentId === membership.get(target.id)?.componentId).toBe(
+              reachable.has(target.id),
+            );
+          }
+        }
         for (const edge of edges) {
           expect(membership.get(edge.sourceId!)?.componentId).toBe(membership.get(edge.targetId!)?.componentId);
           const source = EffectOption.getOrUndefined(

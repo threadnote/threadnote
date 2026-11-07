@@ -76,6 +76,11 @@ describe('durable recall embedding demand', () => {
               else {
                 expect(result.failure.stage).toBe('read');
                 expect(result.failure.reason).toBe(boundary === 'churn' ? 'state-changed' : 'invalid-file');
+                expect(result.failure.message).toContain(
+                  `[recall-demand:${result.failure.stage}/${result.failure.reason}]`,
+                );
+                expect(result.failure.message).not.toContain(scope.agentContextHome);
+                expect(Buffer.byteLength(result.failure.message)).toBeLessThan(256);
               }
               expect(calls).toBe(boundary === 'replacement' ? 2 : boundary === 'churn' ? 3 : 1);
             }),
@@ -310,6 +315,11 @@ describe('durable recall embedding demand', () => {
                 stage: 'guard',
                 reason: 'guard-timeout',
               });
+            if (result._tag === 'Failure') {
+              expect(result.failure.message).toContain('[recall-demand:guard/guard-timeout]');
+              expect(result.failure.message).not.toContain(scope.agentContextHome);
+              expect(Buffer.byteLength(result.failure.message)).toBeLessThan(256);
+            }
             expect(yield* fs.exists(guard)).toBe(true);
             expect((yield* readRecallEmbeddingDemand(scope))?.desired?.revision).toBe(before.revision);
           }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
@@ -368,7 +378,7 @@ describe('durable recall embedding demand', () => {
         if (result._tag !== 'Failure') return yield* Effect.die('Expected failed publish, not an acknowledgment');
         const checked = yield* Schema.decodeEffect(RecallEmbeddingDemandUnavailable)(result.failure);
         expect({message: checked.message, stage: checked.stage, reason: checked.reason}).toEqual({
-          message: 'Recall embedding demand requires repair.',
+          message: 'Recall embedding demand is unavailable [recall-demand:publish/io]; no queued receipt is implied.',
           stage: 'publish',
           reason: 'io',
         });

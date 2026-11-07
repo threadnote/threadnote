@@ -7069,26 +7069,30 @@ describe('native code graph lifecycle', () => {
         manifestPath: join(home, 'seed-manifest.yaml'),
         user: 'tester',
       };
-      const indexer = yield* CodeGraphIndexer;
-      const query = yield* CodeGraphQueryService;
-      const store = yield* CodeGraphStore;
-      const first = yield* indexer.index({cwd: root, threadnoteHome: home});
-      const secondDatabasePath = join(
-        home,
-        'indexes',
-        'code-graph',
-        'repositories',
-        Effect2.pipe('a', EffectString.repeat(64)),
-        `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
-      );
-      yield* store.initialize(secondDatabasePath);
-      const firstStatus = yield* query.status(home, root);
-      yield* store.markBuilding(firstStatus.databasePath, first.identity, {
-        ...first.snapshot,
-        id: `${first.snapshot.id}-interrupted`,
-        state: 'building',
-      });
-      yield* Effect.sync(() => setGraphSchemaVersion(secondDatabasePath, '999'));
+      // Setup owns its collectors: a fresh layer prevents reuse of the outer store,
+      // and closing its scope releases cleanup gates before exact-count maintenance.
+      yield* Effect.gen(function* () {
+        const indexer = yield* CodeGraphIndexer;
+        const query = yield* CodeGraphQueryService;
+        const store = yield* CodeGraphStore;
+        const first = yield* indexer.index({cwd: root, threadnoteHome: home});
+        const secondDatabasePath = join(
+          home,
+          'indexes',
+          'code-graph',
+          'repositories',
+          Effect2.pipe('a', EffectString.repeat(64)),
+          `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
+        );
+        yield* store.initialize(secondDatabasePath);
+        const firstStatus = yield* query.status(home, root);
+        yield* store.markBuilding(firstStatus.databasePath, first.identity, {
+          ...first.snapshot,
+          id: `${first.snapshot.id}-interrupted`,
+          state: 'building',
+        });
+        yield* Effect.sync(() => setGraphSchemaVersion(secondDatabasePath, '999'));
+      }).pipe(provideTestLayer(Layer.fresh(ApplicationLayer)));
       const doctor = yield* captureConsole(runDoctor(config, {dryRun: true}));
       const repair = yield* captureConsole(runRepair(config, {dryRun: true, mcp: 'none', postUpdate: false}));
       const output = {doctor: doctor.output, repair: repair.output};

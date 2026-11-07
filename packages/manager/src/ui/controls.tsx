@@ -137,6 +137,7 @@ export function DropdownSelect(props: {
 export function MarkdownViewer(props: {
   readonly markdown: string;
   readonly onOpenMemory?: (uri: string) => void;
+  readonly staticPreview?: boolean;
 }): React.ReactElement {
   return (
     <article className="markdown-viewer">
@@ -148,7 +149,16 @@ export function MarkdownViewer(props: {
             : defaultUrlTransform(url)
         }
         components={{
-          pre: MarkdownCodeBlock,
+          pre: props.staticPreview
+            ? ({node: _node, children, ...preProps}) => <pre {...preProps}>{children}</pre>
+            : MarkdownCodeBlock,
+          ...(props.staticPreview
+            ? {
+                img: ({node: _node, alt}: {node?: unknown; alt?: string}) => (
+                  <span className="preview-image-label">[Image: {alt || 'embedded image'}]</span>
+                ),
+              }
+            : {}),
           a: ({node: _node, href, ...anchorProps}) => (
             <a
               {...anchorProps}

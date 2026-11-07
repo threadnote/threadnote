@@ -1,3 +1,5 @@
+import {it as effectIt} from '@effect/vitest';
+import {Effect, Array as EffectArray} from 'effect';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from '@threadnote/testing/node-stream';
 import {expect, it, vi} from 'vitest';
@@ -8,6 +10,7 @@ import {
   FixtureProcesses,
   FixtureStdioTransport,
   runFixtureCommand,
+  reconcileFixturePipelineReceipts,
 } from '../../../../scripts/fixture-owned-process.js';
 
 function commandChild() {
@@ -272,4 +275,108 @@ it('rejects an operation that completes after its original deadline before a tim
 it('preserves a child operation failure when it wins the deadline race', async () => {
   const original = new Error('child failed');
   await expect(fixtureDeadline(() => 10, Promise.reject(original))).rejects.toBe(original);
+});
+
+it.each([7, 'SIGTERM'] as const)('records both endpoint exits before reporting failed producer %s', failure => {
+  const processes = new FixtureProcesses();
+  const outcomes = reconcileFixturePipelineReceipts([
+    {
+      role: 'producer',
+      token: 'producer-secret',
+      text: JSON.stringify({
+        version: 1,
+        token: 'producer-secret',
+        code: typeof failure === 'number' ? failure : null,
+        signal: typeof failure === 'string' ? failure : null,
+      }),
+      observation: processes.registry.register(),
+    },
+    {
+      role: 'consumer',
+      token: 'consumer-secret',
+      text: JSON.stringify({version: 1, token: 'consumer-secret', code: 0, signal: null}),
+      observation: processes.registry.register(),
+    },
+  ]);
+  expect(outcomes).toEqual([
+    {
+      role: 'producer',
+      state: 'exited',
+      exitCode: typeof failure === 'number' ? failure : null,
+      signal: typeof failure === 'string' ? failure : null,
+    },
+    {role: 'consumer', state: 'exited', exitCode: 0, signal: null},
+  ]);
+  expect(EffectArray.every(processes.registry.seal(), result => result.state === 'exited')).toBe(true);
+  expect(JSON.stringify(outcomes)).not.toContain('secret');
+});
+
+it.each([undefined, '{', JSON.stringify({version: 1, token: 'foreign-secret', code: 0, signal: null})])(
+  'retains unknown endpoint proof without skipping the later valid receipt',
+  text => {
+    const processes = new FixtureProcesses();
+    const outcomes = reconcileFixturePipelineReceipts([
+      {role: 'producer', token: 'producer-secret', text, observation: processes.registry.register()},
+      {
+        role: 'consumer',
+        token: 'consumer-secret',
+        text: JSON.stringify({version: 1, token: 'consumer-secret', code: 0, signal: null}),
+        observation: processes.registry.register(),
+      },
+    ]);
+    expect(EffectArray.map(outcomes, outcome => outcome.state)).toEqual(['unknown', 'exited']);
+    expect(EffectArray.map(processes.registry.seal(), outcome => outcome.state)).toEqual(['unknown', 'exited']);
+    expect(JSON.stringify(outcomes)).not.toContain('secret');
+  },
+);
+
+effectIt.effect('preserves the original shell failure together with endpoint failure after reconciliation', () =>
+  Effect.gen(function* () {
+    const original = new Error('Owned shell failed');
+    const endpointFailure = new Error('Endpoint failed');
+    const processes = new FixtureProcesses();
+    const outcome = yield* Effect.fail(original).pipe(
+      Effect.onExit(() =>
+        Effect.gen(function* () {
+          const results = reconcileFixturePipelineReceipts([
+            {
+              role: 'producer',
+              token: 'p',
+              text: JSON.stringify({version: 1, token: 'p', code: 7, signal: null}),
+              observation: processes.registry.register(),
+            },
+            {
+              role: 'consumer',
+              token: 'c',
+              text: JSON.stringify({version: 1, token: 'c', code: 0, signal: null}),
+              observation: processes.registry.register(),
+            },
+          ]);
+          expect(results[1].state).toBe('exited');
+          return yield* Effect.fail(endpointFailure);
+        }),
+      ),
+      Effect.exit,
+    );
+    expect(outcome._tag).toBe('Failure');
+    if (outcome._tag === 'Failure')
+      expect(
+        EffectArray.map(outcome.cause.reasons, reason => (reason._tag === 'Fail' ? reason.error : undefined)),
+      ).toEqual([original, endpointFailure]);
+  }),
+);
+
+it('endpoint receipts cannot supply missing parent-shell exit proof', () => {
+  const processes = new FixtureProcesses();
+  processes.registry.register();
+  const outcomes = reconcileFixturePipelineReceipts(
+    EffectArray.map(['producer', 'consumer'] as const, role => ({
+      role,
+      token: role,
+      text: JSON.stringify({version: 1, token: role, code: 0, signal: null}),
+      observation: processes.registry.register(),
+    })),
+  );
+  expect(EffectArray.map(outcomes, outcome => outcome.state)).toEqual(['exited', 'exited']);
+  expect(EffectArray.map(processes.registry.seal(), outcome => outcome.state)).toEqual(['unknown', 'exited', 'exited']);
 });

@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "component": "vector",
+  "decision": "DEFER",
+  "nativeCodeShips": false,
+  "scope": "This bounded batch implementation and measured component/platform pairs only; no universal conclusion about Rust. No decisions for other experiments.",
+  "prototype": {
+    "source": "0b9419ba499076a2260437e81d0ca4f94749791f",
+    "publicTree": "https://github.com/threadnote/threadnote/tree/0b9419ba499076a2260437e81d0ca4f94749791f",
+    "branch": "codex/native-performance-p3",
+    "state": "Frozen for reproduction; never merge prototype code, Cargo dependencies, builder or experimental CI job into delivery."
+  },
+  "reference": {
+    "source": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+    "baselineStatus": "Optimized P2 TypeScript candidate; a causal full-request P2 win over legacy2d7 remains unproven. This reference is not relabeled best-proven TypeScript."
+  },
+  "unchangedR5": {
+    "primaryBoundary": "Complete warm semantic retrieval including real pinned-query inference, authorized SQLite, packing/copies, NAPI scheduling, scoring/top-k and aggregation",
+    "declaredPrimary": {
+      "documents": 100000,
+      "distribution": "dense"
+    },
+    "primaryP95ImprovementRatio": 0.2,
+    "smallScaleSecondaryP95RegressionRatio": 0.05,
+    "secondaryNoiseFloorMilliseconds": 5,
+    "secondaryAllowanceRule": "max(5ms, reference p95 * 5%)",
+    "processTreePeakRssGrowthRatio": 0.1,
+    "minimumPairedRuns": 3,
+    "minimumWarmSamplesPerArm": 30,
+    "perComponentPlatformQualification": true,
+    "exactParityRequired": true,
+    "noGateWidening": true
+  },
+  "linux": {
+    "status": "measured-failed",
+    "artifact": {
+      "runId": 42996460997,
+      "artifactId": 13845263550,
+      "name": "recall-vector-native-pair-42996460997",
+      "publicPage": "https://github.com/threadnote/threadnote/actions/runs/42996460997/artifacts/13845263550",
+      "archiveSha256FromGitHub": "a454ee13c3b9f2bb40ee62613a3a0250483b047b6f96c41aab5a8570d343e0a0",
+      "archiveSizeBytes": 3339440,
+      "createdAt": "2026-11-11T10:03:09Z",
+      "expiresAt": "2026-12-11T10:03:08Z",
+      "workflowHead": "0b9419ba499076a2260437e81d0ca4f94749791f",
+      "archiveDigestSource": "GitHub artifact metadata; each extracted raw capture was separately checked against its archived companion hash."
+    },
+    "summary": {
+      "allCellsTwentyPercentPass": 0,
+      "allCellsComparisons": 12,
+      "declaredPrimaryPass": 0,
+      "declaredPrimaryComparisons": 3,
+      "secondarySmallScaleFailures": 4,
+      "secondarySmallScaleComparisons": 6,
+      "processTreeRssFailures": 4,
+      "processTreeRssComparisons": 12,
+      "maximumProcessTreeRssGrowthRatio": 0.1400335666333381,
+      "exactCrossArmDigestMatches": 12
+    },
+    "projection": "linux-paired-results.json",
+    "sourceAndBinaryFences": "All24 cells: exact clean expected head, equal opening/closing source and binary identities, verified pinned model, matched workload/runtime/configuration and raw hashes; all12 ordered result digests match.",
+    "limits": [
+      "Synthetic document corpus; query inference uses verified committed real BGE model.",
+      "First-use is first retrieval after fixture build, not cold process/filesystem.",
+      "Recursive process-tree RSS is sampled and may miss peaks; sampler counts/gaps retained.",
+      "SQL span union and mixed reader residual percentiles are not additive; residual is not pure kernel time."
+    ]
+  },
+  "macosArm64": {
+    "status": "unqualified-local-negative",
+    "projection": "local-rust-comparison.json",
+    "warmSamplesPerArm": 5,
+    "pairedOrders": 2,
+    "qualification": false,
+    "interpretation": "Rust slower in both descriptive counterbalanced local orders on shared host; no p95 qualification claim."
+  },
+  "p2TypeScript": {
+    "status": "inconclusive-full-request-benefit",
+    "projection": "../vector-typescript/local-comparison.json",
+    "interpretation": "Mixed descriptive local orders with retained large outliers; no causal benefit or regression claim. Graph blob-path performance is not established by this recall case."
+  },
+  "delivery": {
+    "allowedContents": ["Decision documentation", "Whitelisted metrics, sample arrays, counts and hashes"],
+    "excluded": [
+      "Cargo/native code and dependencies",
+      "Node-API adapter or payload",
+      "Build scripts",
+      "Executable capture harness",
+      "Experimental workflow job"
+    ],
+    "followup": "Retain baseline behavior; no further vector benchmarks, profiles or Rust optimization in this experiment."
+  }
+}

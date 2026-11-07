@@ -45,6 +45,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_native_recall_vector_capture:
+        description: Capture serial Linux recall-vector dense/tied evidence with the committed BGE model
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '23 3 * * 1'
 
@@ -982,3 +987,62 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
+
+  recall-vector-native-linux:
+    name: Recall vectors · Linux serial diagnostic capture
+    if: github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MODEL_RELATIVE_PATH: apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Prepare bounded output directory
+        run: mkdir -p "$RUNNER_TEMP/recall-vector-native"
+
+      - name: Capture serial primary samples and separate observer controls
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/recall-vector-native"
+          model_file="$GITHUB_WORKSPACE/$MODEL_RELATIVE_PATH"
+          test -f "$model_file"
+          for replica in 1 2 3; do
+            for documents in 10000 100000; do
+              for distribution in dense tied; do
+                output="$output_dir/recall-vector-${documents}-${distribution}-replica-${replica}.json"
+                bun scripts/benchmark-recall-vectors.ts \
+                  --pair "$replica" \
+                  --arm baseline \
+                  --documents "$documents" \
+                  --distribution "$distribution" \
+                  --samples 30 \
+                  --stage-attribution \
+                  --model bge-small-en-v1.5-q8 \
+                  --model-file "$model_file" \
+                  --output "$output"
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        timeout-minutes: 10
+        with:
+          name: recall-vector-native-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/recall-vector-native/recall-vector-*.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove private capture outputs
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/recall-vector-native"

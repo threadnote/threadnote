@@ -618,3 +618,120 @@ it('opens a home handoff row as full canonical content without embedding it in h
   expect(document.querySelector('dialog')?.open).toBe(true);
   expect(document.body.textContent).toContain('Unfinished steps to resume.');
 });
+
+it.each([false, true])(
+  'coalesces selected citation invalidations with one bounded follow-up (later invalidation: %s)',
+  async later => {
+    const finding: React.ComponentProps<typeof HealthDetail>['finding'] = {
+      id: 'selected',
+      caseId: 'selected-source',
+      category: 'citation-changed',
+      confidence: 'high',
+      severity: 'high',
+      summary: 'Source changed',
+      repairability: 'reviewable',
+      uris: [],
+      repair: {
+        kind: 'repair-citation',
+        subjectUri: 'threadnote://user/tester/memories/source.md',
+        summary: 'Check source',
+      },
+    };
+    const item = {
+      caseId: 'selected-source',
+      project: 'threadnote',
+      memoryId: 'selected',
+      family: 'citation',
+      slot: 'anchor',
+      evidenceRevision: 'fresh',
+      disposition: 'needs-decision',
+      reason: 'source-changed',
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    const result = {
+      outcome: 'ready',
+      item,
+      packet: {
+        version: 2,
+        project: 'threadnote',
+        caseId: item.caseId,
+        evidenceRevision: 'fresh',
+        expectedContentHash: 'same-memory',
+        reason: 'source-changed',
+        choices: [],
+        allowedOperations: [],
+        instructions: 'Compare.',
+        repairFinding: finding,
+      },
+    };
+    const first = Promise.withResolvers<Response>();
+    const second = Promise.withResolvers<Response>();
+    fetchMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockImplementation(() => Promise.resolve(response(result)));
+    const adopted = vi.fn();
+    const show = (stale: boolean) =>
+      render(<HealthDetail {...base} finding={finding} stale={stale} repairsAvailable onEvidenceUpdated={adopted} />);
+    await show(true);
+    const signal: unknown = fetchMock.mock.calls[0]?.[1]?.signal;
+    if (!(signal instanceof AbortSignal)) throw new Error('Expected observation signal');
+    await show(false);
+    await show(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(false);
+    await act(async () => first.resolve(response(result)));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(adopted).not.toHaveBeenCalled();
+    expect(document.querySelector<HTMLButtonElement>('dialog > footer button.primary')?.disabled).toBe(true);
+    if (later) {
+      await show(false);
+      await show(true);
+    }
+    await act(async () => second.resolve(response(result)));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(adopted).toHaveBeenCalledTimes(later ? 0 : 1);
+    expect(document.querySelector<HTMLButtonElement>('dialog > footer button.primary')?.disabled).toBe(later);
+    if (later) {
+      expect(document.body.textContent).toContain('Evidence changed again');
+      await click('Check current evidence');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(adopted).toHaveBeenCalledTimes(1);
+    }
+  },
+);
+
+it('cancels a selected citation observation on unmount without adopting its late result', async () => {
+  const pending = Promise.withResolvers<Response>();
+  fetchMock.mockReturnValue(pending.promise);
+  const adopted = vi.fn();
+  await render(
+    <HealthDetail
+      {...base}
+      stale
+      repairsAvailable
+      onEvidenceUpdated={adopted}
+      finding={{
+        id: 'selected',
+        caseId: 'selected-source',
+        category: 'citation-changed',
+        confidence: 'high',
+        severity: 'high',
+        summary: 'Changed',
+        repair: {kind: 'repair-citation', summary: 'Check source'},
+        repairability: 'reviewable',
+        uris: [],
+      }}
+    />,
+  );
+  const signal: unknown = fetchMock.mock.calls[0]?.[1]?.signal;
+  if (!(signal instanceof AbortSignal)) throw new Error('Expected observation signal');
+  await act(async () => root.render(null));
+  expect(signal.aborted).toBe(true);
+  await act(async () => pending.resolve(response({outcome: 'unavailable', reason: 'changed'})));
+  expect(adopted).not.toHaveBeenCalled();
+});

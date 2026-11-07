@@ -1,3 +1,4 @@
+import type {Request} from '@playwright/test';
 import {String as EffectString, Array as EffectArray} from 'effect';
 import {isJsonObject} from '@threadnote/platform/json';
 import {test, expect} from './fixtures/test.js';
@@ -32,6 +33,34 @@ test('S12 Context Health exposes current evidence and maintenance controls witho
   await expect(controls.getByRole('button', {name: 'Pause automatic maintenance', exact: true})).toBeVisible();
   expect(await manager.api('/api/attention/context-maintenance?view=controls')).toMatchObject({paused: false});
   await page.getByRole('tab', {name: 'Automatic recovery', exact: true}).click();
+  // Enabling maintenance resumes the existing 30-second scheduler; await its first scan.
+  await expect
+    .poll(
+      async () => {
+        const status = await manager.api('/api/attention/context-maintenance?project=alpha');
+        if (
+          status.paused !== false ||
+          status.state === 'failed' ||
+          status.state === 'running' ||
+          status.error ||
+          !EffectArray.isArray(status.projects)
+        )
+          return false;
+        return EffectArray.some(
+          status.projects,
+          project =>
+            isJsonObject(project) &&
+            project.project === 'alpha' &&
+            typeof project.checked === 'number' &&
+            project.checked > 0 &&
+            project.state !== 'running' &&
+            project.state !== 'failed',
+        );
+      },
+      {timeout: 50_000},
+    )
+    .toBe(true);
+  await expect(page.getByRole('button', {name: 'Run maintenance now', exact: true})).toBeEnabled();
   const running = page.waitForResponse(
     response =>
       new URL(response.url()).pathname === '/api/attention/context-maintenance' &&
@@ -58,11 +87,39 @@ test('S12 Context Health exposes current evidence and maintenance controls witho
   await page.getByRole('tab', {name: 'Automatic recovery', exact: true}).click();
   await expect(page.locator('.health-coverage-card > header .health-status-badge')).toHaveText('partial');
   await page.getByRole('tab', {name: /^Needs a decision/u}).click();
-  await page.getByRole('button', {name: 'Compare evidence and preview change', exact: true}).click();
+  const observation = Promise.withResolvers<Request>();
+  let observedRequest: Request | undefined;
+  const observeEvidence = (request: Request) => {
+    if (
+      new URL(request.url()).pathname === '/api/attention/context-maintenance' &&
+      request.method() === 'POST' &&
+      request.postDataJSON()?.action === 'refresh-case' &&
+      request.postDataJSON()?.project === 'alpha'
+    ) {
+      observedRequest = request;
+      observation.resolve(request);
+    }
+  };
   const detail = page.getByRole('dialog', {name: 'Citation changed', exact: true});
-  await expect(detail).toContainText('Keep the alphaGreeting greeting contract stable.');
+  const previewButton = detail.getByRole('button', {name: 'Preview repair', exact: true});
+  page.on('request', observeEvidence);
+  try {
+    await page.getByRole('button', {name: 'Compare evidence and preview change', exact: true}).click();
+    await expect(detail).toContainText('Keep the alphaGreeting greeting contract stable.');
+    // A fresh dialog needs no read; an automatic observation must finish before review is actionable.
+    const enabled = await previewButton.isEnabled();
+    if (observedRequest || !enabled) {
+      const request = observedRequest ?? (await observation.promise);
+      const response = await request.response();
+      expect(response?.status()).toBe(200);
+      expect(await response?.json()).toMatchObject({outcome: 'ready'});
+    }
+    await expect(previewButton).toBeEnabled();
+  } finally {
+    page.off('request', observeEvidence);
+  }
   const preview = page.waitForResponse(response => new URL(response.url()).pathname === '/api/context-health/preview');
-  await detail.getByRole('button', {name: 'Preview repair', exact: true}).click();
+  await previewButton.click();
   expect((await preview).ok()).toBe(true);
   await expect(detail).toContainText(/manual review|review.only|current source|proposed/iu);
   await detail.getByRole('button', {name: 'Close details', exact: true}).click();

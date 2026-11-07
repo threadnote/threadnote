@@ -1,0 +1,28 @@
+{
+  "phase": "P5",
+  "decision": "DEFER",
+  "reason": "Insufficient representative whole-worker/cold Java evidence to justify a native parser port under R1/R5.",
+  "nativePortCreated": false,
+  "nativePilotCompleted": false,
+  "performanceFailureClaimed": false,
+  "qualification": false,
+  "availableFixture": {
+    "path": "apps/threadnote/test/evaluation/fixtures/code-graph-polyglot-v1",
+    "repositoryFiles": 10,
+    "languages": ["java", "kotlin", "swift", "typescript"],
+    "javaFiles": 1,
+    "javaBytes": 66,
+    "javaLines": 5
+  },
+  "availableRunner": {
+    "command": "threadnote --home <isolated-home> graph index --cwd <copied-fixture> --no-vectors --json",
+    "workerControl": "THREADNOTE_CODE_GRAPH_PARSER_WORKERS",
+    "costBoundary": "Whole indexing includes parser query/facts/worker transport/persistence; existing progress exposes combined extraction/serialization/persistence envelopes, not pure splits."
+  },
+  "evidenceLimits": [
+    "P1 tiny in-process Java warm cost around0.1ms is setup provenance, not whole-worker or whole-index materiality.",
+    "Existing heavy-tail fixture is TypeScript-focused. A five-line Java fixture cannot establish representative Java cost share.",
+    "A temporary tiny fixture copy was prepared but no new smoke/index/capture was executed after the coordinator rejected it as uninformative. No harness, global write or model download was added."
+  ],
+  "nextProof": "One bounded pinned public Java/polyglot fixture with realistic file sizes/constructs, actual whole-worker and cold-index costs, exact facts/coverage, isolated home/cache and vectors disabled; preserve TypeScript compiler authority."
+}

@@ -12,6 +12,18 @@ import {sharedUriFor} from '@threadnote/threadnote/share/index';
 import type {ShareRuntime, ShareTeamsFile} from '@threadnote/threadnote/types';
 import {runCommand} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {
+  canonicalAuthoringJson,
+  decodeNativeAuthoringDocument,
+  nativeAuthoringDigest,
+  nativeSpecIntentDigest,
+} from '@threadnote/workflow-automations/authoring';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  decodePortablePlanRef,
+  publishPortablePlanPayload,
+  readPortablePlanPayload,
+} from '../../src/workflow_automation/portable_plan.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -129,5 +141,105 @@ describe('share two-home round trip', () => {
     expect(ingestedDoc?.metadata.memoryId).toBe(publishedDoc?.metadata.memoryId);
     expect(ingestedDoc?.body).toBe(publishedDoc?.body);
     expect(ingestedDoc?.metadata.topic).toBe(publishedDoc?.metadata.topic);
+
+    const plan = decodeNativeAuthoringDocument({
+      format: 'threadnote-native-authoring',
+      schemaVersion: 1,
+      id: 'fixture',
+      project: 'threadnote',
+      title: 'Shared fixture',
+      objective: 'Transfer one exact plan.',
+      requirements: [{id: 'r', behavior: 'Preserve the fixture.'}],
+      context: {codeRefs: [], evidenceRefs: [], note: 'Synthetic test fixture.'},
+      source: null,
+      sourceFreeReason: 'This share boundary fixture has no repository source.',
+      kind: 'plan',
+      current: {summary: 'The fixture is local.', components: [], contracts: [], diagram: ''},
+      target: {summary: 'The fixture is shared.', components: [], contracts: [], diagram: ''},
+      phases: [
+        {
+          id: 'phase',
+          title: 'Share fixture',
+          outcome: 'A recipient reads it.',
+          dependsOn: [],
+          affectedPaths: [],
+          newPaths: [],
+          contracts: [],
+          safeBoundary: 'Only synthetic data is published.',
+          acceptance: [
+            {
+              id: 'a',
+              criterion: 'Recipient reads the plan.',
+              verification: 'Compare the decoded plan.',
+              requirementIds: ['r'],
+            },
+          ],
+        },
+      ],
+      decisions: [],
+      openQuestions: [],
+      review: {required: true, reason: 'Fixture review.'},
+    });
+    if (plan.kind !== 'plan') throw new Error('Invalid fixture');
+    const documentHash = nativeAuthoringDigest(plan);
+    const payload = {
+      format: 'threadnote-portable-plan' as const,
+      version: 1 as const,
+      project: 'threadnote',
+      plan: {document: canonicalAuthoringJson(plan), documentHash},
+      evidence: [],
+      provenance: {
+        root: {
+          uri: sourceUri,
+          memoryId: 'tn_two_home_roundtrip_fixture',
+          revision: sha256HexSync('synthetic-donor-root'),
+        },
+        documentHash,
+        intentHash: nativeSpecIntentDigest(plan, 2),
+        review: {outcome: 'accepted' as const, blockingIssueCount: 0 as const},
+        approval: 'approved' as const,
+      },
+    };
+    const first = await runEffect(publishPortablePlanPayload(publisher.config, payload, 'default'));
+    const second = await runEffect(publishPortablePlanPayload(publisher.config, payload, 'default'));
+    expect(second.sharedPlanRef).toBe(first.sharedPlanRef);
+    await runShareSync(subscriber.config, {push: false});
+    const recipient = await runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote'));
+    expect(recipient.plan).toEqual(plan);
+    const pin = decodePortablePlanRef(first.sharedPlanRef);
+    const rootUri = `threadnote://user/teammate/memories/shared/default/durable/projects/threadnote/portable-plans/${pin.payloadHash}/root.md`;
+    const rootRelative = Effect.pipe(
+      rootUri,
+      EffectString.replace('threadnote://user/teammate/memories/shared/default/', ''),
+    );
+    const rootFile = canonicalResourceFile(subscriber.home, rootUri);
+    const committedRootFile = join(subscriber.worktree, rootRelative);
+    const originalRoot = await readFile(rootFile, 'utf8');
+    await writeFile(
+      rootFile,
+      Effect.pipe(originalRoot, EffectString.replace('visibility: shared', 'visibility: personal')),
+      'utf8',
+    );
+    await expect(
+      runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote')),
+    ).rejects.toMatchObject({code: 'portable-plan-conflict'});
+    await writeFile(rootFile, originalRoot, 'utf8');
+
+    const privateRoot = Effect.pipe(originalRoot, EffectString.replace('visibility: shared', 'visibility: personal'));
+    await writeFile(rootFile, privateRoot, 'utf8');
+    await writeFile(committedRootFile, privateRoot, 'utf8');
+    await git(['add', '--', rootRelative], subscriber.worktree);
+    await git(['commit', '-m', 'fixture private shared plan root'], subscriber.worktree);
+    await expect(
+      runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote')),
+    ).rejects.toMatchObject({code: 'portable-plan-private'});
+    await git(['revert', '--no-edit', 'HEAD'], subscriber.worktree);
+    await writeFile(rootFile, originalRoot, 'utf8');
+
+    const childUri = `threadnote://user/teammate/memories/shared/default/durable/projects/threadnote/portable-plans/${pin.payloadHash}/page-0.md`;
+    await rm(canonicalResourceFile(subscriber.home, childUri));
+    await expect(
+      runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote')),
+    ).rejects.toMatchObject({code: 'portable-plan-missing'});
   });
 });

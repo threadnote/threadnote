@@ -1,0 +1,306 @@
+{
+  "kind": "p2-first-cases-diagnostic-only",
+  "sourceReference": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+  "sourceCandidate": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+  "qualification": false,
+  "hostActivity": [
+    "Obsolete04003 recall worker active during recall candidate; later idle",
+    "Independent t6 graph index writer active during graph case and owns shared checkout writer gate",
+    "Desktop background activity"
+  ],
+  "globalSmoke": {
+    "runtime": "5.3.6-local.g27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+    "doctorPassed": false,
+    "recall": {
+      "exit": 0,
+      "results": 3,
+      "semanticParticipation": false,
+      "classification": "lexical-only"
+    },
+    "graph": {
+      "exit": 0,
+      "nodes": 12,
+      "snapshot": "cgsn_5a492094c5d856b96fcbc8f7494d9fe6b651c94b",
+      "semanticParticipation": "not-established",
+      "warning": "configured result limit"
+    },
+    "installAttempts": 2,
+    "installFailure": "Activated exact27dd runtime, but doctor/repair failed twice because the lexical corpus changed during vector work. No successful install/doctor or global semantic smoke is claimed."
+  },
+  "recall": {
+    "correctnessEqual": true,
+    "reference": {
+      "receipt": {
+        "filename": "reference-10000-dense-1.json",
+        "sha256": "7885563e627538933871d2589aaea9ca51943fcd1a5a32f6dcd6328c36482e46"
+      },
+      "metrics": [
+        {
+          "maximum": 3296.216334,
+          "mean": 3296.216334,
+          "minimum": 3296.216334,
+          "name": "first-use-request",
+          "p50": 3296.216334,
+          "p95": 3296.216334,
+          "p99": 3296.216334,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 171.600792,
+          "mean": 52.34437913333334,
+          "minimum": 42.292041,
+          "name": "warm-request",
+          "p50": 47.246916,
+          "p95": 66.024167,
+          "p99": 171.600792,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 588201984,
+          "mean": 588201984,
+          "minimum": 588201984,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 588201984,
+          "p95": 588201984,
+          "p99": 588201984,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 56.255416,
+          "mean": 48.60379856666666,
+          "minimum": 43.946,
+          "name": "warm-observer-disabled-control",
+          "p50": 47.871417,
+          "p95": 55.77775,
+          "p99": 56.255416,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 32.247334,
+          "mean": 29.762427066666667,
+          "minimum": 27.746749,
+          "name": "warm-sql-row-transport",
+          "p50": 29.627084,
+          "p95": 32.246253,
+          "p99": 32.247334,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 10.816832,
+          "mean": 10.07388133333333,
+          "minimum": 9.620878,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 10.059959,
+          "p95": 10.485371,
+          "p99": 10.816832,
+          "samples": 30,
+          "unit": "milliseconds"
+        }
+      ],
+      "correctnessDigest": "d88c09555314299914fb0a0135331b0d7a90d83ea27dfa4301ff813f40966ed8",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "sourceFencesCleanAndEqual": true
+    },
+    "candidate": {
+      "receipt": {
+        "filename": "candidate-10000-dense-1.json",
+        "sha256": "b669167c932957d8ad6a16537b171b0fbc52a7b56a2d0b74696290284a858c42"
+      },
+      "metrics": [
+        {
+          "maximum": 645.546583,
+          "mean": 645.546583,
+          "minimum": 645.546583,
+          "name": "first-use-request",
+          "p50": 645.546583,
+          "p95": 645.546583,
+          "p99": 645.546583,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 57.465667,
+          "mean": 48.22033616666667,
+          "minimum": 41.427167,
+          "name": "warm-request",
+          "p50": 48.233875,
+          "p95": 53.057542,
+          "p99": 57.465667,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 608616448,
+          "mean": 608616448,
+          "minimum": 608616448,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 608616448,
+          "p95": 608616448,
+          "p99": 608616448,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 55.508042,
+          "mean": 46.69092916666666,
+          "minimum": 41.236209,
+          "name": "warm-observer-disabled-control",
+          "p50": 45.626084,
+          "p95": 54.862083,
+          "p99": 55.508042,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 31.66217,
+          "mean": 30.268591699999998,
+          "minimum": 28.35733,
+          "name": "warm-sql-row-transport",
+          "p50": 30.351796,
+          "p95": 31.657621,
+          "p99": 31.66217,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 14.155088,
+          "mean": 9.066370933333332,
+          "minimum": 8.485121,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 8.876831,
+          "p95": 10.021582,
+          "p99": 14.155088,
+          "samples": 30,
+          "unit": "milliseconds"
+        }
+      ],
+      "correctnessDigest": "d88c09555314299914fb0a0135331b0d7a90d83ea27dfa4301ff813f40966ed8",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "sourceFencesCleanAndEqual": true
+    },
+    "limitations": [
+      "Temporally separated first cases; candidate host loaded; do not infer performance gain or R5 acceptance",
+      "Synthetic document vectors and real pinned BGE384 recall query inference"
+    ],
+    "inference": {
+      "kind": "real-query",
+      "purpose": "recall",
+      "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+      "weightsVerified": true,
+      "model": {
+        "id": "bge-small-en-v1.5-q8",
+        "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+        "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "dimensions": 384,
+        "backend": "node-llama-cpp-query/synthetic-documents"
+      }
+    }
+  },
+  "graph": {
+    "reference": {
+      "receipt": {
+        "filename": "graph-reference-1.json",
+        "sha256": "af4d95fa226eae546cbe085ada555d5ece526eb01988a79d670118cda7bb5ef1"
+      },
+      "first": {
+        "sample": 0,
+        "milliseconds": 4327.6515,
+        "parentCpuMilliseconds": 1259.709,
+        "count": 5,
+        "digest": "5ce69222c81ffb86072aaeee0a5332bec716d0474d0241aa46c5286228e4b592"
+      },
+      "warmSamples": 30,
+      "leaseReleased": true,
+      "fixture": {
+        "snapshotId": "cgsn_5a492094c5d856b96fcbc8f7494d9fe6b651c94b",
+        "graphContentId": "cgc_891fc218d615f66b21b610c2b040b6175fa9ca1b",
+        "commit": "396069f279cda852163b7202e35131238eb14a73",
+        "symbolCount": 176393,
+        "vectorCount": 35782
+      },
+      "model": {
+        "id": "embeddinggemma-2-q8",
+        "dimensions": 768,
+        "templateVersion": 2,
+        "sha256": "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+        "revision": "6ea3e3a309d12a4779cfda98b8c19800d2d5da71"
+      },
+      "payload": {
+        "payloadSha256": "95a8bbe9820c565479803fac06d19d6171ee5453b4e772a4ab5364d0d2374df0",
+        "observedRows": 35782
+      },
+      "outputDigests": 1,
+      "warmMilliseconds": {
+        "samples": 30,
+        "minimum": 640.591167,
+        "p50": 649.828125,
+        "p95": 1846.615125,
+        "maximum": 2092.808833
+      },
+      "sampler": {
+        "method": {
+          "availability": "available",
+          "parentIdentityValidation": "darwin-ps-lstart",
+          "sampleIntervalMilliseconds": 250,
+          "scope": "recursive-process-tree",
+          "source": "darwin-ps"
+        },
+        "phase": {
+          "cpuMilliseconds": 28270,
+          "processPeakCount": 2,
+          "processSampleAttempts": 87,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 412,
+          "processSamples": 87,
+          "rssPeakBytes": 1623670784,
+          "temporaryLinkedPeakBytes": 1586,
+          "temporaryOpenAttempts": 24,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 24,
+          "databasePeakBytes": 1217724416,
+          "journalPeakBytes": 0,
+          "samples": 783,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 1586,
+          "walPeakBytes": 0
+        }
+      },
+      "sourceFencesCleanAndEqual": true
+    },
+    "candidate": {
+      "state": "unavailable",
+      "attempts": [
+        {
+          "state": "failed",
+          "boundary": "snapshot-lease release",
+          "reason": "writer-contention",
+          "measurementsRetained": false
+        },
+        {
+          "state": "failed-closed",
+          "boundary": "snapshot-lease acquire",
+          "reason": "writer-contention",
+          "measurementsStarted": false
+        }
+      ],
+      "furtherLocalCaptures": "stopped"
+    },
+    "limitations": [
+      "Actual semantic-score retrieval includes production verification, isolated query inference, SQL and graph scoring; excludes outer CLI/lexical traversal",
+      "Preflight payload hash warms database/cache; sample0 is runtime/model first query, not cold storage",
+      "No candidate graph evidence or graph improvement/qualification claim",
+      "No owned source-model worker remained after programs exited; no process signals used",
+      "External sampler overhead is not separately isolated; reference-only actual graph timings cannot establish candidate benefit."
+    ]
+  },
+  "status": "Historical diagnostics; DEFER experimental TypeScript change and retain existing runtime",
+  "phaseComplete": false,
+  "canonicalRunComplete": false,
+  "runtimeExperimentShipped": false
+}

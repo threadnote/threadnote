@@ -6,7 +6,8 @@
     "./performance": "./src/performance.ts",
     "./benchmark": "./src/benchmark.ts",
     "./external-evidence": "./src/external-evidence.ts",
-    "./public-controls": "./src/public-controls.ts"
+    "./public-controls": "./src/public-controls.ts",
+    "./native-performance": "./src/native-performance.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

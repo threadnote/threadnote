@@ -1,0 +1,1040 @@
+{
+  "version": 1,
+  "kind": "diagnostic",
+  "operation": "source-mode CLI graph analyze --view full --freshness allow-stale --read-timeout-ms60000 --json",
+  "runs": [
+    {
+      "repeat": 1,
+      "exitCode": 0,
+      "wallMilliseconds": 14133.93091596663,
+      "bytes": 380920,
+      "executedSourceCommit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+      "rawOutputSha256": "bb844cfe97a2e8eaf44a2d84b4cbdb4041cc8dafec4c852eda694854da8a8966",
+      "analysisFixture": {
+        "commit": "a22b434b01e4d2a5aa9463714a35942ced38e731",
+        "dirty": false,
+        "id": "cgsn_324cfb54bedeb4765196580d81ccd904e5c3f118",
+        "repositoryId": "ceb24ab5364b492f5c89a7ebb189f2649f8fd4e608da74f10193048d3c5bb951",
+        "worktreeId": "9dc37ed444e5dfa60bed26f46e26b3bd5a16bfac8a6d18c9aecb8c7eddffc714"
+      },
+      "freshness": "stale",
+      "coverage": {
+        "aggregates": {
+          "edges": {
+            "complete": true,
+            "rows": 592174,
+            "source": "persisted-summary"
+          },
+          "symbols": {
+            "complete": true,
+            "rows": 180749,
+            "source": "persisted-summary"
+          }
+        },
+        "complete": true,
+        "edgeMetricsComplete": true,
+        "edgesComplete": true,
+        "nodesComplete": true,
+        "topology": {
+          "complete": true,
+          "state": "complete"
+        }
+      },
+      "statistics": {
+        "analyzedEdgeCount": 274985,
+        "analyzedNodeCount": 180749,
+        "aggregatedEdgeCount": 592174,
+        "aggregatedNodeCount": 180749,
+        "averageDegree": 3.04272776,
+        "communityCount": 3349,
+        "connectedComponentCount": 780,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 43,
+        "kinds": [
+          {
+            "count": 149094,
+            "value": "variable"
+          },
+          {
+            "count": 17391,
+            "value": "function"
+          },
+          {
+            "count": 3970,
+            "value": "interface"
+          },
+          {
+            "count": 3442,
+            "value": "module"
+          },
+          {
+            "count": 2789,
+            "value": "property"
+          },
+          {
+            "count": 1608,
+            "value": "type"
+          },
+          {
+            "count": 770,
+            "value": "method"
+          },
+          {
+            "count": 561,
+            "value": "class"
+          },
+          {
+            "count": 517,
+            "value": "heading"
+          },
+          {
+            "count": 165,
+            "value": "item"
+          },
+          {
+            "count": 140,
+            "value": "document"
+          },
+          {
+            "count": 81,
+            "value": "table"
+          },
+          {
+            "count": 61,
+            "value": "constructor"
+          },
+          {
+            "count": 28,
+            "value": "package"
+          },
+          {
+            "count": 27,
+            "value": "target"
+          },
+          {
+            "count": 16,
+            "value": "section"
+          },
+          {
+            "count": 15,
+            "value": "rationale"
+          },
+          {
+            "count": 14,
+            "value": "index"
+          },
+          {
+            "count": 13,
+            "value": "constant"
+          },
+          {
+            "count": 12,
+            "value": "external-resource"
+          },
+          {
+            "count": 11,
+            "value": "struct"
+          },
+          {
+            "count": 10,
+            "value": "stage"
+          },
+          {
+            "count": 10,
+            "value": "trigger"
+          },
+          {
+            "count": 2,
+            "value": "config"
+          },
+          {
+            "count": 1,
+            "value": "resource"
+          },
+          {
+            "count": 1,
+            "value": "schema"
+          }
+        ],
+        "languages": [
+          {
+            "count": 174695,
+            "value": "typescript"
+          },
+          {
+            "count": 2620,
+            "value": "json"
+          },
+          {
+            "count": 1690,
+            "value": "javascript"
+          },
+          {
+            "count": 645,
+            "value": "markdown"
+          },
+          {
+            "count": 209,
+            "value": "toml"
+          },
+          {
+            "count": 208,
+            "value": "go"
+          },
+          {
+            "count": 208,
+            "value": "yaml"
+          },
+          {
+            "count": 158,
+            "value": "python"
+          },
+          {
+            "count": 81,
+            "value": "sql"
+          },
+          {
+            "count": 47,
+            "value": "bash"
+          },
+          {
+            "count": 40,
+            "value": "bazel-build"
+          },
+          {
+            "count": 30,
+            "value": "document"
+          },
+          {
+            "count": 28,
+            "value": "starlark"
+          },
+          {
+            "count": 27,
+            "value": "npm-manifest"
+          },
+          {
+            "count": 17,
+            "value": "powershell"
+          },
+          {
+            "count": 15,
+            "value": "dockerfile"
+          },
+          {
+            "count": 12,
+            "value": "url"
+          },
+          {
+            "count": 4,
+            "value": "objective-c"
+          },
+          {
+            "count": 4,
+            "value": "swift"
+          },
+          {
+            "count": 3,
+            "value": "bazelrc"
+          },
+          {
+            "count": 3,
+            "value": "java"
+          },
+          {
+            "count": 3,
+            "value": "kotlin"
+          },
+          {
+            "count": 1,
+            "value": "bazel-module"
+          },
+          {
+            "count": 1,
+            "value": "go-manifest"
+          }
+        ],
+        "maximumDegree": 1252,
+        "provenances": [
+          {
+            "count": 494033,
+            "value": "syntactic"
+          },
+          {
+            "count": 97636,
+            "value": "resolved"
+          },
+          {
+            "count": 505,
+            "value": "declared"
+          }
+        ],
+        "relations": [
+          {
+            "count": 304771,
+            "value": "calls"
+          },
+          {
+            "count": 177111,
+            "value": "contains"
+          },
+          {
+            "count": 94316,
+            "value": "imports"
+          },
+          {
+            "count": 12194,
+            "value": "constructs"
+          },
+          {
+            "count": 1451,
+            "value": "reexports"
+          },
+          {
+            "count": 1425,
+            "value": "documents"
+          },
+          {
+            "count": 444,
+            "value": "depends_on"
+          },
+          {
+            "count": 215,
+            "value": "implements"
+          },
+          {
+            "count": 146,
+            "value": "references"
+          },
+          {
+            "count": 95,
+            "value": "extends"
+          },
+          {
+            "count": 6,
+            "value": "exports"
+          }
+        ],
+        "scannedEdgeCount": 592174,
+        "selectedEdgeCount": 592174,
+        "selfLoopCount": 108,
+        "snapshotEdgeCount": 592174,
+        "snapshotNodeCount": 180749,
+        "unresolvedEndpointEdgeCount": 317189
+      },
+      "usage": {
+        "aggregateEdgePageReads": 0,
+        "aggregateEdgeRows": 592174,
+        "aggregateSummaryReads": 1,
+        "aggregateSymbolPageReads": 0,
+        "aggregateSymbolRows": 180749,
+        "durationMilliseconds": 12631,
+        "edgePageReads": 1186,
+        "edgeVisits": 1184348,
+        "nodePageReads": 181
+      },
+      "budget": {
+        "aggregatePageSize": 50000,
+        "maxEdges": 592174,
+        "maxEdgeVisits": 1184348,
+        "maxDurationMilliseconds": 57429,
+        "maxNodes": 180749,
+        "pageSize": 1000
+      },
+      "structuralOutputDigest": "0d3ef5a732ef768030c051a1cd1bb46a0b8e7240f8b62a03514c2afad2928f8c",
+      "commandCpuMilliseconds": 16540.0,
+      "commandMaximumResidentSetBytes": 1811316736
+    },
+    {
+      "repeat": 2,
+      "exitCode": 0,
+      "wallMilliseconds": 13014.198082964867,
+      "bytes": 380920,
+      "executedSourceCommit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+      "rawOutputSha256": "af8ad8f047197a04e05073b7af9f0ae34a124110219e2e43fa4029053737013f",
+      "analysisFixture": {
+        "commit": "a22b434b01e4d2a5aa9463714a35942ced38e731",
+        "dirty": false,
+        "id": "cgsn_324cfb54bedeb4765196580d81ccd904e5c3f118",
+        "repositoryId": "ceb24ab5364b492f5c89a7ebb189f2649f8fd4e608da74f10193048d3c5bb951",
+        "worktreeId": "9dc37ed444e5dfa60bed26f46e26b3bd5a16bfac8a6d18c9aecb8c7eddffc714"
+      },
+      "freshness": "stale",
+      "coverage": {
+        "aggregates": {
+          "edges": {
+            "complete": true,
+            "rows": 592174,
+            "source": "persisted-summary"
+          },
+          "symbols": {
+            "complete": true,
+            "rows": 180749,
+            "source": "persisted-summary"
+          }
+        },
+        "complete": true,
+        "edgeMetricsComplete": true,
+        "edgesComplete": true,
+        "nodesComplete": true,
+        "topology": {
+          "complete": true,
+          "state": "complete"
+        }
+      },
+      "statistics": {
+        "analyzedEdgeCount": 274985,
+        "analyzedNodeCount": 180749,
+        "aggregatedEdgeCount": 592174,
+        "aggregatedNodeCount": 180749,
+        "averageDegree": 3.04272776,
+        "communityCount": 3349,
+        "connectedComponentCount": 780,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 43,
+        "kinds": [
+          {
+            "count": 149094,
+            "value": "variable"
+          },
+          {
+            "count": 17391,
+            "value": "function"
+          },
+          {
+            "count": 3970,
+            "value": "interface"
+          },
+          {
+            "count": 3442,
+            "value": "module"
+          },
+          {
+            "count": 2789,
+            "value": "property"
+          },
+          {
+            "count": 1608,
+            "value": "type"
+          },
+          {
+            "count": 770,
+            "value": "method"
+          },
+          {
+            "count": 561,
+            "value": "class"
+          },
+          {
+            "count": 517,
+            "value": "heading"
+          },
+          {
+            "count": 165,
+            "value": "item"
+          },
+          {
+            "count": 140,
+            "value": "document"
+          },
+          {
+            "count": 81,
+            "value": "table"
+          },
+          {
+            "count": 61,
+            "value": "constructor"
+          },
+          {
+            "count": 28,
+            "value": "package"
+          },
+          {
+            "count": 27,
+            "value": "target"
+          },
+          {
+            "count": 16,
+            "value": "section"
+          },
+          {
+            "count": 15,
+            "value": "rationale"
+          },
+          {
+            "count": 14,
+            "value": "index"
+          },
+          {
+            "count": 13,
+            "value": "constant"
+          },
+          {
+            "count": 12,
+            "value": "external-resource"
+          },
+          {
+            "count": 11,
+            "value": "struct"
+          },
+          {
+            "count": 10,
+            "value": "stage"
+          },
+          {
+            "count": 10,
+            "value": "trigger"
+          },
+          {
+            "count": 2,
+            "value": "config"
+          },
+          {
+            "count": 1,
+            "value": "resource"
+          },
+          {
+            "count": 1,
+            "value": "schema"
+          }
+        ],
+        "languages": [
+          {
+            "count": 174695,
+            "value": "typescript"
+          },
+          {
+            "count": 2620,
+            "value": "json"
+          },
+          {
+            "count": 1690,
+            "value": "javascript"
+          },
+          {
+            "count": 645,
+            "value": "markdown"
+          },
+          {
+            "count": 209,
+            "value": "toml"
+          },
+          {
+            "count": 208,
+            "value": "go"
+          },
+          {
+            "count": 208,
+            "value": "yaml"
+          },
+          {
+            "count": 158,
+            "value": "python"
+          },
+          {
+            "count": 81,
+            "value": "sql"
+          },
+          {
+            "count": 47,
+            "value": "bash"
+          },
+          {
+            "count": 40,
+            "value": "bazel-build"
+          },
+          {
+            "count": 30,
+            "value": "document"
+          },
+          {
+            "count": 28,
+            "value": "starlark"
+          },
+          {
+            "count": 27,
+            "value": "npm-manifest"
+          },
+          {
+            "count": 17,
+            "value": "powershell"
+          },
+          {
+            "count": 15,
+            "value": "dockerfile"
+          },
+          {
+            "count": 12,
+            "value": "url"
+          },
+          {
+            "count": 4,
+            "value": "objective-c"
+          },
+          {
+            "count": 4,
+            "value": "swift"
+          },
+          {
+            "count": 3,
+            "value": "bazelrc"
+          },
+          {
+            "count": 3,
+            "value": "java"
+          },
+          {
+            "count": 3,
+            "value": "kotlin"
+          },
+          {
+            "count": 1,
+            "value": "bazel-module"
+          },
+          {
+            "count": 1,
+            "value": "go-manifest"
+          }
+        ],
+        "maximumDegree": 1252,
+        "provenances": [
+          {
+            "count": 494033,
+            "value": "syntactic"
+          },
+          {
+            "count": 97636,
+            "value": "resolved"
+          },
+          {
+            "count": 505,
+            "value": "declared"
+          }
+        ],
+        "relations": [
+          {
+            "count": 304771,
+            "value": "calls"
+          },
+          {
+            "count": 177111,
+            "value": "contains"
+          },
+          {
+            "count": 94316,
+            "value": "imports"
+          },
+          {
+            "count": 12194,
+            "value": "constructs"
+          },
+          {
+            "count": 1451,
+            "value": "reexports"
+          },
+          {
+            "count": 1425,
+            "value": "documents"
+          },
+          {
+            "count": 444,
+            "value": "depends_on"
+          },
+          {
+            "count": 215,
+            "value": "implements"
+          },
+          {
+            "count": 146,
+            "value": "references"
+          },
+          {
+            "count": 95,
+            "value": "extends"
+          },
+          {
+            "count": 6,
+            "value": "exports"
+          }
+        ],
+        "scannedEdgeCount": 592174,
+        "selectedEdgeCount": 592174,
+        "selfLoopCount": 108,
+        "snapshotEdgeCount": 592174,
+        "snapshotNodeCount": 180749,
+        "unresolvedEndpointEdgeCount": 317189
+      },
+      "usage": {
+        "aggregateEdgePageReads": 0,
+        "aggregateEdgeRows": 592174,
+        "aggregateSummaryReads": 1,
+        "aggregateSymbolPageReads": 0,
+        "aggregateSymbolRows": 180749,
+        "durationMilliseconds": 11514,
+        "edgePageReads": 1186,
+        "edgeVisits": 1184348,
+        "nodePageReads": 181
+      },
+      "budget": {
+        "aggregatePageSize": 50000,
+        "maxEdges": 592174,
+        "maxEdgeVisits": 1184348,
+        "maxDurationMilliseconds": 57423,
+        "maxNodes": 180749,
+        "pageSize": 1000
+      },
+      "structuralOutputDigest": "0d3ef5a732ef768030c051a1cd1bb46a0b8e7240f8b62a03514c2afad2928f8c",
+      "commandCpuMilliseconds": 15630.0,
+      "commandMaximumResidentSetBytes": 1811808256
+    },
+    {
+      "repeat": 3,
+      "exitCode": 0,
+      "wallMilliseconds": 13579.368124948815,
+      "bytes": 380920,
+      "executedSourceCommit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+      "rawOutputSha256": "5da2d9bc327e60cab8ff8f3a23e1fe8fd094ff56478416167421fa848f1bd4d1",
+      "analysisFixture": {
+        "commit": "a22b434b01e4d2a5aa9463714a35942ced38e731",
+        "dirty": false,
+        "id": "cgsn_324cfb54bedeb4765196580d81ccd904e5c3f118",
+        "repositoryId": "ceb24ab5364b492f5c89a7ebb189f2649f8fd4e608da74f10193048d3c5bb951",
+        "worktreeId": "9dc37ed444e5dfa60bed26f46e26b3bd5a16bfac8a6d18c9aecb8c7eddffc714"
+      },
+      "freshness": "stale",
+      "coverage": {
+        "aggregates": {
+          "edges": {
+            "complete": true,
+            "rows": 592174,
+            "source": "persisted-summary"
+          },
+          "symbols": {
+            "complete": true,
+            "rows": 180749,
+            "source": "persisted-summary"
+          }
+        },
+        "complete": true,
+        "edgeMetricsComplete": true,
+        "edgesComplete": true,
+        "nodesComplete": true,
+        "topology": {
+          "complete": true,
+          "state": "complete"
+        }
+      },
+      "statistics": {
+        "analyzedEdgeCount": 274985,
+        "analyzedNodeCount": 180749,
+        "aggregatedEdgeCount": 592174,
+        "aggregatedNodeCount": 180749,
+        "averageDegree": 3.04272776,
+        "communityCount": 3349,
+        "connectedComponentCount": 780,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 43,
+        "kinds": [
+          {
+            "count": 149094,
+            "value": "variable"
+          },
+          {
+            "count": 17391,
+            "value": "function"
+          },
+          {
+            "count": 3970,
+            "value": "interface"
+          },
+          {
+            "count": 3442,
+            "value": "module"
+          },
+          {
+            "count": 2789,
+            "value": "property"
+          },
+          {
+            "count": 1608,
+            "value": "type"
+          },
+          {
+            "count": 770,
+            "value": "method"
+          },
+          {
+            "count": 561,
+            "value": "class"
+          },
+          {
+            "count": 517,
+            "value": "heading"
+          },
+          {
+            "count": 165,
+            "value": "item"
+          },
+          {
+            "count": 140,
+            "value": "document"
+          },
+          {
+            "count": 81,
+            "value": "table"
+          },
+          {
+            "count": 61,
+            "value": "constructor"
+          },
+          {
+            "count": 28,
+            "value": "package"
+          },
+          {
+            "count": 27,
+            "value": "target"
+          },
+          {
+            "count": 16,
+            "value": "section"
+          },
+          {
+            "count": 15,
+            "value": "rationale"
+          },
+          {
+            "count": 14,
+            "value": "index"
+          },
+          {
+            "count": 13,
+            "value": "constant"
+          },
+          {
+            "count": 12,
+            "value": "external-resource"
+          },
+          {
+            "count": 11,
+            "value": "struct"
+          },
+          {
+            "count": 10,
+            "value": "stage"
+          },
+          {
+            "count": 10,
+            "value": "trigger"
+          },
+          {
+            "count": 2,
+            "value": "config"
+          },
+          {
+            "count": 1,
+            "value": "resource"
+          },
+          {
+            "count": 1,
+            "value": "schema"
+          }
+        ],
+        "languages": [
+          {
+            "count": 174695,
+            "value": "typescript"
+          },
+          {
+            "count": 2620,
+            "value": "json"
+          },
+          {
+            "count": 1690,
+            "value": "javascript"
+          },
+          {
+            "count": 645,
+            "value": "markdown"
+          },
+          {
+            "count": 209,
+            "value": "toml"
+          },
+          {
+            "count": 208,
+            "value": "go"
+          },
+          {
+            "count": 208,
+            "value": "yaml"
+          },
+          {
+            "count": 158,
+            "value": "python"
+          },
+          {
+            "count": 81,
+            "value": "sql"
+          },
+          {
+            "count": 47,
+            "value": "bash"
+          },
+          {
+            "count": 40,
+            "value": "bazel-build"
+          },
+          {
+            "count": 30,
+            "value": "document"
+          },
+          {
+            "count": 28,
+            "value": "starlark"
+          },
+          {
+            "count": 27,
+            "value": "npm-manifest"
+          },
+          {
+            "count": 17,
+            "value": "powershell"
+          },
+          {
+            "count": 15,
+            "value": "dockerfile"
+          },
+          {
+            "count": 12,
+            "value": "url"
+          },
+          {
+            "count": 4,
+            "value": "objective-c"
+          },
+          {
+            "count": 4,
+            "value": "swift"
+          },
+          {
+            "count": 3,
+            "value": "bazelrc"
+          },
+          {
+            "count": 3,
+            "value": "java"
+          },
+          {
+            "count": 3,
+            "value": "kotlin"
+          },
+          {
+            "count": 1,
+            "value": "bazel-module"
+          },
+          {
+            "count": 1,
+            "value": "go-manifest"
+          }
+        ],
+        "maximumDegree": 1252,
+        "provenances": [
+          {
+            "count": 494033,
+            "value": "syntactic"
+          },
+          {
+            "count": 97636,
+            "value": "resolved"
+          },
+          {
+            "count": 505,
+            "value": "declared"
+          }
+        ],
+        "relations": [
+          {
+            "count": 304771,
+            "value": "calls"
+          },
+          {
+            "count": 177111,
+            "value": "contains"
+          },
+          {
+            "count": 94316,
+            "value": "imports"
+          },
+          {
+            "count": 12194,
+            "value": "constructs"
+          },
+          {
+            "count": 1451,
+            "value": "reexports"
+          },
+          {
+            "count": 1425,
+            "value": "documents"
+          },
+          {
+            "count": 444,
+            "value": "depends_on"
+          },
+          {
+            "count": 215,
+            "value": "implements"
+          },
+          {
+            "count": 146,
+            "value": "references"
+          },
+          {
+            "count": 95,
+            "value": "extends"
+          },
+          {
+            "count": 6,
+            "value": "exports"
+          }
+        ],
+        "scannedEdgeCount": 592174,
+        "selectedEdgeCount": 592174,
+        "selfLoopCount": 108,
+        "snapshotEdgeCount": 592174,
+        "snapshotNodeCount": 180749,
+        "unresolvedEndpointEdgeCount": 317189
+      },
+      "usage": {
+        "aggregateEdgePageReads": 0,
+        "aggregateEdgeRows": 592174,
+        "aggregateSummaryReads": 1,
+        "aggregateSymbolPageReads": 0,
+        "aggregateSymbolRows": 180749,
+        "durationMilliseconds": 12051,
+        "edgePageReads": 1186,
+        "edgeVisits": 1184348,
+        "nodePageReads": 181
+      },
+      "budget": {
+        "aggregatePageSize": 50000,
+        "maxEdges": 592174,
+        "maxEdgeVisits": 1184348,
+        "maxDurationMilliseconds": 57412,
+        "maxNodes": 180749,
+        "pageSize": 1000
+      },
+      "structuralOutputDigest": "0d3ef5a732ef768030c051a1cd1bb46a0b8e7240f8b62a03514c2afad2928f8c",
+      "commandCpuMilliseconds": 16540.0,
+      "commandMaximumResidentSetBytes": 1760231424
+    }
+  ],
+  "limitations": [
+    "CLI wall time includes process startup, graph loading, computation and JSON projection; no separate loading/computation attribution is claimed.",
+    "OS time -l process usage is not process-tree peak RSS.",
+    "Snapshot fixture is pinned to a22b434b, while executed measurement source is908cc8a8b; stale fixture coverage is complete.",
+    "Three serial baseline replicas, no candidate arms or native qualification.",
+    "Raw full CLI outputs remain private scratch artifacts; retained structural digests exclude usage, dynamic remaining-duration budgets and per-request lease cleanup expiry."
+  ]
+}

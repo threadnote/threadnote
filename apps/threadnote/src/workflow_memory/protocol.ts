@@ -98,6 +98,7 @@ export type WorkflowOperationInspectionRequest = typeof WorkflowOperationInspect
 
 export interface WorkflowBinding {
   readonly bindingId: string;
+  readonly graphProject?: string;
   readonly naming?: WorkflowNameFamily;
   readonly workflowRunId: string;
   readonly profile: WorkflowProfile;

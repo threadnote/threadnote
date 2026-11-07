@@ -15,15 +15,19 @@ import {
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join, resolve} from '@threadnote/testing/node-path';
 import {Database} from 'bun:sqlite';
-import {Effect} from 'effect';
-import {afterEach, describe, expect, it} from 'vitest';
+import {Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {TestClock} from 'effect/testing';
+import {afterEach, describe, expect, it, vi} from 'vitest';
+import {it as effectIt} from '@effect/vitest';
 import {codeGraphDoctorCheck} from '@threadnote/graph/maintenance';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {SystemInfo} from '@threadnote/platform/system';
-import {runDoctor, runRepair} from '@threadnote/threadnote/lifecycle';
+import {runDoctor, runInstall, runRepair} from '@threadnote/threadnote/lifecycle';
+import {activateStandaloneRelease, withStandaloneInstallationLock} from '@threadnote/threadnote/installations';
+import {installCommandShim} from '@threadnote/threadnote/command-shim';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
@@ -32,6 +36,8 @@ import {THREADNOTE_STORAGE_LAYOUT_VERSION} from '@threadnote/store/layout';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {assertSafeThreadnoteHomeForErase} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -196,63 +202,231 @@ describe('read-only doctor', () => {
 });
 
 describe('repair failure propagation', () => {
-  it('fails repair when the core recall index cannot be rebuilt', async () => {
-    const root = await temporaryRoot('threadnote-repair-recall-failure-');
-    const home = join(root, 'home');
-    const userHome = join(root, 'user');
-    const config = runtimeConfig(home);
-    await mkdir(join(home, 'indexes'), {recursive: true});
-    await writeFile(join(home, 'indexes', 'lexical'), 'blocks the lexical index directory\n');
+  effectIt.effect('dry-run install previews the candidate release without changing active routing', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const system = yield* SystemInfo;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-install-dry-run-routing-'});
+        const installRoot = path.join(root, 'install');
+        const activeRoot = path.join(installRoot, 'versions', '66.4.0');
+        const candidateRoot = path.join(installRoot, 'versions', '66.5.0');
+        const binDirectory = path.join(root, 'bin');
+        const userHome = path.join(root, 'user');
+        const home = path.join(userHome, '.threadnote');
+        const config = runtimeConfig(home);
+        const activeMetadata = `${JSON.stringify({version: '66.4.0'})}\n`;
+        const candidateMetadata = `${JSON.stringify({version: '66.5.0'})}\n`;
+        yield* fs.makeDirectory(activeRoot, {recursive: true});
+        yield* fs.makeDirectory(candidateRoot, {recursive: true});
+        yield* fs.makeDirectory(binDirectory, {recursive: true});
+        yield* fs.writeFileString(path.join(activeRoot, 'release.json'), activeMetadata);
+        yield* fs.writeFileString(path.join(candidateRoot, 'release.json'), candidateMetadata);
+        const testSystem = SystemInfo.of({
+          ...system,
+          environment: () => ({
+            ...system.environment(),
+            HOME: userHome,
+            NVM_DIR: undefined,
+            NVM_HOME: undefined,
+            THREADNOTE_BIN_DIR: binDirectory,
+            THREADNOTE_INSTALL_ROOT: installRoot,
+          }),
+          executablePath: path.join(candidateRoot, 'threadnote'),
+          homeDirectory: userHome,
+        });
+        yield* activateStandaloneRelease(activeRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const activePointerBefore = yield* fs.readFileString(path.join(installRoot, 'active-release.json'));
+        const cliBefore = yield* fs.readFileString(path.join(binDirectory, 'threadnote'));
+        const mcpBefore = yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'));
+        const modelPath = path.join(home, 'models', 'embedding', embeddingManifest.id, 'fixture.gguf');
+        const installation = {
+          bytes: embeddingManifest.size,
+          installed: true,
+          modelId: embeddingManifest.id,
+          partialBytes: 0,
+          path: modelPath,
+          verified: true,
+        };
+        const modelStore = LocalModelStore.of({
+          install: () => Effect.die(TestError.make({message: 'Dry-run install must not install a model.'})),
+          path: () => modelPath,
+          remove: () => Effect.succeed(false),
+          status: () => Effect.succeed(installation),
+          verify: () => Effect.succeed(installation),
+        } satisfies LocalModelStoreShape);
+        const preview = yield* Effect.acquireUseRelease(
+          Effect.sync(() => vi.stubGlobal('THREADNOTE_STANDALONE', true)),
+          () =>
+            captureConsole(
+              runInstall(config, {
+                dryRun: true,
+                modelSetup: false,
+                printNextSteps: false,
+                skipRecallIndexes: true,
+                start: false,
+              }).pipe(
+                Effect.provideService(LocalModelStore, modelStore),
+                Effect.provideService(SystemInfo, testSystem),
+              ),
+            ),
+          () => Effect.sync(() => vi.unstubAllGlobals()),
+        );
 
-    const modelPath = join(home, 'models', 'embedding', embeddingManifest.id, 'fixture.gguf');
-    const installation = {
-      bytes: embeddingManifest.size,
-      installed: true,
-      modelId: embeddingManifest.id,
-      partialBytes: 0,
-      path: modelPath,
-      verified: true,
-    };
-    const modelStore = LocalModelStore.of({
-      install: () => Effect.succeed({...installation, resumed: false, sourceUrl: 'fixture://embedding'}),
-      path: () => modelPath,
-      remove: () => Effect.succeed(false),
-      status: () => Effect.succeed(installation),
-      verify: () => Effect.succeed(installation),
-    } satisfies LocalModelStoreShape);
-    const modelRuntime = LocalModelRuntime.of({
-      diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
-      embedMany: () =>
-        Effect.die(TestError.make({message: 'Embedding must not start when lexical index setup fails.'})),
-      generate: () => Effect.die(TestError.make({message: 'Unexpected generation.'})),
-      rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking.'})),
-    });
+        expect(preview.output).toContain('Would mark standalone Threadnote 66.5.0 as active.');
+        expect(preview.output).toContain(`Would write command launcher: ${path.join(binDirectory, 'threadnote')}`);
+        expect(preview.output).toContain(
+          `Would write command launcher: ${path.join(binDirectory, 'threadnote-mcp-server')}`,
+        );
+        expect(preview.output).not.toContain('Command launcher already current');
+        expect(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))).toBe(activePointerBefore);
+        expect(yield* fs.readFileString(path.join(activeRoot, 'release.json'))).toBe(activeMetadata);
+        expect(yield* fs.readFileString(path.join(candidateRoot, 'release.json'))).toBe(candidateMetadata);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote'))).toBe(cliBefore);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'))).toBe(mcpBefore);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
-    await expect(
-      runEffect(
-        Effect.gen(function* () {
-          const system = yield* SystemInfo;
-          const testSystem = SystemInfo.of({
-            ...system,
-            environment: () => ({
-              ...system.environment(),
-              HOME: userHome,
-              NVM_DIR: undefined,
-              NVM_HOME: undefined,
-              THREADNOTE_BIN_DIR: join(root, 'bin'),
-              THREADNOTE_INSTALL_ROOT: join(root, 'install'),
-            }),
-            homeDirectory: userHome,
-          });
-          yield* runRepair(config, {mcp: 'none', postUpdate: false}).pipe(
-            Effect.provideService(LocalModelRuntime, modelRuntime),
-            Effect.provideService(LocalModelStore, modelStore),
-            Effect.provideService(SystemInfo, testSystem),
+  effectIt.effect('repairs launchers under the release lock and preserves active ownership on recall failure', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const system = yield* SystemInfo;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-repair-recall-failure-'});
+        const home = path.join(root, 'home');
+        const userHome = path.join(root, 'user');
+        const config = runtimeConfig(home);
+        const installRoot = path.join(root, 'install');
+        const releaseRoot = path.join(installRoot, 'versions', '66.4.0');
+        const binDirectory = path.join(root, 'bin');
+        yield* fs.makeDirectory(releaseRoot, {recursive: true});
+        yield* fs.makeDirectory(binDirectory, {recursive: true});
+        const releaseMetadata = `${JSON.stringify({version: '66.4.0'})}\n`;
+        yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), releaseMetadata);
+        const foreignShim =
+          '#!/bin/sh\n# Generated by threadnote\nTHREADNOTE_ENTRY="/foreign/threadnote"\nexec "$THREADNOTE_ENTRY" "$@"\n';
+        yield* fs.writeFileString(path.join(binDirectory, 'threadnote'), foreignShim, {mode: 0o755});
+        yield* fs.writeFileString(path.join(binDirectory, 'threadnote-mcp-server'), foreignShim, {mode: 0o755});
+        const testSystem = SystemInfo.of({
+          ...system,
+          environment: () => ({
+            ...system.environment(),
+            HOME: userHome,
+            NVM_DIR: undefined,
+            NVM_HOME: undefined,
+            THREADNOTE_BIN_DIR: binDirectory,
+            THREADNOTE_INSTALL_ROOT: installRoot,
+          }),
+          homeDirectory: userHome,
+        });
+        yield* activateStandaloneRelease(releaseRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const activePointerA = yield* fs.readFileString(path.join(installRoot, 'active-release.json'));
+        yield* fs.makeDirectory(path.join(home, 'indexes'), {recursive: true});
+        yield* fs.writeFileString(path.join(home, 'indexes', 'lexical'), 'blocks the lexical index directory\n');
+
+        const modelPath = path.join(home, 'models', 'embedding', embeddingManifest.id, 'fixture.gguf');
+        const installation = {
+          bytes: embeddingManifest.size,
+          installed: true,
+          modelId: embeddingManifest.id,
+          partialBytes: 0,
+          path: modelPath,
+          verified: true,
+        };
+        const modelStore = LocalModelStore.of({
+          install: () => Effect.succeed({...installation, resumed: false, sourceUrl: 'fixture://embedding'}),
+          path: () => modelPath,
+          remove: () => Effect.succeed(false),
+          status: () => Effect.succeed(installation),
+          verify: () => Effect.succeed(installation),
+        } satisfies LocalModelStoreShape);
+        const modelRuntime = LocalModelRuntime.of({
+          diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
+          embedMany: () =>
+            Effect.die(TestError.make({message: 'Embedding must not start when lexical index setup fails.'})),
+          generate: () => Effect.die(TestError.make({message: 'Unexpected generation.'})),
+          rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking.'})),
+        });
+        const executeRepair = (coreOnly: boolean, fileSystem: FileSystem.FileSystem = fs) =>
+          captureConsole(
+            runRepair(config, {coreOnly, mcp: 'none', postUpdate: false, skipAgentIntegrations: true}).pipe(
+              Effect.provideService(LocalModelRuntime, modelRuntime),
+              Effect.provideService(LocalModelStore, modelStore),
+              Effect.provideService(SystemInfo, testSystem),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.result,
+            ),
           );
-        }),
-      ),
-    ).rejects.toThrow(/Recall index repair failed/);
-  });
+        const expectRecallFailure = (value: Result.Result<unknown, unknown>) => {
+          expect(Result.isFailure(value)).toBe(true);
+          if (Result.isFailure(value)) expect(String(value.failure)).toContain('Recall index repair failed');
+        };
+
+        const ordinary = yield* executeRepair(false);
+        expectRecallFailure(ordinary.value);
+        expect(ordinary.output).not.toContain('Skipping host instructions');
+        expect(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))).toBe(activePointerA);
+        expect(yield* fs.readFileString(path.join(releaseRoot, 'release.json'))).toBe(releaseMetadata);
+        const cliA = yield* fs.readFileString(path.join(binDirectory, 'threadnote'));
+        const mcpA = yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'));
+        expect(cliA).toContain(releaseRoot);
+        expect(mcpA).toContain(releaseRoot);
+        expect(mcpA).toContain('mcp-broker');
+
+        const coreOnly = yield* executeRepair(true);
+        expectRecallFailure(coreOnly.value);
+        expect(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))).toBe(activePointerA);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote'))).toBe(cliA);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'))).toBe(mcpA);
+
+        const releaseRootB = path.join(installRoot, 'versions', '66.5.0');
+        const releaseMetadataB = `${JSON.stringify({version: '66.5.0'})}\n`;
+        yield* fs.makeDirectory(releaseRootB, {recursive: true});
+        yield* fs.writeFileString(path.join(releaseRootB, 'release.json'), releaseMetadataB);
+        const lockHeld = yield* Deferred.make<void>();
+        const releaseLock = yield* Deferred.make<void>();
+        const installationLock = path.join(installRoot, '.installation.lock');
+        const lockOwner = yield* Effect.forkChild(
+          withStandaloneInstallationLock(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(lockHeld, undefined);
+              yield* Deferred.await(releaseLock);
+            }),
+          ).pipe(Effect.provideService(SystemInfo, testSystem)),
+        );
+        yield* Deferred.await(lockHeld);
+        const sawContention = yield* Deferred.make<void>();
+        const observingFileSystem = FileSystem.FileSystem.of({
+          ...fs,
+          writeFileString: (file, content, options) =>
+            fs
+              .writeFileString(file, content, options)
+              .pipe(
+                Effect.tapError(() =>
+                  file === installationLock ? Deferred.succeed(sawContention, undefined) : Effect.void,
+                ),
+              ),
+        });
+        const repairWaiting = yield* Effect.forkChild(executeRepair(false, observingFileSystem));
+        yield* Deferred.await(sawContention);
+        yield* activateStandaloneRelease(releaseRootB, false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const activePointerB = yield* fs.readFileString(path.join(installRoot, 'active-release.json'));
+        expect(activePointerB).not.toBe(activePointerA);
+        yield* Deferred.succeed(releaseLock, undefined);
+        const afterContention = yield* Fiber.join(repairWaiting);
+        yield* Fiber.join(lockOwner);
+        expectRecallFailure(afterContention.value);
+        expect(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))).toBe(activePointerB);
+        expect(yield* fs.readFileString(path.join(releaseRootB, 'release.json'))).toBe(releaseMetadataB);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote'))).toContain(releaseRootB);
+        expect(yield* fs.readFileString(path.join(binDirectory, 'threadnote-mcp-server'))).toContain(releaseRootB);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
 
   it('fails repair when native code graph maintenance cannot inspect its derived root', async () => {
     const root = await temporaryRoot('threadnote-repair-graph-failure-');

@@ -78,6 +78,7 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   previous: Schema.optionalKey(id),
   supersedes: Schema.optionalKey(id),
   previousTree: Schema.optionalKey(gitObject),
+  unreviewedSupersession: Schema.optionalKey(Schema.Struct({reason: text()})),
   acceptedHead: Schema.optionalKey(gitObject),
   rebase: Schema.optionalKey(rebaseReceipt),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
@@ -90,7 +91,15 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
     (snapshot.ordinaryMergeQualificationV1 && (snapshot.baseRequalification || snapshot.rebase)) ||
     (snapshot.rebase && snapshot.baseRequalification)
       ? 'Version2 requires ordinary merge qualification; snapshot qualifications are mutually exclusive.'
-      : undefined,
+      : snapshot.unreviewedSupersession &&
+          (!snapshot.supersedes ||
+            snapshot.previous !== undefined ||
+            snapshot.previousTree !== undefined ||
+            snapshot.baseRequalification !== undefined ||
+            snapshot.ordinaryMergeQualificationV1 !== undefined ||
+            !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim))
+        ? 'An unreviewed supersession requires one explicit superseded snapshot and reason.'
+        : undefined,
   ),
 );
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
@@ -195,6 +204,68 @@ export const NativeCycleReviewSchema = Schema.Struct({
   findings: Schema.Array(findingSchema).check(Schema.isMaxLength(512)),
 });
 export type NativeCycleReview = typeof NativeCycleReviewSchema.Type;
+export type NativeCycleAcceptedReview = {
+  readonly snapshot: NativeCycleSnapshot;
+  readonly review: NativeCycleReview;
+};
+
+/** Resolve source ancestry separately from the most recent accepted finding ledger. */
+export function nativeCycleReviewBasis(
+  snapshot: NativeCycleSnapshot,
+  retained: readonly NativeCycleSnapshot[],
+  accepted: readonly {readonly snapshotId: string; readonly report: NativeCycleReview}[],
+): {readonly previous?: NativeCycleAcceptedReview; readonly findingBasis?: NativeCycleAcceptedReview | null} {
+  const snapshots = new Map(EffectArray.map(retained, (item, index) => [item.snapshotId, {item, index}]));
+  const reviews = new Map(EffectArray.map(accepted, entry => [entry.snapshotId, entry.report]));
+  if (snapshots.size !== retained.length || reviews.size !== accepted.length)
+    return fail('Review ancestry contains duplicate retained identities.');
+  const visited = new Set([snapshot.snapshotId]);
+  let current = snapshot;
+  let currentIndex = snapshots.get(snapshot.snapshotId)?.index ?? retained.length;
+  while (current.previous || current.supersedes) {
+    const predecessor = current.previous ?? current.supersedes;
+    const entry = predecessor ? snapshots.get(predecessor) : undefined;
+    if (!entry || visited.has(entry.item.snapshotId) || entry.index >= currentIndex)
+      return fail('Review ancestry requires an acyclic retained source chain.');
+    const prior = entry.item;
+    if (
+      (current.previous && current.supersedes) ||
+      (current.unreviewedSupersession && current.tree === prior.tree) ||
+      current.phaseId !== prior.phaseId ||
+      current.baseTree !== prior.baseTree ||
+      current.repo !== prior.repo ||
+      (current.previous && (current.previousTree !== prior.tree || current.phaseHash !== prior.phaseHash)) ||
+      (current.supersedes &&
+        (current.unreviewedSupersession
+          ? current.phaseHash !== prior.phaseHash
+          : current.phaseHash === prior.phaseHash)) ||
+      (current.head !== prior.head && current.acceptedHead !== current.head)
+    )
+      return fail('Review ancestry does not match its retained source boundaries.');
+    const report = reviews.get(prior.snapshotId);
+    if (report) {
+      if (
+        current.unreviewedSupersession ||
+        report.snapshotId !== prior.snapshotId ||
+        report.snapshotTree !== prior.tree ||
+        report.phaseHash !== prior.phaseHash
+      )
+        return fail('Accepted review basis does not match its retained source.');
+      const basis = {snapshot: prior, review: report};
+      return snapshot.unreviewedSupersession ? {findingBasis: basis} : {previous: basis};
+    }
+    if (!snapshot.unreviewedSupersession) return fail('Prior review evidence is required.');
+    visited.add(prior.snapshotId);
+    current = prior;
+    currentIndex = entry.index;
+  }
+  return snapshot.unreviewedSupersession ? {findingBasis: null} : {};
+}
+
+/** Review recording mode follows snapshot lineage; it never limits independent review scope. */
+export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): 'full' | 'incremental' =>
+  snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1 ? 'incremental' : 'full';
+
 const blocking = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
 const safePath = (value: string) =>
@@ -210,9 +281,10 @@ export const nativeCycleCorrectnessLane = 'correctness';
 export function validateNativeCycleReview(
   snapshot: NativeCycleSnapshot,
   input: unknown,
-  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+  previous?: NativeCycleAcceptedReview,
+  findingBasis?: NativeCycleAcceptedReview | null,
 ) {
-  const result = validateNativeCycleReviewHistory(snapshot, input, previous);
+  const result = validateNativeCycleReviewHistory(snapshot, input, previous, findingBasis);
   if (
     result.review.selected.includes(nativeCycleOrchestratorLane) ||
     EffectArray.some(result.review.lanes, lane => lane.name === nativeCycleOrchestratorLane)
@@ -229,7 +301,8 @@ export function validateNativeCycleReview(
 export function validateNativeCycleReviewHistory(
   snapshot: NativeCycleSnapshot,
   input: unknown,
-  previous?: {readonly snapshot: NativeCycleSnapshot; readonly review: NativeCycleReview},
+  previous?: NativeCycleAcceptedReview,
+  findingBasis?: NativeCycleAcceptedReview | null,
 ) {
   let review: NativeCycleReview;
   try {
@@ -241,10 +314,7 @@ export function validateNativeCycleReviewHistory(
     review.snapshotId !== snapshot.snapshotId ||
     review.phaseHash !== snapshot.phaseHash ||
     review.snapshotTree !== snapshot.tree ||
-    review.mode !==
-      (snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1
-        ? 'incremental'
-        : 'full')
+    review.mode !== nativeCycleReviewRecordingMode(snapshot)
   )
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),
@@ -258,7 +328,12 @@ export function validateNativeCycleReviewHistory(
     EffectArray.some([...selected], name => !lanes.has(name))
   )
     fail('Selected and completed review lanes differ.');
-  if ((snapshot.previous || snapshot.supersedes) && !previous) fail('Prior review evidence is required.');
+  if ((snapshot.previous || snapshot.supersedes) && !previous && !snapshot.unreviewedSupersession)
+    fail('Prior review evidence is required.');
+  if (snapshot.unreviewedSupersession && previous)
+    fail('Unreviewed supersession cannot claim a prior accepted review.');
+  if (snapshot.unreviewedSupersession && findingBasis === undefined)
+    fail('Unreviewed supersession requires its retained ancestral finding basis.');
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
   if (
     previous &&
@@ -273,9 +348,18 @@ export function validateNativeCycleReviewHistory(
       (snapshot.head !== previous.snapshot.head && snapshot.acceptedHead !== snapshot.head))
   )
     fail('Review history does not match the source predecessor.');
+  if (
+    findingBasis &&
+    (!snapshot.unreviewedSupersession ||
+      findingBasis.snapshot.phaseId !== snapshot.phaseId ||
+      findingBasis.snapshot.baseTree !== snapshot.baseTree ||
+      findingBasis.snapshot.repo !== snapshot.repo)
+  )
+    fail('An ancestral finding ledger belongs only to its source-bound unreviewed supersession.');
+  const ledger = findingBasis ?? previous;
   const prior = new Map(
     EffectOption.getOrUndefined(
-      EffectOption.map(EffectOption.fromNullishOr(previous?.review.findings), __effectArrayReceiver =>
+      EffectOption.map(EffectOption.fromNullishOr(ledger?.review.findings), __effectArrayReceiver =>
         EffectArray.map(__effectArrayReceiver, finding => [finding.id, finding]),
       ),
     ) ?? [],

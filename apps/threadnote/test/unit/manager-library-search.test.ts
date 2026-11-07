@@ -106,6 +106,22 @@ effectIt.effect(
       const lexical = yield* search('canary rollout', 'local');
       expect(lexical.semantic).toBe('unavailable');
       expect(lexical.uris).toContain(`${base}/${documents[1][0]}`);
+      const warning =
+        'Local AI recall warning: background refresh enqueue not confirmed [guard/guard-timeout]; lexical recall continued.';
+      semantic.mockImplementation(() =>
+        Effect.succeed({
+          status: 'failed',
+          result: {
+            corpusGeneration: Option.none(),
+            scores: Option.none(),
+            warning: Option.some(warning),
+          },
+        }),
+      );
+      const failedEnqueue = yield* search('canary rollout', 'local');
+      expect(failedEnqueue.semantic).toBe('failed');
+      expect(failedEnqueue.uris).toContain(`${base}/${documents[1][0]}`);
+      expect(failedEnqueue.warnings).toContain(warning);
     }).pipe(provideTestLayer(ApplicationLayer)),
 );
 

@@ -86,11 +86,19 @@ export interface LocalStandaloneInstallResult extends DevelopmentRuntimeEvidence
   readonly cleanupComplete: boolean;
   readonly cleanupIssues: readonly LocalStandaloneCleanupIssue[];
   readonly doctorVerified: true;
+  readonly workflowRefresh: readonly DevelopmentWorkflowRefreshResult[];
   readonly launchersVerified: true;
   readonly preservedMcpSessionProcesses: number;
   readonly remainingSupersededProcesses: number;
   readonly reused: boolean;
   readonly terminatedSupersededProcesses: number;
+}
+
+export interface DevelopmentWorkflowRefreshResult {
+  readonly target: string;
+  readonly state: string;
+  readonly outcome: 'updated' | 'unchanged' | 'failed';
+  readonly detail?: string;
 }
 
 export type LocalStandaloneCleanupIssue =
@@ -251,6 +259,17 @@ export const installLocalStandalone = Effect.fn('developmentInstall.run')(functi
     yield* Console.log(`Installed exact-HEAD Threadnote ${result.version}.`);
     yield* Console.log(`Source commit: ${result.sourceCommit}`);
     yield* Console.log(`Executable SHA-256: ${result.executableSha256}`);
+    yield* Console.log(
+      result.workflowRefresh.length === 0
+        ? 'Workflow target refresh: no enrolled targets.'
+        : `Workflow target refresh: ${EffectArray.join(
+            EffectArray.map(
+              result.workflowRefresh,
+              item => `${item.target} (${item.state}): ${item.outcome}${item.detail ? ` — ${item.detail}` : ''}`,
+            ),
+            '; ',
+          )}`,
+    );
     if (result.preservedMcpSessionProcesses > 0) {
       yield* Console.log(
         `${result.preservedMcpSessionProcesses} live MCP session process(es) remain safely pinned and will promote behind their stable transport.`,
@@ -662,6 +681,8 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
       ),
     );
 
+    const workflowRefresh = yield* refreshDevelopmentWorkflowTargets(executable, installRoot);
+
     let terminatedSupersededProcesses = 0;
     const preservedMcpSessionProcessIds = new Set<number>();
     const unresolvedProcessIds = new Set<number>();
@@ -736,6 +757,7 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
       cleanupComplete: cleanupIssues.size === 0 && unresolvedProcessIds.size === 0,
       cleanupIssues: [...cleanupIssues].sort(),
       doctorVerified: true,
+      workflowRefresh,
       launchersVerified: true,
       preservedMcpSessionProcesses: preservedMcpSessionProcessIds.size,
       remainingSupersededProcesses: unresolvedProcessIds.size,
@@ -750,6 +772,92 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         : Effect.void,
     ),
   );
+});
+
+/** Refresh stale, enabled workflow targets after activation has crossed its rollback point. */
+export const refreshDevelopmentWorkflowTargets = Effect.fn('developmentInstall.refreshWorkflowTargets')(function* (
+  executable: string,
+  installRoot: string,
+) {
+  const system = yield* SystemInfo;
+  const commandOptions = {
+    env: {...system.environment(), THREADNOTE_INSTALL_ROOT: installRoot},
+    maxOutputBytes: 2 * 1024 * 1024,
+    timeoutMs: COMMAND_TIMEOUT_MILLISECONDS,
+    allowFailure: true,
+  } as const;
+  const statusResult = yield* runCommandEffect(executable, ['dev-skills', 'status', '--json'], commandOptions).pipe(
+    Effect.result,
+  );
+  if (statusResult._tag === 'Failure')
+    return [
+      {
+        target: 'enrollment',
+        state: 'unavailable',
+        outcome: 'failed',
+        detail: 'Could not inspect enrolled workflow targets.',
+      },
+    ] satisfies DevelopmentWorkflowRefreshResult[];
+  const decodedStatus = yield* Effect.try({
+    try: () => JSON.parse(statusResult.success.stdout) as unknown,
+    catch: () => ScriptError.make({message: 'Invalid workflow status JSON.'}),
+  }).pipe(Effect.result);
+  if (decodedStatus._tag === 'Failure')
+    return [
+      {target: 'enrollment', state: 'unavailable', outcome: 'failed', detail: 'Could not read workflow target status.'},
+    ] satisfies DevelopmentWorkflowRefreshResult[];
+  if (!isJsonObject(decodedStatus.success) || !EffectArray.isArray(decodedStatus.success.targets))
+    return [
+      {target: 'enrollment', state: 'unavailable', outcome: 'failed', detail: 'Workflow target status was incomplete.'},
+    ] satisfies DevelopmentWorkflowRefreshResult[];
+  const results: DevelopmentWorkflowRefreshResult[] = [];
+  for (const item of decodedStatus.success.targets) {
+    if (!isJsonObject(item)) {
+      results.push({
+        target: 'unknown-target',
+        state: 'unknown',
+        outcome: 'failed',
+        detail: 'Target status was malformed.',
+      });
+      continue;
+    }
+    const rawTarget = item.target;
+    const target = isJsonObject(rawTarget) ? rawTarget : undefined;
+    const identifier = target && typeof target.surfaceId === 'string' ? target.surfaceId : 'unknown-target';
+    const state = typeof item.installationState === 'string' ? item.installationState : 'unknown';
+    if (!target || item.enrolled !== true || item.enabled !== true || state !== 'update-available') {
+      results.push({target: identifier, state, outcome: 'unchanged'});
+      continue;
+    }
+    if (
+      typeof target.surfaceId !== 'string' ||
+      typeof target.profile !== 'string' ||
+      typeof target.scope !== 'string' ||
+      (target.cwd !== undefined && typeof target.cwd !== 'string')
+    ) {
+      results.push({target: identifier, state, outcome: 'failed', detail: 'Target selector was incomplete.'});
+      continue;
+    }
+    const args = [
+      'dev-skills',
+      'update',
+      '--agent',
+      target.surfaceId,
+      '--profile',
+      target.profile,
+      '--scope',
+      target.scope,
+      ...(typeof target.cwd === 'string' ? ['--cwd', target.cwd] : []),
+      '--json',
+    ];
+    const updated = yield* runCommandEffect(executable, args, commandOptions).pipe(Effect.result);
+    results.push(
+      updated._tag === 'Success' && updated.success.exitCode === 0
+        ? {target: identifier, state, outcome: 'updated'}
+        : {target: identifier, state, outcome: 'failed', detail: 'The target update command failed.'},
+    );
+  }
+  return results;
 });
 
 const verifyActivatedDevelopmentRelease = Effect.fn('developmentInstall.verifyActivated')(function* (

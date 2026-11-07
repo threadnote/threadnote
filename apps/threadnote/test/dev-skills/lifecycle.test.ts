@@ -172,17 +172,38 @@ describe('development skills lifecycle', () => {
   effectIt.effect('installs complete copied generations, renders only entrypoints and repeats without changes', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
+      const devCycleTemplate = yield* f.fs.readFileString(
+        f.path.join(process.cwd(), 'config/agent-skills/dev-cycle/SKILL.md'),
+      );
+      yield* f.fs.writeFileString(f.path.join(f.source, 'config/agent-skills/dev-cycle/SKILL.md'), devCycleTemplate);
       const result = yield* f.run(applyDevSkills(f.config, 'install', selector));
       expect(result.applied).toBe(true);
       const bundle = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
       const root = generationRoot(f.path, result.target.skillRoot, bundle.manifest.digest);
       for (const [file, content] of EffectRecord.toEntries(bundle.files))
         expect(Buffer.from(yield* f.fs.readFile(f.path.join(root, file))).toString('base64')).toBe(content);
+      const entrypoints = renderEntrypoints(f.path, result.target, bundle);
+      for (const [relative, content] of EffectRecord.toEntries(entrypoints))
+        expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, relative))).toBe(content);
       expect(yield* f.fs.readFileString(f.path.join(result.target.skillRoot, 'dev-plan/SKILL.md'))).toContain(root);
       const before = yield* snapshot(f.root);
       expect((yield* f.run(applyDevSkills(f.config, 'install', selector))).applied).toBe(false);
       expect(yield* snapshot(f.root)).toEqual(before);
     }).pipe(testLayer),
+  );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'keeps non-regular or other unexpected generation entries conflicting',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const installed = yield* f.run(applyDevSkills(f.config, 'install', selector));
+        const root = generationRoot(f.path, installed.target.skillRoot, installed.bundleDigest);
+        yield* f.fs.writeFileString(f.path.join(root, 'unexpected.txt'), 'unowned');
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('conflict');
+        yield* f.fs.remove(f.path.join(root, 'unexpected.txt'));
+        yield* f.fs.symlink(f.path.join(root, 'dev-cycle', 'SKILL.md'), f.path.join(root, '.DS_Store'));
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('conflict');
+      }).pipe(testLayer),
   );
   effectIt.effect(
     'shares one generation across homes, pins roots, updates explicitly and tombstones final removal',
@@ -190,6 +211,10 @@ describe('development skills lifecycle', () => {
       Effect.gen(function* () {
         const f = yield* fixture();
         const first = yield* f.run(applyDevSkills(f.config, 'install', selector));
+        const firstGeneration = generationRoot(f.path, first.target.skillRoot, first.bundleDigest);
+        yield* f.fs.writeFileString(f.path.join(firstGeneration, '.DS_Store'), 'macOS metadata');
+        yield* f.fs.writeFileString(f.path.join(firstGeneration, 'dev-plan', '.DS_Store'), 'nested metadata');
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('current');
         const secondConfig = {...f.config, agentContextHome: f.path.join(f.root, 'second')};
         yield* f.run(applyDevSkills(secondConfig, 'install', {agent: 'amp'}));
         const secondBefore = yield* f.fs.readFileString(homeIndexPath(f.path, secondConfig.agentContextHome));

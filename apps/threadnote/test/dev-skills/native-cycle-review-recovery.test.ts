@@ -5,12 +5,180 @@ import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
+import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
+import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 
 import * as Effect2 from 'effect';
 import {completeLocalPhase, fixture, object, reviewed, run} from './native-cycle-lifecycle-fixture.js';
 
 describe('native cycle lifecycle', () => {
+  effectIt.effect('records one authority-backed review retry atomically and replays the exact report', () =>
+    Effect.gen(function* () {
+      const f = yield* reviewed();
+      const initialTask = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      const initialSnapshot = initialTask.phase?.snapshot;
+      if (!initialTask.taskRef || !initialSnapshot?.snapshotRef) throw new Error('Expected a review task card.');
+      const review = {
+        mode: f.report.mode,
+        selected: f.report.selected,
+        lanes: f.report.lanes,
+        findings: f.report.findings,
+      };
+      const record = (
+        snapshotRef: string,
+        report: unknown,
+        recovery: {readonly taskRef?: string; readonly userAuthority?: string} = {},
+      ) =>
+        runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          report,
+          ...recovery,
+        });
+      const unchangedFailure = (input: Parameters<typeof runNativeTaskAction>[1], code: string) =>
+        Effect.gen(function* () {
+          const before = yield* f.fs.readFileString(f.statePath());
+          const result = yield* runNativeTaskAction(f.config, input).pipe(Effect.result);
+          expect(result).toMatchObject({failure: {code}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+        });
+      const initialAuthority = 'The user authorized one corrected independent review attempt.';
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: initialSnapshot.snapshotRef,
+          report: review,
+          taskRef: initialTask.taskRef,
+          userAuthority: initialAuthority,
+        },
+        'stale-task-ref',
+      );
+
+      yield* f.mutate('validate-review', {
+        snapshotId: f.snapshot.snapshotId,
+        attemptId: 'invalid-first',
+        report: {...f.report, selected: ['simplicity'], lanes: [{name: 'simplicity', status: 'complete'}]},
+      });
+      yield* f.mutate('validate-review', {
+        snapshotId: f.snapshot.snapshotId,
+        attemptId: 'invalid-second',
+        report: {...f.report, selected: ['orchestrator'], lanes: [{name: 'orchestrator', status: 'complete'}]},
+      });
+      const blocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      const blockedSnapshot = blocked.phase?.snapshot;
+      if (!blocked.taskRef || !blockedSnapshot?.snapshotRef)
+        throw new Error('Expected blocked review recovery inputs.');
+      expect(blocked).toMatchObject({status: 'blocked', next: {action: 'resolve-review-failure'}});
+
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: blockedSnapshot.snapshotRef,
+          report: review,
+        },
+        'review-not-ready',
+      );
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: blockedSnapshot.snapshotRef,
+          report: review,
+          taskRef: blocked.taskRef,
+        },
+        'review-authority',
+      );
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: blockedSnapshot.snapshotRef,
+          report: review,
+          taskRef: blocked.taskRef,
+          userAuthority: '  ',
+        },
+        'review-authority',
+      );
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: blockedSnapshot.snapshotRef,
+          report: review,
+          taskRef: initialTask.taskRef,
+          userAuthority: initialAuthority,
+        },
+        'stale-task-ref',
+      );
+      const decodedSnapshotRef = decodeNativeTaskActionRef(blockedSnapshot.snapshotRef);
+      if (!decodedSnapshotRef) throw new Error('Expected the card snapshot reference to decode.');
+      yield* unchangedFailure(
+        {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: encodeNativeTaskActionRef({...decodedSnapshotRef, runId: 'foreign-run'}),
+          report: review,
+          taskRef: blocked.taskRef,
+          userAuthority: initialAuthority,
+        },
+        'invalid-snapshot-ref',
+      );
+
+      const invalidReport = {
+        ...review,
+        selected: ['correctness'],
+        lanes: [{name: 'correctness', status: 'complete'}],
+      };
+      const invalidAttempt = object(
+        yield* record(blockedSnapshot.snapshotRef, invalidReport, {
+          taskRef: blocked.taskRef,
+          userAuthority: initialAuthority,
+        }),
+      );
+      expect(invalidAttempt).toMatchObject({status: 'invalid', replayed: false});
+      expect(object(invalidAttempt.attempt)).toMatchObject({status: 'invalid', authority: initialAuthority});
+      const afterInvalid = yield* f.fs.readFileString(f.statePath());
+      const replay = object(
+        yield* record(blockedSnapshot.snapshotRef, invalidReport, {
+          taskRef: blocked.taskRef,
+          userAuthority: initialAuthority,
+        }),
+      );
+      expect(replay).toMatchObject({status: 'invalid', replayed: true});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterInvalid);
+
+      const retried = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      if (!retried.taskRef || !retried.phase?.snapshot?.snapshotRef)
+        throw new Error('Expected the next blocked recovery card after the invalid retry.');
+      const acceptedAttempt = object(
+        yield* record(retried.phase.snapshot.snapshotRef, review, {
+          taskRef: retried.taskRef,
+          userAuthority: initialAuthority,
+        }),
+      );
+      expect(acceptedAttempt).toMatchObject({status: 'recorded', replayed: false});
+      expect(object(acceptedAttempt.attempt)).toMatchObject({status: 'accepted', authority: initialAuthority});
+      const runtime = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+      expect(runtime.attempts).toHaveLength(4);
+      expect(EffectArray.map(runtime.attempts.slice(2), attempt => [attempt.status, attempt.authority])).toEqual([
+        ['invalid', initialAuthority],
+        ['accepted', initialAuthority],
+      ]);
+      expect(runtime.reviews).toHaveLength(1);
+    }).pipe(run),
+  );
+
   effectIt.effect('carries unresolved findings across an actual material authoring restart', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();

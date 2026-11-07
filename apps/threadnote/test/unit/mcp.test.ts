@@ -23,6 +23,7 @@ import {
 } from '@threadnote/threadnote/agent_integration/index';
 import {installCommandShim} from '@threadnote/threadnote/command-shim';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
 import {SystemInfo} from '@threadnote/platform/system';
 import {repairRegisteredMcpClients, runUninstall} from '@threadnote/threadnote/lifecycle';
 import {mcpAdapterCommand, resolveMcpClients, runMcpInstall} from '@threadnote/threadnote/mcp/index';
@@ -989,16 +990,26 @@ describe('JSON MCP host configuration', () => {
         const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-custom-mcp-retry-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
+        const installRoot = path.join(root, 'install');
+        const releaseRoot = path.join(installRoot, 'versions', '4.6.3');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
         const testRuntime = runtime(path.join(user, '.threadnote'));
         yield* fs.makeDirectory(path.dirname(cursorPath), {recursive: true});
+        yield* fs.makeDirectory(releaseRoot, {recursive: true});
+        yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), '{"version":"4.6.3"}\n');
         yield* fs.writeFileString(cursorPath, '{}\n');
         const testSystem = SystemInfo.of({
           ...baseSystem,
-          environment: () => ({...baseSystem.environment(), PATH: bin, THREADNOTE_BIN_DIR: bin}),
+          environment: () => ({
+            ...baseSystem.environment(),
+            PATH: bin,
+            THREADNOTE_BIN_DIR: bin,
+            THREADNOTE_INSTALL_ROOT: installRoot,
+          }),
           homeDirectory: user,
           platform: 'linux',
         });
+        yield* activateStandaloneRelease(releaseRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* runMcpInstall(testRuntime, 'cursor', {
           apply: true,
           name: 'team-memory',
@@ -1037,16 +1048,26 @@ describe('JSON MCP host configuration', () => {
         );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
+        const installRoot = path.join(root, 'install');
+        const releaseRoot = path.join(installRoot, 'versions', '4.6.3');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
         const testRuntime = runtime(path.join(user, '.threadnote'));
         yield* fs.makeDirectory(path.dirname(cursorPath), {recursive: true});
+        yield* fs.makeDirectory(releaseRoot, {recursive: true});
+        yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), '{"version":"4.6.3"}\n');
         yield* fs.writeFileString(cursorPath, '{}\n');
         const testSystem = SystemInfo.of({
           ...baseSystem,
-          environment: () => ({...baseSystem.environment(), PATH: bin, THREADNOTE_BIN_DIR: bin}),
+          environment: () => ({
+            ...baseSystem.environment(),
+            PATH: bin,
+            THREADNOTE_BIN_DIR: bin,
+            THREADNOTE_INSTALL_ROOT: installRoot,
+          }),
           homeDirectory: user,
           platform: 'linux',
         });
+        yield* activateStandaloneRelease(releaseRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* runMcpInstall(testRuntime, 'cursor', {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
 

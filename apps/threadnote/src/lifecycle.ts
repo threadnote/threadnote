@@ -33,6 +33,7 @@ import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
+  activeInstalledRelease,
   activeInstalledVersion,
   activateStandaloneRelease,
   pruneStandaloneReleases,
@@ -171,36 +172,43 @@ export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(
   authorizationKey: string,
   verifyInputs: Effect.Effect<void, E, R>,
 ) {
-  yield* Console.log('Preparing lexical recall from canonical documents.');
-  const index = yield* Effect.acquireUseRelease(
-    startProgress('Rebuilding lexical recall index from canonical documents.'),
-    progress =>
-      loadRecallIndexData(config, {
-        forceRefresh: true,
-        includeInactive: false,
-        onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
-      }),
-    progress => progress.stop,
-  );
-  yield* verifyInputs;
-  yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
-  yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
-  const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
-    corpusGeneration: index.generation,
-    currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
-  });
-  yield* verifyRecallIndexMaintenanceReadiness({
-    manifestId: manifest.id,
-    readLexicalStatus: () => recallIndexStatus(config, false),
-    readVectorReadiness: () =>
-      vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
-    requestedGeneration: index.generation,
-  });
-  yield* verifyInputs;
-  yield* Console.log(
-    `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
-  );
-  yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+  for (let completedRetries = 0; ; completedRetries += 1) {
+    const attempt = yield* Effect.gen(function* () {
+      yield* Console.log('Preparing lexical recall from canonical documents.');
+      const index = yield* Effect.acquireUseRelease(
+        startProgress('Rebuilding lexical recall index from canonical documents.'),
+        progress =>
+          loadRecallIndexData(config, {
+            forceRefresh: true,
+            includeInactive: false,
+            onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
+          }),
+        progress => progress.stop,
+      );
+      yield* verifyInputs;
+      yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
+      yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
+      const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
+        corpusGeneration: index.generation,
+        currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
+      });
+      yield* verifyRecallIndexMaintenanceReadiness({
+        manifestId: manifest.id,
+        readLexicalStatus: () => recallIndexStatus(config, false),
+        readVectorReadiness: () =>
+          vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
+        requestedGeneration: index.generation,
+      });
+      yield* verifyInputs;
+      yield* Console.log(
+        `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
+      );
+      yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+    }).pipe(Effect.result);
+    if (Result.isSuccess(attempt)) return;
+    if (!recallIndexMaintenanceShouldRetry(attempt.failure, completedRetries))
+      return yield* Effect.fail(attempt.failure);
+  }
 });
 
 interface RunInstallOptions extends InstallOptions {
@@ -210,6 +218,7 @@ interface RunInstallOptions extends InstallOptions {
 
 interface RunRepairOptions extends RepairOptions {
   readonly skipAgentIntegrations?: boolean;
+  /** Caller already owns the standalone installation lock. */
   readonly skipReleaseLifecycle?: boolean;
 }
 
@@ -415,7 +424,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
       Effect.gen(function* () {
         yield* activateStandaloneRelease(releaseRoot, dryRun);
         yield* applyLegacyInstallationCleanup(legacyCleanup, dryRun);
-        yield* installCommandShim(dryRun, undefined, config.agentContextHome);
+        yield* installCommandShim(dryRun, releaseRoot, config.agentContextHome);
       }),
       dryRun,
     );
@@ -512,9 +521,20 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     printNextSteps: false,
     modelSetup: false,
     skipRecallIndexes: true,
-    skipReleaseLifecycle: options.skipReleaseLifecycle,
+    // Repair restores routing to the installed owner. Only install/update may
+    // activate or prune standalone releases.
+    skipReleaseLifecycle: true,
     start: false,
   });
+  const repairLaunchers = Effect.gen(function* () {
+    const activeRelease = yield* activeInstalledRelease();
+    if (activeRelease) {
+      yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
+    } else {
+      yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
+    }
+  });
+  yield* withStandaloneInstallationLock(repairLaunchers, dryRun || options.skipReleaseLifecycle === true);
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
     const selection = yield* readModelSelection(config.agentContextHome);

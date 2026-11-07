@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "phase": "P1",
+  "evidenceClass": "diagnostic baseline construction; no native comparison or adoption",
+  "acceptance": "pending required Linux execution and coordinator review",
+  "frozenGates": {
+    "version": 1,
+    "primaryP95ImprovementRatio": 0.2,
+    "secondaryP95RegressionRatio": 0.05,
+    "secondaryNoiseMilliseconds": 5,
+    "processTreePeakRssGrowthRatio": 0.1,
+    "minimumPairedRuns": 3,
+    "minimumWarmVectorQueries": 30,
+    "platforms": ["darwin-arm64", "linux-x64"],
+    "vectorDocuments": [10000, 100000],
+    "vectorDistributions": ["dense", "tied"],
+    "primaryBoundaries": {
+      "vector": "complete semantic retrieval including pinned-model inference and authorized SQLite reads",
+      "parser": "cold polyglot indexing and whole worker request including serialization and persistence",
+      "topology": "each CLI analysis operation including snapshot loading and output projection; more than 100000 nodes"
+    },
+    "controls": ["first-use separately", "incremental indexing", "small-scale secondary flows"],
+    "refresh": "refresh after separately owned crypto lands; identical configuration apart from candidate change"
+  },
+  "frozenCaptureCommit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+  "productCodeBase": "a22b434b01e4d2a5aa9463714a35942ced38e731",
+  "qualificationFixSourceCommit": "002f5c8f86d36c625133c9bc0db6cd1559c71985",
+  "executedRuntime": {
+    "mode": "Bun source mode",
+    "bun": "bun@1.4.4",
+    "installedGlobalBinaryUsed": false,
+    "architecture": "arm64",
+    "operatingSystem": "macOS 27.2",
+    "cpu": "Apple M1 Max",
+    "physicalMemoryBytes": 68719476736
+  },
+  "vectorEvidence": {
+    "modelPurpose": "recall",
+    "model": {
+      "backend": "node-llama-cpp-query/synthetic-documents",
+      "id": "bge-small-en-v1.5-q8",
+      "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+    },
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "dimensions": 384,
+    "documentEmbeddings": "synthetic controlled dense/tied vectors",
+    "queryInference": "real SHA-verified local model, no downloads",
+    "matrix": "10000/100000 documents x dense/tied x three serial baseline replicas",
+    "warmQueriesPerReplica": 30,
+    "firstUseQueriesPerReplica": 1,
+    "candidateArms": 0,
+    "oracle": "independent scalar full sort over private fixture Float32 blobs after the query sampler stops",
+    "retainedOriginalCapturesHaveClosingTrackedSourceFence": false,
+    "sourceFenceScope": "legacy908 captures checked HEAD and runner file hash at endpoints; new source-fence claims are not retrofitted",
+    "memoryScope": "sampled recursive process-tree peak over first-use plus warm phase; actual process counts, availability, failures and gaps are retained; first-use/warm RSS are not isolated",
+    "qualityScope": "performance over controllable synthetic vectors, not evidence of realistic document retrieval quality"
+  },
+  "fixedUpstreamGraphModel": {
+    "id": "embeddinggemma-2-q8",
+    "revision": "6ea3e3a309d12a4779cfda98b8c19800d2d5da71",
+    "sha256": "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+    "dimensions": 768,
+    "templateVersion": 2,
+    "scope": "pre-existing fixed graph-purpose selection; no graph semantic retrieval performance capture is claimed and BGE384 results are not extrapolated"
+  },
+  "parserEvidence": {
+    "inProcessProbe": "Java/Python/Go, first-use plus30 warm calls per language; production registry/runtime cache identities pinned in graph-stage-probe.json",
+    "timedBoundaries": "pre-callback loading/runtime/parse envelope; query compilation/cache access and matches; callback total; post-callback cleanup",
+    "derivedResidual": "max(0, callback - query) is fact construction plus extraction control/projection residual, not pure fact construction",
+    "workerEvidence": "reduced heavy-tail clean/interrupted/resumed and1/parallel/6/8-worker controls; child parseMilliseconds is combined extraction, parent request includes scheduling/IPC/serialization",
+    "pureCostsUnavailable": ["parser.parse alone", "fact construction alone", "IPC alone"],
+    "sourceFenceScope": "Opening HEAD/status only; no closing tracked-tree fence was retained."
+  },
+  "topologyEvidence": {
+    "operation": "source-mode CLI graph analyze --view full --freshness allow-stale --read-timeout-ms60000 --json",
+    "serialBaselineReplicas": 3,
+    "analyzedNodes": 180749,
+    "aggregateEdges": 592174,
+    "coverage": "complete in every run",
+    "executedSourceCommit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "snapshotFixtureCommit": "a22b434b01e4d2a5aa9463714a35942ced38e731",
+    "freshness": "stale source fixture, complete analysis coverage",
+    "measurementScope": "whole CLI wall time, OS command CPU/maximum RSS; no isolated loading/computation or process-tree peak claimed",
+    "parityDigest": "all structural fields excluding request usage, dynamic remaining-duration budget and lease-expiry metadata",
+    "sourceFenceScope": "Source-mode command identity recorded; no closing tracked-tree fence was retained."
+  },
+  "parityControls": [
+    "packages/inference/test/vector-search.property.test.ts: scalar oracle, permutation and UTF-16 top-k ties",
+    "packages/graph/test/unit/code-graph.analysis.property.test.ts: independent BFS connectedness, ordering/page invariance and bounded induced topology",
+    "graph-heavy-tail-smoke.json: extraction/cache-resume controls"
+  ],
+  "requiredNextEvidence": [
+    "Dispatch the default-off include_native_recall_vector_capture workflow input and retain its serial Linux x64 real-query matrix; no Linux measurements are present in this directory yet",
+    "Candidate/control paired captures when an optimization exists; current artifacts contain baseline replicas only",
+    "Refresh final native-comparison baselines after separately owned crypto integration; use the best current TypeScript baseline",
+    "Run graph-purpose semantic retrieval separately before drawing graph-vector performance conclusions"
+  ],
+  "attributionLimits": [
+    "Legacy908 captures retain their original unisolated stage interpretation; no current fields are retrofitted",
+    "Current SQL timing directly observes actual SQLite spans, including compile/acquire/native execution/row construction; reader-exclusive SQL residual includes validation/scoring/top-k plus control, not pure math",
+    "Current topology loading directly observes production store methods; exclusive body residual includes computation/projection/Effect overhead, not pure algorithm CPU",
+    "Parser query timing is observed directly; callback-exclusive query residual is fact construction plus extraction control. Parser observer-disabled overhead is not isolated. Worker transport remains a mixed envelope, never pure IPC",
+    "Raw marginal p95 stage components cannot be added or interpreted as native adoption gains; observer controls are noisy diagnostics"
+  ],
+  "reproduction": {
+    "vector": "bun scripts/benchmark-recall-vectors.ts --documents <10000|100000> --distribution <dense|tied> --pair <1|2|3> --samples 30 --model-file <SHA-verified-local-BGE-GGUF> --output <outside-checkout.json>",
+    "parserProbe": "bun scripts/benchmark-code-graph.ts --native-stage-probe --samples 30 --output <outside-checkout.json>",
+    "heavyTail": "bun scripts/benchmark-code-graph-heavy-tail.ts --smoke --output <outside-checkout.json>"
+  },
+  "retention": "Bounded JSON diagnostics only. Private model locations, raw CLI output and logs are excluded. Historical/scratch figures are not current baseline proof.",
+  "sourceFenceControls": {
+    "sourceCommit": "002f5c8f86d36c625133c9bc0db6cd1559c71985",
+    "setupSmoke": "100 documents,2 warm queries plus first use, SHA-verified real BGE query inference; diagnostic only, not representative qualification",
+    "injectedFailure": "Owned tracked test content changed after capture start while HEAD and runner hash remained fixed; capture exited1 with mixed-source result and discarded measurements; file restored clean",
+    "endpointScope": "Net tracked diff/index/status changes are detected at opening and closing; ignored dependencies and transient edits reverted before the closing check are outside this proof"
+  },
+  "linuxCaptureRoute": {
+    "workflow": ".github/workflows/benchmarks.yml",
+    "input": "include_native_recall_vector_capture",
+    "default": false,
+    "job": "recall-vector-native-linux",
+    "platform": "ubuntu-24.04 x64",
+    "cells": 12,
+    "execution": "serial baseline replicas, no candidate comparison",
+    "captureTimeoutMinutes": 40,
+    "jobTimeoutMinutes": 45,
+    "retentionDays": 30,
+    "model": "SHA-verified committed core BGE file; no model download",
+    "outputs": "runner.temp outside checkout",
+    "observations": "not executed locally; Linux receipts remain pending CI dispatch",
+    "primaryWarmQueriesPerCell": 30,
+    "separateObserverControlsPerCell": 30,
+    "firstUseQueriesPerCell": 1,
+    "methodFlag": "--stage-attribution",
+    "contextFix": "Output path derived from RUNNER_TEMP in shell steps; no runner context in job-level env",
+    "semanticValidation": "Pinned actionlintv1.7.12 passed locally; actual Linux execution still pending"
+  },
+  "currentStageProbes": {
+    "sourceCommit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+    "summary": "current-stage-summary.json",
+    "vectorMethod": "30 primary observed warm queries plus30 separately labeled controls, alternating first/second order;1 observed first use; exact paired-output equality and independent scalar controls passed",
+    "topologyFixtureCommit": "a4471c4770184aa32e4297afced96952e4235ecb",
+    "topologySnapshotId": "cgsn_52e6cad06e76560014b62fe86161f96cdff52856",
+    "topologyGraphContentId": "cgc_8403408d70c2979739678c66217b9b62bdd4ecce",
+    "topologySamples": "4 observed/control pairs; same pinned snapshot, full coverage and exact structural digest parity",
+    "retention": "Controlled JSON diagnostic projections; full intervals for first-use/first-warm vector examples and all topology/parser samples; raw capture hashes retained; no private paths or raw CLI/source/logs",
+    "contention": "current-contention-diagnostic.json records first failed attempt and successful quiescent retry; no successful measurements claimed from the failed attempt"
+  }
+}

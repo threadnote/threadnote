@@ -217,7 +217,8 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   check(EffectArray.isArray(operation.relations));
   if (operation.deferredCodeAnchor) {
     check(
-      operation.deferredCodeAnchor.callerCwd === binding.repo &&
+      binding.graphProject === undefined &&
+        operation.deferredCodeAnchor.callerCwd === binding.repo &&
         operation.deferredCodeAnchor.project === binding.project,
     );
     check(same(operation.deferredCodeAnchor.codeRefs, request.codeRefs ?? []));

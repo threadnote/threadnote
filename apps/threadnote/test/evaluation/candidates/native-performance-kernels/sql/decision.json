@@ -1,0 +1,128 @@
+{
+  "phase": "P4",
+  "decision": "DEFER",
+  "reason": "Bounded source inspection found no material, safely removable SQL redundancy; no SQL/runtime experiment ships.",
+  "qualification": false,
+  "profiles": [
+    {
+      "arm": "reference",
+      "receipt": {
+        "filename": "code-graph-10k-Linux-X64.json",
+        "sha256": "3ad645758e966ffd7d0a2e40b0bc7157571e2ce52d9d25c8aaa4663610e61d32"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "dirty": false,
+      "fixtureHash": "generated-code-graph-v1:10000",
+      "runtime": "bun/1.4.4",
+      "counts": {
+        "files": 102,
+        "symbols": 10101,
+        "edges": 19999
+      },
+      "measurements": [
+        {
+          "maximum": 3958.6269,
+          "mean": 3958.6269,
+          "minimum": 3958.6269,
+          "name": "cold-materialization",
+          "p50": 3958.6269,
+          "p95": 3958.6269,
+          "p99": 3958.6269,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 841.422945,
+          "mean": 841.422945,
+          "minimum": 841.422945,
+          "name": "cold-reference-resolution",
+          "p50": 841.422945,
+          "p95": 841.422945,
+          "p99": 841.422945,
+          "samples": 1,
+          "unit": "milliseconds"
+        }
+      ]
+    },
+    {
+      "arm": "candidate",
+      "receipt": {
+        "filename": "code-graph-10k-Linux-X64.json",
+        "sha256": "9c407406916bfe629903131346bb08ac4b0132c4cf7c31ef150463de848ab173"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "INTEL(R) XEON(R) PLATINUM 8573C",
+      "dirty": false,
+      "fixtureHash": "generated-code-graph-v1:10000",
+      "runtime": "bun/1.4.4",
+      "counts": {
+        "files": 102,
+        "symbols": 10101,
+        "edges": 19999
+      },
+      "measurements": [
+        {
+          "maximum": 5831.127513,
+          "mean": 5831.127513,
+          "minimum": 5831.127513,
+          "name": "cold-materialization",
+          "p50": 5831.127513,
+          "p95": 5831.127513,
+          "p99": 5831.127513,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 855.831055,
+          "mean": 855.831055,
+          "minimum": 855.831055,
+          "name": "cold-reference-resolution",
+          "p50": 855.831055,
+          "p95": 855.831055,
+          "p99": 855.831055,
+          "samples": 1,
+          "unit": "milliseconds"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Fresh single cold observations per source, on different CPU models; not paired causal performance evidence or p95 qualification.",
+    "Materialization is a combined boundary; reference resolution includes matching, bounded transactions and persistence. No pure SQL attribution or improvement is claimed.",
+    "Optional unobserved stage zeros in raw runners are not proof those costs are zero.",
+    "Explicit indexed SQL source is not a measured query-plan proof. No source or query-plan evidence establishes the observed matching/fact preparation/shard persistence as redundant."
+  ],
+  "sourceInspection": [
+    {
+      "path": "packages/graph/src/store/resolution/matching.ts",
+      "symbol": "codeGraphPersistentLookupMatchStatement",
+      "observation": "Bounded lookup query explicitly uses sqlite_autoindex_snapshot_symbol_lookup_1 with snapshot/key/domain predicates; no redundant missing-index change was identified."
+    },
+    {
+      "path": "packages/graph/src/store/resolution/matching.ts",
+      "symbols": ["resolvePersistedFullReferencePage", "loadLookupSummaries"],
+      "observation": "Lookup pairs deduplicated and chunked256; target IDs batched400; selections retain domain/export/ambiguity semantics."
+    },
+    {
+      "path": "packages/graph/src/store/resolution.ts",
+      "observation": "Persisted reference work is already performed in bounded, adaptive transaction pages."
+    },
+    {
+      "path": "packages/graph/src/indexer/materialization_batch.ts",
+      "symbols": ["cachedFactsMetadata", "groupFilesByCacheIdentity"],
+      "observation": "Cache metadata is grouped by parser identity and can be loaded without fact decoding."
+    },
+    {
+      "path": "packages/graph/src/store/resolution/core.ts",
+      "anchors": ["130-169", "443-485", "517-560"],
+      "observation": "Candidate/payload/reference budgets, batch fingerprint and resume receipt equality preserve bounded reservation/transaction work; no safe replay-removal opportunity was established."
+    },
+    {
+      "path": "packages/graph/src/indexer/materialization.ts",
+      "anchors": ["1061-1071", "1335-1371", "1382-1405"],
+      "observation": "Stable128-file/16MiB logical batches, bounded four-batch physical envelope, resume receipt identity and relationship dedup before strict insertion already exist."
+    }
+  ],
+  "nextProof": "Identify a concrete removable cost with exact fact/eligibility parity and same-host whole-operation comparison before changing batching, indexes or orchestration."
+}

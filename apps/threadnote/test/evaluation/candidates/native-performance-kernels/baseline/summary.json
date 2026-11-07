@@ -1,0 +1,110 @@
+[
+  {
+    "name": "vector-10000-dense-baseline-1",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 11.73,
+    "p95Milliseconds": 52.957791,
+    "firstUseMilliseconds": 4938.548875,
+    "sampledTreeRssBytes": 594313216,
+    "samples": 30
+  },
+  {
+    "name": "vector-10000-dense-baseline-2",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 7.253,
+    "p95Milliseconds": 60.194167,
+    "firstUseMilliseconds": 352.1755,
+    "sampledTreeRssBytes": 597311488,
+    "samples": 30
+  },
+  {
+    "name": "vector-10000-dense-baseline-3",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 7.037,
+    "p95Milliseconds": 54.582125,
+    "firstUseMilliseconds": 332.390791,
+    "sampledTreeRssBytes": 582483968,
+    "samples": 30
+  },
+  {
+    "name": "vector-10000-tied-baseline-1",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 6.99,
+    "p95Milliseconds": 69.798917,
+    "firstUseMilliseconds": 329.012625,
+    "sampledTreeRssBytes": 609419264,
+    "samples": 30
+  },
+  {
+    "name": "vector-10000-tied-baseline-2",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 7.014,
+    "p95Milliseconds": 55.214875,
+    "firstUseMilliseconds": 325.460833,
+    "sampledTreeRssBytes": 626999296,
+    "samples": 30
+  },
+  {
+    "name": "vector-10000-tied-baseline-3",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 7.085,
+    "p95Milliseconds": 99.269542,
+    "firstUseMilliseconds": 344.716584,
+    "sampledTreeRssBytes": 598704128,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-dense-baseline-1",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 75.517,
+    "p95Milliseconds": 525.569292,
+    "firstUseMilliseconds": 753.36625,
+    "sampledTreeRssBytes": 891240448,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-dense-baseline-2",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 74.333,
+    "p95Milliseconds": 461.603084,
+    "firstUseMilliseconds": 715.627333,
+    "sampledTreeRssBytes": 919191552,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-dense-baseline-3",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 73.154,
+    "p95Milliseconds": 454.36775,
+    "firstUseMilliseconds": 729.642792,
+    "sampledTreeRssBytes": 931020800,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-tied-baseline-1",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 73.369,
+    "p95Milliseconds": 463.602083,
+    "firstUseMilliseconds": 716.570625,
+    "sampledTreeRssBytes": 933806080,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-tied-baseline-2",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 76.019,
+    "p95Milliseconds": 470.734,
+    "firstUseMilliseconds": 742.3075,
+    "sampledTreeRssBytes": 912949248,
+    "samples": 30
+  },
+  {
+    "name": "vector-100000-tied-baseline-3",
+    "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+    "seconds": 76.547,
+    "p95Milliseconds": 458.737292,
+    "firstUseMilliseconds": 717.385208,
+    "sampledTreeRssBytes": 899612672,
+    "samples": 30
+  }
+]

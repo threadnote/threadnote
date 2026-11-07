@@ -1,0 +1,352 @@
+{
+  "kind": "topology-typed-dsu-algorithm-diagnostic",
+  "qualification": false,
+  "opening": {
+    "baselineCommit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+    "baselineStatus": "",
+    "candidateCommit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+    "candidateStatus": " M packages/graph/src/analysis.ts\n",
+    "candidateDiffSha256": "2487b90a049b733044dc16afca1a5374f51fbe05fad865bd704cd7315423e965",
+    "candidateSourceSha256": "1a972de30dce190c85503656b9e16729fe46733ef0669551730a6312df4b9073",
+    "baselineSourceSha256": "da9428cb69d6ab1b7767374a29653e918816ef125378f252ef94ff51f5d9f728",
+    "scriptSha256": "c2391752ca66f5519679ac14f3a8bc87b2982d694dd70bddf3c0bfa34ea68aaf"
+  },
+  "closing": {
+    "baselineCommit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+    "baselineStatus": "",
+    "candidateCommit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+    "candidateStatus": " M packages/graph/src/analysis.ts\n",
+    "candidateDiffSha256": "2487b90a049b733044dc16afca1a5374f51fbe05fad865bd704cd7315423e965",
+    "candidateSourceSha256": "1a972de30dce190c85503656b9e16729fe46733ef0669551730a6312df4b9073",
+    "baselineSourceSha256": "da9428cb69d6ab1b7767374a29653e918816ef125378f252ef94ff51f5d9f728",
+    "scriptSha256": "c2391752ca66f5519679ac14f3a8bc87b2982d694dd70bddf3c0bfa34ea68aaf"
+  },
+  "setupParity": true,
+  "fixture": {
+    "nodes": 20000,
+    "edges": 30000,
+    "pageSize": 257,
+    "sha256": "e2f5cb541c57bf05c61302844084d45ca87bf52236a114f29c7e9d74667711f5"
+  },
+  "environment": {
+    "runtime": "1.4.4",
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "limitations": [
+    "Uncommitted bounded representation experiment, exact source/diff hashes retained; not qualifying clean-source evidence.",
+    "Existing20k-node scaling model; no SQL, CLI, canonical database writer, lease, model or native boundary.",
+    "Fixture construction and fake-store sorting plus forced GC occur outside clocks; clocks include actual analyzeCodeGraph Effect execution.",
+    "Pointwise process.memoryUsage before/after is not allocation volume, peak RSS or process-tree RSS; no full-operation or20% gain claim."
+  ],
+  "samples": [
+    {
+      "pair": 1,
+      "arm": "baseline",
+      "milliseconds": 237.762334,
+      "before": {
+        "rss": 98829152,
+        "heapTotal": 24067072,
+        "heapUsed": 26894285,
+        "external": 5489149,
+        "arrayBuffers": 864
+      },
+      "after": {
+        "rss": 241976304,
+        "heapTotal": 137673728,
+        "heapUsed": 91541277,
+        "external": 5742333,
+        "arrayBuffers": 864
+      },
+      "digest": "955c3377aa329a5463c3db53c0e5c705fbb4be7e6296bf0c40830472f662df75",
+      "complete": true,
+      "statistics": {
+        "analyzedEdgeCount": 30000,
+        "analyzedNodeCount": 20000,
+        "aggregatedEdgeCount": 30000,
+        "aggregatedNodeCount": 20000,
+        "averageDegree": 3,
+        "communityCount": 200,
+        "connectedComponentCount": 1,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 0,
+        "kinds": [
+          {
+            "count": 20000,
+            "value": "function"
+          }
+        ],
+        "languages": [
+          {
+            "count": 20000,
+            "value": "typescript"
+          }
+        ],
+        "maximumDegree": 3,
+        "provenances": [
+          {
+            "count": 30000,
+            "value": "resolved"
+          }
+        ],
+        "relations": [
+          {
+            "count": 20000,
+            "value": "calls"
+          },
+          {
+            "count": 10000,
+            "value": "references"
+          }
+        ],
+        "scannedEdgeCount": 30000,
+        "selectedEdgeCount": 30000,
+        "selfLoopCount": 0,
+        "snapshotEdgeCount": 30000,
+        "snapshotNodeCount": 20000,
+        "unresolvedEndpointEdgeCount": 0
+      },
+      "usage": {
+        "aggregateEdgePageReads": 1,
+        "aggregateEdgeRows": 30000,
+        "aggregateSummaryReads": 0,
+        "aggregateSymbolPageReads": 1,
+        "aggregateSymbolRows": 20000,
+        "edgePageReads": 234,
+        "edgeVisits": 60000,
+        "nodePageReads": 78
+      }
+    },
+    {
+      "pair": 1,
+      "arm": "candidate",
+      "milliseconds": 221.34291699999994,
+      "before": {
+        "rss": 151520240,
+        "heapTotal": 25377792,
+        "heapUsed": 27921604,
+        "external": 6589860,
+        "arrayBuffers": 864
+      },
+      "after": {
+        "rss": 198984712,
+        "heapTotal": 140198912,
+        "heapUsed": 95330890,
+        "external": 7486906,
+        "arrayBuffers": 864
+      },
+      "digest": "955c3377aa329a5463c3db53c0e5c705fbb4be7e6296bf0c40830472f662df75",
+      "complete": true,
+      "statistics": {
+        "analyzedEdgeCount": 30000,
+        "analyzedNodeCount": 20000,
+        "aggregatedEdgeCount": 30000,
+        "aggregatedNodeCount": 20000,
+        "averageDegree": 3,
+        "communityCount": 200,
+        "connectedComponentCount": 1,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 0,
+        "kinds": [
+          {
+            "count": 20000,
+            "value": "function"
+          }
+        ],
+        "languages": [
+          {
+            "count": 20000,
+            "value": "typescript"
+          }
+        ],
+        "maximumDegree": 3,
+        "provenances": [
+          {
+            "count": 30000,
+            "value": "resolved"
+          }
+        ],
+        "relations": [
+          {
+            "count": 20000,
+            "value": "calls"
+          },
+          {
+            "count": 10000,
+            "value": "references"
+          }
+        ],
+        "scannedEdgeCount": 30000,
+        "selectedEdgeCount": 30000,
+        "selfLoopCount": 0,
+        "snapshotEdgeCount": 30000,
+        "snapshotNodeCount": 20000,
+        "unresolvedEndpointEdgeCount": 0
+      },
+      "usage": {
+        "aggregateEdgePageReads": 1,
+        "aggregateEdgeRows": 30000,
+        "aggregateSummaryReads": 0,
+        "aggregateSymbolPageReads": 1,
+        "aggregateSymbolRows": 20000,
+        "edgePageReads": 234,
+        "edgeVisits": 60000,
+        "nodePageReads": 78
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "candidate",
+      "milliseconds": 187.7532080000001,
+      "before": {
+        "rss": 146261000,
+        "heapTotal": 25361408,
+        "heapUsed": 28682662,
+        "external": 7327670,
+        "arrayBuffers": 864
+      },
+      "after": {
+        "rss": 151831560,
+        "heapTotal": 140592128,
+        "heapUsed": 93964994,
+        "external": 8193746,
+        "arrayBuffers": 864
+      },
+      "digest": "955c3377aa329a5463c3db53c0e5c705fbb4be7e6296bf0c40830472f662df75",
+      "complete": true,
+      "statistics": {
+        "analyzedEdgeCount": 30000,
+        "analyzedNodeCount": 20000,
+        "aggregatedEdgeCount": 30000,
+        "aggregatedNodeCount": 20000,
+        "averageDegree": 3,
+        "communityCount": 200,
+        "connectedComponentCount": 1,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 0,
+        "kinds": [
+          {
+            "count": 20000,
+            "value": "function"
+          }
+        ],
+        "languages": [
+          {
+            "count": 20000,
+            "value": "typescript"
+          }
+        ],
+        "maximumDegree": 3,
+        "provenances": [
+          {
+            "count": 30000,
+            "value": "resolved"
+          }
+        ],
+        "relations": [
+          {
+            "count": 20000,
+            "value": "calls"
+          },
+          {
+            "count": 10000,
+            "value": "references"
+          }
+        ],
+        "scannedEdgeCount": 30000,
+        "selectedEdgeCount": 30000,
+        "selfLoopCount": 0,
+        "snapshotEdgeCount": 30000,
+        "snapshotNodeCount": 20000,
+        "unresolvedEndpointEdgeCount": 0
+      },
+      "usage": {
+        "aggregateEdgePageReads": 1,
+        "aggregateEdgeRows": 30000,
+        "aggregateSummaryReads": 0,
+        "aggregateSymbolPageReads": 1,
+        "aggregateSymbolRows": 20000,
+        "edgePageReads": 234,
+        "edgeVisits": 60000,
+        "nodePageReads": 78
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "baseline",
+      "milliseconds": 205.0106249999999,
+      "before": {
+        "rss": 133055496,
+        "heapTotal": 25558016,
+        "heapUsed": 28910670,
+        "external": 7552926,
+        "arrayBuffers": 864
+      },
+      "after": {
+        "rss": 133252104,
+        "heapTotal": 141786112,
+        "heapUsed": 95049253,
+        "external": 7648437,
+        "arrayBuffers": 864
+      },
+      "digest": "955c3377aa329a5463c3db53c0e5c705fbb4be7e6296bf0c40830472f662df75",
+      "complete": true,
+      "statistics": {
+        "analyzedEdgeCount": 30000,
+        "analyzedNodeCount": 20000,
+        "aggregatedEdgeCount": 30000,
+        "aggregatedNodeCount": 20000,
+        "averageDegree": 3,
+        "communityCount": 200,
+        "connectedComponentCount": 1,
+        "filteredEdgeCount": 0,
+        "isolatedNodeCount": 0,
+        "kinds": [
+          {
+            "count": 20000,
+            "value": "function"
+          }
+        ],
+        "languages": [
+          {
+            "count": 20000,
+            "value": "typescript"
+          }
+        ],
+        "maximumDegree": 3,
+        "provenances": [
+          {
+            "count": 30000,
+            "value": "resolved"
+          }
+        ],
+        "relations": [
+          {
+            "count": 20000,
+            "value": "calls"
+          },
+          {
+            "count": 10000,
+            "value": "references"
+          }
+        ],
+        "scannedEdgeCount": 30000,
+        "selectedEdgeCount": 30000,
+        "selfLoopCount": 0,
+        "snapshotEdgeCount": 30000,
+        "snapshotNodeCount": 20000,
+        "unresolvedEndpointEdgeCount": 0
+      },
+      "usage": {
+        "aggregateEdgePageReads": 1,
+        "aggregateEdgeRows": 30000,
+        "aggregateSummaryReads": 0,
+        "aggregateSymbolPageReads": 1,
+        "aggregateSymbolRows": 20000,
+        "edgePageReads": 234,
+        "edgeVisits": 60000,
+        "nodePageReads": 78
+      }
+    }
+  ]
+}

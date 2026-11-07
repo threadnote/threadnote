@@ -141,8 +141,18 @@ describe('native cycle pure domain', () => {
       snapshot(),
       validation,
     );
+    const publication = {
+      state: 'published',
+      team: 'default',
+      uri: 'threadnote://memories/shared/default/durable/pr-publication',
+      revision: digest,
+      currentHead: gitSha,
+      remoteCommit: gitSha,
+      evidence: 'The current source was published with this exact reviewed receipt.',
+    } as const;
     const receipt = {
       ...prDelivery('merged'),
+      publication,
       pr: {
         ...prDelivery('merged').pr,
         url: 'https://github.com/example/repo/pull/1',
@@ -159,9 +169,16 @@ describe('native cycle pure domain', () => {
     const delivered = recordNativeCycleDelivery(state, 'one', receipt);
     expect(delivered.plan).toEqual(state.plan);
     expect(delivered.phases.one.phaseHash).toBe(state.phases.one.phaseHash);
+    expect(delivered.phases.one.delivery?.publication).toEqual(publication);
     expect(decodeNativeCycleState(JSON.parse(JSON.stringify(delivered)))).toEqual(delivered);
     expect(recordNativeCycleDelivery(delivered, 'one', receipt)).toEqual(delivered);
     expect(() => recordNativeCycleDelivery(delivered, 'one', {...receipt, commitEvidence: 'different'})).toThrow();
+    expect(() =>
+      recordNativeCycleDelivery(delivered, 'one', {
+        ...receipt,
+        publication: {...publication, evidence: 'Changed authority cannot replay the receipt.'},
+      }),
+    ).toThrow();
     for (const proof of [
       {...receipt.pr.baseRefBinding, remote: 'fork'},
       {...receipt.pr.baseRefBinding, ref: 'refs/remotes/origin/other'},
@@ -177,6 +194,64 @@ describe('native cycle pure domain', () => {
         }),
       ).toThrow();
     }
+  });
+
+  it('preserves bounded PR publication authority across receipt round-trips and rejects changed-authority replay', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .string({minLength: 1, maxLength: 48})
+          .filter(value => /^[A-Za-z0-9 .-]+$/u.test(value) && EffectString.trim(value).length > 0),
+        evidence => {
+          const publication = {
+            state: 'published' as const,
+            team: 'default',
+            uri: 'threadnote://memories/shared/default/durable/pr-publication',
+            revision: digest,
+            currentHead: gitSha,
+            remoteCommit: gitSha,
+            evidence,
+          };
+          const receipt = {...prDelivery('merged'), publication};
+          const delivered = recordNativeCycleDelivery(validateFirst(), 'one', receipt);
+          const readback = decodeNativeCycleState(JSON.parse(JSON.stringify(delivered)));
+          expect(readback.phases.one.delivery?.publication).toEqual(publication);
+          expect(recordNativeCycleDelivery(readback, 'one', receipt)).toEqual(readback);
+          expect(() =>
+            recordNativeCycleDelivery(readback, 'one', {
+              ...receipt,
+              publication: {...publication, evidence: evidence + ' changed'},
+            }),
+          ).toThrow();
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
+  it('binds active versus terminal watch readback to open versus merged PR receipts', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.boolean(), (merged, terminal) => {
+        const receipt = {
+          ...prDelivery(merged ? 'merged' : 'open'),
+          watch: {
+            prUrl: 'https://example.test/pr/1',
+            headSha: gitSha,
+            state: terminal ? 'terminal' : 'active',
+            stateDir: '/private/test-watch',
+            consumerKind: 'worker',
+            consumerId: 'watcher',
+            evidence: 'Canonical private watch readback.',
+          },
+        };
+        if (merged === terminal)
+          expect(recordNativeCycleDelivery(validateFirst(), 'one', receipt).phases.one.delivery).toMatchObject({
+            watch: {state: terminal ? 'terminal' : 'active'},
+          });
+        else expect(() => recordNativeCycleDelivery(validateFirst(), 'one', receipt)).toThrow();
+      }),
+      {numRuns: 4},
+    );
   });
 
   it('preserves all non-delivery state through generated base mappings and serialization', () => {

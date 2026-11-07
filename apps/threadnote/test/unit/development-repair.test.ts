@@ -336,6 +336,18 @@ describe('development installer repair isolation', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('recovers from a canonical write during the first development repair inference', () =>
+    checkRepairSupersessions(1).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'converges after finite corpus supersessions or stops after three attempts',
+    {supersessions: FC.integer({min: 0, max: 5})},
+    ({supersessions}) => checkRepairSupersessions(supersessions).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 12}},
+  );
+
   effectIt.effect.each(['inference', 'corpus', 'selection', 'authorization'] as const)(
     'fails explicit repair on %s failure without claiming readiness',
     failure =>
@@ -390,33 +402,43 @@ describe('development installer repair isolation', () => {
         const authorizationBefore = yield* loadRecallVectorAuthorizationKey(f.config).pipe(
           Effect.provideService(ExternalSourcePolicy, policy),
         );
+        let embeddingAttempts = 0;
         const runtime =
           failure === 'inference'
             ? LocalModelRuntime.of({
                 ...f.embeddingRuntime(),
                 embedMany: () =>
-                  InferenceInterrupted.make({
-                    message: 'Synthetic embedding failure',
-                    modelId: embeddingManifest.id,
-                    operation: 'embedMany',
+                  Effect.suspend(() => {
+                    embeddingAttempts += 1;
+                    return InferenceInterrupted.make({
+                      message: 'Synthetic embedding failure',
+                      modelId: embeddingManifest.id,
+                      operation: 'embedMany',
+                    });
                   }),
               })
             : f.embeddingRuntime(() =>
-                failure === 'selection'
-                  ? writeModelSelection(f.home, {version: 1, roles: {}})
-                  : failure === 'authorization'
-                    ? Effect.sync(() => {
-                        accessEnabled = true;
-                      })
-                    : f.fs
-                        .writeFileString(memoryPath, '# Changed\n\nConcurrent canonical body.')
-                        .pipe(
-                          Effect.andThen(
-                            expireRecallIndexValidation(f.home, false, [
-                              'threadnote://resources/repos/demo/document.md',
-                            ]),
-                          ),
-                        ),
+                Effect.sync(() => {
+                  embeddingAttempts += 1;
+                }).pipe(
+                  Effect.andThen(
+                    failure === 'selection'
+                      ? writeModelSelection(f.home, {version: 1, roles: {}})
+                      : failure === 'authorization'
+                        ? Effect.sync(() => {
+                            accessEnabled = true;
+                          })
+                        : f.fs
+                            .writeFileString(memoryPath, `# Changed\n\nConcurrent canonical body ${embeddingAttempts}.`)
+                            .pipe(
+                              Effect.andThen(
+                                expireRecallIndexValidation(f.home, false, [
+                                  'threadnote://resources/repos/demo/document.md',
+                                ]),
+                              ),
+                            ),
+                  ),
+                ),
               );
         const result = yield* f.provideWithRuntime(
           captureConsole(
@@ -428,6 +450,7 @@ describe('development installer repair isolation', () => {
           ),
           runtime,
         );
+        expect(embeddingAttempts).toBe(failure === 'corpus' ? 3 : 1);
         expect(Result.isFailure(result.value)).toBe(true);
         if (Result.isFailure(result.value))
           expect(result.value.failure).toMatchObject({
@@ -723,6 +746,48 @@ describe('development installer repair isolation', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 });
+
+const checkRepairSupersessions = (supersessions: number) =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const uri = 'threadnote://resources/repos/demo/document.md';
+    const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
+    const canonical = (revision: number) => `# Example\n\nCanonical revision ${revision}.`;
+    yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
+    yield* f.fs.writeFileString(memoryPath, canonical(0));
+    const initial = yield* loadRecallIndexData(f.config, {includeInactive: false});
+    let attempts = 0;
+    const supersededGenerations: string[] = [];
+    const runtime = f.embeddingRuntime(() =>
+      Effect.gen(function* () {
+        attempts += 1;
+        if (attempts <= supersessions) {
+          supersededGenerations.push(EffectOption.getOrThrow(yield* currentRecallCorpusGeneration(f.config)));
+          yield* f.fs.writeFileString(memoryPath, canonical(attempts));
+          yield* expireRecallIndexValidation(f.home, false, [uri]);
+        }
+      }),
+    );
+    const result = yield* f.provideWithRuntime(
+      captureConsole(runDevelopmentInstallRepair(f.config, version).pipe(Effect.result)),
+      runtime,
+    );
+    const converges = supersessions <= 2;
+    expect(attempts).toBe(Math.min(supersessions + 1, 3));
+    expect(Result.isSuccess(result.value)).toBe(converges);
+    expect(yield* f.fs.readFileString(memoryPath)).toBe(canonical(Math.min(supersessions, 3)));
+    const lexical = yield* recallIndexStatus(f.config);
+    expect(lexical.ready).toBe(converges);
+    if (converges) {
+      expect(yield* currentRecallCorpusGeneration(f.config)).toEqual(EffectOption.some(lexical.generation!));
+      expect(yield* vectorIndexGenerationReadiness(f.home, embeddingManifest, lexical.generation!)).toBe('current');
+      if (supersessions > 0) expect(lexical.generation).not.toBe(initial.generation);
+    } else {
+      expect(result.output).not.toContain('indexes are ready');
+    }
+    for (const generation of supersededGenerations)
+      expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, generation)).toBe(false);
+  });
 
 function handoffDocument(body: string): string {
   return EffectArray.join(

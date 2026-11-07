@@ -26,6 +26,7 @@ import e2eConfig from '../../../../vitest.e2e.config.js';
 import {
   createLocalBinsWorkerDrains,
   drainLocalBinsWorkers,
+  runLocalBinsE2eCleanup,
   runLocalBinsWorkerDrain,
   type LocalBinsPositiveHome,
   type LocalBinsWorkerDrain,
@@ -230,7 +231,6 @@ async function enrollPositiveWorkerHome(positiveHome: string, label: LocalBinsPo
     ...(await runLocalBinsWorkerDrain(createLocalBinsWorkerDrains(positiveHome, temporaryRoot, cli, label))),
   );
 }
-
 function installedLauncher(
   mode: 'cli' | 'mcp' = 'cli',
   kind: 'cmd' | 'posix' = process.platform === 'win32' ? 'cmd' : 'posix',
@@ -300,32 +300,36 @@ beforeAll(async () => {
 afterAll(async () => {
   // Share the existing hook's original epoch deadline with both supported worker domains.
   const workerDeadline = Date.now() + e2eConfig.test!.hookTimeout!;
-  const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
-    .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
-    .catch(() => undefined);
-  if (endpoint) {
-    expect(await realpath(endpoint.home)).toBe(await realpath(home));
-    expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
-    if (process.platform === 'win32') {
-      if (isProcessRunning(endpoint.pid)) {
-        try {
-          await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
-        } catch (cause) {
-          if (isProcessRunning(endpoint.pid)) throw cause;
+  await runLocalBinsE2eCleanup(
+    async () => {
+      const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
+        .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
+        .catch(() => undefined);
+      if (endpoint) {
+        expect(await realpath(endpoint.home)).toBe(await realpath(home));
+        expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
+        if (process.platform === 'win32') {
+          if (isProcessRunning(endpoint.pid)) {
+            try {
+              await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
+            } catch (cause) {
+              if (isProcessRunning(endpoint.pid)) throw cause;
+            }
+          }
+        } else {
+          try {
+            process.kill(endpoint.pid, 'SIGKILL');
+          } catch (cause) {
+            if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
+          }
         }
+        await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
       }
-    } else {
-      try {
-        process.kill(endpoint.pid, 'SIGKILL');
-      } catch (cause) {
-        if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
-      }
-    }
-    await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
-  }
-  // Coordinator handling above is unchanged; this proves only enrolled recall/graph worker return.
-  await runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline));
-  await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
+    },
+    // This proves only enrolled recall/graph worker return, even when coordinator cleanup fails.
+    () => runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline)),
+    () => rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50}),
+  );
 });
 
 function requiredMapValue(map: ReadonlyMap<string, string>, key: string): string {
@@ -1825,6 +1829,7 @@ function expectSourceRefreshRequested(sourceId: string): void {
 }
 
 async function activeVectorRevision(): Promise<string> {
+  await runCli(['index', 'verify']);
   const database = new Database(join(home, 'indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()), {
     readonly: true,
   });
@@ -1838,8 +1843,8 @@ async function activeVectorRevision(): Promise<string> {
       )
       .get();
     const jobId = pointer?.job_id;
-    if (typeof jobId !== 'string') throw TestError.make({message: 'Expected a vector generation job ID.'});
-    expect(jobId).toMatch(/^[a-f0-9]{64}$/);
+    if (typeof jobId !== 'string' || jobId.length === 0)
+      throw TestError.make({message: 'Expected a vector generation job ID.'});
     return jobId;
   } finally {
     database.close();

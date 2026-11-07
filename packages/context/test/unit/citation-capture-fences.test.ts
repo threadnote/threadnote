@@ -105,6 +105,33 @@ describe('local citation capture fences', () => {
       }),
     );
 
+    test.effect('rejects an unselected full observation for a selected full project', () =>
+      Effect.gen(function* () {
+        const unselected = yield* captureFixture();
+        const denied = yield* unselected.capture(undefined, 'Alpha').pipe(Effect.flip);
+        expect(denied).toBeInstanceOf(MemoryCodeCitationCaptureError);
+        expect(unselected.leases()).toEqual({acquired: 0, released: 0});
+        const selected = yield* captureFixture({
+          statusFor: status =>
+            attachCodeGraphStatusObservation(
+              {...status},
+              {
+                identity: status.identity,
+                projectScopeObserved: true,
+                projectScope: {
+                  project: {
+                    name: 'Alpha',
+                    uri: 'threadnote://resources/repos/alpha',
+                  },
+                },
+              },
+            ),
+        });
+        expect(yield* selected.capture(undefined, 'Alpha')).toHaveLength(1);
+        expect(selected.leases()).toEqual({acquired: 1, released: 1});
+      }),
+    );
+
     test.effect('keeps internal capture waiting for its writer without reading unleased evidence', () =>
       Effect.gen(function* () {
         const entered = yield* Deferred.make<void>();
@@ -301,12 +328,14 @@ function captureFixture(
       }),
     );
     return {
-      capture: (writerWaitTimeoutMilliseconds?: number) =>
+      capture: (writerWaitTimeoutMilliseconds?: number, selectedProject?: string) =>
         captureMemoryCodeCitations(CONFIG, {
           callerCwd: root,
+          ...(selectedProject === undefined ? {} : {project: selectedProject}),
           refs: ['src/value.ts'],
           expectedCallerIdentity: status.identity,
-          expectedProjectScope: {kind: 'full'},
+          expectedProjectScope:
+            selectedProject === undefined ? {kind: 'full'} : {kind: 'selected-project', project: selectedProject},
           writerWaitTimeoutMilliseconds,
         }).pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, store)),
       observations: () => observations,

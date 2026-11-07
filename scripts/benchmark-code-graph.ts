@@ -1,3 +1,12 @@
+import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {TreeSitterRuntime, TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
+import type {Query} from 'web-tree-sitter';
+import {
+  NATIVE_PERFORMANCE_CONTRACT,
+  createNativeStageTracing,
+  nativeStagePartition,
+  nativePerformanceSourceChanges,
+} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray} from 'effect';
 import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -41,6 +50,8 @@ import {
 } from '@threadnote/graph/store';
 import {
   CodeGraphAnalysis,
+  analyzeCodeGraphWithLease,
+  type CodeGraphAnalysisLeasedStore,
   type CodeGraphAnalysisOptions,
   type CodeGraphAnalysisResult,
 } from '@threadnote/graph/analysis';
@@ -1932,6 +1943,9 @@ const benchmarkCodeGraph = Effect.scoped(
           : []),
       ],
       metadata: {
+        nativePerformanceContract: JSON.stringify(NATIVE_PERFORMANCE_CONTRACT),
+        nativePerformanceAttribution:
+          'Existing stage and request observations retain their declared boundaries. Aggregate stats do not exercise detail topology; no pure parse/query/fact/IPC or topology-compute isolation is claimed. --native-stage-probe provides an overlapping in-process diagnostic only.',
         activationMeasurement:
           'privacy-safe completed-stage duration and row counts; unobserved optional stages are retained as zero',
         coldEdges: cold.snapshot.edgeCount,
@@ -9870,8 +9884,332 @@ const embeddingRuntimeDiagnosticLayer = Layer.mergeAll(
   LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
 ).pipe(Layer.provideMerge(BunServices.layer));
 
+const nativeProbeSourceFence = Effect.fn('benchmarkCodeGraph.nativeProbeSourceFence')(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* path.fromFileUrl(new URL('../', import.meta.url));
+  const git = (args: readonly string[]) => repositoryGit(root, args);
+  const [commit, diff, index, status] = yield* Effect.all(
+    [
+      git(['rev-parse', 'HEAD']),
+      git(['diff', '--binary', '--no-ext-diff', 'HEAD', '--']),
+      git(['ls-files', '--stage', '-z']),
+      git(['status', '--porcelain=v1', '--untracked-files=normal', '-z']),
+    ],
+    {concurrency: 4},
+  );
+  return {
+    commit: EffectString.trim(commit.stdout),
+    dirty: status.stdout.length > 0,
+    trackedDiffHash: sha256HexSync(diff.stdout),
+    indexHash: sha256HexSync(index.stdout),
+    statusHash: sha256HexSync(status.stdout),
+    instrumentationHash: sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(new URL(import.meta.url)))),
+  };
+});
+
+const nativeTopologyProbe = Effect.fn('benchmarkCodeGraph.nativeTopologyProbe')(function* () {
+  const args = process.argv.slice(3);
+  const system = yield* SystemInfo;
+  let cwd = system.currentDirectory();
+  let home: string | undefined;
+  let output: string | undefined;
+  let samples = 3;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--cwd') cwd = required(args[++index], '--cwd');
+    else if (args[index] === '--home') home = required(args[++index], '--home');
+    else if (args[index] === '--output') output = required(args[++index], '--output');
+    else if (args[index] === '--samples') samples = integer(args[++index], '--samples', 1);
+    else return yield* ScriptError.make({message: `Unknown topology probe option: ${args[index]}`});
+  }
+  if (!home)
+    return yield* ScriptError.make({message: 'Topology probe requires explicit --home; it never builds a graph.'});
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const query = yield* CodeGraphQueryService;
+  const store = yield* CodeGraphStore;
+  const opening = yield* nativeProbeSourceFence();
+  const status = yield* query.status(home, cwd, {requestMaintenance: false});
+  const snapshot = status.readySnapshot;
+  if (!snapshot || snapshot.symbolCount <= 100_000)
+    return yield* ScriptError.make({message: 'Topology probe requires an existing ready snapshot over100000 nodes.'});
+  const observations = [];
+  for (let sample = 0; sample < samples; sample += 1) {
+    let pairedDigest: string | undefined;
+    for (const observed of sample % 2 === 0 ? [true, false] : [false, true]) {
+      const loads: {name: string; start: bigint; end: bigint}[] = [];
+      const timed = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          const start = yield* Clock.currentTimeNanos;
+          return yield* effect.pipe(
+            Effect.ensuring(
+              Clock.currentTimeNanos.pipe(
+                Effect.tap(end =>
+                  Effect.sync(() => {
+                    loads.push({name, start, end});
+                  }),
+                ),
+                Effect.asVoid,
+              ),
+            ),
+          );
+        });
+      const decorated: CodeGraphAnalysisLeasedStore = {
+        acquireSnapshotLease: store.acquireSnapshotLease,
+        releaseSnapshotLease: store.releaseSnapshotLease,
+        withSession: store.withSession,
+        loadSymbolPage: (...args) => timed('symbols', store.loadSymbolPage(...args)),
+        loadEdgePage: (...args) => timed('edges', store.loadEdgePage(...args)),
+        loadAnalysisSummary: (...args) => timed('summary', store.loadAnalysisSummary(...args)),
+        loadAnalysisSymbolAggregatePage: (...args) =>
+          timed('symbol-aggregates', store.loadAnalysisSymbolAggregatePage(...args)),
+        loadAnalysisEdgeAggregatePage: (...args) =>
+          timed('edge-aggregates', store.loadAnalysisEdgeAggregatePage(...args)),
+      };
+      const before = yield* Clock.currentTimeNanos;
+      const tracing = observed ? createNativeStageTracing(['codeGraph.analyze']) : undefined;
+      const run = analyzeCodeGraphWithLease(observed ? decorated : store, {
+        databasePath: status.databasePath,
+        snapshot,
+        budget: {maxDurationMilliseconds: 60_000},
+        limits: codeGraphAnalysisLimitsForView('full'),
+      });
+      const result = yield* tracing ? Effect.withTracer(run, tracing.tracer) : run;
+      const after = yield* Clock.currentTimeNanos;
+      const projectionStarted = performance.now();
+      const body = tracing?.snapshot();
+      const partition =
+        body && body.spans.length === 1 && !body.overflow && body.spans[0].success
+          ? nativeStagePartition(body.spans[0], loads)
+          : undefined;
+      const stable = {...result, usage: {...result.usage, durationMilliseconds: 0}, leaseCleanup: undefined};
+      const loaderCalls = EffectArray.map(loads, load => load.name);
+      const structuralDigest = sha256HexSync(JSON.stringify(stable));
+      if (pairedDigest !== undefined && pairedDigest !== structuralDigest)
+        return yield* ScriptError.make({
+          message: 'Observed/control topology results differ; overhead comparison discarded.',
+        });
+      pairedDigest = structuralDigest;
+      const projectionMilliseconds = performance.now() - projectionStarted;
+      observations.push({
+        sample,
+        observed,
+        order: sample % 2 === 0 ? 'observed-first' : 'control-first',
+        totalMilliseconds: Number(after - before) / NANOSECONDS_PER_MILLISECOND,
+        partition: observed
+          ? (partition ?? {
+              available: false,
+              errors: ['missing/failed/overflowed analysis-body span'],
+              observedBodySpans: body?.spans.length ?? 0,
+              overflow: body?.overflow ?? false,
+            })
+          : undefined,
+        loaderCalls,
+        projectionMilliseconds,
+        coverage: result.coverage,
+        usage: result.usage,
+        structuralDigest,
+      });
+    }
+  }
+  const closing = yield* nativeProbeSourceFence();
+  if (nativePerformanceSourceChanges(opening, closing).length > 0)
+    return yield* ScriptError.make({message: 'Mixed-source topology probe; observations discarded.'});
+  const result = {
+    version: 1,
+    kind: 'diagnostic',
+    method: 'actual-leased-store-loader-union-v1/alternating-observer-control',
+    sourceFence: {opening, closing},
+    runtime: Bun.version,
+    platform: process.platform,
+    architecture: process.arch,
+    fixture: snapshot,
+    observations,
+    limitations: [
+      'Direct production analyzeCodeGraphWithLease over the real retained snapshot; CLI startup/worker IPC are outside this probe.',
+      'Load intervals directly enclose actual summary/symbol/edge/aggregate store methods, including SQLite and row decoding.',
+      'Analysis body minus UNION of load intervals is computation/projection plus Effect/reader-control residual, not pure algorithm CPU. Nested/overlapping intervals are never summed twice or silently clamped.',
+      'Total envelope includes lease/session overhead; it is not the same as the inner analysis-body partition.',
+      'Every primary sample has a separately labeled observer-disabled control; first/second order alternates. Per-loader timer/array pushes and tracer are inside observed clocks; postprocessing is timed separately. Signed overhead differences are not noise-corrected or clamped.',
+    ],
+  };
+  if (output) {
+    yield* fs.makeDirectory(path.dirname(output), {recursive: true});
+    yield* atomicWrite(output, `${JSON.stringify(result, undefined, 2)}\n`);
+  }
+  yield* printJson(result);
+});
+
+/** Diagnostic in-process decomposition; production worker measurements remain authoritative. */
+const nativeStageProbe = Effect.fn('benchmarkCodeGraph.nativeStageProbe')(function* () {
+  const args = process.argv.slice(3);
+  let output: string | undefined;
+  let samples = 30;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--output') output = required(args[++index], '--output');
+    else if (args[index] === '--samples') samples = integer(args[++index], '--samples', 1);
+    else return yield* ScriptError.make({message: `Unknown stage probe option: ${args[index]}`});
+  }
+  const registry = yield* CodeGraphLanguagePackRegistry;
+  const runtime = yield* TreeSitterRuntime;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const opening = yield* nativeProbeSourceFence();
+  const {commit, dirty} = opening;
+  const fixtures = [
+    {
+      path: 'Probe.java',
+      language: 'java',
+      content: 'package probe; class Probe { int value; int read() { return value; } }',
+    },
+    {
+      path: 'probe.py',
+      language: 'python',
+      content: 'class Probe:\n    def read(self, value):\n        return value + 1\n',
+    },
+    {path: 'probe.go', language: 'go', content: 'package probe\nfunc Read(value int) int { return value + 1 }\n'},
+  ];
+  const observations: {
+    language: string;
+    sample: number;
+    loadParse: number;
+    query: number;
+    callback: number;
+    factControlResidual?: number;
+    queryCoverage: ReturnType<typeof nativeStagePartition>;
+    cleanup: number;
+    total: number;
+    digest: string;
+  }[] = [];
+  for (const fixture of fixtures) {
+    for (let sample = 0; sample <= samples; sample += 1) {
+      let entered = 0;
+      let exited = 0;
+      let queryMilliseconds = 0;
+      const queryIntervals: {start: bigint; end: bigint}[] = [];
+      const originals = new Map<Query, Query['matches']>();
+      const started = performance.now();
+      const facts = yield* registry
+        .extractRawFile({
+          ...fixture,
+          contentHash: sha256HexSync(fixture.content),
+          blobId: sha256HexSync(fixture.content),
+          mode: '100644',
+          size: new TextEncoder().encode(fixture.content).byteLength,
+          source: 'worktree',
+        })
+        .pipe(
+          Effect.provideService(
+            TreeSitterRuntime,
+            TreeSitterRuntime.of({
+              withParsedSource: (asset, source, use) =>
+                runtime.withParsedSource(asset, source, parsed => {
+                  entered = performance.now();
+                  try {
+                    return use({
+                      ...parsed,
+                      query: source => {
+                        const queryStarted = performance.now();
+                        const query = parsed.query(source);
+                        const queryFinished = performance.now();
+                        queryMilliseconds += queryFinished - queryStarted;
+                        queryIntervals.push({
+                          start: BigInt(Math.round(queryStarted * 1_000_000)),
+                          end: BigInt(Math.round(queryFinished * 1_000_000)),
+                        });
+                        if (!originals.has(query)) {
+                          const original = query.matches;
+                          originals.set(query, original);
+                          query.matches = (...args) => {
+                            const matchStarted = performance.now();
+                            try {
+                              return original.apply(query, args);
+                            } finally {
+                              const matchFinished = performance.now();
+                              queryMilliseconds += matchFinished - matchStarted;
+                              queryIntervals.push({
+                                start: BigInt(Math.round(matchStarted * 1_000_000)),
+                                end: BigInt(Math.round(matchFinished * 1_000_000)),
+                              });
+                            }
+                          };
+                        }
+                        return query;
+                      },
+                    });
+                  } finally {
+                    exited = performance.now();
+                  }
+                }),
+            }),
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              for (const [query, original] of originals) query.matches = original;
+            }),
+          ),
+        );
+      const finished = performance.now();
+      if (entered === 0 || exited === 0)
+        return yield* ScriptError.make({message: 'Stage probe did not enter Tree-sitter callback.'});
+      const queryCoverage = nativeStagePartition(
+        {start: BigInt(Math.round(entered * 1_000_000)), end: BigInt(Math.round(exited * 1_000_000))},
+        queryIntervals,
+      );
+      observations.push({
+        language: fixture.language,
+        sample,
+        loadParse: entered - started,
+        query: queryMilliseconds,
+        callback: exited - entered,
+        factControlResidual: queryCoverage.available ? queryCoverage.exclusiveResidualMilliseconds : undefined,
+        queryCoverage,
+        cleanup: finished - exited,
+        total: finished - started,
+        digest: sha256HexSync(JSON.stringify(facts)),
+      });
+    }
+  }
+  const result = {
+    version: 1,
+    kind: 'diagnostic',
+    contract: NATIVE_PERFORMANCE_CONTRACT,
+    source: {commit, dirty, runtime: Bun.version, platform: process.platform, architecture: process.arch},
+    identities: {
+      grammar: registry.activePackProvenance(EffectArray.map(fixtures, fixture => fixture.path)),
+      runtime: TREE_SITTER_RUNTIME_CACHE_IDENTITY,
+      workers: 0,
+    },
+    fixtures: EffectArray.map(fixtures, fixture => ({
+      language: fixture.language,
+      sha256: sha256HexSync(fixture.content),
+    })),
+    observations,
+    sourceFence: {opening, closing: yield* nativeProbeSourceFence()},
+    limitations: [
+      'In-process diagnostic with tiny fixed polyglot fixtures; no indexing or IPC measured.',
+      'loadParse includes runtime/grammar loading, registry work and parsing up to callback entry.',
+      'query directly times compilation/cache lookup and matches; callback includes query and fact construction, so these overlap.',
+      'factControlResidual = callback minus UNION of directly observed query intervals: fact construction + extraction control/projection residual, not pure fact construction. Invalid clocks/coverage are explicit and never clamped; performance.now is rounded to nanoseconds for union accounting.',
+      'cleanup includes parser/tree deletion, Effect completion and restoration of the diagnostic matches wrapper.',
+      'sample zero is first use per language in one process; remaining samples are warm, not independent cold processes.',
+    ],
+  };
+  if (nativePerformanceSourceChanges(result.sourceFence.opening, result.sourceFence.closing).length > 0)
+    return yield* ScriptError.make({message: 'Mixed-source parser probe; observations discarded.'});
+  if (output) {
+    yield* fs.makeDirectory(path.dirname(output), {recursive: true});
+    yield* atomicWrite(output, `${JSON.stringify(result, undefined, 2)}\n`);
+  }
+  yield* printJson(result);
+});
+
 if (import.meta.main) {
-  if (
+  if (process.argv[2] === '--native-topology-probe')
+    BunRuntime.runMain(provideScriptLayer(nativeTopologyProbe(), ApplicationLayer));
+  else if (process.argv[2] === '--native-stage-probe')
+    BunRuntime.runMain(provideScriptLayer(nativeStageProbe(), ApplicationLayer));
+  else if (
     process.argv[2] === '--embedding-runtime-diagnostics' ||
     process.argv[2] === '--embedding-runtime-diagnostic-child'
   )

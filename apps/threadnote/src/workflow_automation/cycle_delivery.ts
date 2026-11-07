@@ -64,6 +64,43 @@ const observe = Effect.fn('workflowAutomation.cycle.observeBaseBinding')(functio
   return {binding: {ref, remote, repository}, witness: JSON.stringify({ref, remotes, mappings, url, commit})};
 });
 
+/** Verify a supplied PR URL belongs to a repository declared by this checkout. */
+export const verifyNativeCycleDeliveryRepository = Effect.fn('workflowAutomation.cycle.verifyDeliveryRepository')(
+  function* (repo: string, input: unknown) {
+    const delivery = yield* Schema.decodeUnknownEffect(NativeCycleDeliverySchema)(input, {
+      onExcessProperty: 'error',
+    }).pipe(
+      Effect.mapError(() =>
+        WorkflowAutomationError.make({code: 'invalid-cycle', message: 'Invalid delivery receipt.'}),
+      ),
+    );
+    const pr = delivery.pr;
+    if (!pr) return yield* invalid();
+    const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr.url), catch: invalid});
+    const repository = EffectString.toLowerCase(`https://github.com/${target.owner}/${target.repo}`);
+    const remotes = EffectString.split(yield* readGit(repo, ['remote']), '\n');
+    if (remotes.length > 16 || !EffectArray.every(remotes, name => remoteName.test(name))) return yield* invalid();
+    let matchedRepository = false;
+    for (const remote of remotes) {
+      const urls = EffectString.split(yield* readGit(repo, ['remote', 'get-url', '--all', remote]), '\n');
+      const matchingUrls = EffectArray.filter(
+        urls,
+        url =>
+          supportedURL.test(url) && EffectString.toLowerCase(`https://${normalizeGitRemoteUrl(url)}`) === repository,
+      );
+      if (matchingUrls.length > 0) {
+        if (urls.length !== 1 || matchingUrls.length !== 1) return yield* invalid();
+        matchedRepository = true;
+      }
+      const mapping = yield* readGit(repo, ['config', '--get-all', `remote.${remote}.fetch`]);
+      const standard = `refs/heads/*:refs/remotes/${remote}/*`;
+      if (mapping !== standard && mapping !== '+' + standard) return yield* invalid();
+    }
+    if (!matchedRepository) return yield* invalid();
+    return {repository};
+  },
+);
+
 /** New receipts receive proof here; stored exact merged replay uses the immutable domain path. */
 export const bindNativeCycleDeliveryBase = Effect.fn('workflowAutomation.cycle.bindDeliveryBase')(function* (
   repo: string,

@@ -1,0 +1,36 @@
+diff --git a/packages/graph/src/analysis.ts b/packages/graph/src/analysis.ts
+index 7fca59534..acf1cc1d1 100644
+--- a/packages/graph/src/analysis.ts
++++ b/packages/graph/src/analysis.ts
+@@ -1342,13 +1342,26 @@ const scanEdgePages = Effect.fn('codeGraph.scanAnalysisEdges')(function* (
+ });
+ 
+ class DisjointSets {
+-  readonly #parents: number[] = [];
+-  readonly #ranks: number[] = [];
++  #parents = new Uint32Array(0);
++  #ranks = new Uint8Array(0);
++  #size = 0;
+ 
+   add(): number {
+-    const index = this.#parents.length;
+-    this.#parents.push(index);
+-    this.#ranks.push(0);
++    const index = this.#size;
++    if (index === this.#parents.length) {
++      // NodeState[] has the same array-length bound. Rank is at most log2(size).
++      if (index === 0xffff_ffff) throw new RangeError('Invalid array length');
++      const capacity = Math.min(0xffff_ffff, Math.max(16, index * 2));
++      const parents = new Uint32Array(capacity);
++      const ranks = new Uint8Array(capacity);
++      parents.set(this.#parents);
++      ranks.set(this.#ranks);
++      this.#parents = parents;
++      this.#ranks = ranks;
++    }
++    this.#parents[index] = index;
++    this.#ranks[index] = 0;
++    this.#size += 1;
+     return index;
+   }
+ 

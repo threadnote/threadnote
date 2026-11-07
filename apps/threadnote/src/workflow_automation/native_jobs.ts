@@ -26,9 +26,14 @@ import {decodeNativeAuthoringDocument, validateNativeAuthoring} from '@threadnot
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {inspectWorkflowJournal, readWorkflowProgressBinding, withWorkflowLock} from '../workflow_memory/journal.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {isMemoryCodeCitationRecovery} from '../memory/deferred/code_anchor_scope.js';
+import {shellQuote} from '../utils.js';
+import {workflowGraphProjectHint} from '../workflow_memory/graph_scope.js';
 import {readNativeCycleTreeEntry, nativeCycleRelativePath} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
@@ -39,6 +44,7 @@ import {
 } from './closeout_request_schema.js';
 import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
 import * as EffectString from 'effect/String';
+import * as EffectRecord from 'effect/Record';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const retryableContention = (error: unknown): error is WorkflowAutomationError =>
   Schema.is(WorkflowAutomationError)(error) &&
@@ -50,6 +56,12 @@ const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,12
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const witnessLimit = 4 * 1024 * 1024;
+// Existing authoring source bounds, plus eight citation-only files and the commit/tree.
+const maximumSourceFiles = 128;
+const maximumCitationFiles = 8;
+const sourceFileLimit = 1_000_000;
+const maximumRetainedObjects = maximumSourceFiles + maximumCitationFiles + 2;
+const maximumRetainedBytes = maximumSourceFiles * sourceFileLimit + (maximumCitationFiles + 2) * witnessLimit;
 const receiptLimit = 64 * 1024;
 const workerLockOptions = {
   category: 'native-worker',
@@ -170,6 +182,57 @@ const NativeJobSourceViewSchema = Schema.Struct({
     }),
   ),
 });
+const StoredObjectSchema = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literals(['commit', 'tree', 'blob']),
+  sha256: hash,
+  size: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: witnessLimit})),
+});
+const StoredWitnessSchema = Schema.Struct({
+  ...NativeJobSourceViewSchema.fields,
+  commitObject: StoredObjectSchema,
+  treeObject: StoredObjectSchema,
+  files: Schema.Array(Schema.Struct({path: Schema.String, object: StoredObjectSchema})),
+});
+const storedInputSchema = Schema.Struct({
+  format: Schema.Literal('threadnote-native-job-input'),
+  version: Schema.Literal(2),
+  jobId: id,
+  runId: id,
+  generation: Schema.String,
+  bindingId: hash,
+  work: Schema.Unknown,
+  witness: StoredWitnessSchema,
+});
+type StoredInput = typeof storedInputSchema.Type;
+type StoredObject = typeof StoredObjectSchema.Type;
+// The canonical hash is unchanged, but never build a second aggregate base64 JSON string.
+function sourceWitnessDigest(value: unknown): string {
+  const hasher = new Bun.CryptoHasher('sha256');
+  const visit = (item: unknown): void => {
+    if (EffectArray.isArray(item)) {
+      hasher.update('[');
+      EffectArray.forEach(item, (entry, index) => {
+        if (index) hasher.update(',');
+        visit(entry);
+      });
+      hasher.update(']');
+    } else if (item !== null && typeof item === 'object') {
+      hasher.update('{');
+      const entries = EffectArray.filter(EffectRecord.toEntries(item), ([, entry]) => entry !== undefined).sort(
+        ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+      );
+      EffectArray.forEach(entries, ([key, entry], index) => {
+        if (index) hasher.update(',');
+        hasher.update(JSON.stringify(key) + ':');
+        visit(entry);
+      });
+      hasher.update('}');
+    } else hasher.update(JSON.stringify(item));
+  };
+  visit(value);
+  return hasher.digest('hex');
+}
 export const CurrentNativeJobSourceView = Context.Reference<NativeJobSourceView | undefined>(
   'threadnote/NativeJobSourceView',
   {defaultValue: () => undefined},
@@ -222,6 +285,30 @@ export function advanceNativeJobProgress(
     lastProgressAt: Math.max(at, previous?.lastProgressAt ?? 0),
   };
 }
+const failureDetailSchema = Schema.Struct({
+  stage: Schema.Literals(['preparation', 'canonical-work', 'source-verification']),
+  domainCode: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,63}$/u)),
+  domainCause: Schema.Literals(['workflow', 'memory', 'resource-io', 'citation', 'admission', 'lock', 'unknown']),
+  message: Schema.String.check(Schema.isMaxLength(256)),
+  operationId: Schema.optionalKey(id),
+  operationAction: Schema.optionalKey(
+    Schema.Literals(['preflight', 'create', 'replace', 'recover', 'inspect-operation']),
+  ),
+  nativeReceipt: Schema.Literals(['verified', 'prepared', 'absent', 'unavailable']),
+  canonicalOutcome: Schema.Literals(['verified-readback', 'unknown']),
+});
+type FailureDetail = typeof failureDetailSchema.Type;
+/** Attempt-local evidence, bound by error identity to the call that actually fails dispatch. */
+export const CurrentNativeJobMemoryFailure = Context.Reference<
+  | ((
+      error: WorkflowAutomationError,
+      detail: Pick<FailureDetail, 'operationId' | 'operationAction' | 'domainCause'> & {
+        readonly bindingId: string;
+        readonly generation: string;
+      },
+    ) => void)
+  | undefined
+>('threadnote/NativeJobMemoryFailure', {defaultValue: () => undefined});
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-job'),
   version: Schema.Literal(1),
@@ -246,6 +333,7 @@ const envelopeSchema = Schema.Struct({
   action: Schema.optionalKey(Schema.String),
   updatedAt: Schema.Finite,
   progress: Schema.optionalKey(progressSchema),
+  failure: Schema.optionalKey(failureDetailSchema),
 });
 type Envelope = typeof envelopeSchema.Type;
 const inputSchema = Schema.Struct({
@@ -272,7 +360,16 @@ export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: s
 export function nativeJobStatus(
   envelope: Pick<
     Envelope,
-    'jobId' | 'runId' | 'generation' | 'status' | 'stopRequested' | 'updatedAt' | 'code' | 'action' | 'progress'
+    | 'jobId'
+    | 'runId'
+    | 'generation'
+    | 'status'
+    | 'stopRequested'
+    | 'updatedAt'
+    | 'code'
+    | 'action'
+    | 'progress'
+    | 'failure'
   >,
 ) {
   return {
@@ -286,6 +383,7 @@ export function nativeJobStatus(
     stopRequested: envelope.stopRequested,
     updatedAt: envelope.updatedAt,
     ...(envelope.progress ? {progress: envelope.progress} : {}),
+    ...(envelope.failure ? {failure: envelope.failure} : {}),
     ...(envelope.code ? {code: envelope.code} : {}),
     ...(envelope.action ? {nextAction: envelope.action} : {}),
   };
@@ -300,7 +398,7 @@ const decodeInput = (value: unknown, receipt: Envelope): JobInput => {
     input.generation !== receipt.generation ||
     input.bindingId !== receipt.bindingId ||
     sha256HexSync(stableJson(input.work)) !== receipt.intentDigest ||
-    sha256HexSync(stableJson(input.witness)) !== receipt.witnessDigest ||
+    sourceWitnessDigest(input.witness) !== receipt.witnessDigest ||
     !validWitness(input.witness, receipt.bindingId)
   )
     throw fail('invalid-job-state', 'The exact private job request or source witness changed.');
@@ -453,6 +551,199 @@ const read = Effect.fn('nativeJobs.read')(function* (config: RuntimeConfig, runI
   const file = yield* jobPath(config, runId, jobId);
   return file === undefined ? undefined : yield* readAt(file);
 });
+
+/** Read only one canonical run's bounded job directory; used by controlled binding cutover inspection. */
+export const inspectNativeJobsForRun = Effect.fn('nativeJobs.inspectRun')(function* (
+  config: RuntimeConfig,
+  runId: string,
+  generation: string,
+  bindingId: string,
+) {
+  if (!Schema.is(id)(runId) || Effect2.pipe(runId, EffectString.includes('..')))
+    return yield* fail('invalid-request', 'Use a bounded native run identifier.');
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  let directory = yield* fs.realPath(config.agentContextHome);
+  for (const part of ['workflow-automations', 'native-v1', 'jobs', runId]) {
+    directory = path.join(directory, part);
+    if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+      return yield* fail('unsafe-job-state', 'Job state directories cannot be symbolic links.');
+    if (!(yield* fs.exists(directory))) return [];
+    if ((yield* fs.stat(directory)).type !== 'Directory' || (yield* fs.realPath(directory)) !== directory)
+      return yield* fail('unsafe-job-state', 'Job state must remain in its original private directory.');
+  }
+  const names = yield* fs.readDirectory(directory);
+  const receipts = EffectArray.filter(
+    names,
+    name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/u.test(name) && !EffectString.endsWith('.input.json')(name),
+  ).sort();
+  if (receipts.length > 128)
+    return yield* fail(
+      'job-inventory-overflow',
+      'This run has more job receipts than the bounded cutover inspection can verify.',
+    );
+  const observed: Array<{
+    readonly jobId: string;
+    readonly generation: string;
+    readonly bindingId: string;
+    readonly status: Envelope['status'];
+    readonly stopRequested: boolean;
+    readonly revision: string;
+    readonly settled: boolean;
+    readonly resultDigest?: string;
+  }> = [];
+  for (const name of receipts) {
+    const jobId = EffectString.slice(0, -'.json'.length)(name);
+    if (!Schema.is(id)(jobId) || Effect2.pipe(jobId, EffectString.includes('..')))
+      return yield* fail('invalid-job-state', 'A run-scoped job receipt has an invalid identity.');
+    const receipt = yield* read(config, runId, jobId);
+    if (!receipt) return yield* fail('invalid-job-state', 'A run-scoped job receipt disappeared during inspection.');
+    if (
+      receipt.state.runId !== runId ||
+      receipt.state.generation !== generation ||
+      receipt.state.bindingId !== bindingId
+    )
+      return yield* fail('binding-drift', 'A run-scoped job belongs to a different immutable run binding.');
+    yield* readInput(config, receipt.state);
+    observed.push({
+      jobId,
+      generation: receipt.state.generation,
+      bindingId: receipt.state.bindingId,
+      status: receipt.state.status,
+      stopRequested: receipt.state.stopRequested,
+      revision: receipt.revision,
+      settled: receipt.state.status === 'completed' && receipt.state.result !== undefined,
+      ...(receipt.state.result === undefined ? {} : {resultDigest: sha256HexSync(stableJson(receipt.state.result))}),
+    });
+  }
+  return observed;
+});
+/** Validate every expanded role and size before opening a retained object. */
+function validateStoredInput(input: StoredInput): readonly StoredObject[] {
+  const work = parseWork(input.work, input.runId, input.generation);
+  const source = work.action === 'authoring' ? decodeNativeAuthoringDocument(work.document).source : undefined;
+  const sourceFiles = new Map(EffectArray.map(source?.files ?? [], file => [file.path, file.sha256] as const));
+  const witness = input.witness;
+  const objects = [witness.commitObject, witness.treeObject, ...EffectArray.map(witness.files, file => file.object)];
+  const paths = new Set(EffectArray.map(witness.files, file => file.path));
+  const citationPaths = new Set(EffectArray.map(witness.citations, citation => citation.path));
+  let expandedBytes = 0;
+  let encodedBytes = 0;
+  if (
+    witness.bindingId !== input.bindingId ||
+    (source && source.head !== witness.head) ||
+    objects.length > maximumRetainedObjects ||
+    sourceFiles.size > maximumSourceFiles ||
+    witness.citations.length > maximumCitationFiles ||
+    witness.citationRefs.length > maximumCitationFiles ||
+    paths.size !== witness.files.length ||
+    citationPaths.size > maximumCitationFiles ||
+    witness.commitObject.type !== 'commit' ||
+    witness.treeObject.type !== 'tree' ||
+    witness.commitObject.id !== witness.head ||
+    witness.treeObject.id !== witness.tree ||
+    !objectId.test(witness.head) ||
+    !objectId.test(witness.tree) ||
+    EffectArray.some([...sourceFiles.keys()], path => !paths.has(path)) ||
+    EffectArray.some([...citationPaths], path => !paths.has(path)) ||
+    EffectArray.some(
+      witness.files,
+      file =>
+        !nativeCycleRelativePath(file.path) ||
+        file.object.type !== 'blob' ||
+        (!sourceFiles.has(file.path) && !citationPaths.has(file.path)) ||
+        (sourceFiles.has(file.path) &&
+          (file.object.size > sourceFileLimit || file.object.sha256 !== sourceFiles.get(file.path))),
+    )
+  )
+    throw fail('invalid-job-state', 'The retained object manifest exceeds its admitted source scope.');
+  for (const object of objects) {
+    if (
+      !objectId.test(object.id) ||
+      object.id.length !== (witness.objectFormat === 'sha1' ? 40 : 64) ||
+      object.size < 0 ||
+      object.size > witnessLimit
+    )
+      throw fail('invalid-job-state', 'A retained object has an invalid identity or byte bound.');
+    expandedBytes += object.size;
+    encodedBytes += 4 * Math.ceil(object.size / 3);
+  }
+  // Bound logical expansion, including repeated references, rather than only deduplicated disk bytes.
+  if (
+    expandedBytes > maximumRetainedBytes ||
+    encodedBytes > 4 * Math.ceil(maximumRetainedBytes / 3) + 4 * maximumRetainedObjects
+  )
+    throw fail('invalid-job-state', 'The retained source exceeds its expanded byte bounds.');
+  return objects;
+}
+function storedInput(input: JobInput): StoredInput {
+  const witness = Schema.decodeUnknownSync(NativeJobSourceViewSchema)(input.witness);
+  const object = ({bytes, ...metadata}: RetainedObject): StoredObject => ({
+    ...metadata,
+    size: Buffer.from(bytes, 'base64').length,
+  });
+  const stored: StoredInput = {
+    ...input,
+    version: 2,
+    witness: {
+      ...witness,
+      commitObject: object(witness.commitObject),
+      treeObject: object(witness.treeObject),
+      files: EffectArray.map(witness.files, file => ({path: file.path, object: object(file.object)})),
+    },
+  };
+  validateStoredInput(stored);
+  return stored;
+}
+const objectDirectory = Effect.fn('nativeJobs.objectDirectory')(function* (file: string, create: boolean) {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = file + '.objects';
+  if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+    return yield* fail('unsafe-job-state', 'Retained object directories cannot be symbolic links.');
+  if (!(yield* fs.exists(directory))) {
+    if (!create) return yield* fail('invalid-job-state', 'The retained object directory is missing.');
+    yield* fs.makeDirectory(directory, {mode: 0o700});
+  }
+  if ((yield* fs.stat(directory)).type !== 'Directory' || (yield* fs.realPath(directory)) !== directory)
+    return yield* fail('unsafe-job-state', 'Retained objects must remain in their original private directory.');
+  return directory;
+});
+const readObject = Effect.fn('nativeJobs.readObject')(function* (
+  directory: string,
+  object: StoredObject,
+  objectFormat: 'sha1' | 'sha256',
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(directory, object.sha256);
+  if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)) || !(yield* fs.exists(file)))
+    return yield* fail('invalid-job-state', 'A retained source object is missing or unsafe.');
+  const stat = yield* fs.stat(file);
+  if (
+    stat.type !== 'File' ||
+    Number(stat.size) !== object.size ||
+    Number(stat.size) > witnessLimit ||
+    (yield* fs.realPath(directory)) !== directory ||
+    (yield* fs.realPath(file)) !== file
+  )
+    return yield* fail('invalid-job-state', 'A retained source object has an unsafe path or size.');
+  const bytes = yield* fs.readFile(file);
+  if (
+    Option.isSome(yield* fs.readLink(file).pipe(Effect.option)) ||
+    (yield* fs.realPath(directory)) !== directory ||
+    (yield* fs.realPath(file)) !== file ||
+    Number((yield* fs.stat(file)).size) !== object.size
+  )
+    return yield* fail('invalid-job-state', 'A retained source object changed during readback.');
+  if (
+    bytes.length !== object.size ||
+    sha256HexSync(bytes) !== object.sha256 ||
+    new Bun.CryptoHasher(objectFormat).update(`${object.type} ${bytes.length}\0`).update(bytes).digest('hex') !==
+      object.id
+  )
+    return yield* fail('invalid-job-state', 'A retained source object failed independent identity verification.');
+  return bytes;
+});
 const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeConfig, receipt: Envelope) {
   const file = yield* jobPath(config, receipt.runId, receipt.jobId);
   if (!file) return yield* fail('job-not-found', 'The original job input is missing.');
@@ -466,8 +757,49 @@ const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeCo
   const bytes = yield* fs.readFileString(inputFile);
   if (Buffer.byteLength(bytes) > witnessLimit)
     return yield* fail('invalid-job-state', 'The immutable admitted input exceeds its 4 MiB limit.');
+  const parsed = yield* Effect.try({
+    try: () => JSON.parse(bytes) as unknown,
+    catch: () => fail('invalid-job-state', 'The admitted input is malformed.'),
+  });
+  const stored = Schema.is(Schema.Struct({version: Schema.Literal(2)}))(parsed)
+    ? yield* Schema.decodeUnknownEffect(storedInputSchema, {onExcessProperty: 'error'})(parsed).pipe(
+        Effect.mapError(() => fail('invalid-job-state', 'The retained object manifest is malformed.')),
+      )
+    : undefined;
+  let input = parsed;
+  if (stored) {
+    yield* Effect.try({
+      try: () => {
+        if (
+          stored.jobId !== receipt.jobId ||
+          stored.runId !== receipt.runId ||
+          stored.generation !== receipt.generation ||
+          stored.bindingId !== receipt.bindingId ||
+          sha256HexSync(stableJson(stored.work)) !== receipt.intentDigest
+        )
+          throw fail('invalid-job-state', 'The retained object manifest changed its admitted request.');
+        validateStoredInput(stored);
+      },
+      catch: () => fail('invalid-job-state', 'The retained object manifest failed scope verification.'),
+    });
+    const directory = yield* objectDirectory(file, false);
+    const materialize = (object: StoredObject) =>
+      readObject(directory, object, stored.witness.objectFormat).pipe(
+        Effect.map(bytes => ({
+          id: object.id,
+          type: object.type,
+          sha256: object.sha256,
+          bytes: Buffer.from(bytes).toString('base64'),
+        })),
+      );
+    const commitObject = yield* materialize(stored.witness.commitObject);
+    const treeObject = yield* materialize(stored.witness.treeObject);
+    const files: RetainedFile[] = [];
+    for (const entry of stored.witness.files) files.push({path: entry.path, object: yield* materialize(entry.object)});
+    input = {...stored, version: 1, witness: {...stored.witness, commitObject, treeObject, files}};
+  }
   return yield* Effect.try({
-    try: () => decodeInput(JSON.parse(bytes) as unknown, receipt),
+    try: () => decodeInput(input, receipt),
     catch: () => fail('invalid-job-state', 'The exact admitted input failed independent readback.'),
   });
 });
@@ -477,16 +809,47 @@ const writeInput = Effect.fn('nativeJobs.writeInput')(function* (
   input: JobInput,
 ) {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const file = (yield* jobPath(config, receipt.runId, receipt.jobId, true))!;
   const inputFile = file + '.input.json';
-  const serialized = stableJson(decodeInput(input, receipt)) + '\n';
+  const manifest = yield* Effect.try({
+    try: () => storedInput(decodeInput(input, receipt)),
+    catch: () => fail('job-capability', 'The exact request and source exceed the bounded background object contract.'),
+  });
+  const serialized = stableJson(manifest) + '\n';
   if (Buffer.byteLength(serialized) > witnessLimit)
-    return yield* fail('job-capability', 'The exact request and source witness exceed the 4 MiB background limit.');
+    return yield* fail('job-capability', 'The exact request and source manifest exceed the 4 MiB background limit.');
   if (yield* fs.exists(inputFile)) {
-    const old = yield* readInput(config, receipt);
-    if (stableJson(old) !== stableJson(input))
-      return yield* fail('job-intent-conflict', 'This job identity already retains different immutable input.');
+    yield* readInput(config, receipt);
     return;
+  }
+  const directory = yield* objectDirectory(file, true);
+  const view = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness).pipe(
+    Effect.mapError(() => fail('invalid-job-state', 'The source view is malformed.')),
+  );
+  for (const object of [view.commitObject, view.treeObject, ...EffectArray.map(view.files, entry => entry.object)]) {
+    const destination = path.join(directory, object.sha256);
+    const metadata: StoredObject = {
+      id: object.id,
+      type: object.type,
+      sha256: object.sha256,
+      size: Buffer.from(object.bytes, 'base64').length,
+    };
+    if (!(yield* fs.exists(destination)) && Option.isNone(yield* fs.readLink(destination).pipe(Effect.option))) {
+      const temporary = destination + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
+      yield* Effect.gen(function* () {
+        yield* fs.writeFile(temporary, Buffer.from(object.bytes, 'base64'), {mode: 0o600, flag: 'wx'});
+        if (
+          (yield* jobPath(config, receipt.runId, receipt.jobId)) !== file ||
+          (yield* objectDirectory(file, false)) !== directory ||
+          (yield* fs.exists(destination)) ||
+          Option.isSome(yield* fs.readLink(destination).pipe(Effect.option))
+        )
+          return yield* fail('job-conflict', 'Retained source path changed before durable admission.');
+        yield* fs.rename(temporary, destination);
+      }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
+    }
+    yield* readObject(directory, metadata, view.objectFormat);
   }
   const temporary = inputFile + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   yield* Effect.gen(function* () {
@@ -562,10 +925,11 @@ const retainObject = Effect.fn('nativeJobs.retainObject')(function* (
   repo: string,
   type: RetainedObject['type'],
   id: string,
+  maximumBytes = witnessLimit,
 ) {
   const binary = yield* runBinaryCommandEffect('git', ['--no-optional-locks', '-C', repo, 'cat-file', type, id], {
     timeoutMs: 30_000,
-    maxOutputBytes: witnessLimit,
+    maxOutputBytes: maximumBytes,
   });
   const actual = yield* runBinaryCommandEffect(
     'git',
@@ -594,11 +958,8 @@ const parseWork = (value: unknown, runId: string, generation: string): Work => {
     const work = Schema.decodeUnknownSync(nativeCloseoutRequestSchema, {onExcessProperty: 'error'})(value);
     if (work.command === 'prepare' && !work.proposal)
       throw fail('invalid-request', 'Closeout prepare requires its exact proposal.');
-    if (work.command === 'finish' && (work.proposal !== undefined || work.expectedRevision !== undefined))
-      throw fail(
-        'job-capability',
-        'Background finish uses the already prepared transaction without a new proposal or revision override.',
-      );
+    if (work.command === 'finish' && work.proposal !== undefined)
+      throw fail('job-capability', 'Background finish uses the already prepared transaction without a new proposal.');
     return {
       ...work,
       action: 'closeout',
@@ -665,6 +1026,8 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     : undefined;
   const codeRefs =
     work.action === 'authoring' ? document!.context.codeRefs : (closeout?.codeRefs ?? proposalCodeRefs ?? []);
+  if (codeRefs.length > maximumCitationFiles)
+    return yield* fail('job-capability', 'Background admission supports at most eight local citation references.');
   if (EffectArray.some(codeRefs, ref => Effect2.pipe(ref, EffectString.startsWith('cgr_'))))
     return yield* fail(
       'job-capability',
@@ -672,9 +1035,28 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     );
   const captured = yield* captureMemoryCodeCitationsForMcp(
     config,
-    {callerCwd: root, project, refs: codeRefs},
+    {
+      callerCwd: root,
+      project,
+      ...(state.graphProject === undefined
+        ? {}
+        : {expectedProjectScope: {kind: 'selected-project' as const, project: state.graphProject}}),
+      refs: codeRefs,
+    },
     'workflow-job',
   );
+  if (
+    !captured.ok &&
+    Schema.is(MemoryCodeCitationCaptureError)(captured.failure) &&
+    isMemoryCodeCitationRecovery(captured.failure.recovery) &&
+    captured.failure.recovery.code === 'exact-current-evidence-unavailable' &&
+    captured.failure.recovery.recovery === 'prepare-current-graph' &&
+    captured.failure.recovery.preparation.action === 'index-current-graph'
+  )
+    return yield* fail(
+      'job-capability',
+      `Exact current citation evidence is unavailable. Run \`threadnote graph index --no-vectors${state.graphProject === undefined ? '' : ` --project ${shellQuote(state.graphProject)}`}\` from the original checkout, then retry the same save unchanged. No job was accepted.`,
+    );
   if (!captured.ok)
     return yield* fail('job-capability', 'Exact current citation evidence could not be retained before acceptance.');
   const citations = captured.citations;
@@ -694,6 +1076,12 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
       ...EffectArray.map(citations, citation => citation.path),
     ]),
   ];
+  if (
+    paths.length > maximumSourceFiles + maximumCitationFiles ||
+    citations.length > maximumCitationFiles ||
+    codeRefs.length > maximumCitationFiles
+  )
+    return yield* fail('job-capability', 'The retained source exceeds its admitted object count.');
   const files: RetainedFile[] = [];
   for (const path of paths) {
     if (!nativeCycleRelativePath(path))
@@ -701,14 +1089,14 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     const entry = yield* readNativeCycleTreeEntry(root, tree, path);
     if (!['100644', '100755'].includes(entry.mode) || !objectId.test(entry.blob))
       return yield* fail('job-capability', 'Background source requires committed regular files.');
-    const object = yield* retainObject(root, 'blob', entry.blob);
-    const bytes = Buffer.from(object.bytes, 'base64');
     const expected = document?.source
       ? Option.getOrElse(
           EffectArray.findFirst(document.source.files, file => file.path === path),
           () => undefined,
         )
       : undefined;
+    const object = yield* retainObject(root, 'blob', entry.blob, expected ? sourceFileLimit : witnessLimit);
+    const bytes = Buffer.from(object.bytes, 'base64');
     if (
       (expected && expected.sha256 !== sha256HexSync(bytes)) ||
       EffectArray.some(
@@ -751,8 +1139,6 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
         }
       : {}),
   };
-  if (Buffer.byteLength(stableJson(witness)) > witnessLimit)
-    return yield* fail('job-capability', 'The exact source and citation witness exceeds the 4 MiB background limit.');
   yield* assertNativeJobLiveSource(witness);
   return witness;
 });
@@ -772,6 +1158,10 @@ export const assertNativeJobLiveSource = Effect.fn('nativeJobs.assertLiveSource'
     );
 });
 const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, runId: string, jobId: string) {
+  const accepted = yield* read(config, runId, jobId);
+  if (!accepted) return yield* fail('job-not-found', 'No accepted job has this identity.');
+  const input = yield* readInput(config, accepted.state);
+  const witness = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness);
   const system = yield* SystemInfo;
   const executable = system.executablePath;
   const name = EffectString.toLowerCase(
@@ -787,7 +1177,15 @@ const launch = Effect.fn('nativeJobs.launch')(function* (config: RuntimeConfig, 
     jobId,
   ];
   const started = yield* runDetachedCommandEffect(executable, args, {
-    env: {...system.environment(), THREADNOTE_HOME: config.agentContextHome, THREADNOTE_MANIFEST: config.manifestPath},
+    cwd: witness.repo,
+    env: {
+      ...system.environment(),
+      THREADNOTE_HOME: config.agentContextHome,
+      THREADNOTE_MANIFEST: config.manifestPath,
+      THREADNOTE_ACCOUNT: config.account,
+      THREADNOTE_USER: config.user,
+      THREADNOTE_AGENT_ID: config.agentId,
+    },
   });
   if (!started)
     return yield* fail(
@@ -856,24 +1254,25 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
       }
       const loaded = yield* Effect.result(readInput(config, current.state));
       if (loaded._tag === 'Failure') {
-        current = yield* transition(config, runId, jobId, state => ({
-          ...state,
-          status: 'failed',
-          code: 'invalid-job-state',
-          action: 'Restore the exact immutable admitted input before resuming this job.',
-          updatedAt: Date.now(),
-        }));
+        current = yield* transition(config, runId, jobId, state => {
+          const {failure: _failure, ...rest} = state;
+          return {
+            ...rest,
+            status: 'failed',
+            code: 'invalid-job-state',
+            action: 'Restore the exact immutable admitted input before resuming this job.',
+            updatedAt: Date.now(),
+          };
+        });
         return nativeJobStatus(current.state);
       }
       const input = loaded.success;
       const view = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness);
       const firstStart = !current.state.started;
-      current = yield* transition(config, runId, jobId, state => ({
-        ...state,
-        status: 'running',
-        started: true,
-        updatedAt: Date.now(),
-      }));
+      current = yield* transition(config, runId, jobId, state => {
+        const {failure: _failure, ...rest} = state;
+        return {...rest, status: 'running', started: true, updatedAt: Date.now()};
+      });
       const boundary = Effect.gen(function* () {
         const latest = yield* read(config, runId, jobId);
         if (!latest || latest.state.stopRequested)
@@ -917,6 +1316,13 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         );
 
       let workAction: Work['action'] | undefined;
+      let stage: FailureDetail['stage'] = 'preparation';
+      let memoryFailure:
+        | {
+            error: WorkflowAutomationError;
+            detail: Pick<FailureDetail, 'operationId' | 'operationAction' | 'domainCause'>;
+          }
+        | undefined;
       const execute = Effect.gen(function* () {
         const work = yield* Effect.try({
           try: () => parseWork(input.work, runId, generation),
@@ -966,7 +1372,9 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         }
         const beforeDispatch = yield* CurrentNativeJobBeforeDispatch;
         if (beforeDispatch) yield* beforeDispatch;
+        stage = 'canonical-work';
         const prepared = yield* dispatch(work);
+        stage = 'source-verification';
         // A historical draft may materialize from the admitted witness, but
         // changed live source never makes the overall job completed in v1.
         yield* assertNativeJobLiveSource(view);
@@ -975,13 +1383,21 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         Effect.provideService(CurrentNativeJobSourceView, view),
         Effect.provideService(CurrentNativeJobBoundary, boundary),
         Effect.provideService(CurrentNativeJobProgress, reportProgress),
+        Effect.provideService(CurrentNativeJobMemoryFailure, (error, detail) => {
+          if (
+            detail.bindingId === view.bindingId &&
+            detail.generation === generation &&
+            Schema.is(id)(detail.operationId)
+          )
+            memoryFailure = {error, detail};
+        }),
       );
       const result = yield* Effect.result(execute);
       if (result._tag === 'Success') {
         const serialized = stableJson(result.success);
         if (Buffer.byteLength(serialized) > 32_768) {
           current = yield* transition(config, runId, jobId, state => {
-            const {code: _code, ...rest} = state;
+            const {code: _code, failure: _failure, ...rest} = state;
             return {
               ...rest,
               status: 'completed',
@@ -997,17 +1413,52 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           return nativeJobStatus(current.state);
         }
         current = yield* transition(config, runId, jobId, state => {
-          const {code: _code, action: _action, ...rest} = state;
+          const {code: _code, action: _action, failure: _failure, ...rest} = state;
           return {...rest, status: 'completed', stopRequested: false, result: result.success, updatedAt: Date.now()};
         });
       } else {
         const error = result.failure;
         const code = Schema.is(WorkflowAutomationError)(error) ? error.code : 'job-failed';
+        const call = memoryFailure?.error === error ? memoryFailure.detail : undefined;
+        const observed = yield* readNativeWorkflowState(config, runId).pipe(Effect.result);
+        const controller = observed._tag === 'Success' ? observed.success : undefined;
+        const operation =
+          controller?.state.bindingId === view.bindingId &&
+          controller.state.generation === generation &&
+          call?.operationId
+            ? Option.getOrUndefined(
+                EffectArray.findFirst(
+                  controller.state.operations,
+                  item => item.intent.operationId === call.operationId,
+                ),
+              )
+            : undefined;
+        const nativeReceipt: FailureDetail['nativeReceipt'] =
+          !call?.operationId ||
+          !controller ||
+          controller.state.bindingId !== view.bindingId ||
+          controller.state.generation !== generation
+            ? 'unavailable'
+            : (operation?.status ?? 'absent');
+        const failure: FailureDetail = {
+          stage,
+          domainCode: /^[a-z][a-z0-9-]{0,63}$/u.test(code) ? code : 'job-failed',
+          domainCause: call?.domainCause ?? 'unknown',
+          ...(call?.operationId ? {operationId: call.operationId} : {}),
+          ...(call?.operationAction ? {operationAction: call.operationAction} : {}),
+          nativeReceipt,
+          canonicalOutcome: nativeReceipt === 'verified' ? 'verified-readback' : 'unknown',
+          message:
+            nativeReceipt === 'verified'
+              ? 'The native receipt records verified canonical readback. Job completion still failed; inspect this exact operation before same-job resume.'
+              : 'No verified canonical outcome is established for the failed call. Preserve the exact job and operation; inspect receipts before same-job resume.',
+        };
         const stop = code === 'job-stopped';
         const contended = retryableContention(error);
         const blocked = /drift|conflict|approval|source|evidence|publication|busy/u.test(code);
         current = yield* transition(config, runId, jobId, state => ({
           ...state,
+          failure,
           status: stop ? 'stopped-with-progress' : blocked ? 'blocked-with-progress' : 'failed',
           code,
           action: stop
@@ -1082,6 +1533,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     );
     if (
       journal.state.binding.bindingId !== stored.state.bindingId ||
+      journal.state.binding.graphProject !== stored.state.graphProject ||
       journal.state.binding.repo !== (yield* (yield* FileSystem.FileSystem).realPath(journal.state.binding.repo))
     )
       return yield* fail('binding-drift', 'The original logical repository binding changed.');
@@ -1089,7 +1541,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       config,
       stored.state,
       journal.state.binding.repo,
-      journal.state.binding.project,
+      yield* workflowGraphProjectHint(config, journal.state.binding),
       work,
       admissionEpoch,
     );
@@ -1102,7 +1554,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       generation: request.generation,
       bindingId: stored.state.bindingId,
       intentDigest: digest,
-      witnessDigest: sha256HexSync(stableJson(witness)),
+      witnessDigest: sourceWitnessDigest(witness),
       status: 'accepted',
       stopRequested: false,
       started: false,
@@ -1144,9 +1596,61 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     return yield* launchOrReport(config, request.runId, jobId, accepted.state);
   }
   if (!request.jobId) return yield* fail('invalid-request', 'Provide the accepted jobId.');
-  const stored = yield* read(config, request.runId, request.jobId);
-  if (!stored || stored.state.generation !== request.generation)
+  const run = yield* readNativeWorkflowState(config, request.runId);
+  if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
+  const runId = run.state.runId;
+  const stored = yield* read(config, runId, request.jobId);
+  if (
+    !stored ||
+    stored.state.runId !== runId ||
+    stored.state.generation !== run.state.generation ||
+    stored.state.bindingId !== run.state.bindingId
+  )
+    return yield* fail('job-not-found', 'No accepted job has this run and generation.');
+  const progressRead =
+    request.command === 'status' || (request.command === 'result' && stored.state.status !== 'completed');
+  // Progress observes retained receipts without waiting for a publisher. Completed results
+  // still require canonical external-manifest inspection before exposing artifact results.
+  const journalBinding = progressRead
+    ? yield* readWorkflowProgressBinding(config, run.state.bindingId)
+    : request.command === 'result'
+      ? (yield* withWorkflowLock(config, run.state.bindingId, inspectWorkflowJournal(config, run.state.bindingId)))
+          .state.binding
+      : undefined;
+  const callerBinding = journalBinding
+    ? journalBinding
+    : yield* resolveWorkflowBinding(
+        config,
+        {
+          protocolVersion: 1,
+          action: 'bind',
+          workflowRunId: 'native-v1-' + runId,
+          project: run.state.project,
+          ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
+          featureId: run.state.featureId,
+          generation: run.state.generation,
+          profile: run.state.profile ?? 'desktop',
+          ...(run.state.team === undefined ? {} : {team: run.state.team}),
+          ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
+        },
+        run.state.graphProject,
+        true,
+      );
+  if (callerBinding.bindingId !== run.state.bindingId)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
+  if (journalBinding && journalBinding.graphProject !== run.state.graphProject)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
+  const admitted = yield* readInput(config, stored.state);
+  if (
+    admitted.runId !== runId ||
+    admitted.generation !== run.state.generation ||
+    admitted.bindingId !== run.state.bindingId
+  )
+    return yield* fail('invalid-job-state', 'The immutable job input is outside its canonical run binding.');
+  const witness = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(admitted.witness);
+  if (witness.bindingId !== callerBinding.bindingId || witness.repo !== callerBinding.repo)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   if (request.command === 'status') return nativeJobStatus(stored.state);
   if (request.command === 'result') {
     return {
@@ -1155,7 +1659,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     };
   }
   if (request.command === 'cancel') {
-    const changed = yield* transition(config, request.runId, request.jobId, state =>
+    const changed = yield* transition(config, runId, request.jobId, state =>
       state.status === 'completed' ? state : {...state, stopRequested: true, updatedAt: Date.now()},
     );
     return nativeJobStatus(changed.state);
@@ -1163,21 +1667,21 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (request.work !== undefined)
     return yield* fail('invalid-request', 'Resume uses the original durably admitted request.');
   const jobId = request.jobId;
-  const file = yield* jobPath(config, request.runId, jobId);
+  const file = yield* jobPath(config, runId, jobId);
   if (!file) return yield* fail('job-not-found', 'No accepted job has this identity.');
   const fs = yield* FileSystem.FileSystem;
   const resumed = yield* withExclusiveFileLock(
     fs,
     file + '.worker.lock',
     workerLockOptions,
-    transition(config, request.runId, jobId, state =>
-      state.status === 'completed'
-        ? state
-        : {...state, stopRequested: false, status: 'accepted', updatedAt: Date.now()},
-    ).pipe(Effect.map(reopened => ({reopened, active: false}))),
+    transition(config, runId, jobId, state => {
+      if (state.status === 'completed') return state;
+      const {failure: _failure, ...rest} = state;
+      return {...rest, stopRequested: false, status: 'accepted', updatedAt: Date.now()};
+    }).pipe(Effect.map(reopened => ({reopened, active: false}))),
   ).pipe(
     Effect.catchIf(Schema.is(FileLockTimeout), () =>
-      read(config, request.runId, jobId).pipe(
+      read(config, runId, jobId).pipe(
         Effect.flatMap(current =>
           current
             ? Effect.succeed({reopened: current, active: true})
@@ -1188,5 +1692,5 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   );
   const reopened = resumed.reopened;
   if (resumed.active || reopened.state.status === 'completed') return nativeJobStatus(reopened.state);
-  return yield* launchOrReport(config, request.runId, jobId, reopened.state);
+  return yield* launchOrReport(config, runId, jobId, reopened.state);
 });

@@ -17,7 +17,7 @@ import {
   recordNativeWatchLifecycle,
   type NativeWatchState,
 } from '@threadnote/workflow-automations/watch';
-import {collectNativeWatchGitHub} from './watch_provider.js';
+import {collectNativeWatchGitHub, verifyNativeWatchRenewalPr} from './watch_provider.js';
 import {nativeWorkflowError} from './memory.js';
 import {
   readNativeWatch,
@@ -50,6 +50,7 @@ export const nativeWatchRequestSchema = Schema.Struct({
   watchId: id,
   command: Schema.Literals([
     'start',
+    'renew',
     'inspect',
     'consumer',
     'relay',
@@ -62,6 +63,8 @@ export const nativeWatchRequestSchema = Schema.Struct({
     'stop',
   ]),
   pr: Schema.optionalKey(text),
+  baseBranch: Schema.optionalKey(text),
+  headBranch: Schema.optionalKey(text),
   consumerId: Schema.optionalKey(id),
   wakeupId: Schema.optionalKey(id),
   takeover: Schema.optionalKey(Schema.Boolean),
@@ -507,7 +510,12 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
   const request = yield* from(() =>
     Schema.decodeUnknownSync(nativeWatchRequestSchema, {onExcessProperty: 'error'})(input),
   );
-  if ((request.wakeup || request.recoverWakeup) && request.command !== 'start' && request.command !== 'consumer')
+  if (
+    (request.wakeup || request.recoverWakeup) &&
+    request.command !== 'start' &&
+    request.command !== 'consumer' &&
+    request.command !== 'renew'
+  )
     return yield* fail('invalid-request', 'Host wake configuration requires explicit start or consumer attachment.');
   if (
     (request.eventKey !== undefined && (request.command !== 'relay' || request.wakeupId === undefined)) ||
@@ -519,7 +527,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
     envelope?.notification?.wakeupId === request.wakeupId &&
     stableJson(envelope?.notification?.target) === stableJson(request.wakeup);
   let probedCodex = false;
-  if (request.wakeup?.host === 'codex') {
+  if (request.wakeup?.host === 'codex' && request.command !== 'renew') {
     const existing = yield* readNativeWatch(config, request.watchId);
     if (!sameBinding(existing?.envelope)) {
       yield* preflightNativeWatchCodexQueue(request.wakeup.executable);
@@ -532,7 +540,23 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
       throw fail('watch-state-conflict', 'The host binding changed during admission; retry the explicit attachment.');
   };
   const now = yield* Clock.currentTimeMillis;
-  if (request.command === 'start') {
+  if (request.command === 'renew') {
+    if (request.takeover || request.recoverWakeup || !request.wakeup)
+      return yield* fail(
+        'invalid-request',
+        'Renewal requires the unchanged registered host and does not allow takeover or wake recovery.',
+      );
+    const existing = yield* load(config, request.watchId);
+    if (existing.envelope.state.pr !== request.pr)
+      return yield* fail('watch-identity-conflict', 'This watch belongs to another PR.');
+    if (!sameBinding(existing.envelope))
+      return yield* fail('watch-identity-conflict', 'Renewal requires the exact existing consumer and host binding.');
+    yield* verifyNativeWatchRenewalPr(required(request.pr, 'pr'), {
+      baseBranch: required(request.baseBranch, 'baseBranch'),
+      headBranch: required(request.headBranch, 'headBranch'),
+    });
+  }
+  if (request.command === 'start' || request.command === 'renew') {
     const consumerId = required(request.consumerId, 'consumerId');
     const wakeupId = required(request.wakeupId, 'wakeupId');
     const pr = required(request.pr, 'pr');
@@ -540,7 +564,35 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
       config,
       request.watchId,
       Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
         const existing = yield* readNativeWatch(config, request.watchId);
+        if (request.command === 'renew') {
+          if (!existing) return yield* fail('watch-not-found', 'Renewal cannot create a watch.');
+          if (request.expectedRevision !== undefined && request.expectedRevision !== existing.revision)
+            return yield* fail('watch-state-conflict', 'Watch state changed before renewal.');
+          if (
+            !sameBinding(existing.envelope) ||
+            existing.envelope.state.consumer?.id !== consumerId ||
+            existing.envelope.state.consumer.wakeupId !== wakeupId
+          )
+            return yield* fail(
+              'watch-identity-conflict',
+              'Renewal requires the exact existing consumer and host binding.',
+            );
+          if (existing.envelope.state.pr !== pr)
+            return yield* fail('watch-identity-conflict', 'This watch belongs to another PR.');
+          if (existing.envelope.stopRequested)
+            return yield* fail('watch-stopped', 'An explicitly stopped watch cannot be renewed.');
+          const state = existing.envelope.state;
+          if (
+            state.prState !== 'open' &&
+            state.events.length === 0 &&
+            state.delivery === null &&
+            state.acknowledged === state.nextSequence - 1 &&
+            !Array.some(state.work, item => item.status === 'open' || item.status === 'blocked')
+          )
+            return {stored: existing, token: null};
+        }
         yield* from(() => assertQualifiedBinding(existing?.envelope));
         if (existing && existing.envelope.state.pr !== pr)
           return yield* fail('watch-identity-conflict', 'This watch belongs to another PR.');
@@ -549,15 +601,25 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
         const state = yield* from(() =>
           attachNativeWatchConsumer(envelope.state, {id: consumerId, wakeupId}, now, {takeover: request.takeover}),
         );
-        envelope = yield* from(() => attachNotification(envelope, state, request.wakeup, now, request.recoverWakeup));
+        envelope =
+          request.command === 'renew'
+            ? envelope
+            : yield* from(() => attachNotification(envelope, state, request.wakeup, now, request.recoverWakeup));
         const collector = envelope.collector;
-        if (collector && (yield* nativeWatchCollectorAlive(collector)))
-          return yield* fail('collector-busy', 'This watch already has a live collector; use its existing relay.');
+        if (collector && (yield* nativeWatchCollectorAlive(collector))) {
+          if (request.command !== 'renew')
+            return yield* fail('collector-busy', 'This watch already has a live collector; use its existing relay.');
+          return {stored: yield* writeNativeWatch(config, {...envelope, state}, existing!.revision), token: null};
+        }
         if (collector?.status === 'starting' && now - collector.startedAt < 10_000)
           return yield* fail('collector-starting', 'This collector startup is still owned.');
         if (state.prState !== 'open') {
           const saved = yield* writeNativeWatch(config, {...envelope, state}, existing?.revision ?? null);
-          return {stored: saved, token: null, recoveryToken: collector?.token};
+          return {
+            stored: saved,
+            token: null,
+            recoveryToken: request.command === 'renew' ? undefined : collector?.token,
+          };
         }
         const token = yield* (yield* SecureRandom.SecureRandom).uuidV4();
         const saved = yield* writeNativeWatch(

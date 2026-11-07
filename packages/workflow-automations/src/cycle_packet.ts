@@ -172,7 +172,8 @@ export function nativeCyclePacket(
     checks: options.checks,
     detailRefs: options.detailRefs ?? [],
   };
-  const bytes = new TextEncoder().encode(JSON.stringify(packet)).byteLength;
+  const availablePacket = {available: true, ...packet};
+  const bytes = new TextEncoder().encode(JSON.stringify(availablePacket)).byteLength;
   if (bytes > (options.budgetBytes ?? 12_288))
     return {
       available: false,
@@ -183,5 +184,5 @@ export function nativeCyclePacket(
       detailRefs: options.detailRefs ?? [],
       continuation: 'Read the exact phase acceptance and ownership, then create a bounded implementation slice.',
     };
-  return {available: true, ...packet};
+  return availablePacket;
 }

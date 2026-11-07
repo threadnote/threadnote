@@ -1,10 +1,11 @@
 // oxlint-disable-next-line threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Direct child handles and close events are required for fixture-only producer exit proof.
 import {spawn, type ChildProcess} from 'node:child_process';
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Option} from 'effect';
+import {fixturePipelineReceiptProvesExit} from '@threadnote/testing/fixture-pipeline-receipt';
 import {ReadBuffer, serializeMessage} from '@modelcontextprotocol/sdk/shared/stdio.js';
 import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {JSONRPCMessage} from '@modelcontextprotocol/sdk/types.js';
-import {FixtureProducers} from '@threadnote/testing/fixture-producers';
+import {FixtureProducers, type FixtureProducerObservation} from '@threadnote/testing/fixture-producers';
 
 interface FixtureChild {
   readonly stdin: ChildProcess['stdin'];
@@ -131,7 +132,7 @@ const FIXTURE_COMMAND_STAGES = [
   'git-commit',
 ] as const;
 export type FixtureCommandStage = (typeof FIXTURE_COMMAND_STAGES)[number];
-const FIXTURE_DIAGNOSTIC_SIGNALS: readonly string[] = [
+const FIXTURE_DIAGNOSTIC_SIGNALS: readonly NodeJS.Signals[] = [
   'SIGINT',
   'SIGTERM',
   'SIGKILL',
@@ -151,7 +152,52 @@ const FIXTURE_DIAGNOSTIC_SIGNALS: readonly string[] = [
   'SIGUSR1',
   'SIGUSR2',
   'SIGBREAK',
+  'SIGCHLD',
+  'SIGCONT',
+  'SIGIO',
+  'SIGIOT',
+  'SIGPOLL',
+  'SIGPROF',
+  'SIGPWR',
+  'SIGSTKFLT',
+  'SIGSTOP',
+  'SIGTSTP',
+  'SIGTTIN',
+  'SIGTTOU',
+  'SIGUNUSED',
+  'SIGURG',
+  'SIGVTALRM',
+  'SIGWINCH',
+  'SIGLOST',
+  'SIGINFO',
 ];
+
+/** Reconcile every nonce-bound endpoint before deciding whether the pipeline succeeded. */
+export function reconcileFixturePipelineReceipts(
+  receipts: readonly {
+    readonly role: 'producer' | 'consumer';
+    readonly token: string;
+    readonly text: string | undefined;
+    readonly observation: FixtureProducerObservation;
+  }[],
+) {
+  return EffectArray.map(receipts, ({role, token, text, observation}) => {
+    const unknown = {role, state: 'unknown' as const, exitCode: null, signal: null};
+    if (text === undefined || !fixturePipelineReceiptProvesExit(text, token)) return unknown;
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== 'object' || value === null || !('code' in value) || !('signal' in value)) return unknown;
+    if (value.code !== null && (typeof value.code !== 'number' || !Number.isSafeInteger(value.code))) return unknown;
+    const signal =
+      value.signal === null
+        ? null
+        : Option.getOrUndefined(EffectArray.findFirst(FIXTURE_DIAGNOSTIC_SIGNALS, known => known === value.signal));
+    if (signal === undefined) return unknown;
+    observation.spawned();
+    observation.exited(value.code, signal);
+    observation.closed();
+    return {role, state: 'exited' as const, exitCode: value.code, signal};
+  });
+}
 
 export async function runFixtureCommand(
   processes: FixtureProcesses,

@@ -79,6 +79,7 @@ import {
   scheduleMcpRecallBackgroundRefresh,
   type McpRecallBackgroundRefreshSchedule,
 } from './mcp/refresh.js';
+import {RecallEmbeddingDemandUnavailable} from './background/demand.js';
 import {
   retrieveRecallMemoryConnections,
   type RecallMemoryConnectionsResult,
@@ -889,11 +890,23 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
     } satisfies McpRecallSemanticScoresResult;
   }
   if (attempt.value.state === 'refreshable') {
-    const schedule = yield* scheduleMcpRecallBackgroundRefresh(config, attempt.value.manifest);
-    return {
-      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallRefreshingWarning(schedule))),
-      status: 'unavailable',
-    } satisfies McpRecallSemanticScoresResult;
+    return yield* scheduleMcpRecallBackgroundRefresh(config, attempt.value.manifest).pipe(
+      Effect.map(schedule => ({
+        result: emptyRecallSemanticScoresResult(Option.some(semanticRecallRefreshingWarning(schedule))),
+        status: 'unavailable' as const,
+      })),
+      Effect.catchCause(cause => {
+        const reason = cause.reasons[0];
+        if (cause.reasons.length !== 1 || !Cause.isFailReason(reason)) return Effect.failCause(cause);
+        if (!Schema.is(RecallEmbeddingDemandUnavailable)(reason.error)) return Effect.failCause(cause);
+        const error = reason.error;
+        const warning = `Local AI recall warning: background refresh enqueue not confirmed [${error.stage ?? 'unknown'}/${error.reason ?? 'unknown'}]; lexical recall continued.`;
+        return Effect.succeed({
+          result: emptyRecallSemanticScoresResult(Option.some(warning)),
+          status: 'failed' as const,
+        });
+      }),
+    );
   }
   if (attempt.value.state === 'structurally-unavailable') {
     return {

@@ -24,6 +24,7 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {validateWorkflowGraphProject} from './graph_scope.js';
 
 /** Resolve authority from configured profiles. A request cannot opt out of a cloud profile. */
 const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfiguredProfile')(function* (
@@ -89,6 +90,8 @@ const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfig
 export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')(function* (
   config: RuntimeConfig,
   request: WorkflowRequest,
+  graphProject?: string,
+  bound = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
@@ -97,6 +100,24 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   const repoRoot = yield* gitValue(['rev-parse', '--show-toplevel'], system.currentDirectory());
   if (!repoRoot) return yield* workflowError('repository-missing', 'Run the workflow from its Git checkout.');
   const repo = yield* fs.realPath(repoRoot);
+  const selectedGraphProject =
+    graphProject === undefined
+      ? undefined
+      : yield* validateWorkflowGraphProject(config, repo, graphProject).pipe(
+          bound
+            ? Effect.catch(() =>
+                workflowError(
+                  'graph-scope-unavailable',
+                  'The bound graph project is unavailable in this checkout. Restore its original manifest entry and checkout.',
+                ),
+              )
+            : effect => effect,
+        );
+  if (bound && graphProject !== undefined && selectedGraphProject !== graphProject)
+    return yield* workflowError(
+      'graph-scope-unavailable',
+      'The bound graph project changed. Restore its original manifest spelling or start a fresh run.',
+    );
   const scope =
     detected === 'codex-cloud-personal'
       ? yield* codexCloudMemoryScope(config)
@@ -127,6 +148,7 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   }));
   const context = {
     ...identifiers,
+    ...(selectedGraphProject === undefined ? {} : {graphProject: selectedGraphProject}),
     ...(request.naming
       ? {
           naming: yield* validateWorkflowInput(() => {
@@ -157,7 +179,11 @@ export const verifyWorkflowBinding = Effect.fn('workflowMemory.verifyBinding')(f
   config: RuntimeConfig,
   binding: WorkflowBinding,
 ) {
-  const current = yield* resolveWorkflowBinding(config, {protocolVersion: 1, action: 'bind', ...binding});
+  const base = yield* resolveWorkflowBinding(config, {protocolVersion: 1, action: 'bind', ...binding});
+  const {bindingId: _baseId, ...baseIdentity} = base;
+  const identity =
+    binding.graphProject === undefined ? baseIdentity : {...baseIdentity, graphProject: binding.graphProject};
+  const current = {...identity, bindingId: yield* sha256Hex(stableJson(identity))};
   if (stableJson(current) !== stableJson(binding))
     return yield* workflowError(
       'binding-drift',

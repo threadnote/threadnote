@@ -10,7 +10,8 @@ import {
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {contextBriefMemoryCandidate} from '../../src/memory-evidence.js';
 import {assembleContextBriefLogicalResult, planContextBrief} from '../../src/planner.js';
-import type {ContextBriefGraphEvidenceV1} from '../../src/types.js';
+import type {ContextBriefGraphEvidenceV1, ContextBriefCitationValidationReasonV2} from '../../src/types.js';
+import {projectContextBrief, projectContextBriefAgentView} from '../../src/projector.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -21,6 +22,62 @@ describe('Context Brief citation metadata diagnostics', () => {
       false,
     );
     expect(logical.activeHandoffs[0].preciseStatus).toBe('exact');
+  });
+
+  it.each(['citation-limit', 'graph-stale', 'validation-error'] as const)(
+    'preserves the displayed unknown citation reason %s within public response bounds',
+    reason => {
+      const {logical, record} = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION, {
+        linked: [0],
+        unknown: [0],
+        reason,
+      });
+      const memory = logical.activeHandoffs[0];
+      expect(memory.codeRelations).toMatchObject([
+        {citationId: record.metadata.codeCitations![0].id, status: 'unknown'},
+      ]);
+      expect(memory.citationReceipts).toEqual([
+        {citationId: record.metadata.codeCitations![0].id, status: 'unknown', reason},
+      ]);
+      for (const format of ['dual', 'agent'] as const) {
+        const projected = projectContextBrief(logical, 1250, format);
+        expect(projected.measurement.estimatedTokens).toBeLessThanOrEqual(1250);
+        const view = projectContextBriefAgentView(projected.structuredContent, true);
+        expect(view.activeHandoffs?.[0].citationActions).toEqual([{count: 1, reason, status: 'unknown'}]);
+        const serialized = JSON.stringify(projected);
+        for (const privateValue of ['/private/source.ts', 'private-repository', 'private-snapshot']) {
+          expect(serialized).not.toContain(privateValue);
+        }
+      }
+    },
+  );
+
+  it('retains only one associated unknown and never substitutes unrelated unknown evidence', () => {
+    const lines = [citationLine(0), citationLine(1), citationLine(2)];
+    const unrelated = diagnostic(lines, MEMORY_SCHEMA_VERSION, {linked: [1], unknown: [0]});
+    expect(unrelated.logical.activeHandoffs[0].citationReceipts).toBeUndefined();
+    expect(unrelated.logical.activeHandoffs[0].codeRelations).toMatchObject([{status: 'exact'}]);
+    const undisplayed = diagnostic(lines, MEMORY_SCHEMA_VERSION, {linked: [0, 1], unknown: [1]});
+    expect(undisplayed.logical.activeHandoffs[0].codeRelations).toMatchObject([{status: 'exact'}]);
+    expect(undisplayed.logical.activeHandoffs[0].citationReceipts).toBeUndefined();
+    const associated = diagnostic(lines, MEMORY_SCHEMA_VERSION, {linked: [1, 2], unknown: [0, 1, 2]});
+    expect(associated.logical.activeHandoffs[0].citationReceipts).toEqual([
+      {citationId: associated.record.metadata.codeCitations![1].id, reason: 'graph-stale', status: 'unknown'},
+    ]);
+  });
+
+  it('preserves relocation audit priority over unknown diagnostics and compacts exact receipts', () => {
+    const audited = diagnostic([citationLine(0), citationLine(1)], MEMORY_SCHEMA_VERSION, {
+      linked: [0, 1],
+      unknown: [0],
+      relocated: [1],
+    });
+    expect(audited.logical.activeHandoffs[0].citationReceipts).toMatchObject([
+      {citationId: audited.record.metadata.codeCitations![1].id, status: 'relocated', relocationHint: 'src/moved.ts'},
+    ]);
+    expect(audited.logical.activeHandoffs[0].citationReceipts).toHaveLength(1);
+    const exact = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION, {linked: [0]});
+    expect(exact.logical.activeHandoffs[0].citationReceipts).toBeUndefined();
   });
 
   it('reports a document schema mismatch without claiming its valid citation line was malformed', () => {
@@ -75,7 +132,16 @@ function citationLine(index: number): string {
   );
 }
 
-function diagnostic(lines: readonly string[], schemaVersion: number) {
+function diagnostic(
+  lines: readonly string[],
+  schemaVersion: number,
+  options: {
+    readonly linked?: readonly number[];
+    readonly unknown?: readonly number[];
+    readonly relocated?: readonly number[];
+    readonly reason?: ContextBriefCitationValidationReasonV2;
+  } = {},
+) {
   const uri = 'threadnote://user/tester/memories/handoffs/active/synthetic/synthetic-citation-diagnostic.md';
   const record = parseMemoryDocument(
     uri,
@@ -107,18 +173,46 @@ function diagnostic(lines: readonly string[], schemaVersion: number) {
   const logical = assembleContextBriefLogicalResult({
     graph,
     memory: {
-      candidates: [candidate],
+      candidates: [
+        {
+          ...candidate,
+          ...(options.linked === undefined
+            ? {}
+            : {
+                codeLinkMatches: EffectArray.map(options.linked, index => ({
+                  anchorOrdinal: index,
+                  anchorPath: candidate.codeCitations[index].path,
+                  citationId: candidate.codeCitations[index].id,
+                  matchKind: 'file-path' as const,
+                })),
+              }),
+        },
+      ],
       citationValidations: [
         {
           uri,
-          receipts: EffectArray.map(candidate.codeCitations, citation => ({
+          receipts: EffectArray.map(candidate.codeCitations, (citation, index) => ({
             candidateCount: 1,
             citationId: citation.id,
             coverage: 'current-complete' as const,
             kind: 'file' as const,
             observedAt,
-            reason: 'exact' as const,
-            status: 'exact' as const,
+            reason: options.unknown?.includes(index)
+              ? (options.reason ?? 'graph-stale')
+              : options.relocated?.includes(index)
+                ? ('relocated' as const)
+                : ('exact' as const),
+            status: options.unknown?.includes(index)
+              ? ('unknown' as const)
+              : options.relocated?.includes(index)
+                ? ('relocated' as const)
+                : ('exact' as const),
+            ...(options.unknown?.includes(index)
+              ? {}
+              : {observedPath: options.relocated?.includes(index) ? 'src/moved.ts' : citation.path}),
+            sourcePath: '/private/source.ts',
+            repositoryId: 'private-repository',
+            snapshotId: 'private-snapshot',
             strategy: 'file-path' as const,
             validatorVersion: 1 as const,
           })),

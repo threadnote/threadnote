@@ -32,6 +32,7 @@ import {
   developmentRuntimeTakeoverAuthorizationMatches,
   parseLocalStandaloneInstallArguments,
   prepareDevelopmentRuntimeOwnershipAuthorization,
+  refreshDevelopmentWorkflowTargets,
 } from '../../../../scripts/install-local-standalone.js';
 import {commandLauncherPath, renderCommandShim} from '@threadnote/threadnote/command-shim';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
@@ -135,6 +136,77 @@ describe('exact-head development runtime', () => {
     });
     expect(() => parseLocalStandaloneInstallArguments(['--force'])).toThrow('Unknown local standalone install option');
   });
+
+  effectIt.effect('refreshes only enabled enrolled stale workflow targets and reports every target outcome', () =>
+    Effect.gen(function* () {
+      const baseSystem = yield* SystemInfo;
+      const invocations: string[][] = [];
+      const targets = [
+        {
+          target: {surfaceId: 'codex', profile: 'desktop', scope: 'user'},
+          enrolled: true,
+          enabled: true,
+          installationState: 'update-available',
+        },
+        {
+          target: {surfaceId: 'cursor', profile: 'desktop', scope: 'user'},
+          enrolled: true,
+          enabled: true,
+          installationState: 'conflict',
+        },
+        {
+          target: {surfaceId: 'amp', profile: 'desktop', scope: 'user'},
+          enrolled: false,
+          enabled: true,
+          installationState: 'update-available',
+        },
+        {
+          target: {surfaceId: 'broken', profile: 'desktop', scope: 'user'},
+          enrolled: true,
+          enabled: true,
+          installationState: 'unavailable',
+        },
+      ];
+      const testSystem = SystemInfo.of({
+        ...baseSystem,
+        environment: () => ({...baseSystem.environment(), THREADNOTE_INSTALL_ROOT: '/install'}),
+      });
+      const run = (failUpdate: boolean) => {
+        const executor = CommandExecutor.of({
+          execute: (_executable, arguments_) => {
+            invocations.push([...arguments_]);
+            return Effect.succeed(
+              arguments_[0] === 'dev-skills' && arguments_[1] === 'status'
+                ? {exitCode: 0, stderr: '', stdout: JSON.stringify({targets})}
+                : {exitCode: failUpdate ? 1 : 0, stderr: '', stdout: ''},
+            );
+          },
+          executeStreaming: () => Effect.die(TestError.make({message: 'Unexpected streaming command'})),
+        });
+        return refreshDevelopmentWorkflowTargets('/install/threadnote', '/install').pipe(
+          Effect.provideService(CommandExecutor, executor),
+          Effect.provideService(SystemInfo, testSystem),
+        );
+      };
+      const succeeded = yield* run(false);
+      expect(succeeded).toEqual([
+        {target: 'codex', state: 'update-available', outcome: 'updated'},
+        {target: 'cursor', state: 'conflict', outcome: 'unchanged'},
+        {target: 'amp', state: 'update-available', outcome: 'unchanged'},
+        {target: 'broken', state: 'unavailable', outcome: 'unchanged'},
+      ]);
+      const failed = yield* run(true);
+      expect(failed).toEqual([
+        {target: 'codex', state: 'update-available', outcome: 'failed', detail: 'The target update command failed.'},
+        {target: 'cursor', state: 'conflict', outcome: 'unchanged'},
+        {target: 'amp', state: 'update-available', outcome: 'unchanged'},
+        {target: 'broken', state: 'unavailable', outcome: 'unchanged'},
+      ]);
+      expect(invocations).toHaveLength(4);
+      expect(invocations[1]).toContain('codex');
+      expect(failed).toHaveLength(4);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('keeps global development runtime ownership stable across arbitrary checkout identities', () => {
     fc.assert(
@@ -1423,7 +1495,11 @@ describe('exact-head development runtime', () => {
         ['development-install-repair', '--expected-version', result.installed.version],
         ['development-install-repair', '--expected-version', result.installed.version],
       ]);
-      expect(result.invocations.at(-1)).toEqual(['doctor', '--dry-run', '--strict']);
+      expect(EffectArray.filter(result.invocations, invocation => invocation[0] === 'doctor').at(-1)).toEqual([
+        'doctor',
+        '--dry-run',
+        '--strict',
+      ]);
     }),
   );
 
