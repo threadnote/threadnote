@@ -32,6 +32,7 @@ import {
   serveSemanticEndpoint,
   requestSemanticEndpoint,
 } from '../../src/semantic/coordinator.js';
+import {typeScriptConfigurationHasExtendsCycle} from '../../src/semantic/fingerprint.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 const observation = (text: string, overrides: Partial<Observation> = {}): Observation => ({
   version: 1,
@@ -112,6 +113,46 @@ const tsDiagnostic = {
   code: 2322,
 };
 describe('TypeScript observation fences', () => {
+  effectIt.effect('does not publish configuration incompleteness across a changed selected project', () =>
+    Effect.gen(function* () {
+      const basis = observation('target;');
+      const base = fakeClient(() => Effect.succeed([]));
+      let barriers = 0;
+      const session = yield* makeTypeScriptSession(
+        {
+          ...base,
+          request: (method, params, milliseconds) => {
+            if (
+              method === 'workspace/executeCommand' &&
+              Schema.is(
+                Schema.Struct({arguments: Schema.Tuple([Schema.Literal('projectInfo'), Schema.Json, Schema.Json])}),
+              )(params)
+            ) {
+              barriers++;
+              return Effect.succeed({
+                success: true,
+                body: {configFileName: barriers === 1 ? '/test/tsconfig.json' : '/test/other.json', fileNames: []},
+              });
+            }
+            return base.request(method, params, milliseconds);
+          },
+        },
+        {
+          ...options(basis),
+          configurationIncomplete: selected => {
+            expect(selected).toBe('/test/tsconfig.json');
+            return Effect.succeed(true);
+          },
+        },
+      );
+      const current = yield* session.upsert(basis, 'target;', 'typescript', 1000);
+      expect(yield* session.query('references', current, {line: 0, character: 1}, 1000)).toMatchObject({
+        status: 'stale',
+      });
+      expect(barriers).toBe(2);
+    }),
+  );
+
   effectIt.effect('negotiates definition links and validates same-observation target/selection ranges', () =>
     Effect.gen(function* () {
       const text = '// 🚀\r\nlet answer = 42;';
@@ -1199,5 +1240,177 @@ describe.skipIf(process.platform === 'win32')('pinned TypeScript engine read pil
         TestClock.withLive,
       ),
     30000,
+  );
+});
+
+// The real pinned cycle/control witness lives in the P06 feasibility artifact.
+// These tests keep classification deterministic at the selected-configuration boundary.
+describe('selected TypeScript configuration resolution', () => {
+  effectIt.effect.prop(
+    'adding project-reference edges preserves classification of the same extends graph',
+    [
+      Schema.Boolean,
+      Schema.Array(
+        Schema.Tuple([
+          Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3})),
+          Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3})),
+        ]),
+      ).check(Schema.isMaxLength(8)),
+    ],
+    ([cyclic, references]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'semantic-reference-invariance-'}));
+        const files = ['tsconfig.json', 'bridge.json', 'base.json', 'tail.json'];
+        const extensions = [[1, 2], [], [3], cyclic ? [0] : []];
+        const write = (withReferences: boolean) =>
+          Effect.forEach(
+            files,
+            (file, index) =>
+              fs.writeFileString(
+                path.join(root, file),
+                JSON.stringify({
+                  extends: EffectArray.map(extensions[index], target => './' + files[target]),
+                  references: withReferences
+                    ? EffectArray.map(
+                        EffectArray.filter(references, ([from]) => from === index),
+                        ([, target]) => ({path: './' + files[target]}),
+                      )
+                    : [],
+                }),
+              ),
+            {discard: true},
+          );
+        yield* write(false);
+        const selected = path.join(root, files[0]);
+        const baseline = yield* typeScriptConfigurationHasExtendsCycle(root, selected);
+        yield* write(true);
+        expect(yield* typeScriptConfigurationHasExtendsCycle(root, selected)).toBe(baseline);
+        expect(baseline).toBe(cyclic);
+      }).pipe(
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Bounded graph metamorphism at the filesystem validator boundary.
+        Effect.provide(coordinatorIo),
+      ),
+    {arbitrary: {runs: 16}},
+  );
+
+  effectIt.effect('classifies extends cycles without confusing shared bases, foreign configs or reference cycles', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'semantic-selected-config-'}));
+      const cases: readonly {name: string; incomplete: boolean; files: Readonly<Record<string, Schema.Json>>}[] = [
+        {
+          name: 'cycle',
+          incomplete: true,
+          files: {'tsconfig.json': {extends: './base.json'}, 'base.json': {extends: './tsconfig.json'}},
+        },
+        {
+          name: 'reference-visited-extends-cycle',
+          incomplete: true,
+          files: {
+            'tsconfig.json': {extends: ['./bridge.json', './base.json']},
+            'bridge.json': {references: [{path: './base.json'}]},
+            'base.json': {extends: './tsconfig.json'},
+          },
+        },
+        {
+          name: 'shared-base',
+          incomplete: false,
+          files: {
+            'tsconfig.json': {extends: ['./left.json', './right.json']},
+            'left.json': {extends: './base.json'},
+            'right.json': {extends: './base.json'},
+            'base.json': {},
+          },
+        },
+        {
+          name: 'foreign-cycle',
+          incomplete: false,
+          files: {'tsconfig.json': {}, 'tsconfig.other.json': {extends: './tsconfig.other.json'}},
+        },
+        {
+          name: 'reference-cycle',
+          incomplete: false,
+          files: {
+            'tsconfig.json': {references: [{path: './other.json'}]},
+            'other.json': {references: [{path: './tsconfig.json'}]},
+          },
+        },
+        {
+          name: 'referenced-extends-cycle',
+          incomplete: false,
+          files: {'tsconfig.json': {references: [{path: './other.json'}]}, 'other.json': {extends: './other.json'}},
+        },
+      ];
+      for (const fixture of cases) {
+        const project = path.join(root, fixture.name);
+        yield* fs.makeDirectory(project);
+        for (const [name, config] of EffectRecord.toEntries(fixture.files))
+          yield* fs.writeFileString(path.join(project, name), JSON.stringify(config));
+        const text = 'const value: number = "ordinary source error";\nvalue;\n';
+        yield* fs.writeFileString(path.join(project, 'main.ts'), text);
+        const configuration = yield* semanticTreeDigest(project, true);
+        const selected = path.join(project, 'tsconfig.json');
+        expect(yield* typeScriptConfigurationHasExtendsCycle(project, selected)).toBe(fixture.incomplete);
+        const uri = (yield* path.toFileUrl(project)).href;
+        const basis = observation(text, {worktree: uri, project: uri, uri: uri + '/main.ts', configuration});
+        let queryCalls = 0;
+        const base = fakeClient(() =>
+          Effect.sync(() => {
+            queryCalls++;
+            return [];
+          }),
+        );
+        const client = {
+          ...base,
+          request: (method: string, params: Schema.Json | undefined, milliseconds: number) => {
+            if (
+              method === 'workspace/executeCommand' &&
+              Schema.is(
+                Schema.Struct({arguments: Schema.Tuple([Schema.Literal('projectInfo'), Schema.Json, Schema.Json])}),
+              )(params)
+            )
+              return Effect.succeed({
+                success: true,
+                body: {configFileName: selected, fileNames: [path.join(project, 'main.ts')]},
+              });
+            return base.request(method, params, milliseconds);
+          },
+        };
+        const session = yield* makeTypeScriptSession(client, {
+          ...options(basis),
+          configurationIncomplete: config =>
+            typeScriptConfigurationHasExtendsCycle(project, config).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+            ),
+        });
+        const current = yield* session.upsert(basis, text, 'typescript', 1000);
+        const result = yield* session.query('references', current, {line: 1, character: 1}, 1000);
+        if (fixture.incomplete) {
+          expect(result).toMatchObject({
+            status: 'unavailable',
+            reason: 'semantic-project-configuration-incomplete',
+            evidence: {completeness: 'partial'},
+          });
+          expect('items' in result).toBe(false);
+          expect(queryCalls).toBe(0);
+          // Inspection is fresh: repairing the declared graph changes its fingerprint and classification.
+          yield* fs.writeFileString(path.join(project, 'base.json'), '{}');
+          expect(yield* semanticTreeDigest(project, true)).not.toBe(configuration);
+          expect(yield* typeScriptConfigurationHasExtendsCycle(project, selected)).toBe(false);
+        } else {
+          expect(result).toMatchObject({status: 'ok', items: [], evidence: {completeness: 'partial'}});
+          expect(queryCalls).toBe(1);
+        }
+      }
+      expect(yield* typeScriptConfigurationHasExtendsCycle(root, '/dev/null/inferredProject1*')).toBe(false);
+      expect(yield* typeScriptConfigurationHasExtendsCycle(root, '/foreign/tsconfig.json')).toBe(false);
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow selected-configuration filesystem test.
+      Effect.provide(coordinatorIo),
+    ),
   );
 });

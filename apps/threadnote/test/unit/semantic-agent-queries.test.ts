@@ -42,7 +42,7 @@ import {
   SemanticHostProfileFault,
 } from '../../src/semantic/host_profile.js';
 import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
-import {SemanticAgentQueryResult} from '../../src/semantic/agent_query_protocol.js';
+import {SemanticAgentQueryResult, formatSemanticAgentQuery} from '../../src/semantic/agent_query_protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
@@ -503,6 +503,56 @@ describe('host-bound public document diagnostics', () => {
 });
 
 describe('private semantic host profiles and the canonical application read', () => {
+  effectIt.effect(
+    'preserves configuration incompleteness, zero results, unsupported and timeout in application and compact JSON',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixture;
+        yield* f.write(f.profile);
+        const observed = {
+          ...observation(),
+          worktree: f.worktree,
+          project: f.worktree,
+          uri: canonicalFileUri((yield* f.path.toFileUrl(f.file)).href),
+          provider: {id: 'gopls', version: 'v0.24.0', generation: 1},
+        };
+        const replies: SemanticAgentQueryResult[] = [
+          {
+            version: 1,
+            status: 'unavailable',
+            reason: 'semantic-project-configuration-incomplete',
+            evidence: outcome([], observed).evidence,
+          },
+          {...outcome([], observed), offset: 0, remaining: 0, next: null},
+          {version: 1, status: 'unsupported', reason: 'operation-not-qualified', evidence: null},
+          {version: 1, status: 'timeout', reason: 'Semantic query deadline expired', evidence: null},
+        ];
+        for (const reply of replies) {
+          const host: SemanticAgentQueryHost = {
+            runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+            connect: () =>
+              Effect.succeed({
+                request: () =>
+                  Schema.decodeEffect(Schema.Json)(reply).pipe(
+                    Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                  ),
+              }),
+          };
+          const result = yield* runSemanticAgentQueryWith(host, f.config, {
+            callerCwd: f.root,
+            file: 'source.ts',
+            language: 'go',
+            operation: 'references',
+            position: {line: 0, character: 13},
+          });
+          expect(result).toEqual(reply);
+          expect(JSON.parse(formatSemanticAgentQuery(result))).toEqual(reply);
+          if (result.status !== 'ok') expect('items' in result).toBe(false);
+          else expect(result.evidence.completeness).toBe('partial');
+        }
+      }).pipe(provideTestLayer(queryIo)),
+  );
+
   effectIt.effect('requires explicit enabled private regular worktree-bound profile bytes', () =>
     Effect.gen(function* () {
       const f = yield* profileFixture;

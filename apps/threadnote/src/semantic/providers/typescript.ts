@@ -63,6 +63,8 @@ export interface TypeScriptSessionOptions {
   readonly sourceRoot: string;
   readonly verifyPolicy: Effect.Effect<void, unknown>;
   readonly challenge: Effect.Effect<string, unknown>;
+  /** Host inspection is bound to the actual projectInfo-selected configuration. Unknown is false. */
+  readonly configurationIncomplete?: (configuration: string) => Effect.Effect<boolean, unknown>;
   readonly maxMemoryMb: number;
   readonly startupMilliseconds: number;
 }
@@ -331,19 +333,32 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
       if (operation !== 'symbols' && (!position || !validTextPosition(document.text, position)))
         return yield* invalid();
       yield* policy(milliseconds);
+      const incomplete =
+        options.configurationIncomplete && document.project
+          ? yield* options.configurationIncomplete(document.project.configuration)
+          : false;
       const method = operation === 'symbols' ? 'textDocument/documentSymbol' : `textDocument/${operation}`;
-      const response = yield* client.request(
-        method,
-        {
-          textDocument: {uri: fixed.uri},
-          ...(position ? {position} : {}),
-          ...(operation === 'references' ? {context: {includeDeclaration: true}} : {}),
-        },
-        milliseconds,
-      );
+      const response = incomplete
+        ? null
+        : yield* client.request(
+            method,
+            {
+              textDocument: {uri: fixed.uri},
+              ...(position ? {position} : {}),
+              ...(operation === 'references' ? {context: {includeDeclaration: true}} : {}),
+            },
+            milliseconds,
+          );
       const project = yield* projectInfo(fixed.uri, milliseconds);
       yield* policy(milliseconds);
       if (!current(fixed) || document.project?.configuration !== project.configuration) return stale();
+      if (incomplete)
+        return {
+          version: 1,
+          status: 'unavailable',
+          reason: 'semantic-project-configuration-incomplete',
+          evidence: evidence(fixed),
+        } satisfies QueryOutcome;
       let items: Schema.Json[];
       if (operation === 'definition' || operation === 'references') {
         const locations = yield* decode(Navigation, response);
