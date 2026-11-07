@@ -2,7 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {SecureRandom} from 'effect/crypto';
 import {Clock, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import {expect, vi} from 'vitest';
+import {expect, it, vi} from 'vitest';
 import * as WorkerControl from '@threadnote/inference/background/worker-control';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -15,6 +15,7 @@ import {
   drainLocalBinsWorkers,
   localBinsWorkerOptions,
   localBinsWorkerDrainLayer,
+  runLocalBinsE2eCleanup,
   type LocalBinsPositiveHome,
 } from '../helpers/local-bins-worker-drain.js';
 
@@ -242,3 +243,44 @@ effectIt.effect('identifies fixed enrollment context without replacing the origi
     expect(error.message).not.toContain(f.home);
   }).pipe(provideTestLayer(localBinsWorkerDrainLayer)),
 );
+
+it('attempts worker drain after coordinator failure and preserves that failure without deleting fixtures', async () => {
+  const order: string[] = [];
+  const coordinatorFailure = new Error('coordinator cleanup failed');
+  await expect(
+    runLocalBinsE2eCleanup(
+      async () => {
+        order.push('coordinator');
+        throw coordinatorFailure;
+      },
+      async () => {
+        order.push('workers');
+        throw new Error('worker drain failed too');
+      },
+      async () => {
+        order.push('remove');
+      },
+    ),
+  ).rejects.toBe(coordinatorFailure);
+  expect(order).toEqual(['coordinator', 'workers']);
+});
+
+it('retains fixtures when worker drain is unproven', async () => {
+  const order: string[] = [];
+  const workerFailure = new Error('worker drain failed');
+  await expect(
+    runLocalBinsE2eCleanup(
+      async () => {
+        order.push('coordinator');
+      },
+      async () => {
+        order.push('workers');
+        throw workerFailure;
+      },
+      async () => {
+        order.push('remove');
+      },
+    ),
+  ).rejects.toBe(workerFailure);
+  expect(order).toEqual(['coordinator', 'workers']);
+});

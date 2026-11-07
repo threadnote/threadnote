@@ -44,6 +44,7 @@
     "./model-setup-contracts": "./src/model_setup_contracts.ts",
     "./process/contracts": "./src/process/contracts.ts",
     "./processes-view": "./src/processes_view.tsx",
+    "./preview": "./src/preview.tsx",
     "./processes_view": "./src/processes_view.tsx",
     "./refresh": "./src/refresh.ts",
     "./request-inputs": "./src/request_inputs.ts",

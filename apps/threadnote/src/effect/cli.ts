@@ -113,6 +113,7 @@ import {maybeNotifyUpdate, maybeRunPostUpdateAfterRepair, runPostUpdate} from '.
 import {errorMessage} from '@threadnote/platform/errors';
 import {runVersion} from '../release/version/command.js';
 import {runManage} from '../manager/index.js';
+import {makeMemoryPreviewCommand} from '../preview/dispatch.js';
 import {applicationError} from '@threadnote/platform/errors';
 import {runHomeMigration} from '../migration/home.js';
 import {
@@ -1875,6 +1876,9 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('agents', makeAgentsCommand(withScopedRuntime), agentsCommandMetadata),
   registerTopLevelCommand('semantic', makeSemanticCommand(withRuntimeEffect), {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('manage', manage),
+  registerTopLevelCommand('memory-preview', makeMemoryPreviewCommand(withRuntimeEffect), {
+    productionLog: {mode: 'never'},
+  }),
   registerTopLevelCommand('processes', processes, {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('doctor', doctor),
   registerTopLevelCommand('install', install),

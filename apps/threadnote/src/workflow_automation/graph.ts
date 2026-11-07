@@ -20,6 +20,7 @@ const isReady = (status: CodeGraphStatus, repo: string) =>
 export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapter')(function* (
   config: RuntimeConfig,
   binding: WorkflowBinding,
+  options: {readonly prepare?: boolean} = {},
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
@@ -40,6 +41,13 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           });
         let status = yield* query.status(config.agentContextHome, repo, statusOptions);
         if (!isReady(status, repo)) {
+          if (options.prepare === false)
+            return yield* WorkflowAutomationError.make({
+              code: 'evidence-unavailable',
+              message:
+                'Code citations require an already-published ready graph; run `threadnote graph index --no-vectors` from callerCwd, then retry. No indexing was started.',
+              retryable: false,
+            });
           yield* indexer.index({
             cwd: repo,
             threadnoteHome: config.agentContextHome,

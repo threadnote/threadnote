@@ -759,8 +759,11 @@ describe('ordinary merge native qualification', () => {
   }
 });
 
-const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(function* (large = false) {
-  const f = yield* fixture(['one', 'two'], 'local', false, false, false, undefined, repo =>
+const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(function* (
+  large = false,
+  delivery: 'local' | 'pr' = 'local',
+) {
+  const f = yield* fixture(['one', 'two'], delivery, false, false, false, undefined, repo =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const git = (args: readonly string[]) => yieldCommand(repo, args);
@@ -852,7 +855,7 @@ const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(
         ...f.base('authoring'),
         command: 'export-dev-cycle',
         uri: object(saved.root).uri,
-        delivery: 'local',
+        delivery,
         bindings: {
           one: {branch: 'feature/one', baseBranch: 'main'},
           two: {branch: 'feature/two', baseBranch: 'main'},
@@ -1243,6 +1246,77 @@ describe('same-label rewritten-base native qualification', () => {
   );
 
   effectIt.effect(
+    'completes a published manifest3 PR after active checkout and declared base advance',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* rewrittenBaseFixture(false, 'pr');
+        yield* f.mutate('snapshot', f.fields);
+        const snapshot = (yield* f.read()).snapshots.at(-1)!.snapshot;
+        yield* f.mutate('validate-review', {
+          snapshotId: snapshot.snapshotId,
+          attemptId: 'full-qualified',
+          report: report(snapshot),
+        });
+        yield* f.mutate('ready', {
+          phaseId: 'one',
+          snapshotId: snapshot.snapshotId,
+          validation: {
+            snapshotTree: snapshot.tree,
+            reviewTree: snapshot.tree,
+            status: 'passed',
+            productState: 'working',
+            checks: [{command: 'private fixture', result: 'passed', evidence: 'Exact qualified source'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Private fixture'}],
+          },
+        });
+        const publication = {exemption: 'maintenance', reason: 'Private synthetic fixture.'};
+        const delivery = {
+          phaseId: 'one',
+          phaseHash: snapshot.phaseHash,
+          delivery: 'pr',
+          headSha: snapshot.head,
+          validatedTree: snapshot.tree,
+          commitEvidence: 'Private clean committed fixture.',
+          pr: {
+            url: 'https://github.com/example/repo/pull/1',
+            headSha: snapshot.head,
+            branch: 'feature/one',
+            baseBranch: 'main',
+            state: 'open',
+          },
+          watch: {
+            prUrl: 'https://github.com/example/repo/pull/1',
+            headSha: snapshot.head,
+            state: 'active',
+            stateDir: f.path.join(f.root, 'watch'),
+            consumerKind: 'orchestrator',
+            consumerId: 'fixture',
+            evidence: 'Private synthetic owned watch receipt.',
+          },
+        };
+        yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery});
+        const published = yield* f.read();
+        const prior = published.state.phases.one.delivery!;
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'later-base.ts'), 'export const later = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Later base after publication']);
+        const merged = {
+          ...prior,
+          pr: {...prior.pr!, state: 'merged'},
+          watch: {...prior.watch!, state: 'terminal', evidence: 'Private owned watch observed the historical merge.'},
+        };
+        expect((yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery: merged})).status).toBe('ok');
+        const completed = yield* f.read();
+        expect(completed.state.phases.one.status).toBe('merged');
+        expect(completed.snapshots).toEqual(published.snapshots);
+        expect(completed.reviews).toEqual(published.reviews);
+        expect(completed.attempts).toEqual(published.attempts);
+      }).pipe(run),
+    ordinaryMergeFixtureTimeout,
+  );
+
+  effectIt.effect(
     'refuses forged provenance, identities, owners, authority and source drift before surviving pin or state changes',
     () =>
       Effect.gen(function* () {
@@ -1333,7 +1407,12 @@ effectIt.effect('bounds aggregate command, argument, output and deadline acquisi
       executeStreaming: () => Effect.succeed(empty),
     });
     const commands = Effect.gen(function* () {
-      for (let i = 0; i < 128; i++) yield* runCommandEffect('git', ['read']);
+      for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['read']);
+      yield* withNativeCycleSameLabelQualificationBudget(
+        Effect.gen(function* () {
+          for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['nested-read']);
+        }),
+      );
       yield* runCommandEffect('git', ['update-ref', '--stdin']);
     });
     refused(

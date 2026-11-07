@@ -5,6 +5,7 @@ import {writeSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sourceWorkKey} from '@threadnote/integration-runtime/coordinator';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from 'vitest';
 import {Schema} from 'effect';
@@ -49,6 +50,44 @@ interface ClientReply {
   readonly elapsedMs: number;
   readonly result?: {readonly sourceId: string; readonly syncedDocuments: readonly string[]};
 }
+interface ClientClose {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+interface OwnedClient {
+  readonly child: ChildProcess;
+  readonly result: () => Promise<ClientReply>;
+  readonly closed: () => Promise<ClientClose>;
+  readonly action: string;
+}
+interface OwnedClientClose {
+  readonly action: string;
+  readonly pid: number | undefined;
+  readonly wait: () => Promise<ClientClose>;
+}
+interface FixtureCleanupFailure {
+  readonly error: unknown;
+  readonly stage: string;
+  readonly status?: 'failed' | 'unknown';
+  readonly owner?: string;
+  readonly pid?: number;
+}
+interface OwnedCloseCollection {
+  readonly outcomes: readonly PromiseSettledResult<ClientClose>[];
+  readonly failures: readonly FixtureCleanupFailure[];
+  readonly fixtureDisposition: 'removed' | 'preserved' | 'removal-failed';
+}
+
+function clientObservationError(stage: string): Error & {readonly status: 'unknown'} {
+  const error = new Error(`${stage} was not observed before the original client deadline; status unknown`);
+  error.name = 'ClientObservationError';
+  const status = 'unknown' as const;
+  return Object.assign(error, {status});
+}
+
+function isClientObservationError(value: unknown): value is Error & {readonly status: 'unknown'} {
+  return value instanceof Error && 'status' in value && Reflect.get(value, 'status') === 'unknown';
+}
 
 function expectSequentialRuns(events: readonly WorkerEvent[]) {
   let active: number | undefined;
@@ -72,7 +111,123 @@ function persistedJob(home: string) {
   }
 }
 
+function coordinatorJob(home: string, key: string) {
+  const database = new Database(join(home, 'threadnote', 'integration-coordinator', 'jobs.sqlite'), {readonly: true});
+  try {
+    const row = database
+      .query<
+        {key: string; config_json: string; descriptor_json: string; generation: number; mode: string; state: string},
+        [string]
+      >('SELECT key,config_json,descriptor_json,generation,mode,state FROM source_jobs WHERE key=?')
+      .get(key);
+    return row
+      ? {
+          key: row.key,
+          config: JSON.parse(row.config_json) as unknown,
+          descriptor: JSON.parse(row.descriptor_json) as unknown,
+          generation: row.generation,
+          mode: row.mode,
+          state: row.state,
+        }
+      : undefined;
+  } finally {
+    database.close();
+  }
+}
+
 const pause = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds));
+function beforeClientDeadline<A>(promise: Promise<A>, deadline: number, stage: string): () => Promise<A> {
+  const observation: Promise<
+    | {readonly completedAt: number; readonly ok: true; readonly value: A}
+    | {readonly completedAt: number; readonly ok: false; readonly error: unknown}
+  > = promise.then(
+    value => ({completedAt: Date.now(), ok: true, value}),
+    error => ({completedAt: Date.now(), ok: false, error}),
+  );
+  return () =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(clientObservationError(stage)), Math.max(0, deadline - Date.now()));
+      void observation.then(result => {
+        clearTimeout(timer);
+        if (result.completedAt > deadline) {
+          reject(clientObservationError(stage));
+        } else if (result.ok) resolve(result.value);
+        else reject(result.error);
+      });
+    });
+}
+
+async function collectOwnedClientCloses(
+  owners: readonly OwnedClientClose[],
+  removeFixture: () => Promise<void>,
+): Promise<OwnedCloseCollection> {
+  const outcomes = await Promise.allSettled(EffectArray.map(owners, owner => Promise.resolve().then(owner.wait)));
+  const failures: FixtureCleanupFailure[] = [];
+  for (const [index, owner] of owners.entries()) {
+    const outcome = outcomes[index];
+    if (outcome?.status !== 'rejected') continue;
+    failures.push({
+      error: outcome.reason,
+      stage: 'client-close',
+      status: isClientObservationError(outcome.reason) ? 'unknown' : 'failed',
+      owner: owner.action,
+      ...(owner.pid === undefined ? {} : {pid: owner.pid}),
+    });
+  }
+  if (failures.length > 0) return {outcomes, failures, fixtureDisposition: 'preserved'};
+  try {
+    await removeFixture();
+    return {outcomes, failures, fixtureDisposition: 'removed'};
+  } catch (error) {
+    failures.push({error, stage: 'remove-fixture', status: 'failed'});
+    return {outcomes, failures, fixtureDisposition: 'removal-failed'};
+  }
+}
+
+function fixtureCleanupDiagnostic(failures: readonly FixtureCleanupFailure[]): string {
+  const entries = EffectArray.map(failures, entry => ({
+    name: entry.error instanceof Error ? entry.error.name : 'UnknownError',
+    stage: entry.stage,
+    status: entry.status,
+    owner: entry.owner,
+    pid: entry.pid,
+    code:
+      typeof entry.error === 'object' && entry.error !== null && 'code' in entry.error
+        ? Reflect.get(entry.error, 'code')
+        : undefined,
+  }));
+  return `COORDINATOR_FIXTURE_CLEANUP_FAILURE ${JSON.stringify({count: entries.length, failures: entries})}\n`;
+}
+
+function finishFixture<A>(
+  outcome: {readonly ok: true; readonly value: A} | {readonly ok: false; readonly error: unknown},
+  cleanupFailures: readonly FixtureCleanupFailure[],
+  writeDiagnostic: (line: string) => void = line => process.stderr.write(line),
+): A {
+  if (!outcome.ok) {
+    if (cleanupFailures.length > 0) {
+      try {
+        writeDiagnostic(fixtureCleanupDiagnostic(cleanupFailures));
+      } catch {
+        // Cleanup diagnostics are best effort and must not replace the primary failure.
+      }
+    }
+    throw outcome.error;
+  }
+  if (cleanupFailures.length > 0) {
+    try {
+      writeDiagnostic(fixtureCleanupDiagnostic(cleanupFailures));
+    } catch {
+      // Cleanup diagnostics are best effort and must not replace cleanup failure evidence.
+    }
+    throw new AggregateError(
+      EffectArray.map(cleanupFailures, failure => failure.error),
+      'Coordinator fixture cleanup failed.',
+    );
+  }
+  return outcome.value;
+}
+
 function alive(pid: number) {
   try {
     process.kill(pid, 0);
@@ -81,14 +236,18 @@ function alive(pid: number) {
     return false;
   }
 }
-async function until<A>(read: () => Promise<A | undefined>, message: string, timeoutMs = 8_000): Promise<A> {
+async function until<A>(
+  read: () => Promise<A | undefined>,
+  message: string | (() => string),
+  timeoutMs = 8_000,
+): Promise<A> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await read();
     if (value !== undefined) return value;
     await pause(25);
   }
-  throw new Error(message);
+  throw new Error(typeof message === 'string' ? message : message());
 }
 
 async function withProcesses<A>(
@@ -102,6 +261,11 @@ async function withProcesses<A>(
       home?: string,
       environment?: Readonly<Record<string, string | undefined>>,
     ) => Promise<ClientReply>;
+    readonly ownedClient: (
+      action: string,
+      home?: string,
+      environment?: Readonly<Record<string, string | undefined>>,
+    ) => OwnedClient;
   }) => Promise<A>,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'threadnote-coordinator-process-'));
@@ -110,6 +274,7 @@ async function withProcesses<A>(
   const clients = new Set<ChildProcess>();
   let observedEvents: readonly WorkerEvent[] = [];
   const phases: {phase: 'sync-dispatched' | 'provider-released' | 'sync-returned'; at: number}[] = [];
+  const clientClosures = new Map<ChildProcess, OwnedClientClose>();
   const events = async (): Promise<readonly WorkerEvent[]> => {
     const content = await readFile(join(home, 'events.jsonl'), 'utf8').catch(() => '');
     observedEvents = EffectArray.map(
@@ -120,26 +285,56 @@ async function withProcesses<A>(
   };
   await mkdir(home, {recursive: true});
   await symlink(home, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  const client = (
+  const ownedClient = (
     action: string,
     requestedHome = home,
     environment: Readonly<Record<string, string | undefined>> = {},
-  ) =>
-    new Promise<ClientReply>((resolve, reject) => {
-      const child = execFile(
+  ): OwnedClient => {
+    const deadline = Date.now() + 12_000;
+    let resolveClose!: (value: ClientClose) => void;
+    const closed = new Promise<ClientClose>(resolve => {
+      resolveClose = resolve;
+    });
+    const waitForClose = beforeClientDeadline(closed, deadline, `${action} client close`);
+    let child!: ChildProcess;
+    const rawResult = new Promise<ClientReply>((resolve, reject) => {
+      child = execFile(
         process.execPath,
         [fixture, action, requestedHome],
         {timeout: 12_000, maxBuffer: 64 * 1024, env: {...process.env, THREADNOTE_HOME: home, ...environment}},
         (error, stdout, stderr) => {
-          clients.delete(child);
           if (error) reject(new Error(`${action} client failed: ${stderr || error.message}`));
           else resolve(Schema.decodeUnknownSync(ClientReplySchema)(JSON.parse(Effect.pipe(stdout, EffectString.trim))));
         },
       );
       clients.add(child);
+      clientClosures.set(child, {action, pid: child.pid, wait: waitForClose});
+      child.once('close', (code, signal) => {
+        clients.delete(child);
+        resolveClose({code, signal});
+      });
     });
+    return {
+      child,
+      result: beforeClientDeadline(rawResult, deadline, `${action} client result`),
+      closed: waitForClose,
+      action,
+    };
+  };
+  const client = (
+    action: string,
+    requestedHome = home,
+    environment: Readonly<Record<string, string | undefined>> = {},
+  ) => {
+    const owned = ownedClient(action, requestedHome, environment);
+    return owned.result();
+  };
+  let outcome: {readonly ok: true; readonly value: A} | {readonly ok: false; readonly error: unknown};
   try {
-    return await run({home, alias, events, client, mark: phase => phases.push({phase, at: Date.now()})});
+    outcome = {
+      ok: true,
+      value: await run({home, alias, events, client, ownedClient, mark: phase => phases.push({phase, at: Date.now()})}),
+    };
   } catch (error) {
     try {
       // Reuse observations already made by the test; never add a read at the race boundary.
@@ -156,9 +351,20 @@ async function withProcesses<A>(
     } catch {
       // Diagnostic output must preserve the original failure and existing teardown.
     }
-    throw error;
-  } finally {
+    outcome = {ok: false, error};
+  }
+  const cleanupFailures: FixtureCleanupFailure[] = [];
+  const cleanupStep = async (stage: string, action: () => Promise<void> | void) => {
+    try {
+      await action();
+    } catch (error) {
+      cleanupFailures.push({error, stage, status: 'failed'});
+    }
+  };
+  await cleanupStep('kill-owned-clients', async () => {
     for (const child of clients) child.kill('SIGKILL');
+  });
+  await cleanupStep('stop-owned-workers', async () => {
     for (const event of await events()) {
       if (event.kind !== 'spawn' || !alive(event.pid)) continue;
       try {
@@ -167,12 +373,165 @@ async function withProcesses<A>(
         // A worker can complete its idle shutdown during cleanup.
       }
     }
-    await Promise.all(EffectArray.map([...clients], child => new Promise(resolve => child.once('exit', resolve))));
+  });
+  const closeCollection = await collectOwnedClientCloses([...clientClosures.values()], async () => {
     await rm(root, {force: true, recursive: true});
-  }
+  });
+  cleanupFailures.push(...closeCollection.failures);
+  return finishFixture(outcome, cleanupFailures);
 }
 
 describe('integration coordinator process composition', () => {
+  it('keeps a primary failure when the original client deadline expires before close', async () => {
+    const primary = new Error('primary operation failure');
+    let fixtureRemovalAttempted = false;
+    const closeCollection = await collectOwnedClientCloses(
+      [
+        {
+          action: 'expired-sync',
+          pid: undefined,
+          wait: beforeClientDeadline(new Promise<ClientClose>(() => undefined), Date.now() - 1, 'sync close'),
+        },
+      ],
+      async () => {
+        fixtureRemovalAttempted = true;
+      },
+    );
+    expect(closeCollection.fixtureDisposition).toBe('preserved');
+    expect(fixtureRemovalAttempted).toBe(false);
+    expect(closeCollection.failures).toMatchObject([
+      {stage: 'client-close', status: 'unknown', owner: 'expired-sync', error: {name: 'ClientObservationError'}},
+    ]);
+
+    let diagnostic = '';
+    let observed: unknown;
+    try {
+      finishFixture({ok: false, error: primary}, closeCollection.failures, line => (diagnostic += line));
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBe(primary);
+    expect(diagnostic).toContain('"stage":"client-close","status":"unknown","owner":"expired-sync"');
+  });
+
+  it('awaits every owned close after one deadline expires and preserves the fixture', async () => {
+    const expired = await beforeClientDeadline(
+      new Promise<ClientClose>(() => undefined),
+      Date.now() - 1,
+      'first client close',
+    )().then(
+      () => undefined,
+      error => error,
+    );
+    expect(expired).toMatchObject({name: 'ClientObservationError', status: 'unknown'});
+
+    let resolveSecond: (close: ClientClose) => void = () => undefined;
+    const secondClose = new Promise<ClientClose>(resolve => {
+      resolveSecond = resolve;
+    });
+    let secondCloseObserved = false;
+    let fixtureRemovalAttempted = false;
+    let removalSawSecondClose = false;
+    let collectionFinished = false;
+    const collection = collectOwnedClientCloses(
+      [
+        {action: 'expired-client', pid: undefined, wait: () => Promise.reject(expired)},
+        {
+          action: 'pending-client',
+          pid: undefined,
+          wait: () =>
+            secondClose.then(close => {
+              secondCloseObserved = true;
+              return close;
+            }),
+        },
+      ],
+      async () => {
+        fixtureRemovalAttempted = true;
+        removalSawSecondClose = secondCloseObserved;
+      },
+    );
+    void collection.then(() => {
+      collectionFinished = true;
+    });
+    await Promise.resolve();
+    expect(collectionFinished).toBe(false);
+
+    resolveSecond({code: 0, signal: null});
+    const result = await collection;
+    expect(result.outcomes[0]?.status).toBe('rejected');
+    expect(result.outcomes[1]).toEqual({status: 'fulfilled', value: {code: 0, signal: null}});
+    expect(result.fixtureDisposition).toBe('preserved');
+    expect(fixtureRemovalAttempted).toBe(false);
+    expect(removalSawSecondClose).toBe(false);
+    expect(result.failures).toMatchObject([{stage: 'client-close', status: 'unknown', owner: 'expired-client'}]);
+
+    let diagnostic = '';
+    let cleanupFailure: unknown;
+    try {
+      finishFixture({ok: true, value: 'run-complete'}, result.failures, line => (diagnostic += line));
+    } catch (error) {
+      cleanupFailure = error;
+    }
+    expect(cleanupFailure).toBeInstanceOf(AggregateError);
+    expect(diagnostic).toContain('"owner":"expired-client"');
+    expect(diagnostic).not.toContain('"owner":"pending-client"');
+
+    let resolveFirstSuccess: (close: ClientClose) => void = () => undefined;
+    let resolveSecondSuccess: (close: ClientClose) => void = () => undefined;
+    const firstSuccessfulClose = new Promise<ClientClose>(resolve => {
+      resolveFirstSuccess = resolve;
+    });
+    const secondSuccessfulClose = new Promise<ClientClose>(resolve => {
+      resolveSecondSuccess = resolve;
+    });
+    let firstSuccessfulCloseObserved = false;
+    let secondSuccessfulCloseObserved = false;
+    let successfulRemovalAttempted = false;
+    let removalSawAllCloseReceipts = false;
+    const successfulCollection = collectOwnedClientCloses(
+      [
+        {
+          action: 'first-success-client',
+          pid: undefined,
+          wait: () =>
+            firstSuccessfulClose.then(close => {
+              firstSuccessfulCloseObserved = true;
+              return close;
+            }),
+        },
+        {
+          action: 'second-success-client',
+          pid: undefined,
+          wait: () =>
+            secondSuccessfulClose.then(close => {
+              secondSuccessfulCloseObserved = true;
+              return close;
+            }),
+        },
+      ],
+      async () => {
+        successfulRemovalAttempted = true;
+        removalSawAllCloseReceipts = firstSuccessfulCloseObserved && secondSuccessfulCloseObserved;
+      },
+    );
+    await Promise.resolve();
+    expect(successfulRemovalAttempted).toBe(false);
+    resolveFirstSuccess({code: 0, signal: null});
+    await Promise.resolve();
+    expect(firstSuccessfulCloseObserved).toBe(true);
+    expect(successfulRemovalAttempted).toBe(false);
+    resolveSecondSuccess({code: 0, signal: null});
+    const successfulResult = await successfulCollection;
+    expect(successfulResult.outcomes).toEqual([
+      {status: 'fulfilled', value: {code: 0, signal: null}},
+      {status: 'fulfilled', value: {code: 0, signal: null}},
+    ]);
+    expect(successfulResult.fixtureDisposition).toBe('removed');
+    expect(successfulRemovalAttempted).toBe(true);
+    expect(removalSawAllCloseReceipts).toBe(true);
+  });
+
   it('distinguishes safe inventory, worker-launch, and startup-deadline failures', async () => {
     await withProcesses(async ({client, events}) => {
       for (const [action, message] of [
@@ -214,7 +573,7 @@ describe('integration coordinator process composition', () => {
   });
 
   it('shares one canonical-home worker across CLI clients and returns recall demand before provider IO', async () => {
-    await withProcesses(async ({home, alias, events, client, mark}) => {
+    await withProcesses(async ({home, alias, events, client, ownedClient, mark}) => {
       await Promise.all([client('refresh'), client('refresh', alias)]);
       const start = await until(
         async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
@@ -266,12 +625,93 @@ describe('integration coordinator process composition', () => {
         ).status,
       ).toBe(409);
 
-      const sync = client('sync');
+      const sync = ownedClient('sync');
       mark('sync-dispatched');
+      const canonicalConfig = {
+        account: 'local',
+        user: 'process-test',
+        agentId: 'threadnote',
+        manifestPath: join(home, 'seed-manifest.yaml'),
+        agentContextHome: home,
+      };
+      const descriptor = {provider: 'synthetic', sourceId: 'slow'};
+      const canonicalKey = sourceWorkKey(canonicalConfig, descriptor);
+      const aliasKey = sourceWorkKey({...canonicalConfig, manifestPath: join(alias, 'seed-manifest.yaml')}, descriptor);
+      expect(aliasKey).not.toBe(canonicalKey);
+      const aliasJob = coordinatorJob(home, aliasKey);
+      if (!aliasJob) throw new Error(`Alias-manifest job was absent before explicit sync: key=${aliasKey}`);
+      expect(aliasJob.config).toMatchObject({
+        account: 'local',
+        user: 'process-test',
+        agentId: 'threadnote',
+        agentContextHome: home,
+        manifestPath: join(alias, 'seed-manifest.yaml'),
+      });
+      expect(aliasJob.mode).toBe('automatic');
+      const baseline = coordinatorJob(home, canonicalKey);
+      if (!baseline) throw new Error(`Canonical automatic job was absent before explicit sync: key=${canonicalKey}`);
+      expect(baseline).toMatchObject({key: canonicalKey, mode: 'automatic'});
+      expect(baseline.config).toEqual(canonicalConfig);
+      expect(baseline.descriptor).toMatchObject({
+        provider: 'synthetic',
+        sourceId: 'slow',
+        accountKey: 'test-account',
+        fingerprint: 'test-fingerprint',
+      });
+      expect(['pending', 'queued', 'running']).toContain(baseline.state);
+      const baselineGeneration = baseline.generation;
+
+      if (sync.child.pid === undefined) throw new Error('Explicit sync client did not expose its owned child PID.');
+      const syncOutcome = sync.result().then(
+        reply => ({reply}),
+        error => ({error: error instanceof Error ? error : new Error(String(error))}),
+      );
+      let lastObserved: ReturnType<typeof coordinatorJob> = undefined;
+      const admitted = await until(
+        async () => {
+          const row = coordinatorJob(home, canonicalKey);
+          lastObserved = row;
+          if (!row) return undefined;
+          expect(row.key).toBe(canonicalKey);
+          expect(row.config).toEqual(canonicalConfig);
+          expect(row.descriptor).toEqual(baseline.descriptor);
+          expect(row.generation).toBe(baselineGeneration);
+          expect(['pending', 'queued', 'running']).toContain(row.state);
+          if (row.mode === 'automatic') return undefined;
+          expect(row.mode).toBe('explicit');
+          return row;
+        },
+        () =>
+          `Explicit sync did not admit canonical job key=${canonicalKey}, generation=${baselineGeneration}; last=${JSON.stringify(lastObserved ? {key: lastObserved.key, generation: lastObserved.generation, mode: lastObserved.mode, state: lastObserved.state} : null)}; childPid=${sync.child.pid ?? 'unknown'}`,
+      );
+      expect(admitted.mode).toBe('explicit');
+      expect(admitted.generation).toBe(baselineGeneration);
+      expect(alive(start.pid)).toBe(true);
+      expect(EffectArray.filter(await events(), event => event.kind === 'end' && event.pid === start.pid)).toEqual([]);
+      expect(await readFile(join(home, 'snapshot.txt'), 'utf8').catch(() => undefined)).toBeUndefined();
+      expect(await readFile(join(home, 'release'), 'utf8').catch(() => undefined)).toBeUndefined();
       await writeFile(join(home, 'release'), 'release provider');
       mark('provider-released');
-      const reply = await sync;
+      const [outcome, closed] = await Promise.all([syncOutcome, sync.closed()]);
       mark('sync-returned');
+      if ('error' in outcome)
+        throw new Error(
+          `Sync client pid ${sync.child.pid ?? 'unknown'} failed: ${outcome.error.message}; close=${JSON.stringify(closed)}`,
+          {cause: outcome.error},
+        );
+      expect(closed).toEqual({code: 0, signal: null});
+      const reply = outcome.reply;
+      process.stdout.write(
+        `COORDINATOR_SYNC_CLIENT_RECEIPT ${JSON.stringify({
+          pid: sync.child.pid,
+          sourceKey: canonicalKey,
+          generation: admitted.generation,
+          sourceId: reply.result?.sourceId,
+          syncedDocuments: reply.result?.syncedDocuments,
+          closeCode: closed.code,
+          closeSignal: closed.signal,
+        })}\n`,
+      );
       expect(reply.result).toMatchObject({sourceId: 'slow', syncedDocuments: ['synthetic://slow/document']});
       expect(await readFile(join(home, 'snapshot.txt'), 'utf8')).toBe('usable synthetic snapshot');
       expect(

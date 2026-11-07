@@ -904,6 +904,15 @@ export async function execute(root: string, checkout: string, enforced: boolean,
     const generation = join(skills, '.threadnote-dev-skills/generations', installed.bundleDigest);
     const manifest = parseReleaseManifest(readJson(join(releaseRoot, release.devSkills.manifest)));
     requireCondition(manifest.digest === installed.bundleDigest, 'Installed bundle differs from the archive');
+    const status = objectRecord(cli('status', '--agent', 'codex', '--json'), 'Installed skill status');
+    requireCondition(EffectArray.isArray(status.targets) && status.targets.length === 1, 'Installed target is missing');
+    const installedTarget = objectRecord(status.targets[0], 'Installed skill target');
+    requireCondition(
+      installedTarget.enrolled === true &&
+        installedTarget.installationState === 'current' &&
+        installedTarget.installedDigest === manifest.digest,
+      'Installed receipt does not identify the current archived generation',
+    );
     requireCondition(
       isDeepStrictEqual(
         EffectRecord.fromEntries(
@@ -924,16 +933,24 @@ export async function execute(root: string, checkout: string, enforced: boolean,
     result.installedProvenance = {
       generation,
       digest: manifest.digest,
+      receiptDigest: installedTarget.installedDigest,
+      receiptState: installedTarget.installationState,
       files: EffectRecord.keys(manifest.hashes).length,
       nativeOnly: true,
     };
     for (const skill of manifest.skills) {
       const content = fs.readFileSync(join(skills, skill.id, 'SKILL.md'), 'utf8');
+      const template = fs.readFileSync(join(generation, skill.id, 'SKILL.md'), 'utf8');
+      const expected = Effect2.pipe(
+        template,
+        EffectString.replaceAll('{{THREADNOTE_SKILL_ROOT}}', join(generation, skill.id)),
+        EffectString.replaceAll('{{THREADNOTE_BUNDLE_ROOT}}', generation),
+      );
       requireCondition(
-        Effect2.pipe(content, EffectString.includes(generation)) &&
+        content === expected &&
           !Effect2.pipe(content, EffectString.includes(checkout)) &&
           !Effect2.pipe(content, EffectString.includes('{{THREADNOTE_')),
-        `Entrypoint does not resolve to its installed generation: ${skill.id}`,
+        `Entrypoint is not the canonical render of its installed generation: ${skill.id}`,
       );
     }
     for (const action of ['install', 'update'])

@@ -409,6 +409,14 @@ describe('same-label rewritten-base qualification contract', () => {
       {sameLabelRebasedBaseIntegrationV1: undefined},
     ])
       expect(() => Schema.decodeUnknownSync(NativeCycleSnapshotSchema)({...decoded, ...change})).toThrow();
+    const {previous: _previous, previousTree: _previousTree, ...source} = f.current;
+    expect(() =>
+      Schema.decodeSync(NativeCycleSnapshotSchema)({
+        ...source,
+        supersedes: f.prior.snapshotId,
+        unreviewedSupersession: {reason: 'New source before review'},
+      }),
+    ).toThrow();
     expect(f.current.files).not.toContain('staged-only.ts');
     expect(f.proof.reconciliationPaths).toEqual(['staged-only.ts']);
     expect(f.proof.priorDeclaredBaseHead).not.toBe(f.proof.historicalMergeBases[0]);

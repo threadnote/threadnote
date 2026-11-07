@@ -264,6 +264,8 @@ export interface LspSessionPolicy {
   readonly resolveCodeActions?: boolean;
   /** A qualified backend's explicit unknown-version sentinel, only for documents this session never opened. */
   readonly unopenedDocumentVersion?: 0;
+  /** Backend-owned immutable provider-input byte witness; only closed edit targets use it. */
+  readonly verifyClosedEditSource?: (uri: string, content: string) => Effect.Effect<void, unknown>;
   readonly pullDiagnostics?: boolean;
   readonly codeActionKinds?: readonly string[];
 }
@@ -897,6 +899,8 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       let count = 0;
       for (const entry of entries) {
         const original = yield* source(entry.uri, true);
+        if (original.wireVersion === null && options.policy.verifyClosedEditSource)
+          yield* options.policy.verifyClosedEditSource(entry.uri, original.content);
         const unknownClosedVersion =
           original.wireVersion === null && entry.version === options.policy.unopenedDocumentVersion;
         if (

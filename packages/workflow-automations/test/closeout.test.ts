@@ -247,6 +247,47 @@ describe('pure native closeout admission', () => {
     mutable.architecture.components.push('Later mutation');
     expect(isolated.architecture.components).toEqual(['Reader']);
   });
+  it('admits substantive architecture prose without a diagram and preserves an optional valid diagram', () => {
+    const f = fixture();
+    const {diagram: _diagram, ...proseArchitecture} = f.proposal.architecture;
+    const proseProposal = {...f.proposal, architecture: proseArchitecture};
+    const prose = prepareNativeCloseout(f.state, f.plan, proseProposal);
+    const renderedProse = renderNativeDocument(prose.documents.architecture);
+    expect(prose.architecture).toEqual(proseArchitecture);
+    expect(renderedProse).toContain('Actual implemented design.');
+    expect(renderedProse).toContain('- Reader');
+    expect(renderedProse).toContain('- Preserve identity.');
+    expect(renderedProse).not.toContain('### Diagram');
+
+    const withDiagram = prepareNativeCloseout(f.state, f.plan, f.proposal);
+    const renderedDiagram = renderNativeDocument(withDiagram.documents.architecture);
+    expect(renderedDiagram).toContain('flowchart TD\n Reader --> Store');
+  });
+  it('rejects architecture proposals without substantive summary or components', () => {
+    const f = fixture();
+    for (const architecture of [
+      {...f.proposal.architecture, summary: ''},
+      {...f.proposal.architecture, components: []},
+    ])
+      expect(() => prepareNativeCloseout(f.state, f.plan, {...f.proposal, architecture})).toThrow();
+  });
+  it('preserves authored prose summaries across closeout rendering', () => {
+    const f = fixture();
+    const {diagram: _diagram, ...proseArchitecture} = f.proposal.architecture;
+    fc.assert(
+      fc.property(
+        fc
+          .stringMatching(/[A-Za-z][A-Za-z0-9 ]{0,60}/u)
+          .map(value => Effect.pipe(value, EffectString.trim))
+          .filter(Boolean),
+        summary => {
+          const proposal = {...f.proposal, architecture: {...proseArchitecture, summary}};
+          const result = prepareNativeCloseout(f.state, f.plan, proposal);
+          expect(renderNativeDocument(result.documents.architecture)).toContain(summary);
+        },
+      ),
+    );
+  });
   it('requires nonblank evidence and exact phase/criterion/decision membership', () => {
     const f = fixture();
     for (const proposal of [

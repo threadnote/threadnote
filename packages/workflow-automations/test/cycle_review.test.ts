@@ -1,8 +1,13 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {validateNativeCycleReview, validateNativeCycleReviewHistory} from '../src/cycle_review.js';
+import {
+  validateNativeCycleReview,
+  validateNativeCycleReviewHistory,
+  nativeCycleReviewBasis,
+} from '../src/cycle_review.js';
+import {NativeCycleSnapshotSchema} from '../src/cycle_review.js';
 import type {NativeCycleReview, NativeCycleSnapshot} from '../src/cycle_review.js';
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 import * as Effect2 from 'effect';
 
 const hash = (char: string) => Effect2.pipe(char, EffectString.repeat(64));
@@ -185,6 +190,91 @@ describe('native cycle review validation', () => {
       expect(caught(() => validateNativeCycleReview(current, input))).toMatchObject({
         code: 'invalid-cycle-review',
       });
+  });
+
+  it('requires a full independent review for an explicitly superseding unreviewed source', () => {
+    const recovered = snapshot({
+      previous: undefined,
+      previousTree: undefined,
+      supersedes: priorSnapshot.snapshotId,
+      unreviewedSupersession: {reason: 'Corrected the admitted source before any review was accepted.'},
+      tree: objectId('f'),
+    });
+    const complete = review({mode: 'full', findings: [finding({state: 'new'})]}, recovered);
+    const basis = nativeCycleReviewBasis(recovered, [priorSnapshot, recovered], []);
+    expect(
+      validateNativeCycleReview(recovered, complete, basis.previous, basis.findingBasis).summary.blockingIssueCount,
+    ).toBe(1);
+    expect(caught(() => validateNativeCycleReview(recovered, {...complete, mode: 'incremental'}))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    expect(caught(() => validateNativeCycleReview(recovered, complete, previous))).toMatchObject({
+      code: 'invalid-cycle-review',
+    });
+    expect(
+      caught(() =>
+        Schema.decodeSync(NativeCycleSnapshotSchema)(snapshot({...recovered, unreviewedSupersession: {reason: '   '}})),
+      ),
+    ).toMatchObject({_tag: 'SchemaError'});
+    expect(
+      caught(() => Schema.decodeSync(NativeCycleSnapshotSchema)(snapshot({...recovered, supersedes: undefined}))),
+    ).toMatchObject({_tag: 'SchemaError'});
+  });
+
+  it('conserves the most recent accepted ledger over bounded unreviewed source chains', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 8}), count => {
+        const pending = snapshot({
+          snapshotId: 'pending',
+          previous: priorSnapshot.snapshotId,
+          previousTree: priorSnapshot.tree,
+        });
+        const retained = [priorSnapshot, pending];
+        let current = pending;
+        for (let index = 0; index < count; index++) {
+          current = snapshot({
+            snapshotId: `recovery-${index}`,
+            previous: undefined,
+            previousTree: undefined,
+            supersedes: current.snapshotId,
+            tree: objectId((index + 1).toString(16)),
+            unreviewedSupersession: {reason: 'Correct the unreviewed source.'},
+          });
+          retained.push(current);
+        }
+        const accepted = [{snapshotId: priorSnapshot.snapshotId, report: priorReview}];
+        const original = JSON.stringify({retained, accepted});
+        const basis = nativeCycleReviewBasis(current, retained, accepted);
+        expect(basis.previous).toBeUndefined();
+        expect(basis.findingBasis).toEqual(previous);
+        const submit = (findings: NativeCycleReview['findings']) =>
+          validateNativeCycleReview(
+            current,
+            review({mode: 'full', findings}, current),
+            basis.previous,
+            basis.findingBasis,
+          );
+        expect(caught(() => submit([]))).toMatchObject({code: 'invalid-cycle-review'});
+        expect(submit([finding()]).summary.blockingIssueCount).toBe(1);
+        expect(caught(() => submit([finding({state: 'resolved'})]))).toMatchObject({code: 'invalid-cycle-review'});
+        expect(
+          submit([finding({state: 'resolved', reason: 'Validated the input before the write.'})]).summary,
+        ).toMatchObject({blockingIssueCount: 0, resolved: ['finding-1']});
+        expect(JSON.stringify({retained, accepted})).toBe(original);
+        for (const change of [
+          {repo: 'foreign'},
+          {baseTree: objectId('f')},
+          {phaseId: 'foreign'},
+          {supersedes: current.snapshotId},
+        ]) {
+          const corrupted = {...current, ...change};
+          expect(
+            caught(() => nativeCycleReviewBasis(corrupted, [...retained.slice(0, -1), corrupted], accepted)),
+          ).toMatchObject({code: 'invalid-cycle-review'});
+        }
+      }),
+      {numRuns: 16},
+    );
   });
 
   it.each(['full', 'incremental'] as const)(
@@ -584,9 +674,19 @@ describe('native cycle review validation', () => {
 it('forces full independent manifest3 review and retains blockers from the historical predecessor', () => {
   const current = snapshot({version: 3});
   const complete = review({mode: 'full'}, current);
-  expect(() => validateNativeCycleReview(current, complete, previous)).not.toThrow();
-  expect(() => validateNativeCycleReview(current, {...complete, mode: 'incremental'}, previous)).toThrow();
-  expect(() => validateNativeCycleReview(current, {...complete, findings: []}, previous)).toThrow();
+  const basis = nativeCycleReviewBasis(
+    current,
+    [priorSnapshot, current],
+    [{snapshotId: priorSnapshot.snapshotId, report: priorReview}],
+  );
+  expect(basis.previous).toEqual(previous);
+  expect(() => validateNativeCycleReview(current, complete, basis.previous, basis.findingBasis)).not.toThrow();
+  expect(() =>
+    validateNativeCycleReview(current, {...complete, mode: 'incremental'}, basis.previous, basis.findingBasis),
+  ).toThrow();
+  expect(() =>
+    validateNativeCycleReview(current, {...complete, findings: []}, basis.previous, basis.findingBasis),
+  ).toThrow();
   expect(() =>
     validateNativeCycleReview(
       current,
@@ -598,7 +698,8 @@ it('forces full independent manifest3 review and retains blockers from the histo
           {name: 'simplicity', status: 'complete'},
         ],
       },
-      previous,
+      basis.previous,
+      basis.findingBasis,
     ),
   ).toThrow();
 });

@@ -762,13 +762,17 @@ export const loadJavaPreparedModel = Effect.fn('semantic.loadJavaPreparedModel')
         for (const owner of rootOwners) yield* owner.verify;
         for (const root of absentSourceRoots) yield* absent(root);
         yield* verifyInventory;
+        return encoding.sources;
       }).pipe(Effect.mapError(error => (Schema.is(LspFault)(error) ? error : fail())));
-    const verify = verifyUsing(verifySdk);
+    const admitted = verifyUsing(verifySdk);
+    const verify = admitted.pipe(Effect.asVoid);
     // Per-exchange source checks compose with the full SDK guards at public operation boundaries.
-    const verifySource = verifyUsing(Effect.void);
-    yield* verify;
+    const verifySource = verifyUsing(Effect.void).pipe(Effect.asVoid);
+    // Retain the per-file byte image whose aggregate was checked against the sealed model.
+    const sourceBasis = yield* admitted;
     return Object.freeze({
       model,
+      sourceBasis,
       sourceRoots: Object.freeze(sourceRoots),
       absentSourceRoots: Object.freeze(absentSourceRoots),
       verify,

@@ -1,5 +1,5 @@
 import {Array as EffectArray, String as EffectString, Option as EffectOption} from 'effect';
-import {Clock, Effect, Exit, FileSystem, Record as EffectRecord} from 'effect';
+import {Clock, Context, Effect, Exit, FileSystem, Schema, Record as EffectRecord} from 'effect';
 import {
   CommandExecutor,
   CommandOutputLimitExceeded,
@@ -13,6 +13,7 @@ import {WorkflowAutomationError} from '@threadnote/workflow-automations/contract
 import {nativeCyclePhaseHash, type NativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 import {
   validateNativeCycleMergeOwners,
+  NativeCycleSameLabelRebasedBaseInputSchema,
   nativeCycleQualificationEvidenceDigest,
   nativeCycleQualificationHistory,
   type NativeCycleSameLabelRebasedBaseInput,
@@ -37,9 +38,14 @@ export const nativeCycleSameLabelQualificationLimits = {
   outputBytes: 8_388_608,
 } as const;
 
+const CurrentSameLabelQualificationBudget = Context.Reference<boolean>('threadnote/cycle/same-label-budget', {
+  defaultValue: () => false,
+});
+
 /** Request-local acquisition bounds; retention and settled recovery keep their existing critical section semantics. */
 export const withNativeCycleSameLabelQualificationBudget = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
+    if (yield* CurrentSameLabelQualificationBudget) return yield* program;
     const executor = yield* CommandExecutor;
     const started = yield* Clock.monotonicTimeNanos;
     let commands = 0,
@@ -124,7 +130,10 @@ export const withNativeCycleSameLabelQualificationBudget = <A, E, R>(program: Ef
           }
         : {}),
     });
-    return yield* program.pipe(Effect.provideService(CommandExecutor, bounded));
+    return yield* program.pipe(
+      Effect.provideService(CommandExecutor, bounded),
+      Effect.provideService(CurrentSameLabelQualificationBudget, true),
+    );
   });
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'invalid-ordinary-merge', message});
@@ -308,6 +317,12 @@ const verifyRebasedCommits = Effect.fn('workflowAutomation.cycle.verifySameLabel
     return yield* fail('The historical base observation changed.');
 });
 
+export type NativeCycleSameLabelInputResolver = (source: {
+  readonly currentBaseHead: string;
+  readonly currentHead: string;
+  readonly changedPaths: readonly string[];
+}) => NativeCycleSameLabelRebasedBaseInput;
+
 export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomation.cycle.prepareSameLabelRebasedBase')(
   function* (
     repo: string,
@@ -316,7 +331,7 @@ export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomat
     runtime: NativeCycleRuntime,
     prior: NativeCycleSnapshot,
     captured: Effect.Success<ReturnType<typeof captureNativeCycleSource>>,
-    input: NativeCycleSameLabelRebasedBaseInput,
+    inputOrResolve: NativeCycleSameLabelRebasedBaseInput | NativeCycleSameLabelInputResolver,
     identity: {bindingId: string; snapshotId: string; expectedRevision: string; reason: string; authority: string},
   ) {
     const baseline = runtime.baselines[phase.id];
@@ -328,6 +343,8 @@ export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomat
     );
     const binding = plan.source.binding;
     const gitIdentity = yield* canonicalGitIdentity(repo);
+    const currentBaseHead = yield* resolve(repo, phase.baseBranch, 'commit');
+    const raw = typeof inputOrResolve === 'function' ? undefined : inputOrResolve;
     if (
       !baseline ||
       baseline.preservedFiles.length ||
@@ -335,29 +352,32 @@ export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomat
       !priorReview ||
       prior.repo !== repo ||
       baseline.repo !== repo ||
-      input.priorSnapshotId !== prior.snapshotId ||
-      input.expectedPriorEntryDigest !== nativeCycleQualificationEvidenceDigest('predecessor-entry', priorEntry) ||
-      input.expectedPriorReviewDigest !== nativeCycleQualificationEvidenceDigest('predecessor-review', priorReview) ||
       binding.bindingId !== identity.bindingId ||
-      input.sameBaseBranch !== phase.baseBranch ||
-      !hasNativeCycleMergePlanBinding(runtime.plans, prior, input.sameBaseBranch) ||
       !EffectString.trim(identity.reason) ||
       !EffectString.trim(identity.authority) ||
-      input.authorityKind !== 'same-label-upstream-rebase-integration' ||
-      input.currentHead !== captured.head ||
-      input.currentBaseHead === prior.declaredBaseHead ||
       (yield* resolve(repo, captured.head, 'tree')) !== captured.tree ||
       (yield* resolve(repo, baseline.head, 'tree')) !== baseline.tree ||
       (yield* resolve(repo, prior.pinnedRef, 'tree')) !== prior.tree ||
       (yield* resolve(repo, baseline.pinnedRef, 'tree')) !== baseline.tree ||
-      (yield* resolve(repo, phase.baseBranch, 'commit')) !== input.currentBaseHead ||
       (yield* git(repo, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none'])) !== '' ||
       (yield* git(repo, ['branch', '--show-current'])) !== phase.branch
     )
       return yield* fail(
         'Use retained server evidence, exact identities, clean committed source and explicit same-label rewrite authority.',
       );
-    const scope = yield* captureNativeCycleSource(repo, input.currentBaseHead);
+    const matches = (input: NativeCycleSameLabelRebasedBaseInput) =>
+      input.priorSnapshotId === prior.snapshotId &&
+      input.sameBaseBranch === phase.baseBranch &&
+      input.authorityKind === 'same-label-upstream-rebase-integration' &&
+      input.currentHead === captured.head &&
+      input.currentBaseHead === currentBaseHead &&
+      input.currentBaseHead !== prior.declaredBaseHead &&
+      hasNativeCycleMergePlanBinding(runtime.plans, prior, input.sameBaseBranch) &&
+      input.expectedPriorEntryDigest === nativeCycleQualificationEvidenceDigest('predecessor-entry', priorEntry) &&
+      input.expectedPriorReviewDigest === nativeCycleQualificationEvidenceDigest('predecessor-review', priorReview);
+    if (raw && !matches(raw))
+      return yield* fail('The supplied same-label witness differs from retained source evidence.');
+    const scope = yield* captureNativeCycleSource(repo, currentBaseHead);
     // This independent capture includes prior-only staged additions later removed from both base and current source.
     const reconciliation = yield* captureNativeCycleSource(repo, prior.tree);
     if (
@@ -368,6 +388,18 @@ export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomat
     )
       return yield* fail('Source changed during same-label qualification capture.');
     const changed = EffectRecord.keys(scope.files).sort();
+    const candidate = yield* Effect.try({
+      try: () =>
+        typeof inputOrResolve === 'function'
+          ? inputOrResolve({currentBaseHead, currentHead: captured.head, changedPaths: changed})
+          : inputOrResolve,
+      catch: error =>
+        Schema.is(WorkflowAutomationError)(error) ? error : fail('Could not resolve retained qualification evidence.'),
+    });
+    const input = yield* Schema.decodeEffect(NativeCycleSameLabelRebasedBaseInputSchema, {
+      onExcessProperty: 'error',
+    })(candidate).pipe(Effect.mapError(() => fail('Resolve a complete closed same-label qualification witness.')));
+    if (!matches(input)) return yield* fail('The resolved same-label witness differs from retained source evidence.');
     yield* Effect.try({
       try: () => validateNativeCycleMergeOwners(plan, input, changed),
       catch: () => fail('Supply every explicit current-base path owner from the reviewed plan.'),
@@ -462,6 +494,7 @@ export const prepareNativeCycleSameLabelRebasedBase = Effect.fn('workflowAutomat
     yield* verifyRebasedCommits(repo, proof);
     return {
       proof,
+      input,
       pinnedRef: pin(identity.bindingId, identity.snapshotId, 'snapshot'),
       files,
       scopeBase: scope.baseTree,

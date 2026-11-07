@@ -537,6 +537,10 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       )
         return yield* LspFault.make({code: 'prerequisite'});
     } else if (diagnosticModel.projectionDigest !== undefined) return yield* LspFault.make({code: 'prerequisite'});
+    // Capture host-owned byte witnesses, independently of post-response worktree reads.
+    const closedSourceBasis = new Map(
+      preparedModel ? EffectArray.map(preparedModel.sourceBasis, source => [source.file, source.digest] as const) : [],
+    );
     const physicalSourceUri = yield* makeJavaSourceUri(prepared.sourceRoots);
     const sourceUri = (uri: string) =>
       Effect.gen(function* () {
@@ -602,6 +606,16 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
       ready: sourceVerify,
       policy: {
         language: 'java',
+        ...(preparedModel
+          ? {
+              verifyClosedEditSource: (uri: string, content: string) =>
+                Effect.gen(function* () {
+                  const file = yield* path.fromFileUrl(new URL(uri));
+                  if (closedSourceBasis.get(file) !== content)
+                    return yield* SemanticSessionFault.make({reason: 'stale'});
+                }),
+            }
+          : {}),
         documentLimits: {maxDocuments: 128, maxTextLength: 2 * 1024 * 1024, maxTotalTextLength: 8 * 1024 * 1024},
         workspaceName: 'threadnote-private-java21',
         acceptsServer: server =>
