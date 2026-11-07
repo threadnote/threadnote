@@ -65,13 +65,16 @@ const boundaryFailure = (
   cause: unknown,
 ) => {
   const reason = Schema.is(BackgroundWorkerFixtureDrainUnavailable)(cause) ? cause.reason : 'control-unavailable';
+  const diagnostic = Schema.is(BackgroundWorkerFixtureDrainUnavailable)(cause) ? cause.diagnostic : undefined;
   return LocalBinsWorkerDrainUnavailable.make({
     positiveHome,
     domain,
     stage,
     reason,
     cause,
-    message: `Local-bins ${positiveHome} ${domain} ${stage} failed: ${reason}.`,
+    message: `Local-bins ${positiveHome} ${domain} ${stage} failed: ${reason}${
+      diagnostic === undefined ? '' : ` [operation=${diagnostic.operation} cause=${diagnostic.causeCategory}]`
+    }.`,
   });
 };
 

@@ -2,10 +2,13 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
+  Cause,
   Clock,
+  DateTime,
   Deferred,
   Duration,
   Effect,
+  Exit,
   Fiber,
   FileSystem,
   Layer,
@@ -52,6 +55,7 @@ const fixture = Effect.gen(function* () {
   const system = yield* SystemInfo;
   const modelSystem = {
     ...system,
+    isProcessRunning: (processId: number) => (processId === 987_654_321 ? false : system.isProcessRunning(processId)),
     processStartIdentity: () => Effect.succeed('fixture-start'),
     canonicalProcessStartIdentity: () => Effect.succeed('fixture-start'),
   };
@@ -161,6 +165,85 @@ effectIt.effect('retains ordinary per-lock waiting beyond the native allowance',
       expect(error).toMatchObject({_tag: 'FileLockTimeout', category: 'memory'});
       expect(yield* Clock.currentTimeMillis).toBe(5000);
       expect(Schema.is(FileLockTimeout)(error) && error.cumulativeWaitMilliseconds).toBeUndefined();
+    }).pipe(f.model);
+  }).pipe(provide),
+);
+
+effectIt.effect('preserves unverified lock owners across expired or interrupted waits', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* Effect.gen(function* () {
+      const primary = f.file('drain-primary');
+      const recovery = primary + '.recovery';
+      const primaryBytes = 'unverified-primary-owner';
+      const recoveryBytes = 'unverified-recovery-owner';
+      const agedAt = DateTime.toDateUtc(DateTime.makeUnsafe('1970-01-01T00:00:00.000Z'));
+      const failClosed = {
+        ...policy,
+        staleAfterMilliseconds: 0,
+        waitTimeoutMilliseconds: 0,
+        allowUnverifiedStaleRecovery: false,
+      } as const;
+
+      yield* f.fs.writeFileString(primary, primaryBytes);
+      yield* f.fs.utimes(primary, agedAt, agedAt);
+      f.advance(1);
+      const primaryTimeout = yield* withExclusiveFileLock(f.fs, primary, failClosed, Effect.void).pipe(Effect.flip);
+      expect(primaryTimeout).toMatchObject({_tag: 'FileLockTimeout'});
+      expect(yield* f.fs.readFileString(primary)).toBe(primaryBytes);
+
+      yield* f.fs.remove(primary);
+      yield* f.fs.writeFileString(recovery, recoveryBytes);
+      yield* f.fs.utimes(recovery, agedAt, agedAt);
+      f.advance(1);
+      const recoveryTimeout = yield* withExclusiveFileLock(f.fs, primary, failClosed, Effect.void).pipe(Effect.flip);
+      expect(recoveryTimeout).toMatchObject({_tag: 'FileLockTimeout'});
+      expect(yield* f.fs.exists(primary)).toBe(false);
+      expect(yield* f.fs.readFileString(recovery)).toBe(recoveryBytes);
+
+      f.pause();
+      const interruptedWait = yield* withExclusiveFileLock(
+        f.fs,
+        primary,
+        {...failClosed, waitTimeoutMilliseconds: 5000},
+        Effect.void,
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(f.sleeping);
+      yield* Fiber.interrupt(interruptedWait);
+      const interruptedExit = yield* Fiber.await(interruptedWait);
+      expect(Exit.isFailure(interruptedExit) && Cause.hasInterrupts(interruptedExit.cause)).toBe(true);
+      expect(yield* f.fs.exists(primary)).toBe(false);
+      expect(yield* f.fs.readFileString(recovery)).toBe(recoveryBytes);
+
+      const defaulted = f.file('default-recovery');
+      yield* f.fs.writeFileString(defaulted, 'aged-malformed-owner');
+      yield* f.fs.utimes(defaulted, agedAt, agedAt);
+      f.advance(1);
+      expect(
+        yield* withExclusiveFileLock(
+          f.fs,
+          defaulted,
+          {...policy, staleAfterMilliseconds: 0, waitTimeoutMilliseconds: 0},
+          Effect.succeed('acquired'),
+        ),
+      ).toBe('acquired');
+      expect(yield* f.fs.exists(defaulted)).toBe(false);
+
+      const knownDead = f.file('known-dead');
+      yield* f.fs.writeFileString(
+        knownDead,
+        JSON.stringify({processId: 987_654_321, token: 'known-dead-token', version: 1}),
+      );
+      yield* f.fs.utimes(knownDead, agedAt, agedAt);
+      expect(
+        yield* withExclusiveFileLock(
+          f.fs,
+          knownDead,
+          {...failClosed, waitTimeoutMilliseconds: 0},
+          Effect.succeed('recovered'),
+        ),
+      ).toBe('recovered');
+      expect(yield* f.fs.exists(knownDead)).toBe(false);
     }).pipe(f.model);
   }).pipe(provide),
 );

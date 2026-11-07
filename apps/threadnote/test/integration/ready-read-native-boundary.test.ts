@@ -3,7 +3,9 @@ import {readRecallMemoryConnections, retrieveRecallMemoryConnections} from '@thr
 import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
+  Cause,
   Clock,
+  Console,
   Context,
   DateTime,
   Deferred,
@@ -486,32 +488,68 @@ describe('owned native ready-read boundary', () => {
 
   effectIt.effect(
     'cold actual workers return unavailable without creating the lexical database',
-    () =>
-      Effect.gen(function* () {
+    () => {
+      const responses: Array<Record<string, unknown>> = [];
+      let stage:
+        | 'setup'
+        | 'data-request'
+        | 'data-assertions'
+        | 'connections-request'
+        | 'connections-assertions'
+        | 'database-absence' = 'setup';
+      return Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cold-ready-read-'});
+        const config = {account: 'local', agentContextHome: home, user: 'test'};
         const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+        stage = 'data-request';
         const response = yield* boundary.read({
           operation: 'data',
-          config: {account: 'local', agentContextHome: home, user: 'test'},
+          config,
           options: {includeInactive: false, query: 'alpha'},
         });
+        responses.push({
+          call: 'data',
+          response: {outcome: response.outcome, maintenanceRequested: response.maintenanceRequested},
+        });
+        stage = 'data-assertions';
         expect(response.outcome).toBe('unavailable');
         expect(response.maintenanceRequested).toBe(true);
+        stage = 'connections-request';
         const connections = yield* boundary.read({
           operation: 'memory-connections',
-          config: {account: 'local', agentContextHome: home, user: 'test'},
+          config,
           options: {
             allowedUriScopes: ['threadnote://user/test/memories'],
             memoryRefs: ['threadnote://memory/tn_missing_seed'],
             now: '2026-11-04T12:00:00.000Z',
           },
         });
+        responses.push({
+          call: 'memory-connections',
+          response: {outcome: connections.outcome, maintenanceRequested: connections.maintenanceRequested},
+        });
+        stage = 'connections-assertions';
         expect(connections.outcome).toBe('unavailable');
         expect(connections.maintenanceRequested).toBe(true);
+        stage = 'database-absence';
         expect(yield* fs.exists(path.join(home, 'indexes/lexical/active-v13.sqlite'))).toBe(false);
-      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+      }).pipe(
+        Effect.onError(cause => {
+          if (Cause.hasInterrupts(cause)) return Effect.void;
+          return Effect.sync(() => `[cold-ready-maintenance-diagnostic] ${JSON.stringify({stage, responses})}`).pipe(
+            Effect.flatMap(Console.log),
+            Effect.catchCauseIf(
+              diagnosticCause => !Cause.hasInterrupts(diagnosticCause),
+              () => Effect.void,
+            ),
+          );
+        }),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      );
+    },
     {timeout: 10000},
   );
 

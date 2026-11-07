@@ -22,6 +22,8 @@ export interface ExclusiveFileLockOptions {
     | 'native-journal'
     | 'native-job'
     | 'native-worker';
+  /** Allow reclaiming old lock files whose owner cannot be verified. Defaults to true. */
+  readonly allowUnverifiedStaleRecovery?: boolean;
   /** Existing-home workers must never recreate a directory removed by uninstall. Defaults to true. */
   readonly createParentDirectory?: boolean;
   readonly heartbeatIntervalMilliseconds?: number;
@@ -323,7 +325,10 @@ function acquireRecoveryGuard(
   fs: FileSystem.FileSystem,
   lockPath: string,
   guardPath: string,
-  options: Pick<ExclusiveFileLockOptions, 'staleAfterMilliseconds' | 'useCanonicalProcessStartIdentity'>,
+  options: Pick<
+    ExclusiveFileLockOptions,
+    'allowUnverifiedStaleRecovery' | 'staleAfterMilliseconds' | 'useCanonicalProcessStartIdentity'
+  >,
 ): Effect.Effect<string | undefined, unknown, SecureRandom.SecureRandom | SystemInfo> {
   return Effect.gen(function* () {
     const token = yield* fileLockToken(options.useCanonicalProcessStartIdentity === true);
@@ -355,7 +360,10 @@ function staleDeadLockToken(
   path: string,
   options: Pick<
     ExclusiveFileLockOptions,
-    'recoverReusedProcessIdImmediately' | 'staleAfterMilliseconds' | 'useCanonicalProcessStartIdentity'
+    | 'allowUnverifiedStaleRecovery'
+    | 'recoverReusedProcessIdImmediately'
+    | 'staleAfterMilliseconds'
+    | 'useCanonicalProcessStartIdentity'
   >,
 ): Effect.Effect<string | undefined, unknown, SystemInfo> {
   return Effect.gen(function* () {
@@ -393,7 +401,7 @@ function staleDeadLockToken(
         return token;
       }
     }
-    return owner === undefined ? token : undefined;
+    return owner === undefined && options.allowUnverifiedStaleRecovery !== false ? token : undefined;
   });
 }
 

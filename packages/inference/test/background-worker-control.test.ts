@@ -146,8 +146,10 @@ describe('owned fixture cooperative drain', () => {
               (yield* Clock.currentTimeMillis) + 100,
             ).pipe(Effect.provideService(SystemInfo, raced), Effect.result);
             expect(livenessChecks).toBe(2);
-            if (stillRunning) expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
-            else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
+            if (stillRunning) {
+              expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
+              if (result._tag === 'Failure') expect(result.failure.diagnostic).toBeUndefined();
+            } else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
             expect(yield* f.fs.exists(f.home)).toBe(true);
           }),
         );
@@ -195,6 +197,97 @@ describe('owned fixture cooperative drain', () => {
         expect(yield* f.fs.readLink(filename)).toBe(before);
       }).pipe(provideFixtureLayer(platform)),
     );
+
+  effectIt.effect('retains only bounded diagnostics for a receipt read failure', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      const privateSentinel = 'private-receipt-read-detail';
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          expect(yield* lifecycle.register(owner)).toBe(true);
+          yield* f.fs.writeFileString(
+            f.options.receiptPath,
+            JSON.stringify({...owner, protocol: f.options.protocol, version: f.options.version}),
+          );
+          f.identities.delete(owner.processId);
+        }),
+      );
+      const guardedFs = FileSystem.FileSystem.of({
+        ...f.fs,
+        lstat: filename =>
+          filename === f.options.receiptPath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'PermissionDenied',
+                  module: 'FileSystem',
+                  method: 'lstat',
+                  description: privateSentinel,
+                }),
+              )
+            : f.fs.lstat(filename),
+      });
+      expect(yield* f.fs.exists(f.options.receiptPath)).toBe(true);
+      const result = yield* f
+        .run(drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000))
+        .pipe(Effect.provideService(FileSystem.FileSystem, guardedFs), Effect.result);
+
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {
+          _tag: 'BackgroundWorkerFixtureDrainUnavailable',
+          reason: 'control-unavailable',
+          diagnostic: {
+            operation: 'read-receipt',
+            causeCategory: 'platform-error',
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain(privateSentinel);
+      expect(yield* f.fs.exists(f.options.receiptPath)).toBe(true);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('classifies an unexpected worker-exit defect without its private message', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      const privateSentinel = 'private-worker-exit-defect';
+      let childProcessId = 0;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          childProcessId = owner.processId;
+          expect(yield* lifecycle.register(owner)).toBe(true);
+        }),
+      );
+      const system = SystemInfo.of({
+        ...f.system,
+        processStartIdentity: processId =>
+          processId === childProcessId
+            ? Effect.die(new Error(privateSentinel))
+            : f.system.processStartIdentity(processId),
+      });
+      const result = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
+        Effect.provideService(SystemInfo, system),
+        Effect.result,
+      );
+
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {
+          _tag: 'BackgroundWorkerFixtureDrainUnavailable',
+          reason: 'control-unavailable',
+          diagnostic: {
+            operation: 'worker-exit-check',
+            causeCategory: 'other',
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain(privateSentinel);
+    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
+  );
 
   effectIt.effect('fails closed when entry inspection is unavailable rather than treating it as absent', () =>
     Effect.gen(function* () {
@@ -267,15 +360,55 @@ describe('owned fixture cooperative drain', () => {
               Effect.forkScoped,
             );
           yield* Deferred.await(activated);
+          const controlLockPath = f.options.receiptPath + '.launch-v2.lock';
+          const controlLockHeld = yield* Deferred.make<void>();
+          const releaseControlLock = yield* Deferred.make<void>();
+          const controlLockHolder = yield* withExclusiveFileLock(
+            f.fs,
+            controlLockPath,
+            {
+              createParentDirectory: false,
+              retryIntervalMilliseconds: 5,
+              staleAfterMilliseconds: 120_000,
+              waitTimeoutMilliseconds: 2_000,
+              useCanonicalProcessStartIdentity: true,
+            },
+            Effect.gen(function* () {
+              yield* Deferred.succeed(controlLockHeld, undefined);
+              yield* Deferred.await(releaseControlLock);
+            }),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(controlLockHeld);
+          const controlLockContended = yield* Deferred.make<void>();
+          const observedFs = FileSystem.FileSystem.of({
+            ...f.fs,
+            writeFileString: (target, content, writeOptions) => {
+              const write = f.fs.writeFileString(target, content, writeOptions);
+              if (target !== controlLockPath || writeOptions?.flag !== 'wx') return write;
+              return write.pipe(
+                Effect.tapError(error =>
+                  PlatformError.isPlatformError(error) && error.reason._tag === 'AlreadyExists'
+                    ? Deferred.succeed(controlLockContended, undefined).pipe(Effect.asVoid)
+                    : Effect.void,
+                ),
+              );
+            },
+          });
           let finished = false;
-          const drain = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 2000).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                finished = true;
-              }),
-            ),
+          const drainExited = yield* Deferred.make<void>();
+          const drainDeadline = (yield* Clock.currentTimeMillis) + 2000;
+          const drain = yield* drainBackgroundWorkerFixture(f.capability, drainDeadline).pipe(
+            Effect.provideService(FileSystem.FileSystem, observedFs),
+            Effect.tap(() => Effect.sync(() => (finished = true))),
+            Effect.onExit(() => Deferred.succeed(drainExited, undefined).pipe(Effect.asVoid)),
             Effect.forkScoped,
           );
+          yield* Deferred.await(controlLockContended);
+          yield* Effect.sleep(150);
+          expect(yield* Deferred.isDone(drainExited)).toBe(false);
+          expect(finished).toBe(false);
+          yield* Deferred.succeed(releaseControlLock, undefined);
+          yield* Fiber.join(controlLockHolder);
           yield* f.closed;
           expect(yield* lifecycle.shouldDrain).toBe(true);
           expect(yield* wakeBackgroundWorker(f.options)).toMatchObject({state: 'deferred'});
@@ -283,6 +416,7 @@ describe('owned fixture cooperative drain', () => {
           yield* Fiber.join(host);
           expect(yield* f.fs.exists(f.options.receiptPath)).toBe(false);
           yield* Effect.sleep(30);
+          expect(yield* Deferred.isDone(drainExited)).toBe(false);
           expect(finished).toBe(false);
           expect(f.launches).toHaveLength(1);
           f.identities.delete(owner.processId);
@@ -321,16 +455,17 @@ describe('owned fixture cooperative drain', () => {
           const pending = f.home + '/pending-work';
           yield* f.fs.writeFileString(pending, 'unchanged durable work');
           yield* wakeBackgroundWorker(f.options);
-          expect(
-            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 40).pipe(
-              Effect.result,
-            ),
-          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
-          expect(
-            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
-              Effect.result,
-            ),
-          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          const firstAttempt = yield* drainBackgroundWorkerFixture(
+            f.capability,
+            (yield* Clock.currentTimeMillis) + 40,
+          ).pipe(Effect.result);
+          expect(firstAttempt).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          if (firstAttempt._tag === 'Failure') expect(firstAttempt.failure.diagnostic).toBeUndefined();
+          const retry = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
+            Effect.result,
+          );
+          expect(retry).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          if (retry._tag === 'Failure') expect(retry.failure.diagnostic).toBeUndefined();
           expect(yield* f.fs.readFileString(pending)).toBe('unchanged durable work');
           expect(yield* f.fs.exists(f.home)).toBe(true);
         }),

@@ -7,6 +7,7 @@ import {
   FileSystem,
   Option,
   Path,
+  PlatformError,
   Schema,
   String as EffectString,
 } from 'effect';
@@ -88,11 +89,31 @@ export class BackgroundWorkerControlUnavailable extends Schema.TaggedError<
   BackgroundWorkerControlUnavailable,
   {readonly brand: unique symbol}
 >()('BackgroundWorkerControlUnavailable', {message: Schema.String}) {}
+const fixtureDrainDiagnosticSchema = Schema.Struct({
+  operation: Schema.Literals([
+    'unclassified',
+    'read-receipt',
+    'control-observation',
+    'worker-exit-check',
+    'receipt-decode',
+    'lock-inspection',
+    'deadline-wait',
+  ]),
+  causeCategory: Schema.Literals([
+    'control-unavailable',
+    'fixture-drain-error',
+    'platform-error',
+    'schema-error',
+    'other',
+  ]),
+});
+type BackgroundWorkerFixtureDrainDiagnostic = typeof fixtureDrainDiagnosticSchema.Type;
 export class BackgroundWorkerFixtureDrainUnavailable extends Schema.TaggedError<
   BackgroundWorkerFixtureDrainUnavailable,
   {readonly brand: unique symbol}
 >()('BackgroundWorkerFixtureDrainUnavailable', {
   reason: Schema.Literals(['ownership', 'identity-unknown', 'control-unavailable', 'deadline']),
+  diagnostic: Schema.optionalKey(fixtureDrainDiagnosticSchema),
 }) {}
 const fixtureDrainBrand: unique symbol = Symbol('BackgroundWorkerFixtureDrain');
 export interface BackgroundWorkerFixtureDrain {
@@ -107,13 +128,39 @@ const fixtureCapabilities = new WeakMap<
   BackgroundWorkerFixtureDrain,
   BackgroundWorkerControlOptions & {fixture: typeof fixtureSchema.Type; deadlineEpochMilliseconds?: number}
 >();
-const drainUnavailable = (reason: BackgroundWorkerFixtureDrainUnavailable['reason']) =>
-  BackgroundWorkerFixtureDrainUnavailable.make({reason});
-const fixtureFailure = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+const drainUnavailable = (
+  reason: BackgroundWorkerFixtureDrainUnavailable['reason'],
+  diagnostic?: BackgroundWorkerFixtureDrainDiagnostic,
+) => BackgroundWorkerFixtureDrainUnavailable.make({reason, ...(diagnostic === undefined ? {} : {diagnostic})});
+const fixtureFailure = <A, E, R>(program: Effect.Effect<A, E, R>, requestedOperation: unknown = 'unclassified') =>
   program.pipe(
     Effect.catchCause(cause => {
-      const normalize = (error: unknown) =>
-        Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error) ? error : drainUnavailable('control-unavailable');
+      const normalize = (error: unknown) => {
+        const diagnostic: BackgroundWorkerFixtureDrainDiagnostic = {
+          operation:
+            requestedOperation === 'read-receipt' ||
+            requestedOperation === 'control-observation' ||
+            requestedOperation === 'worker-exit-check' ||
+            requestedOperation === 'receipt-decode' ||
+            requestedOperation === 'lock-inspection' ||
+            requestedOperation === 'deadline-wait'
+              ? requestedOperation
+              : 'unclassified',
+          causeCategory: Schema.is(BackgroundWorkerControlUnavailable)(error)
+            ? 'control-unavailable'
+            : Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)
+              ? 'fixture-drain-error'
+              : PlatformError.isPlatformError(error)
+                ? 'platform-error'
+                : Schema.isSchemaError(error)
+                  ? 'schema-error'
+                  : 'other',
+        };
+        if (Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)) {
+          return error;
+        }
+        return drainUnavailable('control-unavailable', diagnostic);
+      };
       return Cause.hasInterrupts(cause)
         ? Effect.failCause(Cause.map(cause, normalize))
         : Effect.fail(normalize(Cause.squash(cause)));
@@ -172,6 +219,7 @@ function guarded<A, E, R>(
   options: BackgroundWorkerControlOptions,
   program: Effect.Effect<A, E, R>,
   waitTimeoutMilliseconds = 100,
+  allowUnverifiedStaleRecovery = true,
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -213,6 +261,7 @@ function guarded<A, E, R>(
         staleAfterMilliseconds: 5000,
         waitTimeoutMilliseconds,
         useCanonicalProcessStartIdentity: true,
+        allowUnverifiedStaleRecovery,
       },
       program,
     );
@@ -431,14 +480,15 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
   const system = yield* SystemInfo;
   let generationCount = 0;
   for (;;) {
-    const remaining = absoluteDeadlineEpochMilliseconds - (yield* Clock.currentTimeMillis);
+    const remaining =
+      absoluteDeadlineEpochMilliseconds - (yield* fixtureFailure(Clock.currentTimeMillis, 'deadline-wait'));
     if (remaining <= 0) return yield* drainUnavailable('deadline');
-    const observed = yield* validateFixture(options, options.fixture).pipe(
+    const observed = yield* fixtureFailure(validateFixture(options, options.fixture), 'control-observation').pipe(
       Effect.andThen(
         guarded(
           options,
           Effect.gen(function* () {
-            const state = yield* readState(options);
+            const state = yield* fixtureFailure(readState(options), 'control-observation');
             const fixture = state?.fixture;
             if (
               !state ||
@@ -454,7 +504,7 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
               fixture.creator.processId !== system.processId
             )
               return yield* drainUnavailable('ownership');
-            yield* validateFixture(options, fixture);
+            yield* fixtureFailure(validateFixture(options, fixture), 'control-observation');
             if (
               (state.starting && !EffectArray.some(fixture.launches, item => item.nonce === state.starting?.nonce)) ||
               (state.active &&
@@ -468,12 +518,15 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
             )
               return yield* drainUnavailable('ownership');
             if (fixture.phase !== 'closing')
-              yield* writeState(options, {...state, fixture: {...fixture, phase: 'closing'}});
+              yield* fixtureFailure(
+                writeState(options, {...state, fixture: {...fixture, phase: 'closing'}}),
+                'control-observation',
+              );
             generationCount = fixture.launches.length;
             let pending = false;
             for (const launch of fixture.launches) {
               if (!launch.owner) pending = true;
-              else if (!(yield* fixtureOwnerExited(launch.owner))) pending = true;
+              else if (!(yield* fixtureFailure(fixtureOwnerExited(launch.owner), 'worker-exit-check'))) pending = true;
             }
             if (pending) return false;
             const fs = yield* FileSystem.FileSystem;
@@ -484,17 +537,20 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
                   launch.owner?.processId === owner.processId &&
                   launch.owner.processStartIdentity === owner.processStartIdentity,
               );
-            const receipt = yield* readRegular(options.receiptPath);
+            const receipt = yield* fixtureFailure(readRegular(options.receiptPath), 'read-receipt');
             if (receipt !== undefined) {
-              const owner = yield* Schema.decodeEffect(
-                Schema.fromJsonString(
-                  Schema.Struct({
-                    ...ownerSchema.fields,
-                    protocol: Schema.Int,
-                    version: Schema.String,
-                  }),
-                ),
-              )(receipt);
+              const owner = yield* fixtureFailure(
+                Schema.decodeEffect(
+                  Schema.fromJsonString(
+                    Schema.Struct({
+                      ...ownerSchema.fields,
+                      protocol: Schema.Int,
+                      version: Schema.String,
+                    }),
+                  ),
+                )(receipt),
+                'receipt-decode',
+              );
               if (
                 owner.protocol !== options.protocol ||
                 owner.version !== options.version ||
@@ -502,23 +558,26 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
               )
                 return yield* drainUnavailable('ownership');
             }
-            const lockEntry = yield* inspectEntry(options.lockPath);
+            const lockEntry = yield* fixtureFailure(inspectEntry(options.lockPath), 'lock-inspection');
             if (Option.isSome(lockEntry)) {
               if (lockEntry.value.type !== 'File') return yield* drainUnavailable('ownership');
-              const owner = yield* readExclusiveFileLockOwner(fs, options.lockPath);
+              const owner = yield* fixtureFailure(readExclusiveFileLockOwner(fs, options.lockPath), 'lock-inspection');
               if (Option.isNone(owner) || !matches(owner.value)) return yield* drainUnavailable('ownership');
             }
             return true;
           }),
-          Math.min(100, remaining),
+          remaining,
+          false,
         ),
       ),
       Effect.timeoutOption(remaining),
     );
     if (Option.isNone(observed)) return yield* drainUnavailable('deadline');
     if (observed.value) return {state: 'drained', generationCount};
-    yield* Effect.sleep(
-      Math.min(25, Math.max(0, absoluteDeadlineEpochMilliseconds - (yield* Clock.currentTimeMillis))),
+    const currentTime = yield* fixtureFailure(Clock.currentTimeMillis, 'deadline-wait');
+    yield* fixtureFailure(
+      Effect.sleep(Math.min(25, Math.max(0, absoluteDeadlineEpochMilliseconds - currentTime))),
+      'deadline-wait',
     );
   }
 }, fixtureFailure);
