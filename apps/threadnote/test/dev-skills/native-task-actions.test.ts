@@ -62,9 +62,17 @@ import {CurrentNativeJobAutoLaunch, runNativeJobWorker} from '../../src/workflow
 import {readNativeCloseoutJournal, writeNativeCloseoutJournal} from '../../src/workflow_automation/closeout_store.js';
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
 import {stableJson} from '../../src/workflow_memory/protocol.js';
-import {completeLocalPhase, fixture, object, run} from './native-cycle-lifecycle-fixture.js';
+import {
+  completeLocalPhase,
+  fixture,
+  object,
+  run,
+  windowsCycleFixtureTimeout,
+} from './native-cycle-lifecycle-fixture.js';
 import {nativeFixture} from './native-automation-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+
+const windowsRealGitFixtureTimeout = windowsCycleFixtureTimeout ?? {timeout: 60_000};
 
 const cliTestLayer = Layer.mergeAll(
   FileSystem.layerNoop({}),
@@ -5265,7 +5273,7 @@ describe('native task actions', () => {
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
     }).pipe(run),
-    {timeout: 60_000},
+    windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect('records canonical commit delivery through MCP with exact replay and guarded refusal', () =>
@@ -6466,7 +6474,7 @@ describe('native task actions', () => {
       expect(saved.readiness).toBe('ready');
       expect(expanded.intentHash).not.toBe(draft.intentHash);
     }).pipe(run),
-    {timeout: 60_000},
+    windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect('recovers an epochless first finish from only prepareRef through concurrent completion', () =>
