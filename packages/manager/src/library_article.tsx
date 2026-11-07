@@ -16,6 +16,7 @@ export function LibraryArticle({
   onVerifiedUpdate,
   onPrepareGraph,
   onOpenMemory,
+  readOnly = false,
 }: {
   readonly node: TreeNode;
   readonly metadata?: MemoryMetadata;
@@ -25,6 +26,7 @@ export function LibraryArticle({
   readonly onVerifiedUpdate?: () => void;
   readonly onPrepareGraph?: () => void;
   readonly onOpenMemory?: (uri: string) => void;
+  readonly readOnly?: boolean;
 }): React.ReactElement {
   const author = metadata?.sourceAgentClient;
   const timestamp = metadata?.timestamp;
@@ -38,7 +40,7 @@ export function LibraryArticle({
         </span>
       </div>
       <h2>{libraryItemTitle(node)}</h2>
-      {!resource && !node.isSystem && !isAgentArtifactUri(node.uri) && metadata?.status === 'active' ? (
+      {!readOnly && !resource && !node.isSystem && !isAgentArtifactUri(node.uri) && metadata?.status === 'active' ? (
         <AutomaticMemoryPanel
           key={node.uri}
           uri={node.uri}
@@ -47,8 +49,9 @@ export function LibraryArticle({
           onChanged={onVerifiedUpdate ?? onChanged}
         />
       ) : null}
-      <MarkdownViewer markdown={markdown} onOpenMemory={onOpenMemory} />
-      {!resource &&
+      <MarkdownViewer markdown={markdown} onOpenMemory={onOpenMemory} staticPreview={readOnly} />
+      {!readOnly &&
+      !resource &&
       !node.isShared &&
       !node.isSystem &&
       metadata?.kind === 'durable' &&
