@@ -393,7 +393,195 @@ function rewrittenBaseFixture() {
   return {...f, runtime, completed, current, proof: completeProof, seal, priorReview};
 }
 
+function ordinaryContinuation(baseline = entry('a'), head = entry('b')) {
+  const f = rewrittenBaseFixture();
+  const proof = {
+    ...f.proof,
+    upstreamEvidence: EffectArray.map(f.proof.upstreamEvidence, item => ({...item, baseline, currentBase: head, head})),
+    sourceEvidence: EffectArray.map(f.proof.sourceEvidence, item =>
+      item.path === 'upstream.ts' ? {...item, baseline, prior: head, currentBase: head, head} : item,
+    ),
+  };
+  const prior = f.seal(proof);
+  const snapshot: NativeCycleSnapshot = {
+    ...f.snapshot,
+    snapshotId: 'continued',
+    head: object('c'),
+    tree: object('d'),
+    declaredBaseHead: object('e'),
+    scopeBase: object('f'),
+    acceptedHead: object('c'),
+    previous: prior.snapshotId,
+    previousTree: prior.tree,
+  };
+  const receipt: NativeCycleOrdinaryMergeReceipt = {
+    ...f.receipt,
+    priorSnapshotId: prior.snapshotId,
+    priorHead: prior.head,
+    priorTree: prior.tree,
+    priorDeclaredBaseHead: prior.declaredBaseHead,
+    priorDeclaredBaseTree: prior.scopeBase,
+    currentBaseHead: snapshot.declaredBaseHead,
+    currentBaseTree: snapshot.scopeBase,
+    currentHead: snapshot.head,
+    mergeBases: {bases: prior.declaredBaseHead, prior: prior.head, current: snapshot.declaredBaseHead},
+    upstreamEvidence: EffectArray.map(proof.upstreamEvidence, item => ({...item, oldBase: head})),
+  };
+  const seal = (value = receipt): NativeCycleSnapshot => ({
+    ...snapshot,
+    ordinaryMergeQualificationV1: {...value, receiptDigest: nativeCycleMergeReceiptDigest(snapshot, value)},
+  });
+  const runtime: NativeCycleRuntime = {
+    ...f.completed,
+    snapshots: [
+      ...f.runtime.snapshots,
+      {
+        snapshot: prior,
+        incoming: [
+          {path: 'upstream.ts', source: 'upstream', tree: prior.scopeBase, commit: prior.declaredBaseHead, ...head},
+        ],
+      },
+      {
+        snapshot: seal(),
+        incoming: [
+          {
+            path: 'upstream.ts',
+            source: 'upstream',
+            tree: snapshot.scopeBase,
+            commit: snapshot.declaredBaseHead,
+            ...head,
+          },
+        ],
+      },
+    ],
+    reviews: [
+      ...f.completed.reviews,
+      {
+        snapshotId: prior.snapshotId,
+        report: {...f.priorReview, snapshotId: prior.snapshotId, snapshotTree: prior.tree},
+      },
+    ],
+  };
+  return {
+    ...f,
+    prior,
+    snapshot: seal(),
+    receipt,
+    seal,
+    runtime,
+    validate: (value = seal(), predecessor: NativeCycleSnapshot = prior) =>
+      validateNativeCycleMergeReceipt(value, predecessor, [f.plan], object('4')),
+  };
+}
+
 describe('same-label rewritten-base qualification contract', () => {
+  it('carries unchanged validated manifest3 inherited existing, added and deleted entries into an ordinary advance', () => {
+    for (const [baseline, head] of [
+      [entry('a'), entry('b')],
+      [entry('0', '000000'), entry('b')],
+      [entry('a'), entry('0', '000000')],
+    ]) {
+      const f = ordinaryContinuation(baseline, head);
+      expect(() => f.validate()).not.toThrow();
+      expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(f.runtime)))).not.toThrow();
+    }
+    const f = ordinaryContinuation();
+    const plan = {
+      ...f.plan,
+      source: {...f.plan.source, documentHash: hash('c')},
+      phases: [{...f.plan.phases[0], definitionHash: hash('c'), baseBranch: 'stack'}],
+    };
+    const {previous: _previous, previousTree: _tree, ...source} = f.snapshot;
+    const snapshot = {...source, phaseHash: nativeCyclePhaseHash(plan, 'one'), supersedes: f.prior.snapshotId};
+    const proof = {...f.receipt, planDocumentHash: plan.source.documentHash, toBaseBranch: 'stack'};
+    const continued = {
+      ...snapshot,
+      ordinaryMergeQualificationV1: {...proof, receiptDigest: nativeCycleMergeReceiptDigest(snapshot, proof)},
+    };
+    expect(snapshot.phaseHash).not.toBe(f.prior.phaseHash);
+    expect(() => validateNativeCycleMergeReceipt(continued, f.prior, [f.plan, plan], object('4'))).not.toThrow();
+  });
+
+  it('refuses carry-forward without exact inherited predecessor evidence and unchanged mode/blob identities', () => {
+    const f = ordinaryContinuation();
+    const priorProof = f.prior.sameLabelRebasedBaseIntegrationV1;
+    for (const predecessor of [
+      {...f.prior, version: 1 as const, sameLabelRebasedBaseIntegrationV1: undefined},
+      {...f.prior, phaseId: 'other'},
+      {...f.prior, repo: '/other'},
+      {...f.prior, baseTree: object('f')},
+      {...f.prior, snapshotId: 'other'},
+    ])
+      expect(() => f.validate(f.snapshot, predecessor)).toThrow();
+    for (const patch of [
+      {upstreamEvidence: []},
+      {upstreamEvidence: [...priorProof.upstreamEvidence, ...priorProof.upstreamEvidence]},
+      {upstreamEvidence: [], inheritedUpstreamOnlyPaths: []},
+      {baselineHead: object('f')},
+      {baselineTree: object('f')},
+      {currentHead: object('f')},
+      {currentBaseHead: object('f')},
+      {currentBaseTree: object('f')},
+      {planDocumentHash: hash('f')},
+      {runId: 'other'},
+      {generation: 'other'},
+      {bindingId: hash('f')},
+    ]) {
+      const changed = {...priorProof, ...patch};
+      const predecessor = {
+        ...f.prior,
+        sameLabelRebasedBaseIntegrationV1: {
+          ...changed,
+          receiptDigest: nativeCycleSameLabelRebasedBaseReceiptDigest(f.prior, changed),
+        },
+      };
+      expect(() => f.validate(f.snapshot, predecessor)).toThrow();
+    }
+    for (const key of ['baseline', 'currentBase', 'head'] as const)
+      for (const value of [entry('d'), entry('b', '100755')]) {
+        const upstreamEvidence = EffectArray.map(f.receipt.upstreamEvidence, item => ({...item, [key]: value}));
+        expect(() => f.validate(f.seal({...f.receipt, upstreamEvidence}))).toThrow();
+      }
+    for (const value of [entry('d'), entry('b', '100755')]) {
+      const upstreamEvidence = EffectArray.map(f.receipt.upstreamEvidence, item => ({
+        ...item,
+        oldBase: value,
+        currentBase: value,
+        head: value,
+      }));
+      expect(() => f.validate(f.seal({...f.receipt, upstreamEvidence}))).toThrow();
+    }
+    expect(() => ordinaryContinuation(entry('b'), entry('b')).validate()).toThrow();
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...f.runtime,
+        snapshots: [
+          f.runtime.snapshots[0],
+          {
+            ...f.runtime.snapshots[1],
+            snapshot: {...f.prior, sameLabelRebasedBaseIntegrationV1: {...priorProof, receiptDigest: hash('f')}},
+          },
+          f.runtime.snapshots[2],
+        ],
+      }),
+    ).toThrow();
+    // Resealing cannot turn a tampered historical proof into validated runtime authority.
+    const changed = {...priorProof, sourceEvidence: priorProof.sourceEvidence.slice(1)};
+    const forged = {
+      ...f.prior,
+      sameLabelRebasedBaseIntegrationV1: {
+        ...changed,
+        receiptDigest: nativeCycleSameLabelRebasedBaseReceiptDigest(f.prior, changed),
+      },
+    };
+    expect(() =>
+      decodeNativeCycleRuntime({
+        ...f.runtime,
+        snapshots: [f.runtime.snapshots[0], {...f.runtime.snapshots[1], snapshot: forged}, f.runtime.snapshots[2]],
+      }),
+    ).toThrow();
+  });
+
   it('round trips manifest3, rejects old readers and conflicting witnesses, and retains independent staged reconciliation', () => {
     const f = rewrittenBaseFixture();
     const decoded = Schema.decodeUnknownSync(NativeCycleSnapshotSchema, {onExcessProperty: 'error'})(
