@@ -196,6 +196,57 @@ describe('owned fixture cooperative drain', () => {
       }).pipe(provideFixtureLayer(platform)),
     );
 
+  effectIt.effect('retains only bounded diagnostics for a receipt read failure', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      const privateSentinel = 'private-receipt-read-detail';
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          expect(yield* lifecycle.register(owner)).toBe(true);
+          yield* f.fs.writeFileString(
+            f.options.receiptPath,
+            JSON.stringify({...owner, protocol: f.options.protocol, version: f.options.version}),
+          );
+          f.identities.delete(owner.processId);
+        }),
+      );
+      const guardedFs = FileSystem.FileSystem.of({
+        ...f.fs,
+        lstat: filename =>
+          filename === f.options.receiptPath
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'PermissionDenied',
+                  module: 'FileSystem',
+                  method: 'lstat',
+                  description: privateSentinel,
+                }),
+              )
+            : f.fs.lstat(filename),
+      });
+      expect(yield* f.fs.exists(f.options.receiptPath)).toBe(true);
+      const result = yield* f
+        .run(drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000))
+        .pipe(Effect.provideService(FileSystem.FileSystem, guardedFs), Effect.result);
+
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {
+          _tag: 'BackgroundWorkerFixtureDrainUnavailable',
+          reason: 'control-unavailable',
+          diagnostic: {
+            operation: 'read-receipt',
+            causeCategory: 'platform-error',
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain(privateSentinel);
+      expect(yield* f.fs.exists(f.options.receiptPath)).toBe(true);
+    }).pipe(provideFixtureLayer(platform)),
+  );
+
   effectIt.effect('fails closed when entry inspection is unavailable rather than treating it as absent', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

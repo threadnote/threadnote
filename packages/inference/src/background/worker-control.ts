@@ -7,6 +7,7 @@ import {
   FileSystem,
   Option,
   Path,
+  PlatformError,
   Schema,
   String as EffectString,
 } from 'effect';
@@ -88,11 +89,23 @@ export class BackgroundWorkerControlUnavailable extends Schema.TaggedError<
   BackgroundWorkerControlUnavailable,
   {readonly brand: unique symbol}
 >()('BackgroundWorkerControlUnavailable', {message: Schema.String}) {}
+const fixtureDrainDiagnosticSchema = Schema.Struct({
+  operation: Schema.Literals(['unclassified', 'read-receipt']),
+  causeCategory: Schema.Literals([
+    'control-unavailable',
+    'fixture-drain-error',
+    'platform-error',
+    'schema-error',
+    'other',
+  ]),
+});
+type BackgroundWorkerFixtureDrainDiagnostic = typeof fixtureDrainDiagnosticSchema.Type;
 export class BackgroundWorkerFixtureDrainUnavailable extends Schema.TaggedError<
   BackgroundWorkerFixtureDrainUnavailable,
   {readonly brand: unique symbol}
 >()('BackgroundWorkerFixtureDrainUnavailable', {
   reason: Schema.Literals(['ownership', 'identity-unknown', 'control-unavailable', 'deadline']),
+  diagnostic: Schema.optionalKey(fixtureDrainDiagnosticSchema),
 }) {}
 const fixtureDrainBrand: unique symbol = Symbol('BackgroundWorkerFixtureDrain');
 export interface BackgroundWorkerFixtureDrain {
@@ -107,13 +120,31 @@ const fixtureCapabilities = new WeakMap<
   BackgroundWorkerFixtureDrain,
   BackgroundWorkerControlOptions & {fixture: typeof fixtureSchema.Type; deadlineEpochMilliseconds?: number}
 >();
-const drainUnavailable = (reason: BackgroundWorkerFixtureDrainUnavailable['reason']) =>
-  BackgroundWorkerFixtureDrainUnavailable.make({reason});
-const fixtureFailure = <A, E, R>(program: Effect.Effect<A, E, R>) =>
+const drainUnavailable = (
+  reason: BackgroundWorkerFixtureDrainUnavailable['reason'],
+  diagnostic?: BackgroundWorkerFixtureDrainDiagnostic,
+) => BackgroundWorkerFixtureDrainUnavailable.make({reason, ...(diagnostic === undefined ? {} : {diagnostic})});
+const fixtureFailure = <A, E, R>(program: Effect.Effect<A, E, R>, requestedOperation: unknown = 'unclassified') =>
   program.pipe(
     Effect.catchCause(cause => {
-      const normalize = (error: unknown) =>
-        Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error) ? error : drainUnavailable('control-unavailable');
+      const normalize = (error: unknown) => {
+        const diagnostic: BackgroundWorkerFixtureDrainDiagnostic = {
+          operation: requestedOperation === 'read-receipt' ? requestedOperation : 'unclassified',
+          causeCategory: Schema.is(BackgroundWorkerControlUnavailable)(error)
+            ? 'control-unavailable'
+            : Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)
+              ? 'fixture-drain-error'
+              : PlatformError.isPlatformError(error)
+                ? 'platform-error'
+                : Schema.isSchemaError(error)
+                  ? 'schema-error'
+                  : 'other',
+        };
+        if (Schema.is(BackgroundWorkerFixtureDrainUnavailable)(error)) {
+          return error.diagnostic === undefined ? drainUnavailable(error.reason, diagnostic) : error;
+        }
+        return drainUnavailable('control-unavailable', diagnostic);
+      };
       return Cause.hasInterrupts(cause)
         ? Effect.failCause(Cause.map(cause, normalize))
         : Effect.fail(normalize(Cause.squash(cause)));
@@ -484,7 +515,7 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
                   launch.owner?.processId === owner.processId &&
                   launch.owner.processStartIdentity === owner.processStartIdentity,
               );
-            const receipt = yield* readRegular(options.receiptPath);
+            const receipt = yield* fixtureFailure(readRegular(options.receiptPath), 'read-receipt');
             if (receipt !== undefined) {
               const owner = yield* Schema.decodeEffect(
                 Schema.fromJsonString(
