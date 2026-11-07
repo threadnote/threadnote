@@ -154,16 +154,15 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description:
-        'Read task; phaseId selects a listed active historical PR watch; detail=packet returns packet. Select one verified closeout body with outputKey and detail=packet.',
+      description: 'Read a task summary or packet (detail=packet).',
       inputSchema: {
         runId: McpInput.requiredString('Run ID'),
         callerCwd: McpInput.requiredString('Absolute path'),
         role: McpInput.string('Role'),
         cursor: McpInput.string('Cursor'),
-        phaseId: McpInput.string('Listed ID'),
+        phaseId: McpInput.string('Listed historical phase ID for its PR watch'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
-        outputKey: McpInput.string('Listed verified closeout output key; requires detail=packet'),
+        outputKey: McpInput.string('One listed verified closeout body key; requires packet detail'),
       },
     },
     Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail, outputKey}) {
