@@ -18,7 +18,14 @@ import {
   selectFiniteProjection,
   uniqueProjectionItems,
 } from '../projector/selection.js';
-import type {ContextBriefLogicalMemoryEvidenceV1} from '../types.js';
+import type {
+  ContextBriefGraphEvidenceV1,
+  ContextBriefLogicalMemoryEvidenceV1,
+  ContextBriefMemoryRetrievalV1,
+  ContextBriefPlanV1,
+} from '../types.js';
+import {selectContextBriefNavigationMemory, type ContextBriefNavigationMemoryProjects} from '../memory-evidence.js';
+import {assembleContextBriefLogicalResult} from '../planner.js';
 import {type NavigationAcquisition, type NavigationAnswerV1, type NavigationScope} from './model.js';
 import type {assembleStructuralNavigationAnswer, NavigationProofLocator} from './structural.js';
 type Item = ProjectionItem<(typeof NAVIGATION_PROJECTION_LANES)[number]>;
@@ -75,6 +82,51 @@ export interface NavigationProjection {
   readonly followUps: readonly NavigationAcquisition[];
   readonly memory: readonly ReturnType<typeof projectAgentViewMemory>[];
 }
+/** Compose already-acquired memory with the actual structural route before stripping private citations. */
+export function projectStructuralNavigationAnswer(
+  input: {
+    readonly structural: Pick<ReturnType<typeof assembleStructuralNavigationAnswer>, 'answer' | 'proofLocators'>;
+    readonly graph: ContextBriefGraphEvidenceV1;
+    readonly plan: ContextBriefPlanV1;
+    readonly observedAt: string;
+    readonly memory?: ContextBriefMemoryRetrievalV1;
+    readonly memoryProjects?: ContextBriefNavigationMemoryProjects;
+    readonly repositoryIdentityKind: 'local' | 'remote';
+  },
+  maximumEstimatedTokens = 1250,
+  responseFormat: 'agent' | 'dual' = 'agent',
+) {
+  if (input.memory === undefined)
+    return projectNavigationAnswer(input.structural, maximumEstimatedTokens, responseFormat);
+  const {answer} = input.structural;
+  const memory = selectContextBriefNavigationMemory({
+    memory: input.memory,
+    anchors: EffectArray.flatMap(answer.nodes, node => {
+      const source = EffectOption.getOrUndefined(
+        EffectArray.findFirst(answer.sources, source => source.id === node.sourceId),
+      );
+      return source === undefined || !sameScope(source, answer.scope)
+        ? []
+        : [{nodeId: node.id, path: source.path, repositoryId: source.repository}];
+    }),
+    repositoryIdentityKind: input.repositoryIdentityKind,
+    memoryProjects: input.memoryProjects,
+  });
+  const logical = assembleContextBriefLogicalResult({...input, memory});
+  return projectNavigationAnswer(
+    {
+      ...input.structural,
+      answer: {
+        ...answer,
+        gaps: [...new Set([...answer.gaps, ...logical.coverage.gaps])],
+      },
+    },
+    maximumEstimatedTokens,
+    responseFormat,
+    [...logical.durableDecisions, ...logical.activeHandoffs],
+  );
+}
+
 /** Pure policy and rendering only. The caller owns all acquisition and proof admission. */
 export function projectNavigationAnswer(
   input: Pick<ReturnType<typeof assembleStructuralNavigationAnswer>, 'answer' | 'proofLocators'>,

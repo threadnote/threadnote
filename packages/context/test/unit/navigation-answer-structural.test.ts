@@ -21,6 +21,7 @@ import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphIndexSummary, CodeGraphProjectCoverage} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {makeReadDeadline, ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
@@ -28,6 +29,11 @@ import * as extractionRuntime from '@threadnote/graph/typescript_runtime';
 import {retrieveNavigationSourceProofs, navigationProofSpansInspected} from '../../src/navigation/source_facts.js';
 import * as sourceEvidence from '../../src/graph/source_evidence.js';
 import {assembleStructuralNavigationAnswer} from '../../src/navigation/structural.js';
+import {projectNavigationAnswer, projectStructuralNavigationAnswer} from '../../src/navigation/project.js';
+import {fromRepositoryQuery} from '../../src/graph/evidence.js';
+import {planContextBrief} from '../../src/planner.js';
+import {selectContextBriefNavigationMemory} from '../../src/memory-evidence.js';
+import type {ContextBriefMemoryCandidateV1, ContextBriefMemoryRetrievalV1} from '../../src/types.js';
 import * as navigationFacts from '@threadnote/graph/query/navigation_facts';
 
 effectIt.layer(citationPlatformLayer)(it => {
@@ -413,6 +419,196 @@ effectIt.layer(dependencies)(it => {
           const structural = assembleStructuralNavigationAnswer(request);
           expect(JSON.stringify(request)).toBe(before);
           expect(assembleStructuralNavigationAnswer(request)).toEqual(structural);
+          // Compose raw canonical citations with the actual physical route, without further acquisition.
+          const observedAt = '2026-11-07T00:00:00.000Z';
+          const memoryProjects = {mode: 'allow-projects-and-projectless', projects: ['memory-fixture']} as const;
+          const target = {
+            kind: 'symbol',
+            nodeId: behavior.id,
+            language: behavior.language,
+            name: behavior.name,
+            qualifiedName: behavior.qualifiedName,
+            symbolKind: behavior.kind,
+            span: behavior.span,
+            fragmentCanonicalization: 'utf8-source-span-v1',
+            fragmentHash: {algorithm: 'sha256', value: behavior.contentHash},
+          } as const;
+          const citation = createMemoryCodeCitation({
+            version: 1,
+            extractorSet: 'fixture',
+            repositoryId: scope.repository,
+            repositoryIdentityKind: 'local',
+            path: behavior.path,
+            target,
+            fileContentHash: {algorithm: 'sha256', value: behavior.contentHash},
+            sourceCommit: f.result.snapshot.commit,
+            sourceDirty: false,
+            sourceSnapshotId: f.result.snapshot.id,
+          });
+          const candidate = (
+            name: string,
+            pin = citation,
+            changes: Partial<ContextBriefMemoryCandidateV1> = {},
+          ): ContextBriefMemoryCandidateV1 => ({
+            uri: `threadnote://memory/tn_${name}`,
+            kind: 'durable',
+            project: 'memory-fixture',
+            rank: 0,
+            authority: 'user_approved',
+            trust: 'approved',
+            excerpt: name,
+            citationErrorCount: 0,
+            codeCitations: [pin],
+            codeLinkMatches: [
+              {
+                anchorNodeId: behavior.id,
+                anchorPath: behavior.path,
+                anchorOrdinal: 0,
+                citationId: pin.id,
+                matchKind: pin.target.kind === 'file' ? 'file-path' : 'symbol-node',
+              },
+            ],
+            actionCard: {appliesTo: 'saveNote', invariant: name},
+            ...changes,
+          });
+          const {id: _citationId, ...citationInput} = citation;
+          const current = candidate('current');
+          const stale = candidate(
+            'stale',
+            createMemoryCodeCitation({
+              ...citationInput,
+              fileContentHash: {algorithm: 'sha256', value: EffectString.repeat(64)('0')},
+            }),
+          );
+          const proposed = candidate('proposed', citation, {authority: 'agent_generated', trust: 'inferred'});
+          const file = candidate('file', createMemoryCodeCitation({...citationInput, target: {kind: 'file'}}), {
+            project: undefined,
+          });
+          const unrelated = candidate(
+            'unrelated',
+            createMemoryCodeCitation({
+              ...citationInput,
+              target: {
+                ...target,
+                nodeId: `cgs_${EffectString.repeat(32)('f')}`,
+                name: 'writeLookingPure',
+                qualifiedName: 'writeLookingPure',
+              },
+            }),
+          );
+          const excluded = [
+            unrelated,
+            candidate('foreign', citation, {project: 'foreign'}),
+            candidate(
+              'foreign_repository',
+              createMemoryCodeCitation({...citationInput, repositoryId: EffectString.repeat(64)('a')}),
+            ),
+            candidate(
+              'foreign_identity',
+              createMemoryCodeCitation({...citationInput, repositoryIdentityKind: 'remote'}),
+            ),
+            candidate('missing_citation', citation, {codeCitations: []}),
+          ];
+          const rawMemory = (candidates: readonly ContextBriefMemoryCandidateV1[]): ContextBriefMemoryRetrievalV1 => ({
+            candidates,
+            consideredCandidates: candidates.length,
+            codeAnchorCoverage: {
+              complete: false,
+              matchedMemories: candidates.length,
+              requested: 2,
+              resolved: 1,
+              unresolvedOrdinals: [1],
+            },
+            gaps: ['code-anchors-unresolved'],
+            trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+            citationValidations: EffectArray.map(candidates, memory => ({
+              uri: memory.uri,
+              receipts: EffectArray.map(memory.codeCitations, pin => ({
+                citationId: pin.id,
+                candidateCount: 1,
+                coverage: 'current-complete',
+                kind: pin.target.kind,
+                observedAt,
+                observedPath: behavior.path,
+                observedNodeId: behavior.id,
+                reason: memory.uri === stale.uri ? 'source-changed' : 'exact',
+                status: memory.uri === stale.uri ? 'changed' : 'exact',
+                strategy: 'node-id',
+                validatorVersion: 1,
+              })),
+            })),
+          });
+          const composition = {
+            structural,
+            graph: fromRepositoryQuery(f.result),
+            observedAt,
+            memoryProjects,
+            plan: planContextBrief({
+              budgetTokens: 1500,
+              mode: 'brief',
+              task: 'saveNote',
+              scope: {kind: 'repository', callerCwd: f.cwd},
+            }),
+            repositoryIdentityKind: 'local' as const,
+          };
+          const noMemory = projectStructuralNavigationAnswer(composition, 1500);
+          expect(noMemory).toEqual(projectNavigationAnswer(structural, 1500));
+          expect(EffectArray.map(noMemory.structuredContent.roles, role => role[1])).toEqual([
+            'supported',
+            'supported',
+            'supported',
+            'supported',
+          ]);
+          for (const [applicable, freshness, authority, memoryTrust] of [
+            [current, 'fresh', 'user_approved', 'approved'],
+            [stale, 'stale', 'user_approved', 'approved'],
+            [proposed, 'fresh', 'agent_generated', 'inferred'],
+            [file, 'fresh', 'user_approved', 'approved'],
+          ] as const) {
+            const memory = rawMemory([applicable, ...excluded]);
+            const immutable = JSON.stringify({composition, memory});
+            const projected = projectStructuralNavigationAnswer({...composition, memory}, 1500);
+            expect(projected.structuredContent.memory).toEqual([
+              expect.objectContaining({uri: applicable.uri, freshness, authority, memoryTrust}),
+            ]);
+            expect(projected.structuredContent.memory[0].actionCard !== undefined).toBe(freshness === 'fresh');
+            expect(projected.structuredContent.omissions.memory).toBe(0);
+            expect(projected.structuredContent.nodes).toEqual(noMemory.structuredContent.nodes);
+            expect(projected.structuredContent.roles).toEqual(noMemory.structuredContent.roles);
+            expect(projected.structuredContent.effects).toEqual(noMemory.structuredContent.effects);
+            expect(projected.structuredContent.gaps).toContain('code-anchors-unresolved');
+            expect(projected.structuredContent.gaps).toContain('navigation-memory-coverage-incomplete');
+            expect(JSON.stringify({composition, memory})).toBe(immutable);
+          }
+          const mixed = rawMemory([current, stale, proposed, file, ...excluded]);
+          const selected = selectContextBriefNavigationMemory({
+            memory: mixed,
+            memoryProjects,
+            repositoryIdentityKind: 'local',
+            anchors: [{nodeId: behavior.id, path: behavior.path, repositoryId: scope.repository}],
+          });
+          expect(selected.candidates).toHaveLength(4);
+          expect(selected.codeAnchorCoverage).toEqual({...mixed.codeAnchorCoverage, matchedMemories: 4});
+          expect(selected.citationValidations).toBe(mixed.citationValidations);
+          const mixedProjection = projectStructuralNavigationAnswer({...composition, memory: mixed}, 1500);
+          expect(
+            mixedProjection.structuredContent.memory.length + mixedProjection.structuredContent.omissions.memory,
+          ).toBe(4);
+          expect(
+            EffectArray.every(
+              mixedProjection.structuredContent.memory,
+              memory => !EffectArray.some(excluded, entry => entry.uri === memory.uri),
+            ),
+          ).toBe(true);
+          const unresolvedProject = projectStructuralNavigationAnswer(
+            {...composition, memory: mixed, memoryProjects: undefined},
+            1500,
+          );
+          expect(unresolvedProject.structuredContent.memory).toEqual([]);
+          expect(unresolvedProject.structuredContent.gaps).toContain('memory-project-scope-unavailable');
+          const empty = projectStructuralNavigationAnswer({...composition, memory: rawMemory([])}, 1500);
+          expect(empty.structuredContent.roles).toEqual(noMemory.structuredContent.roles);
+          expect(empty.structuredContent.effects).toEqual(noMemory.structuredContent.effects);
           // Reuse the real acquired observation: project metadata changes must never relabel its evidence.
           const projectCoverage: CodeGraphProjectCoverage = {
             project: 'selected-project-a',
