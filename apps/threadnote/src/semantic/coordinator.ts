@@ -544,6 +544,39 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               Effect.provideService(SecureRandom.SecureRandom, crypto),
               Effect.provideService(EffectDigest.Digest, digest),
             );
+            const captureEditSource = (uri: string) =>
+              Effect.gen(function* () {
+                const file = yield* path.fromFileUrl(new URL(uri));
+                if (
+                  !EffectString.startsWith(worktree + path.sep)(file) ||
+                  EffectString.split(path.sep)(file).includes('.git') ||
+                  (yield* fs.realPath(file)) !== file
+                )
+                  return yield* LspFault.make({code: 'rejected'});
+                const stat = yield* fs.stat(file);
+                if (
+                  stat.type !== 'File' ||
+                  Option.isNone(stat.ino) ||
+                  Option.isNone(stat.nlink) ||
+                  stat.nlink.value !== 1n
+                )
+                  return yield* LspFault.make({code: 'rejected'});
+                const identity = JSON.stringify([String(stat.dev), String(stat.ino.value)]);
+                const bytes = yield* readBounded(file, semanticAgentChangeLimits.maxSourceBytes);
+                const text = yield* Effect.try({
+                  try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+                  catch: () => LspFault.make({code: 'protocol'}),
+                });
+                const after = yield* fs.stat(file);
+                if (
+                  (yield* fs.realPath(file)) !== file ||
+                  after.type !== 'File' ||
+                  Option.isNone(after.ino) ||
+                  identity !== JSON.stringify([String(after.dev), String(after.ino.value)])
+                )
+                  return yield* LspFault.make({code: 'rejected'});
+                return {uri, text, content: sha256HexSync(bytes), identity};
+              });
             let api: SemanticSession;
             if ('runtimeCandidate' in candidate) {
               if (!selected || !javaDirectory) return yield* LspFault.make({code: 'prerequisite'});
@@ -559,6 +592,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   return reservation.bindProvider(pid);
                 },
                 () => session?.closing !== true,
+                captureEditSource,
               );
               api = java.api;
             } else {
@@ -586,6 +620,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 api = yield* makePythonSession(client, {
                   basis: fixed,
                   notifications,
+                  captureEditSource,
                   roots: [...pythonProject.roots, candidate.serverDirectory],
                   profile: pythonProject.profile,
                   environmentReady: pythonProject.ready,
@@ -595,6 +630,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 api = yield* (language === 'go' ? makeGoSession : makeRustSession)(client, {
                   basis: fixed,
                   notifications,
+                  captureEditSource,
                   roots: nativeProject.roots,
                   profile: nativeProject.profile,
                   ready: nativeProject.ready,
@@ -616,39 +652,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   compiler: typeScriptRuntime.compiler,
                   sourceRoot: typeScriptRuntime.sourceRoot,
                   verifyPolicy: typeScriptRuntime.verify,
-                  captureEditSource: uri =>
-                    Effect.gen(function* () {
-                      const file = yield* path.fromFileUrl(new URL(uri));
-                      if (
-                        !EffectString.startsWith(worktree + path.sep)(file) ||
-                        EffectString.split(path.sep)(file).includes('.git') ||
-                        (yield* fs.realPath(file)) !== file
-                      )
-                        return yield* LspFault.make({code: 'rejected'});
-                      const stat = yield* fs.stat(file);
-                      if (
-                        stat.type !== 'File' ||
-                        Option.isNone(stat.ino) ||
-                        Option.isNone(stat.nlink) ||
-                        stat.nlink.value !== 1n
-                      )
-                        return yield* LspFault.make({code: 'rejected'});
-                      const identity = JSON.stringify([String(stat.dev), String(stat.ino.value)]);
-                      const bytes = yield* readBounded(file, semanticAgentChangeLimits.maxSourceBytes);
-                      const text = yield* Effect.try({
-                        try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
-                        catch: () => LspFault.make({code: 'protocol'}),
-                      });
-                      const after = yield* fs.stat(file);
-                      if (
-                        (yield* fs.realPath(file)) !== file ||
-                        after.type !== 'File' ||
-                        Option.isNone(after.ino) ||
-                        identity !== JSON.stringify([String(after.dev), String(after.ino.value)])
-                      )
-                        return yield* LspFault.make({code: 'rejected'});
-                      return {uri, text, content: sha256HexSync(bytes), identity};
-                    }),
+                  captureEditSource,
                   configurationIncomplete: configuration =>
                     typeScriptConfigurationHasExtendsCycle(worktree, configuration).pipe(
                       Effect.provideService(FileSystem.FileSystem, fs),
@@ -954,6 +958,7 @@ export type SemanticRequest = typeof Request.Type;
 type Coordinator = Effect.Success<ReturnType<typeof makeSemanticCoordinator>>;
 type EndpointCoordinator = Omit<Coordinator, 'observe'> & Partial<Pick<Coordinator, 'observe'>>;
 interface EndpointOptions {
+  readonly dataHome?: string;
   readonly runtimeIdentity?: string;
   readonly directory: string;
   readonly token: string;
@@ -984,11 +989,12 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       ? yield* makeSemanticAgentDiskQueries({...coordinator, observe}, options.worktree, options.runtimeIdentity)
       : undefined;
   const agentChanges =
-    Schema.is(Digest)(options.runtimeIdentity) && observe
+    Schema.is(Digest)(options.runtimeIdentity) && observe && options.dataHome
       ? yield* makeSemanticAgentChanges(
           {...coordinator, observe},
           {
             directory: path.join(path.dirname(options.directory), 'proposals', sha256HexSync(options.worktree)),
+            profileHome: options.dataHome,
             worktree: options.worktree,
             runtimeIdentity: options.runtimeIdentity,
           },
@@ -1669,6 +1675,7 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
         });
         const endpoint = yield* serveSemanticEndpoint(coordinator, {
           directory,
+          dataHome: bootstrap.dataHome,
           token: bootstrap.token,
           worktree: bootstrap.worktree,
           runtimeIdentity: bootstrap.runtimeIdentity,

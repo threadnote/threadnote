@@ -1,3 +1,4 @@
+import {semanticActionChoiceLimits} from '../semantic/action_choices.js';
 import {semanticProposalLimits} from '@threadnote/semantic/proposals';
 import {semanticSessionLimits} from '../semantic/coordinator.js';
 import {semanticAgentChangeLimits} from '../semantic/agent_change_protocol.js';
@@ -74,16 +75,27 @@ export function semanticCapabilities(input: unknown = {}) {
       providerCapabilities: 'assessed-per-project' as const,
       changeSurface: {
         version: 1,
-        operations: ['rename'],
+        operations: ['rename', 'code-action'],
         actions: ['prepare', 'status', 'preflight'],
         readOnly: true,
         writerAuthorityRequired: true,
-        codeActions: 'unqualified',
+        codeActions: {
+          listing: 'retained-expiring-choice-capability',
+          qualifiedInlineFamilies: [
+            'source.organizeImports.ts',
+            'source.sortImports.ts',
+            'source.removeUnusedImports.ts',
+          ],
+          resolution: 'unqualified-denied',
+          commands: 'default-deny',
+          resources: 'complete-ordered-unsupported-preview',
+        },
         resources: 'unsupported',
-        providers: ['typescript-language-server'],
+        providers: ['typescript-language-server', 'basedpyright', 'gopls', 'rust-analyzer', 'jdtls'],
         qualification: 'experimental-source-closure',
         limits: {
           request: semanticAgentChangeLimits,
+          choices: semanticActionChoiceLimits,
           store: semanticProposalStoreLimits,
           proposal: semanticProposalLimits,
           closure: typeScriptEditClosureLimits,
@@ -98,7 +110,7 @@ export function semanticCapabilities(input: unknown = {}) {
           failedPublication: 'initial-page-or-view-fence-failure-rolls-back-retention',
         },
       },
-      pending: ['code-actions', 'resource-changes', 'apply'],
+      pending: ['qualified-action-resolution', 'resource-application', 'apply'],
     },
     providers,
     reason: deferred

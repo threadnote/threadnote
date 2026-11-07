@@ -1,7 +1,7 @@
 import {Schema} from 'effect';
 import {Counter, Digest, FileUri, Identifier, Position} from '@threadnote/semantic/contracts';
 import {SemanticAgentBufferView} from './agent_query_protocol.js';
-import {SemanticLanguage} from './provider.js';
+import {SemanticLanguage, SemanticRange} from './provider.js';
 export const semanticAgentChangeLimits = {
   maxRequestBytes: 65536,
   minPageBytes: 1024,
@@ -35,11 +35,14 @@ export const SemanticAgentChangeRequest = Schema.Union([
     project: Schema.optionalKey(Text),
     file: Text,
     language: Identifier,
-    position: Position,
+    position: Schema.optionalKey(Position),
     newName: Schema.optionalKey(Identifier),
     environment: Schema.optionalKey(Identifier),
     view: Schema.optionalKey(Schema.Union([Schema.Literal('disk'), SemanticAgentBufferView])),
     choiceHandle: Schema.optionalKey(Digest),
+    diagnosticIds: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(128))),
+    range: Schema.optionalKey(SemanticRange),
+    only: Schema.optionalKey(Schema.Array(Identifier).check(Schema.isMaxLength(16))),
   }),
   Schema.Struct({
     ...Common,
@@ -53,6 +56,7 @@ export const SemanticAgentEndpointChange = Schema.Struct({
   version: Schema.Literal(1),
   worktree: FileUri,
   profile: Digest,
+  principal: Digest,
   action: Schema.Literals(['prepare', 'status', 'preflight']),
   project: Schema.optionalKey(FileUri),
   uri: Schema.optionalKey(FileUri),
@@ -60,6 +64,10 @@ export const SemanticAgentEndpointChange = Schema.Struct({
   position: Schema.optionalKey(Position),
   newName: Schema.optionalKey(Identifier),
   operation: Schema.optionalKey(Schema.Literals(['rename', 'code-action'])),
+  choiceHandle: Schema.optionalKey(Digest),
+  diagnosticIds: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(128))),
+  range: Schema.optionalKey(SemanticRange),
+  only: Schema.optionalKey(Schema.Array(Identifier).check(Schema.isMaxLength(16))),
   environment: Schema.optionalKey(Identifier),
   view: Schema.optionalKey(SemanticAgentBufferView),
   handle: Schema.optionalKey(SemanticProposalHandle),
@@ -78,4 +86,5 @@ export const changeRefusal = (status: string, reason: string) => ({
   status,
   reason,
   applicable: false as const,
+  writerAuthorityRequired: true as const,
 });

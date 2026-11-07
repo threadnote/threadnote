@@ -6,9 +6,11 @@ import {createSemanticProposal, proposalPage, type SemanticProposal} from '@thre
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {semanticAgentQueryHost, type SemanticAgentQueryHost} from './agent_queries.js';
-import {readSemanticHostProfile} from './host_profile.js';
+import {SemanticHostProfile, semanticHostProfileName, readSemanticHostProfile} from './host_profile.js';
 import {semanticHostSelection} from './host_catalog.js';
 import {SemanticLanguage, SemanticRange, type SemanticSession} from './provider.js';
+import {SystemInfo} from '@threadnote/platform/system';
+import {makeSemanticActionChoices, SemanticActionChoice} from './action_choices.js';
 import {LspFault} from './lsp_transport.js';
 import {readBounded} from './fingerprint.js';
 import {makeSemanticProposalStore} from './proposal_store.js';
@@ -45,10 +47,26 @@ export const runSemanticAgentChangeWith = <R>(
     const runtimeIdentity = yield* services.runtimeIdentity;
     let scope;
     if (request.action === 'prepare') {
-      if (request.operation !== 'rename')
-        return changeRefusal('unsupported', 'Code-action list/select and resolution families remain unqualified');
-      if (!request.newName || request.choiceHandle)
-        return changeRefusal('invalid-request', 'Rename requires newName and no action choice');
+      if (
+        request.operation === 'rename' &&
+        (!request.position ||
+          !request.newName ||
+          request.choiceHandle ||
+          request.range ||
+          request.only ||
+          request.diagnosticIds)
+      )
+        return changeRefusal('invalid-request', 'Rename requires newName and no action query');
+      if (request.operation === 'code-action' && (request.newName || !request.range))
+        return changeRefusal('invalid-request', 'Code-action requires range and no newName');
+      if (
+        request.operation === 'code-action' &&
+        request.position &&
+        request.range &&
+        (request.position.line !== request.range.start.line ||
+          request.position.character !== request.range.start.character)
+      )
+        return changeRefusal('invalid-request', 'Action position must equal range start');
       if (!Schema.is(SemanticLanguage)(request.language))
         return changeRefusal('unsupported', 'Language is unqualified');
       if (!selected.profile.catalog[semanticHostSelection[request.language].slot])
@@ -70,8 +88,12 @@ export const runSemanticAgentChangeWith = <R>(
         uri: canonicalFileUri((yield* path.toFileUrl(file)).href),
         language: request.language,
         operation: request.operation,
-        position: request.position,
-        newName: request.newName,
+        position: request.position ?? request.range!.start,
+        ...(request.newName ? {newName: request.newName} : {}),
+        ...(request.range ? {range: request.range} : {}),
+        ...(request.diagnosticIds ? {diagnosticIds: request.diagnosticIds} : {}),
+        ...(request.only ? {only: request.only} : {}),
+        ...(request.choiceHandle ? {choiceHandle: request.choiceHandle} : {}),
         ...(request.environment ? {environment: request.environment} : {}),
         ...(typeof request.view === 'object' ? {view: request.view} : {}),
       };
@@ -89,6 +111,7 @@ export const runSemanticAgentChangeWith = <R>(
         version: 1,
         worktree,
         profile: selected.digest,
+        principal: EffectString.slice(0, -5)(semanticHostProfileName(config, worktree)),
         action: request.action,
         ...scope,
         maxBytes: request.maxBytes ?? semanticAgentChangeLimits.defaultPageBytes,
@@ -144,13 +167,23 @@ interface ChangeCoordinator {
 }
 const Prepared = Schema.Struct({
   kind: Schema.Literal('prepared-edit'),
-  operation: Schema.Literal('rename'),
-  sourceBasis: Schema.Literal('pre-request-synchronized-text-v1'),
+  operation: Schema.Literals(['rename', 'code-action']),
+  sourceBasis: Schema.Literals([
+    'pre-request-synchronized-text-v1',
+    'immutable-provider-input-v1',
+    'unqualified-operation-sequence-v1',
+  ]),
+  qualification: Schema.optionalKey(Schema.Literals(['qualified-text-only', 'unsupported-operation-sequence'])),
+  operations: Schema.optionalKey(Schema.Array(Schema.Json)),
+  changeAnnotations: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
   files: Schema.Array(
     Schema.Struct({
       observation: Observation,
       beforeText: Schema.String,
-      edits: Schema.Array(Schema.Struct({range: SemanticRange, newText: Schema.String})),
+      providerDocumentVersion: Schema.optionalKey(Schema.NullOr(Schema.Finite)),
+      edits: Schema.Array(
+        Schema.Struct({range: SemanticRange, newText: Schema.String, annotationId: Schema.optionalKey(Schema.String)}),
+      ),
       precondition: Schema.Struct({
         sourceKind: Schema.Literals(['disk', 'overlay']),
         rawDigest: Schema.String,
@@ -165,16 +198,60 @@ const Prepared = Schema.Struct({
 /** Authenticated coordinator seam; only qualified adapters can provide source-before-request evidence. */
 export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(function* (
   coordinator: ChangeCoordinator,
-  options: {directory: string; worktree: string; runtimeIdentity: string},
+  options: {directory: string; profileHome: string; worktree: string; runtimeIdentity: string},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
+  const system = yield* SystemInfo;
+  const choices = yield* makeSemanticActionChoices();
   const namespace = sha256HexSync(yield* random.randomBytes(32));
   const store = yield* makeSemanticProposalStore({directory: path.join(options.directory, 'proposals'), namespace});
   const root = yield* path.fromFileUrl(new URL(options.worktree));
-  const binding = (profile: string) =>
-    sha256HexSync(JSON.stringify([options.worktree, profile, options.runtimeIdentity]));
+  const binding = (profile: string, principal: string) =>
+    sha256HexSync(JSON.stringify([options.worktree, principal, profile, options.runtimeIdentity]));
+  // The RPC carries only a host-derived profile identity. Validate the actual protected profile again in the worker.
+  const verifyScope = (request: SemanticAgentEndpointChange) =>
+    Effect.gen(function* () {
+      if (!/^[a-f0-9]{64}$/u.test(request.principal)) return yield* LspFault.make({code: 'rejected'});
+      const directory = path.join(options.profileHome, 'semantic', 'profiles');
+      const profileFile = path.join(directory, request.principal + '.json');
+      const verify = Effect.gen(function* () {
+        for (const folder of [options.profileHome, path.join(options.profileHome, 'semantic'), directory]) {
+          const info = yield* fs.stat(folder);
+          if (
+            info.type !== 'Directory' ||
+            (yield* fs.realPath(folder)) !== path.resolve(folder) ||
+            Option.isSome(yield* fs.readLink(folder).pipe(Effect.option)) ||
+            (info.mode & (folder === options.profileHome ? 0o022 : 0o077)) !== 0 ||
+            (system.userId !== undefined && Option.isSome(info.uid) && info.uid.value !== system.userId)
+          )
+            return yield* LspFault.make({code: 'rejected'});
+        }
+        const info = yield* fs.stat(profileFile);
+        if (
+          info.type !== 'File' ||
+          (info.mode & 0o077) !== 0 ||
+          Number(info.size) > 16384 ||
+          (yield* fs.realPath(profileFile)) !== profileFile ||
+          Option.isSome(yield* fs.readLink(profileFile).pipe(Effect.option)) ||
+          (system.userId !== undefined && Option.isSome(info.uid) && info.uid.value !== system.userId)
+        )
+          return yield* LspFault.make({code: 'rejected'});
+      });
+      yield* verify;
+      const bytes = yield* readBounded(profileFile, 16384);
+      const raw = yield* Effect.try({
+        try: () => JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
+        catch: () => LspFault.make({code: 'rejected'}),
+      });
+      const profile = yield* Schema.decodeUnknownEffect(SemanticHostProfile, {onExcessProperty: 'error'})(raw).pipe(
+        Effect.mapError(() => LspFault.make({code: 'rejected'})),
+      );
+      yield* verify;
+      if (!profile.enabled || profile.worktree !== options.worktree || sha256HexSync(bytes) !== request.profile)
+        return yield* LspFault.make({code: 'rejected'});
+    });
   const pageResult = (base: object, proposal: SemanticProposal, maxBytes: number, offset?: number) =>
     Effect.try({
       try: () => ({
@@ -189,18 +266,17 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
   const execute = (request: SemanticAgentEndpointChange, buffer?: Observation) =>
     Effect.gen(function* () {
       if (request.worktree !== options.worktree) return changeRefusal('conflict', 'Different authenticated worktree');
+      yield* verifyScope(request);
       if (request.action === 'prepare') {
         if (
           !request.project ||
           !request.uri ||
           !request.language ||
           !request.position ||
-          !request.newName ||
-          request.operation !== 'rename'
+          !request.operation ||
+          (request.operation === 'rename' ? !request.newName : !request.range)
         )
           return changeRefusal('invalid-request', 'A complete rename request is required');
-        if (!['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(request.language))
-          return changeRefusal('unsupported', 'Provider edit source basis is unqualified');
         const file = yield* path.fromFileUrl(new URL(request.uri));
         const project = yield* path.fromFileUrl(new URL(request.project));
         if (
@@ -239,32 +315,163 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
           };
           observed = (yield* coordinator.attach(seed, text, request.language, request.environment)).observation;
         }
-        const outcome: QueryOutcome = yield* coordinator.use(observed, request.milliseconds, api =>
-          api.prepare
-            ? api.prepare('rename', observed, request.position!, request.newName, request.milliseconds)
-            : Effect.succeed<QueryOutcome>({
-                version: 1,
-                status: 'unsupported',
-                reason: 'Provider preparation unavailable',
-                evidence: null,
-              }),
+        const choiceBinding = sha256HexSync(
+          JSON.stringify([
+            binding(request.profile, request.principal),
+            request.project,
+            request.uri,
+            request.language,
+            request.environment ?? null,
+            request.view ?? 'disk',
+            request.range ?? null,
+            request.only ?? null,
+            request.diagnosticIds ?? null,
+          ]),
         );
+        const selected = request.choiceHandle
+          ? yield* choices.get(request.choiceHandle, choiceBinding, observed)
+          : undefined;
+        if (request.choiceHandle && !selected)
+          return changeRefusal('stale', 'Choice expired or source/query/host binding changed');
+        const outcome: QueryOutcome = yield* coordinator.use(observed, request.milliseconds, api =>
+          request.operation === 'code-action'
+            ? api.actions
+              ? api.actions(
+                  observed,
+                  {
+                    range: request.range!,
+                    ...(request.only ? {only: request.only} : {}),
+                    ...(request.diagnosticIds ? {diagnosticIds: request.diagnosticIds} : {}),
+                  },
+                  request.milliseconds,
+                  selected ? {selector: selected.selector, queryDigest: selected.queryDigest} : undefined,
+                )
+              : Effect.succeed<QueryOutcome>({
+                  version: 1,
+                  status: 'unsupported',
+                  reason: 'Provider action family unqualified',
+                  evidence: null,
+                })
+            : api.prepare
+              ? api.prepare('rename', observed, request.position!, request.newName, request.milliseconds)
+              : Effect.succeed<QueryOutcome>({
+                  version: 1,
+                  status: 'unsupported',
+                  reason: 'Provider preparation unavailable',
+                  evidence: null,
+                }),
+        );
+        if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
+          return changeRefusal('stale', 'Selected action capability expired during preparation');
         if (outcome.status !== 'ok') return outcome;
+        const first = outcome.items[0];
+        const preparedItem =
+          first &&
+          typeof first === 'object' &&
+          !EffectArray.isArray(first) &&
+          'kind' in first &&
+          first.kind === 'prepared-edit';
+        if (request.operation === 'code-action' && !preparedItem) {
+          const actionResult =
+            first &&
+            typeof first === 'object' &&
+            !EffectArray.isArray(first) &&
+            'kind' in first &&
+            first.kind === 'action-result'
+              ? yield* Schema.decodeUnknownEffect(
+                  Schema.Struct({status: Schema.String, reason: Schema.optionalKey(Schema.String)}),
+                )(first)
+              : undefined;
+          const listingItems = actionResult ? EffectArray.drop(outcome.items, 1) : outcome.items;
+          const listing = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listingItems);
+          if (!listing.length)
+            return {
+              ...changeRefusal(actionResult?.status ?? 'no-match', actionResult?.reason ?? 'No matching code actions'),
+              evidence: outcome.evidence,
+              choices: [],
+            };
+          const current = yield* coordinator.observe(outcome.evidence.observation, request.milliseconds);
+          if (!current || observationKey(current) !== observationKey(outcome.evidence.observation))
+            return changeRefusal('stale', 'Source changed before action list publication');
+          let published = false;
+          return yield* Effect.acquireUseRelease(
+            choices.retain(listing, choiceBinding, outcome.evidence.observation),
+            retained =>
+              Effect.gen(function* () {
+                const result = {
+                  ...changeRefusal(
+                    actionResult?.status ?? 'choices',
+                    actionResult?.reason ?? 'Explicit choice required',
+                  ),
+                  evidence: outcome.evidence,
+                  observation: outcome.evidence.observation,
+                  ...retained,
+                  supportedAlternatives: {
+                    readOnly: ['definition', 'references', 'hover', 'symbols'],
+                    qualifiedInline: EffectArray.filter(
+                      retained.choices,
+                      choice => choice.qualified && !choice.command && !choice.disabled,
+                    ),
+                  },
+                };
+                if (new TextEncoder().encode(JSON.stringify(result)).length > request.maxBytes)
+                  return changeRefusal('budget-exceeded', 'Complete action listing exceeds requested byte budget');
+                yield* verifyScope(request);
+                const final = yield* coordinator.observe(outcome.evidence.observation, request.milliseconds);
+                if (!final || observationKey(final) !== observationKey(outcome.evidence.observation))
+                  return changeRefusal('stale', 'Source changed before action list publication');
+                const now = yield* Clock.currentTimeMillis;
+                if (now >= retained.expiresAt || now < retained.createdAt)
+                  return changeRefusal('stale', 'Action choices expired before publication');
+                yield* verifyScope(request);
+                if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
+                  return changeRefusal('stale', 'Selected action capability expired before publication');
+                published = true;
+                return result;
+              }),
+            retained =>
+              published
+                ? Effect.void
+                : choices.discard(
+                    EffectArray.map(retained.choices, choice => choice.choiceHandle),
+                    choiceBinding,
+                  ),
+          );
+        }
+        if (request.operation === 'code-action' && !selected)
+          return changeRefusal('unsupported', 'Provider cannot substitute a proposal for explicit action selection');
         if (outcome.items.length !== 1)
           return changeRefusal('unsupported', 'Provider did not return a complete qualified source basis');
         const prepared = yield* Schema.decodeUnknownEffect(Prepared)(outcome.items[0]).pipe(
           Effect.mapError(() => LspFault.make({code: 'protocol'})),
         );
+        if (
+          prepared.operation !== request.operation ||
+          (prepared.sourceBasis === 'unqualified-operation-sequence-v1') !==
+            (prepared.qualification === 'unsupported-operation-sequence') ||
+          (request.operation === 'rename' && prepared.sourceBasis === 'unqualified-operation-sequence-v1')
+        )
+          return changeRefusal('unsupported', 'Provider source qualification does not match the whole operation');
         const proposal = yield* Effect.try({
           try: () =>
             createSemanticProposal(
               {
-                version: 1,
-                operation: 'rename',
+                ...(request.operation === 'code-action'
+                  ? {
+                      version: 2,
+                      operation: 'code-action',
+                      qualification: prepared.qualification ?? 'qualified-text-only',
+                      operations: prepared.operations,
+                      ...(prepared.changeAnnotations ? {changeAnnotations: prepared.changeAnnotations} : {}),
+                    }
+                  : {version: 1, operation: 'rename'}),
                 evidence: outcome.evidence,
                 targets: EffectArray.map(prepared.files, file => ({
                   observation: file.observation,
                   beforeText: file.beforeText,
+                  ...(request.operation === 'code-action' && file.providerDocumentVersion !== undefined
+                    ? {providerDocumentVersion: file.providerDocumentVersion}
+                    : {}),
                   edits: file.edits,
                   precondition: file.precondition,
                 })),
@@ -273,15 +480,47 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
             ),
           catch: () => LspFault.make({code: 'capacity'}),
         });
+        if (proposal.version === 2) {
+          for (const operation of proposal.operations) {
+            const uris = operation.kind === 'rename' ? [operation.oldUri, operation.newUri] : [operation.uri];
+            for (const uri of uris) {
+              const file = yield* path.fromFileUrl(new URL(uri));
+              if (
+                !EffectString.startsWith(project + path.sep)(file) ||
+                EffectString.split(path.sep)(file).includes('.git')
+              )
+                return changeRefusal('conflict', 'A complete action target escaped the authorized project');
+              const parent = path.dirname(file);
+              if ((yield* fs.realPath(parent)) !== parent || (yield* fs.stat(parent)).type !== 'Directory')
+                return changeRefusal('conflict', 'Action destination parent is not canonical');
+              if (yield* fs.exists(file)) {
+                const stat = yield* fs.stat(file);
+                if (
+                  (yield* fs.realPath(file)) !== file ||
+                  stat.type !== 'File' ||
+                  Option.isNone(stat.nlink) ||
+                  stat.nlink.value !== 1n
+                )
+                  return changeRefusal('conflict', 'Action resource is symlinked, aliased or not a file');
+              }
+            }
+          }
+        }
         let published = false;
         return yield* Effect.acquireUseRelease(
-          store.retain(proposal, binding(request.profile)),
+          store.retain(proposal, binding(request.profile, request.principal)),
           retained =>
             Effect.gen(function* () {
               const result = yield* pageResult(
                 {
                   version: 1,
-                  status: 'ok',
+                  status:
+                    proposal.version === 2 && proposal.qualification === 'unsupported-operation-sequence'
+                      ? 'unsupported'
+                      : 'ok',
+                  ...(proposal.version === 2
+                    ? {qualification: proposal.qualification, operationCount: proposal.operations.length}
+                    : {}),
                   applicable: false,
                   writerAuthorityRequired: true,
                   ...retained,
@@ -301,16 +540,25 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
               const publicationTime = yield* Clock.currentTimeMillis;
               if (publicationTime >= retained.expiresAt || publicationTime < retained.createdAt)
                 return changeRefusal('stale', 'Proposal lifetime expired before publication');
+              yield* verifyScope(request);
+              if (request.choiceHandle && !(yield* choices.get(request.choiceHandle, choiceBinding, observed)))
+                return changeRefusal('stale', 'Selected action capability expired before publication');
               published = true;
               return result;
             }),
           retained =>
-            published ? Effect.void : store.discard(retained.handle, binding(request.profile)).pipe(Effect.ignore),
+            published
+              ? Effect.void
+              : store.discard(retained.handle, binding(request.profile, request.principal)).pipe(Effect.ignore),
         );
       }
       if (!request.handle) return changeRefusal('invalid-request', 'Proposal read capability required');
-      const retained = yield* store.get(request.handle, binding(request.profile));
-      const conflicts: {uri: string; reason: string}[] = [];
+      const retained = yield* store.get(request.handle, binding(request.profile, request.principal));
+      const unsupportedSequence =
+        retained.proposal.version === 2 && retained.proposal.qualification === 'unsupported-operation-sequence';
+      const conflicts: {uri: string; reason: string}[] = unsupportedSequence
+        ? [{uri: retained.proposal.evidence.observation.uri, reason: 'unsupported-operation-sequence'}]
+        : [];
       {
         for (const target of retained.proposal.targets) {
           const uri = target.observation.uri;
@@ -356,13 +604,15 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
         return changeRefusal('stale', 'Proposal lifetime expired before publication');
       const base = {
         version: 1,
-        status: conflicts.length
-          ? request.action === 'preflight'
-            ? 'conflict'
-            : 'stale'
-          : retained.stale
-            ? 'stale'
-            : 'ok',
+        status: unsupportedSequence
+          ? 'unsupported'
+          : conflicts.length
+            ? request.action === 'preflight'
+              ? 'conflict'
+              : 'stale'
+            : retained.stale
+              ? 'stale'
+              : 'ok',
         applicable: false,
         writerAuthorityRequired: true,
         stale: retained.stale || conflicts.length > 0,
@@ -381,6 +631,7 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
   return {
     execute: (request: SemanticAgentEndpointChange, buffer?: Observation) =>
       execute(request, buffer).pipe(
+        Effect.tap(() => verifyScope(request)),
         Effect.timeoutOption(request.milliseconds),
         Effect.map(result =>
           result._tag === 'Some' ? result.value : changeRefusal('timeout', 'Proposal deadline expired'),

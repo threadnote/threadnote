@@ -1,3 +1,4 @@
+import {isJsonObject} from '@threadnote/platform/json';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
 import {
@@ -50,6 +51,23 @@ import {loadRecallIndexData} from '@threadnote/recall/index';
 
 const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
   Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
+
+const citationFailureEvidence = (candidate: unknown, gaps: unknown) => {
+  const selected: Record<string, unknown> = {};
+  if (isJsonObject(candidate)) {
+    for (const key of [
+      'freshness',
+      'freshnessBasis',
+      'preciseStatus',
+      'citationSummary',
+      'citationReceipts',
+      'codeRelations',
+      'citationErrorCount',
+    ])
+      if (key in candidate) selected[key] = candidate[key];
+  }
+  return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps}));
+};
 
 /** Actual graph, canonical memory reads and citation validation; only the provider RPC is a stable fixture. */
 const memoryContextFixture = Effect.gen(function* () {
@@ -546,7 +564,10 @@ describe('semantic context with canonical citation-backed memory', () => {
         expect(knowledge.binding?.scope).toBe('document');
         expect(knowledge.memorySelection?.nodeId).toBe(f.run.id);
         const cards = knowledge.brief?.durableDecisions ?? [];
-        expect(memoryByUri(cards, 'threadnote://memory/tn_current')).toMatchObject({
+        expect(
+          memoryByUri(cards, 'threadnote://memory/tn_current'),
+          citationFailureEvidence(memoryByUri(cards, 'threadnote://memory/tn_current'), knowledge.gaps),
+        ).toMatchObject({
           freshness: 'fresh',
           authority: 'user_approved',
           memoryTrust: 'approved',
@@ -596,7 +617,11 @@ describe('semantic context with canonical citation-backed memory', () => {
         yield* f.prepareMemory;
         const {knowledge, publicKnowledge} = yield* f.ask;
         const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
-        expect(proposal).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
+        expect(proposal, citationFailureEvidence(proposal, knowledge.gaps)).toMatchObject({
+          authority: 'agent_generated',
+          memoryTrust: 'inferred',
+          freshness: 'fresh',
+        });
         expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
         expect(JSON.stringify(publicKnowledge)).toContain('KEEP_FILE_CONSTRAINT');
         expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');

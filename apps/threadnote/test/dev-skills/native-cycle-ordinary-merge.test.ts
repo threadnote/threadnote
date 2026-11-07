@@ -767,6 +767,10 @@ const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const git = (args: readonly string[]) => yieldCommand(repo, args);
+      yield* fs.writeFileString(repo + '/upstream-deleted.ts', 'export const removedUpstream = true;\n');
+      yield* git(['add', '.']);
+      yield* git(['commit', '-m', 'Retain baseline path later deleted upstream']);
+      yield* git(['branch', '-f', 'main', 'HEAD']);
       yield* git(['checkout', 'main']);
       yield* fs.writeFileString(repo + '/historical.ts', 'export const historical = true;\n');
       yield* git(['add', '.']);
@@ -814,6 +818,7 @@ const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(
   yield* f.git(['add', '.']);
   yield* f.git(['commit', '-m', 'Reconcile staged predecessor into current owned implementation']);
   yield* f.git(['checkout', '-b', 'rewritten', root]);
+  yield* f.git(['rm', 'upstream-deleted.ts']);
   yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const rewritten = true;\n');
   for (let index = 0; index < (large ? 410 : 0); index++)
     yield* f.fs.writeFileString(f.path.join(f.repo, `upstream-${index}.ts`), 'export const inherited = true;\n');
@@ -1034,6 +1039,15 @@ describe('same-label rewritten-base native qualification', () => {
         const snapshot = (yield* f.read()).snapshots.at(-1)!.snapshot;
         expect(snapshot.snapshotId).toBe(f.fields.snapshotId);
         const proof = snapshot.sameLabelRebasedBaseIntegrationV1!;
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(proof.upstreamEvidence, item => item.path === 'upstream-deleted.ts'),
+          ),
+        ).toMatchObject({
+          baseline: {mode: '100644'},
+          currentBase: {mode: '000000'},
+          head: {mode: '000000'},
+        });
         expect(snapshot.version).toBe(3);
         expect(snapshot.supersedes).toBe(f.prior.snapshotId);
         expect(snapshot.phaseHash).not.toBe(f.prior.phaseHash);
@@ -1241,6 +1255,53 @@ describe('same-label rewritten-base native qualification', () => {
           'review-blocked',
         );
         expect((yield* f.read()).state.phases.one.validation).toBeUndefined();
+
+        // A normal later base advance must retain the already validated inherited history.
+        const beforeOrdinary = yield* f.read();
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'later-upstream.ts'), 'export const later = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Advance rewritten upstream normally']);
+        const laterBase = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        yield* f.git(['checkout', 'feature/one']);
+        yield* f.git(['merge', '--no-ff', 'main', '-m', 'Ordinary continuation after qualified rewrite']);
+        const laterHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        expect(
+          (yield* f.mutate('snapshot', {
+            protocolVersion: 2,
+            phaseId: 'one',
+            snapshotId: 'ordinary-after-qualified',
+            previous: repeatedSnapshot.snapshotId,
+            acceptedHead: laterHead,
+            reason: 'Continue the same run after a normal base advance',
+            userAuthority: 'Retain the reviewed qualification and explicit current-base owners',
+            ordinaryMergeQualificationV1: {
+              priorHead: repeatedSnapshot.head,
+              currentBaseHead: laterBase,
+              currentHead: laterHead,
+              fromBaseBranch: 'main',
+              planDocumentHash: f.fields.sameLabelRebasedBaseIntegrationV1.planDocumentHash,
+              phaseOwnedPaths: proof.phaseOwnedPaths,
+            },
+          })).status,
+        ).not.toBe('error');
+        const continued = yield* f.read();
+        const ordinary = continued.snapshots.at(-1)!.snapshot;
+        expect(ordinary.version).toBe(2);
+        expect(ordinary.ordinaryMergeQualificationV1!.inheritedUpstreamOnlyPaths).toEqual([
+          'later-upstream.ts',
+          ...proof.inheritedUpstreamOnlyPaths,
+        ]);
+        expect(continued.snapshots.slice(0, -1)).toEqual(beforeOrdinary.snapshots);
+        for (const key of ['baselines', 'reviews', 'attempts', 'reviewLimits', 'reviewExpansions', 'plans'] as const)
+          expect(continued[key]).toEqual(beforeOrdinary[key]);
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: ordinary.snapshotId,
+            attemptId: 'ordinary-incremental',
+            report: report(ordinary, 'incremental'),
+          })).status,
+        ).toBe('error');
       }).pipe(run),
     ordinaryMergeFixtureTimeout,
   );

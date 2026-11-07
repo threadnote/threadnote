@@ -244,15 +244,63 @@ export function validateNativeCycleMergeReceipt(
     )
   )
     fail('Merge provenance or the disjoint exhaustive path partition changed.');
+  // Runtime validation visits retained prefixes first. Only that exact manifest3 predecessor
+  // can establish already inherited history; a fresh ordinary upstream change still uses the legacy rule.
+  const priorProof = prior.version === 3 ? prior.sameLabelRebasedBaseIntegrationV1 : undefined;
+  const priorPlan =
+    priorProof &&
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(plans, item => item.source.documentHash === priorProof.planDocumentHash),
+    );
+  const inherited = new Map<string, NativeCycleOrdinaryMergeReceipt['upstreamEvidence'][number]>();
+  if (
+    priorProof &&
+    priorPlan &&
+    prior.phaseId === snapshot.phaseId &&
+    prior.repo === snapshot.repo &&
+    prior.baseTree === snapshot.baseTree &&
+    (snapshot.previous ?? snapshot.supersedes) === prior.snapshotId &&
+    receipt.priorDeclaredBaseTree === prior.scopeBase &&
+    priorProof.currentHead === prior.head &&
+    prior.acceptedHead === prior.head &&
+    priorProof.currentBaseHead === prior.declaredBaseHead &&
+    priorProof.currentBaseTree === prior.scopeBase &&
+    priorProof.baselineHead === baselineHead &&
+    priorProof.baselineTree === snapshot.baseTree &&
+    priorProof.runId === plan!.source.binding.runId &&
+    priorProof.generation === plan!.source.binding.generation &&
+    priorProof.bindingId === plan!.source.binding.bindingId &&
+    priorProof.project === plan!.project &&
+    priorProof.repo === prior.repo &&
+    same(priorPlan.source.binding, plan!.source.binding) &&
+    priorPlan.project === plan!.project &&
+    priorPlan.featureId === plan!.featureId &&
+    priorProof.toBaseBranch === receipt.fromBaseBranch &&
+    EffectArray.some(plan!.phases, phase => phase.id === snapshot.phaseId && phase.branch === priorProof.phaseBranch) &&
+    nativeCyclePhaseHash(priorPlan, prior.phaseId) === prior.phaseHash &&
+    ordered(priorProof.inheritedUpstreamOnlyPaths) &&
+    same(
+      EffectArray.map(priorProof.upstreamEvidence, item => item.path),
+      priorProof.inheritedUpstreamOnlyPaths,
+    )
+  )
+    for (const item of priorProof.upstreamEvidence) inherited.set(item.path, item);
   for (const item of [...receipt.currentBaseEvidence, ...receipt.upstreamEvidence]) {
     for (const value of [item.baseline, item.oldBase, item.currentBase, item.head])
       if ((value.mode === '000000') !== /^0+$/u.test(value.blob))
         fail('Absent tree entries require the zero object identity.');
+    const retained = inherited.get(item.path);
+    const carried =
+      retained &&
+      sameEntry(retained.baseline, item.baseline) &&
+      sameEntry(retained.currentBase, retained.head) &&
+      sameEntry(retained.head, item.oldBase) &&
+      sameEntry(item.oldBase, item.currentBase);
     if (
       receipt.currentBaseChangedPaths.includes(item.path)
         ? sameEntry(item.currentBase, item.head)
         : !sameEntry(item.currentBase, item.head) ||
-          sameEntry(item.oldBase, item.currentBase) ||
+          (sameEntry(item.oldBase, item.currentBase) && !carried) ||
           sameEntry(item.baseline, item.head)
     )
       fail('Every path requires positive mode and object evidence for its partition.');

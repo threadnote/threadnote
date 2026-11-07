@@ -306,6 +306,7 @@ export const makeRustSession = Effect.fn('semantic.makeRustSession')(function* (
     ready: options.ready.pipe(Effect.andThen(quiet), Effect.timeout(options.startupMilliseconds)),
     policy: {
       language: 'rust',
+      editSourceQualification: 'versioned-text-document-v1',
       resolveCodeActions: true,
       pullDiagnostics: true,
       codeActionKinds: ['', 'quickfix', 'refactor'],
