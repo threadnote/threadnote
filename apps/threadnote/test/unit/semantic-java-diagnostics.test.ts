@@ -481,6 +481,92 @@ describe('Java request diagnostics', () => {
       {arbitrary: {runs: 16}},
     );
 
+    effectIt.effect('refuses the complete edit when a closed target changes A to B to A around conversion', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const file = f.path.join(f.source, 'Included.java');
+        const sealedText = f.texts['Included.java'];
+        const transientText = 'class Unrelate {}\n';
+        let armed = false;
+        let guardDepth = 0;
+        let targetStats = 0;
+        let mutated = false;
+        let restored = false;
+        const guarded = (check: typeof f.prepared.verify) =>
+          Effect.sync(() => {
+            guardDepth++;
+          }).pipe(
+            Effect.andThen(check),
+            Effect.ensuring(
+              Effect.sync(() => {
+                guardDepth--;
+              }),
+            ),
+          );
+        const hooked = {
+          ...f.fs,
+          stat: (...args: Parameters<typeof f.fs.stat>) =>
+            Effect.gen(function* () {
+              // Both post-response reads formerly saw B while every real source/model guard saw A.
+              if (armed && guardDepth === 0 && args[0] === file && ++targetStats === 4) {
+                yield* f.fs.writeFileString(file, transientText);
+                mutated = true;
+              }
+              return yield* f.fs.stat(...args);
+            }),
+        };
+        const response = {
+          changes: {
+            [f.uris['Main.java']]: [
+              {range: {start: {line: 0, character: 6}, end: {line: 0, character: 10}}, newText: 'Next'},
+            ],
+            [f.uris['Included.java']]: [
+              {range: {start: {line: 0, character: 6}, end: {line: 0, character: 14}}, newText: 'Next'},
+            ],
+          },
+        };
+        const made = yield* f
+          .create(response, options => {
+            Reflect.set(options, 'prepared', {
+              ...f.prepared,
+              verify: guarded(f.prepared.verify),
+              verifySource: guarded(f.prepared.verifySource),
+            });
+            const runtimeVerify = options.runtime.verify;
+            Reflect.set(
+              options.runtime,
+              'verify',
+              Effect.gen(function* () {
+                if (mutated && !restored) {
+                  yield* f.fs.writeFileString(file, sealedText);
+                  restored = true;
+                }
+                yield* runtimeVerify;
+              }),
+            );
+          })
+          .pipe(Effect.provideService(FileSystem.FileSystem, hooked));
+        const session = yield* made.result;
+        const view = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        armed = true;
+        const result = yield* Effect.exit(session.prepare('rename', view, {line: 0, character: 15}, 'Next', 10000));
+        expect(mutated).toBe(true);
+        expect(restored).toBe(true);
+        expect(sha256HexSync(transientText)).not.toBe(sha256HexSync(sealedText));
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result))
+          expect(result.cause.reasons).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                error: expect.objectContaining({_tag: 'SemanticSessionFault', reason: 'stale'}),
+              }),
+            ]),
+          );
+        expect(yield* f.fs.readFileString(file)).toBe(sealedText);
+        yield* f.prepared.verify;
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+
     effectIt.effect('does not activate projected reads when the prepared model is missing', () =>
       Effect.gen(function* () {
         const f = yield* preparedSessionFixture();
