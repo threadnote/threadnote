@@ -14,7 +14,11 @@ import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
 import {ReadDeadlineExceeded, isReadCleanupUnconfirmed, type ReadDeadline} from '@threadnote/platform/read_deadline';
 import {RecallReadyReadUnavailable} from '@threadnote/recall/index';
-import {withNativeContextBriefReadSources} from './native_read_boundary.js';
+import {
+  withNativeContextBriefReadSources,
+  type ContextBriefNativeSemanticRead,
+  type ContextBriefNativeSemanticState,
+} from './native_read_boundary.js';
 import {withProductionPhaseTiming} from '../effect/production_log.js';
 
 import type {AnonymousTelemetryContextBriefCitationUnknownReason} from '../effect/telemetry.js';
@@ -75,6 +79,7 @@ export interface ContextBriefRuntimeCompilerSources<
 
 /** Internal compiler controls for reviewed callers; never part of the Context Brief request schema. */
 interface ContextBriefCompilerOptions {
+  readonly semanticContext?: ContextBriefNativeSemanticRead;
   readonly sourceEvidence?: (
     request: ContextBriefSourceEvidenceRequest,
   ) => Effect.Effect<
@@ -306,7 +311,10 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
               const target = options.semanticMemoryTarget?.();
               if (target && (!target.nodeId || !target.binding || !target.repositoryIdentityKind))
                 return Effect.succeed(
-                  unavailableContextBriefCodeLinkedMemoryEvidence(1, target.gap ?? 'semantic-symbol-target-unavailable'),
+                  unavailableContextBriefCodeLinkedMemoryEvidence(
+                    1,
+                    target.gap ?? 'semantic-symbol-target-unavailable',
+                  ),
                 );
               return retrieveContextBriefCodeLinkedMemoryEvidence(
                 config,
@@ -361,6 +369,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
           {
             allowedUriScopes: options.allowedMemoryUriScopes,
             includeProcedureEvidence: options.includeProcedureEvidence,
+            semantic: options.semanticContext,
           },
         ),
         requestedRepositories,
@@ -417,11 +426,7 @@ export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticK
   unknown,
   Effect.Services<ReturnType<typeof compileContextBriefRuntime>>
 > {
-  const state: {
-    binding: SemanticContextSourceBindingV1 | null;
-    repositoryIdentityKind: 'local' | 'remote' | null;
-    selection: {readonly nodeId: string | null; readonly gap?: string};
-  } = {
+  const state: ContextBriefNativeSemanticState = {
     binding: null,
     repositoryIdentityKind: null,
     selection: {nodeId: null, gap: 'semantic-symbol-target-unavailable'},
@@ -432,6 +437,7 @@ export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticK
     {
       codeLinkedMemoryOnly: true,
       includeProcedureEvidence: false,
+      semanticContext: {evidence, target, state},
       semanticMemoryTarget: () => ({
         ...state.selection,
         binding: state.binding,

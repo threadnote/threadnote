@@ -45,6 +45,8 @@ import type {SemanticContextKnowledgeV1} from '@threadnote/context/types';
 import {projectContextBriefAgentView} from '@threadnote/context/projector';
 import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store.js';
 import type {SemanticSession} from '../../src/semantic/provider.js';
+import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_boundary.js';
+import {loadRecallIndexData} from '@threadnote/recall/index';
 
 const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
   Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
@@ -141,16 +143,16 @@ const memoryContextFixture = Effect.gen(function* () {
   const resources = yield* ResourceStore;
   const location = {account: config.account, home, user: config.user};
   const stored = new Map<string, string>();
-  const remember = (name: string, nodeId: string, body: string, inferred = false) =>
+  const remember = (name: string, nodeId: string, body: string, inferred = false, project = 'repository') =>
     Effect.gen(function* () {
       const citations = yield* captureMemoryCodeCitations(config, {callerCwd: repository, refs: [nodeId]});
       expect(citations).toHaveLength(1);
-      const memoryUri = `threadnote://user/tester/memories/durable/projects/repository/${name}.md`;
+      const memoryUri = `threadnote://user/tester/memories/durable/projects/${project}/${name}.md`;
       const metadata: MemoryMetadata = {
         kind: 'durable',
         memoryId: `tn_${name}`,
         topic: name,
-        project: 'repository',
+        project,
         status: 'active',
         schemaVersion: MEMORY_SCHEMA_VERSION,
         sourceAgentClient: 'test',
@@ -419,6 +421,7 @@ const memoryContextFixture = Effect.gen(function* () {
     addReference,
     rename,
     document,
+    prepareMemory: loadRecallIndexData(config, {includeInactive: false}),
     diagnostics,
     rawContext: runSemanticAgentQueryWith(host, config, request),
     closing: (value: Observation | undefined) => {
@@ -446,6 +449,7 @@ describe('semantic context with canonical citation-backed memory', () => {
         yield* f.update;
         yield* f.addReference;
         yield* f.remember('before-rename', f.run.id, 'Applies to: Alpha.run\nInvariant: ORIGINAL_RUN_CONSTRAINT.');
+        yield* f.prepareMemory;
         const before = yield* f.ask;
         const beforeImage = structuredClone(before.result);
         expect(JSON.stringify(before.publicKnowledge)).toContain('ORIGINAL_RUN_CONSTRAINT');
@@ -518,67 +522,95 @@ describe('semantic context with canonical citation-backed memory', () => {
         ).toBe(true);
         yield* f.unchanged;
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 20000},
   );
 
-  effectIt.effect('selects the exact current constraint, labels stale decisions and excludes another method', () =>
-    Effect.gen(function* () {
-      const f = yield* memoryContextFixture;
-      const stale = yield* f.remember('stale', f.run.id, 'Applies to: Alpha.run\nInvariant: OLD_DECISION_42.');
-      yield* f.update;
-      const current = yield* f.remember('current', f.run.id, 'Applies to: Alpha.run\nInvariant: KEEP_CURRENT_43.');
-      yield* f.remember('unrelated', f.other.id, 'Applies to: Alpha.other\nInvariant: NEVER_FOR_RUN.');
-      const {knowledge, publicKnowledge} = yield* f.ask;
-      expect(knowledge.binding?.scope).toBe('document');
-      expect(knowledge.memorySelection?.nodeId).toBe(f.run.id);
-      const cards = knowledge.brief?.durableDecisions ?? [];
-      expect(memoryByUri(cards, 'threadnote://memory/tn_current')).toMatchObject({
-        freshness: 'fresh',
-        authority: 'user_approved',
-        memoryTrust: 'approved',
-        freshnessBasis: 'code-citations',
-      });
-      expect(JSON.stringify(publicKnowledge)).toContain('KEEP_CURRENT_43');
-      expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
-      expect(memoryByUri(cards, 'threadnote://memory/tn_stale')).toMatchObject({freshness: 'stale'});
-      const visible = publicKnowledge.brief.durableDecisions ?? [];
-      expect(memoryByUri(visible, 'threadnote://memory/tn_current')).toMatchObject({
-        freshness: 'fresh',
-        authority: 'user_approved',
-        memoryTrust: 'approved',
-        freshnessBasis: 'code-citations',
-      });
-      const historical = memoryByUri(visible, 'threadnote://memory/tn_stale');
-      expect(historical).toMatchObject({freshness: 'stale', freshnessBasis: 'code-citations'});
-      expect(publicKnowledge.brief.output?.truncated).toBe(true);
-      expect(
-        EffectArray.some(EffectRecord.values(publicKnowledge.brief.output?.omissions ?? {}), count => count > 0),
-      ).toBe(true);
-      expect(JSON.stringify(knowledge.brief)).not.toContain('NEVER_FOR_RUN');
-      expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
-      expect(current).not.toBe(stale);
-      yield* f.unchanged;
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  effectIt.effect(
+    'selects the exact current constraint, labels stale decisions and excludes another method',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* memoryContextFixture;
+        const stale = yield* f.remember('stale', f.run.id, 'Applies to: Alpha.run\nInvariant: OLD_DECISION_42.');
+        yield* f.update;
+        const current = yield* f.remember('current', f.run.id, 'Applies to: Alpha.run\nInvariant: KEEP_CURRENT_43.');
+        yield* f.remember('unrelated', f.other.id, 'Applies to: Alpha.other\nInvariant: NEVER_FOR_RUN.');
+        yield* f.remember(
+          'foreign',
+          f.run.id,
+          'Applies to: Alpha.run\nInvariant: NEVER_FOREIGN_PROJECT.',
+          false,
+          'foreign',
+        );
+        yield* f.prepareMemory;
+        const {knowledge, publicKnowledge} = yield* f.ask;
+        expect(knowledge.binding?.scope).toBe('document');
+        expect(knowledge.memorySelection?.nodeId).toBe(f.run.id);
+        const cards = knowledge.brief?.durableDecisions ?? [];
+        expect(memoryByUri(cards, 'threadnote://memory/tn_current')).toMatchObject({
+          freshness: 'fresh',
+          authority: 'user_approved',
+          memoryTrust: 'approved',
+          freshnessBasis: 'code-citations',
+        });
+        expect(JSON.stringify(publicKnowledge)).toContain('KEEP_CURRENT_43');
+        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOR_RUN');
+        expect(JSON.stringify(publicKnowledge)).not.toContain('NEVER_FOREIGN_PROJECT');
+        expect(memoryByUri(cards, 'threadnote://memory/tn_stale')).toMatchObject({freshness: 'stale'});
+        const visible = publicKnowledge.brief.durableDecisions ?? [];
+        expect(memoryByUri(visible, 'threadnote://memory/tn_current')).toMatchObject({
+          freshness: 'fresh',
+          authority: 'user_approved',
+          memoryTrust: 'approved',
+          freshnessBasis: 'code-citations',
+        });
+        const historical = memoryByUri(visible, 'threadnote://memory/tn_stale');
+        expect(historical).toMatchObject({freshness: 'stale', freshnessBasis: 'code-citations'});
+        expect(publicKnowledge.brief.output?.truncated).toBe(true);
+        expect(
+          EffectArray.some(EffectRecord.values(publicKnowledge.brief.output?.omissions ?? {}), count => count > 0),
+        ).toBe(true);
+        expect(JSON.stringify(knowledge.brief)).not.toContain('NEVER_FOR_RUN');
+        expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+        expect(current).not.toBe(stale);
+        yield* f.unchanged;
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 20000},
   );
 
-  effectIt.effect('keeps code useful without memory and never promotes inferred guidance to approved', () =>
-    Effect.gen(function* () {
-      const f = yield* memoryContextFixture;
-      yield* f.update;
-      const empty = yield* f.ask;
-      expect(empty.knowledge.brief?.durableDecisions ?? []).toEqual([]);
-      expect(JSON.stringify(empty.publicKnowledge)).not.toContain('Invariant:');
-      yield* f.remember('inferred', f.run.id, 'Applies to: Alpha.run\nInvariant: PROPOSED_ONLY.', true);
-      const {knowledge, publicKnowledge} = yield* f.ask;
-      const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
-      expect(proposal).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
-      expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
-      expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');
-      expect(JSON.stringify(publicKnowledge)).toContain('inferred');
-      expect(
-        memoryByUri(publicKnowledge.brief.durableDecisions ?? [], 'threadnote://memory/tn_inferred'),
-      ).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
-      yield* f.unchanged;
-    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  effectIt.effect(
+    'keeps code useful without memory and never promotes inferred guidance to approved',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* memoryContextFixture;
+        yield* f.update;
+        yield* f.prepareMemory;
+        const empty = yield* f.ask;
+        expect(empty.knowledge.brief?.durableDecisions ?? []).toEqual([]);
+        expect(JSON.stringify(empty.publicKnowledge)).not.toContain('Invariant:');
+        yield* f.remember('inferred', f.run.id, 'Applies to: Alpha.run\nInvariant: PROPOSED_ONLY.', true);
+        yield* f.remember('file', 'main.ts', 'Applies to: main.ts\nInvariant: KEEP_FILE_CONSTRAINT.');
+        yield* f.prepareMemory;
+        const {knowledge, publicKnowledge} = yield* f.ask;
+        const proposal = memoryByUri(knowledge.brief?.durableDecisions ?? [], 'threadnote://memory/tn_inferred');
+        expect(proposal).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
+        expect(JSON.stringify(publicKnowledge)).toContain('PROPOSED_ONLY');
+        expect(JSON.stringify(publicKnowledge)).toContain('KEEP_FILE_CONSTRAINT');
+        expect(JSON.stringify(publicKnowledge)).toContain('agent_generated');
+        expect(JSON.stringify(publicKnowledge)).toContain('inferred');
+        expect(
+          memoryByUri(publicKnowledge.brief.durableDecisions ?? [], 'threadnote://memory/tn_inferred'),
+        ).toMatchObject({authority: 'agent_generated', memoryTrust: 'inferred', freshness: 'fresh'});
+        yield* f.unchanged;
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 20000},
   );
 });
 

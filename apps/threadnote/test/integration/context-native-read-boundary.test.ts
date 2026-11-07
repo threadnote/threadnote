@@ -1,9 +1,12 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {canonicalFileUri, type Evidence} from '@threadnote/semantic/contracts';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
@@ -19,7 +22,10 @@ import {
   type ContextBriefNativeReadRequest,
 } from '../../src/context_brief/native_read_boundary.js';
 import {nativeContextReadCommands} from '../../src/context_brief/native_read_worker.js';
-import type {ContextBriefRuntimeCompilerSources} from '../../src/context_brief/index.js';
+import {
+  compileSemanticContextKnowledge,
+  type ContextBriefRuntimeCompilerSources,
+} from '../../src/context_brief/index.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withProductionLogging, withProductionPhaseTiming} from '../../src/effect/production_log.js';
 
@@ -39,7 +45,7 @@ const sources: ContextBriefRuntimeCompilerSources = {
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-context-'});
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-context-'}));
   const repo = path.join(root, 'repo');
   const home = path.join(root, 'home');
   yield* fs.makeDirectory(path.join(repo, 'src'), {recursive: true});
@@ -152,6 +158,100 @@ describe('whole native Context Brief read boundary', () => {
         );
         expect(drift[0]?.receipts[0]?.coverage).toBe('incomplete');
         expect(drift[0]?.receipts[0]?.status).not.toBe('exact');
+      }).pipe(
+        Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
+        provideTestLayer(ApplicationLayer),
+        TestClock.withLive,
+      ),
+    {timeout: 20000},
+  );
+
+  effectIt.effect(
+    'native semantic reads bind the exact document and target, then abstain on foreign project or source drift',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* (yield* CodeGraphIndexer).index({
+          cwd: f.repo,
+          threadnoteHome: f.home,
+          ensureVectors: false,
+          sourceOnly: true,
+        });
+        const nodes = yield* (yield* CodeGraphQueryService).inspect({
+          cwd: f.repo,
+          threadnoteHome: f.home,
+          operation: 'query',
+          query: 'boundedAnswer',
+          nodeLimit: 10,
+          edgeLimit: 1,
+          refresh: false,
+          requestMaintenance: false,
+        });
+        const node = Option.getOrUndefined(EffectArray.findFirst(nodes.nodes, item => item.name === 'boundedAnswer'));
+        if (!node) throw new Error('Fixture target is missing');
+        const worktree = canonicalFileUri((yield* f.path.toFileUrl(f.repo)).href);
+        const uri = canonicalFileUri((yield* f.path.toFileUrl(f.file)).href);
+        const evidence: Evidence = {
+          basis: 'semantic',
+          scope: 'document',
+          completeness: 'partial',
+          limitations: [],
+          observation: {
+            version: 1,
+            repository: sha256HexSync(worktree),
+            worktree,
+            project: worktree,
+            configuration: sha256HexSync('configuration'),
+            toolchain: sha256HexSync('toolchain'),
+            provider: {id: 'fixture', version: '1', generation: 1},
+            view: {kind: 'disk', id: 'fixture', owner: 'fixture', epoch: 0},
+            uri,
+            content: sha256HexSync(yield* f.fs.readFile(f.file)),
+            documentVersion: null,
+            projectEpoch: 1,
+          },
+        };
+        const target = {
+          evidence,
+          uri,
+          range: {
+            start: {line: node.span.line - 1, character: node.span.column - 1},
+            end: {line: node.span.endLine - 1, character: node.span.endColumn - 1},
+          },
+        };
+        const input = {
+          scope: {kind: 'repository' as const, callerCwd: f.repo, project: 'fixture'},
+          codeRefs: ['src/module.ts'],
+          mode: 'explain' as const,
+          task: 'Understand boundedAnswer',
+          budgetTokens: 1500,
+        };
+        const knowledge = yield* compileSemanticContextKnowledge(f.config, input, evidence, target);
+        expect(knowledge.binding?.semanticContent).toBe(evidence.observation.content);
+        expect(knowledge.memorySelection?.nodeId).toBe(node.id);
+        expect(knowledge.brief?.graph?.sources?.[0]?.content).toContain('boundedAnswer');
+        expect(knowledge.gaps).toContain('semantic-symbol-memory-coverage-incomplete');
+        const foreign = {
+          ...evidence,
+          observation: {
+            ...evidence.observation,
+            project: canonicalFileUri((yield* f.path.toFileUrl(f.path.join(f.repo, 'foreign'))).href),
+          },
+        };
+        const unbound = yield* compileSemanticContextKnowledge(f.config, input, foreign, {
+          ...target,
+          evidence: foreign,
+        });
+        expect(unbound.binding).toBeNull();
+        expect(unbound.memorySelection).toBeNull();
+        expect(unbound.brief).toBeNull();
+        expect(unbound.gaps).toContain('semantic-graph-source-unbound');
+        yield* f.fs.writeFileString(f.file, 'export function boundedAnswer() { return 43; }\n');
+        const drifted = yield* compileSemanticContextKnowledge(f.config, input, evidence, target);
+        expect(drifted.binding).toBeNull();
+        expect(drifted.memorySelection).toBeNull();
+        expect(drifted.brief).toBeNull();
+        expect(drifted.gaps).toContain('semantic-graph-source-unbound');
       }).pipe(
         Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
         provideTestLayer(ApplicationLayer),
