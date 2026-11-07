@@ -122,6 +122,7 @@ export function selectContextBriefSourceRanges(
 }
 
 export interface ContextBriefSourceEvidenceRequest {
+  readonly additionalRanges?: readonly ContextBriefSourceRangeCandidateV1[];
   readonly identity: RepositoryIdentity;
   readonly maximumContentBytes: number;
   readonly repositoryKey: string;
@@ -136,7 +137,12 @@ export interface ContextBriefSourceEvidenceResult {
 export const retrieveContextBriefSourceEvidence = Effect.fn('contextBrief.retrieveSourceEvidence')(function* (
   input: ContextBriefSourceEvidenceRequest,
 ) {
-  const ranges = selectContextBriefSourceRanges(contextBriefSourceRangeCandidates(input.result));
+  const ranges = selectContextBriefSourceRanges([
+    ...EffectArray.map(contextBriefSourceRangeCandidates(input.result), candidate =>
+      input.additionalRanges?.length ? {...candidate, rank: candidate.rank + 1} : candidate,
+    ),
+    ...(input.additionalRanges ?? []),
+  ]);
   if (ranges.length === 0) return {excerpts: [], gaps: ['graph-source-selection-empty']} as const;
   const sources = uniqueSources(ranges);
   const resolved = yield* readCodeGraphCitationSources({
