@@ -244,9 +244,10 @@ export function validateNativeCycleMergeReceipt(
     )
   )
     fail('Merge provenance or the disjoint exhaustive path partition changed.');
-  // Runtime validation visits retained prefixes first. Only that exact manifest3 predecessor
+  // Runtime validation visits retained prefixes first. Only that exact merge predecessor
   // can establish already inherited history; a fresh ordinary upstream change still uses the legacy rule.
-  const priorProof = prior.version === 3 ? prior.sameLabelRebasedBaseIntegrationV1 : undefined;
+  const rebasedPriorProof = prior.version === 3 ? prior.sameLabelRebasedBaseIntegrationV1 : undefined;
+  const priorProof = prior.version === 2 ? prior.ordinaryMergeQualificationV1 : rebasedPriorProof;
   const priorPlan =
     priorProof &&
     EffectOption.getOrUndefined(
@@ -266,18 +267,22 @@ export function validateNativeCycleMergeReceipt(
     priorProof.currentBaseHead === prior.declaredBaseHead &&
     priorProof.currentBaseTree === prior.scopeBase &&
     priorProof.baselineHead === baselineHead &&
-    priorProof.baselineTree === snapshot.baseTree &&
-    priorProof.runId === plan!.source.binding.runId &&
-    priorProof.generation === plan!.source.binding.generation &&
-    priorProof.bindingId === plan!.source.binding.bindingId &&
-    priorProof.project === plan!.project &&
-    priorProof.repo === prior.repo &&
     same(priorPlan.source.binding, plan!.source.binding) &&
     priorPlan.project === plan!.project &&
     priorPlan.featureId === plan!.featureId &&
     priorProof.toBaseBranch === receipt.fromBaseBranch &&
-    EffectArray.some(plan!.phases, phase => phase.id === snapshot.phaseId && phase.branch === priorProof.phaseBranch) &&
     nativeCyclePhaseHash(priorPlan, prior.phaseId) === prior.phaseHash &&
+    (!rebasedPriorProof ||
+      (rebasedPriorProof.baselineTree === snapshot.baseTree &&
+        rebasedPriorProof.runId === plan!.source.binding.runId &&
+        rebasedPriorProof.generation === plan!.source.binding.generation &&
+        rebasedPriorProof.bindingId === plan!.source.binding.bindingId &&
+        rebasedPriorProof.project === plan!.project &&
+        rebasedPriorProof.repo === prior.repo &&
+        EffectArray.some(
+          plan!.phases,
+          phase => phase.id === snapshot.phaseId && phase.branch === rebasedPriorProof.phaseBranch,
+        ))) &&
     ordered(priorProof.inheritedUpstreamOnlyPaths) &&
     same(
       EffectArray.map(priorProof.upstreamEvidence, item => item.path),
