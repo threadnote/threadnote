@@ -417,17 +417,22 @@ export function makeNativeTaskActionCommands<E, R>(
         'Bindings for new phases or existing phase bases (branch stays fixed), as JSON',
       ),
     },
-    options =>
-      (options.bindings === undefined
-        ? Effect.void
-        : Effect.try({
-            try: () => JSON.parse(options.bindings!) as unknown,
-            catch: () =>
-              WorkflowAutomationError.make({code: 'invalid-request', message: 'Bindings must be valid JSON.'}),
-          })
+    options => {
+      const {bindings: bindingsJson, ...request} = options;
+      return (
+        bindingsJson === undefined
+          ? Effect.void
+          : Effect.try({
+              try: () => JSON.parse(bindingsJson) as unknown,
+              catch: () =>
+                WorkflowAutomationError.make({code: 'invalid-request', message: 'Bindings must be valid JSON.'}),
+            })
       ).pipe(
-        Effect.flatMap(bindings => lifecycle({command: 'reconcile', ...options, ...(bindings ? {bindings} : {})})),
-      ),
+        Effect.flatMap(bindings =>
+          lifecycle({command: 'reconcile', ...request, ...(bindingsJson === undefined ? {} : {bindings})}),
+        ),
+      );
+    },
   ).pipe(Command.withDescription('Reconcile the current ready, approved plan on the same run'));
   const extendReviewBudget = Command.make(
     'extend-review-budget',

@@ -1,10 +1,12 @@
 import {Effect, String as EffectString} from 'effect';
+import {Command} from 'effect/cli';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {nativeAuthoringDigest} from '@threadnote/workflow-automations/authoring';
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
+import {makeNativeTaskActionCommands} from '../../src/effect/workflow_cli.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {stableJson} from '../../src/workflow_memory/protocol.js';
@@ -154,6 +156,101 @@ describe('standard task plan reconciliation', () => {
       expect(
         yield* reconcile(taskRef, {one: {branch: 'feature/one', baseBranch: 'main'}}).pipe(Effect.result),
       ).toMatchObject({failure: {code: 'invalid-request'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(acceptedBytes);
+    }).pipe(run),
+  );
+
+  effectIt.effect('CLI reconciliation omits optional bindings and preserves existing phase authority', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'pr');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const initial = yield* readNativeWorkflowState(f.config, 'native-run');
+      if (!initial?.state.cycle) throw new Error('Expected the initial canonical cycle.');
+      const prior = initial.state.cycle;
+      const document = {
+        ...f.document,
+        objective: 'Reconcile the same approved phase without restating its runtime-owned branch binding.',
+        review: {required: true, reason: 'Review the updated approved plan.'},
+      };
+      const sourceRoot = object(object(f.exported.source).root);
+      const save = (ready: boolean, revision: unknown, review?: unknown) =>
+        f
+          .call({
+            ...f.base('authoring'),
+            command: 'save',
+            document,
+            ready,
+            uri: sourceRoot.uri,
+            expectedRevision: revision,
+            ...(review ? {review} : {}),
+          })
+          .pipe(Effect.map(value => object(object(value).authoring)));
+      const draft = yield* save(true, sourceRoot.revision);
+      const ready = yield* save(true, object(draft.root).revision, {
+        documentHash: nativeAuthoringDigest(document),
+        outcome: 'accepted',
+        blockingIssueCount: 0,
+      });
+      expect(ready).toMatchObject({readiness: 'ready'});
+      const view = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      expect(view.next.action).toBe('reconcile-plan');
+      const taskRef = String(view.taskRef);
+      const cliResults: Record<string, unknown>[] = [];
+      const ignored = () => Effect.void;
+      const taskCommands = makeNativeTaskActionCommands(
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        ignored,
+        options =>
+          runNativeTaskAction(f.config, options).pipe(
+            Effect.tap(value => Effect.sync(() => cliResults.push(object(value)))),
+            Effect.asVoid,
+          ),
+      );
+      const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([taskCommands]));
+      const args = [
+        'task-action',
+        'reconcile',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--task-ref',
+        taskRef,
+        '--reason',
+        'Reconcile the approved plan while preserving its existing phase binding.',
+      ];
+      const before = yield* f.fs.readFileString(f.statePath());
+      const nullBindings = yield* Command.runWith(cli, {version: 'fixture'})([...args, '--bindings', 'null']).pipe(
+        Effect.result,
+      );
+      expect(nullBindings._tag).toBe('Failure');
+      expect(cliResults).toHaveLength(0);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      yield* Command.runWith(cli, {version: 'fixture'})(args);
+      expect(cliResults[0]).toMatchObject({status: 'reconciled', replayed: false});
+      expect(yield* f.fs.readFileString(f.statePath())).not.toBe(before);
+      const reconciled = yield* readNativeWorkflowState(f.config, 'native-run');
+      const runtime = reconciled?.state.cycle;
+      if (!runtime) throw new Error('Expected the reconciled canonical cycle.');
+      expect(runtime.plans).toHaveLength(prior.plans.length + 1);
+      expect(runtime.state.plan.phases[0]).toMatchObject({
+        branch: prior.state.plan.phases[0]?.branch,
+        baseBranch: prior.state.plan.phases[0]?.baseBranch,
+      });
+      expect(runtime.baselines).toEqual(prior.baselines);
+      expect(runtime.snapshots).toEqual(prior.snapshots);
+      expect(runtime.reviews).toEqual(prior.reviews);
+      const acceptedBytes = yield* f.fs.readFileString(f.statePath());
+      yield* Command.runWith(cli, {version: 'fixture'})(args);
+      expect(cliResults[1]).toMatchObject({status: 'reconciled', replayed: true});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(acceptedBytes);
     }).pipe(run),
   );
