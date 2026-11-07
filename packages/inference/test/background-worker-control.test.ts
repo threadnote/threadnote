@@ -146,8 +146,10 @@ describe('owned fixture cooperative drain', () => {
               (yield* Clock.currentTimeMillis) + 100,
             ).pipe(Effect.provideService(SystemInfo, raced), Effect.result);
             expect(livenessChecks).toBe(2);
-            if (stillRunning) expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
-            else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
+            if (stillRunning) {
+              expect(result).toMatchObject({_tag: 'Failure', failure: {reason: 'identity-unknown'}});
+              if (result._tag === 'Failure') expect(result.failure.diagnostic).toBeUndefined();
+            } else expect(result).toMatchObject({_tag: 'Success', success: {state: 'drained', generationCount: 1}});
             expect(yield* f.fs.exists(f.home)).toBe(true);
           }),
         );
@@ -245,6 +247,46 @@ describe('owned fixture cooperative drain', () => {
       expect(JSON.stringify(result)).not.toContain(privateSentinel);
       expect(yield* f.fs.exists(f.options.receiptPath)).toBe(true);
     }).pipe(provideFixtureLayer(platform)),
+  );
+
+  effectIt.effect('classifies an unexpected worker-exit defect without its private message', () =>
+    Effect.gen(function* () {
+      const f = yield* drainFixture;
+      const privateSentinel = 'private-worker-exit-defect';
+      let childProcessId = 0;
+      yield* f.run(
+        Effect.gen(function* () {
+          yield* wakeBackgroundWorker(f.options);
+          const {owner, lifecycle} = yield* f.child(f.launches[0]);
+          childProcessId = owner.processId;
+          expect(yield* lifecycle.register(owner)).toBe(true);
+        }),
+      );
+      const system = SystemInfo.of({
+        ...f.system,
+        processStartIdentity: processId =>
+          processId === childProcessId
+            ? Effect.die(new Error(privateSentinel))
+            : f.system.processStartIdentity(processId),
+      });
+      const result = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
+        Effect.provideService(SystemInfo, system),
+        Effect.result,
+      );
+
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {
+          _tag: 'BackgroundWorkerFixtureDrainUnavailable',
+          reason: 'control-unavailable',
+          diagnostic: {
+            operation: 'worker-exit-check',
+            causeCategory: 'other',
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain(privateSentinel);
+    }).pipe(TestClock.withLive, provideFixtureLayer(platform)),
   );
 
   effectIt.effect('fails closed when entry inspection is unavailable rather than treating it as absent', () =>
@@ -372,16 +414,17 @@ describe('owned fixture cooperative drain', () => {
           const pending = f.home + '/pending-work';
           yield* f.fs.writeFileString(pending, 'unchanged durable work');
           yield* wakeBackgroundWorker(f.options);
-          expect(
-            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 40).pipe(
-              Effect.result,
-            ),
-          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
-          expect(
-            yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
-              Effect.result,
-            ),
-          ).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          const firstAttempt = yield* drainBackgroundWorkerFixture(
+            f.capability,
+            (yield* Clock.currentTimeMillis) + 40,
+          ).pipe(Effect.result);
+          expect(firstAttempt).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          if (firstAttempt._tag === 'Failure') expect(firstAttempt.failure.diagnostic).toBeUndefined();
+          const retry = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 1000).pipe(
+            Effect.result,
+          );
+          expect(retry).toMatchObject({_tag: 'Failure', failure: {reason: 'deadline'}});
+          if (retry._tag === 'Failure') expect(retry.failure.diagnostic).toBeUndefined();
           expect(yield* f.fs.readFileString(pending)).toBe('unchanged durable work');
           expect(yield* f.fs.exists(f.home)).toBe(true);
         }),

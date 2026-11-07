@@ -1,6 +1,7 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {execFile, type ChildProcess} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
+import {writeSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -95,6 +96,7 @@ async function withProcesses<A>(
     readonly home: string;
     readonly alias: string;
     readonly events: () => Promise<readonly WorkerEvent[]>;
+    readonly mark: (phase: 'sync-dispatched' | 'provider-released' | 'sync-returned') => void;
     readonly client: (
       action: string,
       home?: string,
@@ -106,12 +108,15 @@ async function withProcesses<A>(
   const home = join(root, 'home');
   const alias = join(root, 'home-alias');
   const clients = new Set<ChildProcess>();
+  let observedEvents: readonly WorkerEvent[] = [];
+  const phases: {phase: 'sync-dispatched' | 'provider-released' | 'sync-returned'; at: number}[] = [];
   const events = async (): Promise<readonly WorkerEvent[]> => {
     const content = await readFile(join(home, 'events.jsonl'), 'utf8').catch(() => '');
-    return EffectArray.map(
+    observedEvents = EffectArray.map(
       EffectArray.filter(Effect.pipe(content, EffectString.trim, EffectString.split('\n')), Boolean),
       line => Schema.decodeUnknownSync(WorkerEventSchema)(JSON.parse(line)),
     );
+    return observedEvents;
   };
   await mkdir(home, {recursive: true});
   await symlink(home, alias, process.platform === 'win32' ? 'junction' : 'dir');
@@ -134,7 +139,24 @@ async function withProcesses<A>(
       clients.add(child);
     });
   try {
-    return await run({home, alias, events, client});
+    return await run({home, alias, events, client, mark: phase => phases.push({phase, at: Date.now()})});
+  } catch (error) {
+    try {
+      // Reuse observations already made by the test; never add a read at the race boundary.
+      writeSync(
+        2,
+        `${JSON.stringify({
+          diagnostic: 'coordinator-process-failure',
+          eventsObservation: 'last-completed-test-read',
+          events: EffectArray.map(EffectArray.takeRight(observedEvents, 64), ({kind, pid, at}) => ({kind, pid, at})),
+          omittedEvents: Math.max(0, observedEvents.length - 64),
+          phases,
+        })}\n`,
+      );
+    } catch {
+      // Diagnostic output must preserve the original failure and existing teardown.
+    }
+    throw error;
   } finally {
     for (const child of clients) child.kill('SIGKILL');
     for (const event of await events()) {
@@ -192,7 +214,7 @@ describe('integration coordinator process composition', () => {
   });
 
   it('shares one canonical-home worker across CLI clients and returns recall demand before provider IO', async () => {
-    await withProcesses(async ({home, alias, events, client}) => {
+    await withProcesses(async ({home, alias, events, client, mark}) => {
       await Promise.all([client('refresh'), client('refresh', alias)]);
       const start = await until(
         async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
@@ -245,8 +267,11 @@ describe('integration coordinator process composition', () => {
       ).toBe(409);
 
       const sync = client('sync');
+      mark('sync-dispatched');
       await writeFile(join(home, 'release'), 'release provider');
+      mark('provider-released');
       const reply = await sync;
+      mark('sync-returned');
       expect(reply.result).toMatchObject({sourceId: 'slow', syncedDocuments: ['synthetic://slow/document']});
       expect(await readFile(join(home, 'snapshot.txt'), 'utf8')).toBe('usable synthetic snapshot');
       expect(
