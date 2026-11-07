@@ -654,6 +654,48 @@ describe('semantic capability discovery', () => {
     expect(formatSemanticCapabilities(result)).toContain('installation and project not assessed');
   });
 
+  it('exposes effective bounded proposal limits and continuation semantics', () => {
+    const surface = semanticCapabilities().readSurface.changeSurface;
+    expect(surface.limits).toMatchObject({
+      request: {
+        maxRequestBytes: 65536,
+        minPageBytes: 1024,
+        maxPageBytes: 8388608,
+        defaultPageBytes: 8192,
+        defaultMilliseconds: 10000,
+        maxMilliseconds: 45000,
+        maxSourceBytes: 4194304,
+      },
+      store: {maxBlobBytes: 8388608, maxRetainedBytes: 16777216, maxProposals: 32, ttlMilliseconds: 600000},
+      closure: {
+        maxFiles: 256,
+        maxRetainedBytes: 8388608,
+        maxEdits: 100000,
+        maxProjectFiles: 100000,
+        maxRecomputeRounds: 2,
+      },
+      proposal: {
+        maxTargets: 1000,
+        maxEditsPerTarget: 10000,
+        maxProposalBytes: 8388608,
+        maxPageBytes: 8388608,
+        pageChunkCodePoints: 512,
+      },
+      effectiveTargetCount: 256,
+      session: {
+        queriesPerSession: 4,
+        queuedPerSession: 32,
+        providersPerHome: 8,
+        providersPerWorkspace: 4,
+        importsPerHome: 2,
+      },
+    });
+    expect(surface.continuation).toMatchObject({
+      offset: 'pass-page.next-to-status; null-means-complete',
+      lifetime: 'absolute-ttl; retrieval-does-not-renew; restart-is-stale',
+    });
+  });
+
   it('binds runtime candidates to the selected versioned ledger without promoting unqualified pilots', () => {
     const ledger = Schema.decodeUnknownSync(
       Schema.Struct({
@@ -835,6 +877,53 @@ describe('semantic capability discovery', () => {
       expect(result.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
       expect(JSON.stringify(result)).not.toContain(request.handle.capability);
     }),
+  );
+  effectIt.effect(
+    'CLI and MCP proposal actions share strict refusal semantics without disclosing read capabilities',
+    () =>
+      Effect.gen(function* () {
+        const handle = {
+          id: sha256HexSync('proposal-id'),
+          digest: sha256HexSync('proposal-digest'),
+          capability: sha256HexSync('private-read'),
+        };
+        for (const action of ['prepare', 'status', 'preflight']) {
+          const request =
+            action === 'prepare'
+              ? {
+                  version: 1,
+                  callerCwd: 'relative',
+                  operation: 'rename',
+                  file: 'a.ts',
+                  language: 'typescript',
+                  position: {line: 0, character: 0},
+                  newName: 'renamed',
+                }
+              : {version: 1, callerCwd: 'relative', handle};
+          const cli = yield* captureConsole(
+            Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'change', action, '--json']),
+          ).pipe(
+            provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(request)))})),
+            provideTestLayer(ApplicationLayer),
+          );
+          const registry = new EffectMcpServerRegistry();
+          registerSemanticQueryTool(registry, {
+            account: 'local',
+            user: 'test',
+            agentId: 'test',
+            agentContextHome: '/unused',
+            manifestPath: '/unused/manifest.json',
+          });
+          const result = yield* registry
+            .invokeTool('semantic_change_' + action, {request})
+            .pipe(provideTestLayer(ApplicationLayer));
+          const canonical = JSON.parse(cli.output);
+          expect(canonical).toMatchObject({version: 1, status: 'invalid-request', applicable: false});
+          expect(result.structuredContent).toEqual(canonical);
+          expect(result.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
+          expect(JSON.stringify(result)).not.toContain(handle.capability);
+        }
+      }),
   );
   effectIt.effect(
     'stdin rejects oversized, malformed UTF-8 and incomplete JSON while preserving split codepoints',

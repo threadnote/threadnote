@@ -1,3 +1,5 @@
+import {SemanticAgentEndpointChange, semanticAgentChangeLimits} from './agent_change_protocol.js';
+import {makeSemanticAgentChanges} from './agent_changes.js';
 import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
 import {
   JavaHostCandidate,
@@ -74,12 +76,22 @@ import {
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {
   boundedFileDigest,
+  readBounded,
   readBoundedText,
   semanticTreeDigest,
   semanticSdkDigest,
   typeScriptConfigurationHasExtendsCycle,
 } from './fingerprint.js';
 export {semanticTreeDigest} from './fingerprint.js';
+export const semanticSessionLimits = Object.freeze({
+  queriesPerSession: 4,
+  queuedPerSession: 32,
+  idleMilliseconds: 600000,
+  providersPerHome: 8,
+  providersPerWorkspace: 4,
+  importsPerHome: 2,
+  queued: 32,
+});
 const Instance = Schema.Struct({pid: Counter, identity: Identifier});
 type Instance = typeof Instance.Type;
 const Reservation = Schema.Struct({
@@ -604,6 +616,39 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   compiler: typeScriptRuntime.compiler,
                   sourceRoot: typeScriptRuntime.sourceRoot,
                   verifyPolicy: typeScriptRuntime.verify,
+                  captureEditSource: uri =>
+                    Effect.gen(function* () {
+                      const file = yield* path.fromFileUrl(new URL(uri));
+                      if (
+                        !EffectString.startsWith(worktree + path.sep)(file) ||
+                        EffectString.split(path.sep)(file).includes('.git') ||
+                        (yield* fs.realPath(file)) !== file
+                      )
+                        return yield* LspFault.make({code: 'rejected'});
+                      const stat = yield* fs.stat(file);
+                      if (
+                        stat.type !== 'File' ||
+                        Option.isNone(stat.ino) ||
+                        Option.isNone(stat.nlink) ||
+                        stat.nlink.value !== 1n
+                      )
+                        return yield* LspFault.make({code: 'rejected'});
+                      const identity = JSON.stringify([String(stat.dev), String(stat.ino.value)]);
+                      const bytes = yield* readBounded(file, semanticAgentChangeLimits.maxSourceBytes);
+                      const text = yield* Effect.try({
+                        try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+                        catch: () => LspFault.make({code: 'protocol'}),
+                      });
+                      const after = yield* fs.stat(file);
+                      if (
+                        (yield* fs.realPath(file)) !== file ||
+                        after.type !== 'File' ||
+                        Option.isNone(after.ino) ||
+                        identity !== JSON.stringify([String(after.dev), String(after.ino.value)])
+                      )
+                        return yield* LspFault.make({code: 'rejected'});
+                      return {uri, text, content: sha256HexSync(bytes), identity};
+                    }),
                   configurationIncomplete: configuration =>
                     typeScriptConfigurationHasExtendsCycle(worktree, configuration).pipe(
                       Effect.provideService(FileSystem.FileSystem, fs),
@@ -641,7 +686,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
               basis: fixed,
               diskBasis,
               reservation,
-              queries: yield* Semaphore.make(4),
+              queries: yield* Semaphore.make(semanticSessionLimits.queriesPerSession),
               queued: 0,
               lastUsed: yield* Clock.currentTimeMillis,
               closing: false,
@@ -711,7 +756,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
       const id = sessionIdentity(fixed);
       const session = sessions.get(id);
       if (!session || session.closing) return yield* LspFault.make({code: 'prerequisite'});
-      if (session.queued >= 32) return yield* LspFault.make({code: 'capacity'});
+      if (session.queued >= semanticSessionLimits.queuedPerSession) return yield* LspFault.make({code: 'capacity'});
       session.queued++;
       return yield* session.queries
         .withPermit(
@@ -780,7 +825,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
       yield* Effect.sleep(1000);
       const now = yield* Clock.currentTimeMillis;
       for (const [id, session] of sessions)
-        if (session.queued === 0 && now - session.lastUsed >= 600000) yield* retire(id, session);
+        if (session.queued === 0 && now - session.lastUsed >= semanticSessionLimits.idleMilliseconds)
+          yield* retire(id, session);
     }
   }).pipe(Effect.forkScoped);
   yield* Effect.addFinalizer(() =>
@@ -827,7 +873,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           capabilities: {
             reads: 'experimental',
             diagnostics: 'experimental',
-            rename: id === 'typescript-language-server' ? 'unsupported' : 'preparation-only',
+            rename: id === 'typescript-language-server' ? 'experimental-preparation-only' : 'preparation-only',
             codeActions: id === 'typescript-language-server' ? 'unsupported' : 'inline-preparation-only',
             optional: id === 'typescript-language-server' ? 'unsupported-unqualified' : 'provider-advertised-reads',
             apply: 'unsupported',
@@ -837,9 +883,9 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         effectiveLimits: {
           queryMilliseconds: 10000,
           maximumQueryMilliseconds: 45000,
-          idleMilliseconds: 600000,
-          queriesPerSession: 4,
-          queuedPerSession: 32,
+          idleMilliseconds: semanticSessionLimits.idleMilliseconds,
+          queriesPerSession: semanticSessionLimits.queriesPerSession,
+          queuedPerSession: semanticSessionLimits.queuedPerSession,
           providerFrameBytes: 32 * 1024 * 1024,
           projectFiles: 20000,
           projectBytes: 256 * 1024 * 1024,
@@ -868,6 +914,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   };
 });
 const Request = Schema.Union([
+  Schema.Struct({operation: Schema.Literal('agent-change'), request: SemanticAgentEndpointChange}),
   Schema.Struct({operation: Schema.Literal('agent-view'), request: SemanticAgentEndpointView}),
   Schema.Struct({operation: Schema.Literal('agent-query'), request: SemanticAgentEndpointQuery}),
   Schema.Struct({
@@ -935,6 +982,17 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
   const agentQueries =
     Schema.is(Digest)(options.runtimeIdentity) && observe
       ? yield* makeSemanticAgentDiskQueries({...coordinator, observe}, options.worktree, options.runtimeIdentity)
+      : undefined;
+  const agentChanges =
+    Schema.is(Digest)(options.runtimeIdentity) && observe
+      ? yield* makeSemanticAgentChanges(
+          {...coordinator, observe},
+          {
+            directory: path.join(path.dirname(options.directory), 'proposals', sha256HexSync(options.worktree)),
+            worktree: options.worktree,
+            runtimeIdentity: options.runtimeIdentity,
+          },
+        )
       : undefined;
   const grants = new Map<
     string,
@@ -1164,6 +1222,39 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
         return {status: 'shutting-down'};
       }
       if (body.operation === 'agent-view') return yield* agentView(body.request);
+      if (body.operation === 'agent-change') {
+        if (!agentChanges) return yield* LspFault.make({code: 'prerequisite'});
+        if (body.request.action !== 'prepare' || !body.request.view) return yield* agentChanges.execute(body.request);
+        const selector = body.request.view;
+        const owned = yield* checkPublic(selector.handle, body.request.profile);
+        return yield* owned.grant.gate.withPermit(
+          Effect.gen(function* () {
+            yield* checkPublic(selector.handle, body.request.profile);
+            const before = owned.binding.observation;
+            if (
+              body.request.worktree !== before.worktree ||
+              body.request.project !== before.project ||
+              body.request.uri !== before.uri ||
+              body.request.language !== owned.binding.language ||
+              body.request.environment !== owned.binding.environment ||
+              selector.documentVersion !== before.documentVersion
+            )
+              return yield* SemanticSessionFault.make({reason: 'conflict'});
+            const result = yield* agentChanges.execute(body.request, before);
+            yield* checkPublic(selector.handle, body.request.profile);
+            // Closure may advance the shared epoch without changing the owned document/version.
+            const refreshed = yield* coordinator.observe!(before, body.request.milliseconds);
+            if (
+              refreshed &&
+              refreshed.content === before.content &&
+              refreshed.documentVersion === before.documentVersion
+            )
+              owned.binding.observation = refreshed;
+            return result;
+          }),
+        );
+      }
+
       if (body.operation === 'agent-observe') {
         if (!agentQueries) return yield* LspFault.make({code: 'prerequisite'});
         if (body.observation.view.kind === 'disk')
@@ -1600,7 +1691,7 @@ type Ledger = {
   slots: (typeof Reservation.Type)[];
   tickets: (typeof Ticket.Type)[];
 };
-const limits = Object.freeze({providersPerHome: 8, providersPerWorkspace: 4, importsPerHome: 2, queued: 32});
+const limits = semanticSessionLimits;
 /** Probe only. Unknown/EPERM remains occupied; no PID-only signalling or recovery. */
 function processGroupPresent(pid: number): boolean {
   try {
