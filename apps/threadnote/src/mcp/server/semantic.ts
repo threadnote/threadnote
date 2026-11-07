@@ -27,15 +27,20 @@ export function registerSemanticQueryTool(
   config: RuntimeConfig,
   knowledgeAuthorized = false,
 ): void {
+  const descriptions = {
+    prepare:
+      'Read-only V1 preview. request: callerCwd,file,language,operation; rename uses position/newName; code-action uses range and opaque choiceHandle (omit to list). Protected profile required; no writes/writer grant. Details: semantic_capabilities.',
+    status:
+      'Read-only V1 proposal page. request: callerCwd, private handle, offset=page.next, maxBytes?. No writes/writer grant. Details: semantic_capabilities.',
+    preflight:
+      'Read-only V1 whole-proposal checks. request: callerCwd, private handle. Returns conflicts; no writes or writer grant. Protected profile required. Details: semantic_capabilities.',
+  };
   for (const action of ['prepare', 'status', 'preflight'] as const)
     server.registerTool(
       'semantic_change_' + action,
       {
         annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: action !== 'prepare'},
-        description:
-          'Version 1 read-only semantic proposal ' +
-          action +
-          '. request uses callerCwd and explicit source/view for rename preparation, or private proposal handle for status/preflight. Requires protected host profile; no source writes or writer authority. Code actions remain unqualified.',
+        description: descriptions[action],
         inputSchema: {request: Schema.Json},
       },
       ({request}) =>

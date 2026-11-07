@@ -1802,3 +1802,95 @@ for (const language of ['go', 'rust'] as const) {
     },
   );
 }
+
+describe('backend-owned synchronized rename source closure', () => {
+  for (const failure of ['none', 'wrong-wire-version', 'closing-identity'] as const) {
+    effectIt.effect(`retains exact pre-request targets or refuses ${failure}`, () =>
+      Effect.gen(function* () {
+        const f = yield* goView;
+        const secondFile = f.path.join(f.root, 'other.go');
+        const secondUri = (yield* f.path.toFileUrl(secondFile)).href;
+        const secondText = 'package p\nvar other = value\n';
+        yield* f.fs.writeFileString(secondFile, secondText);
+        let requests = 0;
+        let captures = 0;
+        const versions = new Map<string, number>();
+        const ordinary = goClient(method =>
+          Effect.sync(() => {
+            if (method !== 'textDocument/rename') return null;
+            requests++;
+            return {
+              documentChanges: EffectArray.map([f.uri, secondUri], uri => ({
+                textDocument: {
+                  uri,
+                  version: failure === 'wrong-wire-version' && requests > 1 ? 1 : (versions.get(uri) ?? 0),
+                },
+                edits: [
+                  {
+                    range: {
+                      start: {line: 1, character: uri === f.uri ? 4 : 12},
+                      end: {line: 1, character: uri === f.uri ? 9 : 17},
+                    },
+                    newText: 'next',
+                  },
+                ],
+              })),
+            };
+          }),
+        );
+        const session = yield* makeGoSession(
+          {
+            ...ordinary,
+            notify: (method, params) =>
+              Effect.gen(function* () {
+                if (method !== 'textDocument/didOpen' && method !== 'textDocument/didChange') return;
+                const data = yield* Schema.decodeUnknownEffect(
+                  Schema.Struct({textDocument: Schema.Struct({uri: Schema.String, version: Schema.Finite})}),
+                )(params).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
+                versions.set(data.textDocument.uri, data.textDocument.version);
+              }),
+          },
+          {
+            ...f.options,
+            captureEditSource: uri =>
+              Effect.sync(() => {
+                expect(uri).toBe(secondUri);
+                captures++;
+                return {
+                  uri,
+                  text: secondText,
+                  content: sha256HexSync(secondText),
+                  identity: failure === 'closing-identity' && captures > 1 ? 'replaced' : 'original',
+                };
+              }),
+          },
+        );
+        const view = yield* session.upsert(f.basis, f.text, 'go', 1000);
+        const result = yield* Effect.exit(session.prepare('rename', view, {line: 1, character: 5}, 'next', 1000));
+        expect(requests).toBe(2);
+        if (failure === 'none') {
+          expect(result._tag).toBe('Success');
+          if (result._tag === 'Success')
+            expect(result.value).toMatchObject({
+              status: 'ok',
+              evidence: {observation: {projectEpoch: 1}},
+              items: [
+                {
+                  sourceBasis: 'pre-request-synchronized-text-v1',
+                  files: [
+                    {beforeText: f.text, precondition: {sourceKind: 'overlay', physicalIdentity: null}},
+                    {
+                      beforeText: secondText,
+                      observation: {documentVersion: null},
+                      precondition: {sourceKind: 'disk', physicalIdentity: 'original'},
+                    },
+                  ],
+                },
+              ],
+            });
+        } else expect(result._tag).toBe('Failure');
+        expect(yield* f.fs.readFileString(secondFile)).toBe(secondText);
+      }).pipe(Effect.provide(io)),
+    );
+  }
+});

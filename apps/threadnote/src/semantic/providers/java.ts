@@ -215,6 +215,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
     options: JavaAnalysisOptions,
     onProviderStarted: (pid: number, finish: Effect.Effect<WireStop>) => Effect.Effect<void, unknown>,
     isActive: () => boolean = () => true,
+    captureEditSource?: LspSessionOptions['captureEditSource'],
   ) {
     const captured = yield* Effect.try({
       try: () => structuredClone(options),
@@ -273,6 +274,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
         diagnosticModel,
         runtime,
         isActive,
+        ...(captureEditSource ? {captureEditSource} : {}),
       });
       return {
         pid: launched.wire.pid,
@@ -608,6 +610,7 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         language: 'java',
         ...(preparedModel
           ? {
+              editSourceQualification: 'immutable-provider-input-v1' as const,
               verifyClosedEditSource: (uri: string, content: string) =>
                 Effect.gen(function* () {
                   const file = yield* path.fromFileUrl(new URL(uri));
@@ -715,7 +718,18 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         const result = yield* completed;
         if (result.status === 'stale') return result;
         const current = yield* session.observation(fixed.uri);
-        return current && observationKey(current) === observationKey(fixed)
+        // Only the shared, locked source closure can advance the epoch here. Every
+        // other observation field remains bound to the initiating request.
+        const refreshed =
+          result.status === 'ok' &&
+          result.items.length === 1 &&
+          Schema.is(Schema.Struct({sourceBasis: Schema.Literal('pre-request-synchronized-text-v1')}))(result.items[0])
+            ? result.evidence.observation
+            : fixed;
+        const ownedAdvance =
+          refreshed.projectEpoch >= fixed.projectEpoch &&
+          observationKey({...refreshed, projectEpoch: fixed.projectEpoch}) === observationKey(fixed);
+        return current && ownedAdvance && observationKey(current) === observationKey(refreshed)
           ? result
           : ({
               version: 1,

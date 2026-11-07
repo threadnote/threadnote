@@ -3,7 +3,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {LspFault} from '../../src/semantic/lsp_transport.js';
 import {it} from '@effect/vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema, String as EffectString} from 'effect';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {expect} from 'vitest';
@@ -74,7 +74,7 @@ const fixture = Effect.gen(function* () {
     position: {line: 0, character: 13},
     newName: 'renamed',
   };
-  return {fs, config, request, profile, profileFile};
+  return {fs, path, home, worktree, config, request, profile, profileFile};
 });
 it.effect('rejects caller-supplied authority and unqualified code actions before provider dispatch', () =>
   Effect.gen(function* () {
@@ -95,7 +95,7 @@ it.effect('rejects caller-supplied authority and unqualified code actions before
       });
     }
     expect(yield* runSemanticAgentChangeWith(host, f.config, {...f.request, operation: 'code-action'})).toMatchObject({
-      status: 'unsupported',
+      status: 'invalid-request',
       applicable: false,
     });
     expect(calls).toBe(0);
@@ -211,7 +211,29 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
         },
       ],
     };
+    let actionCalls = 0;
+    const blockedChoice = {
+      kind: 'action-choice',
+      title: 'Opaque command',
+      actionKind: 'quickfix',
+      disabled: null,
+      command: true,
+      qualified: false,
+      selector: sha256HexSync('command'),
+      queryDigest: sha256HexSync('query'),
+      blocker: 'command',
+    };
     const session: SemanticSession = {
+      actions: (_observation, _query, _milliseconds, selection) =>
+        Effect.sync(() => {
+          actionCalls++;
+          return {
+            ...outcome,
+            items: selection
+              ? [{kind: 'action-result', status: 'unsupported', reason: 'command'}, blockedChoice]
+              : [blockedChoice],
+          };
+        }),
       prepare: () => Effect.succeed(outcome),
       upsert: () => Effect.die('Unexpected upsert'),
       query: () => Effect.die('Unexpected query'),
@@ -245,12 +267,13 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
           ),
         observe: () => Effect.succeed(stale ? undefined : observed),
       },
-      {directory, worktree, runtimeIdentity: sha256HexSync('runtime')},
+      {directory, profileHome: f.home, worktree, runtimeIdentity: sha256HexSync('runtime')},
     );
     const request = {
       version: 1 as const,
       worktree,
-      profile: sha256HexSync('profile'),
+      profile: sha256HexSync(JSON.stringify(f.profile)),
+      principal: EffectString.slice(0, -5)(semanticHostProfileName(f.config, worktree)),
       action: 'prepare' as const,
       project: worktree,
       uri,
@@ -276,15 +299,243 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
     expect(yield* blobs()).toEqual([]);
     stale = false;
     invalidateAfterUse = false;
-    expect(yield* changes.execute({...request, maxBytes: 8192}, observed)).toMatchObject({
-      status: 'ok',
-      applicable: false,
-      writerAuthorityRequired: true,
+    const prepared = yield* changes.execute({...request, maxBytes: 8192}, observed);
+    expect(prepared).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+    const {handle} = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
+    )(prepared);
+    const otherConfig = {...f.config, user: 'other-user'};
+    const otherFile = path.join(f.home, 'semantic', 'profiles', semanticHostProfileName(otherConfig, worktree));
+    yield* f.fs.writeFileString(otherFile, JSON.stringify(f.profile), {mode: 0o600});
+    const changeContext = yield* Effect.context<Effect.Services<ReturnType<typeof changes.execute>>>();
+    const endpointHost: SemanticAgentQueryHost = {
+      runtimeIdentity: Effect.succeed(sha256HexSync('runtime')),
+      connect: () =>
+        Effect.succeed({
+          request: body =>
+            body.operation === 'agent-change'
+              ? changes.execute(body.request, observed).pipe(
+                  Effect.provideContext(changeContext),
+                  Effect.flatMap(Schema.decodeUnknownEffect(Schema.Json)),
+                  Effect.mapError(() => LspFault.make({code: 'protocol'})),
+                )
+              : Effect.die('Unexpected operation'),
+        }),
+    };
+    const foreign = yield* runSemanticAgentChangeWith(endpointHost, otherConfig, {
+      version: 1,
+      callerCwd: f.request.callerCwd,
+      action: 'status',
+      handle,
     });
+    expect(foreign).toMatchObject({status: 'stale', applicable: false, writerAuthorityRequired: true});
+    expect(foreign).not.toHaveProperty('page');
+    const action = {
+      version: 1,
+      callerCwd: f.request.callerCwd,
+      action: 'prepare',
+      operation: 'code-action',
+      file: 'a.ts',
+      language: 'typescript',
+      range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+    };
+    const listed = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
+    const {choices} = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
+    )(listed);
+    expect(actionCalls).toBe(1);
+    const selected = {...action, choiceHandle: choices[0].choiceHandle};
+    expect(yield* runSemanticAgentChangeWith(endpointHost, otherConfig, selected)).toMatchObject({status: 'stale'});
+    expect(actionCalls).toBe(1);
+    expect(yield* runSemanticAgentChangeWith(endpointHost, f.config, selected)).toMatchObject({
+      status: 'unsupported',
+      reason: 'command',
+    });
+    expect(actionCalls).toBe(2);
     expect(yield* blobs()).toHaveLength(1);
     expect(yield* f.fs.readFileString(path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
   }).pipe(
     // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow publication filesystem and coordinator seam.
+    Effect.provide(io),
+  ),
+);
+
+it.effect('retains every ordered raw resource effect, refuses the whole preflight and rejects escaped targets', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const uri = f.worktree + '/a.ts';
+    const text = yield* f.fs.readFileString(f.path.join(f.request.callerCwd, 'a.ts'));
+    const observed: Observation = {
+      version: 1,
+      repository: 'repo',
+      worktree: f.worktree,
+      project: f.worktree,
+      uri,
+      configuration: sha256HexSync('config'),
+      toolchain: sha256HexSync('tools'),
+      provider: {id: 'typescript-language-server', version: '6.0.2', generation: 1},
+      view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
+      content: sha256HexSync(text),
+      documentVersion: null,
+      projectEpoch: 0,
+    };
+    const evidence = {
+      basis: 'semantic' as const,
+      observation: observed,
+      scope: 'project',
+      completeness: 'partial' as const,
+      limitations: [],
+    };
+    const edit = {
+      range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+      newText: '// preview\n',
+      annotationId: 'review',
+    };
+    let operations: Schema.Json[] = [
+      {kind: 'text', uri, version: 1, edits: [edit], target: null},
+      {kind: 'create', uri: f.worktree + '/new.ts', options: {ignoreIfExists: true}, annotationId: 'review'},
+      {kind: 'text', uri: f.worktree + '/new.ts', version: null, edits: [edit], target: null},
+      {kind: 'rename', oldUri: f.worktree + '/new.ts', newUri: f.worktree + '/renamed.ts', options: {overwrite: false}},
+      {kind: 'delete', uri, options: {ignoreIfNotExists: false}},
+      {kind: 'text', uri, version: 2, edits: [edit], target: null},
+    ];
+    const annotation = {review: {label: 'Review complete unsupported effect', needsConfirmation: true}};
+    const choice = {
+      kind: 'action-choice',
+      title: 'Move resource',
+      actionKind: 'refactor',
+      disabled: null,
+      command: false,
+      qualified: false,
+      selector: sha256HexSync('raw'),
+      queryDigest: sha256HexSync('query'),
+      blocker: 'unsupported-operation-sequence',
+    };
+    const session: SemanticSession = {
+      actions: (_observation, _query, _milliseconds, selected) =>
+        Effect.succeed({
+          version: 1,
+          status: 'ok',
+          evidence,
+          items: selected
+            ? [
+                {
+                  kind: 'prepared-edit',
+                  operation: 'code-action',
+                  sourceBasis: 'unqualified-operation-sequence-v1',
+                  qualification: 'unsupported-operation-sequence',
+                  files: [],
+                  operations,
+                  changeAnnotations: annotation,
+                },
+              ]
+            : [choice],
+        }),
+      prepare: () => Effect.die('Unexpected rename'),
+      upsert: () => Effect.die('Unexpected upsert'),
+      query: () => Effect.die('Unexpected query'),
+      diagnostics: () => Effect.die('Unexpected diagnostics'),
+      project: () => Effect.succeed({configuration: observed.configuration}),
+      observation: () => Effect.succeed(observed),
+      available: Effect.succeed(true),
+      invalidate: Effect.void,
+      close: Effect.succeed({
+        code: 0,
+        drained: true,
+        forced: false,
+        stdioClosed: true,
+        fault: undefined,
+        graceful: true,
+      }),
+    };
+    const changes = yield* makeSemanticAgentChanges(
+      {
+        attach: () => Effect.succeed({observation: observed}),
+        use: (_observation, _milliseconds, run) => run(session),
+        observe: () => Effect.succeed(observed),
+      },
+      {
+        directory: f.path.join(f.home, 'previews'),
+        profileHome: f.home,
+        worktree: f.worktree,
+        runtimeIdentity: sha256HexSync('runtime'),
+      },
+    );
+    const request = {
+      version: 1 as const,
+      action: 'prepare' as const,
+      worktree: f.worktree,
+      project: f.worktree,
+      uri,
+      profile: sha256HexSync(JSON.stringify(f.profile)),
+      principal: EffectString.slice(0, -5)(semanticHostProfileName(f.config, f.worktree)),
+      operation: 'code-action' as const,
+      language: 'typescript' as const,
+      position: {line: 0, character: 0},
+      range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
+      milliseconds: 10000,
+      maxBytes: 8192,
+    };
+    const listing = yield* changes.execute(request, observed);
+    const {choices} = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
+    )(listing);
+    expect(JSON.stringify(listing)).not.toContain('preview\\n');
+    const selected = {...request, choiceHandle: choices[0].choiceHandle};
+    const prepared = yield* changes.execute(selected, observed);
+    expect(prepared).toMatchObject({
+      status: 'unsupported',
+      qualification: 'unsupported-operation-sequence',
+      targetCount: 0,
+      operationCount: 6,
+      applicable: false,
+      writerAuthorityRequired: true,
+    });
+    const {handle, page} = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String}),
+        page: Schema.Struct({
+          chunks: Schema.Array(Schema.Struct({kind: Schema.String, text: Schema.String})),
+          next: Schema.NullOr(Schema.Finite),
+        }),
+      }),
+    )(prepared);
+    const chunks = [...page.chunks];
+    let next = page.next;
+    while (next !== null) {
+      const result = yield* changes.execute({...request, action: 'status', handle, offset: next});
+      const {page} = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({
+          page: Schema.Struct({
+            chunks: Schema.Array(Schema.Struct({kind: Schema.String, text: Schema.String})),
+            next: Schema.NullOr(Schema.Finite),
+          }),
+        }),
+      )(result);
+      chunks.push(...page.chunks);
+      next = page.next;
+    }
+    const manifest = JSON.parse(
+      EffectArray.join(
+        EffectArray.map(chunks, chunk => chunk.text),
+        '',
+      ),
+    );
+    expect(manifest.operations).toEqual(operations);
+    expect(manifest.changeAnnotations).toEqual(annotation);
+    expect(EffectArray.every(chunks, chunk => chunk.kind === 'manifest')).toBe(true);
+    expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+      status: 'unsupported',
+      applicable: false,
+      writerAuthorityRequired: true,
+      conflicts: [{uri, reason: 'unsupported-operation-sequence'}],
+    });
+    expect(yield* f.fs.readFileString(f.path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
+    expect(yield* f.fs.exists(f.path.join(f.request.callerCwd, 'new.ts'))).toBe(false);
+    operations = [{kind: 'delete', uri: 'file:///outside.ts'}];
+    expect(yield* changes.execute(selected, observed)).toMatchObject({status: 'conflict', applicable: false});
+  }).pipe(
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow private-profile, proposal and coordinator test.
     Effect.provide(io),
   ),
 );

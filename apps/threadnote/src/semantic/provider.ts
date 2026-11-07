@@ -2,7 +2,7 @@ import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
+import {Clock, Deferred, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {
   Counter,
   Evidence,
@@ -83,6 +83,13 @@ export interface SemanticSession {
     newName: string | undefined,
     milliseconds: number,
   ) => Effect.Effect<QueryOutcome, unknown>;
+  /** Host-only action query/selection; public callers never supply adapter selectors or provider data. */
+  readonly actions?: (
+    observation: Observation,
+    query: SemanticActionQuery,
+    milliseconds: number,
+    selection?: SemanticActionSelection,
+  ) => Effect.Effect<QueryOutcome, unknown>;
   readonly project: (uri: string) => Effect.Effect<
     | {
         readonly configuration: string;
@@ -97,6 +104,15 @@ export interface SemanticSession {
   readonly available: Effect.Effect<boolean>;
   readonly invalidate: Effect.Effect<void>;
   readonly close: LspClient['close'];
+}
+export interface SemanticActionQuery {
+  readonly range: typeof SemanticRange.Type;
+  readonly only?: readonly string[];
+  readonly diagnosticIds?: readonly string[];
+}
+export interface SemanticActionSelection {
+  readonly selector: string;
+  readonly queryDigest: string;
 }
 export class SemanticSessionFault extends Schema.TaggedError<SemanticSessionFault, {readonly brand: unique symbol}>()(
   'SemanticSessionFault',
@@ -237,6 +253,9 @@ export interface LspSessionPolicy {
     readonly maxTextLength: number;
     readonly maxTotalTextLength: number;
   };
+  /** Finite host policy backed by the pinned adapter's source snapshot contract. */
+  readonly editSourceQualification?:
+    'versioned-text-document-v1' | 'versioned-diagnostics-foreground-v1' | 'immutable-provider-input-v1';
   readonly workspaceName: string;
   readonly acceptsServer: (
     server:
@@ -269,7 +288,15 @@ export interface LspSessionPolicy {
   readonly pullDiagnostics?: boolean;
   readonly codeActionKinds?: readonly string[];
 }
+export interface LspEditSource {
+  readonly uri: string;
+  readonly text: string;
+  readonly content: string;
+  readonly identity: string;
+}
 export interface LspSessionOptions {
+  /** Canonical, authorized host disk capture; never supplied by the caller. */
+  readonly captureEditSource?: (uri: string) => Effect.Effect<LspEditSource, unknown>;
   readonly basis: Observation;
   readonly notifications: ReturnType<typeof makeSemanticNotifications>;
   readonly roots: readonly string[];
@@ -434,102 +461,108 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       documentVersion: b.documentVersion,
       projectEpoch: b.projectEpoch,
     }) === observationKey(b);
+  const upsertUnlocked = (
+    observation: Observation,
+    text: string,
+    language: string,
+    milliseconds: number,
+    internalDisk = false,
+  ) =>
+    Effect.gen(function* () {
+      let fixed = structuredClone(yield* decode(Observation, observation));
+      if (
+        language !== options.policy.language ||
+        !wellFormed(text) ||
+        text.length > 4 * 1024 * 1024 ||
+        sha256HexSync(text) !== fixed.content ||
+        !sameBasis(fixed, basis) ||
+        invalidated ||
+        (fixed.view.kind === 'disk' ? fixed.documentVersion !== null : fixed.documentVersion === null && !internalDisk)
+      )
+        return yield* invalid();
+      const previous = documents.get(fixed.uri);
+      const totalTextLength = EffectArray.reduce(
+        [...documents],
+        text.length,
+        (total, [uri, document]) => total + (uri === fixed.uri ? 0 : document.text.length),
+      );
+      if (
+        text.length > maxTextLength ||
+        documents.size + (previous ? 0 : 1) > maxDocuments ||
+        totalTextLength > maxTotalTextLength
+      )
+        return yield* LspFault.make({code: 'capacity'});
+      if (
+        previous?.ready &&
+        previous.text === text &&
+        observationKey({...fixed, projectEpoch: previous.observation.projectEpoch}) ===
+          observationKey(previous.observation)
+      )
+        return structuredClone(previous.observation);
+      if (
+        previous &&
+        fixed.documentVersion !== null &&
+        previous.observation.documentVersion !== null &&
+        fixed.documentVersion <= previous.observation.documentVersion
+      )
+        return yield* SemanticSessionFault.make({reason: 'conflict'});
+      if (documents.size && ++epoch >= Number.MAX_SAFE_INTEGER)
+        return yield* SemanticSessionFault.make({reason: 'not-ready'});
+      fixed = {...fixed, projectEpoch: epoch};
+      updating = true;
+      const document: Document = {
+        observation: fixed,
+        text,
+        wireVersion: previous?.wireVersion ?? 0,
+        ready: false,
+        wake: Deferred.makeUnsafe<void>(),
+        diagnosticRequest: 0,
+        ...(previous?.delivered ? {delivered: previous.delivered} : {}),
+      };
+      documents.set(fixed.uri, document);
+      return yield* Effect.gen(function* () {
+        // Publish the changed buffer before reannouncing dependent buffers with their new diagnostic versions.
+        for (const [uri, entry] of [
+          [fixed.uri, document] as const,
+          ...EffectArray.filter([...documents], ([uri]) => uri !== fixed.uri),
+        ]) {
+          entry.observation = {...entry.observation, projectEpoch: epoch};
+          entry.ready = false;
+          entry.published = undefined;
+          entry.nativeDiagnostics = undefined;
+          Deferred.doneUnsafe(entry.wake, Effect.void);
+          entry.wake = Deferred.makeUnsafe<void>();
+          if (++entry.wireVersion > 2147483647) return yield* SemanticSessionFault.make({reason: 'not-ready'});
+          yield* client.notify(
+            uri === fixed.uri && !previous ? 'textDocument/didOpen' : 'textDocument/didChange',
+            uri === fixed.uri && !previous
+              ? {
+                  textDocument: {
+                    uri,
+                    version: entry.wireVersion,
+                    languageId: options.policy.language,
+                    text: entry.text,
+                  },
+                }
+              : {textDocument: {uri, version: entry.wireVersion}, contentChanges: [{text: entry.text}]},
+          );
+        }
+        // A harmless LSP query forms a bounded startup barrier; the metadata receipt must come from the actual server.
+        yield* client.request('textDocument/documentSymbol', {textDocument: {uri: fixed.uri}}, milliseconds);
+        yield* options.ready;
+        for (const entry of documents.values()) entry.ready = true;
+        return structuredClone(fixed);
+      }).pipe(
+        Effect.onExit(exit =>
+          Effect.sync(() => {
+            updating = false;
+            if (Exit.isFailure(exit)) invalidated = true;
+          }),
+        ),
+      );
+    });
   const upsert = (observation: Observation, text: string, language: string, milliseconds: number) =>
-    mutations.withPermit(
-      Effect.gen(function* () {
-        let fixed = structuredClone(yield* decode(Observation, observation));
-        if (
-          language !== options.policy.language ||
-          !wellFormed(text) ||
-          text.length > 4 * 1024 * 1024 ||
-          sha256HexSync(text) !== fixed.content ||
-          !sameBasis(fixed, basis) ||
-          invalidated ||
-          (fixed.view.kind === 'disk' ? fixed.documentVersion !== null : fixed.documentVersion === null)
-        )
-          return yield* invalid();
-        const previous = documents.get(fixed.uri);
-        const totalTextLength = EffectArray.reduce(
-          [...documents],
-          text.length,
-          (total, [uri, document]) => total + (uri === fixed.uri ? 0 : document.text.length),
-        );
-        if (
-          text.length > maxTextLength ||
-          documents.size + (previous ? 0 : 1) > maxDocuments ||
-          totalTextLength > maxTotalTextLength
-        )
-          return yield* LspFault.make({code: 'capacity'});
-        if (
-          previous?.ready &&
-          previous.text === text &&
-          observationKey({...fixed, projectEpoch: previous.observation.projectEpoch}) ===
-            observationKey(previous.observation)
-        )
-          return structuredClone(previous.observation);
-        if (
-          previous &&
-          fixed.documentVersion !== null &&
-          previous.observation.documentVersion !== null &&
-          fixed.documentVersion <= previous.observation.documentVersion
-        )
-          return yield* SemanticSessionFault.make({reason: 'conflict'});
-        if (documents.size && ++epoch >= Number.MAX_SAFE_INTEGER)
-          return yield* SemanticSessionFault.make({reason: 'not-ready'});
-        fixed = {...fixed, projectEpoch: epoch};
-        updating = true;
-        const document: Document = {
-          observation: fixed,
-          text,
-          wireVersion: previous?.wireVersion ?? 0,
-          ready: false,
-          wake: Deferred.makeUnsafe<void>(),
-          diagnosticRequest: 0,
-          ...(previous?.delivered ? {delivered: previous.delivered} : {}),
-        };
-        documents.set(fixed.uri, document);
-        return yield* Effect.gen(function* () {
-          // Publish the changed buffer before reannouncing dependent buffers with their new diagnostic versions.
-          for (const [uri, entry] of [
-            [fixed.uri, document] as const,
-            ...EffectArray.filter([...documents], ([uri]) => uri !== fixed.uri),
-          ]) {
-            entry.observation = {...entry.observation, projectEpoch: epoch};
-            entry.ready = false;
-            entry.published = undefined;
-            entry.nativeDiagnostics = undefined;
-            Deferred.doneUnsafe(entry.wake, Effect.void);
-            entry.wake = Deferred.makeUnsafe<void>();
-            if (++entry.wireVersion > 2147483647) return yield* SemanticSessionFault.make({reason: 'not-ready'});
-            yield* client.notify(
-              uri === fixed.uri && !previous ? 'textDocument/didOpen' : 'textDocument/didChange',
-              uri === fixed.uri && !previous
-                ? {
-                    textDocument: {
-                      uri,
-                      version: entry.wireVersion,
-                      languageId: options.policy.language,
-                      text: entry.text,
-                    },
-                  }
-                : {textDocument: {uri, version: entry.wireVersion}, contentChanges: [{text: entry.text}]},
-            );
-          }
-          // A harmless LSP query forms a bounded startup barrier; the metadata receipt must come from the actual server.
-          yield* client.request('textDocument/documentSymbol', {textDocument: {uri: fixed.uri}}, milliseconds);
-          yield* options.ready;
-          for (const entry of documents.values()) entry.ready = true;
-          return structuredClone(fixed);
-        }).pipe(
-          Effect.onExit(exit =>
-            Effect.sync(() => {
-              updating = false;
-              if (Exit.isFailure(exit)) invalidated = true;
-            }),
-          ),
-        );
-      }),
-    );
+    mutations.withPermit(upsertUnlocked(observation, text, language, milliseconds));
   const evidence = (fixed: Observation): Evidence => ({
     basis: 'semantic',
     observation: structuredClone(fixed),
@@ -855,7 +888,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       document.delivered = structuredClone(snapshot);
       return structuredClone(delta);
     });
-  const prepareEdit = (raw: unknown) =>
+  const editEntries = (raw: unknown) =>
     Effect.gen(function* () {
       const edit = yield* Schema.decodeUnknownEffect(
         Schema.Struct({
@@ -889,6 +922,11 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         new Set(EffectArray.map(entries, entry => entry.uri)).size !== entries.length
       )
         return yield* invalid();
+      return entries;
+    });
+  const prepareEdit = (raw: unknown) =>
+    Effect.gen(function* () {
+      const entries = yield* editEntries(raw);
       const files: {
         uri: string;
         content: string;
@@ -939,7 +977,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       }
       return files;
     });
-  const prepare = (
+  const prepareLegacy = (
     operation: 'rename' | 'code-action',
     observation: Observation,
     position: Position,
@@ -1054,6 +1092,235 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         ? ({version: 1, status: 'ok', evidence: evidence(fixed), items} satisfies QueryOutcome)
         : stale();
     });
+  const qualifiedRename = (
+    observation: Observation,
+    position: Position,
+    newName: string | undefined,
+    milliseconds: number,
+  ) =>
+    mutations
+      .withPermit(
+        Effect.gen(function* () {
+          const fixed = structuredClone(yield* decode(Observation, observation));
+          const initiating = current(fixed);
+          if (!initiating) return stale();
+          if (
+            !validTextPosition(initiating.text, position) ||
+            !newName ||
+            newName.length > 512 ||
+            !wellFormed(newName) ||
+            /\p{Cc}/u.test(newName)
+          )
+            return yield* invalid();
+          if (!capabilities.renameProvider || !options.captureEditSource)
+            return {
+              version: 1,
+              status: 'unsupported',
+              reason: 'Qualified source preparation is unavailable',
+              evidence: evidence(fixed),
+            } satisfies QueryOutcome;
+          const started = yield* Clock.currentTimeMillis;
+          const remaining = Effect.gen(function* () {
+            const left = milliseconds - ((yield* Clock.currentTimeMillis) - started);
+            if (left <= 0) return yield* LspFault.make({code: 'timeout'});
+            return left;
+          });
+          const request = Effect.gen(function* () {
+            const raw = yield* client.request(
+              'textDocument/rename',
+              {textDocument: {uri: fixed.uri}, position, newName},
+              yield* remaining,
+            );
+            return raw === null ? [] : yield* editEntries(raw);
+          });
+          // Discovery identifies targets only. Its edits never acquire source authority.
+          let discovered = yield* request;
+          if (!discovered.length)
+            return {
+              version: 1,
+              status: 'unsupported',
+              reason: 'Provider cannot rename this occurrence',
+              evidence: evidence(fixed),
+            } satisfies QueryOutcome;
+          for (let round = 0; round < 2; round++) {
+            const uris = EffectArray.map(discovered, entry => entry.uri);
+            if (new Set([...documents.keys(), ...uris]).size > maxDocuments)
+              return yield* LspFault.make({code: 'capacity'});
+            const captures = new Map<string, LspEditSource>();
+            let retainedBytes = EffectArray.reduce(
+              [...documents.values()],
+              0,
+              (sum, document) => sum + new TextEncoder().encode(document.text).length,
+            );
+            if (retainedBytes > Math.min(8 * 1024 * 1024, maxTotalTextLength * 3))
+              return yield* LspFault.make({code: 'capacity'});
+            for (const uri of uris) {
+              const retained = documents.get(uri);
+              if (retained && retained.observation.documentVersion !== null) continue;
+              const captured = yield* options.captureEditSource(uri);
+              if (
+                captured.uri !== uri ||
+                !wellFormed(captured.text) ||
+                sha256HexSync(captured.text) !== captured.content
+              )
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              retainedBytes +=
+                new TextEncoder().encode(captured.text).length -
+                (retained ? new TextEncoder().encode(retained.text).length : 0);
+              if (retainedBytes > Math.min(8 * 1024 * 1024, maxTotalTextLength * 3))
+                return yield* LspFault.make({code: 'capacity'});
+              if (options.policy.editSourceQualification === 'immutable-provider-input-v1') {
+                if (!options.policy.verifyClosedEditSource) return yield* invalid();
+                yield* options.policy.verifyClosedEditSource(uri, captured.content);
+              }
+              captures.set(uri, captured);
+              yield* upsertUnlocked(
+                {...fixed, uri, content: captured.content, documentVersion: null},
+                captured.text,
+                options.policy.language,
+                yield* remaining,
+                true,
+              );
+            }
+            const refreshed = documents.get(fixed.uri);
+            if (!refreshed || !current(refreshed.observation)) return stale();
+            const finalObservation = structuredClone(refreshed.observation);
+            const before = new Map(
+              EffectArray.map(
+                [...documents],
+                ([uri, document]) =>
+                  [
+                    uri,
+                    {
+                      text: document.text,
+                      wireVersion: document.wireVersion,
+                      observation: structuredClone(document.observation),
+                    },
+                  ] as const,
+              ),
+            );
+            // Basedpyright 1.40.2 publishes the exact client version only after synchronously
+            // updating its foreground Program, which is also the rename provider's input.
+            if (options.policy.editSourceQualification === 'versioned-diagnostics-foreground-v1') {
+              for (const uri of uris) {
+                const document = documents.get(uri);
+                if (!document) return yield* invalid();
+                // Waiting for the source acknowledgment must not consume the public
+                // diagnostic delta cursor or synthesize a fresh provider publication.
+                while (!document.published) {
+                  yield* Deferred.await(document.wake);
+                  if (!current(document.observation)) return yield* SemanticSessionFault.make({reason: 'stale'});
+                }
+                if (observationKey(document.published.observation) !== observationKey(document.observation))
+                  return yield* SemanticSessionFault.make({reason: 'stale'});
+              }
+            }
+            const final = yield* request;
+            if (!final.length) return yield* invalid();
+            if (EffectArray.some(final, entry => !uris.includes(entry.uri))) {
+              discovered = final;
+              if (round === 0) continue;
+              return yield* SemanticSessionFault.make({reason: 'stale'});
+            }
+            const files = [];
+            let count = 0;
+            for (const entry of final) {
+              const saved = before.get(entry.uri);
+              const live = documents.get(entry.uri);
+              if (!saved || !live || !current(saved.observation) || live.wireVersion !== saved.wireVersion)
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              const immutableDisk =
+                options.policy.editSourceQualification === 'immutable-provider-input-v1' &&
+                saved.observation.documentVersion === null &&
+                captures.has(entry.uri);
+              if (
+                (options.policy.editSourceQualification === 'versioned-text-document-v1' ||
+                  (options.policy.editSourceQualification === 'immutable-provider-input-v1' && !immutableDisk)) &&
+                entry.version !== saved.wireVersion
+              )
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              if (entry.version !== null && entry.version !== saved.wireVersion) return yield* invalid();
+              const edits = [...entry.edits].sort(
+                (a, b) => compare(a.range.start, b.range.start) || compare(a.range.end, b.range.end),
+              );
+              if (!edits.length) return yield* invalid();
+              for (let i = 0; i < edits.length; i++) {
+                const edit = edits[i];
+                if (
+                  ++count > 100000 ||
+                  !validRange(saved.text, edit.range) ||
+                  !wellFormed(edit.newText) ||
+                  edit.newText.length > maxTextLength ||
+                  (i > 0 &&
+                    (compare(edits[i - 1].range.end, edit.range.start) > 0 ||
+                      compare(edits[i - 1].range.start, edit.range.start) === 0))
+                )
+                  return yield* invalid();
+              }
+              const capture = captures.get(entry.uri);
+              if (capture) {
+                const closing = yield* options.captureEditSource(entry.uri);
+                if (closing.content !== capture.content || closing.identity !== capture.identity)
+                  return yield* SemanticSessionFault.make({reason: 'stale'});
+              }
+              const sourceKind = saved.observation.documentVersion === null ? 'disk' : 'overlay';
+              files.push({
+                uri: entry.uri,
+                content: saved.observation.content,
+                documentVersion: saved.observation.documentVersion,
+                source: sourceKind,
+                observation: saved.observation,
+                beforeText: saved.text,
+                edits,
+                precondition: {
+                  sourceKind,
+                  rawDigest: saved.observation.content,
+                  encoding: 'utf-8',
+                  physicalIdentity: capture?.identity ?? null,
+                  owner: saved.observation.view.owner,
+                  documentVersion: saved.observation.documentVersion,
+                },
+              });
+            }
+            if (!current(finalObservation)) return stale();
+            return {
+              version: 1,
+              status: 'ok',
+              evidence: evidence(finalObservation),
+              items: [
+                {
+                  kind: 'prepared-edit',
+                  operation: 'rename',
+                  sourceBasis: 'pre-request-synchronized-text-v1',
+                  files,
+                  scope: 'all-provider-returned-edits',
+                  applied: false,
+                },
+              ],
+            } satisfies QueryOutcome;
+          }
+          return stale();
+        }),
+      )
+      .pipe(
+        Effect.timeoutOption(milliseconds),
+        Effect.flatMap(result =>
+          Option.isSome(result) ? Effect.succeed(result.value) : LspFault.make({code: 'timeout'}),
+        ),
+      );
+  const prepare = (
+    operation: 'rename' | 'code-action',
+    observation: Observation,
+    position: Position,
+    newName: string | undefined,
+    milliseconds: number,
+  ) => {
+    const fixed = structuredClone(observation);
+    const cursor = structuredClone(position);
+    return operation === 'rename' && options.policy.editSourceQualification && options.captureEditSource
+      ? qualifiedRename(fixed, cursor, newName, milliseconds)
+      : prepareLegacy(operation, fixed, cursor, newName, milliseconds);
+  };
   return {
     upsert,
     query,
