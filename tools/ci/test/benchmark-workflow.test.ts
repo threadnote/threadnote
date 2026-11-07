@@ -459,7 +459,7 @@ describe('platform benchmark workflow', () => {
     );
     expect(recallJob['runs-on']).toBe('ubuntu-latest');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
-    expect(recallCommand).toContain('bun run eval:recall');
+    expect(recallCommand).toContain('bun tools/ci/recall-confirmation.ts');
     const recallDiagnosticsStep = Option.getOrUndefined(
       Option.map(Option.fromNullishOr(recallJob.steps), findArray =>
         Option.getOrUndefined(
@@ -473,7 +473,9 @@ describe('platform benchmark workflow', () => {
       ),
     );
     expect(recallDiagnosticsStep?.if).toBe('always()');
-    expect(recallDiagnosticsStep?.with?.path).toBe('artifacts/recall-production-10000.json');
+    expect(recallDiagnosticsStep?.with?.path).toBe(
+      'artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n',
+    );
     expect(recallDiagnosticsStep?.with?.['if-no-files-found']).toBe('warn');
     expect(recallCommand).toContain('bun run bench:recall:vectors');
     expect(recallCommand).toContain('--documents 10000');

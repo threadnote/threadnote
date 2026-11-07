@@ -105,6 +105,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'apps/website/test/website-release-content.test.ts',
   ]);
   const recallQualityEntries = [
+    'tools/ci/recall-confirmation.ts',
     'scripts/evaluate-recall.ts',
     'scripts/evaluate-code-graph.ts',
     'scripts/evaluate-code-graph-workset.ts',

@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Clock, DateTime, Effect, FileSystem, Option} from 'effect';
+import {Clock, Console, DateTime, Effect, Exit, FileSystem, Option, Runtime} from 'effect';
 import {benchmarkMeasurement} from '@threadnote/evidence/benchmark';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -121,7 +121,12 @@ export function recallEvaluationScenario(
   };
 }
 
-export const writeRecallEvaluationDiagnosticsAndEnforce = Effect.fn('recallEvaluation.writeAndEnforce')(function* (
+export type RecallEvaluationVerdict = {
+  readonly verdict: 'pass' | 'timing-only' | 'correctness';
+  readonly message?: string;
+};
+
+export const writeRecallEvaluationDiagnostics = Effect.fn('recallEvaluation.writeDiagnostics')(function* (
   file: string,
   diagnostics: RecallEvaluationDiagnostics,
 ) {
@@ -142,15 +147,58 @@ export const writeRecallEvaluationDiagnosticsAndEnforce = Effect.fn('recallEvalu
   };
   yield* atomicWrite(file, `${JSON.stringify(artifact, undefined, 2)}\n`);
   if (diagnostics.correctnessFailureCount > 0) {
-    return yield* ScriptError.make({
+    return {
+      verdict: 'correctness',
       message: `Recall evaluation failed ${diagnostics.correctnessFailureCount} contract check(s).`,
-    });
+    } satisfies RecallEvaluationVerdict;
   }
   for (const [name, benchmark] of EffectRecord.toEntries(diagnostics.productionBenchmark.scenarios)) {
     if (benchmark.p95Milliseconds > benchmark.p95LimitMilliseconds) {
-      return yield* ScriptError.make({
+      return {
+        verdict: 'timing-only',
         message: `Recall ${name} benchmark p95 ${benchmark.p95Milliseconds.toFixed(2)}ms exceeds ${benchmark.p95LimitMilliseconds}ms.`,
-      });
+      } satisfies RecallEvaluationVerdict;
     }
   }
+  return {verdict: 'pass'} satisfies RecallEvaluationVerdict;
 });
+
+/** Keep the existing strict writer contract for direct callers. */
+export const writeRecallEvaluationDiagnosticsAndEnforce = Effect.fn('recallEvaluation.writeAndEnforce')(function* (
+  file: string,
+  diagnostics: RecallEvaluationDiagnostics,
+) {
+  const result = yield* writeRecallEvaluationDiagnostics(file, diagnostics);
+  if (result.verdict !== 'pass') return yield* ScriptError.make({message: result.message ?? 'Recall gate failed.'});
+});
+
+/** The supplied program must include the entire application scope, including its finalizers. */
+export function completeRecallEvaluation<E, R>(
+  program: Effect.Effect<RecallEvaluationVerdict, E, R>,
+  file: string,
+  nonce?: string,
+) {
+  return Effect.gen(function* () {
+    const result = yield* program;
+    if (result.message) yield* Console.error(result.message);
+    if (nonce !== undefined) {
+      const fs = yield* FileSystem.FileSystem;
+      const bytes = yield* fs.readFile(file);
+      yield* fs.writeFileString(
+        `${file}.receipt.json`,
+        `${JSON.stringify({version: 1, nonce, verdict: result.verdict, diagnosticsSha256: sha256HexSync(bytes)})}\n`,
+      );
+    }
+    return result.verdict === 'pass' ? 0 : result.verdict === 'timing-only' && nonce !== undefined ? 75 : 1;
+  });
+}
+
+export const recallEvaluationTeardown: Runtime.Teardown = (exit, onExit) => {
+  if (
+    Exit.isSuccess(exit) &&
+    typeof exit.value === 'number' &&
+    (exit.value === 0 || exit.value === 1 || exit.value === 75)
+  )
+    onExit(exit.value);
+  else Runtime.defaultTeardown(exit, onExit);
+};

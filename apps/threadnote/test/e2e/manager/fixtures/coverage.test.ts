@@ -94,14 +94,14 @@ it('maps every discovered Chromium case, requirement, section and registered pro
     expect(discovered.has(`${provider.file}:${provider.title}`)).toBe(true);
 });
 
-for (const probe of ['passed', 'skipped', 'flaky', 'expected-failure'] as const) {
+for (const probe of ['passed', 'skipped', 'flaky', 'failed', 'expected-failure'] as const) {
   it(`qualifies the actual ${probe} runner result`, async () => {
     const root = await mkdtemp(join(repositoryRoot, '.context/manager-e2e-contract-'));
     try {
       const reporter = join(repositoryRoot, 'apps/threadnote/test/e2e/manager/fixtures/required-cases-reporter.ts');
       await writeFile(
         join(root, 'playwright.config.ts'),
-        `export default {testDir: '.', testMatch: 'probe.spec.ts', outputDir: ${JSON.stringify(join(root, 'results'))}, retries: 1, failOnFlakyTests: true, reporter: [[${JSON.stringify(reporter)}], ['json', {outputFile: ${JSON.stringify(join(root, 'report.json'))}}]]};`,
+        `import config from ${JSON.stringify(join(repositoryRoot, 'playwright.manager.config.ts'))}; export default {testDir: '.', testMatch: 'probe.spec.ts', outputDir: ${JSON.stringify(join(root, 'results'))}, retries: config.retries, failOnFlakyTests: config.failOnFlakyTests, reporter: [[${JSON.stringify(reporter)}], ['json', {outputFile: ${JSON.stringify(join(root, 'report.json'))}}]]};`,
       );
       await writeFile(
         join(root, 'probe.spec.ts'),
@@ -111,18 +111,35 @@ for (const probe of ['passed', 'skipped', 'flaky', 'expected-failure'] as const)
             ? "import {test} from '@playwright/test'; test.skip('required case', () => {});"
             : probe === 'expected-failure'
               ? "import {test, expect} from '@playwright/test'; test.fail('required case', () => {expect(false).toBe(true)});"
-              : "import {test, expect} from '@playwright/test'; test('required case', () => {expect(test.info().retry).toBe(1)});",
+              : probe === 'failed'
+                ? "import {test, expect} from '@playwright/test'; test('required case', () => {expect(false).toBe(true)});"
+                : "import {test, expect} from '@playwright/test'; test('required case', () => {expect(test.info().retry).toBe(1)});",
       );
       const result = spawnSync(
         findExecutable('bun'),
         ['--bun', 'node_modules/@playwright/test/cli.js', 'test', '--config', join(root, 'playwright.config.ts')],
-        {cwd: repositoryRoot, encoding: 'utf8', timeout: 20_000},
+        {cwd: repositoryRoot, encoding: 'utf8', timeout: 20_000, env: {...process.env, CI: 'true'}},
       );
-      expect(result.status, result.stdout + result.stderr).toBe(probe === 'passed' ? 0 : 1);
+      expect(result.status, result.stdout + result.stderr).toBe(probe === 'passed' || probe === 'flaky' ? 0 : 1);
       const report = Schema.decodeUnknownSync(
-        Schema.Struct({stats: Schema.Struct({expected: Schema.Finite, skipped: Schema.Finite, flaky: Schema.Finite})}),
+        Schema.Struct({
+          stats: Schema.Struct({
+            expected: Schema.Finite,
+            skipped: Schema.Finite,
+            flaky: Schema.Finite,
+            unexpected: Schema.Finite,
+          }),
+        }),
       )(JSON.parse(await readFile(join(root, 'report.json'), 'utf8')));
-      expect(report.stats[probe === 'passed' || probe === 'expected-failure' ? 'expected' : probe]).toBe(1);
+      expect(
+        report.stats[
+          probe === 'passed' || probe === 'expected-failure' ? 'expected' : probe === 'failed' ? 'unexpected' : probe
+        ],
+      ).toBe(1);
+      if (probe === 'flaky') {
+        const rawReport = JSON.parse(await readFile(join(root, 'report.json'), 'utf8'));
+        expect(rawReport.suites[0].specs[0].tests[0].results).toHaveLength(2);
+      }
       if (probe === 'skipped' || probe === 'expected-failure')
         expect(result.stderr).toContain('cannot pass with non-passing cases');
     } finally {

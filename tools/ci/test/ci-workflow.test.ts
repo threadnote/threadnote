@@ -548,3 +548,14 @@ it('preserves every prerequisite failure status and prevents shard execution', (
     {numRuns: 20},
   );
 });
+
+it('confirms only Recall with always-retained attempt evidence', () => {
+  const workflow = Schema.decodeUnknownSync(WorkflowSchema)(parse(readFileSync('.github/workflows/ci.yml', 'utf8')));
+  const steps = workflow.jobs?.['recall-quality']?.steps ?? [];
+  expect(EffectArray.some(steps, step => step.run === 'bun tools/ci/recall-confirmation.ts')).toBe(true);
+  const upload = EffectOption.getOrUndefined(
+    EffectArray.findFirst(steps, step => step.with?.name === 'recall-quality-production-10000'),
+  );
+  expect(upload?.if).toBe('always()');
+  expect(upload?.with?.path).toBe('artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n');
+});
