@@ -1,4 +1,12 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+export {
+  retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  selectSemanticContextSymbol,
+  filterSemanticContextMemory,
+  projectSemanticContextKnowledge,
+  compactSemanticContextKnowledge,
+} from './semantic_evidence.js';
 import {DateTime, Effect, Schema} from 'effect';
 import {
   makeReadDeadline,
@@ -49,6 +57,8 @@ export interface ContextBriefCompilerDependencies<
     plan: ContextBriefPlanV1,
     deadline?: ReadDeadline,
   ) => Effect.Effect<VerifiedProcedureSelection, unknown, MemoryR>;
+  /** Internal callers may require source/target binding before any linked-memory read. */
+  readonly codeLinkedMemoryAfterGraph?: boolean;
   readonly codeLinkedMemoryEvidence?: (
     plan: ContextBriefPlanV1['codeAnchors'],
     deadline?: ReadDeadline,
@@ -139,7 +149,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
           Effect.succeed({...unavailableContextBriefMemoryEvidence(), gaps: ['memory-recall-budget-exhausted']}),
         ),
       ),
-      codeLinkedMemory,
+      dependencies.codeLinkedMemoryAfterGraph ? succeedUndefined : codeLinkedMemory,
       dependencies.procedureEvidence === undefined
         ? Effect.succeed({gaps: [], procedures: []})
         : withinReadDeadline(
@@ -158,7 +168,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     (yield* readGraph(withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit)));
   const memory = mergeContextBriefMemoryEvidence(
     lexicalMemory,
-    linkedMemory,
+    dependencies.codeLinkedMemoryAfterGraph ? yield* codeLinkedMemory : linkedMemory,
     plan.memory.candidateLimit,
     plan.codeAnchors.candidateLimit,
   );

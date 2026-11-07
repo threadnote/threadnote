@@ -30,7 +30,7 @@ import {
   CurrentNativeJobReadyPromotion,
   CurrentNativeJobSourceView,
 } from '../workflow_automation/native_jobs.js';
-import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {MemoryCodeCitationCaptureError, withLocalMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, withWorkflowEvidenceAdmission} from './evidence.js';
 import {
@@ -69,7 +69,6 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
 const prefix = (state: WorkflowJournal) => `workflow-${state.binding.bindingId}-`;
 const nativeRoot = (config: RuntimeConfig) => `threadnote://user/${uriSegment(config.user)}/memories`;
 const ownedArtifacts = workflowOwnedArtifacts;
@@ -203,7 +202,6 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
     return yield* workflowError('identity-conflict', 'The owned artifact changed memory identity.');
   return {live, record, owned};
 });
-
 export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
@@ -243,11 +241,76 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
     verifiedReadback: true,
   } satisfies WorkflowReadResult;
 });
-
-export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperation')(function* (
+export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJournal, request: WorkflowRequest) =>
+  prepareWorkflowOperationWithCapture(config, state, request, () =>
+    captureMemoryCodeCitationsForMcp(
+      config,
+      {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
+      'workflow-memory',
+    ),
+  );
+const workflowCitationCaptureError = (failure: unknown) =>
+  Schema.is(MemoryCodeCitationCaptureError)(failure) && failure.retryable
+    ? workflowError(
+        'evidence-busy',
+        failure.recovery?.code === 'graph-writer-busy'
+          ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
+          : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
+      )
+    : failure;
+type ProjectionPreparation = (
+  state: WorkflowJournal,
+  request: WorkflowRequest,
+) => ReturnType<typeof prepareWorkflowOperation>;
+/** Only the pure byte projection may share one local source fence. */
+export function withWorkflowProjectionCitations<A, E, R>(
+  config: RuntimeConfig,
+  binding: WorkflowJournal['binding'],
+  refs: readonly string[],
+  use: (prepare: ProjectionPreparation) => Effect.Effect<A, E, R>,
+) {
+  const ordinary: ProjectionPreparation = (state, request) => prepareWorkflowOperation(config, state, request);
+  if (!refs.length || EffectArray.some(refs, ref => EffectString.startsWith('cgr_')(EffectString.trim(ref))))
+    return use(ordinary);
+  return Effect.gen(function* () {
+    let active = true;
+    return yield* withLocalMemoryCodeCitations(
+      config,
+      {callerCwd: binding.repo, project: binding.project, refs},
+      citations =>
+        Effect.gen(function* () {
+          const owner = yield* Effect.fiberId;
+          return yield* use((state, request) =>
+            Effect.gen(function* () {
+              if (!active || (yield* Effect.fiberId) !== owner)
+                return yield* workflowError('invalid-request', 'Projection preparation is outside its source fence.');
+              if (
+                stableJson(state.binding) !== stableJson(binding) ||
+                stableJson(request.codeRefs ?? []) !== stableJson(refs) ||
+                request.citationPolicy === 'defer'
+              )
+                return yield* ordinary(state, request);
+              return yield* prepareWorkflowOperationWithCapture(config, state, request, () =>
+                Effect.succeed({ok: true as const, citations}),
+              );
+            }),
+          );
+        }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          active = false;
+        }),
+      ),
+      Effect.mapError(workflowCitationCaptureError),
+    );
+  });
+}
+const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOperation')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
   request: WorkflowRequest,
+  capture: () => ReturnType<typeof captureMemoryCodeCitationsForMcp>,
 ) {
   const resourceIds = makeResourceIdScopeChecker();
   const action = request.action === 'preflight' ? request.mutation : request.action;
@@ -314,7 +377,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     const body = request.body;
     if (
       body === undefined ||
-      new TextEncoder().encode(body).byteLength > 60_000 ||
+      new TextEncoder().encode(body).byteLength > 60000 ||
       !Effect2.pipe(body, EffectString.trim)
     )
       return yield* workflowError(
@@ -394,22 +457,10 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       );
     if (admitted && !promotion && stableJson(request.codeRefs ?? []) !== stableJson(admitted.citationRefs))
       return yield* workflowError('citation-drift', 'Child code references differ from the admitted citation witness.');
-    const captured =
-      admitted && !promotion
-        ? {ok: true as const, citations: admitted.citations}
-        : yield* captureMemoryCodeCitationsForMcp(
-            config,
-            {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
-            'workflow-memory',
-          );
+    const captured = admitted && !promotion ? {ok: true as const, citations: admitted.citations} : yield* capture();
     if (!captured.ok) {
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
-        return yield* workflowError(
-          'evidence-busy',
-          captured.failure.recovery?.code === 'graph-writer-busy'
-            ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
-            : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
-        );
+        return yield* Effect.fail(workflowCitationCaptureError(captured.failure));
       if (
         request.citationPolicy !== 'defer' ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
@@ -483,7 +534,6 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     },
   } satisfies WorkflowOperation;
 });
-
 export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperation')(function* (
   config: RuntimeConfig,
   initial: WorkflowJournal,

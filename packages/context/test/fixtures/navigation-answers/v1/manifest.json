@@ -1,0 +1,654 @@
+{
+  "schemaVersion": 1,
+  "specDocumentHash": "12f5b77cdf10c8e2f8e2c811e5bb00644a1bf65a5be4cf0e53810c7bc1767b5e",
+  "requirements": [
+    {
+      "id": "GNA01",
+      "behavior": "For a code-understanding task, return a compact answer that helps the agent choose where to read or change and which tests to inspect. Respect the explicit repository, project, source view and code anchor before task-text similarity. If the target is ambiguous, expose bounded candidates and their distinguishing scope instead of choosing a symbol as exact."
+    },
+    {
+      "id": "GNA02",
+      "behavior": "Organize the best supported route into entrypoint, behavioral implementation, state/effect boundaries and relevant tests, with material branches when needed. Every included role has a navigable source locator and a short reason it matters to the task. A role may be supported, unknown, unavailable, omitted by budget, or demonstrably not applicable; missing evidence never creates a fictional linear path. When all four roles fit and are supported, include them in the initial answer without requiring a separate graph traversal."
+    },
+    {
+      "id": "GNA03",
+      "behavior": "Distinguish qualified semantic observations, structural graph relations, directly inspected source, inference and recalled engineering knowledge. State the evidence basis of consequential links. Imports are not calls, reads_or_writes is not proof of a write, and structural resolution is not compiler verification. An inferred connection remains labeled even when both endpoint symbols are current."
+    },
+    {
+      "id": "GNA04",
+      "behavior": "Identify source-supported possible or conditional state/effect boundaries relevant to the task, including the target and condition when known. Distinguish an in-memory mutation, durable write and external effect when evidence permits. The answer describes possible code behavior, not an observed runtime write; absence in a bounded graph never proves a flow is read-only or free of effects."
+    },
+    {
+      "id": "GNA05",
+      "behavior": "Prefer source-supported test relationships to filename similarity. Explain which behavior a test appears to exercise and the evidence for that association; describe assertions only when their source has been inspected. Label name-only candidates as candidates. Relevant tests do not imply execution, passing results or coverage; external test-run evidence, if supplied, has its own source/candidate identity."
+    },
+    {
+      "id": "GNA06",
+      "behavior": "Expose source/view identity, freshness, coverage and limitations independently from relevance and evidence basis. Join evidence only when its identities and scopes are compatible; otherwise separate the observations and state the conflict. Distinguish verified-current, stale, deferred/unverified, partial, empty, unsupported and unavailable where applicable. Retain enough provenance to reproduce the source location and never promote a bounded or stale result into a repository-wide absence claim."
+    },
+    {
+      "id": "GNA07",
+      "behavior": "Honor the effective parent output, source-read, result and deadline budgets. Compact navigation must work at 800 and 1500 output tokens without silently changing existing Context Brief defaults or adding a new latency promise. Retain outcome, requested scope/view, the most useful supported route and explicit role/coverage gaps before secondary detail. Report truncation/omissions; offer at most two precise next reads or bounded queries selected for the largest remaining evidence gap. Continuations are bound to the observation and scope and invalidate or explicitly revalidate after drift."
+    },
+    {
+      "id": "GNA08",
+      "behavior": "Use the existing 6.0 semantic-evidence service when a qualified provider is available and authorized, while preserving useful structural/source navigation when it is disabled, unsupported or unavailable. A navigation request does not authorize source or memory edits, publication, test execution, provider installation/downloads, cold indexing, or execution of repository commands. Existing permitted on-demand semantic sessions and operational caches remain subject to the parent policy; this spec introduces no provider stack or execution authority."
+    },
+    {
+      "id": "GNA09",
+      "behavior": "Include only task-applicable engineering constraints or decisions, with memory review/approval and citation freshness separate from code evidence. Missing memory does not block a useful code answer. Unreviewed proposals and stale constraints retain their status; retrieval never approves, rewrites, deletes or shares them."
+    },
+    {
+      "id": "GNA10",
+      "behavior": "Provide equivalent meaning through the parent headless MCP and versioned CLI context/query surfaces and compact human-readable projection: scope, selected route, relationship basis, freshness, gaps and follow-up agree. Preserve existing Context Brief mode purposes and low-level graph APIs; introduce any required representation change through the parent compatibility contract. With the same normalized request, evidence and budget, ordering and deduplication are deterministic; a warm follow-up retrieves only needed new evidence."
+    },
+    {
+      "id": "GNA11",
+      "behavior": "Qualify navigation correctness with source-grounded fixtures and failure cases, then include representative navigation tasks in the existing 6.0 P11/P12 qualification and value study. Report wrong-path selections, omitted critical boundaries/tests, completion, extra reads/tool calls, output size and failures alongside the parent cost/latency/resource measures. Preserve first attempts and failure-inclusive comparisons; do not claim a savings percentage, universal completeness or a new independent release gate from this specification."
+    }
+  ],
+  "sources": [
+    {
+      "id": "operation",
+      "path": "operation.ts",
+      "content": "import {writeFile} from 'node:fs/promises';\nimport {lookup} from './unresolved.js';\n\nexport const normalizeNote = (text: string) => text.trim();\n\nexport async function saveNote(path: string, text: string, persist: boolean) {\n  const normalized = normalizeNote(text);\n  if (persist) {\n    await writeFile(path, normalized);\n  }\n  return normalized;\n}\n\nexport const saveCommand = (path: string, text: string) => saveNote(path, text, true);\nexport const previewCommand = (path: string, text: string) => saveNote(path, text, false);\n\nexport const queryNote = (text: string) => lookup(normalizeNote(text));\n\nexport function writeLookingPure(text: string) {\n  const writeFile = (value: string) => value.trim();\n  return writeFile(text);\n}\n",
+      "sha256": "443cf674d93b02be782f74a7625bfc122bb7d1e3ac18c5a9c6035d35fab4076c"
+    },
+    {
+      "id": "tests",
+      "path": "operation.test.ts",
+      "content": "import assert from 'node:assert/strict';\nimport {saveNote} from './operation.js';\n\nexport async function testSaveNote() {\n  const result = await saveNote('fixture.txt', ' note ', false);\n  assert.equal(result, 'note');\n}\n\nexport function saveNoteNameOnly() {\n  assert.ok('saveNote');\n}\n",
+      "sha256": "2dd315ee27d499231064f5a428b13b73fd8c7fbaef4a64ae188393dc76f74b50"
+    }
+  ],
+  "locators": {
+    "entrypoint": {
+      "source": "operation",
+      "startLine": 14,
+      "endLine": 14
+    },
+    "implementation": {
+      "source": "operation",
+      "startLine": 6,
+      "endLine": 12
+    },
+    "effects": {
+      "source": "operation",
+      "startLine": 9,
+      "endLine": 9
+    },
+    "tests": {
+      "source": "tests",
+      "startLine": 4,
+      "endLine": 7
+    },
+    "branch": {
+      "source": "operation",
+      "startLine": 15,
+      "endLine": 15
+    },
+    "pure": {
+      "source": "operation",
+      "startLine": 4,
+      "endLine": 4
+    },
+    "unresolved": {
+      "source": "operation",
+      "startLine": 17,
+      "endLine": 17
+    },
+    "nameOnlyTest": {
+      "source": "tests",
+      "startLine": 9,
+      "endLine": 11
+    },
+    "shadowedWriteName": {
+      "source": "operation",
+      "startLine": 19,
+      "endLine": 22
+    }
+  },
+  "scenarios": [
+    {
+      "id": "GNAS01",
+      "requirementIds": ["GNA01", "GNA02", "GNA03", "GNA04", "GNA05"],
+      "given": "a current source-grounded fixture with a single public entrypoint, a behavioral function, a conditional durable-write call and a directly related test, all within the effective budget",
+      "when": "the agent asks how that operation reaches persisted state",
+      "then": "the initial answer supplies all four roles with navigable locations, the write condition, relationship bases and task relevance; no extra traversal is needed to discover those supported roles.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "All four connected roles; the durable call is possible under persist, never an observed write."
+      }
+    },
+    {
+      "id": "GNAS02",
+      "requirementIds": ["GNA02", "GNA04", "GNA06"],
+      "given": "a query fixture with inspected pure transformation code, plus an unresolved imported dependency",
+      "when": "a navigation answer is requested",
+      "then": "the transformation is described as inspected local behavior, the dependency effect boundary remains unknown, and the answer does not assert whole-flow purity from the missing edge.",
+      "oracle": {
+        "level": "acquisition",
+        "sourceLocations": [
+          {
+            "name": "pure",
+            "source": "operation",
+            "startLine": 4,
+            "endLine": 4
+          },
+          {
+            "name": "unresolved",
+            "source": "operation",
+            "startLine": 17,
+            "endLine": 17
+          }
+        ],
+        "expectedGaps": ["effects-unknown"],
+        "expectedSupportedRoles": ["implementation"],
+        "rationale": "Inspected local normalization is pure; the unresolved lookup keeps the whole-flow effect unknown."
+      }
+    },
+    {
+      "id": "GNAS03",
+      "requirementIds": ["GNA03", "GNA05"],
+      "given": "one test directly calls the target, another only shares its name, and no execution receipts exist",
+      "when": "the agent requests relevant tests",
+      "then": "the direct relationship ranks first; the other is a name-only candidate if retained; assertion details require source inspection, and neither is described as passing or as coverage proof.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          },
+          {
+            "name": "nameOnlyTest",
+            "source": "tests",
+            "startLine": 9,
+            "endLine": 11
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["tests"],
+        "rationale": "Direct source relationship ranks before a name-only candidate; no execution or coverage receipt."
+      }
+    },
+    {
+      "id": "GNAS04",
+      "requirementIds": ["GNA01", "GNA02"],
+      "given": "two real entrypoints reach distinct conditional branches of an implementation",
+      "when": "a task spans both branches",
+      "then": "the answer retains both material routes or explicitly reports a budget omission; it does not flatten them into an invented call chain.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "branch",
+            "source": "operation",
+            "startLine": 15,
+            "endLine": 15
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects"],
+        "rationale": "Retain both command branches without inventing their call order."
+      }
+    },
+    {
+      "id": "GNAS05",
+      "requirementIds": ["GNA01", "GNA03"],
+      "given": "an explicit current anchor and a more text-similar unrelated symbol",
+      "when": "the task wording matches the unrelated symbol",
+      "then": "the selected anchor controls the answer; unrelated semantic similarity does not displace it or create a relationship.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "pure",
+            "source": "operation",
+            "startLine": 4,
+            "endLine": 4
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation"],
+        "rationale": "An explicit saveCommand anchor excludes the disconnected text-similar pure function."
+      }
+    },
+    {
+      "id": "GNAS06",
+      "requirementIds": ["GNA01", "GNA06"],
+      "given": "identically named symbols in two projects or worktrees and an ambiguous locator",
+      "when": "navigation is requested",
+      "then": "the answer exposes scope-qualified candidates or an unresolved outcome, without arbitrary selection or cross-worktree joining.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          }
+        ],
+        "expectedGaps": ["ambiguous-target"],
+        "expectedSupportedRoles": [],
+        "rationale": "Two scope-qualified same-name candidates remain choices; no cross-worktree route."
+      }
+    },
+    {
+      "id": "GNAS07",
+      "requirementIds": ["GNA03", "GNA06", "GNA08"],
+      "given": "a qualified provider reports an exact reference while a structural graph reports an import and reads_or_writes",
+      "when": "the answer combines available compatible observations",
+      "then": "each basis remains distinct; the import is not called a compiler-proven call and reads_or_writes is not called a proven durable write.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["implementation"],
+        "rationale": "Qualified reference, structural import and reads_or_writes keep their exact bases; the structural relation is not durable-write proof."
+      }
+    },
+    {
+      "id": "GNAS08",
+      "requirementIds": ["GNA06", "GNA07"],
+      "given": "semantic results describe an unsaved owned buffer while graph/source evidence describes older disk bytes",
+      "when": "a route is assembled",
+      "then": "incompatible facts are separated with a view conflict and a precise next acquisition; no single verified-current route silently combines them.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          }
+        ],
+        "expectedGaps": ["relationship-view-unverified"],
+        "expectedSupportedRoles": [],
+        "rationale": "Owned overlay and older disk observations are separated; no single current chain."
+      }
+    },
+    {
+      "id": "GNAS09",
+      "requirementIds": ["GNA02", "GNA06", "GNA08"],
+      "given": "a missing, disabled, timed-out or unsupported semantic provider and useful ready structural/source evidence",
+      "when": "the agent requests code understanding through a headless surface",
+      "then": "the answer supplies the useful structural route and explicit semantic limitation; it does not start an install, download, index, test or unauthorized repository command.",
+      "oracle": {
+        "level": "acquisition",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": ["semantic-unavailable"],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "Structural/source route remains useful and no install, index, test or repository command starts."
+      }
+    },
+    {
+      "id": "GNAS10",
+      "requirementIds": ["GNA06", "GNA07"],
+      "given": "a source hash, selected project/configuration or provider generation changes during an in-flight request",
+      "when": "observations would otherwise be combined",
+      "then": "the response returns a conflict/stale/partial outcome or revalidates under the parent policy; it never labels mixed observations current.",
+      "oracle": {
+        "level": "acquisition",
+        "sourceLocations": [
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          }
+        ],
+        "expectedGaps": ["source-view-changed"],
+        "expectedSupportedRoles": [],
+        "rationale": "In-flight content, configuration and provider drift must produce conflict/stale/partial or revalidation."
+      }
+    },
+    {
+      "id": "GNAS11",
+      "requirementIds": ["GNA02", "GNA06", "GNA07"],
+      "given": "the same connected fixture at effective 800-token and 1500-token limits, plus a larger fixture with more routes than fit",
+      "when": "both compact projections are produced",
+      "then": "each obeys its bound, preserves scope/view/outcome and the best route, includes all supported roles when they fit, and names omitted roles/coverage and at most two exact next acquisitions when they do not; no budget is silently raised.",
+      "oracle": {
+        "level": "projection",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": ["budget-omission"],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "At800/1500 tokens preserve the best route and all roles when they fit; expose omitted roles and at most two acquisitions."
+      }
+    },
+    {
+      "id": "GNAS12",
+      "requirementIds": ["GNA06", "GNA07"],
+      "given": "an answer with a continuation bound to a fixed observation and scope",
+      "when": "the source or scope changes before continuation",
+      "then": "the old continuation is rejected or explicitly revalidated/rebound by a new query; it cannot splice pages or replay stale locations as current.",
+      "oracle": {
+        "level": "integration",
+        "sourceLocations": [
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          }
+        ],
+        "expectedGaps": ["stale-continuation"],
+        "expectedSupportedRoles": [],
+        "rationale": "Changed source/scope invalidates the prior continuation; no mixed pages."
+      }
+    },
+    {
+      "id": "GNAS13",
+      "requirementIds": ["GNA06", "GNA08"],
+      "given": "separate cases of genuinely zero scoped results, an incomplete project, unsupported relation, unavailable graph and exceeded deadline",
+      "when": "the agent requests navigation",
+      "then": "the outcomes remain distinguishable with usable exact-source fallback where available and truthful gaps; no case proves repository-wide absence and no cold index is silently started.",
+      "oracle": {
+        "level": "acquisition",
+        "sourceLocations": [
+          {
+            "name": "pure",
+            "source": "operation",
+            "startLine": 4,
+            "endLine": 4
+          }
+        ],
+        "expectedGaps": ["coverage-distinct"],
+        "expectedSupportedRoles": [],
+        "rationale": "Empty, incomplete, unsupported, unavailable and timed-out evidence remain distinct without repository-wide absence claims."
+      }
+    },
+    {
+      "id": "GNAS14",
+      "requirementIds": ["GNA09"],
+      "given": "one applicable reviewed constraint, one stale decision, one unapproved proposal and unrelated memory",
+      "when": "task-grounded context is composed",
+      "then": "the applicable constraint is linked with its authority, stale/proposed material is labeled if consequential, unrelated memory is omitted, and no memory or publication state is mutated.",
+      "oracle": {
+        "level": "integration",
+        "sourceLocations": [
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["implementation"],
+        "rationale": "Only applicable reviewed/current memory constrains; stale/proposed memory retains its status and no memory mutates."
+      }
+    },
+    {
+      "id": "GNAS15",
+      "requirementIds": ["GNA02", "GNA09"],
+      "given": "current code evidence but no applicable memory",
+      "when": "navigation is requested",
+      "then": "the supported route remains useful without a fabricated engineering constraint or a prerequisite full-memory reload.",
+      "oracle": {
+        "level": "model",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "No applicable memory is required for a useful source-backed route."
+      }
+    },
+    {
+      "id": "GNAS16",
+      "requirementIds": ["GNA06", "GNA10"],
+      "given": "the same normalized request, fixed evidence and effective budget through CLI and MCP without an editor",
+      "when": "structured and compact results are compared and repeated",
+      "then": "their selected roles, evidence basis, freshness, gaps and next steps agree; ordering is stable and there are no duplicate locators introduced by overlapping retrieval.",
+      "oracle": {
+        "level": "integration",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "CLI/MCP agree on fixed evidence and budget; deterministic ordering and locator dedupe."
+      }
+    },
+    {
+      "id": "GNAS17",
+      "requirementIds": ["GNA07", "GNA10"],
+      "given": "a warm agent already has the entrypoint and implementation observation and asks only which write boundary changed",
+      "when": "the follow-up is processed",
+      "then": "the answer identifies the needed delta or invalidation without reloading all skills, memories, symbol bodies and unchanged routes solely because a new turn began.",
+      "oracle": {
+        "level": "integration",
+        "sourceLocations": [
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["effects"],
+        "rationale": "Warm boundary-only follow-up acquires only a needed delta or invalidation."
+      }
+    },
+    {
+      "id": "GNAS18",
+      "requirementIds": ["GNA08", "GNA10", "GNA11"],
+      "given": "the parent 6.0 language/client qualification matrix and a frozen set of representative navigation tasks",
+      "when": "P11/P12 validate this refinement against the same declared candidate and comparison protocol",
+      "then": "supported semantic languages retain their qualification limits, graph-only fallback remains independently useful, navigation errors and failed attempts are reported with task outcomes and costs, and Kotlin or a new positive-savings release gate is not silently added.",
+      "oracle": {
+        "level": "qualification",
+        "sourceLocations": [
+          {
+            "name": "entrypoint",
+            "source": "operation",
+            "startLine": 14,
+            "endLine": 14
+          },
+          {
+            "name": "implementation",
+            "source": "operation",
+            "startLine": 6,
+            "endLine": 12
+          },
+          {
+            "name": "effects",
+            "source": "operation",
+            "startLine": 9,
+            "endLine": 9
+          },
+          {
+            "name": "tests",
+            "source": "tests",
+            "startLine": 4,
+            "endLine": 7
+          }
+        ],
+        "expectedGaps": [],
+        "expectedSupportedRoles": ["entrypoint", "implementation", "effects", "tests"],
+        "rationale": "Parent P11/P12 candidate, failures and language limits remain authoritative; Kotlin deferred, no new savings gate."
+      }
+    }
+  ],
+  "classification": "Independently authored source/oracle definitions; future acquisition, projection, semantic, surface and release scenarios are not execution evidence."
+}

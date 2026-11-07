@@ -10,6 +10,12 @@ import {makeReadDeadline, readDeadlineRemaining} from '@threadnote/platform/read
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {retrieveContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import {retrieveContextBriefSourceEvidence} from '@threadnote/context/graph/source_evidence';
+import {
+  retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  filterSemanticContextMemory,
+} from '@threadnote/context/compiler';
+import {unavailableContextBriefCodeLinkedMemoryEvidence} from '@threadnote/context/memory-evidence';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {
   selectVerifiedProcedureEvidence,
@@ -27,6 +33,7 @@ import {
   ContextBriefNativeReadFailed,
   type ContextBriefNativeReadRequest,
   type ContextBriefNativeReadResponse,
+  type ContextBriefNativeSemanticState,
 } from './native_read_boundary.js';
 import type {ReadDeadline} from '@threadnote/platform/read_deadline';
 
@@ -121,28 +128,78 @@ export const serveContextBriefNativeRead = Effect.fn('contextBrief.serveNativeRe
       commandsJoined: true as const,
     };
     switch (request.operation) {
-      case 'graph':
+      case 'graph': {
+        const semantic: ContextBriefNativeSemanticState = {
+          binding: null,
+          repositoryIdentityKind: null,
+          selection: {nodeId: null, gap: 'semantic-symbol-target-unavailable'},
+        };
+        const value = yield* retrieveContextBriefGraphEvidence(
+          request.config,
+          request.plan,
+          sourceRequest => {
+            const proof = request.semantic;
+            if (!proof) return retrieveContextBriefSourceEvidence(sourceRequest);
+            return retrieveSemanticContextSourceEvidence(sourceRequest, proof.evidence).pipe(
+              Effect.flatMap(result =>
+                Effect.gen(function* () {
+                  semantic.binding = result.binding;
+                  semantic.repositoryIdentityKind = sourceRequest.identity.remoteIdentity ? 'remote' : 'local';
+                  semantic.selection = yield* retrieveSemanticContextSymbol(
+                    request.config,
+                    sourceRequest,
+                    proof.evidence,
+                    proof.target,
+                    result.binding,
+                  ).pipe(Effect.orElseSucceed(() => ({nodeId: null, gap: 'semantic-symbol-lookup-unavailable'})));
+                  return result.source;
+                }),
+              ),
+            );
+          },
+          budget,
+        );
         return {
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value: yield* retrieveContextBriefGraphEvidence(
-            request.config,
-            request.plan,
-            retrieveContextBriefSourceEvidence,
-            budget,
-          ),
+          value,
           counters: {remaining: budget.remaining, primaryRemaining: budget.primaryRemaining},
+          ...(request.semantic === undefined ? {} : {semantic}),
         };
-      case 'linked':
+      }
+      case 'linked': {
+        const semantic = request.semantic;
+        if (semantic && (!semantic.binding || !semantic.repositoryIdentityKind || !semantic.selection.nodeId))
+          return {
+            ...fields,
+            ok: true as const,
+            operation: request.operation,
+            value: unavailableContextBriefCodeLinkedMemoryEvidence(
+              1,
+              semantic.selection.gap ?? 'semantic-symbol-target-unavailable',
+            ),
+          };
+        const memory = yield* retrieveContextBriefCodeLinkedMemoryEvidence(
+          request.config,
+          semantic?.selection.nodeId ? {...request.plan, codeRefs: [semantic.selection.nodeId]} : request.plan,
+          {allowedUriScopes: request.allowedUriScopes},
+        );
         return {
           ...fields,
           ok: true as const,
           operation: request.operation,
-          value: yield* retrieveContextBriefCodeLinkedMemoryEvidence(request.config, request.plan, {
-            allowedUriScopes: request.allowedUriScopes,
-          }),
+          value:
+            semantic?.binding && semantic.repositoryIdentityKind && semantic.selection.nodeId
+              ? filterSemanticContextMemory(
+                  memory,
+                  semantic.selection.nodeId,
+                  semantic.binding.graph,
+                  semantic.repositoryIdentityKind,
+                )
+              : memory,
         };
+      }
       case 'citations':
         return {
           ...fields,

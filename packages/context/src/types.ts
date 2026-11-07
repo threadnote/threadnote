@@ -4,6 +4,7 @@ import type {AgentToolResponseMeasurement} from '@threadnote/protocol/agent-resp
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import type {VerifiedProcedureEvidence} from './procedure/selection.js';
+import type {Evidence} from '@threadnote/semantic/contracts';
 import {Predicate} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -609,6 +610,62 @@ export interface ProjectedContextBriefV1 {
   readonly measurement: AgentToolResponseMeasurement;
   readonly structuredContent: ContextBriefV1;
   readonly text: string;
+}
+
+/** @internal Bounded reason classes; provider text never enters these public gap identifiers. */
+export type SemanticContextDefinitionGap =
+  | 'semantic-symbol-definition-unsupported'
+  | 'semantic-symbol-definition-ambiguous'
+  | 'semantic-symbol-definition-incomplete'
+  | 'semantic-symbol-definition-external-target'
+  | 'semantic-symbol-definition-observation-mismatch'
+  | 'semantic-symbol-definition-unresolved'
+  | 'semantic-symbol-definition-timeout'
+  | 'semantic-symbol-definition-stale'
+  | 'semantic-symbol-definition-failed'
+  | 'semantic-symbol-definition-target-unsupported';
+
+/** @internal Host-validated definition evidence; never accepted from a public context request. */
+export interface SemanticContextSymbolTarget {
+  readonly evidence: Evidence;
+  readonly uri: string;
+  readonly selectionRange?: SemanticContextSymbolTarget['range'];
+  /** Full definition range, not a caret or a name inferred from hover text. */
+  readonly range: {
+    readonly start: {readonly line: number; readonly character: number};
+    readonly end: {readonly line: number; readonly character: number};
+  };
+}
+
+/** The two source identities are independently verified against the same current bytes. */
+export interface SemanticContextSourceBindingV1 {
+  readonly version: 1;
+  readonly scope: 'document';
+  readonly observation: string;
+  readonly semanticContent: Evidence['observation']['content'];
+  readonly graph: {
+    readonly repositoryId: string;
+    readonly snapshotId: string;
+    readonly path: string;
+    readonly contentHash: string;
+  };
+}
+
+/** Knowledge retains its own freshness, trust, authority and omission metadata. */
+export interface SemanticContextKnowledgeV1 {
+  /** Document code evidence and symbol/file memory selection have distinct proofs. */
+  readonly memorySelection?: {
+    readonly version: 1;
+    readonly scope: 'symbol-and-file';
+    readonly nodeId: string;
+    readonly observation: string;
+    readonly graph: SemanticContextSourceBindingV1['graph'];
+    readonly definitionRange: SemanticContextSymbolTarget['range'];
+  } | null;
+  readonly scope: 'document';
+  readonly binding: SemanticContextSourceBindingV1 | null;
+  readonly brief: ContextBriefAgentViewV1 | null;
+  readonly gaps: readonly string[];
 }
 
 /**

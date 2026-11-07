@@ -704,17 +704,35 @@ export function reconcileNativeCyclePlan(
   value: NativeCycleState,
   newValue: NativeCyclePlan,
   reason: string,
+  userAuthority?: string,
 ): {readonly state: NativeCycleState; readonly affected: readonly string[]} {
   const s = decodeNativeCycleState(value),
     plan = decodeNativeCyclePlan(newValue),
     old = s.plan;
-  if (
-    plan.featureId !== old.featureId ||
-    plan.project !== old.project ||
-    plan.delivery !== old.delivery ||
-    canonical(plan.spec ?? null) !== canonical(old.spec ?? null)
-  )
-    err('Plan reconciliation changes identity or spec.');
+  if (plan.featureId !== old.featureId || plan.project !== old.project || plan.delivery !== old.delivery)
+    err('Plan reconciliation changes identity.');
+  let specAmendments = s.specAmendments;
+  if (canonical(plan.spec ?? null) !== canonical(old.spec ?? null)) {
+    // The executor verifies the new ready authoring export before admission.
+    // Approval cannot replace the original specification identity or binding.
+    if (!Schema.is(specPinSchema)(old.spec) || !Schema.is(specPinSchema)(plan.spec))
+      err('Specification amendments require the original linked specification.');
+    const before = Schema.decodeSync(specPinSchema)(old.spec);
+    const after = Schema.decodeSync(specPinSchema)(plan.spec);
+    if (
+      before.root.uri !== after.root.uri ||
+      before.root.memoryId !== after.root.memoryId ||
+      canonical(before.binding) !== canonical(after.binding)
+    )
+      err('Specification amendments cannot change identity or binding.');
+    const amendment = decode(
+      specAmendmentSchema,
+      {before, after, reason, userAuthority},
+      'Record bounded reconciliation reason and explicit user authority for the specification amendment.',
+    );
+    if ((specAmendments?.length ?? 0) >= 64) err('Specification amendment history capacity is exhausted.');
+    specAmendments = [...(specAmendments ?? []), amendment];
+  }
   for (const p of old.phases)
     if (!EffectArray.some(plan.phases, x => x.id === p.id) && s.phases[p.id].status !== 'pending')
       err('Cannot remove evidence-bearing phases.');
@@ -756,5 +774,5 @@ export function reconcileNativeCyclePlan(
       };
     }
   }
-  return {state: {...s, plan, phases}, affected: [...affected]};
+  return {state: {...s, plan, phases, ...(specAmendments ? {specAmendments} : {})}, affected: [...affected]};
 }

@@ -353,7 +353,7 @@ describe('native cycle pure domain', () => {
     );
   });
 
-  it('preserves historical amendments in ordinary transitions while rejecting new specification changes', () => {
+  it('preserves historical amendments while requiring new authority for another specification change', () => {
     const state = amendedState();
     const original = JSON.stringify(state);
     const validated = validateNativeCyclePhase(state, 'one', snapshot(), validation);
@@ -375,7 +375,7 @@ describe('native cycle pure domain', () => {
         }),
         'Historical authority does not authorize a new amendment',
       ),
-    ).toThrow('Plan reconciliation changes identity or spec.');
+    ).toThrow('Record bounded reconciliation reason and explicit user authority for the specification amendment.');
     expect(JSON.stringify(state)).toBe(original);
   });
 

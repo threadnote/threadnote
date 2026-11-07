@@ -1,0 +1,23 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: Threadnote Java diagnostic snapshots
+Bundle-SymbolicName: dev.threadnote.semantic.diagnostics;singleton:=true
+Bundle-Version: 1.0.0
+Bundle-RequiredExecutionEnvironment: JavaSE-21
+Require-Bundle: org.eclipse.jdt.ls.core;
+ bundle-version="[1.63.0.202610191322,1.63.0.202610191322]",
+ org.eclipse.jdt.core;
+ bundle-version="[3.48.0.v20261007-1246,3.48.0.v20261007-1246]",
+ org.eclipse.core.resources;
+ bundle-version="[3.25.0.v20261010-1447,3.25.0.v20261010-1447]",
+ org.eclipse.core.runtime;
+ bundle-version="[3.35.100.v20260910-1515,3.35.100.v20260910-1515]",
+ org.eclipse.equinox.common;
+ bundle-version="[3.21.100.v20260829-1451,3.21.100.v20260829-1451]",
+ org.eclipse.core.jobs;
+ bundle-version="[3.15.900.v20260604-0622,3.15.900.v20260604-0622]",
+ org.eclipse.text;
+ bundle-version="[3.14.900.v20261012-1310,3.14.900.v20261012-1310]",
+ org.eclipse.jdt.launching;
+ bundle-version="[3.25.0.v20261010-0421,3.25.0.v20261010-0421]"
+

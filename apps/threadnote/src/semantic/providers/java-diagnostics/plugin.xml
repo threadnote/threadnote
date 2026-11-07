@@ -1,0 +1,11 @@
+<plugin>
+  <extension point="org.eclipse.jdt.ls.core.delegateCommandHandler">
+    <delegateCommandHandler class="dev.threadnote.semantic.PreparedProjectModel">
+      <command id="threadnote.java.preparedProjectModel.v1" static="true"/>
+    </delegateCommandHandler>
+    <delegateCommandHandler class="dev.threadnote.semantic.DiagnosticSnapshot">
+      <command id="threadnote.java.diagnosticSnapshot.v1" static="true"/>
+      <command id="threadnote.java.typeDefinitionSnapshot.v1" static="true"/>
+    </delegateCommandHandler>
+  </extension>
+</plugin>

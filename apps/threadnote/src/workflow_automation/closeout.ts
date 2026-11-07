@@ -15,6 +15,7 @@ import * as Effect2 from 'effect';
 import {checkNativeCycleScope} from '@threadnote/workflow-automations/cycle';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
+import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {renderNativeDocument} from '@threadnote/workflow-automations/documents';
 import {planNativeCloseoutDocuments} from './closeout_documents.js';
@@ -47,8 +48,53 @@ import {
   writeNativeCloseoutJournal,
   withNativeCloseoutLock,
 } from './closeout_store.js';
-
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+/** Reobserve HEAD and cleanliness together at each closeout mutation boundary. */
+export const verifyNativeCloseoutSource = Effect.fn('workflowAutomation.closeout.verifySource')(function* (
+  repo: string,
+  expectedHead: string,
+) {
+  const result = yield* runCommandEffect(
+    'git',
+    [
+      '--no-optional-locks',
+      '-C',
+      repo,
+      'status',
+      '--porcelain=v2',
+      '-z',
+      '--branch',
+      '--no-ahead-behind',
+      '--ignore-submodules=none',
+    ],
+    {timeoutMs: 30000},
+  );
+  const records = EffectString.endsWith('\0')(result.stdout)
+    ? EffectString.split('\0')(EffectString.slice(0, -1)(result.stdout))
+    : [];
+  let head: string | undefined;
+  let branch = false;
+  let dirty = false;
+  let malformed = records.length === 0;
+  const metadata = new Set<string>();
+  for (const record of records) {
+    if (EffectString.startsWith('# ')(record)) {
+      const match = /^# branch\.(oid|head|upstream|ab) (.+)$/u.exec(record);
+      if (!match || nativeCycleHasControl(record) || metadata.has(match[1])) {
+        malformed = true;
+        continue;
+      }
+      metadata.add(match[1]);
+      if (match[1] === 'oid') {
+        head = match[2];
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)) malformed = true;
+      } else if (match[1] === 'head') branch = true;
+      else if (match[1] === 'ab' && !/^(?:\+\d+ -\d+|\+\? -\?)$/u.test(match[2])) malformed = true;
+    } else dirty = true;
+  }
+  if (malformed || !branch || head !== expectedHead || dirty)
+    return yield* fail('closeout-source-drift', 'Source changed during closeout; keep remaining drafts.');
+});
 const attempt = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
 const hash = (value: unknown) => sha256HexSync(stableJson(value));
 const ref = (artifact: WorkflowArtifact) => ({
@@ -111,7 +157,6 @@ const summary = (journal: Journal, revision: string) => ({
       : {}),
   },
 });
-
 /** Every changed path needs a newly accepted current phase; historical merged owners may overlap it. */
 export const freshCloseoutChangedPathCoverage = (
   changed: readonly string[],
@@ -126,7 +171,6 @@ export const freshCloseoutChangedPathCoverage = (
   }
   return [...covered];
 };
-
 const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission')(function* (
   previous: Journal,
   current: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
@@ -186,7 +230,7 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
                   previous.source.head,
                   source.head,
                 ],
-                {timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024},
+                {timeoutMs: 30000, maxOutputBytes: 4 * 1024 * 1024},
               )).stdout,
               '\0',
             ),
@@ -211,7 +255,6 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
     );
   return [...affected];
 });
-
 export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nativeCall: NativeAuthoringCall<R>) =>
   Effect.gen(function* () {
     let activeTransactionId: string | undefined;
@@ -709,26 +752,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             hash(current.state.cycle.state) !== hash(journal.cycle)
           )
             return yield* fail('closeout-drift', 'Cycle acceptance or binding changed; keep remaining drafts.');
-          const head = yield* runCommandEffect(
-            'git',
-            ['--no-optional-locks', '-C', journal.source.repo, 'rev-parse', '--verify', 'HEAD'],
-            {timeoutMs: 30_000},
-          );
-          const dirty = yield* runCommandEffect(
-            'git',
-            [
-              '--no-optional-locks',
-              '-C',
-              journal.source.repo,
-              'status',
-              '--porcelain=v2',
-              '-z',
-              '--ignore-submodules=none',
-            ],
-            {timeoutMs: 30_000},
-          );
-          if (Effect2.pipe(head.stdout, EffectString.trim) !== journal.source.head || dirty.stdout.length !== 0)
-            return yield* fail('closeout-source-drift', 'Source changed during closeout; keep remaining drafts.');
+          yield* verifyNativeCloseoutSource(journal.source.repo, journal.source.head);
         });
         for (const item of journal.owned) {
           const archived = journal.archives[item.uri];
@@ -907,7 +931,10 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
         const write = (
           key: string,
           body: string,
-          relations: readonly {type: string; uri: string}[] = [],
+          relations: readonly {
+            type: string;
+            uri: string;
+          }[] = [],
           replacing = false,
         ) =>
           Effect.gen(function* () {

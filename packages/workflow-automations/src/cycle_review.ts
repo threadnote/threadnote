@@ -26,6 +26,21 @@ const fail = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-cycle-review', message});
 };
 
+export const NativeCycleRebaseInputSchema = Schema.Struct({
+  preRebaseHead: gitObject,
+  ontoHead: gitObject,
+  rebasedHead: gitObject,
+});
+export type NativeCycleRebaseInput = typeof NativeCycleRebaseInputSchema.Type;
+const rebaseReceipt = Schema.Struct({
+  ...NativeCycleRebaseInputSchema.fields,
+  reason: text(),
+  authority: text(),
+  receiptDigest: digest,
+  beforeRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-before\/[a-f0-9]{64}$/u)),
+  afterRef: Schema.String.check(Schema.isPattern(/^refs\/threadnote\/cycles\/rebase-after\/[a-f0-9]{64}$/u)),
+});
+
 export const NativeCycleBaseRequalificationInputSchema = Schema.Struct({
   preRebaseHead: gitObject,
   ontoHead: gitObject,
@@ -64,6 +79,7 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   supersedes: Schema.optionalKey(id),
   previousTree: Schema.optionalKey(gitObject),
   acceptedHead: Schema.optionalKey(gitObject),
+  rebase: Schema.optionalKey(rebaseReceipt),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
   files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
@@ -71,12 +87,42 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
 }).check(
   Schema.makeFilter(snapshot =>
     (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
-    (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
-      ? 'Version2 requires only the ordinary merge qualification.'
+    (snapshot.ordinaryMergeQualificationV1 && (snapshot.baseRequalification || snapshot.rebase)) ||
+    (snapshot.rebase && snapshot.baseRequalification)
+      ? 'Version2 requires ordinary merge qualification; snapshot qualifications are mutually exclusive.'
       : undefined,
   ),
 );
 export type NativeCycleSnapshot = typeof NativeCycleSnapshotSchema.Type;
+
+export function nativeCycleRebaseReceiptDigest(
+  snapshot: NativeCycleSnapshot,
+  receipt: Omit<NonNullable<NativeCycleSnapshot['rebase']>, 'receiptDigest'>,
+): string {
+  return sha256HexSync(
+    JSON.stringify([
+      'threadnote-native-initial-rebase-v1',
+      snapshot.snapshotId,
+      snapshot.phaseId,
+      snapshot.phaseHash,
+      snapshot.repo,
+      snapshot.head,
+      snapshot.baseTree,
+      snapshot.tree,
+      snapshot.scopeBase,
+      snapshot.declaredBaseHead,
+      snapshot.files,
+      snapshot.scopeFiles,
+      receipt.preRebaseHead,
+      receipt.ontoHead,
+      receipt.rebasedHead,
+      receipt.reason,
+      receipt.authority,
+      receipt.beforeRef,
+      receipt.afterRef,
+    ]),
+  );
+}
 
 export function nativeCycleBaseRequalificationReceiptDigest(
   snapshot: NativeCycleSnapshot,

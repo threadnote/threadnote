@@ -1,9 +1,9 @@
 import {Array as EffectArray} from 'effect';
-import {Context, Effect, Exit, type FileSystem, Tracer} from 'effect';
+import {Context, Effect, Exit, type FileSystem, Option, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
 import * as EffectRecord from 'effect/Record';
-
-// Test-only vocabulary: input, output, attributes, IDs, paths and errors never enter this recorder.
+// Test-only vocabulary: fixed primitive refresh counters and a fixed commit-event timestamp only.
+// Input, output, arbitrary attributes, IDs, paths and errors never enter this recorder.
 export const nativeProgressBoundaries = [
   'init',
   'authoring-save',
@@ -35,6 +35,7 @@ export const nativeProgressSpanLabels = [
   'recall.loadMemoryIdentities',
   'recall.executeIndexQuery',
   'recall.acquireDatabase',
+  'recall.closeDatabase',
   'recall.databaseBody',
   'recall.initializeDatabase',
   'recall.initializeIdentityIndex',
@@ -43,13 +44,19 @@ export const nativeProgressSpanLabels = [
   'recall.ensureDatabaseFresh',
   'recall.scanSources',
   'recall.refreshDatabase',
+  'recall.assembleRefreshSources',
+  'recall.hashRefreshGeneration',
+  'recall.writeRefresh',
+  'recall.writeRefreshBody',
+  'recall.rebuildIdentityConflicts',
+  'recall.resolveLegacyMemoryLinks',
   'recall.refreshDerivedIndexesAfterCanonicalMutation',
   'external.loadAccess',
   'runCommandEffect',
   'CommandExecutor.execute',
 ] as const;
 const selectedLabels = new Set<string>(nativeProgressSpanLabels);
-const ceiling = 2_147_483_647;
+const ceiling = 2147483647;
 const bounded = (n: number) => (Number.isNaN(n) ? 0 : Math.min(ceiling, Math.max(0, Math.round(n))));
 const safely = (observe: () => void) => {
   try {
@@ -65,10 +72,95 @@ type BoundaryRecord = {
   outcome: Outcome | 'Started';
   elapsedMs: number;
 };
-type SpanRecord = {label: string; sequence: number; startedMs: number};
-type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
-type Counts = {started: number; succeeded: number; failed: number};
-
+type SpanRecord = {
+  label: string;
+  sequence: number;
+  startedMs: number;
+};
+type SpanEnd = SpanRecord & {
+  outcome: Outcome;
+  inclusiveMs: number;
+};
+type Counts = {
+  started: number;
+  succeeded: number;
+  failed: number;
+};
+type RefreshTransaction = {
+  start: bigint;
+  invalid: boolean;
+  body?: {
+    start: bigint;
+    end?: bigint;
+    succeeded?: boolean;
+  };
+};
+const transactionIntervals = (span: Tracer.Span, transaction: RefreshTransaction, end: bigint) => {
+  try {
+    const body = transaction.body;
+    if (transaction.invalid || !body?.succeeded || body.end === undefined || !(span instanceof Tracer.NativeSpan))
+      return undefined;
+    const events = span.events;
+    if (events.length > 4) return undefined;
+    let commit: bigint | undefined;
+    for (let index = 0; index < events.length; index++) {
+      const event = events[index];
+      if (event[0] !== 'effect.sql.transaction.commit') continue;
+      if (commit !== undefined || typeof event[1] !== 'bigint') return undefined;
+      commit = event[1];
+    }
+    if (
+      commit === undefined ||
+      transaction.start > body.start ||
+      body.start > body.end ||
+      body.end > commit ||
+      commit > end
+    )
+      return undefined;
+    const milliseconds = (duration: bigint) => bounded(Number(duration) / 1000000);
+    return {
+      acquireAndBeginMs: milliseconds(body.start - transaction.start),
+      bodyMs: milliseconds(body.end - body.start),
+      preCommitMs: milliseconds(commit - body.end),
+      commitAndReleaseMs: milliseconds(end - commit),
+    };
+  } catch {
+    return undefined;
+  }
+};
+const refreshBucket = () => ({count: 0, scannedSources: 0, changedSources: 0, removedSources: 0, maxChangedSources: 0});
+const refreshDecision = (span: Tracer.Span) => {
+  const forceAllSources = span.attributes.get('recall.refresh.forceAllSources');
+  const forceRefresh = span.attributes.get('recall.refresh.forceRefresh');
+  const forceFromMarker = span.attributes.get('recall.refresh.forceFromMarker');
+  const canonicalMutationChanged = span.attributes.get('recall.refresh.canonicalMutationChanged');
+  const continuityAllowed = span.attributes.get('recall.refresh.continuityAllowed');
+  const scannedSources = span.attributes.get('recall.refresh.scannedSources');
+  const changedSources = span.attributes.get('recall.refresh.changedSources');
+  const removedSources = span.attributes.get('recall.refresh.removedSources');
+  if (
+    typeof forceAllSources !== 'boolean' ||
+    typeof forceRefresh !== 'boolean' ||
+    typeof forceFromMarker !== 'boolean' ||
+    typeof canonicalMutationChanged !== 'boolean' ||
+    typeof continuityAllowed !== 'boolean' ||
+    typeof scannedSources !== 'number' ||
+    typeof changedSources !== 'number' ||
+    typeof removedSources !== 'number' ||
+    !EffectArray.every([scannedSources, changedSources, removedSources], value => Number.isInteger(value) && value >= 0)
+  )
+    return undefined;
+  return {
+    forceAllSources,
+    forceRefresh,
+    forceFromMarker,
+    canonicalMutationChanged,
+    continuityAllowed,
+    scannedSources: bounded(scannedSources),
+    changedSources: bounded(changedSources),
+    removedSources: bounded(removedSources),
+  };
+};
 export const classifyNativeProgress = (input: unknown): NativeProgressBoundary => {
   try {
     if (typeof input !== 'object' || input === null) return 'other';
@@ -93,7 +185,6 @@ export const classifyNativeProgress = (input: unknown): NativeProgressBoundary =
     return 'other';
   }
 };
-
 export const makeNativeProgressDiagnostics = (
   delegate: Tracer.Tracer,
   options: {
@@ -124,7 +215,34 @@ export const makeNativeProgressDiagnostics = (
     (label): readonly [NativeProgressBoundary, Counts] => [label, {started: 0, succeeded: 0, failed: 0}],
   );
   const counters = EffectRecord.fromEntries(counterEntries);
-  const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
+  const totals: Record<
+    string,
+    {
+      started: number;
+      ended: number;
+      failed: number;
+      inclusiveMs: number;
+    }
+  > = {};
+  const refreshWrites = new WeakSet<Tracer.Span>();
+  const refreshTransactions = new WeakMap<Tracer.Span, RefreshTransaction>();
+  const transactionBoundaries = {
+    observed: 0,
+    rejected: 0,
+    acquireAndBeginMs: 0,
+    bodyMs: 0,
+    preCommitMs: 0,
+    commitAndReleaseMs: 0,
+  };
+  const refreshDecisions = {
+    observed: 0,
+    forceRefresh: 0,
+    forceFromMarker: 0,
+    canonicalMutationChanged: 0,
+    continuityMissing: 0,
+    allSources: refreshBucket(),
+    incremental: refreshBucket(),
+  };
   const active = new Map<Tracer.Span, SpanRecord>();
   const recent: SpanEnd[] = [];
   let sequence = 0;
@@ -153,13 +271,36 @@ export const makeNativeProgressDiagnostics = (
     span(spanOptions) {
       // Preserve the active backend and any observer already wrapping this exact span.
       const span = delegate.span.call(delegate, spanOptions);
-      if (!selectedLabels.has(spanOptions.name)) return span;
+      const selected = selectedLabels.has(spanOptions.name);
+      let transaction: RefreshTransaction | undefined;
+      let bodyTransaction: RefreshTransaction | undefined;
       safely(() => {
-        const total = (totals[spanOptions.name] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0});
-        total.started = bounded(total.started + 1);
-        const entry = {label: spanOptions.name, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()};
-        activeCount = bounded(activeCount + 1);
-        if (active.size < 8) active.set(span, entry);
+        const parent = Option.getOrUndefined(spanOptions.parent);
+        if (spanOptions.name === 'recall.writeRefresh') refreshWrites.add(span);
+        if (parent?._tag !== 'Span') return;
+        if (spanOptions.name === 'sql.transaction' && refreshWrites.has(parent)) {
+          transaction = {start: spanOptions.startTime, invalid: false};
+          refreshTransactions.set(span, transaction);
+        } else if (spanOptions.name === 'recall.writeRefreshBody') {
+          bodyTransaction = refreshTransactions.get(parent);
+          if (!bodyTransaction) return;
+          if (bodyTransaction.body) bodyTransaction.invalid = true;
+          else bodyTransaction.body = {start: spanOptions.startTime};
+        }
+      });
+      if (!selected && !transaction) return span;
+      safely(() => {
+        const total = selected
+          ? (totals[spanOptions.name] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0})
+          : undefined;
+        const entry = total
+          ? {label: spanOptions.name, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()}
+          : undefined;
+        if (total && entry) {
+          total.started = bounded(total.started + 1);
+          activeCount = bounded(activeCount + 1);
+          if (active.size < 8) active.set(span, entry);
+        }
         const end = span.end.bind(span);
         let ended = false;
         span.end = (at, exit) => {
@@ -168,16 +309,56 @@ export const makeNativeProgressDiagnostics = (
           safely(() => {
             if (ended) return;
             ended = true;
+            if (bodyTransaction?.body) {
+              bodyTransaction.body.end = at;
+              bodyTransaction.body.succeeded = Exit.isSuccess(exit);
+            }
+            if (transaction) {
+              const intervals = Exit.isSuccess(exit) ? transactionIntervals(span, transaction, at) : undefined;
+              if (intervals) {
+                transactionBoundaries.observed = bounded(transactionBoundaries.observed + 1);
+                transactionBoundaries.acquireAndBeginMs = bounded(
+                  transactionBoundaries.acquireAndBeginMs + intervals.acquireAndBeginMs,
+                );
+                transactionBoundaries.bodyMs = bounded(transactionBoundaries.bodyMs + intervals.bodyMs);
+                transactionBoundaries.preCommitMs = bounded(transactionBoundaries.preCommitMs + intervals.preCommitMs);
+                transactionBoundaries.commitAndReleaseMs = bounded(
+                  transactionBoundaries.commitAndReleaseMs + intervals.commitAndReleaseMs,
+                );
+              } else transactionBoundaries.rejected = bounded(transactionBoundaries.rejected + 1);
+            }
+            if (!total || !entry) return;
             activeCount = Math.max(0, activeCount - 1);
             active.delete(span);
             total.ended = bounded(total.ended + 1);
             if (Exit.isFailure(exit)) total.failed = bounded(total.failed + 1);
-            const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1_000_000);
+            const inclusiveMs = bounded(Number(at - spanOptions.startTime) / 1000000);
             total.inclusiveMs = bounded(total.inclusiveMs + inclusiveMs);
             recent.push({...entry, inclusiveMs, outcome: exit._tag});
             if (recent.length > 32) {
               recent.shift();
               recentDropped = bounded(recentDropped + 1);
+            }
+            if (spanOptions.name === 'recall.refreshDatabase') {
+              const decision = refreshDecision(span);
+              if (!decision) return;
+              refreshDecisions.observed = bounded(refreshDecisions.observed + 1);
+              refreshDecisions.forceRefresh = bounded(refreshDecisions.forceRefresh + Number(decision.forceRefresh));
+              refreshDecisions.forceFromMarker = bounded(
+                refreshDecisions.forceFromMarker + Number(decision.forceFromMarker),
+              );
+              refreshDecisions.canonicalMutationChanged = bounded(
+                refreshDecisions.canonicalMutationChanged + Number(decision.canonicalMutationChanged),
+              );
+              refreshDecisions.continuityMissing = bounded(
+                refreshDecisions.continuityMissing + Number(!decision.continuityAllowed),
+              );
+              const bucket = decision.forceAllSources ? refreshDecisions.allSources : refreshDecisions.incremental;
+              bucket.count = bounded(bucket.count + 1);
+              bucket.scannedSources = bounded(bucket.scannedSources + decision.scannedSources);
+              bucket.changedSources = bounded(bucket.changedSources + decision.changedSources);
+              bucket.removedSources = bounded(bucket.removedSources + decision.removedSources);
+              bucket.maxChangedSources = Math.max(bucket.maxChangedSources, decision.changedSources);
             }
           });
         };
@@ -249,6 +430,12 @@ export const makeNativeProgressDiagnostics = (
         totals: EffectRecord.fromEntries(
           EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
         ),
+        refreshDecisions: {
+          ...refreshDecisions,
+          allSources: {...refreshDecisions.allSources},
+          incremental: {...refreshDecisions.incremental},
+        },
+        transactionBoundaries: {...transactionBoundaries},
         activeCount,
         unlistedActiveCount: activeCount - active.size,
         active: EffectArray.map([...active.values()], entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),
@@ -262,12 +449,12 @@ export const makeNativeProgressDiagnostics = (
       safely(() => {
         const packet = {...observer.snapshot(), outerFailure: true};
         let json = serialize(packet);
-        while (json.length > 16_000 && packet.recent.length > 0) {
+        while (json.length > 16000 && packet.recent.length > 0) {
           packet.recent.shift();
           packet.recentDropped = bounded(packet.recentDropped + 1);
           json = serialize(packet);
         }
-        if (json.length <= 16_000) sink('NATIVE_AUTHORING_PROGRESS_DIAGNOSTICS ' + json);
+        if (json.length <= 16000) sink('NATIVE_AUTHORING_PROGRESS_DIAGNOSTICS ' + json);
       });
     },
   };
@@ -278,7 +465,6 @@ export const CurrentNativeProgress = Context.Reference<NativeProgressDiagnostics
   'test/CurrentNativeProgress',
   {defaultValue: () => undefined},
 );
-
 export const observeNativeBoundary = <A, E, R>(
   program: Effect.Effect<A, E, R>,
   observer: NativeProgressDiagnostics,
@@ -299,7 +485,6 @@ export const observeNativeBoundary = <A, E, R>(
       ),
     );
   }).pipe(Effect.withSpan(`native.progress.${label}`));
-
 // Construct the original Effect once before classification/observation. A delegate throw stays a throw.
 export const nativeProgressMethod =
   <S, Args extends unknown[], A, E, R>(
@@ -316,7 +501,6 @@ export const nativeProgressMethod =
     });
     return label ? observeNativeBoundary(program, observer, label) : program;
   };
-
 export const observeNativeBody = <A, E, R>(program: Effect.Effect<A, E, R>, observer: NativeProgressDiagnostics) =>
   Effect.suspend(() => {
     safely(() => observer.enterBody());
@@ -330,7 +514,6 @@ export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, ob
       }),
     ),
   );
-
 // These returned facades are never provided back into the application service graph.
 const storeFacades = new WeakMap<NativeProgressDiagnostics, WeakMap<object, object>>();
 const storeFacadeSources = new WeakMap<object, object>();
@@ -361,7 +544,10 @@ export const nativeProgressFacades = <
   fs: F,
   defaultStatePath: string,
   observer: NativeProgressDiagnostics | undefined,
-): {store: S; fs: F} =>
+): {
+  store: S;
+  fs: F;
+} =>
   observer
     ? {
         store: progressStore(store, observer),

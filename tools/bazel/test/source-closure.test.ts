@@ -5,14 +5,23 @@ import {collectSourceClosure, sourceImports} from '../source-closure.mjs';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
-
 const collect = (files: Record<string, string>, entries = ['src/0.ts'], workspaces = new Map()) =>
   collectSourceClosure(entries, {
     read: (path: string) => files[path],
     exists: (path: string) => path in files,
     workspaces,
   });
-
+it('scopes editor-supplied modules to the declared fixture host', () => {
+  const files: Record<string, string> = {'fixture/probe.cjs': "require('vscode');", 'src/app.ts': "import 'vscode';"};
+  const options = {
+    read: (path: string) => files[path],
+    exists: (path: string) => path in files,
+    workspaces: new Map(),
+    hostModules: {'fixture/probe.cjs': ['vscode']},
+  };
+  expect(collectSourceClosure(['fixture/probe.cjs'], options)).toEqual({files: ['fixture/probe.cjs'], npm: []});
+  expect(collectSourceClosure(EffectRecord.keys(files), options).npm).toEqual(['vscode']);
+});
 it('retains namespace dependencies after interpolated templates', () => {
   const files = {
     'src/0.ts': 'const label = `${1}`; export * as ns from "./1.js";',
@@ -42,7 +51,6 @@ it('retains namespace dependencies after interpolated templates', () => {
     {numRuns: 50},
   );
 });
-
 it('recognizes namespace exports across arbitrary bounded trivia', () => {
   fc.assert(
     fc.property(
@@ -59,10 +67,9 @@ it('recognizes namespace exports across arbitrary bounded trivia', () => {
     {numRuns: 50},
   );
   expect(
-    sourceImports('file.ts', `export ${Effect.pipe('/* *//* */', EffectString.repeat(2_000))}const value = 1;`),
+    sourceImports('file.ts', `export ${Effect.pipe('/* *//* */', EffectString.repeat(2000))}const value = 1;`),
   ).toEqual([]);
 });
-
 it('follows source additions, removals, and changed import edges', () => {
   const files = {'src/0.ts': 'export const first = 1;', 'src/1.ts': 'export const second = 2;'};
   expect(collect(files).files).toEqual(['src/0.ts']);
@@ -73,7 +80,6 @@ it('follows source additions, removals, and changed import edges', () => {
     'good',
   ]);
 });
-
 it('resolves explicit private exports and rejects missing exports', () => {
   const workspace = {path: 'packages/domain', manifest: {exports: {'./value': './src/value.ts'}}};
   const files = {
@@ -94,7 +100,6 @@ it('resolves explicit private exports and rejects missing exports', () => {
     ),
   ).toThrow('workspace export');
 });
-
 it('matches a bounded graph model and ignores input enumeration order', () => {
   fc.assert(
     fc.property(
@@ -123,7 +128,6 @@ it('matches a bounded graph model and ignores input enumeration order', () => {
     {numRuns: 50},
   );
 });
-
 it('exposes resolved direct edges from the closure resolver without changing its result shape', () => {
   const files: Record<string, string> = {
     'src/root.ts':
@@ -151,7 +155,6 @@ it('exposes resolved direct edges from the closure resolver without changing its
   expect(graph.get('packages/domain/src/value.ts')).toEqual({files: ['packages/domain/src/other.ts'], npm: []});
   expect(graph.get('packages/domain/package.json')).toEqual({files: [], npm: []});
 });
-
 it('reuses direct edges only within a fixed model across shared entry closures', () => {
   const files: Record<string, string> = {
     'src/first.ts': 'import "@threadnote/domain/value";',
