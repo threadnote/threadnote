@@ -35,6 +35,7 @@ const admission = (
   phaseEvidence: [],
   decisions: [],
   scenarios: [],
+  watchWork: [],
   documents: {
     architecture: createNativeDocument({
       kind: 'architecture-current',

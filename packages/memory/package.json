@@ -12,6 +12,7 @@
     "./hygiene": "./src/hygiene.ts",
     "./hygiene/provenance": "./src/hygiene/provenance.ts",
     "./identity-alias": "./src/identity-alias.ts",
+    "./navigation-link": "./src/navigation-link.ts",
     "./knowledge_delta": "./src/knowledge_delta.ts",
     "./local-path": "./src/local-path.ts",
     "./lock": "./src/lock.ts",

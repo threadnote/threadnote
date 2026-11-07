@@ -6,6 +6,7 @@ import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
   NativeAuthoringPlanDocumentSchema,
+  projectNativeCompactIntent,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -143,6 +144,21 @@ const caught = (run: () => unknown): unknown => {
 };
 const issueCodes = (document: NativeAuthoringDocument) =>
   EffectArray.map(validateNativeAuthoring(document).issues, issue => issue.code);
+
+const compactInput = (changes: Record<string, unknown> = {}) => ({
+  title: 'Refresh stale cache entries',
+  currentBehavior: 'Expired cache entries are returned without a freshness check.',
+  desiredChange: 'Expired cache entries are refreshed before they are returned.',
+  affectedPaths: ['src/cache.ts'],
+  acceptanceCriterion: 'Expired entries are refreshed before return.',
+  verification: 'Exercise an expired entry and observe its refresh.',
+  eligibilityRationale: 'One behavior and one source path are explicit; no product decision or dependency is open.',
+  eligibility: {status: 'eligible'},
+  review: {required: false, reason: 'Routine local cache fix.'},
+  ...changes,
+});
+
+const compactSource = {head: Effect.pipe('c', EffectString.repeat(40)), files: [{path: 'src/cache.ts', sha256: hash}]};
 
 const alternativesPlan = (count: number, index = 0, marker = 'private-fixture') => {
   const plan = asPlan(validPlan());
@@ -412,7 +428,59 @@ describe('native authoring documents', () => {
       ),
     ).not.toBe(nativeSpecIntentDigest(original));
     const plan = validPlan();
-    expect(nativeSpecIntentDigest(plan)).toBe(nativeAuthoringDigest(plan));
+    const refreshedPlan = validPlan({
+      source: {...source, head: Effect.pipe('c', EffectString.repeat(40))},
+      context: {
+        ...context,
+        evidenceRefs: [{uri: 'threadnote://memory/tn_evidence', memoryId: 'tn_evidence', revision: hash}],
+        note: 'Refreshed evidence.',
+      },
+      openQuestions: ['A transient evidence follow-up.'],
+      review: {required: true, reason: 'Updated review rationale.'},
+    });
+    expect(nativeSpecIntentDigest(refreshedPlan)).toBe(nativeSpecIntentDigest(plan));
+    expect(nativeAuthoringDigest(refreshedPlan)).not.toBe(nativeAuthoringDigest(plan));
+    expect(nativeSpecIntentDigest(plan, 1)).toBe(nativeAuthoringDigest(plan));
+    const semanticChanges = [
+      validPlan({requirements: [{id: 'req-cache', behavior: 'Only fresh entries are returned.'}]}),
+      validPlan({current: {...asPlan(plan).current, summary: 'The cache reader serves stale entries.'}}),
+      validPlan({target: {...asPlan(plan).target, summary: 'A new freshness design gates cache reads.'}}),
+      validPlan({phases: [{...asPlan(plan).phases[0], outcome: 'A changed implementation outcome.'}]}),
+      validPlan({decisions: [{...asPlan(plan).decisions[0], selected: 'Use a different freshness boundary.'}]}),
+      validPlan({review: {required: false, reason: 'Routine plan.'}}),
+    ];
+    for (const changed of semanticChanges)
+      expect(nativeSpecIntentDigest(changed)).not.toBe(nativeSpecIntentDigest(plan));
+  });
+
+  it('property: plan source and evidence refreshes preserve v2 intent while changing the full document digest', () => {
+    const original = asPlan(validPlan());
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 0x7fffffff}), index => {
+        const head = Effect.pipe(index.toString(16), EffectString.padStart(40, '0'));
+        const refreshed = asPlan(
+          validPlan({
+            source: {...source, head},
+            context: {
+              ...context,
+              note: `Evidence refresh ${index}.`,
+              evidenceRefs: [
+                {
+                  uri: 'threadnote://memory/tn_evidence',
+                  memoryId: 'tn_evidence',
+                  revision: Effect.pipe(index.toString(16), EffectString.padStart(64, '0')),
+                },
+              ],
+            },
+            openQuestions: [`Refresh follow-up ${index}.`],
+            review: {required: original.review.required, reason: `Updated review reason ${index}.`},
+          }),
+        );
+        expect(nativeSpecIntentDigest(refreshed)).toBe(nativeSpecIntentDigest(original));
+        expect(nativeAuthoringDigest(refreshed)).not.toBe(nativeAuthoringDigest(original));
+      }),
+      {numRuns: 60},
+    );
   });
 
   it('reports spec semantic gaps and only marks an exact confirmed, reviewed spec ready', () => {
@@ -487,6 +555,30 @@ describe('native authoring documents', () => {
       review: {documentHash: planIntent, outcome: 'accepted', blockingIssueCount: 0},
     });
     expect(validReady).toMatchObject({ready: true, issues: []});
+    const legacyReady = validateNativeAuthoring(plan, {
+      ready: true,
+      planIntentPolicyVersion: 1,
+      review: {documentHash: planIntent, outcome: 'accepted', blockingIssueCount: 0},
+    });
+    expect(legacyReady).toMatchObject({ready: true, documentHash: planIntent, intentHash: planIntent, issues: []});
+    const evidenceRefresh = validPlan({context: {...context, note: 'Updated source context.'}});
+    expect(nativeSpecIntentDigest(evidenceRefresh)).toBe(nativeSpecIntentDigest(plan));
+    expect(
+      validateNativeAuthoring(evidenceRefresh, {
+        ready: true,
+        review: {documentHash: planIntent, outcome: 'accepted', blockingIssueCount: 0},
+      }).issues,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({code: 'review-required'})]));
+    expect(
+      validateNativeAuthoring(evidenceRefresh, {
+        ready: true,
+        review: {
+          documentHash: nativeAuthoringDigest(evidenceRefresh),
+          outcome: 'accepted',
+          blockingIssueCount: 0,
+        },
+      }).ready,
+    ).toBe(true);
     expect(() =>
       validPlan({
         current: {...asPlan(validPlan()).current, summary: ''},
@@ -603,5 +695,110 @@ describe('native authoring documents', () => {
       },
     });
     expect(issueCodes(proseDiagram)).not.toContain('diagram-invalid');
+  });
+
+  it('projects one compact intent into the canonical plan and requires exact intent confirmation', () => {
+    const result = projectNativeCompactIntent(
+      compactInput(),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      compactSource,
+    );
+    expect(result.status).toBe('eligible');
+    if (result.status !== 'eligible' || result.document.kind !== 'plan') throw new Error('Expected compact plan.');
+    const plan = result.document;
+    expect(plan).toMatchObject({
+      kind: 'plan',
+      compactOrigin: {version: 1, expanded: false},
+      current: {summary: compactInput().currentBehavior, components: []},
+      target: {summary: compactInput().desiredChange, components: []},
+      phases: [
+        {dependsOn: [], affectedPaths: ['src/cache.ts'], acceptance: [{criterion: compactInput().acceptanceCriterion}]},
+      ],
+      decisions: [],
+    });
+    expect(validateNativeAuthoring(plan, {ready: true})).toMatchObject({
+      ready: false,
+      issues: expect.arrayContaining([expect.objectContaining({code: 'confirmation-required'})]),
+    });
+    const validation = validateNativeAuthoring(plan, {
+      ready: true,
+      confirmation: {
+        intentHash: nativeSpecIntentDigest(plan),
+        decision: 'approved',
+        response: 'I approve this exact compact behavior and scope.',
+      },
+    });
+    expect(validation).toMatchObject({ready: true, issues: []});
+    expect(
+      validateNativeAuthoring(plan, {
+        ready: true,
+        confirmation: {
+          intentHash: nativeSpecIntentDigest({...plan, target: {...plan.target, summary: 'A changed intent.'}}),
+          decision: 'approved',
+          response: 'I approve this exact compact behavior and scope.',
+        },
+      }).ready,
+    ).toBe(false);
+  });
+
+  it('returns the exact planning decision for ineligible compact intent without constructing a plan', () => {
+    const result = projectNativeCompactIntent(
+      compactInput({
+        eligibility: {
+          status: 'needs-planning',
+          missingDecision: 'Choose whether expired cache entries should refresh synchronously or in the background.',
+          evidenceRefs: ['threadnote://user/me/memories/durable/projects/threadnote/cache.md'],
+        },
+      }),
+      {featureId: 'cache-refresh', project: 'threadnote'},
+      compactSource,
+    );
+    expect(result).toMatchObject({
+      status: 'needs-planning',
+      missingDecision: 'Choose whether expired cache entries should refresh synchronously or in the background.',
+      evidenceRefs: ['threadnote://user/me/memories/durable/projects/threadnote/cache.md'],
+    });
+  });
+
+  it('keeps compact projection deterministic, idempotent and nonmutating across bounded prose inputs', () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ]{0,32}$/u),
+        fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ]{0,32}$/u),
+        (currentBehavior, desiredChange) => {
+          fc.pre(EffectString.trim(currentBehavior) !== EffectString.trim(desiredChange));
+          const input = compactInput({currentBehavior, desiredChange});
+          const before = JSON.stringify(input);
+          const first = projectNativeCompactIntent(
+            input,
+            {featureId: 'cache-refresh', project: 'threadnote'},
+            compactSource,
+          );
+          const second = projectNativeCompactIntent(
+            input,
+            {featureId: 'cache-refresh', project: 'threadnote'},
+            compactSource,
+          );
+          expect(first.status).toBe('eligible');
+          expect(second.status).toBe('eligible');
+          if (first.status !== 'eligible' || second.status !== 'eligible') return;
+          expect(nativeAuthoringDigest(first.document)).toBe(nativeAuthoringDigest(second.document));
+          expect(nativeSpecIntentDigest(first.document)).toBe(nativeSpecIntentDigest(second.document));
+          if (first.document.kind !== 'plan' || !first.document.compactOrigin)
+            throw new Error('The compact marker must remain in the canonical plan.');
+          expect(
+            nativeSpecIntentDigest({
+              ...first.document,
+              compactOrigin: {
+                ...first.document.compactOrigin,
+                eligibilityRationale: first.document.compactOrigin.eligibilityRationale + ' Reclassified.',
+              },
+            }),
+          ).not.toBe(nativeSpecIntentDigest(first.document));
+          expect(JSON.stringify(input)).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
   });
 });

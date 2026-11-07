@@ -113,6 +113,7 @@ describe('native request schema discovery', () => {
         rebase: expect.any(String),
         baseRequalification: expect.any(String),
         ordinaryMergeQualificationV1: expect.any(String),
+        supersedeUnreviewed: expect.any(String),
       },
     ],
     [

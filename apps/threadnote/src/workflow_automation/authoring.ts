@@ -12,6 +12,7 @@ import {
   decodeNativeAuthoringDocument,
   isNativeMermaidDiagram,
   nativeAuthoringDigest,
+  NativePlanIntentPolicyVersion,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -27,6 +28,8 @@ import {createNativeDocument, nativeDocumentTemplateDefinitions} from '@threadno
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   admitNativeAuthoringSave,
+  decodeNativeWorkflowRequest,
+  nativeWorkflowIntentDigest,
   nativeAuthoringPrefixDigest,
   nativeAuthoringSaveByteBudget,
   type NativeWorkflowState,
@@ -113,6 +116,7 @@ const NATIVE_AUTHORING_DOCUMENT_KEYS = [
   'decisions',
   'openQuestions',
   'spec',
+  'compactOrigin',
 ] as const;
 
 function isNativeAuthoringDocumentKey(value: string): boolean {
@@ -202,6 +206,9 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
   return {head, files};
 });
 
+/** Run the same bounded Git/filesystem source inspection before a run is initialized. */
+export const inspectNativeSourcePaths = (repo: string, paths: readonly string[]) => inspectSource(repo, paths, true);
+
 const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(function* (
   repo: string,
   document: NativeAuthoringDocument,
@@ -220,21 +227,25 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
     );
 });
 
+/** Reuse the section's existing UTF-8-safe excerpt rule for independently visible prose. */
+function boundedViewText(body: string, limit: number): string {
+  const bytes = utf8.encode(body);
+  if (bytes.byteLength <= limit) return body;
+  let end = limit - 100;
+  while ((bytes[end] & 0xc0) === 0x80) end--;
+  return (
+    new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, end)) +
+    '\n\nComplete content is retained in the linked structured data.'
+  );
+}
+
 /** Small semantic views link to the complete separately indexed structured data. */
 function createViewDocument(input: Parameters<typeof createNativeDocument>[0]): NativeDocumentEnvelope {
   const sections = EffectRecord.fromEntries(
-    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => {
-      const bytes = utf8.encode(body);
-      const limit = id === 'diagram' ? 10000 : 2000;
-      if (bytes.byteLength <= limit) return [id, body];
-      let end = limit - 100;
-      while ((bytes[end] & 0xc0) === 0x80) end--;
-      return [
-        id,
-        new TextDecoder('utf-8', {fatal: true}).decode(bytes.slice(0, end)) +
-          '\n\nComplete content is retained in the linked structured data.',
-      ];
-    }),
+    EffectArray.map(EffectRecord.toEntries(input.sections), ([id, body]) => [
+      id,
+      boundedViewText(body, id === 'diagram' ? 10000 : 2000),
+    ]),
   );
   return createNativeDocument({...input, sections});
 }
@@ -285,6 +296,7 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         diagram: isNativeMermaidDiagram(value.diagram) ? '```mermaid\n' + value.diagram + '\n```' : value.diagram,
       },
     });
+  const compactDraft = document.compactOrigin !== undefined && !document.compactOrigin.expanded;
   return [
     {
       id: 'plan',
@@ -292,7 +304,16 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         kind: 'plan',
         title: document.title,
         sections: {
-          summary: document.objective,
+          summary: compactDraft
+            ? EffectArray.join(
+                [
+                  'Objective: ' + boundedViewText(document.objective, 600),
+                  'Current behavior: ' + boundedViewText(document.current.summary, 600),
+                  'Desired change: ' + boundedViewText(document.target.summary, 600),
+                ],
+                '\n\n',
+              )
+            : document.objective,
           phases: compact(
             bullets(EffectArray.map(document.phases, item => item.id + ': ' + compact(item.outcome, 120))),
             3500,
@@ -313,12 +334,18 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
                 bullets(EffectArray.map(document.decisions, item => item.id + ': ' + compact(item.selected, 120))),
                 2000,
               )
-            : 'Design decision remains unresolved; this is a durable draft.',
+            : document.compactOrigin
+              ? 'Compact eligibility: ' + compact(document.compactOrigin.eligibilityRationale, 1800)
+              : 'Design decision remains unresolved; this is a durable draft.',
         },
       }),
     },
-    {id: 'current', document: architecture('architecture-current', document.current)},
-    {id: 'target', document: architecture('architecture-target', document.target)},
+    ...(compactDraft
+      ? []
+      : [
+          {id: 'current', document: architecture('architecture-current', document.current)},
+          {id: 'target', document: architecture('architecture-target', document.target)},
+        ]),
     {
       id: 'decisions',
       document: createViewDocument({
@@ -362,6 +389,13 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
   ];
 }
 
+/** Project canonical authoring data into the same semantic view envelopes used by rendering and persistence. */
+export function projectNativeAuthoringDocumentViews(
+  document: NativeAuthoringDocument,
+): readonly {id: string; document: NativeDocumentEnvelope}[] {
+  return documentViews(document);
+}
+
 function isWorkflowArtifact(value: unknown): value is WorkflowArtifact {
   return (
     isJsonObject(value) &&
@@ -387,9 +421,36 @@ const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
   documentHash: root.documentHash,
   intentHash: root.intentHash,
   readiness: root.readiness,
+  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
   data: root.data,
   documents: root.documents,
   previous: root.previous,
+});
+
+const acceptancePacket = (
+  document: NativeAuthoringDocument,
+  validation: ReturnType<typeof validateNativeAuthoring>,
+  detail?: string,
+) => ({
+  documentHash: validation.documentHash,
+  intentHash: validation.intentHash,
+  summary: {
+    title: document.title,
+    objective: document.objective,
+    requirements: EffectArray.map(document.requirements, item => ({
+      id: item.id,
+      behavior: compact(item.behavior, 100),
+    })),
+  },
+  views: EffectArray.map(documentViews(document), item => ({
+    id: item.id,
+    outline: outlineNativeDocument(item.document),
+  })),
+  approvalInstruction:
+    document.kind === 'plan' && document.compactOrigin
+      ? 'Present the complete current behavior, desired change, bounded scope, acceptance, verification and eligibility rationale. Ask for an actual user response to this exact intent hash. The stored response is caller-asserted; actor identity is not independently verified.'
+      : 'Present all material behavior/scenario/domain/contract details before asking for approval; fetch explicit detail where needed.',
+  ...(detail === 'document' ? {document} : {}),
 });
 
 const ownedAuthoringUris = (state: NativeWorkflowState) =>
@@ -397,7 +458,12 @@ const ownedAuthoringUris = (state: NativeWorkflowState) =>
     operation.status === 'verified' && operation.artifact?.state === 'active' ? [operation.artifact.uri] : [],
   );
 
-export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, call: NativeAuthoringCall<R>) =>
+export const runNativeAuthoring = <R>(
+  config: RuntimeConfig,
+  input: unknown,
+  call: NativeAuthoringCall<R>,
+  options: {readonly allowCompactOriginCreation?: boolean} = {},
+) =>
   Effect.gen(function* () {
     let request = yield* Schema.decodeUnknownEffect(nativeAuthoringRequestSchema, {onExcessProperty: 'error'})(
       input,
@@ -467,11 +533,13 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       evidenceRefs,
       ownedUris: ownedAuthoringUris(state),
     });
-    const load = (uri: string) =>
+    const load = (uri: string, verifiedArtifact?: WorkflowArtifact) =>
       Effect.gen(function* () {
-        const artifact = yield* call({...base('read'), uri, evidenceRefs}).pipe(
-          Effect.flatMap(value => Effect.try({try: () => asArtifact(value), catch: nativeWorkflowError})),
-        );
+        const artifact =
+          verifiedArtifact ??
+          (yield* call({...base('read'), uri, evidenceRefs}).pipe(
+            Effect.flatMap(value => Effect.try({try: () => asArtifact(value), catch: nativeWorkflowError})),
+          ));
         const root = yield* Effect.try({
           try: () => decodeAuthoringArtifact(artifact.body, AuthoringRootSchema),
           catch: nativeWorkflowError,
@@ -499,6 +567,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         });
         if (
           nativeAuthoringDigest(document) !== root.documentHash ||
+          nativeSpecIntentDigest(document, root.planIntentPolicyVersion ?? 1) !== root.intentHash ||
           document.id !== root.featureId ||
           document.kind !== root.kind ||
           document.project !== state.project
@@ -616,6 +685,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
         });
         const linkedValidation = validateNativeAuthoring(linked, {
           ready: true,
+          planIntentPolicyVersion: root.planIntentPolicyVersion ?? 1,
           confirmation: root.confirmation,
           review: root.review,
         });
@@ -636,6 +706,98 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
           );
         return {root, artifact, document: linked};
       });
+    if (request.command === 'current-plan' || request.command === 'current-authoring') {
+      const kind = request.command === 'current-plan' ? 'plan' : request.documentKind;
+      if (!kind) return yield* fail('invalid-request', 'Select spec or plan for the current authoring document.');
+      // Native receipts, not operation IDs or inferred filenames, own the current root.
+      const operation = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...state.operations].reverse(),
+          entry =>
+            entry.status === 'verified' &&
+            entry.intent.role === 'authoring-root' &&
+            entry.intent.artifactKey === 'author-root-' + kind,
+        ),
+      );
+      if (!operation) return {currentPlan: null};
+      if (
+        !operation.artifact ||
+        operation.intent.bindingId !== state.bindingId ||
+        operation.intent.sourceRunId !== state.runId
+      )
+        return yield* fail('binding-drift', 'The current authoring root lacks its original native receipt.');
+      const artifact = yield* reader.read(artifactReference(operation.artifact));
+      if (artifact.body !== operation.artifact.body || artifact.body !== operation.intent.body)
+        return yield* fail('invalid-readback', 'The current authoring root differs from its verified write intent.');
+      const loaded = yield* load(artifact.uri, artifact);
+      if (loaded.root.kind !== kind)
+        return yield* fail('invalid-readback', 'The current plan receipt does not contain a plan root.');
+      const document = yield* loadDocument(loaded.root);
+      if (document.kind !== kind)
+        return yield* fail('invalid-readback', 'The current authoring kind differs from its receipt.');
+      const validation = yield* Effect.try({
+        try: () =>
+          validateNativeAuthoring(document, {
+            ready: true,
+            confirmation: loaded.root.confirmation,
+            review: loaded.root.review,
+            planIntentPolicyVersion: loaded.root.planIntentPolicyVersion ?? 1,
+          }),
+        catch: nativeWorkflowError,
+      });
+      if (request.command === 'current-authoring')
+        return {
+          currentAuthoring: {
+            ...rootSummary(loaded.root, artifact),
+            ...(request.detail === 'document' ? {document} : {}),
+            packet: acceptancePacket(document, validation, request.detail),
+            blockers: validation.issues,
+          },
+        };
+      // Standard plans use the existing authoring readiness policy; compact
+      // plans additionally require the explicit confirmation of their intent.
+      const confirmed =
+        document.kind === 'plan' &&
+        (!document.compactOrigin ||
+          (loaded.root.confirmation?.decision === 'approved' &&
+            loaded.root.confirmation.intentHash === loaded.root.intentHash &&
+            EffectString.trim(loaded.root.confirmation.response).length > 0));
+      const reviewed =
+        !document.review.required ||
+        (loaded.root.review?.documentHash === loaded.root.documentHash &&
+          loaded.root.review.outcome === 'accepted' &&
+          loaded.root.review.blockingIssueCount === 0);
+      const admitted =
+        state.cycle?.state.plan.source.documentHash === loaded.root.documentHash && loaded.root.readiness === 'ready';
+      const status = !confirmed
+        ? 'awaiting-user-confirmation'
+        : !reviewed
+          ? 'awaiting-review'
+          : loaded.root.readiness !== 'ready' || !validation.ready
+            ? 'awaiting-readiness'
+            : admitted
+              ? 'admitted'
+              : 'awaiting-admission';
+      return {
+        currentPlan: {
+          ...rootSummary(loaded.root, artifact),
+          status,
+          next: {
+            action: document.kind === 'plan' && document.compactOrigin ? 'compact-confirm' : 'workflow_task_author',
+          },
+          packetDetail: {
+            action: 'workflow_task_view',
+            detail: 'packet',
+            runId: state.runId,
+            intentHash: loaded.root.intentHash,
+            documentHash: loaded.root.documentHash,
+          },
+          blockers: validation.issues,
+          packet: acceptancePacket(document, validation, request.detail),
+          actorIdentity: 'caller-asserted; not independently verified by this local command boundary',
+        },
+      };
+    }
     if (['load', 'read', 'recover', 'export-plan', 'export-dev-cycle', 'closeout-input'].includes(request.command)) {
       if (!request.uri) return yield* fail('invalid-request', 'Provide the saved native authoring root URI.');
       const loaded = yield* load(request.uri);
@@ -822,29 +984,10 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       try: () => validateNativeAuthoring(document, request),
       catch: nativeWorkflowError,
     });
-    if (request.command === 'acceptance-packet')
-      return {
-        documentHash: validation.documentHash,
-        intentHash: validation.intentHash,
-        summary: {
-          title: document.title,
-          objective: document.objective,
-          requirements: EffectArray.map(document.requirements, item => ({
-            id: item.id,
-            behavior: compact(item.behavior, 100),
-          })),
-        },
-        views: EffectArray.map(documentViews(document), item => ({
-          id: item.id,
-          outline: outlineNativeDocument(item.document),
-        })),
-        approvalInstruction:
-          'Present all material behavior/scenario/domain/contract details before asking for approval; fetch explicit detail where needed.',
-        ...(request.detail === 'document' ? {document} : {}),
-      };
+    if (request.command === 'acceptance-packet') return acceptancePacket(document, validation, request.detail);
     if (request.command === 'confirm') {
       if (
-        document.kind !== 'spec' ||
+        (document.kind === 'plan' && request.presentedIntentHash !== validation.intentHash) ||
         !Effect2.pipe(request.userResponse, effectOptionalString =>
           effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
         ) ||
@@ -852,7 +995,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
       )
         return yield* fail(
           'confirmation-required',
-          'Record the actual human response to the displayed spec acceptance packet.',
+          'Record an actual user response to the displayed spec or exact compact-intent packet.',
         );
       if (request.userDecision !== 'approve')
         return {confirmation: null, decision: request.userDecision, intentHash: validation.intentHash};
@@ -907,12 +1050,37 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
     if (request.command === 'render')
       return {
         documentHash: validation.documentHash,
-        documents: EffectArray.map(documentViews(document), item => ({
+        documents: EffectArray.map(projectNativeAuthoringDocumentViews(document), item => ({
           id: item.id,
           outline: outlineNativeDocument(item.document),
           ...(request.detail === 'document' ? {markdown: renderNativeDocument(item.document)} : {}),
         })),
       };
+    if (request.command === 'save' && document.kind === 'plan' && document.compactOrigin) {
+      if (!options.allowCompactOriginCreation) {
+        const priorRootOperation = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...state.operations].reverse(),
+            operation =>
+              operation.status === 'verified' &&
+              operation.intent.artifactKey === 'author-root-plan' &&
+              operation.artifact !== undefined,
+          ),
+        );
+        if (!priorRootOperation?.artifact)
+          return yield* fail(
+            'compact-origin-forbidden',
+            'Only the native compact task action can create compact-origin provenance; generic authoring saves remain standard plans.',
+          );
+        const prior = yield* load(priorRootOperation.artifact.uri);
+        const priorDocument = yield* loadDocument(prior.root);
+        if (priorDocument.kind !== 'plan' || !priorDocument.compactOrigin)
+          return yield* fail(
+            'compact-origin-forbidden',
+            'Only the native compact task action can create compact-origin provenance; generic authoring saves remain standard plans.',
+          );
+      }
+    }
     const journal = yield* withWorkflowLock(config, state.bindingId, inspectWorkflowJournal(config, state.bindingId));
     yield* verifySource(journal.state.binding.repo, document);
     const preview = {
@@ -1115,8 +1283,95 @@ const saveAuthoring = <R>(
       const {rootUri, readiness, metadata, saveDigest} = authoringSaveIntent(state, request, document, validation);
       if (state.authoringSave && state.authoringSave.intentDigest !== saveDigest)
         return yield* fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+      const initialCompactResume =
+        state.authoringSave?.operationStart === 0 &&
+        state.authoringSave.rootUri === null &&
+        document.kind === 'plan' &&
+        document.compactOrigin !== undefined &&
+        !document.compactOrigin.expanded &&
+        readiness === 'draft' &&
+        request.confirmation === undefined &&
+        request.review === undefined;
+      const retainedPrefix = initialCompactResume ? state.operations : [];
+      if (
+        EffectArray.some(
+          retainedPrefix,
+          (operation, index) => operation.status === 'prepared' && index !== retainedPrefix.length - 1,
+        )
+      )
+        return yield* fail('pending-operation', 'The initial compact save has a nonsequential prepared prefix.');
+      let prefixPosition = 0;
       const authoringCall: NativeAuthoringCall<R> = input =>
-        call(input).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+        Effect.gen(function* () {
+          if (
+            initialCompactResume &&
+            typeof input === 'object' &&
+            input !== null &&
+            'action' in input &&
+            input.action === 'write'
+          ) {
+            const child = yield* Effect.try({
+              try: () => decodeNativeWorkflowRequest(input),
+              catch: nativeWorkflowError,
+            });
+            if (child.action !== 'write')
+              return yield* fail('pending-operation', 'Resume only the original authoring write sequence.');
+            const {
+              protocolVersion: _protocol,
+              executorVersion: _executor,
+              action: _action,
+              runId,
+              generation,
+              ...fields
+            } = child;
+            const existing = retainedPrefix[prefixPosition];
+            if (
+              runId !== state.runId ||
+              generation !== state.generation ||
+              (existing &&
+                nativeWorkflowIntentDigest(
+                  {...fields, bindingId: state.bindingId, sourceRunId: state.runId},
+                  sha256HexSync,
+                ) !== existing.intentDigest)
+            )
+              return yield* fail(
+                'pending-operation',
+                'The admitted compact save prefix differs from its exact original write sequence.',
+              );
+            prefixPosition++;
+            if (existing?.status === 'verified') {
+              const retained = existing.artifact;
+              if (!retained)
+                return yield* fail('invalid-readback', 'The verified compact prefix lacks its artifact receipt.');
+              // Pure readback while matching the retained prefix: a later mismatch must not
+              // trigger any recovery/manifest write for an earlier already verified child.
+              const observed = yield* call({
+                protocolVersion: 1,
+                executorVersion: 1,
+                action: 'read',
+                runId,
+                generation,
+                uri: retained.uri,
+                ...(child.evidenceRefs ? {evidenceRefs: child.evidenceRefs} : {}),
+              });
+              const artifact = yield* Effect.try({try: () => asArtifact(observed), catch: nativeWorkflowError});
+              if (
+                artifact.uri !== retained.uri ||
+                artifact.memoryId !== retained.memoryId ||
+                artifact.revision !== retained.revision ||
+                artifact.storageKind !== retained.storageKind ||
+                artifact.state !== 'active' ||
+                artifact.body !== existing.intent.body
+              )
+                return yield* fail(
+                  'invalid-readback',
+                  'An original compact save receipt differs from current artifact readback.',
+                );
+              return observed;
+            }
+          }
+          return yield* call(input).pipe(Effect.provideService(CurrentNativeAuthoringSave, saveDigest));
+        });
 
       let artifacts = makeAuthoringArtifacts({
         call: authoringCall,
@@ -1131,7 +1386,7 @@ const saveAuthoring = <R>(
         EffectArray.findFirst(state.operations, operation => operation.status === 'prepared'),
       );
       const key = 'author-root-' + document.kind;
-      if (pending?.intent.artifactKey === key && pending.intent.role === 'authoring-root') {
+      if (!initialCompactResume && pending?.intent.artifactKey === key && pending.intent.role === 'authoring-root') {
         const intent = pending.intent;
         if (
           intent.artifactKey !== key ||
@@ -1287,7 +1542,7 @@ const saveAuthoring = <R>(
       yield* admitLinkedSpec(document);
       const priorOperation = EffectOption.getOrUndefined(
         EffectArray.findFirst(
-          [...state.operations].reverse(),
+          [...(initialCompactResume ? [] : state.operations)].reverse(),
           operation =>
             operation.status === 'verified' && operation.intent.artifactKey === 'author-root-' + document.kind,
         ),
@@ -1301,6 +1556,18 @@ const saveAuthoring = <R>(
             catch: nativeWorkflowError,
           })
         : undefined;
+      if (priorRoot?.kind === 'plan' && document.kind === 'plan') {
+        const priorDocumentText = yield* artifacts.readData(priorRoot.data);
+        const priorDocument = yield* Effect.try({
+          try: () => decodeNativeAuthoringDocument(JSON.parse(priorDocumentText)),
+          catch: nativeWorkflowError,
+        });
+        if (priorDocument.kind === 'plan' && priorDocument.compactOrigin && !document.compactOrigin)
+          return yield* fail(
+            'compact-confirmation-required',
+            'A compact-origin plan must retain its origin marker and exact-intent confirmation obligation through expansion.',
+          );
+      }
       if (
         prior &&
         priorRoot &&
@@ -1515,6 +1782,7 @@ const saveAuthoring = <R>(
         },
         documentHash: validation.documentHash,
         intentHash: validation.intentHash,
+        ...(document.kind === 'plan' ? {planIntentPolicyVersion: NativePlanIntentPolicyVersion} : {}),
         baseRevision: prior?.revision ?? null,
         readiness,
         data,
@@ -1553,6 +1821,11 @@ const saveAuthoring = <R>(
       );
       const admitted = yield* CurrentNativeJobSourceView;
       if (admitted && readiness === 'ready') yield* assertNativeJobLiveSource(admitted);
+      if (initialCompactResume && prefixPosition < retainedPrefix.length)
+        return yield* fail(
+          'pending-operation',
+          'The compact reservation contains operations outside its original save.',
+        );
       yield* clearAuthoringSave(config, request.runId, saveDigest);
       return {...rootSummary(root, artifact), changed: true};
     }).pipe(
@@ -1588,6 +1861,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
 ) {
   const validation = validateNativeAuthoring(document, {
     ready: true,
+    planIntentPolicyVersion: root.planIntentPolicyVersion ?? 1,
     confirmation: root.confirmation,
     review: root.review,
   });

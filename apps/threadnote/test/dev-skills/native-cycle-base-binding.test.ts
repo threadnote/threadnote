@@ -308,6 +308,18 @@ describe('native cycle remote base binding', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "bound";\n');
         yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery});
         const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+        const canonicalOpenDelivery = after.state.phases.one.delivery;
+        if (canonicalOpenDelivery?.delivery !== 'pr' || !canonicalOpenDelivery.pr || !canonicalOpenDelivery.watch)
+          throw new Error('Expected the canonical stored open PR receipt and watch.');
+        const mergedDelivery = {
+          ...canonicalOpenDelivery,
+          pr: {...canonicalOpenDelivery.pr, state: 'merged' as const},
+          watch: {
+            ...canonicalOpenDelivery.watch,
+            state: 'terminal' as const,
+            evidence: 'The owned watch observed merge.',
+          },
+        };
         for (const key of [
           'plans',
           'baselines',
@@ -331,7 +343,7 @@ describe('native cycle remote base binding', () => {
             .mutate('record-delivery', {
               phaseId: 'one',
               publication,
-              delivery: {...delivery, pr: {...delivery.pr, state: 'merged'}},
+              delivery: mergedDelivery,
             })
             .pipe(Effect.result),
         ).toMatchObject({failure: {code: 'base-ref-unverified'}});
@@ -341,7 +353,7 @@ describe('native cycle remote base binding', () => {
         yield* f.mutate('record-delivery', {
           phaseId: 'one',
           publication,
-          delivery: {...delivery, pr: {...delivery.pr, state: 'merged'}},
+          delivery: mergedDelivery,
         });
         const merged = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
         yield* f.git(['remote', 'remove', 'origin']);

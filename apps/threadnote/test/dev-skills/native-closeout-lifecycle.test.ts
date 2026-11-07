@@ -31,6 +31,7 @@ import {readNativeCloseoutJournal} from '../../src/workflow_automation/closeout_
 import {freshCloseoutChangedPathCoverage} from '../../src/workflow_automation/closeout.js';
 
 import {decodeJournal} from '../../src/workflow_automation/closeout_request_schema.js';
+import * as Effect2 from 'effect';
 
 import {
   CurrentNativeJobAutoLaunch,
@@ -39,12 +40,123 @@ import {
 } from '../../src/workflow_automation/native_jobs.js';
 
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
+import {nativeAuthoringDigest} from '@threadnote/workflow-automations/authoring';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
 
 import {runCloseout} from './native-closeout-diagnostics.js';
 
 import {assertOwnedState, commandResult, object, proposalFor} from './native-closeout-lifecycle-fixture.js';
 
+type CloseoutFixture = Effect.Success<ReturnType<typeof nativeCloseoutFixture>>;
+
+const snapshotAuthoringStores = (f: CloseoutFixture) =>
+  Effect.gen(function* () {
+    const state = yield* readNativeWorkflowState(f.config, 'plan-run');
+    if (!state) throw new Error('Expected the seeded authoring state.');
+    const bodies = [] as {readonly uri: string; readonly body: string}[];
+    const uris = [
+      ...EffectArray.flatMap(state.state.operations, operation =>
+        operation.status === 'verified' && operation.artifact ? [operation.artifact.uri] : [],
+      ),
+      f.unrelated.uri,
+    ];
+    for (const uri of uris) bodies.push({uri, body: yield* f.store.read(f.location, uri)});
+    return {
+      planState: yield* f.fs.readFileString(f.statePath('plan-run')),
+      controllerState: yield* f.fs.readFileString(f.statePath(f.controllerRunId)),
+      journal: yield* f.fs.readFileString(f.journalPath(state.state.bindingId)),
+      bodies,
+    };
+  });
+
 describe('native closeout lifecycle', () => {
+  effectIt.effect('reads, exports and admits a persisted v1 plan root without rewriting owned data', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeCloseoutFixture(false, 'desktop', 'controller', 'local', 'v1');
+      const rootMemory = parseMemoryDocument(f.planRoot.uri, yield* f.store.read(f.location, f.planRoot.uri));
+      if (!rootMemory) throw new Error('Expected the persisted legacy root memory.');
+      const root = decodeAuthoringArtifact(
+        Effect2.pipe(rootMemory.body, EffectString.trimEnd) + '\n',
+        AuthoringRootSchema,
+      );
+      expect(root).not.toHaveProperty('planIntentPolicyVersion');
+      expect(root.intentHash).toBe(nativeAuthoringDigest(f.plan));
+      const before = yield* snapshotAuthoringStores(f);
+
+      const loaded = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring', 'plan-run'),
+            command: 'load',
+            uri: f.planRoot.uri,
+            detail: 'document',
+          }),
+        ).authoring,
+      );
+      expect(loaded).toMatchObject({
+        root: f.planRoot,
+        intentHash: nativeAuthoringDigest(f.plan),
+        documentHash: nativeAuthoringDigest(f.plan),
+        readiness: 'ready',
+        document: f.plan,
+      });
+
+      const exported = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring', 'plan-run'),
+            command: 'export-dev-cycle',
+            uri: f.planRoot.uri,
+            delivery: 'local',
+            bindings: {one: {branch: 'fixture/reader', baseBranch: 'main'}},
+          }),
+        ).authoring,
+      );
+      expect(exported).toMatchObject({
+        format: 'threadnote-native-cycle-plan',
+        source: {root: f.planRoot, documentHash: nativeAuthoringDigest(f.plan)},
+      });
+      const closeout = yield* f.load();
+      expect(closeout.plan).toEqual(f.plan);
+      expect(closeout.planRoot).toEqual(f.planRoot);
+
+      expect(yield* snapshotAuthoringStores(f)).toEqual(before);
+    }).pipe(runCloseout),
+  );
+
+  effectIt.effect(
+    'refuses legacy-version tampering, unknown policy versions and mismatched intent hashes without writes',
+    () =>
+      Effect.gen(function* () {
+        for (const policy of ['missing-marker', 'unknown-version', 'mismatched-intent'] as const) {
+          const f = yield* nativeCloseoutFixture(false, 'desktop', 'controller', 'local', policy);
+          const before = yield* snapshotAuthoringStores(f);
+          const load = yield* Effect.result(
+            f.call({
+              ...f.base('authoring', 'plan-run'),
+              command: 'load',
+              uri: f.planRoot.uri,
+              detail: 'document',
+            }),
+          );
+          expect(load._tag).toBe('Failure');
+          const cycleExport = yield* Effect.result(
+            f.call({
+              ...f.base('authoring', 'plan-run'),
+              command: 'export-dev-cycle',
+              uri: f.planRoot.uri,
+              delivery: 'local',
+              bindings: {one: {branch: 'fixture/reader', baseBranch: 'main'}},
+            }),
+          );
+          expect(cycleExport._tag).toBe('Failure');
+          expect(yield* Effect.result(f.load()).pipe(Effect.map(result => result._tag))).toBe('Failure');
+          expect(yield* snapshotAuthoringStores(f)).toEqual(before);
+        }
+      }).pipe(runCloseout),
+  );
+
   it('covers every changed path with fresh phases despite overlapping merged owners', () => {
     const phase = {
       id: 'merged',
@@ -102,25 +214,23 @@ describe('native closeout lifecycle', () => {
         const original = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!original?.state.cycle) throw new Error('Expected original published phase.');
         const owner = original.state.cycle.state.phases.one;
-        if (!owner.head || !owner.tree) throw new Error('Expected initial source proof.');
+        if (
+          !owner.head ||
+          !owner.tree ||
+          owner.delivery?.delivery !== 'pr' ||
+          !owner.delivery.pr ||
+          !owner.delivery.watch
+        )
+          throw new Error('Expected the canonical open PR receipt and source proof.');
+        const mergedDelivery = {
+          ...owner.delivery,
+          pr: {...owner.delivery.pr, state: 'merged' as const},
+          watch: {...owner.delivery.watch, state: 'terminal' as const, evidence: 'The owned watch observed merge.'},
+        };
         yield* mutateCycle('record-delivery', {
           phaseId: 'one',
           publication: {exemption: 'maintenance', reason: 'Private merged predecessor fixture.'},
-          delivery: {
-            phaseId: 'one',
-            phaseHash: owner.phaseHash,
-            delivery: 'pr',
-            headSha: owner.head,
-            validatedTree: owner.tree,
-            commitEvidence: 'Private merged predecessor commit.',
-            pr: {
-              url: 'https://github.com/example/private-fixture/pull/1',
-              headSha: owner.head,
-              branch: 'fixture/reader',
-              baseBranch: 'main',
-              state: 'merged',
-            },
-          },
+          delivery: mergedDelivery,
         });
         expect(
           (yield* readNativeWorkflowState(f.config, f.controllerRunId))?.state.cycle?.state.phases.one.status,

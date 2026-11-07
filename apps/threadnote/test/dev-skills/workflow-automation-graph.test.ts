@@ -77,6 +77,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
   index: (
     options: Parameters<Parameters<typeof CodeGraphIndexer.of>[0]['index']>[0],
   ) => Effect.Effect<CodeGraphIndexSummary, unknown>,
+  options: {readonly prepare?: boolean} = {},
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
@@ -97,7 +98,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
       return index(options);
     },
   });
-  const adapter = yield* makeWorkflowGraphAdapter(f.config, bindingFor(f)).pipe(
+  const adapter = yield* makeWorkflowGraphAdapter(f.config, bindingFor(f), options).pipe(
     Effect.provideService(CodeGraphQueryService, observedQuery),
     Effect.provideService(CodeGraphIndexer, observedIndexer),
   );
@@ -139,6 +140,25 @@ describe('native workflow graph adapter', () => {
       expect(yield* fixture.adapter.ready(f.repo)).toMatchObject({state: 'ready', snapshotId: 'snapshot-fixture'});
       expect(fixture.counts()).toEqual({indexCalls: 1, statusCalls: 2});
       expect(optionsSeen).toMatchObject({cwd: f.repo, threadnoteHome: f.home, ensureVectors: false});
+    }).pipe(run),
+  );
+
+  effectIt.effect('refuses stale graph evidence without starting preparation when disabled', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const stale = graphStatus(f.repo, {stale: true});
+      const fixture = yield* makeReady(
+        f,
+        [stale],
+        () => Effect.die('index must not run when preparation is disabled'),
+        {prepare: false},
+      );
+      const failed = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
+      expect(failed).toMatchObject({
+        _tag: 'Failure',
+        failure: {code: 'evidence-unavailable', retryable: false},
+      });
+      expect(fixture.counts()).toEqual({indexCalls: 0, statusCalls: 1});
     }).pipe(run),
   );
 

@@ -122,3 +122,32 @@ export const runLocalBinsWorkerDrain = <A, E>(
       Layer.build(localBinsWorkerDrainLayer).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context)))),
     ),
   );
+
+/** Run all cleanup stages, retaining fixture files unless coordinator and workers are proven drained. */
+export const runLocalBinsE2eCleanup = async (
+  stopCoordinator: () => Promise<void>,
+  drainWorkers: () => Promise<unknown>,
+  removeFixtureRoot: () => Promise<void>,
+): Promise<void> => {
+  let coordinatorFailure: unknown;
+  let coordinatorFailed = false;
+  try {
+    await stopCoordinator();
+  } catch (cause) {
+    coordinatorFailed = true;
+    coordinatorFailure = cause;
+  }
+
+  let workerDrainFailure: unknown;
+  let workerDrainFailed = false;
+  try {
+    await drainWorkers();
+  } catch (cause) {
+    workerDrainFailed = true;
+    workerDrainFailure = cause;
+  }
+
+  if (coordinatorFailed) throw coordinatorFailure;
+  if (workerDrainFailed) throw workerDrainFailure;
+  await removeFixtureRoot();
+};

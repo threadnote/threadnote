@@ -100,8 +100,9 @@ import {
 } from '@threadnote/memory/code/citation-policy';
 import {discardDeferredCodeAnchorIntent} from '../memory/deferred/code_anchor.js';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
-import {verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {verifyResolvedMemoryIdentity, type ResolvedMemoryIdentityAlias} from '@threadnote/recall/memory/identity';
 import {resolveManagerMemoryIdentity} from './memory/identity.js';
+import {MAX_PREVIEW_DOCUMENT_BYTES, resolvePreviewMemoryIdentity, validatePreviewMemoryPath} from './memory/read.js';
 import {
   ensureSharedDirectoryChain,
   assertSharedWorktreeFileReady,
@@ -222,7 +223,6 @@ const lstat = Effect.fn('manager.lstat')(function* (target: string) {
     size: Number(info.size),
   };
 });
-
 function readFile(target: string): Effect.Effect<Uint8Array, unknown, FileSystem.FileSystem>;
 function readFile(target: string, encoding: 'utf8'): Effect.Effect<string, unknown, FileSystem.FileSystem>;
 function readFile(
@@ -234,7 +234,6 @@ function readFile(
     return encoding ? yield* fs.readFileString(target, encoding) : yield* fs.readFile(target);
   });
 }
-
 const readdir = Effect.fn('manager.readdir')(function* (target: string, includeName?: (name: string) => boolean) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -438,7 +437,6 @@ export const memoryTree = Effect.fn('manager.memoryTree')(function* (config: Run
   const uri = `threadnote://user/${uriSegment(config.user)}/memories`;
   return yield* readManagerTreeRoot(lstat(root), readTree(config, root, uri, ''), emptyManagerTree('memories', uri));
 });
-
 export const resourcesTree = Effect.fn('manager.resourcesTree')(function* (config: RuntimeConfig) {
   const root = yield* localResourcesRoot(config);
   const uri = 'threadnote://resources';
@@ -448,15 +446,23 @@ export const resourcesTree = Effect.fn('manager.resourcesTree')(function* (confi
     emptyManagerTree('resources', uri),
   );
 });
-
-export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function* (config: RuntimeConfig, uri: string) {
-  const resolved = yield* resolveManagerMemoryIdentity(config, uri);
+export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function* (
+  config: RuntimeConfig,
+  uri: string,
+  options: {readonly preview?: boolean; readonly resolved?: ResolvedMemoryIdentityAlias} = {},
+) {
+  const resolved =
+    options.resolved ??
+    (yield* options.preview ? resolvePreviewMemoryIdentity(config, uri) : resolveManagerMemoryIdentity(config, uri));
   const canonicalUri = resolved.canonicalUri;
   const path = yield* localPathForMemoryUri(config, canonicalUri);
   if (!path) return yield* ManagerOperationError.make({message: `Memory is outside this Library: ${canonicalUri}`});
+  if (options.preview) yield* validatePreviewMemoryPath(yield* localMemoriesRoot(config), path);
   const pathStat = yield* lstat(path);
   if (!pathStat.isFile())
     return yield* ManagerOperationError.make({message: `Manager requires regular memory files: ${canonicalUri}`});
+  if (options.preview && pathStat.size > MAX_PREVIEW_DOCUMENT_BYTES)
+    return yield* ManagerOperationError.make({message: 'Memory preview target is unavailable.'});
   const content = yield* readFile(path, 'utf8');
   yield* verifyResolvedMemoryIdentity(resolved, canonicalUri, content);
   const relativePath = EffectArray.join(
@@ -485,7 +491,6 @@ export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function
     record,
   };
 });
-
 export const readContextUri = Effect.fn('manager.readContextUri')(function* (
   config: RuntimeConfig,
   uri: string,
@@ -1438,7 +1443,6 @@ const runBulk = Effect.fn('manager.runBulk')(function* (
   }
   return {results};
 });
-
 function createConsolidation(context: ApiContext, body: Record<string, unknown>) {
   return Effect.gen(function* () {
     const crypto = yield* SecureRandom.SecureRandom;
@@ -1529,7 +1533,6 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
     return yield* ManagerOperationError.make({message: 'Consolidation job is not completed.'});
   return yield* applyReviewedConsolidation(config, job, id, body);
 });
-
 function consolidationPrompt(sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[]): string {
   return EffectArray.join(
     [
@@ -1817,14 +1820,12 @@ const resolveManagerGraphActionCwd = Effect.fn('manager.resolveGraphActionCwd')(
     message: 'The selected graph has no current local worktree target. Supply cwd and refresh graph diagnostics.',
   });
 });
-
 function requireGraphIdentity(value: unknown, name: string): string {
   const identity = requireString(value, name);
   if (!/^[0-9a-f]{64}$/.test(identity))
     throw ManagerOperationError.make({message: `Provide ${name} as a 64-character graph identity.`});
   return identity;
 }
-
 function requireGraphSnapshotIdentity(value: unknown): string {
   const identity = requireString(value, 'expectedSnapshotId');
   if (!/^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(identity)) {
@@ -1849,7 +1850,6 @@ const memoryUriFor = Effect.fn('manager.memoryUriFor')(function* (
       : `threadnote-${safeTimestamp()}-${Effect2.pipe(yield* sha256(JSON.stringify(metadata)), EffectString.slice(0, 12))}.md`;
   return `${memoryDirectoryUri(config, metadata.kind, metadata.status, project)}/${filename}`;
 });
-
 function sharedMemoryUriFor(
   config: RuntimeConfig,
   team: string,
@@ -1864,7 +1864,6 @@ function sharedMemoryUriFor(
   }
   return `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team)}/durable/projects/${uriSegment(metadata.project)}/${uriSegment(metadata.topic)}.md`;
 }
-
 function memoryDirectoryUri(
   config: RuntimeConfig,
   kind: MemoryKind,
@@ -1945,7 +1944,6 @@ const ensurePersonalDirectoryChain = Effect.fn('manager.ensurePersonalDirectoryC
     yield* store.makeDirectory({account: config.account, home: config.agentContextHome, user: config.user}, uri);
   }
 });
-
 function publicConfig(config: RuntimeConfig): Record<string, unknown> {
   return {
     account: config.account,
@@ -1955,11 +1953,9 @@ function publicConfig(config: RuntimeConfig): Record<string, unknown> {
     user: config.user,
   };
 }
-
 function isAuthorized(context: ApiContext, request: ManagerRequest): boolean {
   return managerRequestIsAuthorized(request, context.token);
 }
-
 function isGraphApiPath(pathname: string): boolean {
   return (
     pathname === '/api/graph' ||
@@ -1980,7 +1976,6 @@ function writeJson(response: ManagerResponseSink, statusCode: number, body: unkn
     headers: {'cache-control': 'no-store'},
   });
 }
-
 function targetFromBody(body: Record<string, unknown>): TargetMemoryInput {
   return {
     kind: memoryKind(body.kind),
