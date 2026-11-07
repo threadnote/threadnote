@@ -1,8 +1,27 @@
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, String as EffectString, Option as EffectOption, Record as EffectRecord} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, PlatformError, Result, Schema} from 'effect';
+import {
+  Cause,
+  Clock,
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  PlatformError,
+  Result,
+  Schema,
+} from 'effect';
+import {TestClock} from 'effect/testing';
+import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
+import {
+  nativeCycleSameLabelQualificationLimits,
+  withNativeCycleSameLabelQualificationBudget,
+} from '../../src/workflow_automation/cycle_merge.js';
 import {describe, expect} from 'vitest';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {NativeCycleSnapshotSchema, type NativeCycleSnapshot} from '@threadnote/workflow-automations/cycle-review';
 import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
@@ -232,9 +251,22 @@ describe('ordinary merge native qualification', () => {
         const before = yield* f.fs.readFileString(f.statePath());
         const journal = yield* f.fs.readFileString(f.journalPath(stored.state.bindingId));
         const fs = yield* FileSystem.FileSystem;
+        const clock = yield* Clock.Clock;
         const stateFile = yield* fs.realPath(f.statePath());
         for (const point of ['write', 'rename']) {
           let injected = false;
+          let expiredBy = 0;
+          const acquisitionClock: Clock.Clock = {
+            currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+            currentTimeMillis: clock.currentTimeMillis,
+            currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+            currentTimeNanos: clock.currentTimeNanos,
+            monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe() + BigInt(expiredBy) * 1_000_000n,
+            monotonicTimeNanos: Effect.suspend(() =>
+              clock.monotonicTimeNanos.pipe(Effect.map(time => time + BigInt(expiredBy) * 1_000_000n)),
+            ),
+            sleep: duration => clock.sleep(duration),
+          };
           const failed = FileSystem.FileSystem.of({
             ...fs,
             writeFileString: (path, data, options) =>
@@ -248,11 +280,19 @@ describe('ordinary merge native qualification', () => {
               point === 'rename' && to === stateFile
                 ? Effect.suspend(() => {
                     injected = true;
+                    expiredBy = 31_000;
                     return Effect.fail(syntheticIo(to));
                   })
                 : fs.rename(from, to),
           });
-          refused(yield* f.capture().pipe(Effect.provideService(FileSystem.FileSystem, failed), Effect.result));
+          refused(
+            yield* withNativeCycleSameLabelQualificationBudget(f.capture()).pipe(
+              Effect.provideService(FileSystem.FileSystem, failed),
+              Effect.provideService(Clock.Clock, acquisitionClock),
+              Effect.result,
+            ),
+          );
+          expect(expiredBy).toBe(point === 'rename' ? 31_000 : 0);
           expect(injected).toBe(true);
           expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
           expect(yield* f.fs.readFileString(f.journalPath(stored.state.bindingId))).toBe(journal);
@@ -718,3 +758,737 @@ describe('ordinary merge native qualification', () => {
     );
   }
 });
+
+const rewrittenBaseFixture = Effect.fn('test.nativeCycle.rewrittenBaseFixture')(function* (
+  large = false,
+  delivery: 'local' | 'pr' = 'local',
+) {
+  const f = yield* fixture(['one', 'two'], delivery, false, false, false, undefined, repo =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const git = (args: readonly string[]) => yieldCommand(repo, args);
+      yield* git(['checkout', 'main']);
+      yield* fs.writeFileString(repo + '/historical.ts', 'export const historical = true;\n');
+      yield* git(['add', '.']);
+      yield* git(['commit', '-m', 'Historical declared base divergent from phase']);
+      yield* git(['checkout', 'feature/one']);
+    }),
+  );
+  const priorPlan = yield* f.revise({
+    phases: EffectArray.map(f.document.phases, phase => ({
+      ...phase,
+      affectedPaths: phase.id === 'one' ? ['source.ts', 'prior-only.ts'] : phase.affectedPaths,
+    })),
+  });
+  yield* f.mutate('reconcile', {
+    plan: priorPlan,
+    reason: 'Retain exact staged prior-only path in the historical phase contract',
+  });
+  const root = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+  yield* f.git(['commit', '--allow-empty', '-m', 'Original phase HEAD']);
+  const priorHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+  yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const stagedOnly = true;\n');
+  yield* f.fs.writeFileString(f.path.join(f.repo, 'prior-only.ts'), 'export const stagedOnlyPath = true;\n');
+  yield* f.git(['add', 'source.ts', 'prior-only.ts']);
+  const prior = yield* Schema.decodeUnknownEffect(NativeCycleSnapshotSchema)(
+    object(
+      (yield* f.mutate('snapshot', {
+        phaseId: 'one',
+        snapshotId: 'prior',
+        acceptedHead: priorHead,
+        reason: 'Retain staged-only prior source',
+      })).snapshot,
+    ).snapshot,
+  );
+  yield* f.mutate('validate-review', {snapshotId: prior.snapshotId, attemptId: 'prior-review', report: report(prior)});
+  yield* f.mutate('extend-reviews', {
+    phaseId: 'one',
+    reviewLimit: 10,
+    userAuthority: 'Continue the existing review history',
+  });
+  yield* f.git(['restore', '--staged', '--worktree', 'source.ts']);
+  yield* f.git(['rm', '--cached', 'prior-only.ts']);
+  yield* f.fs.remove(f.path.join(f.repo, 'prior-only.ts'));
+  yield* f.fs.writeFileString(f.path.join(f.repo, 'owned.ts'), 'export const owned = true;\n');
+  yield* f.fs.writeFileString(f.path.join(f.repo, 'other-owned.ts'), 'export const otherOwned = true;\n');
+  yield* f.git(['add', '.']);
+  yield* f.git(['commit', '-m', 'Reconcile staged predecessor into current owned implementation']);
+  yield* f.git(['checkout', '-b', 'rewritten', root]);
+  yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const rewritten = true;\n');
+  for (let index = 0; index < (large ? 410 : 0); index++)
+    yield* f.fs.writeFileString(f.path.join(f.repo, `upstream-${index}.ts`), 'export const inherited = true;\n');
+  yield* f.git(['add', '.']);
+  yield* f.git(['commit', '-m', 'Rewritten published upstream']);
+  const rewrittenParentHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+  yield* f.git(['commit', '--allow-empty', '-m', 'Equivalent upstream tree with a distinct base identity']);
+  const currentBaseHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+  yield* f.git(['branch', '-f', 'main', currentBaseHead]);
+  yield* f.git(['checkout', 'feature/one']);
+  yield* f.git(['merge', '--no-ff', 'main', '-m', 'Preserve phase lineage while integrating rewritten base']);
+  yield* f.git(['commit', '--allow-empty', '-m', 'Later descendant of legitimate integration']);
+  const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+  const currentDocument = {
+    ...f.document,
+    phases: EffectArray.map(f.document.phases, phase => ({
+      ...phase,
+      affectedPaths: phase.id === 'one' ? ['owned.ts'] : ['other-owned.ts'],
+      contracts: [...phase.contracts, 'Approved qualification prerequisite changes current phase definition.'],
+    })),
+  };
+  // Reuse the authoring save/export boundary with the latest immutable root revision after the initial amendment.
+  const priorRoot = object(object(priorPlan.source).root);
+  const saved = object(
+    object(
+      yield* f.call({
+        ...f.base('authoring'),
+        command: 'save',
+        document: currentDocument,
+        ready: true,
+        uri: priorRoot.uri,
+        expectedRevision: priorRoot.revision,
+      }),
+    ).authoring,
+  );
+  const plan = object(
+    object(
+      yield* f.call({
+        ...f.base('authoring'),
+        command: 'export-dev-cycle',
+        uri: object(saved.root).uri,
+        delivery,
+        bindings: {
+          one: {branch: 'feature/one', baseBranch: 'main'},
+          two: {branch: 'feature/two', baseBranch: 'main'},
+        },
+      }),
+    ).authoring,
+  );
+  yield* f.mutate('reconcile', {plan, reason: 'Approved prerequisite retained with original phase history'});
+  const read = () =>
+    readNativeWorkflowState(f.config, 'native-run').pipe(
+      Effect.map(stored => decodeNativeCycleRuntime(stored!.state.cycle)),
+    );
+  const old = yield* read();
+  const predecessorManifest = object(
+    yield* f.call({
+      ...f.base('cycle'),
+      command: 'detail',
+      snapshotId: prior.snapshotId,
+      detailKind: 'manifest',
+      maxBytes: 65536,
+    }),
+  );
+  const predecessorCAS = object(predecessorManifest.sameLabelRebasedBaseCAS);
+  expect(predecessorCAS.priorSnapshotId).toBe(prior.snapshotId);
+  const fields = {
+    protocolVersion: 3,
+    phaseId: 'one',
+    snapshotId: 'qualified',
+    previous: prior.snapshotId,
+    acceptedHead: head,
+    reason: 'Reconcile same-label upstream rewrite and staged snapshot explicitly',
+    userAuthority: 'Integrate the rewritten same-label base in the existing run with all original history retained',
+    sameLabelRebasedBaseIntegrationV1: {
+      priorSnapshotId: prior.snapshotId,
+      expectedPriorEntryDigest: predecessorCAS.expectedPriorEntryDigest,
+      expectedPriorReviewDigest: predecessorCAS.expectedPriorReviewDigest,
+      currentBaseHead,
+      currentHead: head,
+      sameBaseBranch: 'main',
+      authorityKind: 'same-label-upstream-rebase-integration',
+      planDocumentHash: object(plan.source).documentHash,
+      phaseOwnedPaths: [
+        {phaseId: 'one', paths: ['owned.ts']},
+        {phaseId: 'two', paths: ['other-owned.ts']},
+      ],
+    },
+  };
+  return {...f, read, old, prior, fields, head, currentBaseHead, rewrittenParentHead};
+});
+const yieldCommand = (repo: string, args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+
+describe('same-label rewritten-base native qualification', () => {
+  effectIt.effect(
+    'retains legacy staged snapshots and historical scope while forcing full current-base review without resetting history',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* rewrittenBaseFixture(true);
+        expect(f.prior.scopeBase).not.toBe(
+          EffectString.trim((yield* f.git(['rev-parse', f.prior.declaredBaseHead + '^{tree}'])).stdout),
+        );
+        expect(f.prior.tree).not.toBe(
+          EffectString.trim((yield* f.git(['rev-parse', f.prior.head + '^{tree}'])).stdout),
+        );
+        const spawner = yield* ChildProcessSpawner;
+        let measuring = false,
+          finished = false,
+          trackedExecution = false;
+        let commands = 0,
+          argumentBytes = 0,
+          outputBytes = 0,
+          started = 0,
+          elapsedMs = 0;
+        const ownedChildren = new Set<number>();
+        const captureTrees: {baseTree: string; tree: string}[] = [];
+        const treeBatches: Record<string, {batches: number; pathArguments: number; paths: Set<string>}> = {};
+        const noteCommand = (args: readonly string[]) =>
+          Effect.gen(function* () {
+            if (!measuring && !finished && args.includes('--show-toplevel')) {
+              measuring = true;
+              started = yield* Clock.currentTimeMillis;
+            }
+            trackedExecution = measuring;
+            if (!measuring) return;
+            commands++;
+            argumentBytes += EffectArray.reduce(
+              args,
+              0,
+              (total, arg) => total + new TextEncoder().encode(arg).byteLength + 1,
+            );
+            const objects = EffectArray.filter(args, arg => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(arg));
+            if (args.includes('diff') && args.includes('--raw'))
+              captureTrees.push({baseTree: objects[0], tree: objects[1]});
+            if (args.includes('ls-tree')) {
+              const tree = objects[0];
+              const batch = (treeBatches[tree] ??= {batches: 0, pathArguments: 0, paths: new Set()});
+              const paths = EffectArray.filter(args, arg => EffectString.startsWith(':(literal)')(arg));
+              batch.batches++;
+              batch.pathArguments += paths.length;
+              for (const path of paths) batch.paths.add(EffectString.slice(10)(path));
+            }
+            if (args.includes('update-ref') && args.includes('--stdin')) {
+              elapsedMs = (yield* Clock.currentTimeMillis) - started;
+              measuring = false;
+              finished = true;
+            }
+          });
+        const measuredSpawner = ChildProcessSpawner.of({
+          ...spawner,
+          spawn: command =>
+            spawner.spawn(command).pipe(
+              Effect.tap(handle =>
+                Effect.sync(() => {
+                  if (trackedExecution) ownedChildren.add(Number(handle.pid));
+                }),
+              ),
+            ),
+        });
+        const executorContext = yield* Layer.build(Layer.fresh(CommandExecutor.layer)).pipe(
+          Effect.provideService(ChildProcessSpawner, measuredSpawner),
+        );
+        const executor = Context.get(executorContext, CommandExecutor);
+        const measured = CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) =>
+            Effect.gen(function* () {
+              yield* noteCommand(args);
+              const result = yield* executor.execute(executable, args, options);
+              if (measuring) outputBytes += new TextEncoder().encode(result.stdout + result.stderr).byteLength;
+              return result;
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  trackedExecution = false;
+                }),
+              ),
+            ),
+          executeBytes: (executable, args, options) =>
+            Effect.gen(function* () {
+              yield* noteCommand(args);
+              const result = yield* executor.executeBytes!(executable, args, options);
+              if (measuring)
+                outputBytes += result.stdout.byteLength + new TextEncoder().encode(result.stderr).byteLength;
+              return result;
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  trackedExecution = false;
+                }),
+              ),
+            ),
+        });
+        let preparedBytes = 0;
+        const fs = yield* FileSystem.FileSystem;
+        const stateFile = yield* fs.realPath(f.statePath());
+        const measuredFs = FileSystem.FileSystem.of({
+          ...fs,
+          writeFileString: (path, data, options) => {
+            if (EffectString.startsWith(stateFile + '.')(path) && EffectString.endsWith('.tmp')(path))
+              preparedBytes = new TextEncoder().encode(data).byteLength;
+            return fs.writeFileString(path, data, options);
+          },
+        });
+        const admitted = yield* f
+          .mutate('snapshot', f.fields)
+          .pipe(
+            Effect.provideService(CommandExecutor, measured),
+            Effect.provideService(ChildProcessSpawner, measuredSpawner),
+            Effect.provideService(FileSystem.FileSystem, measuredFs),
+          );
+        expect(finished).toBe(true);
+        expect(commands).toBeLessThanOrEqual(nativeCycleSameLabelQualificationLimits.commands);
+        expect(ownedChildren.size, 'observed native child spawns').toBeGreaterThan(0);
+        expect(preparedBytes, 'observed prepared state bytes').toBeGreaterThan(0);
+
+        expect(admitted.status).not.toBe('error');
+        const snapshot = (yield* f.read()).snapshots.at(-1)!.snapshot;
+        expect(snapshot.snapshotId).toBe(f.fields.snapshotId);
+        const proof = snapshot.sameLabelRebasedBaseIntegrationV1!;
+        expect(snapshot.version).toBe(3);
+        expect(snapshot.supersedes).toBe(f.prior.snapshotId);
+        expect(snapshot.phaseHash).not.toBe(f.prior.phaseHash);
+        expect(proof.priorScopeBase).toBe(f.prior.scopeBase);
+        expect(proof.priorDeclaredBaseHead).toBe(f.prior.declaredBaseHead);
+        expect(proof.historicalMergeBases).not.toContain(f.prior.declaredBaseHead);
+        expect(proof.reconciliationPaths).toContain('source.ts');
+        expect(f.prior.files).toContain('prior-only.ts');
+        expect(
+          EffectString.trim((yield* f.git(['ls-tree', '-r', f.old.baselines.one.tree, '--', 'prior-only.ts'])).stdout),
+        ).toBe('');
+        expect(
+          EffectString.trim((yield* f.git(['ls-tree', '-r', f.currentBaseHead, '--', 'prior-only.ts'])).stdout),
+        ).toBe('');
+        expect(proof.reconciliationPaths).toContain('prior-only.ts');
+        expect(snapshot.files).not.toContain('prior-only.ts');
+        const removed = EffectOption.getOrUndefined(
+          EffectArray.findFirst(proof.reconciliationEvidence, item => item.path === 'prior-only.ts'),
+        );
+        expect(removed).toMatchObject({
+          baseline: {mode: '000000'},
+          currentBase: {mode: '000000'},
+          prior: {mode: '100644'},
+          head: {mode: '000000'},
+        });
+
+        expect(snapshot.files).not.toContain('source.ts');
+        expect(proof.phaseOwnedPaths).toEqual([
+          {phaseId: 'one', paths: ['owned.ts']},
+          {phaseId: 'two', paths: ['other-owned.ts']},
+        ]);
+        const current = yield* f.read();
+        for (const key of ['baselines', 'reviews', 'attempts', 'reviewLimits', 'reviewExpansions', 'plans'] as const)
+          expect(current[key]).toEqual(f.old[key]);
+        expect(current.snapshots.slice(0, -1)).toEqual(f.old.snapshots);
+        expect(current.state).toEqual(f.old.state);
+        const detail = object(
+          yield* f.call({
+            ...f.base('cycle'),
+            command: 'detail',
+            snapshotId: snapshot.snapshotId,
+            detailKind: 'patch',
+            maxBytes: 65_536,
+          }),
+        );
+        expect(JSON.stringify(detail)).toContain('stagedOnly');
+        expect(JSON.stringify(detail)).toContain('owned.ts');
+        const treeRoles = {
+          baseline: proof.baselineTree,
+          historicalDeclaredBase: proof.priorDeclaredBaseTree,
+          actualPriorScope: proof.priorScopeBase,
+          priorSnapshot: proof.priorTree,
+          currentBase: proof.currentBaseTree,
+          current: snapshot.tree,
+        };
+        const cost = {
+          evidenceAdmissions: commands,
+          actualOwnedChildren: ownedChildren.size,
+          argumentBytes,
+          outputBytes,
+          elapsedMs,
+          retentionAdmissionIncluded: true,
+          captures: EffectArray.map(captureTrees, (capture, index) => ({
+            ...capture,
+            kind:
+              index === captureTrees.length - 1
+                ? 'closing'
+                : capture.baseTree === proof.baselineTree
+                  ? 'opening-baseline'
+                  : capture.baseTree === proof.currentBaseTree
+                    ? 'current-base'
+                    : 'prior-reconciliation',
+          })),
+          treeRoles,
+          uniqueTreeLookups: EffectArray.map(EffectRecord.toEntries(treeBatches), ([tree, batch]) => ({
+            tree,
+            batches: batch.batches,
+            pathArguments: batch.pathArguments,
+            uniquePaths: batch.paths.size,
+          })),
+          receiptBytes: new TextEncoder().encode(stableJson(proof)).byteLength,
+          preparedStoredBytes: preparedBytes,
+          preparedLogicalBytes: new TextEncoder().encode(
+            stableJson((yield* readNativeWorkflowState(f.config, 'native-run'))!.state) + '\n',
+          ).byteLength,
+          detailPageBytes: new TextEncoder().encode(JSON.stringify(detail)).byteLength,
+          detailExportTotalBytes: object(detail.page).totalBytes,
+        };
+        yield* Effect.sync(() => process.stdout.write('SAME_LABEL_QUALIFICATION_COST ' + JSON.stringify(cost) + '\n'));
+
+        const beforeRetry = yield* f.fs.readFileString(f.statePath());
+        yield* f.mutate('snapshot', f.fields);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRetry);
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: snapshot.snapshotId,
+            attemptId: 'incremental',
+            report: report(snapshot, 'incremental'),
+          })).status,
+        ).toBe('error');
+        yield* f.mutate('validate-review', {
+          snapshotId: snapshot.snapshotId,
+          attemptId: 'current-full',
+          report: report(snapshot),
+        });
+        expect((yield* f.read()).reviews).toHaveLength(f.old.reviews.length + 1);
+        yield* f.mutate('ready', {
+          phaseId: 'one',
+          snapshotId: snapshot.snapshotId,
+          validation: {
+            snapshotTree: snapshot.tree,
+            reviewTree: snapshot.tree,
+            status: 'passed',
+            productState: 'working',
+            checks: [{command: 'private integration', result: 'passed', evidence: 'Exact qualified source'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Private fixture'}],
+          },
+        });
+        expect(object(yield* f.call({...f.base('cycle'), command: 'publication-ready', phaseId: 'one'})).status).toBe(
+          'ok',
+        );
+        yield* f.git(['update-ref', 'refs/heads/main', f.prior.head]);
+        refused(yield* f.call({...f.base('cycle'), command: 'publication-ready', phaseId: 'one'}).pipe(Effect.result));
+        const check = () => f.call({...f.base('cycle'), command: 'check', snapshotId: snapshot.snapshotId});
+        // C001: plain check enforces the qualified branch/base without a phase argument.
+        refused(yield* check().pipe(Effect.result));
+        yield* f.git(['update-ref', 'refs/heads/main', f.currentBaseHead]);
+        yield* f.git(['checkout', '-b', 'same-head-alias', f.head]);
+        refused(yield* check().pipe(Effect.result));
+        yield* f.git(['checkout', 'feature/one']);
+        // C002: the historical declared-base commit pin is independent of the staged snapshot tree pin.
+        yield* f.git(['update-ref', '-d', proof.priorBaseRef]);
+        refused(yield* check().pipe(Effect.result));
+        yield* f.git(['update-ref', proof.priorBaseRef, proof.priorDeclaredBaseHead]);
+        expect(object(yield* check()).status).toBe('unchanged');
+        // NQ01-SEC001: a distinct rewritten base with the same tree must retire old ready H/T evidence.
+        const readyRuntime = yield* f.read();
+        const oldReady = readyRuntime.state.phases.one;
+        yield* f.git(['update-ref', 'refs/heads/main', f.rewrittenParentHead]);
+        const repeatCAS = object(
+          object(
+            yield* f.call({
+              ...f.base('cycle'),
+              command: 'detail',
+              snapshotId: snapshot.snapshotId,
+              detailKind: 'manifest',
+              maxBytes: 65536,
+            }),
+          ).sameLabelRebasedBaseCAS,
+        );
+        const repeatFields = {
+          ...f.fields,
+          snapshotId: 'qualified-same-source',
+          previous: snapshot.snapshotId,
+          sameLabelRebasedBaseIntegrationV1: {
+            ...f.fields.sameLabelRebasedBaseIntegrationV1,
+            priorSnapshotId: snapshot.snapshotId,
+            currentBaseHead: f.rewrittenParentHead,
+            expectedPriorEntryDigest: repeatCAS.expectedPriorEntryDigest,
+            expectedPriorReviewDigest: repeatCAS.expectedPriorReviewDigest,
+          },
+        };
+        yield* f.mutate('snapshot', repeatFields);
+        const repeated = yield* f.read();
+        const repeatedSnapshot = repeated.snapshots.at(-1)!.snapshot;
+        expect(repeatedSnapshot.head).toBe(snapshot.head);
+        expect(repeatedSnapshot.tree).toBe(snapshot.tree);
+        expect(repeatedSnapshot.declaredBaseHead).not.toBe(snapshot.declaredBaseHead);
+        expect(repeated.state.phases.one.validation).toBeUndefined();
+        expect(repeated.state.phases.one.history?.at(-1)?.validation).toEqual(oldReady.validation);
+        expect(repeated.snapshots.slice(0, -1)).toEqual(readyRuntime.snapshots);
+        expect(repeated.attempts).toEqual(readyRuntime.attempts);
+        expect(repeated.reviews).toEqual(readyRuntime.reviews);
+        const blockedReport = {
+          ...report(repeatedSnapshot),
+          findings: [
+            {
+              id: 'SEC001-blocker',
+              file: 'owned.ts',
+              line: 1,
+              body: 'The current candidate has a concrete blocker.',
+              trigger: 'Exercise current source.',
+              impact: 'The operation fails.',
+              evidence: 'Private retained regression report.',
+              severity: 'important',
+              category: 'security',
+              confidence: 99,
+              state: 'new',
+            },
+          ],
+        };
+        expect(
+          (yield* f.mutate('validate-review', {
+            snapshotId: repeatedSnapshot.snapshotId,
+            attemptId: 'blocked-current-full',
+            report: blockedReport,
+          })).status,
+        ).toBe('ok');
+        refused(yield* f.call({...f.base('cycle'), command: 'publication-ready', phaseId: 'one'}).pipe(Effect.result));
+        refused(yield* f.mutate('record-delivery', {phaseId: 'one'}).pipe(Effect.result));
+        refused(
+          yield* f
+            .mutate('ready', {phaseId: 'one', snapshotId: repeatedSnapshot.snapshotId, validation: oldReady.validation})
+            .pipe(Effect.result),
+          'review-blocked',
+        );
+        expect((yield* f.read()).state.phases.one.validation).toBeUndefined();
+      }).pipe(run),
+    ordinaryMergeFixtureTimeout,
+  );
+
+  effectIt.effect(
+    'completes a published manifest3 PR after active checkout and declared base advance',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* rewrittenBaseFixture(false, 'pr');
+        yield* f.mutate('snapshot', f.fields);
+        const snapshot = (yield* f.read()).snapshots.at(-1)!.snapshot;
+        yield* f.mutate('validate-review', {
+          snapshotId: snapshot.snapshotId,
+          attemptId: 'full-qualified',
+          report: report(snapshot),
+        });
+        yield* f.mutate('ready', {
+          phaseId: 'one',
+          snapshotId: snapshot.snapshotId,
+          validation: {
+            snapshotTree: snapshot.tree,
+            reviewTree: snapshot.tree,
+            status: 'passed',
+            productState: 'working',
+            checks: [{command: 'private fixture', result: 'passed', evidence: 'Exact qualified source'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Private fixture'}],
+          },
+        });
+        const publication = {exemption: 'maintenance', reason: 'Private synthetic fixture.'};
+        const delivery = {
+          phaseId: 'one',
+          phaseHash: snapshot.phaseHash,
+          delivery: 'pr',
+          headSha: snapshot.head,
+          validatedTree: snapshot.tree,
+          commitEvidence: 'Private clean committed fixture.',
+          pr: {
+            url: 'https://github.com/example/repo/pull/1',
+            headSha: snapshot.head,
+            branch: 'feature/one',
+            baseBranch: 'main',
+            state: 'open',
+          },
+          watch: {
+            prUrl: 'https://github.com/example/repo/pull/1',
+            headSha: snapshot.head,
+            state: 'active',
+            stateDir: f.path.join(f.root, 'watch'),
+            consumerKind: 'orchestrator',
+            consumerId: 'fixture',
+            evidence: 'Private synthetic owned watch receipt.',
+          },
+        };
+        yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery});
+        const published = yield* f.read();
+        const prior = published.state.phases.one.delivery!;
+        yield* f.git(['checkout', 'main']);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'later-base.ts'), 'export const later = true;\n');
+        yield* f.git(['add', '.']);
+        yield* f.git(['commit', '-m', 'Later base after publication']);
+        const merged = {
+          ...prior,
+          pr: {...prior.pr!, state: 'merged'},
+          watch: {...prior.watch!, state: 'terminal', evidence: 'Private owned watch observed the historical merge.'},
+        };
+        expect((yield* f.mutate('record-delivery', {phaseId: 'one', publication, delivery: merged})).status).toBe('ok');
+        const completed = yield* f.read();
+        expect(completed.state.phases.one.status).toBe('merged');
+        expect(completed.snapshots).toEqual(published.snapshots);
+        expect(completed.reviews).toEqual(published.reviews);
+        expect(completed.attempts).toEqual(published.attempts);
+      }).pipe(run),
+    ordinaryMergeFixtureTimeout,
+  );
+
+  effectIt.effect(
+    'refuses forged provenance, identities, owners, authority and source drift before surviving pin or state changes',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* rewrittenBaseFixture();
+        const before = yield* f.fs.readFileString(f.statePath());
+        const refs = EffectString.trim(
+          (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout,
+        );
+        const witness = f.fields.sameLabelRebasedBaseIntegrationV1;
+        for (const patch of [
+          {protocolVersion: 2},
+          {userAuthority: ' '},
+          {previous: 'missing'},
+          {acceptedHead: f.prior.head},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, expectedPriorEntryDigest: EffectString.repeat(64)('f')}},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, expectedPriorReviewDigest: EffectString.repeat(64)('f')}},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, sameBaseBranch: 'other'}},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, phaseOwnedPaths: []}},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, currentHead: f.prior.head}},
+          {sameLabelRebasedBaseIntegrationV1: {...witness, authorityKind: 'ordinary-merge'}},
+        ]) {
+          refused(yield* f.mutate('snapshot', {...f.fields, ...patch}).pipe(Effect.result));
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+          expect(
+            EffectString.trim(
+              (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout,
+            ),
+          ).toBe(refs);
+        }
+        yield* f.git(['checkout', 'rewritten']);
+        refused(yield* f.mutate('snapshot', f.fields).pipe(Effect.result));
+        yield* f.git(['checkout', 'feature/one']);
+        yield* f.git(['update-ref', 'refs/heads/main', f.prior.head]);
+        refused(yield* f.mutate('snapshot', f.fields).pipe(Effect.result));
+        yield* f.git(['update-ref', 'refs/heads/main', f.currentBaseHead]);
+        yield* f.git(['update-ref', f.prior.pinnedRef, f.prior.scopeBase]);
+        refused(yield* f.mutate('snapshot', f.fields).pipe(Effect.result));
+        yield* f.git(['update-ref', f.prior.pinnedRef, f.prior.tree]);
+        const executor = yield* CommandExecutor;
+        let moved = false;
+        const raced = CommandExecutor.of({
+          ...executor,
+          execute: (executable, args, options) =>
+            Effect.gen(function* () {
+              if (
+                !moved &&
+                args.includes('show-ref') &&
+                EffectArray.some(args, arg => EffectString.includes('/merge-prior/')(arg))
+              ) {
+                moved = true;
+                yield* executor.execute('git', ['-C', f.repo, 'update-ref', 'refs/heads/main', f.prior.head]);
+              }
+              return yield* executor.execute(executable, args, options);
+            }),
+        });
+        refused(
+          yield* f.mutate('snapshot', f.fields).pipe(Effect.provideService(CommandExecutor, raced), Effect.result),
+        );
+        expect(moved).toBe(true);
+        yield* f.git(['update-ref', 'refs/heads/main', f.currentBaseHead]);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+        expect(
+          EffectString.trim(
+            (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/threadnote/'])).stdout,
+          ),
+        ).toBe(refs);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'owned.ts'), 'dirty\n');
+        yield* f.git(['add', 'owned.ts']);
+        refused(yield* f.mutate('snapshot', f.fields).pipe(Effect.result));
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      }).pipe(run),
+    ordinaryMergeFixtureTimeout,
+  );
+});
+
+effectIt.effect('bounds aggregate command, argument, output and deadline acquisition before retention admission', () =>
+  Effect.gen(function* () {
+    const empty = {exitCode: 0, stdout: '', stderr: ''};
+    let executed = 0,
+      mutations = 0;
+    const executor = CommandExecutor.of({
+      execute: (_executable, args) =>
+        Effect.sync(() => {
+          executed++;
+          if (args.includes('update-ref')) mutations++;
+          return empty;
+        }),
+      executeStreaming: () => Effect.succeed(empty),
+    });
+    const commands = Effect.gen(function* () {
+      for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['read']);
+      yield* withNativeCycleSameLabelQualificationBudget(
+        Effect.gen(function* () {
+          for (let i = 0; i < 64; i++) yield* runCommandEffect('git', ['nested-read']);
+        }),
+      );
+      yield* runCommandEffect('git', ['update-ref', '--stdin']);
+    });
+    refused(
+      yield* withNativeCycleSameLabelQualificationBudget(commands).pipe(
+        Effect.provideService(CommandExecutor, executor),
+        Effect.result,
+      ),
+    );
+    expect(executed).toBe(128);
+    expect(mutations).toBe(0);
+    executed = 0;
+    refused(
+      yield* withNativeCycleSameLabelQualificationBudget(
+        runCommandEffect('git', [EffectString.repeat(1_048_576)('x')]),
+      ).pipe(Effect.provideService(CommandExecutor, executor), Effect.result),
+    );
+    expect(executed).toBe(0);
+    const multibyte = EffectString.repeat(262_143)('é');
+    expect(new TextEncoder().encode(multibyte).byteLength).toBe(524_286);
+    const cumulative = Effect.gen(function* () {
+      yield* runCommandEffect('git', [multibyte]);
+      yield* runCommandEffect('git', [multibyte]);
+      yield* runCommandEffect('git', ['x']); // Exactly1048576UTF-8 argv bytes including argument terminators.
+      yield* runCommandEffect('git', ['y']);
+    });
+    refused(
+      yield* withNativeCycleSameLabelQualificationBudget(cumulative).pipe(
+        Effect.provideService(CommandExecutor, executor),
+        Effect.result,
+      ),
+    );
+    expect(executed).toBe(3);
+    executed = 0;
+    const output = CommandExecutor.of({
+      ...executor,
+      execute: () =>
+        Effect.sync(() => {
+          executed++;
+          return {
+            exitCode: 0,
+            stdout: EffectString.repeat(4_194_304)('x'),
+            stderr: EffectString.repeat(4_194_304)('y'),
+          };
+        }),
+    });
+    refused(
+      yield* withNativeCycleSameLabelQualificationBudget(
+        runCommandEffect('git', ['read']).pipe(Effect.andThen(runCommandEffect('git', ['next']))),
+      ).pipe(Effect.provideService(CommandExecutor, output), Effect.result),
+    );
+    expect(executed).toBe(1);
+    const expired = CommandExecutor.of({
+      ...executor,
+      execute: () => TestClock.adjust('30 seconds').pipe(Effect.as(empty)),
+    });
+    refused(
+      yield* withNativeCycleSameLabelQualificationBudget(runCommandEffect('git', ['read'])).pipe(
+        Effect.provideService(CommandExecutor, expired),
+        Effect.result,
+      ),
+    );
+    const options: {timeoutMs?: number; maxOutputBytes?: number}[] = [];
+    const remaining = CommandExecutor.of({
+      ...executor,
+      execute: (_executable, _args, option) =>
+        Effect.sync(() => options.push(option ?? {})).pipe(
+          Effect.andThen(TestClock.adjust('1 second')),
+          Effect.as({...empty, stdout: 'read'}),
+        ),
+    });
+    yield* withNativeCycleSameLabelQualificationBudget(
+      runCommandEffect('git', ['one']).pipe(Effect.andThen(runCommandEffect('git', ['two']))),
+    ).pipe(Effect.provideService(CommandExecutor, remaining));
+    expect(options[0].timeoutMs).toBe(30_000);
+    expect(options[1].timeoutMs).toBe(29_000);
+    expect(options[0].maxOutputBytes).toBe(4_194_304);
+    expect(options[1].maxOutputBytes).toBe(4_194_302);
+  }),
+);

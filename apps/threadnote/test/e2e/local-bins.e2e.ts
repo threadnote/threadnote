@@ -26,6 +26,7 @@ import e2eConfig from '../../../../vitest.e2e.config.js';
 import {
   createLocalBinsWorkerDrains,
   drainLocalBinsWorkers,
+  runLocalBinsE2eCleanup,
   runLocalBinsWorkerDrain,
   type LocalBinsPositiveHome,
   type LocalBinsWorkerDrain,
@@ -230,7 +231,6 @@ async function enrollPositiveWorkerHome(positiveHome: string, label: LocalBinsPo
     ...(await runLocalBinsWorkerDrain(createLocalBinsWorkerDrains(positiveHome, temporaryRoot, cli, label))),
   );
 }
-
 function installedLauncher(
   mode: 'cli' | 'mcp' = 'cli',
   kind: 'cmd' | 'posix' = process.platform === 'win32' ? 'cmd' : 'posix',
@@ -300,32 +300,36 @@ beforeAll(async () => {
 afterAll(async () => {
   // Share the existing hook's original epoch deadline with both supported worker domains.
   const workerDeadline = Date.now() + e2eConfig.test!.hookTimeout!;
-  const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
-    .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
-    .catch(() => undefined);
-  if (endpoint) {
-    expect(await realpath(endpoint.home)).toBe(await realpath(home));
-    expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
-    if (process.platform === 'win32') {
-      if (isProcessRunning(endpoint.pid)) {
-        try {
-          await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
-        } catch (cause) {
-          if (isProcessRunning(endpoint.pid)) throw cause;
+  await runLocalBinsE2eCleanup(
+    async () => {
+      const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
+        .then(text => Schema.decodeUnknownSync(CoordinatorEndpointSchema)(JSON.parse(text)))
+        .catch(() => undefined);
+      if (endpoint) {
+        expect(await realpath(endpoint.home)).toBe(await realpath(home));
+        expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
+        if (process.platform === 'win32') {
+          if (isProcessRunning(endpoint.pid)) {
+            try {
+              await execute('taskkill', ['/PID', String(endpoint.pid), '/T', '/F']);
+            } catch (cause) {
+              if (isProcessRunning(endpoint.pid)) throw cause;
+            }
+          }
+        } else {
+          try {
+            process.kill(endpoint.pid, 'SIGKILL');
+          } catch (cause) {
+            if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
+          }
         }
+        await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
       }
-    } else {
-      try {
-        process.kill(endpoint.pid, 'SIGKILL');
-      } catch (cause) {
-        if (childProcessOutput(cause, 'code') !== 'ESRCH') throw cause;
-      }
-    }
-    await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
-  }
-  // Coordinator handling above is unchanged; this proves only enrolled recall/graph worker return.
-  await runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline));
-  await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
+    },
+    // This proves only enrolled recall/graph worker return, even when coordinator cleanup fails.
+    () => runLocalBinsWorkerDrain(drainLocalBinsWorkers(workerDrains, workerDeadline)),
+    () => rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50}),
+  );
 });
 
 function requiredMapValue(map: ReadonlyMap<string, string>, key: string): string {
@@ -1869,7 +1873,13 @@ async function runCliJson<S extends Schema.ConstraintDecoder<unknown>>(
   );
 }
 
-async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<string> {
+async function cliFailureEvidence(
+  targetHome: string,
+  cause: unknown,
+  childPid: number | undefined,
+  launchedAt: number,
+  operation: string | undefined,
+): Promise<string> {
   const detail = (key: string) => {
     const value = childProcessOutput(cause, key);
     if (typeof value === 'string') return Effect.pipe(value, EffectString.slice(0, 128));
@@ -1884,18 +1894,31 @@ async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<s
     platform: process.platform,
     architecture: process.arch,
   };
-  // Test homes contain synthetic data. Read a bounded tail and expose only diagnostic categories.
+  // Test homes contain synthetic data. Correlate bounded records internally; never emit the PID or invocation ID.
   const phases = await (async () => {
+    if (childPid === undefined || operation === undefined)
+      return {diagnostics: 'inconclusive', reason: 'child-identity-or-operation-unavailable'};
     const file = await open(join(targetHome, 'logs', 'threadnote.log'), 'r');
     try {
       const size = (await file.stat()).size;
       const buffer = Buffer.alloc(Math.min(32_768, size));
       const {bytesRead} = await file.read(buffer, 0, buffer.length, Math.max(0, size - buffer.length));
       const lines = Effect.pipe(buffer.subarray(0, bytesRead).toString('utf8'), EffectString.split('\n'));
-      return EffectArray.flatMap(EffectArray.takeRight(lines, 17), line => {
+      const records = EffectArray.flatMap(EffectArray.takeRight(lines, 17), line => {
         try {
           const record: unknown = JSON.parse(line);
           if (typeof record !== 'object' || record === null) return [];
+          const processId = Reflect.get(record, 'processId');
+          const recordOperation = Reflect.get(record, 'operation');
+          const timestamp = Reflect.get(record, 'timestamp');
+          if (
+            processId !== childPid ||
+            recordOperation !== operation ||
+            typeof timestamp !== 'string' ||
+            !Number.isFinite(Date.parse(timestamp)) ||
+            Date.parse(timestamp) < launchedAt
+          )
+            return [];
           const selected: Record<string, string | number | boolean> = {};
           for (const key of ['component', 'operation', 'event', 'outcome', 'errorType', 'phase']) {
             const value = Reflect.get(record, key);
@@ -1907,10 +1930,13 @@ async function cliFailureEvidence(targetHome: string, cause: unknown): Promise<s
           return [];
         }
       });
+      return records.length === 0
+        ? {diagnostics: 'inconclusive', reason: 'no-matching-correlated-phase'}
+        : {diagnostics: 'correlated', phases: records};
     } finally {
       await file.close();
     }
-  })().catch(() => []);
+  })().catch(() => ({diagnostics: 'inconclusive', reason: 'log-unavailable'}));
   return `Packaged CLI failure evidence: ${JSON.stringify({exit, phases})}`;
 }
 
@@ -1919,13 +1945,18 @@ async function runCliOutput(
   environment: NodeJS.ProcessEnv = {},
   targetHome = home,
 ): Promise<{readonly stderr: string; readonly stdout: string}> {
+  const launchedAt = Date.now();
+  let childPid: number | undefined;
+  const operation: string | undefined = args[0];
   try {
-    const result = await execute(cli, ['--home', targetHome, ...args], {
+    const pending = execute(cli, ['--home', targetHome, ...args], {
       cwd: root,
       env: cliEnvironment(environment),
       maxBuffer: cliOutputMaxBytes,
       timeout: realModelTimeoutMs,
     });
+    childPid = pending.child.pid;
+    const result = await pending;
     return {stderr: result.stderr, stdout: result.stdout};
   } catch (cause) {
     throw TestError.make({
@@ -1936,7 +1967,9 @@ async function runCliOutput(
           `${cli} --home ${targetHome} ${EffectArray.join(args, ' ')}`,
           `stdout:\n${boundedFailureOutput(childProcessOutput(cause, 'stdout'))}`,
           `stderr:\n${boundedFailureOutput(childProcessOutput(cause, 'stderr'))}`,
-          await cliFailureEvidence(targetHome, cause).catch(() => 'Packaged CLI failure evidence unavailable.'),
+          await cliFailureEvidence(targetHome, cause, childPid, launchedAt, operation).catch(
+            () => 'Packaged CLI failure evidence unavailable.',
+          ),
           ...(args[0] === 'recall' ? [`Packaged recall stages: ${await recallFailureStages('cli', targetHome)}`] : []),
           ...(args[0] === 'source' && args[1] === 'sync'
             ? [await coordinatorFailureEvidence(targetHome, environment)]

@@ -7,9 +7,14 @@ import {expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {decodeNativeAuthoringDocument, nativeAuthoringDigest} from '@threadnote/workflow-automations/authoring';
 import {persistCodexCloudProfile} from '../../src/codex/profile.js';
 import {persistCursorCloudIdentityProfile} from '../../src/cursor/profile.js';
+import {applyDevSkills} from '../../src/dev_skills/index.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
+import {runNativeTaskAuthoring} from '../../src/workflow_automation/task_authoring.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {
@@ -36,6 +41,30 @@ const context = {
   codeRefs: [] as string[],
   evidenceRefs: [] as [],
   note: 'Source-free personal-cloud fixture; no external evidence is claimed.',
+};
+const semanticSpec = {
+  title: 'Semantic private cloud spec',
+  objective: 'Keep approved semantic authoring private to its bound task.',
+  requirements: [{id: 'private', behavior: 'Save and reload the complete approved specification privately.'}],
+  context: {...context, codeRefs: ['source.ts']},
+  actors: ['author'],
+  inScope: ['Save and reload this private specification.'],
+  outOfScope: ['Publish to the configured share.'],
+  constraints: ['Preserve cloud task-local ownership.'],
+  observations: ['The source is a committed fixture module.'],
+  scenarios: [
+    {
+      id: 'private-readback',
+      requirementIds: ['private'],
+      given: 'A personal cloud profile is bound to one configured share.',
+      when: 'An approved semantic specification is saved and read.',
+      then: 'The full specification remains task-local and unpublished.',
+    },
+  ],
+  assumptions: [],
+  questions: [],
+  artifacts: [],
+  review: {required: true, reason: 'An independent review is required.'},
 };
 const document = () =>
   decodeNativeAuthoringDocument({
@@ -85,7 +114,20 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
         );
         if (profile === 'cursor-cloud-personal') environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'default';
         const f = yield* nativeFixture(environment);
-        const config = {...f.config, manifestSource: 'bundled-example' as const};
+        const repo = yield* f.fs.realPath(f.repo);
+        const home = yield* f.fs.realPath(f.home);
+        const cloudSystem = {
+          ...system,
+          platform: 'linux' as const,
+          currentDirectory: () => repo,
+          homeDirectory: home,
+        };
+        const config = {
+          ...f.config,
+          agentContextHome: home,
+          manifestPath: f.path.join(home, 'manifest.json'),
+          manifestSource: 'bundled-example' as const,
+        };
         const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
 
         executionDiagnosticPhase(diagnostics, 'authoring-git-setup');
@@ -103,26 +145,129 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
         yield* git(worktree, ['add', 'README.md']);
         yield* git(worktree, ['commit', '-m', 'seed']);
         yield* git(worktree, ['push', 'origin', 'main']);
+        const remoteRefsBefore = yield* git(f.root, ['ls-remote', remote]);
         yield* f.fs.makeDirectory(f.path.join(f.home, 'share'));
-        yield* f.fs.writeFileString(
-          f.path.join(f.home, 'share', 'teams.json'),
-          JSON.stringify({
-            version: 1,
-            defaultTeam: 'default',
-            teams: {
-              default: {
-                name: 'default',
-                access: 'read-write',
-                remote,
-                worktree,
-                gitdir: f.path.join(worktree, '.git'),
+        const teamsPath = f.path.join(f.home, 'share', 'teams.json');
+        const setShareAccess = (access: 'read-only' | 'read-write') =>
+          f.fs.writeFileString(
+            teamsPath,
+            JSON.stringify({
+              version: 1,
+              defaultTeam: 'default',
+              teams: {
+                default: {
+                  name: 'default',
+                  access,
+                  remote,
+                  worktree,
+                  gitdir: f.path.join(worktree, '.git'),
+                },
               },
-            },
-          }),
-        );
+            }),
+          );
+        yield* setShareAccess('read-write');
         executionDiagnosticPhase(diagnostics, 'authoring-profile-setup');
         if (profile === 'codex-cloud-personal') yield* persistCodexCloudProfile(config, ['default']);
         else yield* persistCursorCloudIdentityProfile(config);
+
+        executionDiagnosticPhase(diagnostics, 'authoring-init');
+        const targetAgent = profile === 'codex-cloud-personal' ? 'codex-cloud' : 'cursor-cloud-personal';
+        yield* applyDevSkills(config, 'install', {agent: targetAgent, scope: 'user', profile}).pipe(
+          Effect.provideService(SystemInfo, cloudSystem),
+        );
+        expect((yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home})).snapshot.state).toBe(
+          'ready',
+        );
+        const mcp = new EffectMcpServerAdapter('test', '1', 'private cloud semantic authoring');
+        registerWorkflowTaskTool(mcp, config);
+        const semanticAuthor = (input: Record<string, unknown>) =>
+          mcp.invokeTool('workflow_task_author', {callerCwd: repo, ...input}).pipe(
+            Effect.provideService(SystemInfo, cloudSystem),
+            Effect.map(result => {
+              const envelope = object(result);
+              if (envelope.isError) throw new Error(JSON.stringify(envelope));
+              return object(envelope.structuredContent);
+            }),
+          );
+        const semanticFile = f.path.join(f.root, 'semantic-spec.json');
+        yield* f.fs.writeFileString(semanticFile, JSON.stringify(semanticSpec));
+        const semanticStart = {
+          command: 'start' as const,
+          callerCwd: repo,
+          featureName: 'Semantic private cloud',
+          kind: 'spec' as const,
+          contentFile: semanticFile,
+          installationTarget: targetAgent,
+        };
+        yield* setShareAccess('read-only');
+        const readOnlyRefusal = yield* runNativeTaskAuthoring(config, semanticStart).pipe(
+          Effect.provideService(SystemInfo, cloudSystem),
+          Effect.result,
+        );
+        expect(readOnlyRefusal._tag).toBe('Failure');
+        const remoteAfterReadOnlyRefusal = yield* git(f.root, ['ls-remote', remote]);
+        expect(String(remoteAfterReadOnlyRefusal.stdout)).toBe(String(remoteRefsBefore.stdout));
+        yield* setShareAccess('read-write');
+        executionDiagnosticPhase(diagnostics, 'authoring-draft-save');
+        const semanticDraft = yield* semanticAuthor(semanticStart);
+        expect(semanticDraft.status).toBe('draft');
+        const semanticRef = semanticDraft.authoringRef;
+        const semanticStatePath = f.statePath(String(semanticDraft.runId));
+        executionDiagnosticPhase(diagnostics, 'authoring-readback');
+        const semanticRead = yield* semanticAuthor({command: 'read', authoringRef: semanticRef, detail: 'document'});
+        expect(object(semanticRead.document)).toMatchObject({
+          title: semanticSpec.title,
+          requirements: semanticSpec.requirements,
+          scenarios: semanticSpec.scenarios,
+        });
+        expect(String(object(semanticDraft.root).uri)).toContain('/memories/handoffs/active/');
+        expect(String(object(semanticDraft.root).uri)).not.toContain('/shared/');
+        const beforeSourceDrift = yield* f.fs.readFileString(semanticStatePath);
+        const foreign = f.path.join(f.root, 'foreign', 'repo');
+        yield* f.fs.makeDirectory(foreign, {recursive: true});
+        yield* git(foreign, ['init', '--initial-branch=main']);
+        const foreignRead = yield* runNativeTaskAuthoring(config, {
+          command: 'read',
+          callerCwd: foreign,
+          authoringRef: String(semanticRef),
+          detail: 'document',
+        }).pipe(Effect.provideService(SystemInfo, cloudSystem), Effect.result);
+        expect(foreignRead).toMatchObject({failure: {code: 'binding-drift'}});
+        expect(yield* f.fs.readFileString(semanticStatePath)).toBe(beforeSourceDrift);
+        const sourceBytes = yield* f.fs.readFileString(f.path.join(repo, 'source.ts'));
+        yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'export const fixture = "changed";\n');
+        const sourceDrift = yield* runNativeTaskAuthoring(config, {
+          command: 'decide',
+          callerCwd: repo,
+          authoringRef: String(semanticRef),
+          userDecision: 'approve',
+          userResponse: 'I approve the displayed cloud document.',
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+        }).pipe(Effect.provideService(SystemInfo, cloudSystem), Effect.result);
+        expect(sourceDrift).toMatchObject({failure: {code: 'source-drift'}});
+        expect(yield* f.fs.readFileString(semanticStatePath)).toBe(beforeSourceDrift);
+        yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), sourceBytes);
+        executionDiagnosticPhase(diagnostics, 'authoring-review');
+        expect(
+          yield* semanticAuthor({
+            command: 'decide',
+            authoringRef: semanticRef,
+            userDecision: 'approve',
+            userResponse: 'I approve the exact semantic cloud readback.',
+          }),
+        ).toMatchObject({status: 'needs-review'});
+        const approvedSemantic = yield* semanticAuthor({
+          command: 'decide',
+          authoringRef: semanticRef,
+          userDecision: 'approve',
+          userResponse: 'I approve the exact semantic cloud readback.',
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+        });
+        expect(approvedSemantic.status).toBe('ready');
+        const sharedStatus = yield* git(worktree, ['status', '--porcelain']);
+        expect(EffectString.trim(String(sharedStatus.stdout))).toBe('');
+        const remoteRefs = yield* git(f.root, ['ls-remote', remote]);
+        expect(String(remoteRefs.stdout)).toBe(String(remoteRefsBefore.stdout));
 
         executionDiagnosticPhase(diagnostics, 'authoring-init');
         const init = yield* f.call(

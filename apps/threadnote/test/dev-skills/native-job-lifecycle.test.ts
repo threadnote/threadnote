@@ -36,6 +36,7 @@ import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/au
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {stableJson} from '../../src/workflow_memory/protocol.js';
+import {withWorkflowLock} from '../../src/workflow_memory/journal.js';
 import {decodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js';
 import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journal_storage.js';
 import {
@@ -617,6 +618,49 @@ describe('native private job lifecycle', () => {
       yield* Deferred.succeed(release, undefined);
       expect(object(yield* Fiber.join(worker)).status).toBe('completed');
       expect(object(yield* f.call(statusRequest)).progress).toEqual(status.progress);
+    }).pipe(run),
+  );
+
+  effectIt.effect('waits for the canonical workflow journal before reading an accepted job', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const head = yield* commit(f.repo, 'source');
+      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      const initialized = yield* f.init();
+      const bindingId = requiredString(initialized.bindingId);
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document(
+          {head, files: [{path: 'source.ts', sha256: sha256HexSync('export const fixture = true;\n')}]},
+          ['source.ts'],
+        ),
+        ready: false,
+        expectedRevision: null,
+      };
+      const accepted = object(yield* submit(f, work));
+      const jobId = requiredString(accepted.jobId);
+      const acquired = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      const journal = yield* withWorkflowLock(
+        f.config,
+        bindingId,
+        Effect.gen(function* () {
+          yield* Deferred.succeed(acquired, undefined);
+          yield* Deferred.await(release);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(acquired);
+      const status = yield* f.call({...f.base('job'), command: 'status', jobId}).pipe(
+        Effect.tap(() => Deferred.succeed(completed, undefined)),
+        Effect.forkChild,
+      );
+      yield* Effect.sleep('100 millis');
+      expect(Option.isNone(yield* Deferred.poll(completed))).toBe(true);
+      yield* Deferred.succeed(release, undefined);
+      expect(object(yield* Fiber.join(status))).toMatchObject({jobId, status: 'accepted'});
+      yield* Fiber.join(journal);
     }).pipe(run),
   );
 
@@ -1367,11 +1411,34 @@ describe('native private job lifecycle', () => {
         expect(prepared.status).toBe('prepared');
         expect(EffectRecord.keys(prepared.archives)).toHaveLength(0);
         expect(EffectRecord.keys(prepared.outputs)).toHaveLength(0);
-        const finishWork = {...f.base('closeout', f.controllerRunId), command: 'finish'};
+        const inspectedPrepared = object(yield* f.closeout('inspect'));
+        const expectedRevision = requiredString(object(inspectedPrepared.closeout).revision);
+        const staleFinishWork = {
+          ...f.base('closeout', f.controllerRunId),
+          command: 'finish',
+          expectedRevision: Effect2.pipe('0', EffectString.repeat(64)),
+        };
+        const staleFinishJobId = requiredString(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: staleFinishWork})).jobId,
+        );
+        const beforeStaleFinish = yield* f.fs.readFileString(journalFile);
+        expect(object(yield* runNativeJobWorker(f.config, f.controllerRunId, staleFinishJobId, f.call)).status).toBe(
+          'blocked-with-progress',
+        );
+        expect(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'result', jobId: staleFinishJobId})),
+        ).toMatchObject({code: 'closeout-conflict'});
+        expect(yield* f.fs.readFileString(journalFile)).toBe(beforeStaleFinish);
+        const finishWork = {
+          ...f.base('closeout', f.controllerRunId),
+          command: 'finish',
+          expectedRevision,
+        };
         const finishJobId = requiredString(
           object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: finishWork})).jobId,
         );
         expect(finishJobId).not.toBe(jobId);
+        expect(finishJobId).not.toBe(staleFinishJobId);
         expect(object(yield* runNativeJobWorker(f.config, f.controllerRunId, finishJobId, f.call)).status).toBe(
           'completed',
         );

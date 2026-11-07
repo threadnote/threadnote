@@ -20,6 +20,7 @@ import {
 import {codeGraphWorksetCatalogLayout} from '@threadnote/graph/workset_catalog/layout';
 import {prepareManagerCodeGraphWorksetIsolated} from '@threadnote/graph/workset_catalog/isolated_prepare';
 import {CodeGraphWorksetCatalogError} from '@threadnote/graph/workset_catalog/types';
+import {managerWorksetFailureDiagnosticEffect} from './workset_status_diagnostics.js';
 import {
   inspectCodeGraphWorksetStatus,
   type PrepareCodeGraphWorksetOptionsV1,
@@ -637,9 +638,24 @@ export const handleManagerWorksetRequest = Effect.fn('managerWorksets.handleRequ
 ) {
   if (!isManagerWorksetApiPath(request.url.pathname)) return yield* succeedUndefined;
   return yield* routeManagerWorksetRequest(request).pipe(
-    Effect.catchCause(cause => Effect.succeed(managerWorksetErrorResponse(Cause.squash(cause)))),
+    Effect.catchCause(cause =>
+      Effect.gen(function* () {
+        const error = Cause.squash(cause);
+        yield* Effect.exit(managerWorksetFailureDiagnosticTap(request, error));
+        return managerWorksetErrorResponse(error);
+      }),
+    ),
   );
 });
+
+function managerWorksetFailureDiagnosticTap(request: ManagerWorksetApiRequest, error: unknown): Effect.Effect<void> {
+  if (request.method !== 'GET' || request.url.pathname !== '/api/worksets/status') return Effect.void;
+  return Effect.suspend(() =>
+    Bun.env.THREADNOTE_MANAGER_WORKSET_FAILURE_DIAGNOSTICS === '1'
+      ? managerWorksetFailureDiagnosticEffect(error)
+      : Effect.void,
+  );
+}
 
 function routeManagerWorksetRequest(request: ManagerWorksetApiRequest) {
   const {config, method, url} = request;

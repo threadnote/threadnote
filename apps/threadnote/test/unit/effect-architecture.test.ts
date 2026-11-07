@@ -1,8 +1,10 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
-import {readFile, readdir} from '@threadnote/testing/node-fs-promises';
+import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {statSync} from '@threadnote/testing/node-fs';
 import {builtinModules} from '@threadnote/testing/node-module';
 import {dirname, join, relative} from '@threadnote/testing/node-path';
+import {tmpdir} from '@threadnote/testing/node-os';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {describe, expect, it} from 'vitest';
 import * as EffectString from 'effect/String';
@@ -48,6 +50,27 @@ const sourceFiles = async () => {
     path => !Effect.pipe(relative(repoRoot, path), EffectString.split(/[\\/]/)).includes('test'),
   );
 };
+
+async function packageSourceRoots(packagesRoot: string): Promise<readonly string[]> {
+  const packageDirectories = EffectArrayPipe(await readdir(packagesRoot, {withFileTypes: true}), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (__effectArrayValue, __effectArrayIndex) =>
+        (__effectArrayIndex in __effectArrayValues &&
+          __effectArrayValue.isDirectory() &&
+          __effectArrayValue.name !== 'testing' &&
+          statSync(join(packagesRoot, __effectArrayValue.name, 'package.json'), {throwIfNoEntry: false})?.isFile()) ??
+        false,
+    ),
+  );
+  return EffectArray.map(packageDirectories, entry => join(packagesRoot, entry.name, 'src'));
+}
+
+async function scanSourceFiles(appSourceRoot: string, packagesRoot: string): Promise<readonly string[]> {
+  const packageRoots = await packageSourceRoots(packagesRoot);
+  return (await Promise.all([codeFiles(appSourceRoot), ...EffectArray.map(packageRoots, codeFiles)])).flat();
+}
+
 const nodeBuiltinModules = new Set(
   EffectArray.map(
     EffectArray.filter(builtinModules, module => !Effect.pipe(module, EffectString.startsWith('bun:'))),
@@ -104,6 +127,33 @@ describe('Effect architecture boundaries', () => {
     );
   });
 
+  it('scans workspace packages, ignores empty leftovers, and fails for a package without src', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'effect-architecture-scan-'));
+    const appSource = join(root, 'app', 'src');
+    const packagesRoot = join(root, 'packages');
+    const packageRoot = join(packagesRoot, 'valid');
+    const leftoverRoot = join(packagesRoot, 'leftover');
+    const missingSourceRoot = join(packagesRoot, 'broken');
+
+    try {
+      await mkdir(appSource, {recursive: true});
+      await mkdir(join(packageRoot, 'src'), {recursive: true});
+      await mkdir(leftoverRoot, {recursive: true});
+      await writeFile(join(appSource, 'app.ts'), 'export {};');
+      await writeFile(join(packageRoot, 'package.json'), JSON.stringify({name: 'valid'}));
+      await writeFile(join(packageRoot, 'src', 'index.ts'), 'export {};');
+
+      expect([...(await scanSourceFiles(appSource, packagesRoot))].sort()).toEqual(
+        [join(appSource, 'app.ts'), join(packageRoot, 'src', 'index.ts')].sort(),
+      );
+
+      await mkdir(missingSourceRoot, {recursive: true});
+      await writeFile(join(missingSourceRoot, 'package.json'), JSON.stringify({name: 'broken'}));
+      await expect(scanSourceFiles(appSource, packagesRoot)).rejects.toMatchObject({code: 'ENOENT'});
+    } finally {
+      await rm(root, {recursive: true, force: true});
+    }
+  });
   it('keeps the CLI free of generic Promise workflow bridges', async () => {
     const cli = await readFile(join(sourceRoot, 'effect', 'cli.ts'), 'utf8');
     expect(cli).not.toContain('withRuntimePromise');
@@ -202,7 +252,7 @@ describe('Effect architecture boundaries', () => {
           EffectString.match(/\bgetBuiltinModule\b/g),
           Effect.Option.getOrElse(() => null),
         )?.length ?? 0;
-      expect(mentions, relativePath).toBe(relativePath === 'packages/platform/src/system.ts' ? 3 : 0);
+      expect(mentions, relativePath).toBe(relativePath === 'packages/platform/src/system.ts' ? 4 : 0);
       const calls = [
         ...Effect.pipe(source, EffectString.matchAll(/process\.getBuiltinModule\(\s*['"]([^'"]+)['"]\s*\)/g)),
       ];
@@ -212,6 +262,7 @@ describe('Effect architecture boundaries', () => {
       {module: 'os', path: 'packages/platform/src/system.ts'},
       {module: 'fs', path: 'packages/platform/src/system.ts'},
       {module: 'path', path: 'packages/platform/src/system.ts'},
+      {module: 'util', path: 'packages/platform/src/system.ts'},
     ]);
 
     const system = await readFile(join(repoRoot, 'packages', 'platform', 'src', 'system.ts'), 'utf8');

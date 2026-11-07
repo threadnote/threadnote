@@ -34,6 +34,8 @@ import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
 import {runNativeWatch} from './watch.js';
 import {runNativeCloseout} from './closeout.js';
+import {decodeJournal} from './closeout_request_schema.js';
+import {readNativeCloseoutJournal} from './closeout_store.js';
 import {CurrentNativeJobBoundary, CurrentNativeJobProgress, runNativeJob} from './native_jobs.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
@@ -42,6 +44,7 @@ import {
   withWorkflowReadCache,
 } from '../workflow_memory/read_cache.js';
 import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -432,6 +435,8 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
 const runBound = Effect.fn('workflowAutomation.bound')(function* (
   config: RuntimeConfig,
   request: Exclude<NativeWorkflowRequest, {readonly action: 'init' | 'capabilities' | 'graph-ready'}>,
+  taskDetail?: 'summary' | 'packet',
+  taskOutputKey?: string,
 ) {
   const stored = yield* load(config, request);
   return yield* withNativeWorkflowMemorySession(config, stored.state.bindingId, (admission, call) =>
@@ -450,6 +455,179 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
       )
         return yield* issue('binding-drift', 'Native run identity differs from its current journal admission.');
       const inspection = yield* inspectNative(config, stored.state, binding, admission);
+      if (taskDetail !== undefined) {
+        const memory = yield* makeWorkflowMemoryAdapter(config, binding, call);
+        // This closure is created only after actual admission and expires with the existing journal session.
+        // It admits reads only; caller JSON cannot supply or reuse an inspection capability.
+        const read = (input: unknown) =>
+          Effect.gen(function* () {
+            const child = yield* Effect.try({
+              try: () => decodeNativeWorkflowRequest(input),
+              catch: nativeWorkflowError,
+            });
+            if (
+              !('runId' in child) ||
+              child.runId !== stored.state.runId ||
+              child.generation !== stored.state.generation
+            )
+              return yield* issue('binding-drift', 'The task read belongs to another native run.');
+            if (child.action === 'inspect') return inspection;
+            if (child.action !== 'read')
+              return yield* issue('invalid-request', 'Task inspection only admits current artifact reads.');
+            return {
+              ...version,
+              status: 'ok' as const,
+              artifact: yield* memory.read(binding.bindingId, child.uri, child.evidenceRefs),
+            };
+          });
+        const completedCloseout = yield* readNativeCloseoutJournal(config, stored.state.runId, decodeJournal);
+        const completedJournal =
+          completedCloseout?.state.status === 'complete' &&
+          completedCloseout.state.runId === stored.state.runId &&
+          completedCloseout.state.generation === stored.state.generation &&
+          completedCloseout.state.bindingId === stored.state.bindingId
+            ? completedCloseout.state
+            : undefined;
+        // Documents can repeat a key when closeout replaces an earlier draft; the last value is the final output.
+        const finalDocuments = new Map<
+          string,
+          {readonly document: NonNullable<typeof completedJournal>['documents'][number]; readonly operationId: string}
+        >();
+        if (completedJournal) {
+          for (const document of completedJournal.documents) {
+            const repeated = finalDocuments.has(document.key);
+            finalDocuments.set(document.key, {
+              document,
+              operationId:
+                'closeout-' +
+                EffectString.slice(0, 24)(completedJournal.transactionId) +
+                '-' +
+                document.key +
+                (repeated ? '-final' : ''),
+            });
+          }
+        }
+        const expectedOutputKeys = [...finalDocuments.keys()];
+        const actualOutputKeys = completedJournal ? new Set(EffectRecord.keys(completedJournal.outputs)) : undefined;
+        if (
+          completedJournal &&
+          (expectedOutputKeys.length === 0 ||
+            expectedOutputKeys.length !== actualOutputKeys?.size ||
+            EffectArray.some(expectedOutputKeys, key => !actualOutputKeys?.has(key)))
+        )
+          return yield* issue(
+            'invalid-closeout-state',
+            'Completed closeout output receipts do not cover every admitted final document.',
+          );
+        const terminalCloseout = completedJournal;
+        const source = stored.state.cycle?.state.plan.source;
+        const pinned = source && !terminalCloseout ? yield* memory.read(binding.bindingId, source.root.uri) : undefined;
+        const planDrift =
+          source &&
+          !terminalCloseout &&
+          (pinned?.memoryId !== source.root.memoryId || pinned.revision !== source.root.revision)
+            ? 'The approved plan root changed. Reconcile its current verified export before further delivery.'
+            : undefined;
+        const verifiedCloseoutOutputs = terminalCloseout
+          ? yield* Effect.forEach(EffectRecord.toEntries(terminalCloseout.outputs), ([key, reference]) =>
+              Effect.gen(function* () {
+                const artifact = yield* memory.read(binding.bindingId, reference.uri);
+                const finalDocument = finalDocuments.get(key);
+                const document = finalDocument?.document;
+                const operation = finalDocument
+                  ? EffectOption.getOrUndefined(
+                      EffectArray.findFirst(
+                        stored.state.operations,
+                        entry => entry.intent.operationId === finalDocument.operationId,
+                      ),
+                    )
+                  : undefined;
+                if (
+                  !document ||
+                  !operation ||
+                  operation.status !== 'verified' ||
+                  !operation.artifact ||
+                  operation.intent.bindingId !== stored.state.bindingId ||
+                  operation.intent.sourceRunId !== stored.state.runId ||
+                  operation.intent.artifactKey !==
+                    'closeout-' + EffectString.slice(0, 24)(terminalCloseout.transactionId) + '-' + key ||
+                  operation.intent.role !== 'closeout-' + key ||
+                  operation.intent.body !== document.body ||
+                  operation.artifact.uri !== document.uri ||
+                  operation.artifact.body !== document.body ||
+                  operation.artifact.storageKind !== (terminalCloseout.profile === 'desktop' ? 'durable' : 'handoff') ||
+                  operation.artifact.state !== 'active' ||
+                  operation.artifact.memoryId !== reference.memoryId ||
+                  operation.artifact.revision !== reference.revision ||
+                  reference.uri !== document.uri ||
+                  artifact.uri !== reference.uri ||
+                  artifact.memoryId !== reference.memoryId ||
+                  artifact.revision !== reference.revision ||
+                  artifact.body !== document.body ||
+                  artifact.storageKind !== (terminalCloseout.profile === 'desktop' ? 'durable' : 'handoff') ||
+                  artifact.state !== 'active'
+                )
+                  return yield* issue(
+                    'invalid-readback',
+                    'A completed closeout output no longer matches its verified native receipt.',
+                  );
+                return {
+                  key,
+                  uri: artifact.uri,
+                  memoryId: artifact.memoryId,
+                  revision: artifact.revision,
+                  ...(key === taskOutputKey ? {body: artifact.body} : {}),
+                };
+              }),
+            )
+          : undefined;
+        if (terminalCloseout) {
+          const afterCloseoutRead = yield* readNativeCloseoutJournal(config, stored.state.runId, decodeJournal);
+          if (afterCloseoutRead?.revision !== completedCloseout?.revision)
+            return yield* issue(
+              'inspection-failed',
+              'The completed closeout changed while reading its durable outputs.',
+            );
+        }
+        const hasPlan =
+          !terminalCloseout &&
+          EffectArray.some(
+            stored.state.operations,
+            entry =>
+              entry.status === 'verified' &&
+              entry.intent.role === 'authoring-root' &&
+              entry.intent.artifactKey === 'author-root-plan',
+          );
+        const authoring = hasPlan
+          ? yield* runNativeAuthoring(
+              config,
+              {
+                ...version,
+                action: 'authoring',
+                command: 'current-plan',
+                runId: stored.state.runId,
+                generation: stored.state.generation,
+                detail: taskDetail === 'packet' ? 'document' : 'summary',
+              },
+              read,
+            )
+          : undefined;
+        return {
+          ...inspection,
+          revision: stored.revision,
+          taskAuthoring: authoring?.authoring,
+          ...(terminalCloseout && verifiedCloseoutOutputs
+            ? {
+                taskCloseout: {
+                  status: 'complete' as const,
+                  transactionId: terminalCloseout.transactionId,
+                  outputs: verifiedCloseoutOutputs,
+                },
+              }
+            : {}),
+          ...(planDrift ? {planDrift} : {}),
+        };
+      }
       if (request.action === 'inspect') return inspection;
       const memory = yield* makeWorkflowMemoryAdapter(config, binding, call);
       if (request.action === 'read')
@@ -504,7 +682,11 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
   return yield* withNativeWorkflowLock(config, request.runId, false, runBound(config, request));
 });
 
-const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
+const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (
+  config: RuntimeConfig,
+  input: unknown,
+  allowCompactOriginCreation = false,
+) {
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'request-schema')
     return yield* Effect.try({try: () => nativeRequestSchema(input), catch: nativeWorkflowError});
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'job')
@@ -557,14 +739,62 @@ const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (confi
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'watch')
     return yield* runNativeWatch(config, input);
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'authoring')
-    return yield* runNativeAuthoring(config, input, request =>
-      runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+    return yield* runNativeAuthoring(
+      config,
+      input,
+      request => runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      {allowCompactOriginCreation: allowCompactOriginCreation && 'command' in input && input.command === 'save'},
     );
   return yield* runCoreNative(config, input);
 });
 
+const runWorkflowAutomationWithCompactCapability = (
+  config: RuntimeConfig,
+  input: unknown,
+  allowCompactOriginCreation: boolean,
+) =>
+  dispatchNative(config, input, allowCompactOriginCreation).pipe(
+    withNativeFileLockWaitBudget,
+    Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
+    Effect.mapError(nativeWorkflowError),
+  );
+
 export const runWorkflowAutomation = (config: RuntimeConfig, input: unknown) =>
-  dispatchNative(config, input).pipe(
+  runWorkflowAutomationWithCompactCapability(config, input, false);
+
+export const runCompactOriginAuthoringSave = (config: RuntimeConfig, input: unknown) => {
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    !('action' in input) ||
+    input.action !== 'authoring' ||
+    !('command' in input) ||
+    input.command !== 'save' ||
+    !('document' in input) ||
+    typeof input.document !== 'object' ||
+    input.document === null ||
+    !('compactOrigin' in input.document)
+  )
+    return Effect.fail(
+      issue('invalid-request', 'The internal compact-origin capability only admits compact plan saves.'),
+    );
+  return runWorkflowAutomationWithCompactCapability(config, input, true);
+};
+
+/** Internal task read: admission and canonical authoring reads share one live journal session. */
+export const readNativeTaskInspection = (
+  config: RuntimeConfig,
+  runId: string,
+  generation: string,
+  detail: 'summary' | 'packet',
+  outputKey?: string,
+) =>
+  withNativeWorkflowLock(
+    config,
+    runId,
+    false,
+    runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
+  ).pipe(
     withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),

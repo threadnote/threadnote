@@ -943,6 +943,7 @@ export const makeJavaPreparedProject = Effect.fn('semantic.makeJavaPreparedProje
       documentationUri,
       model,
       sourceRoots: loaded.sourceRoots,
+      sourceBasis: loaded.sourceBasis,
       absentSourceRoots: loaded.absentSourceRoots,
       compilerOptions: model.compilerOptions,
       projectionDigest: projected.digest,
