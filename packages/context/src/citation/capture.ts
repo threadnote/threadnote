@@ -460,20 +460,20 @@ function withCapturedRepositoryGroup<A, E, R>(
             yield* Effect.acquireRelease(
               store
                 .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
-              .pipe(
-                Effect.mapError(error =>
-                  Schema.is(CodeGraphStoreBusyError)(error)
-                    ? MemoryCodeCitationCaptureError.of(
-                        'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
-                        writerBusyRecovery(before),
-                        undefined,
-                        true,
-                      )
-                    : captureError(cwd, error),
+                .pipe(
+                  Effect.mapError(error =>
+                    Schema.is(CodeGraphStoreBusyError)(error)
+                      ? MemoryCodeCitationCaptureError.of(
+                          'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
+                          writerBusyRecovery(before),
+                          undefined,
+                          true,
+                        )
+                      : captureError(cwd, error),
+                  ),
                 ),
-              ),
-            token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
-          );
+              token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
+            );
           const leased = Effect.gen(function* () {
             const repositoryRoot = yield* fs
               .realPath(before.identity.repoRoot)
@@ -501,8 +501,8 @@ function withCapturedRepositoryGroup<A, E, R>(
               } => target.target.kind === 'symbol',
             );
             const request = {
-              paths: fileTargets.map(target => target.target.path),
-              symbolIds: symbolTargets.map(target => target.target.nodeId),
+              paths: EffectArray.map(fileTargets, target => target.target.path),
+              symbolIds: EffectArray.map(symbolTargets, target => target.target.nodeId),
             };
             const evidence = yield* (
               readReadyEvidence
@@ -686,7 +686,7 @@ function withCapturedRepositoryGroup<A, E, R>(
             // Capture callback failures as values so the outer capture error adapter
             // cannot relabel body, ownership, revision or relation failures.
             const result = yield* Effect.exit(use(retainedTargets));
-            if (Exit.isFailure(result)) return yield* Effect.done(result);
+            if (Exit.isFailure(result)) return result;
             if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1_000_000 >= 60_000)
               return yield* MemoryCodeCitationCaptureError.of('Projection citation lease expired.');
             const closingOptions = {
@@ -709,7 +709,7 @@ function withCapturedRepositoryGroup<A, E, R>(
             if (expectedProjectScope) yield* requireExpectedProjectScope(after, expectedProjectScope);
             if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1000000 >= 60000)
               return yield* MemoryCodeCitationCaptureError.of('Projection citation lease expired.');
-            return yield* Effect.done(result);
+            return result;
           });
           return yield* enforceLeaseBudget
             ? leased.pipe(
@@ -724,11 +724,12 @@ function withCapturedRepositoryGroup<A, E, R>(
     const options = {project, manifestPath: config.manifestPath, observeWorktree: true, requestMaintenance: false};
     // Retain one repository session through this capture only. The independent
     // closing status above still reobserves identity, scope, worktree and snapshot.
-    return yield* (
+    const result = yield* (
       query.withStatusSession
         ? query.withStatusSession(config.agentContextHome, cwd, undefined, options, captureAtStatus)
         : query.status(config.agentContextHome, cwd, options).pipe(Effect.flatMap(captureAtStatus))
     ).pipe(Effect.mapError(error => captureError(cwd, error)));
+    return yield* Exit.isFailure(result) ? Effect.failCause(result.cause) : Effect.succeed(result.value);
   }).pipe(Effect.withSpan('memoryCodeCitation.captureRepositoryGroup'));
 }
 const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpectedCallerIdentity')(function* (

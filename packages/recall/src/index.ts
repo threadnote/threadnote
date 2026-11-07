@@ -56,7 +56,12 @@ import {
 import {selectRecallCodeLinks, type RecallCodeLinkQueryOptions} from './code_links.js';
 import {selectRecallMemoryLinks, type RecallMemoryLinkQueryOptions} from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
-import {withCanonicalResourceMutationLock, withRecallIndexLock} from './index/locks.js';
+import {
+  withCanonicalResourceMutationLock,
+  withRecallIndexLock,
+  withVerifiedRecallIndexActivation,
+  type RecallIndexActivation,
+} from './index/locks.js';
 import {
   failFastIdentityPreparation,
   normalizeRecallIdentityPreparation,
@@ -382,162 +387,164 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
   let metadataStale = false;
   let selectorCanonicalMismatch = false;
   const query = Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      if (!options.readyOnly) yield* initializeRecallDatabase(sql);
-      const fs = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      let readState: RecallReadyReadState | undefined;
-      const exactWindows: RecallReadyExactWindow[] = [];
-      if (options.readyOnly) {
-        yield* sql.unsafe('PRAGMA busy_timeout = 50');
-        const metadata = yield* loadRecallMetadata(sql);
-        if (
-          metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION) ||
-          metadata.get('initialized') !== 'true' ||
-          !metadata.get('content_generation') ||
-          !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
-          !RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata)
-        )
-          return yield* RecallIndexCorrupt.make({message: 'No compatible ready lexical snapshot is available.'});
-        const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
-        const canonical = yield* readCanonicalMutationGeneration(
-          fs,
-          pathService,
-          config.agentContextHome,
-          config.account,
-        );
-        const stale =
-          !recallInventoryPolicyIsCurrent(metadata) ||
-          recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, {}));
-        metadataStale = stale;
-        readState = {freshness: stale ? 'stale' : 'current', maintenance: 'unneeded'};
-      } else {
-        yield* fs.chmod(databasePath, 0o600);
-        yield* ensureRecallDatabaseFresh(
-          sql,
-          fs,
-          pathService,
-          databasePath,
-          staleMarkerBasePath,
-          config,
-          {
-            forceRefresh: options.forceRefresh,
-            includeInactive: options.includeInactive,
-            onProgress: options.onProgress,
-            validateNow: 'validateNow' in options ? options.validateNow : undefined,
-          },
-          activation,
-        );
-      }
-      const externalResources =
-        options.readyOnly || ('memoryIds' in options && options.memoryIds?.length === 0)
-          ? {}
-          : yield* loadExternalResourceAccess({
-              home: config.agentContextHome,
-              account: config.account,
-              user: config.user,
+    const sql = yield* SqlClient.SqlClient;
+    if (!options.readyOnly) yield* initializeRecallDatabase(sql);
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    let readState: RecallReadyReadState | undefined;
+    const exactWindows: RecallReadyExactWindow[] = [];
+    if (options.readyOnly) {
+      yield* sql.unsafe('PRAGMA busy_timeout = 50');
+      const metadata = yield* loadRecallMetadata(sql);
+      if (
+        metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION) ||
+        metadata.get('initialized') !== 'true' ||
+        !metadata.get('content_generation') ||
+        !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
+        !RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata)
+      )
+        return yield* RecallIndexCorrupt.make({message: 'No compatible ready lexical snapshot is available.'});
+      const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
+      const canonical = yield* readCanonicalMutationGeneration(
+        fs,
+        pathService,
+        config.agentContextHome,
+        config.account,
+      );
+      const stale =
+        !recallInventoryPolicyIsCurrent(metadata) ||
+        recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, {}));
+      metadataStale = stale;
+      readState = {freshness: stale ? 'stale' : 'current', maintenance: 'unneeded'};
+    } else {
+      yield* fs.chmod(databasePath, 0o600);
+      yield* ensureRecallDatabaseFresh(
+        sql,
+        fs,
+        pathService,
+        databasePath,
+        staleMarkerBasePath,
+        config,
+        {
+          forceRefresh: options.forceRefresh,
+          includeInactive: options.includeInactive,
+          onProgress: options.onProgress,
+          validateNow: 'validateNow' in options ? options.validateNow : undefined,
+        },
+        activation,
+      );
+    }
+    const externalResources =
+      options.readyOnly || ('memoryIds' in options && options.memoryIds?.length === 0)
+        ? {}
+        : yield* loadExternalResourceAccess({
+            home: config.agentContextHome,
+            account: config.account,
+            user: config.user,
+          });
+    const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
+    const allowedExternalCandidate = (candidate: RecallCandidate) =>
+      !isExternalResourceUri(candidate.uri)
+        ? Effect.succeed(true)
+        : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
+            Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
+          );
+    const filterUriMatches = <A>(matches: readonly A[]) =>
+      options.readyOnly
+        ? Effect.succeed(matches)
+        : filterExternalUriMatches(matches, externalLocation, externalResources);
+    const filterData = (data: RecallIndexData) =>
+      options.readyOnly ? Effect.succeed(data) : filterExternalRecallData(data, allowedExternalCandidate);
+    const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy =>
+      options.readyOnly
+        ? readyRecallSelectionPolicy(policy)
+        : {
+            ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
+            externalResources,
+          };
+    const scopedOptions =
+      'selections' in options
+        ? {
+            ...options,
+            selections: EffectArray.map(options.selections, selection => ({
+              ...selection,
+              eligibility: accessEligibility(selection.eligibility),
+            })),
+          }
+        : {...options, eligibility: accessEligibility(options.eligibility)};
+    const effectiveOptions =
+      'memorySeeds' in scopedOptions
+        ? {
+            ...scopedOptions,
+            onCanonicalMismatch: (count: number) => {
+              selectorCanonicalMismatch ||= count > 0;
+              scopedOptions.onCanonicalMismatch?.(count);
+            },
+          }
+        : scopedOptions;
+    let result: unknown = yield* 'anchors' in effectiveOptions
+      ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
+      : 'memorySeeds' in effectiveOptions
+        ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
+        : 'terms' in effectiveOptions
+          ? selectRecallExactMatches(sql, effectiveOptions, options.readyOnly ? exactWindows : undefined).pipe(
+              Effect.flatMap(filterUriMatches),
+            )
+          : Effect.gen(function* () {
+              const metadata = yield* loadRecallMetadata(sql);
+              const generation = metadata.get('content_generation') ?? '';
+              const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
+              const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
+              const selectData = (selection: LoadRecallIndexOptions) =>
+                selectRecallIndexData(
+                  sql,
+                  corpusStatistics,
+                  generation,
+                  selection,
+                  loadIdentityConflicts,
+                  metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
+                );
+              return 'selections' in effectiveOptions
+                ? yield* Effect.forEach(
+                    effectiveOptions.selections,
+                    selection =>
+                      selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
+                        Effect.flatMap(filterData),
+                      ),
+                    {concurrency: 1},
+                  )
+                : yield* selectData(effectiveOptions).pipe(Effect.flatMap(filterData));
             });
-      const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
-      const allowedExternalCandidate = (candidate: RecallCandidate) =>
-        !isExternalResourceUri(candidate.uri)
-          ? Effect.succeed(true)
-          : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
-              Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
-            );
-      const filterUriMatches = <A>(matches: readonly A[]) =>
-        options.readyOnly
-          ? Effect.succeed(matches)
-          : filterExternalUriMatches(matches, externalLocation, externalResources);
-      const filterData = (data: RecallIndexData) =>
-        options.readyOnly ? Effect.succeed(data) : filterExternalRecallData(data, allowedExternalCandidate);
-      const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy =>
-        options.readyOnly
-          ? readyRecallSelectionPolicy(policy)
-          : {
-              ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
-              externalResources,
-            };
-      const scopedOptions =
-        'selections' in options
-          ? {
-              ...options,
-              selections: EffectArray.map(options.selections, selection => ({
-                ...selection,
-                eligibility: accessEligibility(selection.eligibility),
-              })),
-            }
-          : {...options, eligibility: accessEligibility(options.eligibility)};
-      const effectiveOptions =
-        'memorySeeds' in scopedOptions
-          ? {
-              ...scopedOptions,
-              onCanonicalMismatch: (count: number) => {
-                selectorCanonicalMismatch ||= count > 0;
-                scopedOptions.onCanonicalMismatch?.(count);
-              },
-            }
-          : scopedOptions;
-      let result: unknown = yield* 'anchors' in effectiveOptions
-        ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
-        : 'memorySeeds' in effectiveOptions
-          ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
-          : 'terms' in effectiveOptions
-            ? selectRecallExactMatches(sql, effectiveOptions, options.readyOnly ? exactWindows : undefined).pipe(
-                Effect.flatMap(filterUriMatches),
-              )
-            : Effect.gen(function* () {
-                const metadata = yield* loadRecallMetadata(sql);
-                const generation = metadata.get('content_generation') ?? '';
-                const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
-                const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
-                const selectData = (selection: LoadRecallIndexOptions) =>
-                  selectRecallIndexData(
-                    sql,
-                    corpusStatistics,
-                    generation,
-                    selection,
-                    loadIdentityConflicts,
-                    metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
-                  );
-                return 'selections' in effectiveOptions
-                  ? yield* Effect.forEach(
-                      effectiveOptions.selections,
-                      selection =>
-                        selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
-                          Effect.flatMap(filterData),
-                        ),
-                      {concurrency: 1},
-                    )
-                  : yield* selectData(effectiveOptions).pipe(Effect.flatMap(filterData));
-              });
-      if (options.readyOnly) {
-        const validated = yield* validateRecallReadyResult(
-          sql,
-          config,
-          options,
-          result,
-          decodeCandidateRow,
-          exactWindows,
-        );
-        result = validated.result;
-        if (validated.reconcileNeeded || selectorCanonicalMismatch || metadataStale) {
-          const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded || selectorCanonicalMismatch);
-          readState = {freshness: 'stale', maintenance};
-        } else if (validated.unverified) readState = {freshness: 'stale', maintenance: 'unavailable'};
-        if (readState) options.onReadState?.(readState);
-      }
-      const withState = (data: RecallIndexData) => (readState ? {...data, readState} : data);
-      const finalResult =
-        'selections' in options
-          ? EffectArray.map(recallIndexDataBatchResult(result), withState)
-          : 'terms' in options || 'anchors' in options || 'memorySeeds' in options
-            ? result
-            : withState(recallIndexDataResult(result));
-      return finalResult;
-    });
-  return yield* (options.readyOnly
-    ? useRecallDatabaseReadOnly(databasePath, query)
-    : useRecallDatabase(databasePath, query, !prepareForActivation)).pipe(
+    if (options.readyOnly) {
+      const validated = yield* validateRecallReadyResult(
+        sql,
+        config,
+        options,
+        result,
+        decodeCandidateRow,
+        exactWindows,
+      );
+      result = validated.result;
+      if (validated.reconcileNeeded || selectorCanonicalMismatch || metadataStale) {
+        const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded || selectorCanonicalMismatch);
+        readState = {freshness: 'stale', maintenance};
+      } else if (validated.unverified) readState = {freshness: 'stale', maintenance: 'unavailable'};
+      if (readState) options.onReadState?.(readState);
+    }
+    const withState = (data: RecallIndexData) => (readState ? {...data, readState} : data);
+    const finalResult =
+      'selections' in options
+        ? EffectArray.map(recallIndexDataBatchResult(result), withState)
+        : 'terms' in options || 'anchors' in options || 'memorySeeds' in options
+          ? result
+          : withState(recallIndexDataResult(result));
+    return finalResult;
+  });
+  const runQuery = (
+    options.readyOnly
+      ? useRecallDatabaseReadOnly(databasePath, query)
+      : useRecallDatabase(databasePath, query, activation === undefined)
+  ).pipe(
     Effect.onError(cause =>
       options.readyOnly && selectorCanonicalMismatch && !Cause.hasInterrupts(cause)
         ? readyMaintenance.request(true).pipe(Effect.asVoid)
@@ -547,12 +554,33 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
       Schema.is(RecallReadyReadIncomplete)(error) ? retainReadyRecallMaintenance(error, metadataStale) : error,
     ),
   );
+  const result = yield* runQuery;
+  if (!activation) return result;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* withVerifiedRecallIndexActivation(
+    fs,
+    path,
+    config,
+    options.includeInactive,
+    {
+      lockPath: recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+      databasePath,
+      activeDatabasePath: activation.expectedActiveDatabasePath,
+      staleMarkerBasePath,
+      pointerPath: recallIndexPointerPath(path, config.agentContextHome, options.includeInactive),
+    },
+    activation.publication,
+    writeActiveRecallDatabasePointer(
+      fs,
+      path,
+      config.agentContextHome,
+      options.includeInactive,
+      activation.relativeDatabasePath,
+    ),
+  );
+  return result;
 });
-
-interface RecallIndexActivation {
-  readonly expectedActiveDatabasePath: string;
-  readonly relativeDatabasePath: string;
-}
 
 const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
   fs: FileSystem.FileSystem,
@@ -1831,18 +1859,12 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
           yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
           yield* sql.unsafe('PRAGMA journal_mode = DELETE');
           yield* removeRecallDatabaseAuxiliaryFiles(fs, databasePath);
-          yield* writeActiveRecallDatabasePointer(
-            fs,
-            path,
-            config.agentContextHome,
-            options.includeInactive,
-            activation.relativeDatabasePath,
-          );
         }
         if (base.staleMarker && base.metadata.get('stale_generation') !== base.staleMarker.generation)
           yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, base.staleMarker).pipe(Effect.ignore);
         yield* fs.chmod(databasePath, 0o600);
         yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
+        if (activation) activation.publication = {seal: (yield* capture()).seal, sourceInputs: prepared.sourceInputs};
         return count;
       }),
     );

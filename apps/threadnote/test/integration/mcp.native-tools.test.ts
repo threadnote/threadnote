@@ -653,16 +653,30 @@ describe('Threadnote MCP toolsets', () => {
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
-        const priorCore = EffectArray.filter(
+        const legacyCore = EffectArray.filter(
           tools.tools,
-          tool => tool.name !== 'memory_write_status' && tool.name !== 'workflow_task_view',
+          tool =>
+            tool.name !== 'memory_write_status' &&
+            tool.name !== 'workflow_task_view' &&
+            tool.name !== 'semantic_capabilities' &&
+            tool.name !== 'semantic_query',
         );
-        const withoutWorkflowTaskView = EffectArray.filter(tools.tools, tool => tool.name !== 'workflow_task_view');
-        // Preserve the existing core and total catalog budgets; bound each required addition separately.
-        expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
+        const mainCore = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
+        );
+        const mainCoreWithoutWorkflowTaskView = EffectArray.filter(
+          tools.tools,
+          tool =>
+            tool.name !== 'workflow_task_view' &&
+            tool.name !== 'semantic_capabilities' &&
+            tool.name !== 'semantic_query',
+        );
+        // Keep the legacy base, main's expanded core, and each additive descriptor budget distinct.
+        expect(Buffer.byteLength(JSON.stringify(legacyCore))).toBeLessThanOrEqual(36_000);
         expect(status).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
+        expect(Buffer.byteLength(JSON.stringify(mainCoreWithoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
         const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         const discoveryTool = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_capabilities'),
@@ -670,15 +684,11 @@ describe('Threadnote MCP toolsets', () => {
         const queryTool = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_query'),
         )!;
-        const existingCoreTools = EffectArray.filter(
-          tools.tools,
-          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
-        );
-        // Preserve the original catalog budget; bound each semantic descriptor separately.
-        expect(Buffer.byteLength(JSON.stringify(existingCoreTools))).toBeLessThanOrEqual(36000);
+        // Main's expanded core includes memory_write_status and workflow_task_view.
+        expect(Buffer.byteLength(JSON.stringify(mainCore))).toBeLessThanOrEqual(37_200);
         expect(Buffer.byteLength(JSON.stringify(discoveryTool))).toBeLessThanOrEqual(512);
         expect(Buffer.byteLength(JSON.stringify(queryTool))).toBeLessThanOrEqual(1024);
-        expect(serializedToolsBytes).toBeLessThanOrEqual(37538); // Existing array + two descriptors + two commas.
+        expect(serializedToolsBytes).toBeLessThanOrEqual(38_738); // Main core + two bounded descriptors + two commas.
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

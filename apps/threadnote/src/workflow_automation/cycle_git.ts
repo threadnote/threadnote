@@ -317,11 +317,7 @@ export const pinNativeCycleCommit = Effect.fn('workflowAutomation.cycle.pinCommi
   snapshotId: string,
   commit: string,
   purpose:
-    | 'rebase-before'
-    | 'rebase-after'
-    | 'requalification-before'
-    | 'requalification-after'
-    | 'requalification-base',
+    'rebase-before' | 'rebase-after' | 'requalification-before' | 'requalification-after' | 'requalification-base',
 ) {
   if (
     !/^[a-f0-9]{64}$/u.test(bindingId) ||

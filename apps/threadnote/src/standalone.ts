@@ -621,6 +621,7 @@ async function semanticCoordinatorWorkerProgram(arguments_: readonly string[]) {
   const ports = command.CommandExecutor.layer.pipe(
     Layer.provideMerge(system.SystemInfo.layer),
     Layer.provideMerge(BunServices.layer),
+    Layer.provideMerge(cryptoLayer),
   );
   return coordinator.runSemanticCoordinatorWorker(arguments_).pipe(
     Effect.provide(ports),
