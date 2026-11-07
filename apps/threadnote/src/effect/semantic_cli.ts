@@ -20,7 +20,11 @@ const candidates: readonly {
   readonly candidateVersion: string;
   readonly languages: readonly string[];
 }[] = [
-  {id: 'typescript-language-server', candidateVersion: '6.0.2', languages: ['typescript', 'javascript']},
+  {
+    id: 'typescript-language-server',
+    candidateVersion: '6.0.2',
+    languages: ['typescript', 'javascript', 'typescriptreact', 'javascriptreact'],
+  },
   {id: 'basedpyright', candidateVersion: '1.40.2', languages: ['python']},
   {id: 'gopls', candidateVersion: 'v0.24.0', languages: ['go']},
   {id: 'rust-analyzer', candidateVersion: '2026-10-26', languages: ['rust']},

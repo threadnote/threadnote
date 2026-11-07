@@ -630,9 +630,11 @@ describe('semantic capability discovery', () => {
       'go',
       'java',
       'javascript',
+      'javascriptreact',
       'python',
       'rust',
       'typescript',
+      'typescriptreact',
     ]);
     expect(result.readiness).toEqual({
       installation: 'not-assessed',
@@ -669,10 +671,22 @@ describe('semantic capability discovery', () => {
     expect(
       EffectRecord.fromEntries(
         EffectArray.flatMap(result.providers, provider =>
-          EffectArray.map(provider.languages, language => [language, provider.id] as const),
+          EffectArray.map(
+            EffectArray.filter(provider.languages, language => EffectRecord.has(ledger.selectedProviders, language)),
+            language => [language, provider.id] as const,
+          ),
         ),
       ),
     ).toEqual(ledger.selectedProviders);
+    for (const language of ['typescriptreact', 'javascriptreact']) {
+      const provider = Option.getOrUndefined(
+        EffectArray.findFirst(result.providers, candidate => candidate.languages.includes(language)),
+      );
+      expect(provider?.id).toBe('typescript-language-server');
+      expect(provider?.candidateVersion).toBe('6.0.2');
+      expect(provider?.productionQualified).toBe(false);
+      expect(provider?.qualification).toBe('pending');
+    }
     for (const [language, id] of EffectRecord.toEntries(ledger.selectedProviders)) {
       const provider = Option.getOrUndefined(
         EffectArray.findFirst(result.providers, candidate => candidate.languages.includes(language)),
@@ -710,22 +724,34 @@ describe('semantic capability discovery', () => {
   it('keeps filtered results deterministic, independent and confined to the requested language', () => {
     const full = semanticCapabilities();
     fc.assert(
-      fc.property(fc.constantFrom('typescript', 'javascript', 'python', 'go', 'rust', 'java'), language => {
-        const result = semanticCapabilities({language});
-        expect(result.status).toBe('ok');
-        expect(result.providers).toHaveLength(1);
-        expect(result.providers[0].languages).toEqual([language]);
-        expect(result.providers[0].id).toBe(
-          Option.getOrUndefined(
-            EffectArray.findFirst(full.providers, provider => provider.languages.includes(language)),
-          )?.id,
-        );
-        const original = structuredClone(result);
-        result.providers[0].languages.push('foreign');
-        result.providers[0].candidateVersion = 'forged';
-        expect(semanticCapabilities({language})).toEqual(original);
-        expect(semanticCapabilities()).toEqual(full);
-      }),
+      fc.property(
+        fc.constantFrom(
+          'typescript',
+          'javascript',
+          'typescriptreact',
+          'javascriptreact',
+          'python',
+          'go',
+          'rust',
+          'java',
+        ),
+        language => {
+          const result = semanticCapabilities({language});
+          expect(result.status).toBe('ok');
+          expect(result.providers).toHaveLength(1);
+          expect(result.providers[0].languages).toEqual([language]);
+          expect(result.providers[0].id).toBe(
+            Option.getOrUndefined(
+              EffectArray.findFirst(full.providers, provider => provider.languages.includes(language)),
+            )?.id,
+          );
+          const original = structuredClone(result);
+          result.providers[0].languages.push('foreign');
+          result.providers[0].candidateVersion = 'forged';
+          expect(semanticCapabilities({language})).toEqual(original);
+          expect(semanticCapabilities()).toEqual(full);
+        },
+      ),
       {numRuns: 32},
     );
   });
