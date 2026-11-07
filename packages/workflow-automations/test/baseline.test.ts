@@ -6,7 +6,7 @@ import {dirname, join} from '@threadnote/testing/node-path';
 import {PassThrough} from '@threadnote/testing/node-stream';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {type TestContext, afterEach, describe, expect, it} from 'vitest';
-import {FixtureProcesses, runFixtureCommand} from '../../../scripts/fixture-owned-process.js';
+import {FixtureProcesses, runFixtureCommand, type FixtureCommandStage} from '../../../scripts/fixture-owned-process.js';
 import fc from 'fast-check';
 import {workflowScenarios} from '../src/scenarios.js';
 import {captureBaseline} from './helpers/capture-baseline.js';
@@ -89,6 +89,29 @@ const gitFixtureFailure = (args: string[], result: GitFixtureProcessResult) => {
     '; ',
   );
 };
+
+async function runGitFixtureCommand(
+  processes: FixtureProcesses,
+  root: string,
+  stage: FixtureCommandStage,
+  args: readonly string[],
+  deadline: number,
+) {
+  try {
+    return await runFixtureCommand(processes, 'git', args, {
+      stage,
+      cwd: root,
+      env: process.env,
+      deadline,
+      maxOutputBytes: 4_096,
+    });
+  } catch (cause) {
+    throw new Error(
+      `bounded git fixture command failed (${stage}); argv=${boundedFixtureText(JSON.stringify(['git', ...args]))}`,
+      {cause},
+    );
+  }
+}
 
 type GitFixture = {
   readonly root: string;
@@ -237,6 +260,26 @@ async function makeEncodedPathCliCheckout() {
 }
 
 describe('workflow baseline capture', () => {
+  it('preserves bounded Git diagnostics and the original owned-close failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'workflow-baseline-rejection-'));
+    const processes = new FixtureProcesses();
+    const deadline = performance.now() + 10_000;
+    const args = ['--definitely-invalid-baseline-fixture-option'];
+    const failure: unknown = await runGitFixtureCommand(processes, root, 'git-init', args, deadline).catch(
+      cause => cause,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error('Expected Git fixture failure.');
+    expect(failure.message).toContain('bounded git fixture command failed (git-init)');
+    expect(failure.message).toContain(`argv=${JSON.stringify(['git', ...args])}`);
+    expect(failure.cause).toBeInstanceOf(Error);
+    if (!(failure.cause instanceof Error)) throw new Error('Expected original owned-process error.');
+    expect(failure.cause.message).toMatch(/"stage":"git-init","observed":"owned-close","reason":"nonzero-exit"/);
+    const observation = await processes.closeAndObserve(deadline);
+    expect(observation).toBe('exited');
+    await rm(root, {recursive: true, force: true});
+  });
+
   it('preserves a Git fixture when an owned process close is unknown', async () => {
     const root = await mkdtemp(join(tmpdir(), 'workflow-baseline-unknown-'));
     await writeFile(join(root, 'marker.txt'), 'preserved');
