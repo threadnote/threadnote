@@ -85,6 +85,12 @@ Threadnote application and runtime behavior is predominantly Effect code. Tests 
   properties, or both according to the risk; do not require a paired example and property. Refactor or delete redundant
   tests when appropriate, and explain the rationale in the change.
 
+## Keep validation tooling lightweight
+
+Treat disposable benchmarks, dogfood experiments, and one-off validation harnesses according to their limited lifetime and impact. Reuse existing helpers and owner mechanisms, add one basic setup smoke, and run the first real validation case as soon as its inputs are ready. Fix concrete execution, accounting, safety, or reproducibility problems revealed by that case. Preserve basic isolation, time and output bounds, owned-process cleanup, and a truthful record of results, failures, and costs.
+
+Stop building harness machinery when it can run the agreed validation and retain reviewable evidence. Do not apply a production-style multilaned review process, extensive synthetic unit matrices, repeated proposal/freeze/versioning cycles, or speculative hardening to disposable tooling. A failed case should lead to a bounded fix or a clear recorded failure; it should not automatically trigger another harness redesign. Unrelated documentation or tooling edits do not invalidate a frozen feature build or restart its validation. Shipped or reusable high-impact runtime and CI tooling still needs proportionate production checks, with coverage aimed at real operational risks and supported behavior.
+
 ## Let pull-request CI run the full suite
 
 Do not run the complete test suite locally. Run the narrow tests and checks appropriate to the change, then open the
