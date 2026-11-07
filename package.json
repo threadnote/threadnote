@@ -131,7 +131,7 @@
   },
   "devDependencies": {
     "@effect/ai-openai-compat": "4.1.2",
-    "@effect/tsgo": "0.63.0",
+    "@effect/tsgo": "0.67.0",
     "@effect/vitest": "4.1.2",
     "@expo-google-fonts/spline-sans": "0.4.2",
     "@fontsource-variable/jetbrains-mono": "5.3.0",
