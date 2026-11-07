@@ -1,3 +1,9 @@
+import {semanticProposalLimits} from '@threadnote/semantic/proposals';
+import {semanticSessionLimits} from '../semantic/coordinator.js';
+import {semanticAgentChangeLimits} from '../semantic/agent_change_protocol.js';
+import {semanticProposalStoreLimits} from '../semantic/proposal_store.js';
+import {typeScriptEditClosureLimits} from '../semantic/providers/typescript.js';
+import {runSemanticAgentChange} from '../semantic/agent_changes.js';
 import type {CliRuntimeRunner} from './cli_runtime_contract.js';
 import {runSemanticAgentQuery, runSemanticAgentView} from '../semantic/agent_queries.js';
 import {
@@ -66,7 +72,33 @@ export function semanticCapabilities(input: unknown = {}) {
       views: ['disk', 'buffer'] as const,
       bufferLimits: semanticAgentBufferLimits,
       providerCapabilities: 'assessed-per-project' as const,
-      pending: ['changes'],
+      changeSurface: {
+        version: 1,
+        operations: ['rename'],
+        actions: ['prepare', 'status', 'preflight'],
+        readOnly: true,
+        writerAuthorityRequired: true,
+        codeActions: 'unqualified',
+        resources: 'unsupported',
+        providers: ['typescript-language-server'],
+        qualification: 'experimental-source-closure',
+        limits: {
+          request: semanticAgentChangeLimits,
+          store: semanticProposalStoreLimits,
+          proposal: semanticProposalLimits,
+          closure: typeScriptEditClosureLimits,
+          session: semanticSessionLimits,
+          effectiveTargetCount: typeScriptEditClosureLimits.maxFiles,
+        },
+        continuation: {
+          handle: 'private-read-capability-bound-to-host-profile-worktree-runtime',
+          offset: 'pass-page.next-to-status; null-means-complete',
+          budget: 'maxBytes-bounds-whole-response; indivisible-next-chunk-may-refuse',
+          lifetime: 'absolute-ttl; retrieval-does-not-renew; restart-is-stale',
+          failedPublication: 'initial-page-or-view-fence-failure-rolls-back-retention',
+        },
+      },
+      pending: ['code-actions', 'resource-changes', 'apply'],
     },
     providers,
     reason: deferred
@@ -163,10 +195,27 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
       }),
     ),
   );
+  const change = Command.make('change').pipe(
+    Command.withSubcommands(
+      EffectArray.map(['prepare', 'status', 'preflight'], action =>
+        Command.make(action, {json: boolean('json', 'Print versioned proposal JSON')}, () =>
+          withRuntime(config =>
+            Effect.gen(function* () {
+              const raw = yield* readSemanticAgentQueryInput;
+              const input = typeof raw === 'object' && raw !== null ? {...raw, action} : raw;
+              const result = yield* runSemanticAgentChange(config, input);
+              return yield* Console.log(JSON.stringify(result));
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
   return Command.make('semantic').pipe(
     Command.withSubcommands([
       capabilities,
       query,
+      change,
       view.pipe(
         Command.withDescription(
           'Manage volatile owned buffers: open, update or close using JSON on stdin; no disk writes',
