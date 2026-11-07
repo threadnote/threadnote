@@ -83,7 +83,7 @@
     "@threadnote/workspace": "workspace:*",
     "dompurify": "3.4.17",
     "effect": "4.1.2",
-    "lucide-react": "^1.63.0",
+    "lucide-react": "^1.68.0",
     "mermaid": "12.2.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

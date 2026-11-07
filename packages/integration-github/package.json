@@ -25,7 +25,7 @@
     "@threadnote/store": "workspace:*",
     "@threadnote/workspace": "workspace:*",
     "effect": "4.1.2",
-    "lucide-react": "^1.63.0",
+    "lucide-react": "^1.68.0",
     "react": "^19.3.1"
   },
   "devDependencies": {
