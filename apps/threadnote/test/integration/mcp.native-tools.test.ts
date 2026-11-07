@@ -185,6 +185,9 @@ const CORE_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_change_prepare',
+  'semantic_change_status',
+  'semantic_change_preflight',
   'semantic_view',
   'semantic_query',
   'context_brief',
@@ -835,26 +838,42 @@ describe('Threadnote MCP toolsets', () => {
           expect(tool?.annotations).toMatchObject({readOnlyHint: false, destructiveHint: false});
           expect(Buffer.byteLength(JSON.stringify(tool)), name).toBeLessThanOrEqual(maximumBytes);
         }
+        const changeTools = EffectArray.filter(
+          tools.tools,
+          tool =>
+            tool.name === 'semantic_change_prepare' ||
+            tool.name === 'semantic_change_status' ||
+            tool.name === 'semantic_change_preflight',
+        );
+        expect(changeTools).toHaveLength(3);
+        for (const tool of changeTools) {
+          expect(tool.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
+          // Measured prepare/status/preflight are 538/535/541 bytes. Bound this additive surface separately.
+          expect(Buffer.byteLength(JSON.stringify(tool)), tool.name).toBeLessThanOrEqual(576);
+        }
         const priorCore = EffectArray.filter(
           tools.tools,
           tool =>
             tool.name !== 'memory_write_status' &&
             tool.name !== 'workflow_task_view' &&
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name),
+            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         const withoutWorkflowTaskTools = EffectArray.filter(
           tools.tools,
           tool =>
             tool.name !== 'workflow_task_view' &&
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name),
+            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         const withoutMutatingWorkflowTaskTools = EffectArray.filter(
           tools.tools,
           tool =>
             !isWorkflowTaskMutatingTool(tool.name) &&
-            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name),
+            !EffectArray.contains(['semantic_capabilities', 'semantic_query', 'semantic_view'], tool.name) &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         // Preserve the P1 budgets for the catalog without the later workflow-task additions.
         expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
@@ -866,6 +885,9 @@ describe('Threadnote MCP toolsets', () => {
           ['semantic_capabilities', 512],
           ['semantic_query', 1024],
           ['semantic_view', 768],
+          ['semantic_change_prepare', 576],
+          ['semantic_change_status', 576],
+          ['semantic_change_preflight', 576],
         ] as const;
         const semanticNames = EffectArray.map(semanticDescriptorBudgets, ([name]) => name);
         const semanticDescriptors = EffectArray.filter(tools.tools, tool =>
@@ -881,10 +903,10 @@ describe('Threadnote MCP toolsets', () => {
           tools.tools,
           tool => !EffectArray.some(semanticNames, name => name === tool.name),
         );
-        // Preserve main's catalog contract independently of these three bounded additions.
+        // Preserve main's catalog contract independently of these separately bounded additions.
         expect(nonsemanticCatalog.length).toBeGreaterThan(0);
         expect(Buffer.byteLength(JSON.stringify(nonsemanticCatalog))).toBeLessThanOrEqual(65_000);
-        // Adding three descriptors to a nonempty compact JSON array adds three commas.
+        // Each added descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
           65_000 +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +

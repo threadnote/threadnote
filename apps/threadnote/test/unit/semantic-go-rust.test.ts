@@ -202,7 +202,7 @@ describe('native semantic setup causes', () => {
       });
       expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
     }).pipe(
-      Effect.provide(io),
+      Effect.provide(Layer.merge(io, TestSystemInfoLayer)),
       Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
       TestClock.withLive,
     ),

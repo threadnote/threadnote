@@ -1,4 +1,5 @@
-import {Effect, Schema} from 'effect';
+import {runSemanticAgentChange} from '../../semantic/agent_changes.js';
+import {Array as EffectArray, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runSemanticAgentQuery, runSemanticAgentView} from '../../semantic/agent_queries.js';
 import {formatSemanticAgentQuery} from '../../semantic/agent_query_protocol.js';
@@ -26,6 +27,30 @@ export function registerSemanticQueryTool(
   config: RuntimeConfig,
   knowledgeAuthorized = false,
 ): void {
+  for (const action of ['prepare', 'status', 'preflight'] as const)
+    server.registerTool(
+      'semantic_change_' + action,
+      {
+        annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: action !== 'prepare'},
+        description:
+          'Version 1 read-only semantic proposal ' +
+          action +
+          '. request uses callerCwd and explicit source/view for rename preparation, or private proposal handle for status/preflight. Requires protected host profile; no source writes or writer authority. Code actions remain unqualified.',
+        inputSchema: {request: Schema.Json},
+      },
+      ({request}) =>
+        runSemanticAgentChange(
+          config,
+          typeof request === 'object' && request !== null && !EffectArray.isArray(request)
+            ? {...request, action}
+            : request,
+        ).pipe(
+          Effect.map(result => ({
+            content: [{type: 'text' as const, text: JSON.stringify(result)}],
+            structuredContent: result,
+          })),
+        ),
+    );
   server.registerTool(
     'semantic_view',
     {
