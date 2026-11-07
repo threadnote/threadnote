@@ -149,7 +149,16 @@ describe('first-party development bundle', () => {
       expect(
         EffectArray.some(EffectRecord.keys(manifest.hashes), file => Effect2.pipe(file, EffectString.endsWith('.py'))),
       ).toBe(false);
-      expect(manifest.hashes['dev-plan/references/native-authoring.md']).toMatch(/^[a-f0-9]{64}$/u);
+      for (const retiredProtocolGuide of [
+        'dev-plan/references/native-authoring.md',
+        'dev-cycle/references/native-bootstrap.md',
+        'dev-cycle/references/native.md',
+      ]) {
+        expect(manifest.hashes).not.toHaveProperty(retiredProtocolGuide);
+      }
+      for (const taskSkill of ['dev-spec', 'dev-plan', 'dev-cycle']) {
+        expect(manifest.hashes[`${taskSkill}/SKILL.md`]).toMatch(/^[a-f0-9]{64}$/u);
+      }
       expect(manifest.hashes['watch-pr/references/background-worker.md']).toMatch(/^[a-f0-9]{64}$/u);
     }).pipe(provideTestLayer(BunServices.layer)),
   );
