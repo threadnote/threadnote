@@ -1,4 +1,4 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, String as EffectString} from 'effect';
 import {Option, Tracer} from 'effect';
 import * as EffectRecord from 'effect/Record';
 
@@ -78,8 +78,23 @@ const labels = new Set([
   'closeout.stage.status-after',
   'closeout.stage.other',
 ]);
+const sampledLabels = new Set([
+  'recall.loadMemoryIdentities',
+  'recall.loadIndexDataInternal',
+  'recall.executeIndexQuery',
+]);
+const sampleLimit = 64;
 const bounded = (value: number) => Math.min(2_147_483_647, Math.max(0, Math.round(value)));
 type Entry = {sequence: number; stage: string; parent: string; startedMs: number};
+type Sample = {
+  readonly operation: string;
+  readonly ordinal: number;
+  readonly stage: string;
+  readonly parent: string;
+  readonly startedMs: number;
+  inclusiveMs?: number;
+  outcome?: 'Active' | 'Success' | 'Failure';
+};
 
 export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
   const totals: Record<string, {started: number; ended: number; failures: number; inclusiveMs: number}> =
@@ -87,9 +102,12 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
   const selected = new WeakMap<object, string>();
   const active = new Map<number, Entry>();
   const recent: (Entry & {inclusiveMs: number; outcome: 'Success' | 'Failure'})[] = [];
+  const sampleOrdinals: Record<string, number> = Object.create(null);
+  const samples: Sample[] = [];
   let sequence = 0;
   let activeCount = 0;
   let recentDropped = 0;
+  let sampleDropped = 0;
   let lastClock = 0;
   const clock = () => {
     try {
@@ -114,16 +132,32 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
         const total = (totals[options.name] ??= {started: 0, ended: 0, failures: 0, inclusiveMs: 0});
         total.started = bounded(total.started + 1);
         let parent = 'unobserved';
+        let stage = 'unobserved';
+        let foundParent = false;
         let ancestor = options.parent;
         for (let depth = 0; depth < 64 && Option.isSome(ancestor); depth++) {
           const known = selected.get(ancestor.value);
           if (known) {
-            parent = known;
-            break;
+            if (!foundParent) {
+              parent = known;
+              foundParent = true;
+            }
+            if (EffectString.startsWith('closeout.stage.')(known)) {
+              stage = known;
+              break;
+            }
           }
           ancestor = ancestor.value._tag === 'Span' ? ancestor.value.parent : Option.none();
         }
         const entry = {sequence: (sequence = bounded(sequence + 1)), stage: options.name, parent, startedMs: elapsed()};
+        let sample: Sample | undefined;
+        if (sampledLabels.has(options.name)) {
+          const ordinal = (sampleOrdinals[options.name] = bounded((sampleOrdinals[options.name] ?? 0) + 1));
+          if (samples.length < sampleLimit) {
+            sample = {operation: options.name, ordinal, stage, parent, startedMs: entry.startedMs, outcome: 'Active'};
+            samples.push(sample);
+          } else sampleDropped = bounded(sampleDropped + 1);
+        }
         activeCount = bounded(activeCount + 1);
         if (active.size < 8) active.set(entry.sequence, entry);
         const end = span.end.bind(span);
@@ -146,6 +180,10 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
               recent.shift();
               recentDropped = bounded(recentDropped + 1);
             }
+            if (sample) {
+              sample.inclusiveMs = inclusiveMs;
+              sample.outcome = exit._tag;
+            }
           } catch {
             /* Observation must not change native span completion. */
           }
@@ -161,7 +199,7 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
     snapshot: () => {
       const at = elapsed();
       return {
-        version: 1,
+        version: 2,
         timing: 'inclusive-span-ms' as const,
         totals: EffectRecord.fromEntries(
           EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
@@ -171,6 +209,13 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
         active: EffectArray.map([...active.values()], entry => ({...entry, elapsedMs: bounded(at - entry.startedMs)})),
         recent: EffectArray.map(recent, entry => ({...entry})),
         recentDropped,
+        samples: EffectArray.map(samples, sample => ({
+          ...sample,
+          inclusiveMs: sample.inclusiveMs ?? bounded(at - sample.startedMs),
+          outcome: sample.outcome ?? 'Active',
+        })),
+        sampleLimit,
+        sampleDropped,
       };
     },
   };

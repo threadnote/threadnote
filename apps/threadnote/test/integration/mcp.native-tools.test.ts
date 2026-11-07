@@ -1,4 +1,4 @@
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Record as EffectRecord} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {existsSync} from '@threadnote/testing/node-fs';
@@ -222,7 +222,20 @@ const CORE_TOOL_NAMES = [
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
+  'workflow_task_author',
+  'workflow_task_start',
+  'workflow_task_compact_start',
+  'workflow_task_compact_expand',
+  'workflow_task_compact_confirm',
   'workflow_task_view',
+  'workflow_task_work',
+  'workflow_task_control',
+  'workflow_task_snapshot',
+  'workflow_task_record_review',
+  'workflow_task_record_validation',
+  'workflow_task_deliver',
+  'workflow_task_watch_pr',
+  'workflow_task_finish',
   'context_health',
   'context_health_aggregate',
   'context_health_schedule',
@@ -281,6 +294,28 @@ const LIFECYCLE_TOOL_NAMES = [
   'procedure_publish_preview',
   'procedure_publish_apply',
 ];
+
+const WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES = {
+  workflow_task_author: 3_200,
+  workflow_task_start: 3_200,
+  workflow_task_compact_start: 2_500,
+  workflow_task_compact_expand: 800,
+  workflow_task_compact_confirm: 2_500,
+  workflow_task_work: 1_800,
+  workflow_task_control: 2_200,
+  workflow_task_snapshot: 2_500,
+  workflow_task_record_review: 2_300,
+  workflow_task_record_validation: 1_300,
+  workflow_task_deliver: 4_000,
+  workflow_task_watch_pr: 3_000,
+  workflow_task_finish: 3_200,
+} as const;
+
+const WORKFLOW_TASK_MUTATING_TOOL_NAMES = EffectRecord.keys(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES);
+
+function isWorkflowTaskMutatingTool(name: string): boolean {
+  return EffectArray.some(WORKFLOW_TASK_MUTATING_TOOL_NAMES, expectedName => expectedName === name);
+}
 
 interface McpFixture {
   readonly home: string;
@@ -651,18 +686,151 @@ describe('Threadnote MCP toolsets', () => {
         );
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
-        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(850);
+        const taskViewSchema = decodeJsonObject(workflowTaskView?.inputSchema);
+        expect(taskViewSchema.required).toEqual(expect.arrayContaining(['runId', 'callerCwd']));
+        expect(decodeJsonObject(decodeJsonObject(workflowTaskView?.inputSchema).properties).detail).toMatchObject({
+          enum: ['summary', 'packet'],
+        });
+        const workflowTaskStart = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_start'),
+        );
+        expect(workflowTaskStart).toBeDefined();
+        expect(decodeJsonObject(workflowTaskStart?.inputSchema).required).toEqual(
+          expect.arrayContaining(['installationTarget']),
+        );
+        const compactConfirm = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_compact_confirm'),
+        );
+        expect(decodeJsonObject(decodeJsonObject(compactConfirm?.inputSchema).properties).userDecision).toMatchObject({
+          enum: ['approve', 'reject', 'defer'],
+        });
+        const workflowTaskControl = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_control'),
+        );
+        expect(workflowTaskControl?.description).toContain('resume a blocked phase after dependencies are accepted');
+        const controlProperties = decodeJsonObject(decodeJsonObject(workflowTaskControl?.inputSchema).properties);
+        const controlVariants = decodeJsonObject(controlProperties.control).anyOf;
+        expect(controlVariants instanceof Array).toBe(true);
+        if (!(controlVariants instanceof Array))
+          throw new Error('The control operation must expose its typed variants.');
+        const variantsByCommand = new Map(
+          EffectArray.map(controlVariants, value => {
+            const variant = decodeJsonObject(value);
+            const properties = decodeJsonObject(variant.properties);
+            const command = decodeJsonObject(properties.command).enum;
+            if (!(command instanceof Array) || typeof command[0] !== 'string')
+              throw new Error('Each workflow control variant must expose one command literal.');
+            return [command[0], {properties, required: variant.required}];
+          }),
+        );
+        expect([...variantsByCommand.keys()]).toEqual(['begin', 'resume', 'reconcile', 'extend-review-budget']);
+        expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
+        expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('reconcile')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('reconcile')?.properties.bindings).toBeDefined();
+        expect(variantsByCommand.get('extend-review-budget')?.required).toEqual([
+          'command',
+          'additionalReviews',
+          'reason',
+          'userAuthority',
+        ]);
+
+        const workflowTaskAuthor = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_author'),
+        );
+        expect(workflowTaskAuthor?.description).toContain('local, commit, or PR plan');
+        const authorProperties = decodeJsonObject(decodeJsonObject(workflowTaskAuthor?.inputSchema).properties);
+        const authorDelivery = decodeJsonObject(authorProperties.delivery);
+        expect(authorDelivery.enum).toEqual(['local', 'commit', 'pr']);
+
+        const workflowTaskSnapshot = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_snapshot'),
+        );
+        expect(workflowTaskSnapshot?.description).toContain('supersede only the latest unreviewed snapshot');
+        const snapshotProperties = decodeJsonObject(decodeJsonObject(workflowTaskSnapshot?.inputSchema).properties);
+        const snapshotVariants = decodeJsonObject(snapshotProperties.snapshot).anyOf;
+        expect(snapshotVariants instanceof Array).toBe(true);
+        if (!(snapshotVariants instanceof Array)) throw new Error('Snapshot operations must be typed variants.');
+        const snapshotByCommand = new Map(
+          EffectArray.map(snapshotVariants, value => {
+            const variant = decodeJsonObject(value);
+            const command = decodeJsonObject(decodeJsonObject(variant.properties).command).enum;
+            if (!(command instanceof Array) || typeof command[0] !== 'string')
+              throw new Error('Each snapshot operation must expose one command literal.');
+            return [command[0], variant];
+          }),
+        );
+        expect([...snapshotByCommand.keys()]).toEqual(['record', 'supersede-unreviewed', 'requalify-base']);
+        expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
+        expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
+        expect(snapshotByCommand.get('requalify-base')?.required).toEqual([
+          'command',
+          'snapshotRef',
+          'reason',
+          'userAuthority',
+        ]);
+
+        const workflowTaskDeliver = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_deliver'),
+        );
+        expect(workflowTaskDeliver?.description).toContain('local or commit delivery');
+        const deliveryProperties = decodeJsonObject(decodeJsonObject(workflowTaskDeliver?.inputSchema).properties);
+        const deliveryVariants = decodeJsonObject(deliveryProperties.delivery).anyOf;
+        expect(deliveryVariants instanceof Array).toBe(true);
+        if (!(deliveryVariants instanceof Array)) throw new Error('Delivery operations must be typed variants.');
+        const deliveryByCommand = new Map(
+          EffectArray.map(deliveryVariants, value => {
+            const variant = decodeJsonObject(value);
+            const command = decodeJsonObject(decodeJsonObject(variant.properties).command).enum;
+            if (!(command instanceof Array) || typeof command[0] !== 'string')
+              throw new Error('Each delivery operation must expose one command literal.');
+            return [command[0], variant];
+          }),
+        );
+        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr']);
+        expect(deliveryByCommand.get('local')?.required).toEqual(['command', 'validationRef']);
+        expect(deliveryByCommand.get('commit')?.required).toEqual(['command', 'validationRef', 'commitEvidence']);
+        expect(deliveryByCommand.get('pr')?.required).toEqual([
+          'command',
+          'validationRef',
+          'commitEvidence',
+          'pr',
+          'publication',
+        ]);
+
+        for (const [name, maximumBytes] of EffectRecord.toEntries(WORKFLOW_TASK_MUTATING_TOOL_MAX_BYTES)) {
+          const tool = EffectOption.getOrUndefined(
+            EffectArray.findFirst(tools.tools, candidate => candidate.name === name),
+          );
+          expect(tool).toBeDefined();
+          expect(tool?.annotations).toMatchObject({readOnlyHint: false, destructiveHint: false});
+          expect(Buffer.byteLength(JSON.stringify(tool)), name).toBeLessThanOrEqual(maximumBytes);
+        }
         const priorCore = EffectArray.filter(
           tools.tools,
-          tool => tool.name !== 'memory_write_status' && tool.name !== 'workflow_task_view',
+          tool =>
+            tool.name !== 'memory_write_status' &&
+            tool.name !== 'workflow_task_view' &&
+            !isWorkflowTaskMutatingTool(tool.name),
         );
-        const withoutWorkflowTaskView = EffectArray.filter(tools.tools, tool => tool.name !== 'workflow_task_view');
-        // Preserve the existing core and total catalog budgets; bound each required addition separately.
+        const withoutWorkflowTaskTools = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'workflow_task_view' && !isWorkflowTaskMutatingTool(tool.name),
+        );
+        const withoutMutatingWorkflowTaskTools = EffectArray.filter(
+          tools.tools,
+          tool => !isWorkflowTaskMutatingTool(tool.name),
+        );
+        // Preserve the P1 budgets for the catalog without the later workflow-task additions.
         expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
         expect(status).toBeDefined();
         expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(37_200);
+        expect(Buffer.byteLength(JSON.stringify(withoutWorkflowTaskTools))).toBeLessThanOrEqual(36_500);
+        expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
+        // Semantic task bootstrap adds one tool beyond compact authoring; keep the additive catalog budget explicit.
+        const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
+        expect(totalCatalogBytes).toBeLessThanOrEqual(65_000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
@@ -5404,7 +5572,24 @@ describe('Threadnote MCP toolsets', () => {
           client.callTool({arguments: {uri}, name: 'read'}),
         ]);
         expect(aliasRead.content).toEqual(primaryRead.content);
-        expect(aliasRead.structuredContent).toEqual(primaryRead.structuredContent);
+        if (!aliasRead.structuredContent || !primaryRead.structuredContent)
+          throw new Error('A successful canonical read must include structured content.');
+        const {warnings: aliasWarnings, ...aliasStableProjection} = aliasRead.structuredContent;
+        const {warnings: primaryWarnings, ...primaryStableProjection} = primaryRead.structuredContent;
+        expect(aliasStableProjection).toEqual(primaryStableProjection);
+        for (const warnings of [primaryWarnings, aliasWarnings]) {
+          if (!EffectArray.isArray(warnings)) throw new Error('A canonical read must retain warning diagnostics.');
+          expect(
+            EffectArray.every(
+              warnings,
+              (warning: unknown) =>
+                typeof warning === 'string' &&
+                /^Auto-sync warning: Automatic synchronization (?:is queued in the background|enqueue was not confirmed); read uses ready local data\.$/u.test(
+                  warning,
+                ),
+            ),
+          ).toBe(true);
+        }
         const aliasText = EffectString.trim(textContents(aliasRead.content)[0]?.text ?? '');
         expect(aliasText).toContain('TN-MEMORY/1');
         expect(aliasText).toContain(

@@ -61,8 +61,10 @@ test('S12 Context Health exposes current evidence and maintenance controls witho
   await page.getByRole('button', {name: 'Compare evidence and preview change', exact: true}).click();
   const detail = page.getByRole('dialog', {name: 'Citation changed', exact: true});
   await expect(detail).toContainText('Keep the alphaGreeting greeting contract stable.');
+  const previewButton = detail.getByRole('button', {name: 'Preview repair', exact: true});
+  await expect(previewButton).toBeEnabled();
   const preview = page.waitForResponse(response => new URL(response.url()).pathname === '/api/context-health/preview');
-  await detail.getByRole('button', {name: 'Preview repair', exact: true}).click();
+  await previewButton.click();
   expect((await preview).ok()).toBe(true);
   await expect(detail).toContainText(/manual review|review.only|current source|proposed/iu);
   await detail.getByRole('button', {name: 'Close details', exact: true}).click();

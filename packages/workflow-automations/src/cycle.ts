@@ -99,7 +99,7 @@ export type NativeCycleValidation = typeof validationSchema.Type;
 const watchSchema = Schema.Struct({
   prUrl: text(2048),
   headSha: gitObject,
-  state: Schema.Literal('active'),
+  state: Schema.Literals(['active', 'terminal']),
   stateDir: text(2048),
   consumerKind: Schema.Literals(['worker', 'heartbeat', 'orchestrator']),
   consumerId: text(256),
@@ -144,6 +144,25 @@ const prSchema = Schema.Struct({
       : 'PR base binding is inconsistent.';
   }),
 );
+/** Actual caller-supplied publication authority retained with a new PR receipt. */
+const publicationText = (maximum: number) =>
+  text(maximum).check(
+    Schema.makeFilter(value =>
+      nativeCycleHasControl(value) ? 'Use bounded single-line publication evidence.' : undefined,
+    ),
+  );
+export const NativeCyclePublicationAuthoritySchema = Schema.Union([
+  Schema.Struct({exemption: Schema.Literals(['small-fix', 'maintenance']), reason: publicationText(512)}),
+  Schema.Struct({
+    state: Schema.Literal('published'),
+    team: publicationText(128),
+    uri: publicationText(4096),
+    revision: digest,
+    currentHead: gitObject,
+    remoteCommit: gitObject,
+    evidence: publicationText(4096),
+  }),
+]);
 export const NativeCycleDeliverySchema = Schema.Struct({
   phaseId: id,
   phaseHash: digest,
@@ -153,6 +172,7 @@ export const NativeCycleDeliverySchema = Schema.Struct({
   commitEvidence: Schema.optionalKey(text()),
   pr: Schema.optionalKey(prSchema),
   watch: Schema.optionalKey(watchSchema),
+  publication: Schema.optionalKey(NativeCyclePublicationAuthoritySchema),
 });
 export type NativeCycleDelivery = typeof NativeCycleDeliverySchema.Type;
 const deliverySchema = NativeCycleDeliverySchema;
@@ -163,7 +183,7 @@ function matchesPRBase(base: string, pr: typeof prSchema.Type): boolean {
     ? base !== pr.baseBranch && (base === `${proof.remote}/${pr.baseBranch}` || base === proof.ref)
     : base === pr.baseBranch;
 }
-const historySchema = Schema.Struct({
+export const NativeCyclePhaseProofSchema = Schema.Struct({
   phaseHash: digest,
   head: gitObject,
   tree: gitObject,
@@ -178,7 +198,7 @@ const phaseStateSchema = Schema.Struct({
   tree: Schema.optionalKey(gitObject),
   delivery: Schema.optionalKey(deliverySchema),
   reason: Schema.optionalKey(text()),
-  history: Schema.optionalKey(Schema.Array(historySchema).check(Schema.isMaxLength(64))),
+  history: Schema.optionalKey(Schema.Array(NativeCyclePhaseProofSchema).check(Schema.isMaxLength(64))),
 });
 const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
 const specAmendmentSchema = Schema.Struct({
@@ -198,6 +218,7 @@ export type NativeCycleState = typeof NativeCycleStateSchema.Type;
 function err(message: string): never {
   throw WorkflowAutomationError.make({code: 'invalid-cycle', message});
 }
+export {canonical as nativeCycleCanonicalJson};
 function canonical(v: unknown): string {
   if (v === null || typeof v === 'string' || typeof v === 'boolean') return JSON.stringify(v);
   if (typeof v === 'number' && Number.isFinite(v)) return JSON.stringify(v);
@@ -386,12 +407,24 @@ export function decodeNativeCycleState(value: unknown): NativeCycleState {
         (!r.delivery.watch ||
           r.delivery.watch.prUrl !== pr.url ||
           r.delivery.watch.headSha !== pr.headSha ||
+          r.delivery.watch.state !== 'active' ||
           !nativeCycleAbsolutePath(r.delivery.watch.stateDir) ||
           !Effect.pipe(r.delivery.commitEvidence, effectOptionalString =>
             effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
           ))
       )
         err('Open PR receipt lacks matching watch evidence.');
+      if (
+        pr.state === 'merged' &&
+        r.delivery.watch &&
+        (r.delivery.watch.prUrl !== pr.url ||
+          r.delivery.watch.headSha !== pr.headSha ||
+          r.delivery.watch.state !== 'terminal' ||
+          !nativeCycleAbsolutePath(r.delivery.watch.stateDir) ||
+          !Effect.pipe(r.delivery.watch.consumerId, EffectString.trim) ||
+          !Effect.pipe(r.delivery.watch.evidence, EffectString.trim))
+      )
+        err('Merged PR watch evidence is not a matching terminal readback.');
       if (pr.state === 'merged' && r.status !== 'merged') err('Merged receipt has an inconsistent phase status.');
       if (pr.state === 'open' && r.status !== 'published') err('Open PR has an inconsistent phase status.');
     }
@@ -640,14 +673,19 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
         !w ||
         w.prUrl !== pr.url ||
         w.headSha !== d.headSha ||
+        w.state !== 'active' ||
         !nativeCycleAbsolutePath(w.stateDir) ||
         !Effect.pipe(w.consumerId, EffectString.trim) ||
         !Effect.pipe(w.evidence, EffectString.trim)
       )
         err('Open PR requires a matching watch.');
-    } else status = 'merged';
+    } else {
+      if (d.watch && (d.watch.state !== 'terminal' || d.watch.prUrl !== pr.url || d.watch.headSha !== d.headSha))
+        err('Merged PR watch evidence is not a matching terminal readback.');
+      status = 'merged';
+    }
   }
-  return {...s, phases: {...s.phases, [idValue]: {...r, status, delivery: d}}};
+  return decodeNativeCycleState({...s, phases: {...s.phases, [idValue]: {...r, status, delivery: d}}});
 }
 function descendants(plans: readonly NativeCyclePlan[], seeds: readonly string[]) {
   const found = new Set(seeds);

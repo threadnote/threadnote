@@ -4,6 +4,7 @@ import {WorkflowAutomationError} from './contracts.js';
 import {decodeNativeCycleState, nextNativeCycle, nativeCycleHasControl, type NativeCycleState} from './cycle.js';
 import {
   decodeNativeAuthoringDocument,
+  isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeSpecIntentDigest,
   type NativeAuthoringDocument,
@@ -51,12 +52,7 @@ const path = text(4096).check(
 const texts = (minimum = 0, maximum = 128) => Schema.Array(text()).check(Schema.isBetweenLength(minimum, maximum));
 const mermaid = text().check(
   Schema.makeFilter(value =>
-    /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(
-      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-      Effect.pipe(value, EffectString.trimStart).split(/\r?\n/u, 1)[0] ?? '',
-    )
-      ? undefined
-      : 'Use a supported raw Mermaid declaration without fences.',
+    isNativeMermaidDiagram(value) ? undefined : 'Use a supported raw Mermaid declaration without fences.',
   ),
 );
 export const NativeCloseoutProposalSchema = Schema.Struct({
@@ -64,7 +60,7 @@ export const NativeCloseoutProposalSchema = Schema.Struct({
     summary: text(),
     components: texts(1),
     contracts: texts(),
-    diagram: mermaid,
+    diagram: Schema.optionalKey(mermaid),
     invariants: texts(),
     unknowns: texts(),
     deviations: texts(),
@@ -84,6 +80,30 @@ export const NativeCloseoutProposalSchema = Schema.Struct({
   ).check(Schema.isBetweenLength(1, 128)),
   scenarios: Schema.Array(Schema.Struct({id, evidence: text()})).check(Schema.isMaxLength(256)),
   behaviorVerification: Schema.optionalKey(text()),
+  watchWork: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        eventId: text(384),
+        status: Schema.Literals(['open', 'blocked']),
+        reason: text(1024),
+        evidence: text(2048),
+        event: Schema.Struct({
+          sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+          id: text(384),
+          source: Schema.Literals(['comments', 'reviews', 'threads', 'checks', 'statuses', 'watch']),
+          kind: text(64),
+          key: text(256),
+          version: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+          url: Schema.optionalKey(text(2048)),
+          head: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+          at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+          removed: Schema.Boolean,
+          ready: Schema.optionalKey(Schema.Literal(false)),
+        }),
+        at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      }),
+    ).check(Schema.isMaxLength(128)),
+  ),
   decisions: Schema.Array(Schema.Struct({id, implemented: text(), rationale: text()})).check(Schema.isMaxLength(64)),
 });
 export type NativeCloseoutProposal = typeof NativeCloseoutProposalSchema.Type;
@@ -237,8 +257,10 @@ export function prepareNativeCloseout(
         '\n\nUnknowns\n' +
         lines(proposal.architecture.unknowns) +
         '\n\nDeviations\n' +
-        lines(proposal.architecture.deviations),
-      diagram: proposal.architecture.diagram,
+        lines(proposal.architecture.deviations) +
+        '\n\nRetained unresolved PR watch work\n' +
+        json(proposal.watchWork ?? []),
+      ...(proposal.architecture.diagram === undefined ? {} : {diagram: proposal.architecture.diagram}),
       'data-flow': 'Source references\n' + lines(proposal.architecture.codeRefs),
     },
   });
@@ -306,7 +328,9 @@ export function prepareNativeCloseout(
         'Unknowns\n' +
         lines(proposal.architecture.unknowns) +
         '\n\nDeviations\n' +
-        lines(proposal.architecture.deviations),
+        lines(proposal.architecture.deviations) +
+        '\n\nRetained unresolved PR watch work\n' +
+        json(proposal.watchWork ?? []),
       'next-step':
         'Application must verify current source and ready roots, then publish the admitted documents and retire only owned working artifacts.',
     },
@@ -326,6 +350,7 @@ export function prepareNativeCloseout(
       decisions,
       scenarios,
       ...(proposal.behaviorVerification === undefined ? {} : {behaviorVerification: proposal.behaviorVerification}),
+      watchWork: proposal.watchWork ?? [],
       documents: {architecture, decisions: decisionDocuments, handoff, ...(behavior ? {behavior} : {})},
     }),
   );

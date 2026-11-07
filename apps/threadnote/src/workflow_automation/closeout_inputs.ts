@@ -183,7 +183,13 @@ export const loadNativeCloseoutInputs = Effect.fn('workflowAutomation.closeout.l
     )
       return yield* fail('Stored authoring root readiness or binding differs from the loaded document.');
     const validation = yield* Effect.try({
-      try: () => validateNativeAuthoring(document, {ready: true, confirmation: root.confirmation, review: root.review}),
+      try: () =>
+        validateNativeAuthoring(document, {
+          ready: true,
+          planIntentPolicyVersion: root.planIntentPolicyVersion ?? 1,
+          confirmation: root.confirmation,
+          review: root.review,
+        }),
       catch: nativeWorkflowError,
     });
     if (!validation.ready) return yield* fail('Stored authoring approval or readiness evidence is incomplete.');
