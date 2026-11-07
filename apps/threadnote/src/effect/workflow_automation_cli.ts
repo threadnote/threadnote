@@ -117,6 +117,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             ...(options.cursor === undefined ? {} : {cursor: options.cursor}),
             ...(options.phaseId === undefined ? {} : {phaseId: options.phaseId}),
             ...(options.detail === undefined ? {} : {detail: options.detail}),
+            ...(options.outputKey === undefined ? {} : {outputKey: options.outputKey}),
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),
             Effect.mapError(nativeWorkflowError),

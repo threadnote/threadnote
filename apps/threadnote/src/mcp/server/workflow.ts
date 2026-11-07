@@ -154,7 +154,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_view',
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: 'Read task; phaseId selects a listed active historical PR watch; detail=packet returns packet.',
+      description:
+        'Read task; phaseId selects a listed active historical PR watch; detail=packet returns packet. Select one verified closeout body with outputKey and detail=packet.',
       inputSchema: {
         runId: McpInput.requiredString('Run ID'),
         callerCwd: McpInput.requiredString('Absolute path'),
@@ -162,9 +163,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         cursor: McpInput.string('Cursor'),
         phaseId: McpInput.string('Listed ID'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
+        outputKey: McpInput.string('Listed verified closeout output key; requires detail=packet'),
       },
     },
-    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail}) {
+    Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail, outputKey}) {
       const result = yield* readNativeTaskView(config, {
         runId,
         callerCwd,
@@ -172,6 +174,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         ...(cursor === undefined ? {} : {cursor}),
         ...(phaseId === undefined ? {} : {phaseId}),
         ...(detail === undefined ? {} : {detail}),
+        ...(outputKey === undefined ? {} : {outputKey}),
       });
       const nextTool =
         result.next.action === 'deliver'

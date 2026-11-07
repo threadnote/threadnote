@@ -4721,6 +4721,14 @@ describe('native task actions', () => {
   effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
+      const readbackProposal = {
+        ...proposal,
+        architecture: {
+          ...proposal.architecture,
+          summary: EffectString.repeat(4199)('S') + 'é',
+          components: EffectArray.makeBy(3, index => EffectString.repeat(8192)(String(index))),
+        },
+      };
       yield* f.mutate('begin-phase', {phaseId: 'one'});
       const work = object(
         yield* runNativeTaskAction(f.config, {
@@ -4864,7 +4872,7 @@ describe('native task actions', () => {
       const finishThroughMcp = (input: Record<string, unknown>) =>
         mcp.invokeTool('workflow_task_finish', input).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
       let lostPrepareAcknowledgment: Record<string, unknown> | undefined;
-      const lostPrepare = yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}).pipe(
+      const lostPrepare = yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal: readbackProposal}).pipe(
         Effect.tap(value => Effect.sync(() => (lostPrepareAcknowledgment = object(object(value).structuredContent)))),
         Effect.andThen(
           Effect.fail(
@@ -4874,7 +4882,9 @@ describe('native task actions', () => {
         Effect.result,
       );
       expect(lostPrepare._tag).toBe('Failure');
-      const preparingEnvelope = object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}));
+      const preparingEnvelope = object(
+        yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal: readbackProposal}),
+      );
       const preparing = object(preparingEnvelope.structuredContent);
       expect(preparing).toMatchObject({status: 'pending', stage: 'prepare'});
       expect(preparing.job).not.toHaveProperty('jobId');
@@ -4886,7 +4896,7 @@ describe('native task actions', () => {
       const prepareRef = String(preparing.prepareRef);
       const prepareJobId = String(decodeNativeTaskActionRef(prepareRef)?.jobId);
       const changedProposal = {
-        ...proposal,
+        ...readbackProposal,
         architectureVerification: 'Changed semantic evidence on the same prepare reference.',
       };
       const changedPrepare = yield* runNativeTaskAction(f.config, {
@@ -4932,7 +4942,10 @@ describe('native task actions', () => {
         }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
       );
       expect(explicitlyResumed).toMatchObject({status: 'pending', stage: 'prepare', job: {status: 'accepted'}});
-      expect(object(yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call)).status).toBe('completed');
+      const largePrepareCompletion = object(
+        yield* runNativeJobWorker(f.config, 'native-run', prepareJobId, f.call),
+      );
+      expect(largePrepareCompletion.status, JSON.stringify(largePrepareCompletion)).toBe('completed');
       expect(object(yield* f.call({...f.base('closeout'), command: 'recover'})).closeout).toMatchObject({
         state: 'superseded',
       });
@@ -4943,7 +4956,9 @@ describe('native task actions', () => {
       yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Revalidate the current local implementation.'});
       const previousSnapshotId = String(object(object(recorded.snapshot).snapshot).snapshotId);
       yield* completeLocalPhase(f, 'one', 'replacement', previousSnapshotId);
-      const replacementEnvelope = object(yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal}));
+      const replacementEnvelope = object(
+        yield* finishThroughMcp({runId: 'native-run', callerCwd: f.repo, proposal: readbackProposal}),
+      );
       const replacementPrepare = object(replacementEnvelope.structuredContent);
       expect(replacementPrepare).toMatchObject({status: 'pending', stage: 'prepare'});
       const replacementJobId = String(decodeNativeTaskActionRef(String(replacementPrepare.prepareRef))?.jobId);
@@ -5061,6 +5076,14 @@ describe('native task actions', () => {
         detail: 'packet',
       }).pipe(Effect.result);
       expect(incompleteView).toMatchObject({failure: {code: 'invalid-closeout-state'}});
+      expect(
+        yield* readNativeTaskView(f.config, {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          detail: 'packet',
+          outputKey: outputKeys[0],
+        }).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'invalid-closeout-state'}});
       const restoredJournal = yield* writeNativeCloseoutJournal(
         f.config,
         'native-run',
@@ -5175,6 +5198,70 @@ describe('native task actions', () => {
         yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo, detail: 'packet'}),
       );
       expect(terminalViewReplay).toEqual(terminalView);
+      expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
+      if (!completedCloseout) throw new Error('Expected the completed closeout journal.');
+      const outputKey = 'architecture';
+      if (!completedCloseout.state.outputs[outputKey]) throw new Error('Expected the verified architecture output.');
+      const expectedBody = EffectOption.getOrUndefined(
+        EffectArray.findFirst(EffectArray.reverse(completedCloseout.state.documents), document => document.key === outputKey),
+      )?.body;
+      if (expectedBody === undefined) throw new Error('Expected the selected closeout output body.');
+      expect(expectedBody).toContain('é');
+      expect(expectedBody.length).toBeGreaterThanOrEqual(59_000);
+      expect(expectedBody.length).toBeLessThan(60_000);
+      const defaultOutputs = object(terminalView.closeout).outputs;
+      if (!EffectArray.isArray(defaultOutputs)) throw new Error('Expected default closeout output references.');
+      expect(EffectArray.every(defaultOutputs, output => !('body' in object(output)))).toBe(true);
+      const selectedBodyView = object(
+        yield* readNativeTaskView(f.config, {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          detail: 'packet',
+          outputKey,
+        }),
+      );
+      const selectedOutputs = object(selectedBodyView.closeout).outputs;
+      if (!EffectArray.isArray(selectedOutputs)) throw new Error('Expected verified closeout output references.');
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(selectedOutputs, output => object(output).key === outputKey),
+        ),
+      ).toMatchObject({body: expectedBody});
+      expect(
+        EffectArray.every(selectedOutputs, output => {
+          const record = object(output);
+          return record.key === outputKey ? record.body === expectedBody : !('body' in record);
+        }),
+      ).toBe(true);
+      expect(
+        object(
+          object(
+            yield* mcp.invokeTool('workflow_task_view', {
+              runId: 'native-run',
+              callerCwd: f.repo,
+              detail: 'packet',
+              outputKey,
+            }),
+          ).structuredContent,
+        ).closeout,
+      ).toEqual(selectedBodyView.closeout);
+      expect(
+        yield* readNativeTaskView(f.config, {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          detail: 'summary',
+          outputKey,
+        }).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'invalid-request'}});
+      expect(
+        yield* readNativeTaskView(f.config, {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          detail: 'packet',
+          outputKey: 'unknown-output',
+        }).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'closeout-output-not-found'}});
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedCloseoutBytes);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(completedNativeState);
     }).pipe(run),

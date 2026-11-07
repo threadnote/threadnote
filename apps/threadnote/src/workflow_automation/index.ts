@@ -425,6 +425,7 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
   config: RuntimeConfig,
   request: Exclude<NativeWorkflowRequest, {readonly action: 'init' | 'capabilities' | 'graph-ready'}>,
   taskDetail?: 'summary' | 'packet',
+  taskOutputKey?: string,
 ) {
   const stored = yield* load(config, request);
   return yield* withNativeWorkflowMemorySession(config, stored.state.bindingId, (admission, call) =>
@@ -559,7 +560,13 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
                     'invalid-readback',
                     'A completed closeout output no longer matches its verified native receipt.',
                   );
-                return {key, uri: artifact.uri, memoryId: artifact.memoryId, revision: artifact.revision};
+                return {
+                  key,
+                  uri: artifact.uri,
+                  memoryId: artifact.memoryId,
+                  revision: artifact.revision,
+                  ...(key === taskOutputKey ? {body: artifact.body} : {}),
+                };
               }),
             )
           : undefined;
@@ -769,12 +776,13 @@ export const readNativeTaskInspection = (
   runId: string,
   generation: string,
   detail: 'summary' | 'packet',
+  outputKey?: string,
 ) =>
   withNativeWorkflowLock(
     config,
     runId,
     false,
-    runBound(config, {...version, action: 'inspect', runId, generation}, detail),
+    runBound(config, {...version, action: 'inspect', runId, generation}, detail, outputKey),
   ).pipe(
     withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),

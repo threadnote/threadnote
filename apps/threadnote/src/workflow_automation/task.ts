@@ -25,6 +25,7 @@ const requestSchema = Schema.Struct({
   callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   role: Schema.optionalKey(Schema.Literals(['implementation', 'review', 'delivery'])),
   detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
+  outputKey: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   cursor: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048))),
   phaseId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
 });
@@ -352,6 +353,8 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const request = yield* Schema.decodeUnknownEffect(requestSchema, {onExcessProperty: 'error'})(input).pipe(
       Effect.mapError(() => fail('invalid-request', 'Provide runId, an absolute callerCwd, and an optional role.')),
     );
+    if (request.outputKey !== undefined && request.detail !== 'packet')
+      return yield* fail('invalid-request', 'Select a closeout output key only with detail=packet.');
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     if (!path.isAbsolute(request.callerCwd))
@@ -369,9 +372,17 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       stored.state.runId,
       stored.state.generation,
       request.detail ?? 'summary',
+      request.outputKey,
     ).pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => checkout}));
     if (!('revision' in inspected) || inspected.revision !== stored.revision || !('taskAuthoring' in inspected))
       return yield* fail('inspection-failed', 'The native run could not be inspected.');
+    if (request.outputKey !== undefined) {
+      const closeout = 'taskCloseout' in inspected ? inspected.taskCloseout : undefined;
+      if (!closeout || closeout.status !== 'complete')
+        return yield* fail('closeout-incomplete', 'A complete verified closeout is required to read an output body.');
+      if (!EffectArray.some(closeout.outputs, output => output.key === request.outputKey))
+        return yield* fail('closeout-output-not-found', 'The selected key is not a verified closeout output.');
+    }
     const planDrift = 'planDrift' in inspected ? inspected.planDrift : undefined;
     const authoringResult = inspected.taskAuthoring;
     const authoring =

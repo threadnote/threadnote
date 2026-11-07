@@ -66,6 +66,7 @@ export function makeNativeTaskViewCommand<E, R>(
     readonly cursor?: string;
     readonly phaseId?: string;
     readonly detail?: 'summary' | 'packet';
+    readonly outputKey?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
@@ -81,6 +82,7 @@ export function makeNativeTaskViewCommand<E, R>(
         ['summary', 'packet'],
         'Read the bounded summary or full current approval/review packet',
       ),
+      outputKey: optionalString('output-key', 'Listed verified closeout output key; requires detail=packet'),
     },
     handler,
   ).pipe(Command.withDescription('Read the next task or select a discovered active historical PR watch'));
