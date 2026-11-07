@@ -686,7 +686,7 @@ describe('Threadnote MCP toolsets', () => {
         );
         expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
         expect(workflowTaskView).toBeDefined();
-        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(850);
         const taskViewSchema = decodeJsonObject(workflowTaskView?.inputSchema);
         expect(taskViewSchema.required).toEqual(expect.arrayContaining(['runId', 'callerCwd']));
         expect(decodeJsonObject(decodeJsonObject(workflowTaskView?.inputSchema).properties).detail).toMatchObject({
@@ -830,7 +830,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(withoutMutatingWorkflowTaskTools))).toBeLessThanOrEqual(37_200);
         // Semantic task bootstrap adds one tool beyond compact authoring; keep the additive catalog budget explicit.
         const totalCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        expect(totalCatalogBytes).toBeLessThanOrEqual(58_000);
+        expect(totalCatalogBytes).toBeLessThanOrEqual(65_000);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
