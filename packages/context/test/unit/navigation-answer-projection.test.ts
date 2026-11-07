@@ -150,6 +150,77 @@ function fixture() {
   );
   return {answer: assembleNavigationAnswer(input), proofLocators};
 }
+/** Portable form of the physical eight-node observation that originally fell back to no route. */
+function broaderFixture() {
+  const base = fixture();
+  const broadScope = {
+    ...scope,
+    worktree: EffectString.repeat(64)('e'),
+    project: 'fixture',
+    view: {...scope.view, id: 'fixture-disk', owner: 'fixture-caller', epoch: 0},
+  };
+  const owner = EffectOption.getOrUndefined(EffectArray.findFirst(base.answer.nodes, node => node.id === OWNER))!;
+  const [normalized, normalizeNote, queryNote, preview] = EffectArray.map(
+    [5, 6, 7, 8],
+    index => `cgs_${EffectString.repeat(32)(String(index))}`,
+  );
+  const helpers = EffectArray.map(
+    [
+      [normalized, 7, 'implementation'],
+      [normalizeNote, 4, 'implementation'],
+      [queryNote, 17, 'implementation'],
+      [preview, 15, 'entrypoint'],
+    ] as const,
+    ([id, line, role]) => ({
+      ...owner,
+      id,
+      startLine: line,
+      endLine: line,
+      roles: [role],
+      relevance: 0.05,
+      possibleEffect: undefined,
+    }),
+  );
+  const input: NavigationInput = {
+    scope: broadScope,
+    target: {kind: 'anchors', candidateIds: [OWNER]},
+    candidates: EffectArray.map([...base.answer.nodes, ...helpers], node => ({
+      ...node,
+      roles: node.id === RESULT ? ['implementation'] : node.roles,
+      basis: ['inspected-source', 'structural'],
+    })),
+    sources: EffectArray.map(base.answer.sources, source => ({...source, ...broadScope})),
+    links: [
+      ...base.answer.links,
+      ...EffectArray.map(
+        [
+          [OWNER, normalized, 'contains'],
+          [normalized, normalizeNote, 'calls'],
+          [queryNote, normalizeNote, 'calls'],
+          [preview, OWNER, 'calls'],
+        ] as const,
+        ([from, to, relation]) => ({
+          from,
+          to,
+          relation,
+          basis: 'structural' as const,
+          compatibility: 'verified' as const,
+          reason: 'Actual authored structural relation.',
+        }),
+      ),
+    ],
+    coverage: {status: 'partial', description: 'Bounded acquired graph and source; no repository-wide completeness.'},
+  };
+  return {
+    answer: assembleNavigationAnswer(input),
+    proofLocators: EffectArray.map(base.proofLocators.slice(0, 1), locator => ({
+      ...locator,
+      scope: broadScope,
+      snapshot: {...locator.snapshot, worktreeId: broadScope.worktree},
+    })),
+  };
+}
+
 export function legacyFixture(mode: ContextBriefLogicalResultV1['mode']): ContextBriefLogicalResultV1 {
   const graphTrust = {
     classification: 'untrusted-repository-data',
@@ -278,6 +349,59 @@ describe('shared final navigation projection', () => {
       }
     expect(JSON.stringify(input)).toBe(before);
   });
+  it('retains all four supported roles and exact proof from a broader acquired graph at 800 tokens', () => {
+    const input = broaderFixture();
+    expect(input.answer.nodes).toHaveLength(8);
+    expect(input.answer.links).toHaveLength(7);
+    for (const budget of [800, 1500]) {
+      const projected = projectNavigationAnswer(input, budget, 'dual');
+      const view = projected.structuredContent;
+      expect(projected.measurement.totalBytes).toBeLessThanOrEqual(budget * 3);
+      expect(projected.measurement).toEqual(measureAgentToolResponse({structuredContent: view, text: projected.text}));
+      expect(EffectArray.map(view.roles, row => row[1])).toEqual(['supported', 'supported', 'supported', 'supported']);
+      const retainedIds = EffectArray.map(view.nodes, row => row[0]);
+      for (const id of [OWNER, ENTRY, TEST, RESULT]) expect(retainedIds).toContain(id);
+      expect(view.effects).toHaveLength(1);
+      expect(view.effects[0]?.slice(1, 3)).toEqual(['path', 'then branch of (persist)']);
+      expect(view.effects[0]?.[6]).toBe('then');
+      expect(view.nodes[view.effects[0][0]]?.[0]).toBe(OWNER);
+      expect(view.outcome).toBe('partial');
+      expect(view.coverage).toBe('partial');
+      if (budget === 800) {
+        expect(view.nodes.length).toBeLessThan(8);
+        expect(view.omissions.nodes).toBe(8 - view.nodes.length);
+        expect(view.omissions.proofs).toBe(0);
+        expect(view.followUps).toEqual([
+          {kind: 'read-source', selector: 'operation.ts:4-17', reason: 'Recover omitted navigation evidence.'},
+        ]);
+      } else {
+        expect(view.nodes).toHaveLength(8);
+        expect(view.links).toHaveLength(7);
+        expect(view.followUps).toEqual([]);
+      }
+    }
+  });
+
+  it('retains an honest useful subset when the required route genuinely exceeds the floor envelope', () => {
+    const base = broaderFixture();
+    const input = {
+      ...base,
+      answer: {
+        ...base.answer,
+        sources: EffectArray.map(base.answer.sources, source =>
+          source.path === 'operation.test.ts' ? {...source, path: `${EffectString.repeat(120)('守')}.test.ts`} : source,
+        ),
+      },
+    };
+    const projected = projectNavigationAnswer(input, 800, 'dual');
+    expect(projected.measurement.totalBytes).toBeLessThanOrEqual(2400);
+    expect(projected.structuredContent.nodes.length).toBeGreaterThan(0);
+    expect(projected.structuredContent.nodes.length).toBeLessThan(input.answer.nodes.length);
+    expect(EffectArray.some(projected.structuredContent.roles, row => row[1] === 'omitted')).toBe(true);
+    expect(projected.structuredContent.followUps.length).toBeLessThanOrEqual(2);
+    expect(projected.structuredContent.outcome).toBe('partial');
+  });
+
   it('keeps material tuples paired and reports effect omissions with exact recovery at smaller budgets', () => {
     const base = fixture();
     const input = {

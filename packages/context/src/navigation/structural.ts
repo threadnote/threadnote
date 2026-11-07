@@ -57,7 +57,20 @@ export function structuralNavigationInput(request: StructuralNavigationRequest):
     throw new RangeError('Structural navigation exceeds acquisition limits.');
   const gaps = new Set(acquired.gaps);
   const observation = acquired.facts.observation;
+  const projectCoverage = result.projectCoverage;
+  const acquiredProjectCoverage = 'projectCoverage' in observation ? observation.projectCoverage : undefined;
+  // A scoped observation owns its project label. Caller scope never renames foreign evidence.
+  // Both absent retains the legacy unscoped contract; one absent cannot certify a scoped join.
+  const projectCompatible =
+    (projectCoverage === undefined || projectCoverage.project === scope.project) &&
+    sameProjectCoverage(projectCoverage, acquiredProjectCoverage);
+  if (!projectCompatible) gaps.add('navigation-project-observation-conflict');
+  else {
+    if (projectCoverage?.completeness === 'partial') gaps.add('navigation-project-coverage-partial');
+    if (projectCoverage?.negativeProof === 'unavailable') gaps.add('navigation-project-negative-proof-unavailable');
+  }
   const compatible =
+    projectCompatible &&
     scope.repository === result.repository.repositoryId &&
     scope.worktree === result.snapshot.worktreeId &&
     scope.view.kind === 'disk' &&
@@ -220,18 +233,46 @@ export function structuralNavigationInput(request: StructuralNavigationRequest):
         reason: `Structural ${edge.relation} relation (${edge.provenance}); no runtime execution claim.`,
       })),
       coverage: {
-        status: result.searchCoverage?.status === 'timed-out' ? 'timeout' : symbols.length === 0 ? 'empty' : 'partial',
+        status: !projectCompatible
+          ? 'unavailable'
+          : result.searchCoverage?.status === 'timed-out'
+            ? 'timeout'
+            : symbols.length === 0
+              ? 'empty'
+              : 'partial',
         description:
           'Bounded structural graph and one inspected source batch; no repository-wide completeness or test execution claim.',
       },
       roleGaps: EffectArray.map(['entrypoint', 'implementation', 'effects', 'tests'] as const, role => ({
         role,
-        status: 'unknown',
-        reason: 'No supported role in the acquired bounded observation; absence proves no negative behavior.',
+        status: projectCompatible ? 'unknown' : 'unavailable',
+        reason: projectCompatible
+          ? 'No supported role in the acquired bounded observation; absence proves no negative behavior.'
+          : 'Requested project evidence is unavailable because the graph and acquired project observations do not match.',
       })),
       gaps: [...gaps].sort(),
     },
   };
+}
+
+function sameProjectCoverage(
+  left: CodeGraphQueryResult['projectCoverage'],
+  right: CodeGraphQueryResult['projectCoverage'],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.project === right.project &&
+    left.kind === right.kind &&
+    left.completeness === right.completeness &&
+    left.negativeProof === right.negativeProof &&
+    left.rootComponents === right.rootComponents &&
+    left.dependencyComponents === right.dependencyComponents &&
+    left.snapshotSourceCommit === right.snapshotSourceCommit &&
+    left.observedWorktreeCommit === right.observedWorktreeCommit &&
+    left.reusedEquivalentSnapshot === right.reusedEquivalentSnapshot &&
+    left.configuredRoots.length === right.configuredRoots.length &&
+    EffectArray.every(left.configuredRoots, (root, index) => root === right.configuredRoots[index])
+  );
 }
 
 function isTestPath(path: string): boolean {

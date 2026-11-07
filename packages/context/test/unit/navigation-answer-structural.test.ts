@@ -18,7 +18,7 @@ import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
 import {CodeGraphObservability, CodeGraphProcessActivity} from '@threadnote/graph/runtime_ports';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
-import type {CodeGraphIndexSummary} from '@threadnote/graph/types';
+import type {CodeGraphIndexSummary, CodeGraphProjectCoverage} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -413,6 +413,88 @@ effectIt.layer(dependencies)(it => {
           const structural = assembleStructuralNavigationAnswer(request);
           expect(JSON.stringify(request)).toBe(before);
           expect(assembleStructuralNavigationAnswer(request)).toEqual(structural);
+          // Reuse the real acquired observation: project metadata changes must never relabel its evidence.
+          const projectCoverage: CodeGraphProjectCoverage = {
+            project: 'selected-project-a',
+            kind: 'project',
+            configuredRoots: ['operation.ts'],
+            rootComponents: 1,
+            dependencyComponents: 0,
+            completeness: 'partial',
+            negativeProof: 'unavailable',
+            observedWorktreeCommit: f.result.snapshot.commit,
+            reusedEquivalentSnapshot: false,
+          };
+          const projectRequest = (coverage: CodeGraphProjectCoverage) => ({
+            ...request,
+            scope: {...scope, project: coverage.project},
+            result: {...f.result, projectCoverage: coverage},
+            acquired: {
+              ...acquired,
+              facts: {...acquired.facts, observation: {...acquired.facts.observation, projectCoverage: coverage}},
+            },
+          });
+          const partialRequest = projectRequest(projectCoverage);
+          const mismatched = assembleStructuralNavigationAnswer({
+            ...partialRequest,
+            scope: {...scope, project: 'requested-project-b'},
+          });
+          expect(mismatched.answer.coverage.status).toBe('unavailable');
+          expect(mismatched.answer.gaps).toContain('navigation-project-observation-conflict');
+          expect(mismatched.answer.sources).toEqual([]);
+          expect(mismatched.answer.nodes).toEqual([]);
+          expect(mismatched.proofLocators).toEqual([]);
+          expect(EffectArray.every(mismatched.answer.roles, role => role.status === 'unavailable')).toBe(true);
+          const partialProject = assembleStructuralNavigationAnswer(partialRequest);
+          expect(partialProject.answer.roles).toEqual(structural.answer.roles);
+          expect(partialProject.proofLocators).toHaveLength(1);
+          expect(partialProject.answer.coverage.status).toBe('partial');
+          expect(partialProject.answer.gaps).toEqual(
+            expect.arrayContaining([
+              'navigation-project-coverage-partial',
+              'navigation-project-negative-proof-unavailable',
+            ]),
+          );
+          expect(
+            EffectArray.every(partialProject.answer.sources, source => source.project === 'selected-project-a'),
+          ).toBe(true);
+          const completeRequest = projectRequest({
+            ...projectCoverage,
+            completeness: 'complete',
+            negativeProof: 'selected-graph-only',
+          });
+          const completeProject = assembleStructuralNavigationAnswer(completeRequest);
+          expect(completeProject.answer.roles).toEqual(partialProject.answer.roles);
+          expect(completeProject.proofLocators).toHaveLength(1);
+          expect(completeProject.answer.coverage.status).toBe('partial');
+          expect(completeProject.answer.gaps).not.toContain('navigation-project-coverage-partial');
+          expect(completeProject.answer.gaps).not.toContain('navigation-project-negative-proof-unavailable');
+          expect(completeProject.answer).not.toEqual(partialProject.answer);
+          for (const foreignObservation of [
+            {
+              ...partialRequest,
+              acquired: {
+                ...partialRequest.acquired,
+                facts: {
+                  ...partialRequest.acquired.facts,
+                  observation: {
+                    ...partialRequest.acquired.facts.observation,
+                    projectCoverage: {...projectCoverage, project: 'foreign-project'},
+                  },
+                },
+              },
+            },
+            {...partialRequest, acquired: completeRequest.acquired},
+            {...partialRequest, acquired},
+            {...request, acquired: partialRequest.acquired},
+          ]) {
+            const rejected = assembleStructuralNavigationAnswer(foreignObservation);
+            expect(rejected.answer.coverage.status).toBe('unavailable');
+            expect(rejected.answer.gaps).toContain('navigation-project-observation-conflict');
+            expect(rejected.answer.nodes).toEqual([]);
+            expect(rejected.answer.sources).toEqual([]);
+            expect(rejected.proofLocators).toEqual([]);
+          }
           expect(structural.answer.roles).toEqual([
             expect.objectContaining({role: 'entrypoint', status: 'supported'}),
             expect.objectContaining({role: 'implementation', status: 'supported'}),

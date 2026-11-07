@@ -95,23 +95,12 @@ export function projectNavigationAnswer(
     throw new RangeError('Navigation projection exceeds admitted evidence limits.');
   const {proofs, rejected} = compatibleProofs(answer, input.proofLocators);
   const items: Item[] = [
-    ...EffectArray.map(answer.nodes, (node, index) => item('node', node.id, index)),
     ...EffectArray.map(proofs, (_, index) => item('proof', String(index), index)),
+    ...EffectArray.map(answer.nodes, (node, index) => item('node', node.id, index)),
     ...EffectArray.map(answer.gaps, (gap, index) => item('gap', gap, index)),
     ...EffectArray.map(reviewedMemory, (memory, index) => item('memory', memory.uri, index)),
   ];
-  const coreIds = new Set(
-    EffectArray.flatMap(answer.roles, role => [...role.nodeIds.slice(0, 1), ...role.candidateIds.slice(0, 1)]),
-  );
-  // Keep the direct route including intermediaries (e.g. test block -> test result -> owner).
-  for (const node of answer.nodes)
-    if (
-      EffectArray.some(
-        answer.links,
-        link => (link.from === node.id && coreIds.has(link.to)) || (link.to === node.id && coreIds.has(link.from)),
-      )
-    )
-      coreIds.add(node.id);
+  const coreIds = requiredRouteNodes(answer);
   const required = uniqueProjectionItems(
     EffectArray.filter(items, candidate => candidate.lane === 'node' && coreIds.has(candidate.id)),
   );
@@ -130,10 +119,17 @@ export function projectNavigationAnswer(
     renderText: value => renderText(value, responseFormat),
   });
   if (selection === undefined) {
-    // One finite admission pass also evaluates an explicit empty-core fallback. Never truncate evidence strings.
+    // If the complete route cannot fit, admit its best honest prefix through the same core.
+    const primaryId = primaryNodeId(answer);
+    const fallbackItems = uniqueProjectionItems([
+      ...EffectArray.filter(required, candidate => candidate.id === primaryId),
+      ...EffectArray.filter(optional, candidate => candidate.lane === 'proof'),
+      ...EffectArray.filter(required, candidate => candidate.id !== primaryId),
+      ...EffectArray.filter(optional, candidate => candidate.lane !== 'proof'),
+    ]);
     const fallback = selectFiniteProjection({
       required: [],
-      optional: [],
+      optional: fallbackItems,
       maximumBytes,
       format: responseFormat,
       render: selected => renderSelected(answer, proofs, rejected, reviewedMemory, selected),
@@ -183,7 +179,16 @@ function renderSelected(
   const roles = EffectArray.map(answer.roles, role => {
     const supported = EffectArray.flatMap(role.nodeIds, id => (nodeIndex.has(id) ? [nodeIndex.get(id)!] : []));
     const candidates = EffectArray.flatMap(role.candidateIds, id => (nodeIndex.has(id) ? [nodeIndex.get(id)!] : []));
-    const missing = supported.length < role.nodeIds.length || candidates.length < role.candidateIds.length;
+    // Missing optional breadth does not erase a retained, connected role witness.
+    const primaryId = primaryNodeId(answer);
+    const retainedIds = new Set(EffectArray.map(nodes, node => node.id));
+    const missing =
+      role.status === 'supported'
+        ? !EffectArray.some(
+            role.nodeIds,
+            id => retainedIds.has(id) && routePath(answer, id, primaryId, retainedIds) !== undefined,
+          )
+        : role.candidateIds.length > 0 && candidates.length === 0;
     const partialEffects =
       role.role === 'effects' &&
       (omittedProofs > 0 ||
@@ -360,20 +365,24 @@ function exactAcquisitions(
     answer.nodes,
     node => !selected.includes(node) || (effectsOmitted && node.roles.includes('effects')),
   );
-  const generated: NavigationAcquisition[] = EffectArray.flatMap(missing, node => {
+  const bySource = new Map<string, {path: string; start: number; end: number}>();
+  for (const node of missing) {
     const source = EffectOption.getOrUndefined(
-      EffectArray.findFirst(answer.sources, source => source.id === node.sourceId),
+      EffectArray.findFirst(answer.sources, candidate => candidate.id === node.sourceId),
     );
-    return source === undefined
-      ? []
-      : [
-          {
-            kind: 'read-source' as const,
-            selector: `${source.path}:${node.startLine}-${node.endLine}`,
-            reason: 'Recover omitted navigation evidence.',
-          },
-        ];
-  });
+    if (source === undefined) continue;
+    const range = bySource.get(source.id);
+    bySource.set(source.id, {
+      path: source.path,
+      start: Math.min(range?.start ?? node.startLine, node.startLine),
+      end: Math.max(range?.end ?? node.endLine, node.endLine),
+    });
+  }
+  const generated: NavigationAcquisition[] = EffectArray.map([...bySource.values()], range => ({
+    kind: 'read-source',
+    selector: `${range.path}:${range.start}-${range.end}`,
+    reason: 'Recover omitted navigation evidence.',
+  }));
   const seen = new Set<string>();
   return EffectArray.filter([...generated, ...answer.followUps], acquisition => {
     const key = `${acquisition.kind}:${acquisition.selector}`;
@@ -413,7 +422,7 @@ function renderText(value: NavigationProjection, format: 'agent' | 'dual'): stri
       ),
       ...EffectArray.map(value.gaps, gap => `Gap: ${gap}`),
       ...value.warnings,
-      `Omitted: ${JSON.stringify(value.omissions)}`,
+      `Omitted: ${projectionOmissionCount(value.omissions)}`,
       ...EffectArray.map(value.followUps, next => `${next.kind}: ${next.selector}`),
     ],
     '\n',
@@ -436,4 +445,53 @@ function sameScope(left: NavigationScope, right: NavigationScope): boolean {
     left.view.owner === right.view.owner &&
     left.view.epoch === right.view.epoch
   );
+}
+
+/** Only paths needed to join the best role witnesses are mandatory; neighbors remain optional. */
+function requiredRouteNodes(answer: NavigationAnswerV1): ReadonlySet<string> {
+  const primaryId = primaryNodeId(answer);
+  const selected = new Set<string>();
+  if (primaryId !== undefined) selected.add(primaryId);
+  for (const role of answer.roles) {
+    const id = role.nodeIds[0] ?? role.candidateIds[0];
+    if (id === undefined) continue;
+    selected.add(id);
+    for (const nodeId of routePath(answer, id, primaryId) ?? []) selected.add(nodeId);
+  }
+  return selected;
+}
+function primaryNodeId(answer: NavigationAnswerV1): string | undefined {
+  const ids = new Set(EffectArray.map(answer.nodes, node => node.id));
+  return (
+    (answer.target.kind === 'task'
+      ? undefined
+      : EffectOption.getOrUndefined(EffectArray.findFirst(answer.target.candidateIds, id => ids.has(id)))) ??
+    EffectOption.getOrUndefined(EffectArray.findFirst(answer.roles, role => role.role === 'implementation'))
+      ?.nodeIds[0] ??
+    answer.nodes[0]?.id
+  );
+}
+/** Bounded BFS over real compatible relations, retaining intermediary declarations. */
+function routePath(
+  answer: NavigationAnswerV1,
+  from: string,
+  to: string | undefined,
+  allowed: ReadonlySet<string> = new Set(EffectArray.map(answer.nodes, node => node.id)),
+): readonly string[] | undefined {
+  if (to === undefined || !allowed.has(from) || !allowed.has(to)) return undefined;
+  const queue: string[][] = [[from]];
+  const seen = new Set([from]);
+  for (let index = 0; index < queue.length; index += 1) {
+    const path = queue[index];
+    const current = path[path.length - 1];
+    if (current === to) return path;
+    for (const link of answer.links) {
+      if (link.compatibility !== 'verified') continue;
+      const next = link.from === current ? link.to : link.to === current ? link.from : undefined;
+      if (next === undefined || seen.has(next) || !allowed.has(next)) continue;
+      seen.add(next);
+      queue.push([...path, next]);
+    }
+  }
+  return undefined;
 }
