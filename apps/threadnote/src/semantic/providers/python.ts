@@ -16,6 +16,7 @@ export const makePythonSession = Effect.fn('semantic.makePythonSession')(functio
     ready: options.environmentReady,
     policy: {
       language: 'python',
+      editSourceQualification: 'versioned-diagnostics-foreground-v1',
       workspaceName: 'semantic-python-project',
       acceptsServer: server =>
         server?.version === '1.40.2' && EffectString.includes('basedpyright')(EffectString.toLowerCase(server.name)),

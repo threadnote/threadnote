@@ -7,6 +7,8 @@ import {
   createSemanticProposal,
   proposalPage,
   type ProposalInput,
+  type OrderedProposalInput,
+  type ProposalOperation,
   type ProposalPage,
   type ProposalPageChunk,
   type SemanticProposal,
@@ -78,8 +80,16 @@ function expectCompletePages(proposal: SemanticProposal, maxBytes: number): void
     version: proposal.version,
     operation: proposal.operation,
     evidence: proposal.evidence,
+    ...(proposal.version === 2
+      ? {
+          qualification: proposal.qualification,
+          operations: proposal.operations,
+          ...(proposal.changeAnnotations === undefined ? {} : {changeAnnotations: proposal.changeAnnotations}),
+        }
+      : {}),
     targets: EffectArray.map(proposal.targets, target => ({
       observation: target.observation,
+      ...('providerDocumentVersion' in target ? {providerDocumentVersion: target.providerDocumentVersion} : {}),
       precondition: target.precondition,
       edits: target.edits,
     })),
@@ -102,7 +112,191 @@ function expectCompletePages(proposal: SemanticProposal, maxBytes: number): void
   }
   expect(JSON.stringify(proposal)).toBe(original);
 }
+const sha256 = (value: string): string => new Bun.CryptoHasher('sha256').update(value).digest('hex');
+function raw(operations: readonly ProposalOperation[]): OrderedProposalInput {
+  return {
+    version: 2,
+    operation: 'code-action',
+    qualification: 'unsupported-operation-sequence',
+    evidence,
+    targets: [],
+    operations,
+  };
+}
+const uri = observation.uri;
+const destination = `${uri}.new`;
+function qualified(): OrderedProposalInput {
+  const legacy = input('abc', 0, 1, 'A');
+  return {
+    version: 2,
+    operation: 'code-action',
+    qualification: 'qualified-text-only',
+    evidence: legacy.evidence,
+    targets: legacy.targets,
+    operations: [{kind: 'text', uri, version: 1, edits: legacy.targets[0].edits, target: 0}],
+  };
+}
 describe('semantic edit proposal model', () => {
+  it('preserves the original V1 canonical SHA-256 and verifies stored fields without permitting injected metadata', () => {
+    const source = input('legacy', 0, 1, 'L');
+    const rawDigest = sha256('legacy');
+    const targetObservation = {...source.targets[0].observation, content: rawDigest};
+    const original = {
+      ...source,
+      evidence: {...source.evidence, observation: targetObservation},
+      targets: [
+        {
+          ...source.targets[0],
+          observation: targetObservation,
+          precondition: {...source.targets[0].precondition, rawDigest},
+        },
+      ],
+    };
+    const proposal = createSemanticProposal(original, sha256);
+    expect(proposal.digest).toBe('7cffb106ffac7356b07e16dea240efd01fbd565b4a9c9eb82d72330dfd29eb10');
+    expect(createSemanticProposal(JSON.parse(JSON.stringify(proposal)), sha256)).toEqual(proposal);
+    for (const injected of [
+      {operations: []},
+      {qualification: 'qualified-text-only'},
+      {metadata: {}},
+      {digest: hash('f')},
+    ])
+      expect(() => createSemanticProposal({...proposal, ...injected}, sha256)).toThrow();
+    expect(() =>
+      createSemanticProposal({...proposal, targets: [{...proposal.targets[0], afterText: 'tampered'}]}, sha256),
+    ).toThrow(/after-image/);
+    expect(() =>
+      createSemanticProposal({...original, targets: [{...original.targets[0], providerDocumentVersion: 1}]}, sha256),
+    ).toThrow();
+  });
+  it('qualifies complete unique text groups and binds exact provider versions without altering legacy observations', () => {
+    const value = qualified();
+    const proposal = createSemanticProposal(value, digest);
+    expect(proposal.targets[0].afterText).toBe('Abc');
+    expectCompletePages(proposal, 4096);
+    expect(createSemanticProposal(proposal, digest)).toEqual(proposal);
+    const providerVersion = {
+      ...value,
+      targets: [{...value.targets[0], providerDocumentVersion: 9}],
+      operations: [{...value.operations[0], version: 9}],
+    };
+    expect(createSemanticProposal(providerVersion, digest).digest).not.toBe(proposal.digest);
+    expectCompletePages(createSemanticProposal(providerVersion, digest), 4096);
+    expect(() => createSemanticProposal({...proposal, digest: hash('f')}, digest)).toThrow(/digest/);
+    expect(() =>
+      createSemanticProposal({...proposal, targets: [{...proposal.targets[0], afterText: 'tampered'}]}, digest),
+    ).toThrow(/after-image/);
+    for (const altered of [
+      {...value, operations: [{...value.operations[0], target: null}]},
+      {...value, operations: [{...value.operations[0], version: 3}]},
+      {...value, operations: [{...value.operations[0], edits: []}]},
+      {...value, operations: [...value.operations, ...value.operations]},
+      {...value, operations: [{kind: 'create', uri}]},
+      {
+        ...value,
+        qualification: 'unsupported-operation-sequence',
+        targets: [],
+        operations: [{...value.operations[0], target: null}],
+      },
+    ])
+      expect(() => createSemanticProposal(altered, digest)).toThrow();
+  });
+  it('retains resource options, annotations, repeated raw text groups and exact ordering with zero fabricated images', () => {
+    const edit = {
+      range: {start: {line: 900, character: 700}, end: {line: 901, character: 1}},
+      newText: '😀\nraw',
+      annotationId: 'a',
+    };
+    const value = {
+      ...raw([
+        {kind: 'create', uri: destination, options: {overwrite: false, ignoreIfExists: true}, annotationId: 'a'},
+        {kind: 'text', uri: destination, version: null, edits: [edit], target: null},
+        {kind: 'rename', oldUri: destination, newUri: uri, options: {overwrite: true}, annotationId: 'a'},
+        {kind: 'text', uri: destination, version: 7, edits: [edit], target: null},
+        {kind: 'delete', uri, options: {recursive: true, ignoreIfNotExists: false}, annotationId: 'a'},
+      ]),
+      changeAnnotations: {a: {label: 'Review', needsConfirmation: true, description: 'Exact metadata'}},
+    };
+    const proposal = createSemanticProposal(value, digest);
+    expect(proposal.targets).toEqual([]);
+    expectCompletePages(proposal, 4096);
+    expect(createSemanticProposal(proposal, digest)).toEqual(proposal);
+    expect(Object.isFrozen(proposal)).toBe(true);
+    if (proposal.version !== 2) throw new Error('expected V2');
+    expect(Object.isFrozen(proposal.operations[0])).toBe(true);
+    const rawText = proposal.operations[1];
+    if (rawText.kind !== 'text') throw new Error('expected raw text');
+    expect(Object.isFrozen(rawText.edits[0].range.start)).toBe(true);
+    edit.newText = 'caller mutation';
+    expect(rawText.edits[0].newText).toBe('😀\nraw');
+    expect(Object.isFrozen(proposal.changeAnnotations?.a)).toBe(true);
+    for (const altered of [
+      {...value, operations: EffectArray.reverse(value.operations)},
+      {...value, changeAnnotations: {a: {...value.changeAnnotations.a, description: 'changed'}}},
+      {
+        ...value,
+        operations: [
+          {kind: 'create', uri: destination, options: {overwrite: true}},
+          ...EffectArray.drop(value.operations, 1),
+        ],
+      },
+    ])
+      expect(createSemanticProposal(altered, digest).digest).not.toBe(proposal.digest);
+    for (const altered of [
+      {...value, qualification: 'qualified-text-only'},
+      {...value, arbitrary: true},
+      {...value, operations: [{kind: 'delete', uri, options: {unknown: true}}]},
+      {...value, changeAnnotations: {a: {label: 'Review', unknown: true}}},
+      {...value, changeAnnotations: {}},
+      {
+        ...value,
+        operations: [
+          {
+            kind: 'text',
+            uri,
+            version: null,
+            target: null,
+            edits: [{...edit, range: {start: {line: 2, character: 0}, end: {line: 1, character: 0}}}],
+          },
+          {kind: 'delete', uri},
+        ],
+      },
+    ])
+      expect(() => createSemanticProposal(altered, digest)).toThrow();
+    const repeated = raw([
+      {kind: 'text', uri, version: 1, edits: [edit], target: null},
+      {kind: 'text', uri, version: 2, edits: [edit], target: null},
+    ]);
+    expectCompletePages(
+      createSemanticProposal({...repeated, changeAnnotations: value.changeAnnotations}, digest),
+      4096,
+    );
+    expectCompletePages(createSemanticProposal(raw([{kind: 'delete', uri}]), digest), 4096);
+  });
+  it('reconstructs bounded ordered raw resource sequences without dropping options or text payloads', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({text: fc.string({maxLength: 700}), overwrite: fc.boolean()}), {minLength: 1, maxLength: 5}),
+        entries => {
+          const operations: ProposalOperation[] = [];
+          for (const entry of entries) {
+            operations.push({kind: 'create', uri: destination, options: {overwrite: entry.overwrite}});
+            operations.push({
+              kind: 'text',
+              uri: destination,
+              version: null,
+              target: null,
+              edits: [{range: {start: {line: 99, character: 0}, end: {line: 99, character: 0}}, newText: entry.text}],
+            });
+          }
+          const proposal = createSemanticProposal(raw(operations), digest);
+          expectCompletePages(proposal, 4096);
+          expect(createSemanticProposal(JSON.parse(JSON.stringify(proposal)), digest)).toEqual(proposal);
+        },
+      ),
+      {numRuns: 20},
+    );
+  });
   it('derives CRLF and non-BMP edits using UTF-16 positions without changing caller input', () => {
     const source = 'a😀b\r\nnext';
     const value = input(source, 1, 3, 'X');
@@ -112,6 +306,111 @@ describe('semantic edit proposal model', () => {
     expect(Object.isFrozen(result.targets[0].edits[0].range.start)).toBe(true);
     expect(() => createSemanticProposal(input(source, 2, 3, 'X'), digest)).toThrow(/surrogate/);
     expect(() => createSemanticProposal(input(source, 5, 5, 'X'), digest)).toThrow(/outside/);
+  });
+  it('uses CR, LF and CRLF provider line coordinates without changing source bytes', () => {
+    for (const source of [
+      '// first\rconst target = 1;\nconst backup = 2;',
+      '// first\rconst target = 1;\rconst backup = 2;',
+    ]) {
+      const base = input(source, 0, 0, '');
+      const value = {
+        ...base,
+        targets: [
+          {
+            ...base.targets[0],
+            edits: [{range: {start: {line: 1, character: 6}, end: {line: 1, character: 12}}, newText: 'renamed'}],
+          },
+        ],
+      };
+      const result = createSemanticProposal(value, digest);
+      expect(result.targets[0].afterText).toBe(EffectString.replace('target', 'renamed')(source));
+      expect(value.targets[0].beforeText).toBe(source);
+      const ordered = {
+        ...qualified(),
+        evidence: value.evidence,
+        targets: value.targets,
+        operations: [{kind: 'text' as const, uri, version: 1, edits: value.targets[0].edits, target: 0}],
+      };
+      expect(createSemanticProposal(ordered, digest).targets[0].afterText).toBe(result.targets[0].afterText);
+    }
+    const source = 'a\r😀b\r\nend\n';
+    const base = input(source, 0, 0, '');
+    const make = (line: number, start: number, end: number) => ({
+      ...base,
+      targets: [
+        {
+          ...base.targets[0],
+          edits: [{range: {start: {line, character: start}, end: {line, character: end}}, newText: 'X'}],
+        },
+      ],
+    });
+    expect(createSemanticProposal(make(1, 0, 2), digest).targets[0].afterText).toBe('a\rXb\r\nend\n');
+    expect(createSemanticProposal(make(3, 0, 0), digest).targets[0].afterText).toBe(`${source}X`);
+    expect(() => createSemanticProposal(make(1, 1, 2), digest)).toThrow(/surrogate/);
+    expect(() => createSemanticProposal(make(1, 0, 4), digest)).toThrow(/outside/);
+    expect(() => createSemanticProposal(make(4, 0, 0), digest)).toThrow(/outside/);
+  });
+  it('matches an independent per-line splice across mixed line endings and UTF-16 coordinates', () => {
+    const lines = fc.array(
+      fc.record({
+        points: fc.array(fc.constantFrom('a', 'é', '😀'), {minLength: 1, maxLength: 12}),
+        eol: fc.constantFrom('\r', '\n', '\r\n'),
+      }),
+      {minLength: 2, maxLength: 7},
+    );
+    fc.assert(
+      fc.property(
+        lines,
+        fc.nat(),
+        fc.nat(),
+        fc.nat(),
+        fc.nat(),
+        fc.string({maxLength: 8}),
+        (entries, startPick, endPick, startPoint, endPoint, replacement) => {
+          const first = startPick % entries.length;
+          const last = first + (endPick % (entries.length - first));
+          const start = startPoint % (entries[first].points.length + 1);
+          const end =
+            first === last
+              ? start + (endPoint % (entries[last].points.length - start + 1))
+              : endPoint % (entries[last].points.length + 1);
+          const prefix = EffectArray.join(EffectArray.take(entries[first].points, start), '');
+          const endPrefix = EffectArray.join(EffectArray.take(entries[last].points, end), '');
+          const text = (entry: (typeof entries)[number]): string => EffectArray.join(entry.points, '') + entry.eol;
+          const source = EffectArray.join(EffectArray.map(entries, text), '');
+          // Oracle operates on generated line components, without parsing source or calculating flat offsets.
+          const expected =
+            EffectArray.join(EffectArray.map(EffectArray.take(entries, first), text), '') +
+            prefix +
+            replacement +
+            EffectArray.join(EffectArray.drop(entries[last].points, end), '') +
+            entries[last].eol +
+            EffectArray.join(EffectArray.map(EffectArray.drop(entries, last + 1), text), '');
+          const base = input(source, 0, 0, '');
+          const value = {
+            ...base,
+            targets: [
+              {
+                ...base.targets[0],
+                edits: [
+                  {
+                    range: {
+                      start: {line: first, character: prefix.length},
+                      end: {line: last, character: endPrefix.length},
+                    },
+                    newText: replacement,
+                  },
+                ],
+              },
+            ],
+          };
+          const result = createSemanticProposal(value, digest);
+          expect(result.targets[0].afterText).toBe(expected);
+          expect(value.targets[0].beforeText).toBe(source);
+        },
+      ),
+      {numRuns: 40},
+    );
   });
   it('rejects overlaps, unordered edits, and mismatched raw source preconditions', () => {
     const base = input('abcdef', 1, 3, 'x');

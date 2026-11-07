@@ -1,3 +1,4 @@
+import {preparedSessionFixture} from '../fixtures/semantic/jvm/prepared-session.js';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {Digest as EffectDigest} from 'effect/crypto';
 /* oxlint-disable effecttsgo/strict-effect-provide -- Filesystem model tests provide narrow OS and crypto services. */
@@ -1986,4 +1987,53 @@ describe('Java session source targets', () => {
         expect(yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'))).toBe(f.text);
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
+});
+
+describe('Java immutable prepared source qualification', () => {
+  for (const closed of [true, false]) {
+    effectIt.effect(`qualifies sealed closed input and refuses unversioned owned buffers: ${closed}`, () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const target = closed ? f.uris['Included.java'] : f.uris['Main.java'];
+        const edit = {
+          changes: {
+            [target]: [
+              {range: {start: {line: 0, character: 6}, end: {line: 0, character: closed ? 14 : 10}}, newText: 'Next'},
+            ],
+          },
+        };
+        const made = yield* f.create(edit, options => {
+          Reflect.set(options, 'captureEditSource', (uri: string) =>
+            Effect.gen(function* () {
+              const file = yield* f.path.fromFileUrl(new URL(uri));
+              const bytes = yield* f.fs.readFile(file);
+              return {
+                uri,
+                text: new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+                content: sha256HexSync(bytes),
+                identity: file,
+              };
+            }),
+          );
+        });
+        expect(made.result._tag).toBe('Success');
+        if (made.result._tag !== 'Success') return;
+        const session = made.result.value;
+        const view = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        const result = yield* Effect.exit(session.prepare('rename', view, {line: 0, character: 15}, 'Next', 1000));
+        expect(result._tag).toBe(closed ? 'Success' : 'Failure');
+        if (closed && result._tag === 'Success')
+          expect(result.value).toMatchObject({
+            status: 'ok',
+            evidence: {observation: {...view, projectEpoch: 1}},
+            items: [
+              {
+                sourceBasis: 'pre-request-synchronized-text-v1',
+                files: [{beforeText: f.texts['Included.java'], observation: {uri: target, documentVersion: null}}],
+              },
+            ],
+          });
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+  }
 });

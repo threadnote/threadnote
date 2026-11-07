@@ -200,6 +200,7 @@ export const makeGoSession = Effect.fn('semantic.makeGoSession')(function* (
     ...options,
     policy: {
       language: 'go',
+      editSourceQualification: 'versioned-text-document-v1',
       resolveCodeActions: true,
       unopenedDocumentVersion: 0,
       workspaceName: 'semantic-go-project',

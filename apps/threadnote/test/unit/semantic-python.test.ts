@@ -1033,3 +1033,53 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
     30000,
   );
 });
+
+describe('Python foreground-source qualification barrier', () => {
+  for (const accepted of [true, false]) {
+    effectIt.effect(`requires a current versioned diagnostic acknowledgment: ${accepted}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const requested = yield* Deferred.make<void>();
+        let renames = 0;
+        const client = fake(method =>
+          Effect.gen(function* () {
+            if (method !== 'textDocument/rename') return null;
+            renames++;
+            yield* Deferred.succeed(requested, undefined);
+            return {changes: {[f.uri]: [{range: diagnostic.range, newText: 'next'}]}};
+          }),
+        );
+        const session = yield* makePythonSession(client, {
+          ...f.options,
+          captureEditSource: () => Effect.die('Owned overlay must not be read from disk'),
+        });
+        const view = yield* session.upsert(f.basis, f.text, 'python', 1000);
+        // Wrong and unversioned publications never authorize the foreground rename.
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 0, diagnostics: []});
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, diagnostics: []});
+        const pending = yield* Effect.forkChild(
+          Effect.exit(session.prepare('rename', view, {line: 0, character: 1}, 'next', 1000)),
+        );
+        yield* Deferred.await(requested);
+        if (accepted)
+          f.notifications.receive('textDocument/publishDiagnostics', {
+            uri: f.uri,
+            version: 1,
+            diagnostics: [diagnostic],
+          });
+        else yield* TestClock.adjust(1001);
+        const result = yield* Fiber.join(pending);
+        expect(renames).toBe(accepted ? 2 : 1);
+        expect(result._tag).toBe(accepted ? 'Success' : 'Failure');
+        if (accepted) expect((yield* session.diagnostics(view, 1000)).added).toHaveLength(1);
+        if (accepted && result._tag === 'Success')
+          expect(result.value).toMatchObject({
+            status: 'ok',
+            items: [
+              {sourceBasis: 'pre-request-synchronized-text-v1', files: [{beforeText: f.text, observation: view}]},
+            ],
+          });
+      }).pipe(Effect.provide(io)),
+    );
+  }
+});

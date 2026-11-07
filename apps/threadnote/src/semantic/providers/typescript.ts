@@ -1,3 +1,5 @@
+import {ProposalOperation, ProposalChangeAnnotations} from '@threadnote/semantic/proposals';
+import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectRecord from 'effect/Record';
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
@@ -23,6 +25,8 @@ import {
   type SemanticDiagnostic,
   type DiagnosticSnapshot,
   type DiagnosticDelta,
+  type SemanticActionQuery,
+  type SemanticActionSelection,
 } from '../provider.js';
 export {SemanticSessionFault, validTextPosition} from '../provider.js';
 export type {SemanticDiagnostic, DiagnosticSnapshot, DiagnosticDelta} from '../provider.js';
@@ -500,206 +504,471 @@ export const makeTypeScriptSession = Effect.fn('semantic.makeTypeScriptSession')
     });
   const prepare = (
     operation: 'rename' | 'code-action',
-    observation: Observation,
-    position: Position,
+    inputObservation: Observation,
+    inputPosition: Position,
     newName: string | undefined,
     milliseconds: number,
+    inputActionQuery?: SemanticActionQuery,
+    inputSelection?: SemanticActionSelection,
   ) =>
-    mutations.withPermit(
-      Effect.gen(function* () {
-        if (operation !== 'rename' || !options.captureEditSource)
-          return {
-            version: 1,
-            status: 'unsupported',
-            reason: 'Edit family source basis is unqualified',
-            evidence: null,
-          } satisfies QueryOutcome;
-        const initial = current(observation);
-        if (!initial) return stale();
-        if (
-          !validTextPosition(initial.text, position) ||
-          !newName ||
-          newName.length > 512 ||
-          !wellFormed(newName) ||
-          /\p{Cc}/u.test(newName)
-        )
-          return yield* invalid();
-        const started = yield* Clock.currentTimeMillis;
-        const remaining = Effect.gen(function* () {
-          const left = milliseconds - ((yield* Clock.currentTimeMillis) - started);
-          if (left <= 0) return yield* LspFault.make({code: 'timeout'});
-          return left;
-        });
-        const Edit = Schema.Struct({range: Range, newText: Schema.String});
-        const Response = Schema.Struct({changes: Schema.Record(FileUri, Schema.Array(Edit))});
-        const request = () =>
-          Effect.gen(function* () {
-            yield* policy(yield* remaining);
-            const raw = yield* client.request(
-              'textDocument/rename',
-              {
-                textDocument: {uri: observation.uri},
-                position,
-                newName,
-              },
-              yield* remaining,
-            );
-            if (raw === null) return yield* SemanticSessionFault.make({reason: 'invalid'});
-            return yield* Schema.decodeUnknownEffect(Response, {onExcessProperty: 'error'})(raw).pipe(
-              Effect.mapError(invalid),
-            );
+    Effect.gen(function* () {
+      const {observation, position, actionQuery, selection} = yield* Effect.try({
+        try: () =>
+          structuredClone({
+            observation: inputObservation,
+            position: inputPosition,
+            actionQuery: inputActionQuery,
+            selection: inputSelection,
+          }),
+        catch: invalid,
+      });
+      return yield* mutations.withPermit(
+        Effect.gen(function* () {
+          if (!options.captureEditSource)
+            return {
+              version: 1,
+              status: 'unsupported',
+              reason: 'Edit family source basis is unqualified',
+              evidence: null,
+            } satisfies QueryOutcome;
+          const initial = current(observation);
+          if (!initial) return stale();
+          if (
+            !validTextPosition(initial.text, position) ||
+            (operation === 'rename' &&
+              (!newName || newName.length > 512 || !wellFormed(newName) || /\p{Cc}/u.test(newName))) ||
+            (operation === 'code-action' && (!actionQuery || !validRange(initial.text, actionQuery.range)))
+          )
+            return yield* invalid();
+          const started = yield* Clock.currentTimeMillis;
+          const remaining = Effect.gen(function* () {
+            const left = milliseconds - ((yield* Clock.currentTimeMillis) - started);
+            if (left <= 0) return yield* LspFault.make({code: 'timeout'});
+            return left;
           });
-        // Discovery has no authority. All edits from it are discarded before the retained-source request.
-        let discovered = yield* request();
-        for (let round = 0; round < typeScriptEditClosureLimits.maxRecomputeRounds; round++) {
-          const uris = EffectRecord.keys(discovered.changes).sort();
-          if (
-            !uris.length ||
-            uris.length > typeScriptEditClosureLimits.maxFiles ||
-            new Set([...documents.keys(), ...uris]).size > typeScriptEditClosureLimits.maxFiles
-          )
-            return yield* LspFault.make({code: 'capacity'});
-          const proof = new Map<string, TypeScriptEditSource>();
-          let bytes = 0;
-          for (const document of documents.values()) bytes += new TextEncoder().encode(document.text).length;
-          if (bytes > typeScriptEditClosureLimits.maxRetainedBytes) return yield* LspFault.make({code: 'capacity'});
-          for (const uri of uris) {
-            const retained = documents.get(uri);
-            if (retained && retained.observation.documentVersion !== null) continue;
-            const captured = yield* options.captureEditSource(uri);
-            if (captured.uri !== uri || sha256HexSync(captured.text) !== captured.content || !wellFormed(captured.text))
-              return yield* SemanticSessionFault.make({reason: 'stale'});
-            bytes +=
-              new TextEncoder().encode(captured.text).length -
-              (retained ? new TextEncoder().encode(retained.text).length : 0);
-            if (bytes > typeScriptEditClosureLimits.maxRetainedBytes) return yield* LspFault.make({code: 'capacity'});
-            proof.set(uri, captured);
-            const extension = EffectString.split('.')(new URL(uri).pathname).pop();
-            const language =
-              extension === 'tsx'
-                ? 'typescriptreact'
-                : extension === 'jsx'
-                  ? 'javascriptreact'
-                  : extension === 'js' || extension === 'mjs' || extension === 'cjs'
-                    ? 'javascript'
-                    : 'typescript';
-            // Internal disk opens keep disk provenance, even in an owned-buffer provider view.
-            yield* upsertUnlocked(
-              {...observation, uri, content: captured.content, documentVersion: null, view: observation.view},
-              captured.text,
-              language,
-              yield* remaining,
-              true,
-            );
-          }
-          const refreshed = documents.get(observation.uri);
-          if (!refreshed?.ready) return stale();
-          const finalObservation = structuredClone(refreshed.observation);
-          const before = new Map(
-            EffectArray.map([...documents], ([uri, doc]) => [
-              uri,
-              {text: doc.text, wireVersion: doc.wireVersion, observation: structuredClone(doc.observation)},
-            ]),
-          );
-          // Ordered projectInfo runs on the same tsserver queue after every didOpen/didChange.
-          const barrier = yield* projectInfo(observation.uri, yield* remaining);
-          if (
-            barrier.configuration !== initial.project?.configuration ||
-            JSON.stringify(barrier.files) !== JSON.stringify(initial.project.files) ||
-            !barrier.files.includes(decodeURIComponent(new URL(observation.uri).pathname))
-          )
-            return stale();
-          const final = yield* request();
-          const finalUris = EffectRecord.keys(final.changes).sort();
-          if (EffectArray.some(finalUris, uri => !uris.includes(uri))) {
-            discovered = final;
-            if (round === 0) continue;
-            return yield* SemanticSessionFault.make({reason: 'stale'});
-          }
-          const files = [];
-          let editCount = 0;
-          for (const uri of finalUris) {
-            const source = before.get(uri);
-            const live = documents.get(uri);
-            if (
-              !source ||
-              !live ||
-              live.project?.configuration !== barrier.configuration ||
-              !barrier.files.includes(decodeURIComponent(new URL(uri).pathname)) ||
-              live.wireVersion !== source.wireVersion ||
-              source.observation.projectEpoch !== finalObservation.projectEpoch
-            )
-              return yield* SemanticSessionFault.make({reason: 'stale'});
-            const edits = [...final.changes[uri]].sort(
-              (a, b) =>
-                a.range.start.line - b.range.start.line ||
-                a.range.start.character - b.range.start.character ||
-                a.range.end.line - b.range.end.line ||
-                a.range.end.character - b.range.end.character,
-            );
-            if (!edits.length) return yield* invalid();
-            for (const edit of edits) {
-              if (
-                ++editCount > typeScriptEditClosureLimits.maxEdits ||
-                !validRange(source.text, edit.range) ||
-                !wellFormed(edit.newText)
-              )
+          const Edit = Schema.Struct({range: Range, newText: Schema.String});
+          const Response = Schema.Struct({changes: Schema.Record(FileUri, Schema.Array(Edit))});
+          const normalizeActionEdit = (raw: unknown) =>
+            Effect.gen(function* () {
+              const envelope = yield* Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  changes: Schema.optionalKey(Schema.Record(FileUri, Schema.Array(Schema.Json))),
+                  documentChanges: Schema.optionalKey(Schema.Array(Schema.Json)),
+                  changeAnnotations: Schema.optionalKey(ProposalChangeAnnotations),
+                }),
+                {onExcessProperty: 'error'},
+              )(raw).pipe(Effect.mapError(invalid));
+              if ((envelope.changes === undefined) === (envelope.documentChanges === undefined))
                 return yield* invalid();
-            }
-            const captured = proof.get(uri);
-            if (captured) {
-              const closing = yield* options.captureEditSource(uri);
-              if (closing.content !== captured.content || closing.identity !== captured.identity)
-                return yield* SemanticSessionFault.make({reason: 'stale'});
-            }
-            files.push({
-              uri,
-              content: source.observation.content,
-              documentVersion: source.observation.documentVersion,
-              source: source.observation.documentVersion === null ? 'disk' : 'overlay',
-              beforeText: source.text,
-              observation: source.observation,
-              precondition: {
-                sourceKind: source.observation.documentVersion === null ? 'disk' : 'overlay',
-                rawDigest: source.observation.content,
-                encoding: 'utf-8',
-                physicalIdentity: captured?.identity ?? null,
-                owner: source.observation.view.owner,
-                documentVersion: source.observation.documentVersion,
-              },
-              edits,
+              const operations: ProposalOperation[] = [];
+              if (envelope.documentChanges) {
+                for (const raw of envelope.documentChanges) {
+                  if (!isJsonObject(raw)) return yield* invalid();
+                  if ('kind' in raw)
+                    operations.push(
+                      yield* Schema.decodeUnknownEffect(ProposalOperation, {onExcessProperty: 'error'})(raw),
+                    );
+                  else {
+                    const change = yield* Schema.decodeUnknownEffect(
+                      Schema.Struct({
+                        textDocument: Schema.Struct({uri: FileUri, version: Schema.NullOr(Counter)}),
+                        edits: Schema.Array(Schema.Json),
+                      }),
+                      {onExcessProperty: 'error'},
+                    )(raw);
+                    operations.push(
+                      yield* Schema.decodeUnknownEffect(ProposalOperation, {onExcessProperty: 'error'})({
+                        kind: 'text',
+                        ...change.textDocument,
+                        edits: change.edits,
+                        target: null,
+                      }),
+                    );
+                  }
+                }
+              } else
+                for (const [uri, edits] of EffectRecord.toEntries(envelope.changes!))
+                  operations.push(
+                    yield* Schema.decodeUnknownEffect(ProposalOperation, {onExcessProperty: 'error'})({
+                      kind: 'text',
+                      uri,
+                      version: null,
+                      edits,
+                      target: null,
+                    }),
+                  );
+              if (!operations.length || operations.length > typeScriptEditClosureLimits.maxEdits)
+                return yield* invalid();
+              return {
+                operations,
+                ...(envelope.changeAnnotations ? {changeAnnotations: envelope.changeAnnotations} : {}),
+              };
             });
-          }
-          const closingProject = yield* projectInfo(observation.uri, yield* remaining);
-          yield* policy(yield* remaining);
-          if (
-            !current(finalObservation) ||
-            closingProject.configuration !== barrier.configuration ||
-            JSON.stringify(closingProject.files) !== JSON.stringify(barrier.files)
-          )
-            return stale();
-          return {
+          const actionOutcome = (observation: Observation, items: readonly Schema.Json[]): QueryOutcome => ({
             version: 1,
             status: 'ok',
-            evidence: evidence(finalObservation),
-            items: [
-              {
-                kind: 'prepared-edit',
-                operation,
-                files,
-                scope: 'all-provider-returned-edits',
-                applied: false,
-                sourceBasis: 'pre-request-synchronized-text-v1',
-              },
-            ],
-          } satisfies QueryOutcome;
-        }
-        return stale();
-      }),
-    );
+            evidence: evidence(observation),
+            items: [...items],
+          });
+          const sourceFamilies: Readonly<Record<string, string>> = {
+            'source.organizeImports.ts': 'Organize Imports',
+            'source.sortImports.ts': 'Sort Imports',
+            'source.removeUnusedImports.ts': 'Remove Unused Imports',
+          };
+          const actionList = () =>
+            Effect.gen(function* () {
+              const fixed = documents.get(observation.uri)?.observation;
+              if (!fixed || !actionQuery) return yield* invalid();
+              // Recompute diagnostics as well as actions; stale data/edits are never replayed.
+              const refreshed = yield* diagnostics(fixed, yield* remaining);
+              const subset = actionQuery.diagnosticIds;
+              if (
+                subset &&
+                (new Set(subset).size !== subset.length ||
+                  EffectArray.some(subset, id => !EffectArray.some(refreshed.items, item => item.id === id)))
+              )
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              const native = EffectArray.map(
+                EffectArray.filter(refreshed.items, item => !subset || subset.includes(item.id)),
+                item => ({
+                  range: item.range,
+                  code: item.code,
+                  message: item.message,
+                  severity: item.category === 'error' ? 1 : item.category === 'warning' ? 2 : 3,
+                }),
+              );
+              const queryDigest = sha256HexSync(
+                JSON.stringify([
+                  actionQuery.range,
+                  actionQuery.only ?? null,
+                  EffectArray.map(refreshed.items, item => item.id).sort(),
+                  subset ?? null,
+                ]),
+              );
+              const raw = yield* client.request(
+                'textDocument/codeAction',
+                {
+                  textDocument: {uri: fixed.uri},
+                  range: actionQuery.range,
+                  context: {diagnostics: native, ...(actionQuery.only ? {only: [...actionQuery.only]} : {})},
+                },
+                yield* remaining,
+              );
+              const actions =
+                (yield* decode(Schema.NullOr(Schema.Array(Schema.Json).check(Schema.isMaxLength(128))), raw)) ?? [];
+              const choices = [];
+              for (const raw of actions) {
+                if (!isJsonObject(raw) || typeof raw.title !== 'string' || !wellFormed(raw.title))
+                  return yield* invalid();
+                const kind = typeof raw.kind === 'string' ? raw.kind : '';
+                const disabled =
+                  'disabled' in raw
+                    ? isJsonObject(raw.disabled) &&
+                      typeof raw.disabled.reason === 'string' &&
+                      wellFormed(raw.disabled.reason)
+                      ? raw.disabled.reason
+                      : 'Provider disabled this action'
+                    : null;
+                const command = 'command' in raw;
+                // Commands/opaque provider data are never executed or retained as authority.
+                const parsed =
+                  !command && !disabled && 'edit' in raw
+                    ? yield* normalizeActionEdit(raw.edit).pipe(Effect.option)
+                    : Option.none();
+                const preview = Option.getOrUndefined(parsed);
+                const independent =
+                  preview &&
+                  EffectArray.every(preview.operations, op => op.kind === 'text') &&
+                  new Set(EffectArray.map(preview.operations, op => (op.kind === 'text' ? op.uri : ''))).size ===
+                    preview.operations.length;
+                // TLS6.0.2 / TS6.0.3 provide exactly these finite semantic source families as inline edits.
+                const qualified = sourceFamilies[kind] === raw.title && !command && !disabled && !!independent;
+                const rawDigest = preview ? sha256HexSync(JSON.stringify(preview)) : null;
+                const selector = sha256HexSync(
+                  JSON.stringify([
+                    'tls-6.0.2-ts-6.0.3-source-v1',
+                    qualified ? kind : [kind, raw.title, disabled, command, rawDigest],
+                    queryDigest,
+                  ]),
+                );
+                choices.push({
+                  raw,
+                  preview,
+                  choice: {
+                    kind: 'action-choice' as const,
+                    title: raw.title,
+                    actionKind: kind,
+                    disabled,
+                    command,
+                    qualified,
+                    selector,
+                    queryDigest,
+                    blocker: disabled
+                      ? 'disabled'
+                      : command
+                        ? 'command'
+                        : qualified
+                          ? null
+                          : preview && !independent
+                            ? 'unsupported-operation-sequence'
+                            : 'unqualified-action-family',
+                  },
+                });
+              }
+              if (!current(fixed)) return yield* SemanticSessionFault.make({reason: 'stale'});
+              return {fixed, choices, queryDigest};
+            });
+          const request = () =>
+            Effect.gen(function* () {
+              yield* policy(yield* remaining);
+              if (operation === 'code-action') {
+                const listed = yield* actionList();
+                const choices = EffectArray.map(listed.choices, item => item.choice);
+                if (!selection) return {outcome: actionOutcome(listed.fixed, choices)};
+                if (selection.queryDigest !== listed.queryDigest)
+                  return {
+                    outcome: actionOutcome(listed.fixed, [
+                      {kind: 'action-result', status: 'changed-selection'},
+                      ...choices,
+                    ]),
+                  };
+                const matches = EffectArray.filter(listed.choices, item => item.choice.selector === selection.selector);
+                if (matches.length !== 1)
+                  return {
+                    outcome: actionOutcome(listed.fixed, [
+                      {kind: 'action-result', status: matches.length ? 'ambiguous' : 'no-match'},
+                      ...choices,
+                    ]),
+                  };
+                const selected = matches[0];
+                if (!selected.choice.qualified) {
+                  if (selected.preview && selected.choice.blocker === 'unsupported-operation-sequence')
+                    return {
+                      outcome: actionOutcome(listed.fixed, [
+                        {
+                          kind: 'prepared-edit',
+                          operation: 'code-action',
+                          sourceBasis: 'unqualified-operation-sequence-v1',
+                          qualification: 'unsupported-operation-sequence',
+                          files: [],
+                          ...selected.preview,
+                          scope: 'all-provider-returned-edits',
+                          applied: false,
+                        },
+                      ]),
+                    };
+                  return {
+                    outcome: actionOutcome(listed.fixed, [
+                      {kind: 'action-result', status: 'unsupported', reason: selected.choice.blocker},
+                      ...choices,
+                    ]),
+                  };
+                }
+                if (!selected.preview) return yield* invalid();
+                const changes: Record<string, readonly (typeof Edit.Type)[]> = {};
+                const versions: Record<string, number | null> = {};
+                for (const item of selected.preview.operations) {
+                  if (item.kind !== 'text' || changes[item.uri]) return yield* invalid();
+                  const doc = documents.get(item.uri);
+                  if (doc && item.version !== null && item.version !== doc.wireVersion)
+                    return yield* SemanticSessionFault.make({reason: 'stale'});
+                  changes[item.uri] = item.edits;
+                  versions[item.uri] = item.version;
+                }
+                return {changes, versions, preview: selected.preview};
+              }
+              const raw = yield* client.request(
+                'textDocument/rename',
+                {
+                  textDocument: {uri: observation.uri},
+                  position,
+                  newName: newName!,
+                },
+                yield* remaining,
+              );
+              if (raw === null) return yield* SemanticSessionFault.make({reason: 'invalid'});
+              return yield* Schema.decodeUnknownEffect(Response, {onExcessProperty: 'error'})(raw).pipe(
+                Effect.mapError(invalid),
+              );
+            });
+          // Discovery has no authority. All edits from it are discarded before the retained-source request.
+          let discovered = yield* request();
+          if ('outcome' in discovered && discovered.outcome) return discovered.outcome;
+          for (let round = 0; round < typeScriptEditClosureLimits.maxRecomputeRounds; round++) {
+            const uris = EffectRecord.keys(discovered.changes).sort();
+            if (
+              !uris.length ||
+              uris.length > typeScriptEditClosureLimits.maxFiles ||
+              new Set([...documents.keys(), ...uris]).size > typeScriptEditClosureLimits.maxFiles
+            )
+              return yield* LspFault.make({code: 'capacity'});
+            const proof = new Map<string, TypeScriptEditSource>();
+            let bytes = 0;
+            for (const document of documents.values()) bytes += new TextEncoder().encode(document.text).length;
+            if (bytes > typeScriptEditClosureLimits.maxRetainedBytes) return yield* LspFault.make({code: 'capacity'});
+            for (const uri of uris) {
+              const retained = documents.get(uri);
+              if (retained && retained.observation.documentVersion !== null) continue;
+              const captured = yield* options.captureEditSource(uri);
+              if (
+                captured.uri !== uri ||
+                sha256HexSync(captured.text) !== captured.content ||
+                !wellFormed(captured.text)
+              )
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              bytes +=
+                new TextEncoder().encode(captured.text).length -
+                (retained ? new TextEncoder().encode(retained.text).length : 0);
+              if (bytes > typeScriptEditClosureLimits.maxRetainedBytes) return yield* LspFault.make({code: 'capacity'});
+              proof.set(uri, captured);
+              const extension = EffectString.split('.')(new URL(uri).pathname).pop();
+              const language =
+                extension === 'tsx'
+                  ? 'typescriptreact'
+                  : extension === 'jsx'
+                    ? 'javascriptreact'
+                    : extension === 'js' || extension === 'mjs' || extension === 'cjs'
+                      ? 'javascript'
+                      : 'typescript';
+              // Internal disk opens keep disk provenance, even in an owned-buffer provider view.
+              yield* upsertUnlocked(
+                {...observation, uri, content: captured.content, documentVersion: null, view: observation.view},
+                captured.text,
+                language,
+                yield* remaining,
+                true,
+              );
+            }
+            const refreshed = documents.get(observation.uri);
+            if (!refreshed?.ready) return stale();
+            const finalObservation = structuredClone(refreshed.observation);
+            const before = new Map(
+              EffectArray.map([...documents], ([uri, doc]) => [
+                uri,
+                {text: doc.text, wireVersion: doc.wireVersion, observation: structuredClone(doc.observation)},
+              ]),
+            );
+            // Ordered projectInfo runs on the same tsserver queue after every didOpen/didChange.
+            const barrier = yield* projectInfo(observation.uri, yield* remaining);
+            if (
+              barrier.configuration !== initial.project?.configuration ||
+              JSON.stringify(barrier.files) !== JSON.stringify(initial.project.files) ||
+              !barrier.files.includes(decodeURIComponent(new URL(observation.uri).pathname))
+            )
+              return stale();
+            const final = yield* request();
+            if ('outcome' in final && final.outcome) return final.outcome;
+            const finalUris = EffectRecord.keys(final.changes).sort();
+            if (EffectArray.some(finalUris, uri => !uris.includes(uri))) {
+              discovered = final;
+              if (round === 0) continue;
+              return yield* SemanticSessionFault.make({reason: 'stale'});
+            }
+            const files = [];
+            let editCount = 0;
+            for (const uri of finalUris) {
+              const source = before.get(uri);
+              const live = documents.get(uri);
+              if (
+                !source ||
+                !live ||
+                live.project?.configuration !== barrier.configuration ||
+                !barrier.files.includes(decodeURIComponent(new URL(uri).pathname)) ||
+                live.wireVersion !== source.wireVersion ||
+                source.observation.projectEpoch !== finalObservation.projectEpoch
+              )
+                return yield* SemanticSessionFault.make({reason: 'stale'});
+              const edits = [...final.changes[uri]].sort(
+                (a, b) =>
+                  a.range.start.line - b.range.start.line ||
+                  a.range.start.character - b.range.start.character ||
+                  a.range.end.line - b.range.end.line ||
+                  a.range.end.character - b.range.end.character,
+              );
+              if (!edits.length) return yield* invalid();
+              for (const edit of edits) {
+                if (
+                  ++editCount > typeScriptEditClosureLimits.maxEdits ||
+                  !validRange(source.text, edit.range) ||
+                  !wellFormed(edit.newText)
+                )
+                  return yield* invalid();
+              }
+              const captured = proof.get(uri);
+              if (captured) {
+                const closing = yield* options.captureEditSource(uri);
+                if (closing.content !== captured.content || closing.identity !== captured.identity)
+                  return yield* SemanticSessionFault.make({reason: 'stale'});
+              }
+              files.push({
+                uri,
+                content: source.observation.content,
+                documentVersion: source.observation.documentVersion,
+                source: source.observation.documentVersion === null ? 'disk' : 'overlay',
+                beforeText: source.text,
+                ...(operation === 'code-action' && 'versions' in final
+                  ? {providerDocumentVersion: final.versions[uri]}
+                  : {}),
+                observation: source.observation,
+                precondition: {
+                  sourceKind: source.observation.documentVersion === null ? 'disk' : 'overlay',
+                  rawDigest: source.observation.content,
+                  encoding: 'utf-8',
+                  physicalIdentity: captured?.identity ?? null,
+                  owner: source.observation.view.owner,
+                  documentVersion: source.observation.documentVersion,
+                },
+                edits,
+              });
+            }
+            const closingProject = yield* projectInfo(observation.uri, yield* remaining);
+            yield* policy(yield* remaining);
+            if (
+              !current(finalObservation) ||
+              closingProject.configuration !== barrier.configuration ||
+              JSON.stringify(closingProject.files) !== JSON.stringify(barrier.files)
+            )
+              return stale();
+            return {
+              version: 1,
+              status: 'ok',
+              evidence: evidence(finalObservation),
+              items: [
+                {
+                  kind: 'prepared-edit',
+                  operation,
+                  files,
+                  ...(operation === 'code-action' && 'preview' in final
+                    ? {
+                        qualification: 'qualified-text-only',
+                        operations: EffectArray.map(final.preview.operations, op =>
+                          op.kind === 'text' ? {...op, target: finalUris.indexOf(op.uri)} : op,
+                        ),
+                        ...(final.preview.changeAnnotations
+                          ? {changeAnnotations: final.preview.changeAnnotations}
+                          : {}),
+                      }
+                    : {}),
+                  scope: 'all-provider-returned-edits',
+                  applied: false,
+                  sourceBasis: 'pre-request-synchronized-text-v1',
+                },
+              ],
+            } satisfies QueryOutcome;
+          }
+          return stale();
+        }),
+      );
+    });
   return {
     upsert,
     prepare,
+    actions: (
+      observation: Observation,
+      query: SemanticActionQuery,
+      milliseconds: number,
+      selection?: SemanticActionSelection,
+    ) => prepare('code-action', observation, query.range.start, undefined, milliseconds, query, selection),
     verifyPolicy: policy(2000),
     available: Effect.sync(() => !invalidated),
     project: (uri: string) => Effect.sync(() => structuredClone(documents.get(uri)?.project)),
