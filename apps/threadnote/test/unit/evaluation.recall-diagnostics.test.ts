@@ -1,10 +1,13 @@
 import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Record} from 'effect';
+import {Effect, Exit, FileSystem, Path, Record} from 'effect';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
+  completeRecallEvaluation,
+  recallEvaluationTeardown,
+  writeRecallEvaluationDiagnostics,
   measureRecallEvaluationSample,
   recallEvaluationScenario,
   writeRecallEvaluationDiagnosticsAndEnforce,
@@ -86,7 +89,7 @@ effectIt.effect('writes passing and correctness-failed evidence without weakenin
       JSON.parse(yield* fs.readFileString(`${root}/pass.json`)).productionBenchmark.scenarios.hotQuery.p95Milliseconds,
     ).toBe(150);
     const failed = yield* writeRecallEvaluationDiagnosticsAndEnforce(`${root}/correctness.json`, {
-      ...passing,
+      ...diagnostics(Array<number>(25).fill(151)),
       correctnessFailureCount: 2,
     }).pipe(Effect.result);
     expect(failed._tag).toBe('Failure');
@@ -131,3 +134,50 @@ it('preserves sample order/input bytes and the existing percentile definition ac
     {numRuns: 80},
   );
 });
+
+effectIt.effect('publishes completion only after successful scope teardown and never after a failed finalizer', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped({prefix: 'recall-terminal-'});
+    const file = `${root}/diagnostics.json`;
+    for (const failCleanup of [false, true]) {
+      let cleaned = false;
+      yield* fs.remove(`${file}.receipt.json`, {force: true});
+      const scoped = Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.gen(function* () {
+              expect(yield* fs.exists(`${file}.receipt.json`).pipe(Effect.orDie)).toBe(false);
+              cleaned = true;
+              if (failCleanup) return yield* Effect.die('cleanup failed');
+            }),
+          );
+          return yield* writeRecallEvaluationDiagnostics(file, diagnostics(Array<number>(25).fill(151)));
+        }),
+      );
+      const result = yield* completeRecallEvaluation(scoped, file, 'fresh-nonce').pipe(Effect.exit);
+      expect(cleaned).toBe(true);
+      expect(yield* fs.exists(`${file}.receipt.json`)).toBe(!failCleanup);
+      if (!failCleanup) {
+        expect(result).toEqual(Exit.succeed(75));
+        expect(JSON.parse(yield* fs.readFileString(`${file}.receipt.json`))).toMatchObject({
+          nonce: 'fresh-nonce',
+          verdict: 'timing-only',
+        });
+      } else expect(Exit.isFailure(result)).toBe(true);
+      let code = -1;
+      recallEvaluationTeardown(result, value => {
+        code = value;
+      });
+      expect(code).toBe(failCleanup ? 1 : 75);
+    }
+    yield* fs.remove(`${file}.receipt.json`, {force: true});
+    expect(yield* completeRecallEvaluation(Effect.succeed({verdict: 'timing-only'}), file)).toBe(1);
+    expect(yield* fs.exists(`${file}.receipt.json`)).toBe(false);
+    yield* fs.makeDirectory(`${file}.receipt.json`);
+    const failedWrite = yield* completeRecallEvaluation(Effect.succeed({verdict: 'timing-only'}), file, 'nonce').pipe(
+      Effect.exit,
+    );
+    expect(Exit.isFailure(failedWrite)).toBe(true);
+  }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer)),
+);

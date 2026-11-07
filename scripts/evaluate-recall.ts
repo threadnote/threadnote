@@ -1,6 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
-import {BunRuntime} from '@effect/platform-bun';
+import {BunServices, BunRuntime} from '@effect/platform-bun';
 import {Clock, Console, DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {evaluateRecallFixture, parseRecallEvaluationFixture} from '@threadnote/recall/evaluate';
@@ -17,7 +17,9 @@ import {
   captureRecallEvaluationSource,
   measureRecallEvaluationSample,
   recallEvaluationScenario,
-  writeRecallEvaluationDiagnosticsAndEnforce,
+  writeRecallEvaluationDiagnostics,
+  completeRecallEvaluation,
+  recallEvaluationTeardown,
   type RecallEvaluationSample,
 } from './evaluate-recall-diagnostics.js';
 import * as EffectString from 'effect/String';
@@ -69,7 +71,7 @@ const program = Effect.gen(function* () {
     productionBenchmark,
   };
   yield* Console.log(JSON.stringify(output, undefined, 2));
-  yield* writeRecallEvaluationDiagnosticsAndEnforce('artifacts/recall-production-10000.json', {
+  return yield* writeRecallEvaluationDiagnostics('artifacts/recall-production-10000.json', {
     correctnessFailureCount: result.failures.length,
     fixtureSha256: sha256HexSync(raw),
     observations,
@@ -295,6 +297,13 @@ function percentile(sorted: readonly number[], quantile: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * quantile))] ?? 0;
 }
 
-BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer), {
-  disableErrorReporting: false,
-});
+BunRuntime.runMain(
+  completeRecallEvaluation(
+    provideScriptLayer(program, ApplicationLayer),
+    'artifacts/recall-production-10000.json',
+    process.env.THREADNOTE_RECALL_ATTEMPT_NONCE,
+    // This executable owns the outer receipt-publication filesystem after application cleanup.
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide
+  ).pipe(Effect.provide(BunServices.layer)),
+  {disableErrorReporting: false, teardown: recallEvaluationTeardown},
+);

@@ -543,6 +543,8 @@ describe('generated Bazel test contracts', () => {
     ]);
     expect(target('//:compile_targets').dependsOn).toEqual(['//:compile_inputs']);
     expect(target('//:recall_quality').dependsOn).toEqual(['//:recall_quality_inputs']);
+    expect(target('//:recall_quality_inputs').inputs).toContain('tools/ci/recall-confirmation.ts');
+    expect(target('//:recall_quality_inputs').inputs).toContain('scripts/evaluate-recall.ts');
     expect(target('//:windows_smoke').dependsOn).toEqual(['//:windows_smoke_inputs']);
   });
 
@@ -662,6 +664,7 @@ describe('generated Bazel test contracts', () => {
     ],
     ['packages/inference/src/vector-search.ts', '//packages/inference:test', '//:recall_quality'],
     ['scripts/support/code-graph-workset-fixture.ts', '//:recall_quality_inputs', '//:recall_quality'],
+    ['tools/ci/recall-confirmation.ts', '//:recall_quality_inputs', '//:recall_quality'],
     ['apps/threadnote/test/helpers/runtime-policy.ts', '//:windows_smoke_inputs', '//:windows_smoke'],
   ])('selects %s via the transitive lane contract', (changedFile, impactedTarget, lane) => {
     const result = selectTargets({

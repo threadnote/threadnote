@@ -127,13 +127,15 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: Gate production lexical and exact-search behavior
-        run: bun run eval:recall
+        run: bun tools/ci/recall-confirmation.ts
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: recall-production-pr-10000-Linux-${{ runner.arch }}
-          path: artifacts/recall-production-10000.json
+          path: |
+            artifacts/recall-production-10000.json
+            artifacts/recall-confirmation/
           if-no-files-found: warn
           retention-days: 14
 

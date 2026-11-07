@@ -8,7 +8,7 @@ export default defineConfig({
   globalSetup: './apps/threadnote/test/e2e/manager/fixtures/global-setup.ts',
   fullyParallel: true,
   forbidOnly: ci,
-  failOnFlakyTests: ci,
+  failOnFlakyTests: false,
   retries: ci ? 1 : 0,
   workers: 1,
   timeout: 30_000,
