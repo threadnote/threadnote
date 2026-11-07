@@ -1,8 +1,10 @@
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {SecureRandom} from 'effect/crypto';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {SystemInfo} from '@threadnote/platform/system';
 import type {
   CodeGraphWorksetCatalogCandidateLaneV1,
   CodeGraphWorksetCatalogCandidatePageV1,
@@ -113,18 +115,22 @@ interface LexicalCursor {
 type CandidateCursor = ExactCursor | LexicalCursor;
 
 /**
- * Capture the filesystem services once and expose the service-free candidate
+ * Capture the catalog services once and expose the service-free candidate
  * boundary expected by the router.
  */
 export const makeCodeGraphWorksetCatalogCandidateSource = Effect.fn('codeGraphWorksetCatalog.makeCandidateSource')(
   function* (threadnoteHome: string) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const random = yield* SecureRandom.SecureRandom;
+    const system = yield* SystemInfo;
     const databasePath = codeGraphWorksetCatalogLayout(path, threadnoteHome).databasePath;
     const readGeneration = (worksetName: string) =>
       readPublishedCodeGraphWorksetCatalogGeneration(threadnoteHome, worksetName).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(SecureRandom.SecureRandom, random),
+        Effect.provideService(SystemInfo, system),
       );
     return {
       mode: 'catalog-index',

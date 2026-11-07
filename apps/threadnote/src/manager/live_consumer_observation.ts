@@ -39,7 +39,9 @@ const PROCESS_SAMPLE_MILLISECONDS = 3_000;
 const MAX_WATCHES = 128;
 const MAX_RESOURCES = 32;
 
-type Probe = {readonly revision: string; readonly directories: readonly string[]} | undefined;
+type Probe =
+  | {readonly revision: string; readonly structuralRevision?: string; readonly directories: readonly string[]}
+  | undefined;
 export interface ManagerLiveConsumerAdapter {
   readonly topics: readonly ManagerLiveTopic[];
   readonly subscribe: (
@@ -54,6 +56,7 @@ type Entry = {
   readonly resource: ManagerLiveResource;
   available: boolean;
   revision?: string;
+  structuralRevision?: string;
   directories: readonly string[];
   needsRecovery?: boolean;
 };
@@ -97,6 +100,7 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
   const signal = Queue.offer(wake, undefined).pipe(Effect.asVoid);
   const entries = new Map<string, Entry>();
   const connections = new Map<string, readonly ManagerLiveResource[]>();
+  const processDisplayConsumers = new Set<string>();
   const watches = new Map<string, Fiber.Fiber<void>>();
   let nextPeriodic = 0;
   let nextProcess = 0;
@@ -185,11 +189,13 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     const directory = path.join(config.agentContextHome, 'runtime', 'processes');
     const names = yield* readBoundedProcessRegistrationNames(directory);
     if (names.truncated) return undefined;
-    const snapshot = yield* readManageableThreadnoteProcessDiagnostics(config);
+    const snapshot = yield* readManageableThreadnoteProcessDiagnostics(config, {
+      resources: processDisplayConsumers.size > 0,
+    });
     if (snapshot.truncated) return undefined;
     processSnapshot = snapshot;
-    // Age and RSS are display clocks, not process membership or action state.
-    const revision = sha256HexSync(
+    // Resource samples update lanes independently from graph membership/activity invalidation.
+    const structuralRevision = sha256HexSync(
       JSON.stringify(
         EffectArray.map(snapshot.processes, process => ({
           activityRole: process.activityRole,
@@ -205,7 +211,10 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
         })),
       ),
     );
-    return {revision, directories: [directory]} satisfies Probe;
+    const revision = sha256HexSync(
+      JSON.stringify(EffectArray.map(snapshot.processes, process => ({...process, ageMilliseconds: undefined}))),
+    );
+    return {revision, structuralRevision, directories: [directory]} satisfies Probe;
   });
 
   const modelProbe = Effect.gen(function* () {
@@ -357,15 +366,21 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
       }
       entry.directories = observed.directories;
       const prior = entry.revision;
+      const priorStructural = entry.structuralRevision ?? prior;
+      const nextStructural =
+        'structuralRevision' in observed && typeof observed.structuralRevision === 'string'
+          ? observed.structuralRevision
+          : observed.revision;
       const wasAvailable = entry.available;
       const needsRecovery = entry.needsRecovery === true;
       entry.revision = observed.revision;
+      entry.structuralRevision = nextStructural;
       entry.needsRecovery = false;
       if (entry.available && prior !== observed.revision)
         yield* callbacks.onInvalidate(entry.resource, observed.revision);
       yield* availability(entry, true);
       if (entry.resource.topic === 'processes')
-        yield* reportProcessCoverage(true, needsRecovery || (wasAvailable && prior !== observed.revision));
+        yield* reportProcessCoverage(true, needsRecovery || (wasAvailable && priorStructural !== nextStructural));
     });
 
   const watchDirectory = (directory: string) =>
@@ -466,6 +481,9 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
     },
     subscribe: (connection: string, requested: readonly ManagerLiveResource[]) =>
       Effect.gen(function* () {
+        if (EffectArray.some(requested, resource => resource.topic === 'processes'))
+          processDisplayConsumers.add(connection);
+        else processDisplayConsumers.delete(connection);
         const supported = EffectArray.filter(
           requested,
           (resource, __effectArrayIndex) => __effectArrayIndex in requested && topics.includes(resource.topic),
@@ -504,7 +522,10 @@ export const makeManagerLiveConsumerObservation = Effect.fn('manager.consumerLiv
         ];
       }).pipe(gate.withPermit),
     release: (connection: string) =>
-      Effect.sync(() => connections.delete(connection)).pipe(
+      Effect.sync(() => {
+        connections.delete(connection);
+        processDisplayConsumers.delete(connection);
+      }).pipe(
         Effect.andThen(admitRetained),
         Effect.andThen(Effect.forEach(adapters, adapter => adapter.release(connection), {discard: true})),
         Effect.andThen(signal),

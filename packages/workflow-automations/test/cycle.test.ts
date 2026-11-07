@@ -1,8 +1,9 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Array as A, String as S} from 'effect';
 import {
+  NativeCyclePacketOptionsSchema,
   nativeCyclePacket,
   validateNativeCycleCapacityRecord,
   validateNativeCycleFeaturePublication,
@@ -230,11 +231,28 @@ describe('native cycle pure domain', () => {
     expect(checkNativeCycleScope(plan.phases[0], ['src/a.ts'])).toBe(false);
     expect(validateNativeCyclePhase(state, 'one', snapshot([]), validation).phases.one.status).toBe('validated');
     expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation)).toThrow();
-    expect(
-      withPaths(Array.from({length: 128}, (_, index) => `src/file-${index}.ts`)).phases[0].allowedPaths,
-    ).toHaveLength(128);
-    expect(() => withPaths(Array.from({length: 129}, (_, index) => `src/file-${index}.ts`))).toThrow();
+    for (const count of [129, 162, 256]) {
+      const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+      const phase = withPaths(allowedPaths).phases[0];
+      expect(phase.allowedPaths).toEqual(allowedPaths);
+      expect(checkNativeCycleScope(phase, allowedPaths)).toBe(true);
+      expect(checkNativeCycleScope(phase, ['src/outside.ts'])).toBe(false);
+    }
+    expect(() => withPaths(Array.from({length: 257}, (_, index) => `src/file-${index}.ts`))).toThrow();
     expect(() => withPaths([''])).toThrow();
+  });
+
+  it('preserves exact-path scope for every bounded authoring-sized path set', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 129, max: 256}), count => {
+        const allowedPaths = Array.from({length: count}, (_, index) => `src/file-${index}.ts`);
+        const phase = decodeNativeCyclePlan(makePlan([{...makePlan().phases[0], allowedPaths}])).phases[0];
+        expect(phase.allowedPaths).toEqual(allowedPaths);
+        expect(checkNativeCycleScope(phase, allowedPaths)).toBe(true);
+        expect(checkNativeCycleScope(phase, ['src/unlisted.ts'])).toBe(false);
+      }),
+      {numRuns: 24},
+    );
   });
 
   it('permits a change set under empty scope exactly when the change set is empty', () => {
@@ -487,6 +505,36 @@ describe('native cycle pure domain', () => {
     expect(reconciled.state.phases.one?.phaseHash).toBe(nativeCyclePhaseHash(reconciled.state.plan, 'one'));
   });
 
+  it('invalidates base-dependent acceptance while preserving generated delivery history and phase identity', () => {
+    fc.assert(
+      fc.property(fc.constantFrom('stable', 'prerelease', 'release'), baseBranch => {
+        const delivered = recordNativeCycleDelivery(validateFirst(), 'one', prDelivery());
+        const before = structuredClone(delivered);
+        const plan = makePlan();
+        plan.phases[0].baseBranch = baseBranch;
+        const reconciled = reconcileNativeCyclePlan(delivered, decodeNativeCyclePlan(plan), 'Approved new PR base');
+        expect(reconciled.affected).toEqual(['one', 'two']);
+        for (const id of ['one', 'two']) {
+          expect(reconciled.state.phases[id].status).toBe('stale');
+          expect(reconciled.state.phases[id].phaseHash).toBe(before.phases[id].phaseHash);
+          expect(reconciled.state.phases[id].validation).toBeUndefined();
+          expect(reconciled.state.phases[id].delivery).toBeUndefined();
+        }
+        expect(reconciled.state.phases.one.history?.at(-1)).toMatchObject({
+          delivery: before.phases.one.delivery,
+          validation: before.phases.one.validation,
+        });
+        expect(nextNativeCycle(reconciled.state)).toEqual({
+          action: 'blocked',
+          phaseId: 'one',
+          reason: 'Approved new PR base',
+        });
+        expect(delivered).toEqual(before);
+      }),
+      {numRuns: 12},
+    );
+  });
+
   it('rejects removal or rewriting of accepted and merged evidence', () => {
     const first = recordNativeCycleDelivery(validateFirst(), 'one', prDelivery());
     const accepted = validateNativeCyclePhase(first, 'two', snapshot(['test/a.ts']), {
@@ -572,5 +620,8 @@ describe('native cycle pure domain', () => {
     expect(() =>
       validateNativeCycleCapacityRecord({...packetOptions.capacity, selection: 'escalation', risk: 'settled'}),
     ).toThrow();
+    const mainAgentCapacity = {...packetOptions.capacity, selection: 'main-agent'};
+    expect(() => validateNativeCycleCapacityRecord(mainAgentCapacity)).toThrow('background worker');
+    expect(Schema.is(NativeCyclePacketOptionsSchema)({...packetOptions, capacity: mainAgentCapacity})).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -16,6 +16,7 @@ import {normalizedRecallRecordedAt} from './selection.js';
 import {recallCandidateLogicalCorpusKey, type RecallCandidate} from '../rank.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {captureRecallSourceInput, recallRefreshSuperseded} from './refresh_cut.js';
 
 export interface RecallIndexSource {
   readonly modifiedAt?: string;
@@ -52,6 +53,9 @@ interface RecallRefreshSourceRow {
   readonly source_size: number;
   readonly uri: string;
 }
+interface RetainedRecallSourceRow extends RecallRefreshSourceRow {
+  readonly authority_policy_key: string | null;
+}
 
 interface RecallRefreshIndexedGenerationRow {
   readonly candidate_json: string;
@@ -80,7 +84,7 @@ const RECALL_REFRESH_GENERATION_PAGE_SIZE = 16;
 const RECALL_REFRESH_CODE_LINK_GENERATION_PAGE_SIZE = 256;
 const RECALL_REFRESH_SOURCE_PAGE_SIZE = 256;
 const RECALL_REFRESH_SOURCE_GC_INTERVAL = RECALL_REFRESH_SOURCE_PAGE_SIZE * 32;
-const MAX_INDEXED_FILE_BYTES = 512 * 1_024;
+export const MAX_INDEXED_FILE_BYTES = 512 * 1_024;
 const TEXT_EXTENSIONS = new Set(['.json', '.md', '.mdx', '.txt', '.yaml', '.yml']);
 
 export const RECALL_REFRESH_AFFECTED_TERM_TABLE = 'recall_refresh_affected_terms';
@@ -90,6 +94,7 @@ export const RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE = 'recall_refresh_indexed_
 export const RECALL_REFRESH_INDEXED_POSTING_TABLE = 'recall_refresh_indexed_postings';
 export const RECALL_REFRESH_REPLACED_DOCUMENT_TABLE = 'recall_refresh_replaced_documents';
 export const RECALL_REFRESH_SOURCE_TABLE = 'recall_refresh_sources';
+const RECALL_REFRESH_SOURCE_DIGEST_TABLE = 'recall_refresh_source_digests';
 
 export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   sql: SqlClient.SqlClient,
@@ -109,27 +114,12 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   let pendingSources: RecallRefreshSourceInsert[] = [];
   let scannedSourceCount = 0;
   let skippedOversizedDocumentCount = 0;
+  const omittedSourceInputs = new Map<string, string>();
   const flushPendingSources = () => {
     if (pendingSources.length === 0) return Effect.void;
     const batch = pendingSources;
     pendingSources = [];
-    return sql.unsafe(
-      `INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} (
-        uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
-      ) VALUES ${EffectArray.join(
-        EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?)'),
-        ', ',
-      )}`,
-      EffectArray.flatMap(batch, source => [
-        source.uri,
-        source.uriLocatorDigest,
-        source.path,
-        source.modifiedAt ?? null,
-        source.size,
-        source.authorityPolicyKey,
-        source.invalidated ? 1 : 0,
-      ]),
-    );
+    return insertRecallSourceMetadata(sql, batch);
   };
   for (const root of recallIndexRoots(config, path)) {
     const rootId = parseResourceId(root.uri);
@@ -144,6 +134,9 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
       file =>
         Effect.gen(function* () {
           if (file.size > MAX_INDEXED_FILE_BYTES) {
+            const input = yield* captureRecallSourceInput(file.path);
+            if (!input.info || Number(input.info.size) !== file.size) return yield* recallRefreshSuperseded();
+            omittedSourceInputs.set(file.path, input.key);
             skippedOversizedDocumentCount += 1;
             return;
           }
@@ -152,7 +145,10 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
             segment => Effect2.pipe(segment, EffectString.normalize('NFC')),
           );
           const uri = canonicalResourceUri(rootId.namespace, [...rootId.segments, ...relativeSegments]);
-          if (isExternalResourceUri(uri) && externalAccess[uri] === undefined) return;
+          if (isExternalResourceUri(uri) && externalAccess[uri] === undefined) {
+            omittedSourceInputs.set(file.path, (yield* captureRecallSourceInput(file.path)).key);
+            return;
+          }
           pendingSources.push({
             authorityPolicyKey: canonicalResourcePolicy.entryKeyByUri.get(uri) ?? null,
             invalidated: invalidatedUris.has(uri),
@@ -176,12 +172,352 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
     );
   }
   yield* flushPendingSources();
-  yield* sql.unsafe(
+  yield* indexRecallSourceLocators(sql);
+  return {scannedSourceCount, skippedOversizedDocumentCount, omittedSourceInputs};
+});
+
+function insertRecallSourceMetadata(sql: SqlClient.SqlClient, sources: readonly RecallRefreshSourceInsert[]) {
+  if (sources.length === 0) return Effect.void;
+  return sql.unsafe(
+    `INSERT INTO ${RECALL_REFRESH_SOURCE_TABLE} (
+        uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
+      ) VALUES ${EffectArray.join(
+        EffectArray.map(sources, () => '(?, ?, ?, ?, ?, ?, ?)'),
+        ', ',
+      )}`,
+    EffectArray.flatMap(sources, source => [
+      source.uri,
+      source.uriLocatorDigest,
+      source.path,
+      source.modifiedAt ?? null,
+      source.size,
+      source.authorityPolicyKey,
+      source.invalidated ? 1 : 0,
+    ]),
+  );
+}
+
+function insertRecallSourceDigests(
+  sql: SqlClient.SqlClient,
+  sources: readonly {readonly uri: string; readonly uriLocatorDigest: string}[],
+) {
+  if (sources.length === 0) return Effect.void;
+  return sql.unsafe(
+    `INSERT INTO temp.${RECALL_REFRESH_SOURCE_DIGEST_TABLE} (uri, uri_locator_digest)
+     VALUES ${EffectArray.join(
+       EffectArray.map(sources, () => '(?, ?)'),
+       ', ',
+     )}`,
+    EffectArray.flatMap(sources, source => [source.uri, source.uriLocatorDigest]),
+  );
+}
+function indexRecallSourceLocators(sql: SqlClient.SqlClient) {
+  return sql.unsafe(
     `CREATE INDEX temp.${RECALL_REFRESH_SOURCE_TABLE}_locator_digest
      ON ${RECALL_REFRESH_SOURCE_TABLE}(uri_locator_digest, uri)`,
   );
-  return {scannedSourceCount, skippedOversizedDocumentCount};
+}
+
+/** A touched pass still stages a complete inventory for deletion and legacy-link joins. */
+export const stageRecallSources = Effect.fn('recall.stageSources')(function* (
+  sql: SqlClient.SqlClient,
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  config: RecallRefreshConfig,
+  options: {
+    readonly includeInactive: boolean;
+    readonly canonicalResourcePolicy: CanonicalResourcePolicy;
+    readonly invalidatedUris: ReadonlySet<string>;
+    /** The caller proves mutation continuity and unchanged scope/policy before choosing touched mode. */
+    readonly mode: {readonly kind: 'full'} | {readonly kind: 'touched'; readonly contentGeneration: string};
+  },
+) {
+  if (options.mode.kind === 'touched') {
+    const touched = yield* tryStageTouchedRecallSources(sql, fs, path, config, options, options.mode.contentGeneration);
+    if (touched) return {...touched, mode: 'touched' as const, forceAllSources: false};
+  }
+  return {
+    ...(yield* scanRecallSources(
+      sql,
+      fs,
+      path,
+      config,
+      options.includeInactive,
+      options.canonicalResourcePolicy,
+      options.invalidatedUris,
+    )),
+    mode: 'full' as const,
+    forceAllSources: options.mode.kind === 'touched',
+  };
 });
+
+/** An uncertain mapping leaves the caller free to load complete policy before one full scan. */
+export const tryStageTouchedRecallSources = Effect.fn('recall.tryStageTouchedSources')(function* (
+  sql: SqlClient.SqlClient,
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  config: RecallRefreshConfig,
+  options: {
+    readonly includeInactive: boolean;
+    readonly canonicalResourcePolicy: CanonicalResourcePolicy;
+    readonly invalidatedUris: ReadonlySet<string>;
+  },
+  contentGeneration: string,
+) {
+  yield* prepareRecallSourceScan(sql);
+  return yield* sql
+    .withTransaction(stageTouchedRecallSources(sql, fs, path, config, options, contentGeneration))
+    .pipe(Effect.provideService(SqlClient.BeginTransaction, 'BEGIN DEFERRED'));
+});
+
+const stageTouchedRecallSources = Effect.fn('recall.stageTouchedSources')(function* (
+  sql: SqlClient.SqlClient,
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  config: RecallRefreshConfig,
+  options: {
+    readonly includeInactive: boolean;
+    readonly canonicalResourcePolicy: CanonicalResourcePolicy;
+    readonly invalidatedUris: ReadonlySet<string>;
+  },
+  contentGeneration: string,
+) {
+  if (options.invalidatedUris.size === 0 || options.invalidatedUris.size > 1024) return undefined;
+  const metadata = yield* sql.unsafe<{readonly key: string; readonly value: string}>(
+    "SELECT key, value FROM metadata WHERE key IN ('content_generation', 'oversized_document_count')",
+  );
+  const values = new Map(EffectArray.map(metadata, row => [row.key, row.value]));
+  const skipped = Number(values.get('oversized_document_count'));
+  if (
+    values.get('content_generation') !== contentGeneration ||
+    !Number.isSafeInteger(skipped) ||
+    skipped < 0 ||
+    String(skipped) !== values.get('oversized_document_count')
+  )
+    return undefined;
+  const roots = EffectArray.map(recallIndexRoots(config, path), root => {
+    const id = parseResourceId(root.uri);
+    return {...root, uri: id.canonicalUri, id};
+  });
+  const selected = new Map<string, {readonly root: (typeof roots)[number]; readonly segments: readonly string[]}>();
+  const folded = new Map<string, string>();
+  for (const raw of options.invalidatedUris) {
+    const id = yield* Effect.try(() => parseResourceId(stripRecallAnchor(raw))).pipe(Effect.option);
+    if (Option.isNone(id)) return undefined;
+    const root = EffectArray.findFirst(
+      roots,
+      root =>
+        root.id.namespace === id.value.namespace &&
+        EffectArray.every(root.id.segments, (segment, i) => id.value.segments[i] === segment),
+    );
+    if (Option.isNone(root)) return undefined;
+    const segments = id.value.segments.slice(root.value.id.segments.length);
+    const filename = path.join(root.value.path, ...segments);
+    if (segments.length === 0 || excludedFile(filename)) return undefined;
+    // A compatible active baseline contains no lifecycle-pruned paths; an archive target adds no active row.
+    if (excludedDirectory(filename, options.includeInactive)) continue;
+    const key = EffectString.toLowerCase(id.value.canonicalUri);
+    if (folded.has(key) && folded.get(key) !== id.value.canonicalUri) return undefined;
+    folded.set(key, id.value.canonicalUri);
+    selected.set(id.value.canonicalUri, {root: root.value, segments});
+  }
+  const previous = new Map<string, RetainedRecallSourceRow>();
+  const ambiguousTargets = new Set<string>();
+  const targets = [...selected];
+  for (let i = 0; i < targets.length; i++)
+    for (let j = i + 1; j < targets.length; j++) {
+      const [leftUri, left] = targets[i];
+      const [rightUri, right] = targets[j];
+      if (left.root.uri === right.root.uri && recallSourcePathsMayAlias(left.segments, right.segments)) {
+        ambiguousTargets.add(leftUri);
+        ambiguousTargets.add(rightUri);
+      }
+    }
+  let cursor: string | undefined;
+  for (;;) {
+    const rows = yield* sql.unsafe<{readonly uri: string}>(
+      `SELECT uri FROM documents
+       ${cursor === undefined ? '' : 'WHERE uri COLLATE BINARY > ? COLLATE BINARY'}
+       ORDER BY uri COLLATE BINARY LIMIT ?`,
+      cursor === undefined ? [RECALL_REFRESH_SOURCE_PAGE_SIZE] : [cursor, RECALL_REFRESH_SOURCE_PAGE_SIZE],
+    );
+    const retainedDigests: {uri: string; uriLocatorDigest: string}[] = [];
+    const selectedUris: string[] = [];
+    for (const row of rows) {
+      const alias = folded.get(EffectString.toLowerCase(row.uri));
+      if (alias !== undefined && alias !== row.uri) return undefined;
+      const root = EffectArray.findFirst(roots, root => EffectString.startsWith(root.uri + '/')(row.uri));
+      if (Option.isNone(root)) return undefined;
+      const id = yield* Effect.try(() => parseResourceId(row.uri)).pipe(Effect.option);
+      if (Option.isNone(id)) return undefined;
+      const segments = id.value.segments.slice(root.value.id.segments.length);
+      for (const [uri, target] of targets)
+        if (
+          row.uri !== uri &&
+          target.root.uri === root.value.uri &&
+          recallSourcePathsMayAlias(segments, target.segments)
+        )
+          ambiguousTargets.add(uri);
+      if (selected.has(row.uri)) {
+        selectedUris.push(row.uri);
+      } else {
+        retainedDigests.push({uri: row.uri, uriLocatorDigest: memoryLinkLocatorDigest(row.uri)});
+      }
+    }
+    if (selectedUris.length > 0) {
+      const priorRows = yield* sql.unsafe<RetainedRecallSourceRow>(
+        `SELECT uri, source_path, source_modified_at, source_size, authority_policy_key
+         FROM documents WHERE uri IN (${EffectArray.join(
+           EffectArray.map(selectedUris, () => '?'),
+           ', ',
+         )})`,
+        selectedUris,
+      );
+      if (priorRows.length !== selectedUris.length) return undefined;
+      for (const prior of priorRows) {
+        if (!selected.has(prior.uri) || previous.has(prior.uri)) return undefined;
+        previous.set(prior.uri, prior);
+      }
+    }
+    yield* insertRecallSourceDigests(sql, retainedDigests);
+    cursor = rows.at(-1)?.uri;
+    if (rows.length < RECALL_REFRESH_SOURCE_PAGE_SIZE) break;
+  }
+  // Keep URI validation and digest generation in the bounded JS pass, but let SQLite
+  // project the retained source metadata directly from the same snapshot.
+  yield* sql.unsafe(`
+    INSERT INTO temp.${RECALL_REFRESH_SOURCE_TABLE} (
+      uri, uri_locator_digest, source_path, source_modified_at, source_size, authority_policy_key, invalidated
+    )
+    SELECT document.uri, digest.uri_locator_digest, document.source_path, document.source_modified_at,
+      document.source_size, document.authority_policy_key, 0
+    FROM documents AS document
+    INNER JOIN temp.${RECALL_REFRESH_SOURCE_DIGEST_TABLE} AS digest ON digest.uri = document.uri
+    ORDER BY document.uri COLLATE BINARY
+  `);
+  // Oversized files have no documents row; unknown prior membership requires a full count.
+  if (skipped > 0 && EffectArray.some([...selected.keys()], uri => !previous.has(uri))) return undefined;
+  for (const [uri, target] of selected)
+    if (
+      !previous.has(uri) &&
+      (ambiguousTargets.has(uri) || EffectArray.some(target.segments, segment => /\P{ASCII}/u.test(segment)))
+    )
+      return undefined;
+  const access = EffectArray.some([...selected.keys()], isExternalResourceUri)
+    ? yield* loadExternalResourceAccess({
+        home: config.agentContextHome,
+        account: config.account,
+        user: config.user,
+      })
+    : {};
+  const home = yield* fs.realPath(config.agentContextHome);
+  const checkedDirectories = new Set<string>();
+  const checkedRoots = new Map<string, string>();
+  let skippedOversizedDocumentCount = skipped;
+  let scannedSourceCount = 0;
+  const omittedSourceInputs = new Map<string, string>();
+  for (const [uri, target] of selected) {
+    const prior = previous.get(uri);
+    const canonicalFilename = path.join(target.root.path, ...target.segments);
+    const filename = prior?.source_path ?? canonicalFilename;
+    const relative = path.relative(target.root.path, filename);
+    if (relative === '..' || EffectString.startsWith('..' + path.sep)(relative) || path.isAbsolute(relative))
+      return undefined;
+    const relativeSegments = EffectArray.map(EffectString.split(path.sep)(relative), segment =>
+      EffectString.normalize('NFC')(segment),
+    );
+    if (canonicalResourceUri(target.root.id.namespace, [...target.root.id.segments, ...relativeSegments]) !== uri)
+      return undefined;
+    let realRoot = checkedRoots.get(target.root.uri);
+    if (!realRoot) {
+      realRoot = yield* fs.realPath(target.root.path).pipe(Effect.orElseSucceed(() => undefined));
+      if (!realRoot || realRoot !== path.join(home, path.relative(config.agentContextHome, target.root.path)))
+        return undefined;
+      checkedRoots.set(target.root.uri, realRoot);
+    }
+    let parent = target.root.path;
+    for (const segment of ['', ...EffectString.split(path.sep)(path.dirname(relative))]) {
+      if (segment && segment !== '.') parent = path.join(parent, segment);
+      if (checkedDirectories.has(parent)) continue;
+      if (Option.isSome(yield* fs.readLink(parent).pipe(Effect.option))) return undefined;
+      const info = yield* fs.stat(parent).pipe(Effect.option);
+      if (Option.isNone(info) || info.value.type !== 'Directory') return undefined;
+      checkedDirectories.add(parent);
+    }
+    if (Option.isSome(yield* fs.readLink(filename).pipe(Effect.option))) return undefined;
+    const currentPath = yield* fs.realPath(filename).pipe(Effect.option);
+    let verifiedFilename = filename;
+    if (filename !== canonicalFilename) {
+      const canonicalPath = yield* fs.realPath(canonicalFilename).pipe(Effect.option);
+      if (Option.isNone(currentPath) || Option.isNone(canonicalPath) || currentPath.value !== canonicalPath.value)
+        return undefined;
+    }
+    if (Option.isSome(currentPath)) {
+      const currentRelative = path.relative(realRoot, currentPath.value);
+      if (
+        currentRelative === '..' ||
+        EffectString.startsWith('..' + path.sep)(currentRelative) ||
+        path.isAbsolute(currentRelative)
+      )
+        return undefined;
+      const actual = EffectArray.map(EffectString.split(path.sep)(currentRelative), segment =>
+        EffectString.normalize('NFC')(segment),
+      );
+      if (canonicalResourceUri(target.root.id.namespace, [...target.root.id.segments, ...actual]) !== uri)
+        return undefined;
+      verifiedFilename = path.join(target.root.path, currentRelative);
+    }
+    const info = yield* fs.stat(filename).pipe(Effect.result);
+    if (info._tag === 'Failure') {
+      if (prior && info.failure.reason._tag === 'NotFound') {
+        const input = yield* captureRecallSourceInput(filename);
+        if (input.info !== undefined) return yield* recallRefreshSuperseded();
+        omittedSourceInputs.set(filename, input.key);
+        continue;
+      }
+      return undefined;
+    }
+    if (info.success.type !== 'File') return undefined;
+    if (Number(info.success.size) > MAX_INDEXED_FILE_BYTES) {
+      const input = yield* captureRecallSourceInput(filename);
+      if (!input.info || input.info.size !== info.success.size) return yield* recallRefreshSuperseded();
+      omittedSourceInputs.set(filename, input.key);
+      skippedOversizedDocumentCount++;
+      continue;
+    }
+    if (isExternalResourceUri(uri) && access[uri] === undefined) {
+      omittedSourceInputs.set(filename, (yield* captureRecallSourceInput(filename)).key);
+      continue;
+    }
+    yield* insertRecallSourceMetadata(sql, [
+      {
+        uri,
+        path: verifiedFilename,
+        size: Number(info.success.size),
+        modifiedAt: Option.getOrUndefined(info.success.mtime)?.toISOString(),
+        authorityPolicyKey: options.canonicalResourcePolicy.entryKeyByUri.get(uri) ?? null,
+        invalidated: true,
+        uriLocatorDigest: memoryLinkLocatorDigest(uri),
+      },
+    ]);
+    scannedSourceCount++;
+  }
+  yield* indexRecallSourceLocators(sql);
+  return {scannedSourceCount, skippedOversizedDocumentCount, omittedSourceInputs};
+});
+
+/** Only a differing ASCII branch proves that two filesystem paths cannot alias. */
+function recallSourcePathsMayAlias(left: readonly string[], right: readonly string[]): boolean {
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] === right[i]) continue;
+    return (
+      /\P{ASCII}/u.test(left[i]) ||
+      /\P{ASCII}/u.test(right[i]) ||
+      EffectString.toLowerCase(left[i]) === EffectString.toLowerCase(right[i])
+    );
+  }
+  return true;
+}
 
 export function countRecallSourceChanges(sql: SqlClient.SqlClient, forceRefresh: boolean) {
   return sql
@@ -496,6 +832,7 @@ export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
       RECALL_REFRESH_INDEXED_CODE_LINK_TABLE,
       RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
       RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
+      RECALL_REFRESH_SOURCE_DIGEST_TABLE,
       RECALL_REFRESH_SOURCE_TABLE,
     ]) {
       yield* sql.unsafe(`DROP TABLE IF EXISTS temp.${table}`);
@@ -515,6 +852,11 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       source_path TEXT NOT NULL, source_modified_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
       invalidated INTEGER NOT NULL CHECK (invalidated IN (0, 1))) WITHOUT ROWID`);
+    yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_SOURCE_DIGEST_TABLE} (
+      uri TEXT PRIMARY KEY NOT NULL,
+      uri_locator_digest TEXT NOT NULL CHECK (
+        length(uri_locator_digest) = 64 AND uri_locator_digest NOT GLOB '*[^0-9a-f]*'
+      )) WITHOUT ROWID`);
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),
@@ -563,8 +905,41 @@ function recallIndexRoots(config: RecallRefreshConfig, path: Path.Path) {
   ];
 }
 
+/** The caller supplies canonical paths; a URI alone cannot prove physical account membership. */
+export function recallSourceIsWithinIndexRoots(
+  config: RecallRefreshConfig,
+  path: Path.Path,
+  uri: string,
+  filename: string,
+): boolean {
+  return EffectArray.some(recallIndexRoots(config, path), root => {
+    const relative = path.relative(root.path, filename);
+    return (
+      EffectString.startsWith(root.uri + '/')(uri) &&
+      relative !== '' &&
+      relative !== '..' &&
+      !EffectString.startsWith('..' + path.sep)(relative) &&
+      !path.isAbsolute(relative)
+    );
+  });
+}
+
+export function recallSourceIsIntentionallyExcluded(
+  config: RecallRefreshConfig,
+  path: Path.Path,
+  includeInactive: boolean,
+  uri: string,
+  filename: string,
+): boolean {
+  return (
+    !EffectArray.some(recallIndexRoots(config, path), root => EffectString.startsWith(root.uri + '/')(uri)) ||
+    excludedDirectory(filename, includeInactive) ||
+    excludedFile(filename)
+  );
+}
+
 function excludedDirectory(path: string, includeInactive: boolean): boolean {
-  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/'));
+  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/')) + '/';
   if (Effect2.pipe(normalized, EffectString.includes('/agent-artifacts/packs/'))) return true;
   return (
     !includeInactive &&

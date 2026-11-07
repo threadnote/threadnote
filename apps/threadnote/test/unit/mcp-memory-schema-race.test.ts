@@ -1,7 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {expect, it} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
-import {describe} from 'vitest';
+import {describe, vi} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {preparePersonalMemoryWrite, writeDurableMemory} from '@threadnote/threadnote/mcp/server/memory';
@@ -11,12 +11,88 @@ import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {resolveAuthoredMemoryRelations} from '@threadnote/threadnote/memory/relations';
 import {loadRecallIndex} from '@threadnote/recall/index';
+import * as recallIndex from '@threadnote/recall/index';
+import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 describe('MCP personal-memory schema rewrite guard', () => {
+  for (const dependency of ['scoped-identity', 'unscoped-identity', 'identity-less', 'none'] as const)
+    it.effect(`prepares only applicable ${dependency} dependencies before memory and account locks`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-relation-preparation-'});
+        const config: RuntimeConfig = {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'threadnote',
+          manifestPath: path.join(home, 'seed-manifest.yaml'),
+          user: 'tester',
+        };
+        const store = yield* ResourceStore;
+        const targetUri = 'threadnote://user/tester/memories/durable/projects/threadnote/preparation-target.md';
+        const sourceUri = 'threadnote://user/tester/memories/durable/projects/threadnote/preparation-source.md';
+        const targetMemoryId = dependency === 'identity-less' ? undefined : 'tn_preparation_target';
+        const metadata: MemoryMetadata = {
+          kind: 'durable',
+          project: 'threadnote',
+          schemaVersion: MEMORY_SCHEMA_VERSION,
+          sourceAgentClient: 'codex',
+          status: 'active',
+          timestamp: '2026-08-31T00:00:00.000Z',
+          topic: 'preparation-target',
+        };
+        const target = formatMemoryDocument('MEMORY', {...metadata, memoryId: targetMemoryId}, 'Target bytes.');
+        if (dependency !== 'none')
+          yield* store.write({account: config.account, home, user: config.user}, targetUri, target, {mode: 'create'});
+        const original = recallIndex.loadRecallMemoryIdentities;
+        let preparations = 0;
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() =>
+            vi.spyOn(recallIndex, 'loadRecallMemoryIdentities').mockImplementation((...args) =>
+              Effect.gen(function* () {
+                preparations++;
+                expect(args[1]).toEqual({allowedUriScopes: [], memoryIds: []});
+                const directory = path.join(home, 'threadnote', 'memory-locks');
+                expect((yield* fs.exists(directory)) ? yield* fs.readDirectory(directory) : []).toEqual([]);
+                expect(yield* fs.exists(resourceAccountMutationLockPath(path, home, config.account))).toBe(false);
+                return yield* original(...args);
+              }),
+            ),
+          ),
+          () =>
+            Effect.gen(function* () {
+              const result = yield* writeDurableMemory(config, {
+                bodyText: 'Source bytes.',
+                deferRecallIndexRefresh: true,
+                expectedSourceContent:
+                  dependency === 'none'
+                    ? undefined
+                    : [
+                        {
+                          content: target,
+                          uri: targetUri,
+                          memoryId: targetMemoryId,
+                          allowedUriScopes:
+                            dependency === 'unscoped-identity' ? [] : ['threadnote://user/tester/memories'],
+                        },
+                      ],
+                metadata: {...metadata, memoryId: 'tn_preparation_source', topic: 'preparation-source'},
+              });
+              expect(result.isError).not.toBe(true);
+              expect(preparations).toBe(dependency === 'scoped-identity' ? 1 : 0);
+              expect(yield* store.read({account: config.account, home, user: config.user}, sourceUri)).toContain(
+                'Source bytes.',
+              );
+            }),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+
   it.effect('preserves a receipt-witnessed identity when replacing an id-less destination by alias', () =>
     Effect.scoped(
       Effect.gen(function* () {

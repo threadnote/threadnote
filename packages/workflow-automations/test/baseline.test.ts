@@ -1,13 +1,16 @@
-import {Array as EffectArray, Predicate} from 'effect';
+import {Array as EffectArray, Predicate, String as EffectString} from 'effect';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {mkdtemp, mkdir, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
+import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {workflowScenarios} from '../src/scenarios.js';
 import {captureBaseline} from './helpers/capture-baseline.js';
 import * as EffectRecord from 'effect/Record';
+import {FixtureProcesses, runFixtureCommand, type FixtureCommandStage} from '../../../scripts/fixture-owned-process.js';
+import {CI_STANDARD_TEST_TIMEOUT_MILLISECONDS} from '../../../tools/ci/vitest-plan.js';
 
 type FileMeasurement = {readonly path: string; readonly bytes: number};
 type ScenarioCase = {readonly id: string; readonly expectedInvariants: string[]; readonly measurementUnits: string[]};
@@ -19,7 +22,6 @@ type RuntimeMeasurements = {
   readonly startup: {readonly durationsMilliseconds: number[]};
   readonly fileSize: {readonly bytes: number; readonly label: string};
 };
-
 const isStringArray = (value: unknown): value is string[] =>
   EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 const isBaselineMeasurements = (value: unknown): value is BaselineMeasurements => {
@@ -56,14 +58,59 @@ const isRuntimeMeasurements = (value: unknown): value is RuntimeMeasurements =>
   typeof value.fileSize.bytes === 'number' &&
   typeof value.fileSize.label === 'string';
 
-const roots: string[] = [];
+const boundedFixtureText = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const bytes = Buffer.from(value, 'utf8');
+  let length = Math.min(bytes.byteLength, 4_096);
+  while (length > 0 && (bytes[length] & 0xc0) === 0x80) length--;
+  return bytes.subarray(0, length).toString('utf8');
+};
+async function runGitFixtureCommand(
+  processes: FixtureProcesses,
+  root: string,
+  stage: FixtureCommandStage,
+  args: readonly string[],
+  deadline: number,
+) {
+  try {
+    return await runFixtureCommand(processes, 'git', args, {
+      stage,
+      cwd: root,
+      env: process.env,
+      deadline,
+      maxOutputBytes: 4_096,
+    });
+  } catch (cause) {
+    throw new Error(
+      `bounded git fixture command failed (${stage}); argv=${boundedFixtureText(JSON.stringify(['git', ...args]))}`,
+      {cause},
+    );
+  }
+}
+
+// Fixture setup uses the repository's standard test budget, independently of runtime sampling caps.
+const fixtureSetupBudget = CI_STANDARD_TEST_TIMEOUT_MILLISECONDS;
+const fixtureTestBudget = fixtureSetupBudget + CI_STANDARD_TEST_TIMEOUT_MILLISECONDS;
+type FixtureRoot = {readonly root: string; removable: boolean};
+const roots: FixtureRoot[] = [];
+async function removeFixture(fixture: FixtureRoot) {
+  if (!fixture.removable) {
+    process.stderr.write(`Git fixture producer exit unknown; fixture retained: ${fixture.root}\n`);
+    return;
+  }
+  await rm(fixture.root, {recursive: true, force: true});
+}
+async function observeFixtureProducers(fixture: FixtureRoot, processes: FixtureProcesses, deadline: number) {
+  fixture.removable = (await processes.closeAndObserve(deadline)) === 'exited';
+}
 afterEach(async () => {
-  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), removeFixture));
 });
 
 async function makeGitFixture() {
   const root = await mkdtemp(join(tmpdir(), 'workflow-baseline-'));
-  roots.push(root);
+  const fixture = {root, removable: true};
+  roots.push(fixture);
   const docs = join(root, 'config/agent-skills/dev-spec');
   await mkdir(join(docs, 'references'), {recursive: true});
   const manifest = {
@@ -77,25 +124,41 @@ async function makeGitFixture() {
   await writeFile(join(docs, 'SKILL.md'), 'Workflow café 🧭\n');
   await writeFile(join(docs, 'references/contract.md'), 'Résumé: naïve façade\n');
   await writeFile(join(root, 'ignored.txt'), 'not shipped\n');
-  for (const args of [
-    ['init', '-q'],
-    [
-      'add',
-      'config/dev-skills.json',
-      'config/agent-skills/dev-spec/SKILL.md',
-      'config/agent-skills/dev-spec/references/contract.md',
-    ],
-    ['-c', 'user.name=Baseline Test', '-c', 'user.email=baseline@example.invalid', 'commit', '-qm', 'fixture'],
-  ]) {
-    const result = spawnSync('git', args, {cwd: root, encoding: 'utf8', timeout: 4_000, maxBuffer: 4_096});
-    if (result.status !== 0) throw new Error(`bounded git fixture command failed (${args[0]})`);
+  const processes = new FixtureProcesses();
+  const deadline = performance.now() + fixtureSetupBudget;
+  fixture.removable = false;
+  try {
+    for (const [stage, args] of [
+      ['git-init', ['-c', 'core.autocrlf=false', 'init', '-q']],
+      [
+        'git-add',
+        [
+          '-c',
+          'core.autocrlf=false',
+          'add',
+          'config/dev-skills.json',
+          'config/agent-skills/dev-spec/SKILL.md',
+          'config/agent-skills/dev-spec/references/contract.md',
+        ],
+      ],
+      [
+        'git-commit',
+        ['-c', 'user.name=Baseline Test', '-c', 'user.email=baseline@example.invalid', 'commit', '-qm', 'fixture'],
+      ],
+    ] as const) {
+      await runGitFixtureCommand(processes, root, stage, args, deadline);
+    }
+  } finally {
+    // Shared tooling requires this owned child's spawn, exit and close before permitting removal.
+    // A deadline/error with unknown producer state retains the root and preserves the body failure.
+    await observeFixtureProducers(fixture, processes, deadline);
   }
   return {root};
 }
 
 async function makeEncodedPathCliCheckout() {
   const checkout = await mkdtemp(join(tmpdir(), 'baseline checkout café-'));
-  roots.push(checkout);
+  roots.push({root: checkout, removable: true});
   const packagePath = join(checkout, 'packages/workflow-automations');
   await mkdir(join(packagePath, 'test/helpers'), {recursive: true});
   await mkdir(join(packagePath, 'src'), {recursive: true});
@@ -137,7 +200,72 @@ async function makeEncodedPathCliCheckout() {
   return join(packagePath, 'test/helpers/capture-baseline.ts');
 }
 
-describe('workflow baseline capture', () => {
+describe('workflow baseline capture', {timeout: fixtureTestBudget}, () => {
+  it('reports bounded Git argv and original owned-close failure before allowing cleanup', async () => {
+    const fixture = {root: await mkdtemp(join(tmpdir(), 'workflow-baseline-rejection-')), removable: false};
+    roots.push(fixture);
+    const processes = new FixtureProcesses();
+    const deadline = performance.now() + fixtureSetupBudget;
+    const args = ['--definitely-invalid-baseline-fixture-option'];
+    const failure: unknown = await runGitFixtureCommand(processes, fixture.root, 'git-init', args, deadline).catch(
+      cause => cause,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error('Expected Git fixture failure.');
+    expect(failure.message).toContain('bounded git fixture command failed (git-init)');
+    expect(failure.message).toContain(`argv=${JSON.stringify(['git', ...args])}`);
+    expect(failure.cause).toBeInstanceOf(Error);
+    if (!(failure.cause instanceof Error)) throw new Error('Expected original owned-process error.');
+    expect(failure.cause.message).toMatch(/"stage":"git-init","observed":"owned-close","reason":"nonzero-exit"/);
+    await observeFixtureProducers(fixture, processes, deadline);
+    expect(fixture.removable).toBe(true);
+
+    expect(Buffer.byteLength(boundedFixtureText(EffectString.repeat(1_366)('€')))).toBeLessThanOrEqual(4_096);
+    fc.assert(
+      fc.property(
+        fc.integer({min: 4_088, max: 4_096}),
+        fc.array(fc.constantFrom('a', 'é', '€', '😀'), {minLength: 1, maxLength: 8}),
+        (prefixLength, suffix) => {
+          const input = `${EffectString.repeat(prefixLength)('a')}${EffectArray.join(suffix, '')}`;
+          const output = boundedFixtureText(input);
+          expect(Buffer.byteLength(output)).toBeLessThanOrEqual(4_096);
+          if (Buffer.byteLength(input) <= 4_096) expect(output).toBe(input);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
+  it('preserves an expired setup deadline cause and conservatively retains the fixture', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'workflow-baseline-retention-'));
+    const fixture = {root, removable: false};
+    roots.push(fixture);
+    const marker = join(root, 'owned-file');
+    await writeFile(marker, 'retained');
+    const processes = new FixtureProcesses();
+    const deadline = performance.now();
+    // This expires before spawn; actual child exit/close behavior is covered by the shared helper suite.
+    const failure: unknown = await runGitFixtureCommand(processes, root, 'git-init', ['init'], deadline).catch(
+      cause => cause,
+    );
+    await observeFixtureProducers(fixture, processes, deadline);
+    try {
+      expect(failure).toBeInstanceOf(Error);
+      if (!(failure instanceof Error)) throw new Error('Expected Git fixture deadline failure.');
+      expect(failure.message).toContain('bounded git fixture command failed (git-init)');
+      expect(failure.cause).toBeInstanceOf(Error);
+      if (!(failure.cause instanceof Error)) throw new Error('Expected original deadline error.');
+      expect(failure.cause.message).toBe('Fixture body deadline expired');
+      await removeFixture(fixture);
+      expect(fixture.removable).toBe(false);
+      expect(await readFile(marker, 'utf8')).toBe('retained');
+      expect(failure.cause.message).toBe('Fixture body deadline expired');
+    } finally {
+      // No child was launched in this seam; its root is safe for the test's own teardown.
+      fixture.removable = true;
+    }
+  });
+
   it('accounts UTF-8 bytes deterministically and includes the complete frozen scenario catalog', async () => {
     const {root} = await makeGitFixture();
     const first = await captureBaseline({repo: root});

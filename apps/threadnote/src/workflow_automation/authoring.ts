@@ -2,6 +2,7 @@ import {isJsonObject} from '@threadnote/platform/json';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
@@ -9,6 +10,7 @@ import {
   NativeAuthoringDocumentSchema,
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
+  isNativeMermaidDiagram,
   nativeAuthoringDigest,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
@@ -280,7 +282,7 @@ function documentViews(document: NativeAuthoringDocument): readonly {id: string;
         summary: value.summary,
         components: compact(bullets(value.components), 3000),
         contracts: compact(bullets(value.contracts), 3000),
-        diagram: '```mermaid\n' + value.diagram + '\n```',
+        diagram: isNativeMermaidDiagram(value.diagram) ? '```mermaid\n' + value.diagram + '\n```' : value.diagram,
       },
     });
   return [
@@ -811,6 +813,10 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
     });
     if (document.id !== state.featureId || document.project !== state.project)
       return yield* fail('binding-drift', 'Authoring document identity must match its existing native binding.');
+    if (request.command === 'save' && document.kind === 'plan' && document.spec)
+      yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+        withRecallIdentityPreparation,
+      );
     yield* admitLinkedSpec(document);
     const validation = yield* Effect.try({
       try: () => validateNativeAuthoring(document, request),

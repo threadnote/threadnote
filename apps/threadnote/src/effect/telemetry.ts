@@ -1,3 +1,5 @@
+import {ReadDeadlineExceeded} from '@threadnote/platform/read_deadline';
+import {Schema} from 'effect';
 import {Array as EffectArray} from 'effect';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import * as HttpClient from 'effect/http/HttpClient';
@@ -779,7 +781,7 @@ function phaseOutcome<A, E>(
   if (Cause.hasInterruptsOnly(exit.cause)) return {outcome: 'interrupted' as const};
   return {
     errorType: anonymousTelemetryDiagnosticFromError(Cause.squash(exit.cause))?.errorType ?? 'UnknownError',
-    outcome: 'failure' as const,
+    outcome: Schema.is(ReadDeadlineExceeded)(Cause.squash(exit.cause)) ? ('timed-out' as const) : ('failure' as const),
   };
 }
 

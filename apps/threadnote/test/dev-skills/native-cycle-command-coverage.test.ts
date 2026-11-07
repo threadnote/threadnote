@@ -139,7 +139,12 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
       semanticPrerequisites: {
         requiredSelectedLanes: ['correctness', 'simplicity'],
         requiredCompletedLanes: ['correctness', 'simplicity'],
-        specialistLanes: expect.stringContaining('optional'),
+        specialistLanes: expect.stringContaining('run every applicable lane'),
+      },
+    });
+    expect(reviewSchema).toMatchObject({
+      semanticPrerequisites: {
+        specialistLanes: expect.stringContaining('cannot determine which specialists apply'),
       },
     });
     expect(new TextEncoder().encode(JSON.stringify(reviewSchema)).byteLength).toBeLessThanOrEqual(4096);

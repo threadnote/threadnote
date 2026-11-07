@@ -20,6 +20,7 @@ const response = () =>
         {
           ageMilliseconds: 1_000,
           currentOperation: 'graph',
+          cpu: {state: 'sampled', percent: 12.5, windowMilliseconds: 3000, sampledAt: new Date().toISOString()},
           parentProcessId: 0,
           processId: 42,
           role: 'mcp',
@@ -84,6 +85,7 @@ it('retains scoped rows and footer during a held read/error and advances age wit
   await flush();
   expect(reads).toBe(1);
   expect(document.querySelector('.process-workspace')?.textContent).toContain('Graph');
+  expect(document.querySelector('.process-workspace')?.textContent).toContain('12.5%');
   expect(document.querySelector('.footer-operations.is-visible')).not.toBeNull();
   const deferred = Promise.withResolvers<Response>();
   vi.mocked(fetch).mockImplementationOnce(async () => deferred.promise);
@@ -99,6 +101,8 @@ it('retains scoped rows and footer during a held read/error and advances age wit
   await act(async () => vi.advanceTimersByTimeAsync(65_000));
   expect(reads).toBe(before);
   expect(document.querySelector('.process-row')?.textContent).not.toBe(ageBefore);
+  expect(document.querySelector('.process-row')?.textContent).not.toContain('12.5%');
+  expect(document.querySelector('.process-row')?.textContent).toContain('Unavailable');
 });
 
 it('updates the panel and shared footer from pushed inventories without process GETs', async () => {

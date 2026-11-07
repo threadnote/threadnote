@@ -16,7 +16,8 @@
     "./cycle-review": "./src/cycle_review.ts",
     "./cycle-runtime": "./src/cycle_runtime.ts",
     "./cycle-output": "./src/cycle_output.ts",
-    "./closeout": "./src/closeout.ts"
+    "./closeout": "./src/closeout.ts",
+    "./task": "./src/task.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

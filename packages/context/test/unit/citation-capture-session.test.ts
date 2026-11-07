@@ -1,7 +1,7 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {describe, expect, it} from '@effect/vitest';
-import {Clock, Context, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path} from 'effect';
+import {Clock, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -65,7 +65,6 @@ const offsetClock = (clock: Clock.Clock, offset: () => bigint): Clock.Clock => (
 const fixture = (
   options: {
     legacy?: boolean;
-    atomic?: boolean;
     drift?: boolean;
     interrupt?: boolean;
     beforeEvidence?: () => Effect.Effect<void>;
@@ -161,13 +160,13 @@ const fixture = (
     };
     const events: string[] = [];
     const clients: unknown[] = [];
+    const evidenceClients: unknown[] = [];
     let active = false;
     let leased = false;
+    let sessionDepth = 0;
+    const readyEvidence = store.readReadySnapshotCitationEvidence;
     const observedStore = CodeGraphStore.of({
       ...store,
-      readReadySnapshotCitationEvidence: options.atomic
-        ? () => Effect.die('Scoped projection must retain its lease instead of copying anchors')
-        : undefined,
       readySnapshot: (...args) =>
         Effect.gen(function* () {
           const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
@@ -202,6 +201,20 @@ const fixture = (
           if (options.interrupt) return yield* Effect.interrupt;
           return yield* store.effectiveSnapshotCitationEvidence(...args);
         }),
+      readReadySnapshotCitationEvidence: readyEvidence
+        ? (...args) =>
+            Effect.gen(function* () {
+              expect(active).toBe(true);
+              expect(leased).toBe(false);
+              const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
+              expect(Option.isSome(session)).toBe(true);
+              evidenceClients.push(Option.isSome(session) ? session.value.sql : undefined);
+              events.push('evidence');
+              yield* options.beforeEvidence?.() ?? Effect.void;
+              if (options.interrupt) return yield* Effect.interrupt;
+              return yield* readyEvidence(...args);
+            })
+        : undefined,
     });
     const context = yield* Layer.build(CodeGraphQueryService.layer).pipe(
       Effect.provideService(CodeGraphStore, observedStore),
@@ -213,24 +226,39 @@ const fixture = (
       ...query,
       withStatusSession: options.legacy
         ? undefined
-        : (home, cwd, expected, routing, use) =>
-            withSession(home, cwd, expected, routing, status =>
-              Effect.acquireUseRelease(
-                Effect.sync(() => {
-                  expect(expected).toBeUndefined();
-                  expect(routing).toMatchObject({observeWorktree: true, requestMaintenance: false});
-                  active = true;
-                  events.push('opening');
-                }),
-                () => use(status),
-                () =>
-                  Effect.sync(() => {
-                    expect(leased).toBe(false);
-                    active = false;
-                    events.push('session-end');
-                  }),
+        : (home, cwd, expected, routing, use) => {
+            const closing = sessionDepth > 0;
+            const prepare = closing
+              ? Effect.gen(function* () {
+                  yield* options.beforeClosing?.() ?? Effect.void;
+                  if (options.drift)
+                    yield* fs.writeFileString(paths.join(repo, 'source.ts'), 'export const value = 2;\n');
+                })
+              : Effect.void;
+            return prepare.pipe(
+              Effect.andThen(
+                withSession(home, cwd, expected, routing, status =>
+                  Effect.acquireUseRelease(
+                    Effect.sync(() => {
+                      expect(expected).toBeUndefined();
+                      expect(routing).toMatchObject({observeWorktree: true, requestMaintenance: false});
+                      sessionDepth++;
+                      active = true;
+                      events.push(closing ? 'closing' : 'opening');
+                    }),
+                    () => use(status),
+                    () =>
+                      Effect.sync(() => {
+                        expect(leased).toBe(false);
+                        sessionDepth--;
+                        active = sessionDepth > 0;
+                        if (!active) events.push('session-end');
+                      }),
+                  ),
+                ),
               ),
-            ),
+            );
+          },
       status: (home, cwd, routing) =>
         Effect.gen(function* () {
           events.push(leased ? 'closing' : 'opening');
@@ -243,12 +271,18 @@ const fixture = (
     });
     return {
       clients,
+      evidenceClients,
       events,
       withCitations: <A, E, R>(
         use: Parameters<typeof withLocalMemoryCodeCitations<A, E, R>>[2],
         refs = ['source.ts'],
       ) =>
-        withLocalMemoryCodeCitations(config, {callerCwd: repo, refs}, use).pipe(
+        withLocalMemoryCodeCitations(config, {callerCwd: repo, refs}, citations =>
+          Effect.gen(function* () {
+            events.push('callback');
+            return yield* use(citations);
+          }),
+        ).pipe(
           Effect.provideService(CodeGraphQueryService, observedQuery),
           Effect.provideService(CodeGraphStore, observedStore),
         ),
@@ -266,7 +300,7 @@ const fixture = (
 describe('repository citation capture session', () => {
   it.layer(dependencies)(test => {
     test.effect(
-      'keeps real opening/evidence/closing observations in one session and allocates a new session per capture',
+      'shares opening and evidence sessions, closes independently and allocates fresh sessions per capture',
       () =>
         Effect.gen(function* () {
           const f = yield* fixture();
@@ -276,23 +310,22 @@ describe('repository citation capture session', () => {
           expect(first).toHaveLength(1);
           expect(f.events).toEqual([
             'opening',
-            'lease',
             'evidence',
             'closing',
-            'release',
             'session-end',
             'opening',
-            'lease',
             'evidence',
             'closing',
-            'release',
             'session-end',
           ]);
           expect(f.clients).toHaveLength(4);
           expect(f.clients[0]).toBeDefined();
-          expect(f.clients[0]).toBe(f.clients[1]);
-          expect(f.clients[2]).toBe(f.clients[3]);
+          expect(f.clients[0]).not.toBe(f.clients[1]);
+          expect(f.clients[2]).not.toBe(f.clients[3]);
           expect(f.clients[0]).not.toBe(f.clients[2]);
+          expect(f.evidenceClients).toHaveLength(2);
+          expect(f.evidenceClients[0]).toBe(f.clients[0]);
+          expect(f.evidenceClients[1]).toBe(f.clients[2]);
         }).pipe(TestClock.withLive),
     );
     test.effect('runs normalized citations and all projection work before the real closing observation', () =>
@@ -302,28 +335,14 @@ describe('repository citation capture session', () => {
           citations =>
             Effect.sync(() => {
               expect(citations).toHaveLength(1);
-              f.events.push('callback');
               return EffectArray.map(citations, citation => citation.id);
             }),
           [moduleId, ' source.ts ', 'source.ts'],
         );
         expect(output).toHaveLength(1);
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'callback', 'closing', 'release', 'session-end']);
+        expect(f.events).toEqual(['opening', 'evidence', 'callback', 'closing', 'session-end']);
         yield* f.capture;
-        expect(EffectArray.filter(f.events, event => event === 'lease')).toHaveLength(2);
-      }).pipe(TestClock.withLive),
-    );
-    test.effect('retains a scoped projection lease when atomic returned-anchor capture is available', () =>
-      Effect.gen(function* () {
-        const f = yield* fixture({atomic: true});
-        const output = yield* f.withCitations(citations =>
-          Effect.sync(() => {
-            expect(f.events).toEqual(['opening', 'lease', 'evidence']);
-            return citations.length;
-          }),
-        );
-        expect(output).toBe(1);
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
+        expect(EffectArray.filter(f.events, event => event === 'evidence')).toHaveLength(2);
       }).pipe(TestClock.withLive),
     );
     test.effect('preserves callback error identity and releases without publishing a projection', () =>
@@ -331,7 +350,7 @@ describe('repository citation capture session', () => {
         const f = yield* fixture();
         const failure = {code: 'original-body-or-cas-error'};
         expect(yield* f.withCitations(() => Effect.fail(failure)).pipe(Effect.flip)).toBe(failure);
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+        expect(f.events).toEqual(['opening', 'evidence', 'callback', 'session-end']);
       }).pipe(TestClock.withLive),
     );
     test.effect('rejects late projection drift and cleans up an interrupted continuation', () =>
@@ -340,7 +359,7 @@ describe('repository citation capture session', () => {
         expect(yield* drift.withCitations(() => Effect.succeed('discarded')).pipe(Effect.flip)).toBeInstanceOf(
           MemoryCodeCitationCaptureError,
         );
-        expect(drift.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
+        expect(drift.events).toEqual(['opening', 'evidence', 'callback', 'closing', 'session-end']);
         const f = yield* fixture();
         const entered = yield* Deferred.make<void>();
         const fiber = yield* f
@@ -348,7 +367,8 @@ describe('repository citation capture session', () => {
           .pipe(Effect.forkScoped);
         yield* Deferred.await(entered);
         yield* Fiber.interrupt(fiber);
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+        expect(Exit.hasInterrupts(yield* Fiber.await(fiber))).toBe(true);
+        expect(f.events).toEqual(['opening', 'evidence', 'callback', 'session-end']);
       }).pipe(TestClock.withLive),
     );
     test.effect('counts evidence time against the same 60-second lease budget as the callback', () =>
@@ -377,7 +397,7 @@ describe('repository citation capture session', () => {
           );
         expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
         expect(String(failure)).toContain('lease expired');
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+        expect(f.events).toEqual(['opening', 'evidence', 'callback', 'session-end']);
       }).pipe(TestClock.withLive),
     );
     test.effect(
@@ -417,21 +437,25 @@ describe('repository citation capture session', () => {
               Effect.flip,
             );
           expect(String(failure)).toContain('lease expired');
-          expect(closing.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
+          expect(closing.events).toEqual(['opening', 'evidence', 'callback', 'closing', 'session-end']);
         }).pipe(TestClock.withLive),
     );
-    test.effect('preserves the independent closing fence and releases the real lease when source changes', () =>
+    test.effect('preserves the independent closing fence and closes the ready session when source changes', () =>
       Effect.gen(function* () {
         const f = yield* fixture({drift: true});
         expect(yield* f.capture.pipe(Effect.flip)).toBeInstanceOf(MemoryCodeCitationCaptureError);
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'closing', 'release', 'session-end']);
+        expect(f.events).toEqual(['opening', 'evidence', 'closing', 'session-end']);
       }).pipe(TestClock.withLive),
     );
-    test.effect('releases the real lease before closing an interrupted capture session', () =>
+    test.effect('cleans up interrupted ready sessions and legacy writer leases', () =>
       Effect.gen(function* () {
-        const f = yield* fixture({interrupt: true});
-        expect((yield* f.capture.pipe(Effect.exit))._tag).toBe('Failure');
-        expect(f.events).toEqual(['opening', 'lease', 'evidence', 'release', 'session-end']);
+        for (const legacy of [false, true]) {
+          const f = yield* fixture({interrupt: true, legacy});
+          expect(Exit.hasInterrupts(yield* f.capture.pipe(Effect.exit))).toBe(true);
+          expect(f.events).toEqual(
+            legacy ? ['opening', 'lease', 'evidence', 'release'] : ['opening', 'evidence', 'session-end'],
+          );
+        }
       }).pipe(TestClock.withLive),
     );
     test.effect('retains the original observation path when the optional query session API is absent', () =>

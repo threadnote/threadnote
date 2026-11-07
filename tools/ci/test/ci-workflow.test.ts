@@ -149,6 +149,7 @@ it('routes platform and quality lanes from Bazel outputs', () => {
     bazel_validation: '${{ steps.selection.outputs.bazel_validation }}',
     compile_targets: '${{ steps.selection.outputs.compile_targets }}',
     execute_bazel: '${{ steps.shards.outputs.execute_bazel }}',
+    manager_e2e: '${{ steps.selection.outputs.manager_e2e }}',
     recall_quality: '${{ steps.selection.outputs.recall_quality }}',
     release_matrix: '${{ steps.selection.outputs.release_matrix }}',
     shard_matrix: '${{ steps.shards.outputs.matrix }}',
@@ -156,6 +157,7 @@ it('routes platform and quality lanes from Bazel outputs', () => {
     windows_smoke: '${{ steps.selection.outputs.windows_smoke }}',
   });
   expect(jobs['recall-quality']?.if).toBe("needs.bazel-plan.outputs.recall_quality == 'true'");
+  expect(jobs['manager-e2e']?.if).toBe("needs.bazel-plan.outputs.manager_e2e == 'true'");
   expect(jobs['windows-smoke']?.if).toBe("needs.bazel-plan.outputs.windows_smoke == 'true'");
   expect(jobs['standalone-targets']?.if).toBe("needs.bazel-plan.outputs.compile_targets == 'true'");
   expect(jobs['self-contained-distribution']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
@@ -240,6 +242,7 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
     'bazel-plan',
     'bazel-plan-validation',
     'bazel-shards',
+    'manager-e2e',
     'recall-quality',
     'windows-smoke',
     'standalone-targets',
@@ -250,7 +253,29 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
     'test "$BAZEL_PLAN_VALIDATION_RESULT" = success',
   );
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_SHARDS_RESULT" = success');
+  expect(step(jobs.test, 'Require every selected lane')?.env?.MANAGER_E2E_RESULT).toBe(
+    '${{ needs.manager-e2e.result }}',
+  );
 });
+
+it.each(['success', 'failure', 'cancelled', 'skipped'])(
+  'requires selected Manager E2E result %s to succeed',
+  result => {
+    const aggregate = step(jobs.test, 'Require every selected lane');
+    const completed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate?.run ?? 'exit 98'], {
+      env: {
+        MANUAL_STRESS: 'false',
+        BAZEL_PLAN_RESULT: 'success',
+        BAZEL_PLAN_VALIDATION_RESULT: 'success',
+        BAZEL_EXECUTE: 'false',
+        BAZEL_SHARDS_RESULT: 'skipped',
+        MANAGER_E2E_SELECTED: 'true',
+        MANAGER_E2E_RESULT: result,
+      },
+    });
+    expect(completed.status).toBe(result === 'success' ? 0 : 1);
+  },
+);
 
 it.each(['success', 'failure', 'cancelled', 'skipped'])(
   'uses a distinct manual qualification context and requires stress result %s to be success',
@@ -522,4 +547,15 @@ it('preserves every prerequisite failure status and prevents shard execution', (
     }),
     {numRuns: 20},
   );
+});
+
+it('confirms only Recall with always-retained attempt evidence', () => {
+  const workflow = Schema.decodeUnknownSync(WorkflowSchema)(parse(readFileSync('.github/workflows/ci.yml', 'utf8')));
+  const steps = workflow.jobs?.['recall-quality']?.steps ?? [];
+  expect(EffectArray.some(steps, step => step.run === 'bun tools/ci/recall-confirmation.ts')).toBe(true);
+  const upload = EffectOption.getOrUndefined(
+    EffectArray.findFirst(steps, step => step.with?.name === 'recall-quality-production-10000'),
+  );
+  expect(upload?.if).toBe('always()');
+  expect(upload?.with?.path).toBe('artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n');
 });

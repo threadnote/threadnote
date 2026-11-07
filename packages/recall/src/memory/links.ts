@@ -333,11 +333,14 @@ export const selectRecallMemoryLinks = Effect.fn('recall.selectMemoryLinks')(fun
           const witnessedSource = witnessedSourceBySeed.get(
             memoryLinkSeedKey(row.requested_memory_id, row.requested_ordinal),
           );
+          const hasApplicableWitness =
+            direction === 'outgoing' && row.source_memory_id === '' && witnessedSource?.uri === row.source_uri;
           const isWitnessedSource =
-            direction === 'outgoing' &&
-            row.source_memory_id === '' &&
-            witnessedSource?.uri === row.source_uri &&
-            canonicalWitnessedMemoryLinkSourceMatches(row.source_uri, memory, options);
+            hasApplicableWitness && canonicalWitnessedMemoryLinkSourceMatches(row.source_uri, memory, options);
+          // An indexed identity-less source is ineligible here unless the caller supplies its witness.
+          // Its unchanged lack of identity is not evidence that the index needs reconciliation.
+          if (!hasApplicableWitness && row.source_memory_id === '' && memory && memory.metadata.memoryId === undefined)
+            return {canonicalMismatch: false};
           if (!isWitnessedSource && !canonicalMemoryLinkSourceMatches(row.source_uri, memory, options)) {
             return {canonicalMismatch: true};
           }

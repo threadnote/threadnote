@@ -30,7 +30,8 @@ import {
 } from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {isDeferredCodeAnchorIntentFilename} from '@threadnote/threadnote/memory/deferred/code_anchor';
-import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import {runEffect} from '../helpers/effect-runtime.js';
+import {loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {
   parseContextBriefJsonText,
   parseContextBriefV1,
@@ -173,11 +174,9 @@ async function listDeferredCodeAnchorIntentRelativePaths(root: string): Promise<
   ).sort();
 }
 const RECALL_PROGRESS_PHASES = [
-  'recall.shared-sync',
-  'recall.obsidian-sync',
   'recall.workspace-context',
-  'recall.semantic-retrieval',
   'recall.lexical-ranking',
+  'recall.semantic-retrieval',
 ] as const;
 const COLD_BUILD_TOOL_TIMEOUT_MILLISECONDS = 10000;
 const CORE_TOOL_NAMES = [
@@ -201,6 +200,7 @@ const CORE_TOOL_NAMES = [
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
+  'workflow_task_view',
   'context_health',
   'context_health_aggregate',
   'context_health_schedule',
@@ -266,6 +266,19 @@ interface McpClientOptions {
   readonly maxBufferSize?: number;
   readonly toolset?: 'core' | 'full' | null;
 }
+
+// Explicit producer preparation after the test has completed its canonical seeds.
+async function prepareReadyFixture(fixture: McpFixture): Promise<void> {
+  const config = {
+    account: 'local',
+    user: 'test-user',
+    agentContextHome: fixture.home,
+    manifestPath: join(fixture.home, 'seed-manifest.yaml'),
+  };
+  await runEffect(loadRecallIndexData(config, {includeInactive: false}));
+  await runEffect(loadRecallIndexData(config, {includeInactive: true}));
+}
+
 async function withMcpClient<T>(
   fn: (client: NativeToolClient, fixture: McpFixture) => Promise<T>,
   options: McpClientOptions = {},
@@ -631,30 +644,51 @@ describe('Threadnote MCP toolsets', () => {
         for (const fullOnlyTool of ['archive', 'compact_context', 'forget', 'share_conflicts', 'share_skill']) {
           expect(EffectArray.map(tools.tools, tool => tool.name)).not.toContain(fullOnlyTool);
         }
+        const status = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'memory_write_status'),
+        );
+        const workflowTaskView = EffectOption.getOrUndefined(
+          EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_view'),
+        );
+        expect(workflowTaskView?.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
+        expect(workflowTaskView).toBeDefined();
+        expect(Buffer.byteLength(JSON.stringify(workflowTaskView))).toBeLessThanOrEqual(700);
+        const legacyCore = EffectArray.filter(
+          tools.tools,
+          tool =>
+            tool.name !== 'memory_write_status' &&
+            tool.name !== 'workflow_task_view' &&
+            tool.name !== 'semantic_capabilities' &&
+            tool.name !== 'semantic_query',
+        );
+        const mainCore = EffectArray.filter(
+          tools.tools,
+          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
+        );
+        const mainCoreWithoutWorkflowTaskView = EffectArray.filter(
+          tools.tools,
+          tool =>
+            tool.name !== 'workflow_task_view' &&
+            tool.name !== 'semantic_capabilities' &&
+            tool.name !== 'semantic_query',
+        );
+        // Keep the legacy base, main's expanded core, and each additive descriptor budget distinct.
+        expect(Buffer.byteLength(JSON.stringify(legacyCore))).toBeLessThanOrEqual(36_000);
+        expect(status).toBeDefined();
+        expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
+        expect(Buffer.byteLength(JSON.stringify(mainCoreWithoutWorkflowTaskView))).toBeLessThanOrEqual(36_500);
+        const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
         const discoveryTool = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_capabilities'),
         )!;
         const queryTool = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'semantic_query'),
         )!;
-        const status = EffectOption.getOrUndefined(
-          EffectArray.findFirst(tools.tools, tool => tool.name === 'memory_write_status'),
-        );
-        const mainCore = EffectArray.filter(
-          tools.tools,
-          tool => tool.name !== 'semantic_capabilities' && tool.name !== 'semantic_query',
-        );
-        const existingCore = EffectArray.filter(mainCore, tool => tool.name !== 'memory_write_status');
-        // Preserve both prior catalog budgets and bound each added descriptor separately.
-        expect(Buffer.byteLength(JSON.stringify(existingCore))).toBeLessThanOrEqual(36_000);
-        expect(status).toBeDefined();
-        expect(discoveryTool).toBeDefined();
-        expect(queryTool).toBeDefined();
-        expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThanOrEqual(500);
-        expect(Buffer.byteLength(JSON.stringify(mainCore))).toBeLessThanOrEqual(36_500);
+        // Main's expanded core includes memory_write_status and workflow_task_view.
+        expect(Buffer.byteLength(JSON.stringify(mainCore))).toBeLessThanOrEqual(37_200);
         expect(Buffer.byteLength(JSON.stringify(discoveryTool))).toBeLessThanOrEqual(512);
         expect(Buffer.byteLength(JSON.stringify(queryTool))).toBeLessThanOrEqual(1024);
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(38_038);
+        expect(serializedToolsBytes).toBeLessThanOrEqual(38_738); // Main core + two bounded descriptors + two commas.
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
@@ -1060,6 +1094,7 @@ describe('Threadnote MCP toolsets', () => {
           'structured-recall.md',
           canonicalMemoryContent('structured-recall', 'Structured recall ranking anchor qz-structured-7788.'),
         );
+        await prepareReadyFixture(fixture);
         const defaultResult = await client.callTool(
           {
             arguments: {project: 'threadnote', query: 'qz-structured-7788', threshold: 0},
@@ -1183,6 +1218,8 @@ describe('Threadnote MCP toolsets', () => {
           'mcp-connection-target.md',
           memory('mcp-connection-target', 'tn_mcp_connection_target', 'Direct neighbor is also lexically unrelated.'),
         );
+
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {
             arguments: {
@@ -1270,6 +1307,8 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, memory('identity-conflict-alias', 'A divergent body.'), 'utf8');
+
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {
             arguments: {
@@ -1307,6 +1346,8 @@ describe('Threadnote MCP toolsets', () => {
           'environment-threshold.md',
           canonicalMemoryContent('environment-threshold', 'Environment threshold anchor qz-environment-8811.'),
         );
+
+        await prepareReadyFixture(fixture);
         const configured = await client.callTool(
           {
             arguments: {project: 'threadnote', query: 'qz-environment-8811', responseFormat: 'dual'},
@@ -1349,7 +1390,8 @@ describe('Threadnote MCP toolsets', () => {
       {toolset: 'core'},
     );
   });
-  it('records one-time recall pre-sync and read-only retrieval phases without private inputs', async () => {
+
+  it('records deferred synchronization and read-only retrieval phases without private inputs', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const privateQuery = 'private-phase-timing-query-7788';
@@ -1364,6 +1406,8 @@ describe('Threadnote MCP toolsets', () => {
           'phase-timing.md',
           canonicalMemoryContent('phase-timing', `Lexical anchor ${privateQuery}.`),
         );
+
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {arguments: {project: 'threadnote', query: privateQuery}, name: 'recall_context'},
           undefined,
@@ -1395,7 +1439,7 @@ describe('Threadnote MCP toolsets', () => {
               ),
             ),
           ),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
         expect(
           EffectOption.getOrUndefined(
             EffectOption.map(EffectOption.fromNullishOr(phaseTimings), __phaseTimingArray =>
@@ -1406,7 +1450,7 @@ describe('Threadnote MCP toolsets', () => {
               ),
             ),
           ),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
         expect(
           EffectOption.getOrUndefined(
             EffectOption.map(EffectOption.fromNullishOr(phaseTimings), __phaseTimingArray =>
@@ -1481,8 +1525,8 @@ describe('Threadnote MCP toolsets', () => {
         expect(structured.warnings).toEqual([
           expect.objectContaining({
             code: 'lexical_index_unavailable',
-            message: expect.stringContaining('could not be read or recovered'),
-            remediation: expect.stringContaining('threadnote doctor --dry-run'),
+            message: expect.stringContaining('has no readable ready snapshot'),
+            remediation: expect.stringContaining('threadnote repair'),
           }),
         ]);
         const text = contentText(result.content);
@@ -1584,7 +1628,7 @@ describe('Threadnote MCP toolsets', () => {
             message: expect.stringContaining('AbortError'),
           });
           expect(controller.signal.aborted).toBe(true);
-          expect(recallProgressPhases(cancelledUpdates)).toEqual(['recall.shared-sync']);
+          expect(recallProgressPhases(cancelledUpdates)).toEqual(['recall.workspace-context']);
           await new Promise(resolve => setTimeout(resolve, 400));
           expect(protocolErrors).toEqual([]);
           const followUp = await client.callTool({arguments: {}, name: 'list_context'}, undefined, {
@@ -1599,7 +1643,7 @@ describe('Threadnote MCP toolsets', () => {
         environment: {
           NODE_ENV: 'test',
           THREADNOTE_TEST_MCP_PROGRESS_HEARTBEAT_MILLISECONDS: '100',
-          THREADNOTE_TEST_MCP_PROGRESS_SHARED_SYNC_DELAY_MILLISECONDS: '300',
+          THREADNOTE_TEST_MCP_PROGRESS_WORKSPACE_DELAY_MILLISECONDS: '300',
         },
         toolset: 'core',
       },
@@ -1846,6 +1890,8 @@ describe('Threadnote MCP toolsets', () => {
           )}\n`,
           {mode: 0o600},
         );
+
+        await prepareReadyFixture(fixture);
         const result = await client.callTool(
           {arguments: {responseFormat: 'dual', uri: requestedUri}, name: 'read_context'},
           undefined,
@@ -1901,6 +1947,7 @@ describe('Threadnote MCP toolsets', () => {
           EffectString.replace('source_agent_client:', `memory_id: ${memoryId}\nsource_agent_client:`),
         );
         await writeCanonicalMemory(fixture.home, 'identity-alias.md', content);
+        await prepareReadyFixture(fixture);
         const recalled = await client.callTool(
           {arguments: {project: 'threadnote', query: 'qz-alias-4411'}, name: 'recall_context'},
           undefined,
@@ -2015,6 +2062,7 @@ describe('Threadnote MCP toolsets', () => {
         );
         await mkdir(join(sharedPath, '..'), {recursive: true});
         await writeFile(sharedPath, content, 'utf8');
+        await prepareReadyFixture(fixture);
         const result = await client.callTool({arguments: {uri: requestedUri}, name: 'read_context'}, undefined, {
           timeout: 30000,
         });
@@ -2617,6 +2665,8 @@ describe('Threadnote MCP toolsets', () => {
           handoff('feature/billing', '2026-08-20T00:00:00.000Z'),
           'utf8',
         );
+
+        await prepareReadyFixture(fixture);
         const recalled = await client.callTool(
           {
             arguments: {

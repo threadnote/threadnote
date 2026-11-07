@@ -3,10 +3,11 @@ import {Array as EffectArray} from 'effect';
 import {Context, Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schedule, Schema} from 'effect';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {globToRegExp} from '@threadnote/platform/glob';
-import {readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {readExclusiveFileLockOwner} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from './resource/lock.js';
 import {
   advanceCanonicalMutationGeneration,
+  withCanonicalMutationLock,
   type CanonicalMutationGenerationTransition,
 } from './resource/mutation_generation.js';
 import {
@@ -362,9 +363,11 @@ function createResourceStoreOperations(
   const withLock = <A, E, R>(location: ResourceStoreLocation, id: ResourceId, effect: Effect.Effect<A, E, R>) => {
     const lockPath = resourceAccountMutationLockPath(path, location.home, location.account);
     const event = {account: location.account, lockPath, uri: id.canonicalUri};
-    const lockEffect = withExclusiveFileLock(
+    const lockEffect = withCanonicalMutationLock(
       fs,
-      lockPath,
+      path,
+      location.home,
+      location.account,
       {
         ...resourceAccountMutationLockPolicy,
         ...(layerOptions.onMutationLockAcquired ? {onAcquired: () => layerOptions.onMutationLockAcquired!(event)} : {}),

@@ -26,6 +26,7 @@ import {
   runProductionLogs,
   withProductionLogging,
   withProductionPhaseTiming,
+  recordUnavailableProductionPhase,
 } from '@threadnote/threadnote/effect/production_log';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -226,6 +227,21 @@ describe('production log writer', () => {
         expect(content).not.toContain(responseText);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('records a rejected phase as unavailable without charging unrelated elapsed work', () =>
+    Effect.gen(function* () {
+      const {fs, home, path} = yield* ownedTestHome('unavailable-phase');
+      yield* withProductionLogging(
+        home,
+        {component: 'mcp', operation: 'recall_context'},
+        TestClock.adjust(137).pipe(Effect.andThen(recordUnavailableProductionPhase('recall.semantic-retrieval'))),
+      );
+      const entries = parseEntries(yield* fs.readFileString(productionLogPath(path, home)));
+      expect(entries[1]?.phaseTimings).toEqual([
+        {durationMilliseconds: 0, outcome: 'unavailable', phase: 'recall.semantic-retrieval'},
+      ]);
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('batches typed phase timings into the existing finished entry without application content', () =>

@@ -10,7 +10,10 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
-import type {NativeCycleRebaseInput} from '@threadnote/workflow-automations/cycle-review';
+import type {
+  NativeCycleBaseRequalificationInput,
+  NativeCycleRebaseInput,
+} from '@threadnote/workflow-automations/cycle-review';
 import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -313,14 +316,18 @@ export const pinNativeCycleCommit = Effect.fn('workflowAutomation.cycle.pinCommi
   bindingId: string,
   snapshotId: string,
   commit: string,
-  purpose: 'rebase-before' | 'rebase-after',
+  purpose:
+    'rebase-before' | 'rebase-after' | 'requalification-before' | 'requalification-after' | 'requalification-base',
 ) {
   if (
     !/^[a-f0-9]{64}$/u.test(bindingId) ||
     !objectId.test(commit) ||
     (yield* resolveObject(repo, commit, 'commit')) !== commit
   )
-    return yield* fail('invalid-rebase', 'Rebase retention requires exact commit identities.');
+    return yield* fail(
+      EffectString.startsWith('requalification-')(purpose) ? 'invalid-base-requalification' : 'invalid-rebase',
+      'Retention requires exact commit identities.',
+    );
   const reference = `refs/threadnote/cycles/${purpose}/${sha256HexSync(JSON.stringify([bindingId, purpose, snapshotId]))}`;
   return yield* pinNativeCycleReference(repo, reference, commit, 'commit');
 });
@@ -337,14 +344,56 @@ export const nativeCycleIsAncestor = Effect.fn('workflowAutomation.cycle.isAnces
     ['--no-optional-locks', '-C', repo, 'merge-base', '--is-ancestor', before, after],
     {
       allowFailure: true,
-      timeoutMs: 30000,
+      timeoutMs: 30_000,
       maxOutputBytes: 4096,
     },
   );
   if (result.exitCode === 0) return true;
   if (result.exitCode === 1) return false;
-  return yield* fail('invalid-rebase', 'Git could not verify the source ancestry.');
+  return yield* fail('invalid-base-requalification', 'Git could not verify source ancestry.');
 });
+
+export const verifyNativeCycleBaseRequalification = Effect.fn('workflowAutomation.cycle.verifyBaseRequalification')(
+  function* (
+    repo: string,
+    priorHead: string,
+    currentHead: string,
+    declaredBaseHead: string,
+    witness: NativeCycleBaseRequalificationInput,
+  ) {
+    if (
+      witness.preRebaseHead !== priorHead ||
+      witness.rebasedHead !== currentHead ||
+      witness.ontoHead !== declaredBaseHead
+    )
+      return yield* fail(
+        'invalid-base-requalification',
+        'Use the exact reviewed predecessor, current HEAD and declared new base.',
+      );
+    for (const commit of new Set([priorHead, currentHead, declaredBaseHead]))
+      if (
+        (yield* resolveObject(repo, commit, 'commit').pipe(
+          Effect.mapError(() => fail('invalid-base-requalification', 'A witnessed commit is unavailable.')),
+        )) !== commit
+      )
+        return yield* fail('invalid-base-requalification', 'Every witnessed commit must resolve exactly.');
+    if (
+      (yield* nativeCycleIsAncestor(repo, priorHead, currentHead)) ||
+      !(yield* nativeCycleIsAncestor(repo, declaredBaseHead, currentHead))
+    )
+      return yield* fail(
+        'invalid-base-requalification',
+        'Requalification requires rewritten source descended from its declared new base.',
+      );
+    const common = EffectString.trim(
+      yield* git(repo, ['merge-base', priorHead, declaredBaseHead]).pipe(
+        Effect.mapError(() => fail('invalid-base-requalification', 'Keep a common repository history.')),
+      ),
+    );
+    if (!objectId.test(common))
+      return yield* fail('invalid-base-requalification', 'Git did not return a common repository history.');
+  },
+);
 
 export const verifyNativeCycleRebase = Effect.fn('workflowAutomation.cycle.verifyRebase')(function* (
   repo: string,

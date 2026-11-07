@@ -173,17 +173,24 @@ describe.skipIf(process.platform === 'win32' && !manualCloud)('verified personal
           const store = f.store;
           const observedStore = {
             ...store,
-            remove: (
-              location: Parameters<typeof store.remove>[0],
-              uri: string,
-              options?: Parameters<typeof store.remove>[2],
+            mutateChecked: <E, R>(
+              location: Parameters<typeof store.mutateChecked>[0],
+              mutations: Parameters<typeof store.mutateChecked>[1],
+              check: Effect.Effect<void, E, R>,
             ) =>
               Effect.gen(function* () {
-                if (!verifiedBeforeFirstRemoval && EffectArray.some(loaded.owned, i => i.uri === uri)) {
+                if (
+                  !verifiedBeforeFirstRemoval &&
+                  EffectArray.some(
+                    mutations,
+                    mutation =>
+                      mutation.type === 'remove' && EffectArray.some(loaded.owned, item => item.uri === mutation.uri),
+                  )
+                ) {
                   yield* readRemote(f, projected);
                   verifiedBeforeFirstRemoval = true;
                 }
-                return yield* store.remove(location, uri, options);
+                return yield* store.mutateChecked(location, mutations, check);
               }),
           };
           const finished = yield* decode(summary)(

@@ -215,7 +215,15 @@ export function withCatalogReader<A, E, R>(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* configureCodeGraphWorksetCatalogReadConnection(sql);
-        yield* validateWorksetScopeReadSchema(sql);
+        const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+        // Initialization publishes this marker after all base tables and scope
+        // migration commit. Ready readers must not queue behind normal writers.
+        const admission = sql.withTransaction(validateWorksetScopeReadSchema(sql));
+        if (versions[0]?.user_version === CODE_GRAPH_WORKSET_CATALOG_SCHEMA_VERSION) {
+          yield* admission;
+        } else {
+          yield* withExclusiveFileLock(fs, layout.lockPath, CATALOG_LOCK_OPTIONS, admission);
+        }
         return yield* use(sql);
       }),
     );

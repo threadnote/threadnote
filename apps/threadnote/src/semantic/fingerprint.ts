@@ -32,21 +32,12 @@ export const boundedFileDigest = Effect.fn('semantic.boundedFileDigest')(functio
     '',
   );
 });
-/** Bounded conservative pilot invalidation. No build/config code is evaluated to compute this basis. */
-const treeDigest = Effect.fn('semantic.treeDigest')(function* (
-  root: string,
-  projectConfiguration: boolean,
-  sdk: boolean,
-) {
+/** Shared bounded validation; only extends backedges classify configuration resolution. */
+const configurationValidator = Effect.fn('semantic.configurationValidator')(function* (canonical: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const canonical = yield* fs.realPath(root);
-  if (canonical !== path.resolve(root)) return yield* LspFault.make({code: 'prerequisite'});
-  const pending = [canonical];
-  const entries: [string, string][] = [];
-  let files = 0;
-  let totalBytes = 0;
   const configurations = new Set<string>();
+  const extensionsByFile = new Map<string, string[]>();
   const validateConfiguration = (file: string): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       if (configurations.has(file)) return;
@@ -57,6 +48,8 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
       )
         return yield* LspFault.make({code: 'prerequisite'});
       configurations.add(file);
+      const resolvedExtensions: string[] = [];
+      extensionsByFile.set(file, resolvedExtensions);
       if (Number((yield* fs.stat(file)).size) > 1024 * 1024) return yield* LspFault.make({code: 'capacity'});
       const errors: ParseError[] = [];
       const raw: unknown = parseJsonc(yield* readBoundedText(file, 1024 * 1024), errors, {allowTrailingComma: true});
@@ -84,6 +77,7 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
             catch: () => LspFault.make({code: 'prerequisite'}),
           });
         if (!EffectString.endsWith('.json')(resolved)) return yield* LspFault.make({code: 'prerequisite'});
+        resolvedExtensions.push(resolved);
         yield* validateConfiguration(resolved);
       }
       for (const reference of configuration.references ?? []) {
@@ -95,6 +89,55 @@ const treeDigest = Effect.fn('semantic.treeDigest')(function* (
         );
       }
     });
+  // Validation may visit a file through references before its extends ancestors
+  // finish. Analyze only the completed extends graph, with separate traversal state.
+  const hasExtendsCycle = (selected: string) => {
+    const active = new Set<string>();
+    const completed = new Map<string, boolean>();
+    const visit = (file: string): boolean => {
+      if (active.has(file)) return true;
+      if (completed.has(file)) return completed.get(file) === true;
+      active.add(file);
+      const cyclic = EffectArray.some(extensionsByFile.get(file) ?? [], visit);
+      active.delete(file);
+      completed.set(file, cyclic);
+      return cyclic;
+    };
+    return visit(selected);
+  };
+  return {validateConfiguration, hasExtendsCycle};
+});
+
+/** Unknown/inferred or foreign configuration is never a positive classification. */
+export const typeScriptConfigurationHasExtendsCycle = Effect.fn('semantic.typeScriptConfigurationHasExtendsCycle')(
+  function* (root: string, selected: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const canonical = yield* fs.realPath(root);
+    if (canonical !== path.resolve(root)) return yield* LspFault.make({code: 'prerequisite'});
+    if (!EffectString.startsWith(canonical + path.sep)(selected) || !EffectString.endsWith('.json')(selected))
+      return false;
+    const validator = yield* configurationValidator(canonical);
+    yield* validator.validateConfiguration(selected);
+    return validator.hasExtendsCycle(selected);
+  },
+);
+
+/** Bounded conservative pilot invalidation. No build/config code is evaluated to compute this basis. */
+const treeDigest = Effect.fn('semantic.treeDigest')(function* (
+  root: string,
+  projectConfiguration: boolean,
+  sdk: boolean,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const canonical = yield* fs.realPath(root);
+  if (canonical !== path.resolve(root)) return yield* LspFault.make({code: 'prerequisite'});
+  const pending = [canonical];
+  const entries: [string, string][] = [];
+  let files = 0;
+  let totalBytes = 0;
+  const {validateConfiguration} = yield* configurationValidator(canonical);
   const largeReads = sdk ? yield* Semaphore.make(1) : undefined;
   while (pending.length) {
     const directory = pending.pop()!;

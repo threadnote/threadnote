@@ -1,3 +1,4 @@
+import {RECALL_LOGICAL_SCOPE_CHANGED_REASON} from './freshness.js';
 import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Layer, Schema} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -37,7 +38,10 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
 ) {
   const initial = yield* recallIndexStatus(config, false);
   if (!initial.ready || !initial.generation || !initial.databasePath)
-    return yield* initial.reason === 'canonical documents changed; run `threadnote repair`' ? changed() : corrupt();
+    return yield* initial.reason === 'canonical documents changed; run `threadnote repair`' ||
+    initial.reason === RECALL_LOGICAL_SCOPE_CHANGED_REASON
+      ? changed()
+      : corrupt();
   const databasePath = initial.databasePath;
   const generation = initial.generation;
   const location = {home: config.agentContextHome, account: config.account, user: config.user};
@@ -53,7 +57,11 @@ export const openRecallVectorPreparationSource = Effect.fn('recall.openVectorPre
     if (recallVectorAuthorizationKey(yield* loadExternalResourceAccess(location)) !== authorizationKey)
       return yield* changed();
     const current = yield* recallIndexStatus(config, false);
-    if (current.reason === 'canonical documents changed; run `threadnote repair`') return yield* changed();
+    if (
+      current.reason === 'canonical documents changed; run `threadnote repair`' ||
+      current.reason === RECALL_LOGICAL_SCOPE_CHANGED_REASON
+    )
+      return yield* changed();
     if (!current.ready) return yield* corrupt();
     if (current.generation !== generation || current.databasePath !== databasePath) return yield* changed();
   });

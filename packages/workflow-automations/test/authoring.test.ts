@@ -1,10 +1,11 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   canonicalAuthoringJson,
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
+  NativeAuthoringPlanDocumentSchema,
   nativeSpecIntentDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -164,6 +165,129 @@ const alternativesPlan = (count: number, index = 0, marker = 'private-fixture') 
 };
 
 describe('native authoring documents', () => {
+  const scopedPlan = (affected: number, added: number) => {
+    const document = asPlan(validPlan());
+    return {
+      ...document,
+      phases: EffectArray.map(document.phases, phase => ({
+        ...phase,
+        affectedPaths: Array.from({length: affected}, (_, index) => `src/affected-${index}.ts`),
+        newPaths: Array.from({length: added}, (_, index) => `src/new-${index}.ts`),
+      })),
+    };
+  };
+
+  it('admits either path classification up to the unchanged combined cycle capacity', () => {
+    for (const [affected, added] of [
+      [136, 53],
+      [256, 0],
+      [0, 256],
+      [128, 128],
+      [0, 0],
+    ]) {
+      const input = scopedPlan(affected, added);
+      expect(decodeNativeAuthoringDocument(input)).toEqual(input);
+      expect(validateNativeAuthoring(input).issues).toEqual([]);
+      expect(decodeNativeAuthoringDocument(JSON.parse(canonicalAuthoringJson(input)))).toEqual(input);
+    }
+  });
+
+  it('rejects combined overflow across classifications without mutating input', () => {
+    for (const [affected, added] of [
+      [256, 1],
+      [129, 128],
+      [1, 256],
+      [0, 257],
+      [257, 0],
+    ]) {
+      const input = scopedPlan(affected, added);
+      const before = JSON.stringify(input);
+      const error = caught(() => decodeNativeAuthoringDocument(input));
+      expect(error).toMatchObject({code: 'invalid-document'});
+      expect(error instanceof Error ? error.message : '').toBe(
+        'A phase may contain at most 256 affectedPaths and newPaths entries combined.',
+      );
+      expect(JSON.stringify(input)).toBe(before);
+    }
+    const privateMarker = 'private-overflow-path-value';
+    const privateInput = scopedPlan(129, 128);
+    const [firstPhase, ...remainingPhases] = privateInput.phases;
+    if (!firstPhase) throw new Error('Expected the phase fixture.');
+    const privacyError = caught(() =>
+      decodeNativeAuthoringDocument({
+        ...privateInput,
+        phases: [
+          {...firstPhase, affectedPaths: [privateMarker, ...firstPhase.affectedPaths.slice(1)]},
+          ...remainingPhases,
+        ],
+      }),
+    );
+    expect(privacyError).toMatchObject({
+      code: 'invalid-document',
+      message: 'A phase may contain at most 256 affectedPaths and newPaths entries combined.',
+    });
+    if (!(privacyError instanceof Error)) throw new Error('Expected a rejected authoring document.');
+    expect(privacyError.message).not.toContain(privateMarker);
+    expect(Schema.toJsonSchemaDocument(NativeAuthoringPlanDocumentSchema)).toBeDefined();
+    // Source evidence retains its separate128-entry cap.
+    expect(
+      caught(() =>
+        decodeNativeAuthoringDocument({
+          ...scopedPlan(0, 0),
+          source: {
+            ...source,
+            files: Array.from({length: 129}, (_, index) => ({path: `src/${index}.ts`, sha256: hash})),
+          },
+        }),
+      ),
+    ).toMatchObject({code: 'invalid-document'});
+  });
+
+  it('publishes per-list limits and the required combined runtime constraint', () => {
+    const publicSchema = Schema.decodeUnknownSync(
+      Schema.Struct({
+        schema: Schema.Struct({
+          properties: Schema.Struct({
+            phases: Schema.Struct({
+              items: Schema.Struct({
+                allOf: Schema.Array(Schema.Struct({description: Schema.String})),
+                properties: Schema.Struct({
+                  affectedPaths: Schema.Struct({maxItems: Schema.Finite}),
+                  newPaths: Schema.Struct({maxItems: Schema.Finite}),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    )(Schema.toJsonSchemaDocument(NativeAuthoringPlanDocumentSchema));
+    expect(publicSchema.schema.properties.phases.items).toMatchObject({
+      allOf: [
+        {
+          description:
+            'Runtime validation requires affectedPaths and newPaths to contain at most 256 entries combined.',
+        },
+      ],
+      properties: {affectedPaths: {maxItems: 256}, newPaths: {maxItems: 256}},
+    });
+  });
+
+  it('preserves exact classified paths and round trips iff their combined count fits', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 270}), fc.integer({min: 0, max: 270}), (affected, added) => {
+        const input = scopedPlan(affected, added);
+        const before = JSON.stringify(input);
+        if (affected + added <= 256) {
+          const decoded = decodeNativeAuthoringDocument(input);
+          expect(decoded).toEqual(input);
+          expect(decodeNativeAuthoringDocument(JSON.parse(canonicalAuthoringJson(decoded)))).toEqual(input);
+        } else expect(caught(() => decodeNativeAuthoringDocument(input))).toMatchObject({code: 'invalid-document'});
+        expect(JSON.stringify(input)).toBe(before);
+      }),
+      {numRuns: 48},
+    );
+  });
+
   it('strictly decodes versioned spec and plan shapes, safe source paths, and the canonical byte ceiling', () => {
     expect(decodeNativeAuthoringDocument(validSpec())).toEqual(validSpec());
     expect(decodeNativeAuthoringDocument(validPlan())).toEqual(validPlan());
@@ -363,6 +487,33 @@ describe('native authoring documents', () => {
       review: {documentHash: planIntent, outcome: 'accepted', blockingIssueCount: 0},
     });
     expect(validReady).toMatchObject({ready: true, issues: []});
+    expect(() =>
+      validPlan({
+        current: {...asPlan(validPlan()).current, summary: ''},
+      }),
+    ).toThrow();
+
+    const proseArchitecture = validPlan({
+      current: {
+        ...asPlan(validPlan()).current,
+        diagram: 'graph traversal follows imports and returns the cached result.',
+      },
+      target: {...asPlan(validPlan()).target, diagram: ''},
+    });
+    const proseReady = validateNativeAuthoring(proseArchitecture, {
+      ready: true,
+      confirmation: {
+        decision: 'approved',
+        intentHash: nativeAuthoringDigest(proseArchitecture),
+        response: 'Approved implementation plan.',
+      },
+      review: {
+        documentHash: nativeAuthoringDigest(proseArchitecture),
+        outcome: 'accepted',
+        blockingIssueCount: 0,
+      },
+    });
+    expect(proseReady).toMatchObject({ready: true, issues: []});
 
     const changedRequirement = validPlan({
       requirements: [{id: 'req-cache', behavior: 'Fresh entries only are returned.'}],
@@ -444,5 +595,13 @@ describe('native authoring documents', () => {
         issue => issue.code,
       ),
     ).toContain('diagram-invalid');
+
+    const proseDiagram = validPlan({
+      current: {
+        ...asPlan(validPlan()).current,
+        diagram: 'The reader checks freshness before it returns a cached entry.',
+      },
+    });
+    expect(issueCodes(proseDiagram)).not.toContain('diagram-invalid');
   });
 });

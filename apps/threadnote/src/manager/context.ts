@@ -24,6 +24,7 @@ import {parseResourceId, resourceIdIsManagedMemoryNamespace} from '@threadnote/s
 import type {ApplicationServices} from '../effect/runtime.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {RecallHit} from '@threadnote/recall/results';
+import {RecallReadyReadUnavailable} from '@threadnote/recall/index';
 import {
   MemoryIdentityResolutionError,
   resolveMemoryIdentityAliases,
@@ -553,6 +554,12 @@ function projectMemoryMetadata(metadata: MemoryMetadata): ManagerRecallResultMet
 }
 
 function managerContextOperationError(cause: unknown, code: string): ManagerContextApiError {
+  if (Schema.is(RecallReadyReadUnavailable)(cause))
+    return ManagerContextApiError.of(
+      code,
+      'A ready recall snapshot is unavailable. Retry after background maintenance, or run threadnote repair.',
+      503,
+    );
   return Schema.is(ManagerContextApiError)(cause)
     ? cause
     : ManagerContextApiError.of(code, 'Threadnote could not complete this context operation. Retry or narrow it.', 500);

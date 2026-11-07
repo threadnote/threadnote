@@ -2,7 +2,9 @@ import {Array as EffectArray, Schema} from 'effect';
 import {access, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Effect} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {Deferred, Effect, Fiber} from 'effect';
+import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {clearAutoShareStateForTest, publishShareGitChange} from '@threadnote/threadnote/share/index';
 import {
@@ -16,6 +18,8 @@ import type {ShareRuntime} from '@threadnote/threadnote/types';
 import * as utils from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const runShareRemove = (...args: Parameters<typeof runShareRemoveEffect>) => runEffect(runShareRemoveEffect(...args));
 const runShareRename = (...args: Parameters<typeof runShareRenameEffect>) => runEffect(runShareRenameEffect(...args));
@@ -330,44 +334,36 @@ describe('share administration', () => {
     ).resolves.toContain('"succeeded":true');
   });
 
-  it('serializes concurrent process states and reuses the completed fetch receipt', async () => {
-    const config = await makeRuntime();
-    homes.push(config.agentContextHome);
-    let markFetchStarted: (() => void) | undefined;
-    let releaseFetch: (() => void) | undefined;
-    const fetchStarted = new Promise<void>(resolve => {
-      markFetchStarted = resolve;
-    });
-    const fetchBlocked = new Promise<void>(resolve => {
-      releaseFetch = resolve;
-    });
-    vi.mocked(utils.runCommand).mockImplementation((_executable, args) => {
-      if (args[2] === 'fetch') {
-        return Effect.promise(async () => {
-          markFetchStarted?.();
-          await fetchBlocked;
-          return ok();
-        });
-      }
-      return Effect.succeed(ok());
-    });
-
-    const first = runEffect(syncSharedReposBeforeAgentRead(config));
-    await fetchStarted;
-    clearAutoShareStateForTest();
-    const second = runEffect(syncSharedReposBeforeAgentRead(config));
-    await new Promise(resolve => setTimeout(resolve, 40));
-    releaseFetch?.();
-    const results = await Promise.all([first, second]);
-
-    const commands = vi.mocked(utils.runCommand).mock.calls;
-    expect(EffectArray.filter(commands, ([, args]) => args[2] === 'fetch')).toHaveLength(1);
-    expect(EffectArray.filter(commands, ([, args]) => args[2] === 'rev-list')).toHaveLength(1);
-    expect(results).toEqual([
-      {syncedTeams: [], warnings: []},
-      {syncedTeams: [], warnings: []},
-    ]);
-  });
+  effectIt.effect('defers a concurrent reader and reuses the completed fetch receipt afterward', () =>
+    Effect.gen(function* () {
+      const config = yield* Effect.promise(makeRuntime);
+      homes.push(config.agentContextHome);
+      const fetchStarted = yield* Deferred.make<void>();
+      const fetchBlocked = yield* Deferred.make<void>();
+      vi.mocked(utils.runCommand).mockImplementation((_executable, args) =>
+        args[2] === 'fetch'
+          ? Deferred.succeed(fetchStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(fetchBlocked)),
+              Effect.as(ok()),
+            )
+          : Effect.succeed(ok()),
+      );
+      const first = yield* Effect.forkScoped(syncSharedReposBeforeAgentRead(config));
+      yield* Deferred.await(fetchStarted);
+      clearAutoShareStateForTest();
+      // It must return while the first fetch is still blocked, without launching another fetch.
+      const second = yield* syncSharedReposBeforeAgentRead(config).pipe(
+        Effect.timeout('1 second'),
+        Effect.ensuring(Deferred.succeed(fetchBlocked, undefined)),
+      );
+      expect(second).toEqual({syncedTeams: [], warnings: [], deferred: true});
+      expect(yield* Fiber.join(first)).toEqual({syncedTeams: [], warnings: []});
+      expect(yield* syncSharedReposBeforeAgentRead(config)).toEqual({syncedTeams: [], warnings: []});
+      const commands = vi.mocked(utils.runCommand).mock.calls;
+      expect(EffectArray.filter(commands, ([, args]) => args[2] === 'fetch')).toHaveLength(1);
+      expect(EffectArray.filter(commands, ([, args]) => args[2] === 'rev-list')).toHaveLength(1);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   it('repairs a corrupt fetch receipt by performing one fresh fetch', async () => {
     const config = await makeRuntime();

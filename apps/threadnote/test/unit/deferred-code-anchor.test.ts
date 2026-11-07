@@ -26,6 +26,8 @@ import {
   hasDeferredCodeAnchorIntent,
   listDeferredCodeAnchorIntents,
   stageDeferredCodeAnchorIntent,
+  prepareDeferredCodeAnchorIntent,
+  persistPreparedDeferredCodeAnchorIntent,
   type DeferredCodeAnchorWriteRequest,
   type DeferredCodeAnchorFinalizationRoute,
   withDeferredCodeAnchorMutationLocks,
@@ -73,6 +75,50 @@ const MEMORY_URI = 'threadnote://user/tester/memories/durable/projects/threadnot
 const TEST_ROUTE_PASS_TIMEOUT_MILLISECONDS = 5_000;
 
 describe('deferred code-anchor outbox', () => {
+  effectIt.effect.prop(
+    'prepared staging and finalization never recreate a deleted canonical memory',
+    {actions: Schema.Array(Schema.Literals(['stage', 'delete', 'finalize'])).check(Schema.isMaxLength(6))},
+    ({actions}) =>
+      Effect.gen(function* () {
+        const f = yield* makeFixture();
+        const store = yield* ResourceStore;
+        const location = {account: f.config.account, home: f.config.agentContextHome, user: f.config.user};
+        const content = memoryContent(f.metadata, 'Prepared before a concurrent delete.');
+        yield* store.write(location, MEMORY_URI, content, {mode: 'create'});
+        const prepared = yield* prepareDeferredCodeAnchorIntent(f.config, {
+          memoryContent: content,
+          memoryMetadata: f.metadata,
+          memoryUri: MEMORY_URI,
+          request: deferredRequest(f.repository, ['src/value.ts']),
+        });
+        let deleted = false;
+        for (const action of [...actions, 'delete', 'stage', 'finalize']) {
+          if (action === 'stage')
+            yield* withDeferredCodeAnchorMutationLocks(
+              f.fs,
+              f.config,
+              [MEMORY_URI],
+              persistPreparedDeferredCodeAnchorIntent(f.config, prepared),
+            );
+          else if (action === 'delete') {
+            yield* withDeferredCodeAnchorMutationLocks(
+              f.fs,
+              f.config,
+              [MEMORY_URI],
+              store.remove(location, MEMORY_URI).pipe(
+                Effect.catchTag('ResourceNotFound', () => Effect.void),
+                Effect.andThen(discardDeferredCodeAnchorIntent(f.config, MEMORY_URI)),
+              ),
+            );
+            deleted = true;
+          } else yield* finalizeDeferredCodeAnchors(f.config, {uris: [MEMORY_URI]});
+          const observed = yield* store.read(location, MEMORY_URI).pipe(Effect.option);
+          expect(Option.isNone(observed)).toBe(deleted);
+        }
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {arbitrary: {runs: 20}},
+  );
+
   effectIt.effect('round trips busy intents and rejects mixed or impossible readiness descriptors', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();

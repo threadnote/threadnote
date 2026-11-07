@@ -13,9 +13,7 @@ import {exactRecallTerms, type ExactMatch, type RecallHit} from '@threadnote/rec
 import {resolveEffectAiConfiguration} from '../../effect/ai/consolidator.js';
 import {jevConfiguration} from '../../effect/ai/jev.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {loadRecallExactMatches} from '@threadnote/recall/index';
-import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
-import {lexicalIndexUnavailableWarning, type RecallOperationalWarning} from '@threadnote/recall/warning';
+import {type RecallOperationalWarning} from '@threadnote/recall/warning';
 import {
   exactMemoryScopes,
   MAX_WORKSET_PASSES,
@@ -36,8 +34,20 @@ export interface RecallWorkspaceContextParams {
   readonly workset: string | undefined;
 }
 
+const MCP_PROGRESS_TEST_WORKSPACE_DELAY_ENV = 'THREADNOTE_TEST_MCP_PROGRESS_WORKSPACE_DELAY_MILLISECONDS';
+const MCP_PROGRESS_TEST_WORKSPACE_DELAY_MAX_MILLISECONDS = 1_000;
+function mcpProgressTestWorkspaceDelayMilliseconds(environment: NodeJS.ProcessEnv): number {
+  if (environment.NODE_ENV !== 'test') return 0;
+  const configured = Number(environment[MCP_PROGRESS_TEST_WORKSPACE_DELAY_ENV]);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, MCP_PROGRESS_TEST_WORKSPACE_DELAY_MAX_MILLISECONDS)
+    : 0;
+}
+
 export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: RecallWorkspaceContextParams) {
   return Effect.gen(function* () {
+    const delay = mcpProgressTestWorkspaceDelayMilliseconds((yield* SystemInfo).environment());
+    if (delay > 0) yield* Effect.sleep(delay);
     const query = params.query;
     const navigationOnly = query.length === 0;
     const workspaceComponent =
@@ -92,13 +102,16 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     }
     const eligibility = scope.eligibility;
 
-    const exactLookup = yield* collectExactMemoryMatches(
-      config,
-      query,
-      params.includeArchived,
-      eligibility,
-      params.pinnedUri ? [params.pinnedUri] : params.allowedUriScopes,
-    );
+    const exactRead = navigationOnly
+      ? undefined
+      : {
+          terms: exactRecallTerms(query),
+          uriScopes: params.pinnedUri
+            ? [params.pinnedUri]
+            : (params.allowedUriScopes ??
+              exactMemoryScopes(config, params.includeArchived, query, undefined, undefined)),
+          limitPerTerm: 25,
+        };
     const effectAiResult = navigationOnly
       ? undefined
       : yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment()).pipe(Effect.result);
@@ -114,9 +127,10 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       effectAi,
       jev,
       eligibility,
-      exactMatches: exactLookup.matches,
+      exactRead,
+      exactMatches: [] as readonly ExactMatch[],
       navigationOnly,
-      operationalWarnings: exactLookup.operationalWarnings,
+      operationalWarnings: [] as readonly RecallOperationalWarning[],
       passes,
       query,
       recallProjectName,
@@ -131,30 +145,3 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     };
   });
 }
-
-const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatches')(function* (
-  config: RuntimeConfig,
-  query: string,
-  includeArchived: boolean,
-  eligibility: RecallEligibilityPolicy,
-  allowedUriScopes?: readonly string[],
-) {
-  const terms = exactRecallTerms(query);
-  if (terms.length === 0) {
-    return {
-      matches: [] as readonly ExactMatch[],
-      operationalWarnings: [] as readonly RecallOperationalWarning[],
-    };
-  }
-  const scopes = allowedUriScopes ?? exactMemoryScopes(config, includeArchived, query, undefined, undefined);
-  const result = yield* loadRecallExactMatches(config, {
-    eligibility,
-    includeInactive: includeArchived,
-    limitPerTerm: 25,
-    terms,
-    uriScopes: scopes,
-  }).pipe(Effect.result);
-  return Result.isSuccess(result)
-    ? {matches: result.success, operationalWarnings: []}
-    : {matches: [], operationalWarnings: [lexicalIndexUnavailableWarning()]};
-});

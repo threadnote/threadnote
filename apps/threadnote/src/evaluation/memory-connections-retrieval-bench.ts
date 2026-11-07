@@ -38,9 +38,16 @@ export const runMemoryConnectionsRetrievalBench = Effect.fn('evaluation.memoryCo
 
   const observations = yield* Effect.forEach(
     fixture.cases,
-    testCase =>
+    (testCase, caseIndex) =>
       Effect.gen(function* () {
         const started = yield* Clock.currentTimeNanos;
+        // Retain active-index preparation in the first measured read; the inactive variant is prepared above.
+        if (caseIndex === 0)
+          yield* loadRecallIndexData(config, {
+            allowedUriScopes: [memoryRoot(config.user)],
+            includeInactive: false,
+            memoryIds: [],
+          });
         const result = yield* retrieveRecallMemoryConnections(config, {
           allowedUriScopes: [memoryRoot(config.user)],
           ...(testCase.includeHistorical === undefined ? {} : {includeHistorical: testCase.includeHistorical}),

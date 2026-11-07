@@ -8,7 +8,7 @@ import {
   type MemoryMetadata,
   type MemoryRelation,
 } from '@threadnote/memory/document';
-import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
+import {loadRecallIndexData, loadRecallMemoryIdentities, recallIndexStatus} from '@threadnote/recall/index';
 import {projectRecallMcpResponse} from '@threadnote/recall/mcp/response';
 import {retrieveRecallMemoryConnections} from '@threadnote/recall/memory/connections';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -113,7 +113,20 @@ export const runMemoryConnectionsScaleWorkload = Effect.fn('evaluation.memoryCon
           id => runScenario(corpus.config, id, options),
           {concurrency: 1},
         );
-        const storage = yield* recallStorageBytes(fs, status.databasePath);
+        const activeStatus = yield* recallIndexStatus(corpus.config, false);
+        if (!activeStatus.ready || activeStatus.documentCount !== options.memoryCandidates)
+          return yield* MemoryConnectionsScaleError.make({
+            message: `Active identity index contains ${activeStatus.documentCount}/${options.memoryCandidates} memories.`,
+          });
+        const variants = yield* Effect.forEach(
+          [status.databasePath, activeStatus.databasePath],
+          filename => recallStorageBytes(fs, filename),
+          {concurrency: 2},
+        );
+        const storage = {
+          database: EffectArray.reduce(variants, 0, (sum, variant) => sum + variant.database),
+          total: EffectArray.reduce(variants, 0, (sum, variant) => sum + variant.total),
+        };
         rss.observe();
         const peakRssBytes = rss.peak();
         return {
@@ -201,7 +214,7 @@ const runScenario = Effect.fn('evaluation.memoryConnectionsScale.scenario')(func
   options: MemoryConnectionsScaleWorkloadOptions,
 ) {
   const run = () => runLookup(config, id);
-  const cold = yield* run();
+  const cold = yield* runLookup(config, id, true);
   const warmups = yield* Effect.forEach(Array.from({length: options.warmups}), run, {concurrency: 1});
   const samples = yield* Effect.forEach(Array.from({length: options.samples}), run, {concurrency: 1});
   const fixture = EffectOption.getOrUndefined(
@@ -220,11 +233,14 @@ const runScenario = Effect.fn('evaluation.memoryConnectionsScale.scenario')(func
 const runLookup = Effect.fn('evaluation.memoryConnectionsScale.lookup')(function* (
   config: RuntimeConfig,
   id: MemoryConnectionsScaleScenarioId,
+  prepareActive = false,
 ) {
   const fixture = EffectOption.getOrUndefined(
     EffectArray.findFirst(MEMORY_CONNECTIONS_SCALE_FIXTURE.scenarios, value => value.id === id),
   )!;
   const started = yield* Clock.currentTimeNanos;
+  // Preserve the former implicit active-index preparation inside the cold measurement.
+  if (prepareActive) yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
   const result = yield* retrieveRecallMemoryConnections(config, {
     allowedUriScopes: [memoryProjectRoot(config.user)],
     limit: 8,

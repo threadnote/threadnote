@@ -120,9 +120,9 @@ import {
   runModelList,
   runModelRemove,
   runModelRuntimeStatus,
-  runModelSelect,
   runModelVerify,
 } from '../models/commands.js';
+import {makeModelSelectionCommands} from './model_selection_cli.js';
 import {makeModelsSetupCommand} from './models_setup_cli.js';
 import {runIndexPurge, runIndexRebuild, runIndexStatus, runIndexVerify} from '../search/commands.js';
 import {runProductionLogs} from './production_log.js';
@@ -589,23 +589,18 @@ const modelsRemove = Command.make(
   ({modelId, ...options}) => withRuntimeEffect(config => runModelRemove(config, modelId, options)),
 ).pipe(Command.withDescription('Remove one Threadnote-managed model'));
 
-const modelsSelect = Command.make(
-  'select',
-  {
-    dryRun: boolean('dry-run', 'Show the role selection without changing it'),
-    modelId: argument('model-id', 'Installed model ID'),
-    role: Argument.Literals('role', ['embedding', 'reranker', 'generation']).pipe(
-      Argument.withDescription('embedding, reranker, or generation'),
-    ),
-  },
-  ({modelId, role, ...options}) => withRuntimeEffect(config => runModelSelect(config, role, modelId, options)),
-).pipe(Command.withDescription('Select a verified installed model for one runtime role'));
-
 const modelsRuntime = Command.make('runtime', {}, () => withRuntimeEffect(() => runModelRuntimeStatus())).pipe(
   Command.withDescription('Verify the prebuilt-only node-llama-cpp runtime and show its backend'),
 );
 
-const modelCatalogCommands = [modelsList, modelsInstall, modelsVerify, modelsRemove, modelsSelect, modelsRuntime];
+const modelCatalogCommands = [
+  modelsList,
+  modelsInstall,
+  modelsVerify,
+  modelsRemove,
+  ...makeModelSelectionCommands(withRuntimeEffect),
+  modelsRuntime,
+];
 const models = Command.make('models').pipe(
   Command.withDescription('Manage pinned local GGUF models'),
   Command.withSubcommands([makeModelsSetupCommand(withRuntimeEffect), ...modelCatalogCommands]),
@@ -615,7 +610,7 @@ const indexRebuild = Command.make(
   'rebuild',
   {model: optionalString('model', 'Embedding model ID; defaults to the selected embedding model')},
   options => withRuntimeEffect(config => runIndexRebuild(config, options)),
-).pipe(Command.withDescription('Build and atomically activate a complete vector-index generation'));
+).pipe(Command.withDescription('Prepare lexical and vector recall indexes now; wait until both are ready'));
 
 const indexStatus = Command.make('status', {}, () => withRuntimeEffect(config => runIndexStatus(config))).pipe(
   Command.withDescription('Show vector-index generation and compatibility state'),

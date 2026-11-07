@@ -1,6 +1,6 @@
 import {Array as EffectArray, Schema} from 'effect';
 import {Effect} from 'effect';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceNotFound, ResourceStore} from '@threadnote/store/resource-store';
 import {makeResourceIdScopeChecker, parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -16,7 +16,12 @@ import {
   memoryIdFromIdentityAlias,
 } from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
-import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {
+  prepareMemoryIdentityAliases,
+  resolveMemoryIdentityAliases,
+  verifyResolvedMemoryIdentity,
+  MemoryIdentityResolutionError,
+} from '@threadnote/recall/memory/identity';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
@@ -37,6 +42,13 @@ export interface ResolvedAuthoredMemoryRelations {
   /** Canonical target snapshots rechecked atomically by the writer. */
   readonly targets: readonly AuthoredMemoryRelationTarget[];
 }
+
+type RelationTargetSnapshot = {
+  readonly allowedUriScopes?: readonly string[];
+  readonly content: string;
+  readonly memoryId?: string;
+  readonly uri: string;
+};
 
 export function memoryIdentityWriteLockKeys(
   sourceMemoryId: string | undefined,
@@ -160,7 +172,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     }
   }
 
-  const initiallyResolved = yield* resolveMemoryIdentityAliases(
+  const initiallyResolved = yield* prepareMemoryIdentityAliases(
     config,
     EffectArray.map(relations, relation => relation.uri),
     allowedUriScopes,
@@ -196,7 +208,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   const identityChecks =
     identityBearing.length === 0
       ? []
-      : yield* resolveMemoryIdentityAliases(
+      : yield* prepareMemoryIdentityAliases(
           config,
           EffectArray.map(identityBearing, target => memoryIdentityAlias(target.memoryId)),
           allowedUriScopes,
@@ -241,43 +253,31 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   } satisfies ResolvedAuthoredMemoryRelations;
 });
 
-/**
- * Re-resolve stable identities while the writer holds identity and URI locks.
- * Exact-byte CAS alone cannot notice a new conflicting URI for the same ID.
- */
-export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.verifyRelationTargetIdentities')(
+const verifyAuthoredMemoryRelationTargetIdentitiesInternal = Effect.fn('memory.verifyRelationTargetIdentities')(
   function* (
     config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>,
-    targets: readonly {
-      readonly allowedUriScopes?: readonly string[];
-      readonly content: string;
-      readonly memoryId?: string;
-      readonly uri: string;
-    }[],
+    targets: readonly RelationTargetSnapshot[],
+    prepare: boolean,
   ) {
-    const store = yield* ResourceStore;
+    yield* verifyAuthoredMemoryRelationTargetBytes(config, targets);
     const grouped = new Map<string, typeof targets>();
     for (const target of targets) {
-      const liveContent = yield* store
-        .read({account: config.account, home: config.agentContextHome, user: config.user}, target.uri)
-        .pipe(Effect.mapError(() => relationError('A relation target changed during the write; refresh and retry.')));
-      if (liveContent !== target.content) {
-        return yield* relationError('A relation target changed during the write; refresh and retry.');
-      }
       if (!target.memoryId || !target.allowedUriScopes?.length) continue;
       const key = JSON.stringify(target.allowedUriScopes);
       grouped.set(key, [...(grouped.get(key) ?? []), target]);
     }
     for (const targetsInScope of grouped.values()) {
       const allowedUriScopes = targetsInScope[0].allowedUriScopes!;
-      const resolved = yield* resolveMemoryIdentityAliases(
+      const resolved = yield* (prepare ? prepareMemoryIdentityAliases : resolveMemoryIdentityAliases)(
         config,
         EffectArray.map(targetsInScope, target => memoryIdentityAlias(target.memoryId!)),
         allowedUriScopes,
         {validateNow: true},
       ).pipe(
-        Effect.mapError(() =>
-          relationError('A relation target identity became ambiguous or moved during the write; refresh and retry.'),
+        Effect.mapError(error =>
+          Schema.is(MemoryIdentityResolutionError)(error)
+            ? relationError('A relation target identity became ambiguous or moved during the write; refresh and retry.')
+            : error,
         ),
       );
       for (const [index, target] of targetsInScope.entries()) {
@@ -296,6 +296,39 @@ export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.ve
     }
   },
 );
+
+/** Ready-only identity recheck, safe for legacy checked writes; never refresh under their locks. */
+export const verifyAuthoredMemoryRelationTargetIdentities = (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>,
+  targets: readonly RelationTargetSnapshot[],
+) => verifyAuthoredMemoryRelationTargetIdentitiesInternal(config, targets, false);
+
+/** Explicit preparation before memory locks. Prepared admission checks the resulting cut at the write fence. */
+export const prepareAuthoredMemoryRelationTargetIdentities = (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>,
+  targets: readonly RelationTargetSnapshot[],
+) => verifyAuthoredMemoryRelationTargetIdentitiesInternal(config, targets, true);
+
+/** Exact target recheck for a writer whose prepared identity proof is still current. */
+export const verifyAuthoredMemoryRelationTargetBytes = Effect.fn('memory.verifyRelationTargetBytes')(function* (
+  config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
+  targets: readonly RelationTargetSnapshot[],
+) {
+  const store = yield* ResourceStore;
+  for (const target of targets) {
+    const live = yield* store
+      .read({account: config.account, home: config.agentContextHome, user: config.user}, target.uri)
+      .pipe(
+        Effect.mapError(error =>
+          Schema.is(ResourceNotFound)(error)
+            ? relationError('A relation target changed during the write; refresh and retry.')
+            : error,
+        ),
+      );
+    if (live !== target.content)
+      return yield* relationError('A relation target changed during the write; refresh and retry.');
+  }
+});
 
 function relationError(message: string): MemoryRelationWriteError {
   return MemoryRelationWriteError.make({message});

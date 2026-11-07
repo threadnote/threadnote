@@ -17,6 +17,7 @@
     "tools/bazel/test/**/*.ts",
     "tools/ci/**/*.ts",
     "vitest.config.ts",
+    "playwright.manager.config.ts",
     "tools/workspace/**/*.ts"
   ],
   "exclude": ["apps/threadnote/test/evaluation/fixtures/**/repository/**"]

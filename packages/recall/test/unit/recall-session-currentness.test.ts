@@ -73,7 +73,8 @@ it.effect(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const paths = yield* Path.Path;
-      const home = yield* fs.makeTempDirectoryScoped({prefix: 'recall-recovery-session-'});
+      const temporaryHome = yield* fs.makeTempDirectoryScoped({prefix: 'recall-recovery-session-'});
+      const home = yield* fs.realPath(temporaryHome);
       const config = {account: 'local', agentContextHome: home, user: 'me'};
       const store = yield* ResourceStore;
       const uri = 'threadnote://user/me/memories/durable/source.md';

@@ -1,6 +1,7 @@
 import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Clock, Console, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import type {SecureRandom} from 'effect/crypto';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -30,10 +31,22 @@ import {
 } from '@threadnote/recall/index';
 import {
   rebuildVectorIndex,
+  loadRecallVectorAuthorizationKey,
   VectorCorpusGenerationChanged,
   vectorIndexMatchesGeneration,
+  vectorIndexGenerationReadiness,
 } from '@threadnote/recall/vector-index';
 import {readRecallEmbeddingDemand} from '@threadnote/recall/background/demand';
+import {writeModelSelection} from '@threadnote/inference/models/selection';
+import {InferenceInterrupted} from '@threadnote/inference/engine/errors';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  ExternalSourcePolicy,
+  externalDocumentManifestUri,
+  externalResourceUri,
+  renderExternalResource,
+  serializeExternalDocumentManifest,
+} from '@threadnote/store/external-resource';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -111,10 +124,15 @@ const fixture = Effect.gen(function* () {
     status: () => Effect.succeed(installation),
     verify: () => Effect.succeed(installation),
   });
-  const runtimeContext = yield* Effect.context<FileSystem.FileSystem | Path.Path | SystemInfo>();
+  const runtimeContext = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+  >();
   const embeddingRuntime = (
-    beforeEmbedding: () => Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path | SystemInfo> = () =>
-      Effect.void,
+    beforeEmbedding: () => Effect.Effect<
+      void,
+      unknown,
+      FileSystem.FileSystem | Path.Path | SystemInfo | SecureRandom.SecureRandom
+    > = () => Effect.void,
   ): LocalModelRuntimeShape =>
     LocalModelRuntime.of({
       diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
@@ -277,44 +295,218 @@ describe('development installer repair isolation', () => {
     {fastCheck: {numRuns: 100}},
   );
 
-  effectIt.effect('completes lexical repair and queues vectors without invoking inference side effects', () =>
-    Effect.scoped(
+  effectIt.effect('waits for vector repair before the development installer reports recall readiness', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
+      yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
+      yield* f.fs.writeFileString(memoryPath, '# Example\n\nInitial canonical body.');
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let embeddingAttempts = 0;
+      const runtime = f.embeddingRuntime(() =>
+        Effect.sync(() => {
+          embeddingAttempts += 1;
+        }).pipe(Effect.andThen(Deferred.succeed(started, undefined)), Effect.andThen(Deferred.await(release))),
+      );
+      const output: string[] = [];
+      const fiber = yield* Console.consoleWith(parent =>
+        f.provideWithRuntime(runDevelopmentInstallRepair(f.config, version), runtime).pipe(
+          Effect.provideService(Console.Console, {
+            ...parent,
+            log: (...args) => {
+              output.push(EffectArray.join(EffectArray.map(args, String), ' '));
+            },
+          }),
+          Effect.forkChild,
+        ),
+      );
+      yield* Deferred.await(started);
+      expect(EffectArray.some(output, EffectString.includes('indexes are ready'))).toBe(false);
+      expect(embeddingAttempts).toBe(1);
+      expect(yield* readRecallEmbeddingDemand(f.config)).toBeUndefined();
+      expect((yield* recallIndexStatus(f.config)).ready).toBe(true);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(fiber);
+      const lexical = yield* recallIndexStatus(f.config);
+      expect(lexical).toMatchObject({ready: true, documentCount: 1});
+      expect(yield* vectorIndexGenerationReadiness(f.home, embeddingManifest, lexical.generation!)).toBe('current');
+      expect(EffectArray.some(output, EffectString.includes('indexes are ready'))).toBe(true);
+      expect(yield* f.fs.readFileString(memoryPath)).toBe('# Example\n\nInitial canonical body.');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.each(['inference', 'corpus', 'selection', 'authorization'] as const)(
+    'fails explicit repair on %s failure without claiming readiness',
+    failure =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const uri = 'threadnote://user/tester/memories/handoffs/active/threadnote/install-repair.md';
-        const memoryRoot = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories', 'handoffs', 'active');
-        const memoryPath = f.path.join(memoryRoot, 'threadnote', 'install-repair.md');
+        const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
         yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
-        yield* f.fs.writeFileString(memoryPath, handoffDocument('Initial handoff body.'));
-        let embeddingAttempts = 0;
-        const runtime = f.embeddingRuntime(() =>
-          Effect.gen(function* () {
-            embeddingAttempts += 1;
-            if (embeddingAttempts !== 1) return;
-            yield* f.fs.writeFileString(memoryPath, handoffDocument('Concurrent handoff body.'));
-            yield* expireRecallIndexValidation(f.home, false, [uri]);
-          }),
+        yield* f.fs.writeFileString(memoryPath, '# Example\n\nInitial canonical body.');
+        let accessEnabled = false;
+        const policy = ExternalSourcePolicy.of({
+          current: () =>
+            Effect.succeed({
+              enabled: accessEnabled,
+              configFingerprint: EffectString.repeat(64)('a'),
+              project: 'demo',
+            }),
+        });
+        if (failure === 'authorization') {
+          const metadata = {
+            version: 1 as const,
+            sourceId: 'source',
+            documentId: 'doc',
+            pageId: 'page',
+            chunkId: 'chunk',
+            project: 'demo',
+            title: 'Synthetic external',
+            rendererVersion: '1',
+            scrubberVersion: '1',
+            coverage: 'canvas-plain-text' as const,
+          };
+          const uri = externalResourceUri(metadata);
+          const bytes = renderExternalResource(metadata, 'Synthetic external content.');
+          const manifest = serializeExternalDocumentManifest({
+            version: 1,
+            sourceId: 'source',
+            documentId: 'doc',
+            configFingerprint: EffectString.repeat(64)('a'),
+            status: 'active',
+            fetchedAt: yield* Clock.currentTimeMillis,
+            maxStaleMilliseconds: 60_000,
+            chunks: {[uri]: sha256HexSync(bytes)},
+          });
+          for (const [resourceUri, content] of [
+            [externalDocumentManifestUri('source', 'doc'), manifest],
+            [uri, bytes],
+          ]) {
+            const filename = f.path.join(f.home, 'data/local/resources', new URL(resourceUri).pathname);
+            yield* f.fs.makeDirectory(f.path.dirname(filename), {recursive: true});
+            yield* f.fs.writeFileString(filename, content);
+          }
+        }
+        const authorizationBefore = yield* loadRecallVectorAuthorizationKey(f.config).pipe(
+          Effect.provideService(ExternalSourcePolicy, policy),
         );
-
+        const runtime =
+          failure === 'inference'
+            ? LocalModelRuntime.of({
+                ...f.embeddingRuntime(),
+                embedMany: () =>
+                  InferenceInterrupted.make({
+                    message: 'Synthetic embedding failure',
+                    modelId: embeddingManifest.id,
+                    operation: 'embedMany',
+                  }),
+              })
+            : f.embeddingRuntime(() =>
+                failure === 'selection'
+                  ? writeModelSelection(f.home, {version: 1, roles: {}})
+                  : failure === 'authorization'
+                    ? Effect.sync(() => {
+                        accessEnabled = true;
+                      })
+                    : f.fs
+                        .writeFileString(memoryPath, '# Changed\n\nConcurrent canonical body.')
+                        .pipe(
+                          Effect.andThen(
+                            expireRecallIndexValidation(f.home, false, [
+                              'threadnote://resources/repos/demo/document.md',
+                            ]),
+                          ),
+                        ),
+              );
         const result = yield* f.provideWithRuntime(
-          captureConsole(runDevelopmentInstallRepair(f.config, version)),
+          captureConsole(
+            runRepair(f.config, {
+              coreOnly: true,
+              postUpdate: false,
+              skipReleaseLifecycle: true,
+            }).pipe(Effect.provideService(ExternalSourcePolicy, policy), Effect.result),
+          ),
           runtime,
         );
-        const corpusGeneration = yield* currentRecallCorpusGeneration(f.config);
-
-        expect(result.output).toContain(
-          'Rebuilt lexical recall for 1 document(s). Document embeddings queued for idle background work.',
-        );
-        expect(embeddingAttempts).toBe(0);
-        expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeDefined();
-        expect(yield* recallIndexStatus(f.config)).toMatchObject({ready: true, documentCount: 1});
-        expect(yield* f.fs.readFileString(memoryPath)).toContain('Initial handoff body.');
-        expect(corpusGeneration._tag).toBe('Some');
-        if (corpusGeneration._tag === 'Some') {
-          expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, corpusGeneration.value)).toBe(false);
+        expect(Result.isFailure(result.value)).toBe(true);
+        if (Result.isFailure(result.value))
+          expect(result.value.failure).toMatchObject({
+            message: expect.stringContaining('Recall index repair failed'),
+          });
+        if (failure === 'authorization') {
+          if (Result.isFailure(result.value))
+            expect(result.value.failure).toMatchObject({
+              message:
+                'Recall index repair failed: Recall inputs changed during preparation. Run `threadnote repair` again.',
+            });
+          expect(
+            yield* loadRecallVectorAuthorizationKey(f.config).pipe(Effect.provideService(ExternalSourcePolicy, policy)),
+          ).not.toBe(authorizationBefore);
         }
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
+        expect(result.output).not.toContain('indexes are ready');
+        expect(result.output).not.toContain('Document embeddings queued');
+        const lexical = yield* recallIndexStatus(f.config);
+        if (lexical.generation)
+          expect(yield* vectorIndexMatchesGeneration(f.home, embeddingManifest, lexical.generation)).toBe(false);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('dry-run repair leaves canonical bytes and derived indexes untouched', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
+      const canonical = '# Example\n\nPreserve this canonical body.';
+      yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
+      yield* f.fs.writeFileString(memoryPath, canonical);
+      const selection = f.path.join(f.home, 'models', 'selection.json');
+      const result = yield* f.provide(
+        captureConsole(
+          runRepair(f.config, {
+            coreOnly: true,
+            dryRun: true,
+            postUpdate: false,
+            skipReleaseLifecycle: true,
+          }),
+        ),
+      );
+      expect(result.output).toContain('Would synchronously rebuild lexical and vector recall indexes');
+      expect(result.output).not.toContain('indexes are ready');
+      expect(yield* f.fs.readFileString(memoryPath)).toBe(canonical);
+      expect(yield* f.fs.exists(f.path.join(f.home, 'indexes'))).toBe(false);
+      expect(yield* f.fs.exists(selection)).toBe(false);
+      expect(yield* f.fs.readFileString(f.registry)).toBe(f.registryContent);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'repeated repair preserves canonical bytes and maintains current recall generations',
+    {
+      body: FC.string({minLength: 1, maxLength: 120}),
+    },
+    ({body}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const memoryPath = f.path.join(f.home, 'data/local/resources/repos/demo/document.md');
+        const canonical = `# Generated\n\n${body}`;
+        yield* f.fs.makeDirectory(f.path.dirname(memoryPath), {recursive: true});
+        yield* f.fs.writeFileString(memoryPath, canonical);
+        let embeddingAttempts = 0;
+        const runtime = f.embeddingRuntime(() =>
+          Effect.sync(() => {
+            embeddingAttempts += 1;
+          }),
+        );
+        yield* f.provideWithRuntime(captureConsole(runDevelopmentInstallRepair(f.config, version)), runtime);
+        const previousAttempts = embeddingAttempts;
+        yield* f.provideWithRuntime(captureConsole(runDevelopmentInstallRepair(f.config, version)), runtime);
+        expect(embeddingAttempts).toBe(previousAttempts);
+        expect(yield* f.fs.readFileString(memoryPath)).toBe(canonical);
+        const lexical = yield* recallIndexStatus(f.config);
+        expect(lexical.ready).toBe(true);
+        expect(yield* vectorIndexGenerationReadiness(f.home, embeddingManifest, lexical.generation!)).toBe('current');
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 4}},
   );
 
   effectIt.effect('rejects an explicit vector rebuild superseded by a canonical write during inference', () =>
@@ -369,7 +561,7 @@ describe('development installer repair isolation', () => {
         const f = yield* fixture;
         const instruction = yield* f.fs.readFileString(f.instruction);
         const result = yield* f.provide(captureConsole(runDevelopmentInstallRepair(f.config, version)));
-        expect(result.output).toContain('Rebuilt lexical recall for 0 document(s).');
+        expect(result.output).toContain('Lexical recall prepared: 0 canonical document(s).');
         expect(yield* f.fs.readFileString(f.instruction)).toBe(instruction);
         expect(yield* f.fs.readFileString(f.registry)).toBe(f.registryContent);
         expect(yield* f.fs.readFileString(f.path.join(f.installRoot, 'active-release.json'))).toBe(f.pointer);
@@ -383,7 +575,7 @@ describe('development installer repair isolation', () => {
             }),
           ),
         );
-        expect(coreRepair.output).toContain('Rebuilt lexical recall for 0 document(s).');
+        expect(coreRepair.output).toContain('Lexical recall prepared: 0 canonical document(s).');
         expect(coreRepair.output).toContain('Skipping host instructions, hooks, and MCP client repair');
         expect(yield* f.fs.readFileString(f.instruction)).toBe(instruction);
         expect(yield* f.fs.readFileString(f.registry)).toBe(f.registryContent);

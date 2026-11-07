@@ -331,6 +331,7 @@
     "./process/owned_file": "./src/process/owned_file.ts",
     "./process/process_identity": "./src/process/process_identity.ts",
     "./process/standalone_lease": "./src/process/standalone_lease.ts",
+    "./recall/embedding_worker_process": "./src/recall/embedding_worker_process.ts",
     "./recall/cli_response": "./src/recall/cli_response.ts",
     "./recall/feedback_commands": "./src/recall/feedback_commands.ts",
     "./release/auto_update": "./src/release/auto_update.ts",
@@ -431,6 +432,7 @@
     "@threadnote/semantic": "workspace:*"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@effect/sql-sqlite-bun": "4.1.2",
     "@effect/tsgo": "0.63.0",
     "@effect/vitest": "4.1.2",

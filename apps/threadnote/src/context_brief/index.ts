@@ -2,6 +2,8 @@ import {Array as EffectArray} from 'effect';
 import {
   compileContextBriefWith,
   retrieveSemanticContextSourceEvidence,
+  retrieveSemanticContextSymbol,
+  filterSemanticContextMemory,
   projectSemanticContextKnowledge,
   type ContextBriefCompilerDependencies,
 } from '@threadnote/context/compiler';
@@ -9,6 +11,15 @@ import type {Evidence} from '@threadnote/semantic/contracts';
 export {compileContextBriefWith, type ContextBriefCompilerDependencies} from '@threadnote/context/compiler';
 import {Clock, DateTime, Effect, Exit, Schema} from 'effect';
 import {CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
+import {withReadyRecallReadBoundary} from '../recall/ready_read_boundary.js';
+import {ReadDeadlineExceeded, isReadCleanupUnconfirmed, type ReadDeadline} from '@threadnote/platform/read_deadline';
+import {RecallReadyReadUnavailable} from '@threadnote/recall/index';
+import {
+  withNativeContextBriefReadSources,
+  type ContextBriefNativeSemanticRead,
+  type ContextBriefNativeSemanticState,
+} from './native_read_boundary.js';
+import {withProductionPhaseTiming} from '../effect/production_log.js';
 
 import type {AnonymousTelemetryContextBriefCitationUnknownReason} from '../effect/telemetry.js';
 import {
@@ -46,6 +57,7 @@ import type {
   ProjectedContextBriefV1,
   SemanticContextKnowledgeV1,
   SemanticContextSourceBindingV1,
+  SemanticContextSymbolTarget,
 } from '@threadnote/context/types';
 
 export interface ContextBriefRuntimeCompilerSources<
@@ -57,6 +69,7 @@ export interface ContextBriefRuntimeCompilerSources<
   readonly citationValidation: NonNullable<
     ContextBriefCompilerDependencies<never, never, CitationR>['citationValidation']
   >;
+  readonly codeLinkedMemoryAfterGraph?: boolean;
   readonly graphEvidence: ContextBriefCompilerDependencies<GraphR>['graphEvidence'];
   readonly codeLinkedMemoryEvidence?: ContextBriefCompilerDependencies<never, MemoryR>['codeLinkedMemoryEvidence'];
   readonly memoryEvidence: ContextBriefCompilerDependencies<never, MemoryR>['memoryEvidence'];
@@ -66,15 +79,23 @@ export interface ContextBriefRuntimeCompilerSources<
 
 /** Internal compiler controls for reviewed callers; never part of the Context Brief request schema. */
 interface ContextBriefCompilerOptions {
+  readonly semanticContext?: ContextBriefNativeSemanticRead;
   readonly sourceEvidence?: (
     request: ContextBriefSourceEvidenceRequest,
   ) => Effect.Effect<
     Effect.Success<ReturnType<typeof retrieveContextBriefSourceEvidence>>,
     unknown,
-    Effect.Services<ReturnType<typeof retrieveContextBriefSourceEvidence>>
+    | Effect.Services<ReturnType<typeof retrieveContextBriefSourceEvidence>>
+    | Effect.Services<ReturnType<typeof retrieveSemanticContextSymbol>>
   >;
   readonly allowedMemoryUriScopes?: readonly string[];
   readonly codeLinkedMemoryOnly?: boolean;
+  readonly semanticMemoryTarget?: () => {
+    readonly nodeId: string | null;
+    readonly binding: SemanticContextSourceBindingV1 | null;
+    readonly repositoryIdentityKind: 'local' | 'remote' | null;
+    readonly gap?: string;
+  };
   readonly includeProcedureEvidence?: boolean;
   readonly projection?: (
     logical: ContextBriefLogicalResultV1,
@@ -99,55 +120,102 @@ export function instrumentContextBriefCompilerDependencies<
   requestedRepositories: number,
 ): ContextBriefCompilerDependencies<GraphR, MemoryR, CitationR, ProjectR> {
   return {
-    citationValidation: (scope, candidates, fence) =>
+    codeLinkedMemoryAfterGraph: sources.codeLinkedMemoryAfterGraph,
+    citationValidation: (scope, candidates, fence, deadline) =>
       reporter
-        .citationValidation(sources.citationValidation(scope, candidates, fence), validations =>
-          summarizeContextBriefCitationTelemetry(candidates, validations),
+        .citationValidation(
+          withProductionPhaseTiming(
+            'context.brief.citation-validation',
+            sources.citationValidation(scope, candidates, fence, deadline),
+          ),
+          validations => summarizeContextBriefCitationTelemetry(candidates, validations),
         )
         .pipe(
-          Effect.catch(() =>
-            Clock.currentTimeMillis.pipe(
-              Effect.map(now => failedContextBriefCitationValidations(candidates, new Date(now).toISOString())),
-            ),
+          Effect.catchIf(
+            error => !Schema.is(ReadDeadlineExceeded)(error) && !isReadCleanupUnconfirmed(error),
+            () =>
+              Clock.currentTimeMillis.pipe(
+                Effect.map(now => failedContextBriefCitationValidations(candidates, new Date(now).toISOString())),
+              ),
           ),
         ),
     graphEvidence: (graphPlan, readBudget) =>
-      reporter.graph(sources.graphEvidence(graphPlan, readBudget), contextBriefGraphPhaseOutcome).pipe(
-        Effect.catchIf(
-          error => !Schema.is(CodeGraphScopeRoutingError)(error),
-          () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-query-unavailable', requestedRepositories)),
+      reporter
+        .graph(
+          withProductionPhaseTiming(
+            'context.brief.graph',
+            sources.graphEvidence(graphPlan, readBudget),
+            contextBriefGraphPhaseOutcome,
+          ),
+          contextBriefGraphPhaseOutcome,
+        )
+        .pipe(
+          Effect.catchIf(
+            error =>
+              !Schema.is(CodeGraphScopeRoutingError)(error) &&
+              !Schema.is(ReadDeadlineExceeded)(error) &&
+              !isReadCleanupUnconfirmed(error),
+            () =>
+              Effect.succeed(unavailableContextBriefGraphEvidence('graph-query-unavailable', requestedRepositories)),
+          ),
         ),
-      ),
     ...(sources.codeLinkedMemoryEvidence === undefined
       ? {}
       : {
-          codeLinkedMemoryEvidence: (codePlan: ContextBriefPlanV1['codeAnchors']) =>
+          codeLinkedMemoryEvidence: (codePlan: ContextBriefPlanV1['codeAnchors'], deadline?: ReadDeadline) =>
             reporter
-              .codeLinkedMemory(sources.codeLinkedMemoryEvidence!(codePlan), contextBriefCodeLinkedMemoryPhaseOutcome)
+              .codeLinkedMemory(
+                withProductionPhaseTiming(
+                  'context.brief.code-linked-memory',
+                  sources.codeLinkedMemoryEvidence!(codePlan, deadline),
+                  contextBriefCodeLinkedMemoryPhaseOutcome,
+                ),
+                contextBriefCodeLinkedMemoryPhaseOutcome,
+              )
               .pipe(
-                Effect.orElseSucceed(() =>
-                  unavailableContextBriefCodeLinkedMemoryEvidence(
-                    codePlan.codeRefs.length,
-                    'code-anchor-resolution-unavailable',
-                  ),
+                Effect.catchIf(
+                  error => !Schema.is(ReadDeadlineExceeded)(error) && !isReadCleanupUnconfirmed(error),
+                  () =>
+                    Effect.succeed(
+                      unavailableContextBriefCodeLinkedMemoryEvidence(
+                        codePlan.codeRefs.length,
+                        'code-anchor-resolution-unavailable',
+                      ),
+                    ),
                 ),
               ),
         }),
-    memoryEvidence: memoryPlan =>
+    memoryEvidence: (memoryPlan, deadline) =>
       reporter
-        .memory(sources.memoryEvidence(memoryPlan))
-        .pipe(Effect.orElseSucceed(() => unavailableContextBriefMemoryEvidence())),
+        .memory(withProductionPhaseTiming('context.brief.memory', sources.memoryEvidence(memoryPlan, deadline)))
+        .pipe(
+          Effect.catchIf(
+            error => !isReadCleanupUnconfirmed(error),
+            error =>
+              Effect.succeed(
+                Schema.is(RecallReadyReadUnavailable)(error) && error.reason === 'budget-exhausted'
+                  ? {...unavailableContextBriefMemoryEvidence(), gaps: ['memory-recall-budget-exhausted']}
+                  : unavailableContextBriefMemoryEvidence(),
+              ),
+          ),
+        ),
     ...(sources.procedureEvidence === undefined
       ? {}
       : {
-          procedureEvidence: (plan: ContextBriefPlanV1) =>
-            sources.procedureEvidence!(plan).pipe(
-              Effect.orElseSucceed(() => ({gaps: ['procedure-evidence-unavailable'], procedures: []}) as const),
+          procedureEvidence: (plan: ContextBriefPlanV1, deadline?: ReadDeadline) =>
+            withProductionPhaseTiming('context.brief.procedures', sources.procedureEvidence!(plan, deadline)).pipe(
+              Effect.catchIf(
+                error => !isReadCleanupUnconfirmed(error),
+                () => Effect.succeed({gaps: ['procedure-evidence-unavailable'], procedures: []} as const),
+              ),
             ),
         }),
     projection: (logical, maximumEstimatedTokens, responseFormat) =>
       reporter.projection(
-        sources.projection(logical, maximumEstimatedTokens, responseFormat),
+        withProductionPhaseTiming(
+          'context.brief.projection',
+          sources.projection(logical, maximumEstimatedTokens, responseFormat),
+        ),
         projected => projected.structuredContent.output.truncated,
         logical.coverage.memory.codeAnchors === undefined
           ? undefined
@@ -226,53 +294,84 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
     return yield* compileContextBriefWith(
       instrumentContextBriefCompilerDependencies(
         reporter,
-        {
-          citationValidation: (scope, candidates, fence) =>
-            validateContextBriefMemoryCitations(config, scope, candidates, fence),
-          graphEvidence: (graphPlan, readBudget) =>
-            retrieveContextBriefGraphEvidence(
-              config,
-              graphPlan,
-              options.sourceEvidence ?? retrieveContextBriefSourceEvidence,
-              readBudget,
-            ),
-          codeLinkedMemoryEvidence: codePlan =>
-            retrieveContextBriefCodeLinkedMemoryEvidence(config, codePlan, {
-              allowedUriScopes: options.allowedMemoryUriScopes,
-            }),
-          memoryEvidence: memoryPlan =>
-            options.codeLinkedMemoryOnly
-              ? Effect.succeed({
-                  candidates: [],
-                  consideredCandidates: 0,
-                  gaps: [],
-                  trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
-                } satisfies ContextBriefMemoryRetrievalV1)
-              : retrieveContextBriefMemoryEvidence(config, memoryPlan, options.allowedMemoryUriScopes),
-          procedureEvidence: plan =>
-            options.includeProcedureEvidence === false
-              ? Effect.succeed({gaps: [], procedures: []})
-              : loadPublishedProcedureCandidates(config).pipe(
-                  Effect.map(repositoryEvidence => {
-                    const selected = selectVerifiedProcedureEvidence({
-                      candidates: repositoryEvidence.candidates,
-                      cohort: config.user,
-                      surface: plan.surface ?? config.agentId,
-                      task: plan.task,
-                    });
-                    return {
-                      gaps: [
-                        ...new Set<VerifiedProcedureCoverageGap>([...repositoryEvidence.gaps, ...selected.gaps]),
-                      ].sort(),
-                      procedures: selected.procedures,
-                    };
-                  }),
+        yield* withNativeContextBriefReadSources(
+          config,
+          {
+            citationValidation: (scope, candidates, fence) =>
+              validateContextBriefMemoryCitations(config, scope, candidates, fence),
+            graphEvidence: (graphPlan, readBudget) =>
+              retrieveContextBriefGraphEvidence(
+                config,
+                graphPlan,
+                options.sourceEvidence ?? retrieveContextBriefSourceEvidence,
+                readBudget,
+              ),
+            codeLinkedMemoryAfterGraph: options.semanticMemoryTarget !== undefined,
+            codeLinkedMemoryEvidence: codePlan => {
+              const target = options.semanticMemoryTarget?.();
+              if (target && (!target.nodeId || !target.binding || !target.repositoryIdentityKind))
+                return Effect.succeed(
+                  unavailableContextBriefCodeLinkedMemoryEvidence(
+                    1,
+                    target.gap ?? 'semantic-symbol-target-unavailable',
+                  ),
+                );
+              return retrieveContextBriefCodeLinkedMemoryEvidence(
+                config,
+                target?.nodeId ? {...codePlan, codeRefs: [target.nodeId]} : codePlan,
+                {allowedUriScopes: options.allowedMemoryUriScopes},
+              ).pipe(
+                Effect.map(memory =>
+                  target?.nodeId && target.binding && target.repositoryIdentityKind
+                    ? filterSemanticContextMemory(
+                        memory,
+                        target.nodeId,
+                        target.binding.graph,
+                        target.repositoryIdentityKind,
+                      )
+                    : memory,
                 ),
-          projection: (logical, maximumEstimatedTokens, responseFormat) =>
-            Effect.sync(() =>
-              (options.projection ?? projectContextBrief)(logical, maximumEstimatedTokens, responseFormat),
-            ),
-        },
+              );
+            },
+            memoryEvidence: memoryPlan =>
+              options.codeLinkedMemoryOnly
+                ? Effect.succeed({
+                    candidates: [],
+                    consideredCandidates: 0,
+                    gaps: [],
+                    trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+                  } satisfies ContextBriefMemoryRetrievalV1)
+                : retrieveContextBriefMemoryEvidence(config, memoryPlan, options.allowedMemoryUriScopes),
+            procedureEvidence: plan =>
+              options.includeProcedureEvidence === false
+                ? Effect.succeed({gaps: [], procedures: []})
+                : loadPublishedProcedureCandidates(config).pipe(
+                    Effect.map(repositoryEvidence => {
+                      const selected = selectVerifiedProcedureEvidence({
+                        candidates: repositoryEvidence.candidates,
+                        cohort: config.user,
+                        surface: plan.surface ?? config.agentId,
+                        task: plan.task,
+                      });
+                      return {
+                        gaps: [
+                          ...new Set<VerifiedProcedureCoverageGap>([...repositoryEvidence.gaps, ...selected.gaps]),
+                        ].sort(),
+                        procedures: selected.procedures,
+                      };
+                    }),
+                  ),
+            projection: (logical, maximumEstimatedTokens, responseFormat) =>
+              Effect.sync(() =>
+                (options.projection ?? projectContextBrief)(logical, maximumEstimatedTokens, responseFormat),
+              ),
+          },
+          {
+            allowedUriScopes: options.allowedMemoryUriScopes,
+            includeProcedureEvidence: options.includeProcedureEvidence,
+            semantic: options.semanticContext,
+          },
+        ),
         requestedRepositories,
       ),
       {
@@ -287,7 +386,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
       },
     );
   });
-  return yield* compilation.pipe(
+  return yield* withReadyRecallReadBoundary(compilation).pipe(
     Effect.onExit(exit =>
       Clock.currentTimeMillis.pipe(
         Effect.flatMap(completedAt =>
@@ -316,33 +415,74 @@ export const compileContextBrief = Effect.fn('contextBrief.compile')(function* (
   return yield* compileContextBriefRuntime(config, input);
 });
 
-/** Only exact document links enter semantic context; ordinary Context Brief behavior is unchanged. */
+/** Document code evidence remains useful when exact symbol memory selection must abstain. */
 export const compileSemanticContextKnowledge = Effect.fn('contextBrief.semanticKnowledge')(function* (
   config: RuntimeConfig,
   input: ContextBriefRequestV1,
   evidence: Evidence,
+  target: SemanticContextSymbolTarget | null = null,
 ): Effect.fn.Return<
   SemanticContextKnowledgeV1,
   unknown,
   Effect.Services<ReturnType<typeof compileContextBriefRuntime>>
 > {
-  let binding: SemanticContextSourceBindingV1 | null = null;
+  const state: ContextBriefNativeSemanticState = {
+    binding: null,
+    repositoryIdentityKind: null,
+    selection: {nodeId: null, gap: 'semantic-symbol-target-unavailable'},
+  };
   const projected = yield* compileContextBriefRuntime(
     config,
     {...input, detail: 'source', responseFormat: 'agent'},
     {
       codeLinkedMemoryOnly: true,
       includeProcedureEvidence: false,
+      semanticContext: {evidence, target, state},
+      semanticMemoryTarget: () => ({
+        ...state.selection,
+        binding: state.binding,
+        repositoryIdentityKind: state.repositoryIdentityKind,
+      }),
       sourceEvidence: (request: ContextBriefSourceEvidenceRequest) =>
         retrieveSemanticContextSourceEvidence(request, evidence).pipe(
-          Effect.map(result => {
-            binding = result.binding;
-            return result.source;
-          }),
+          Effect.flatMap(result =>
+            Effect.gen(function* () {
+              state.binding = result.binding;
+              state.repositoryIdentityKind = request.identity.remoteIdentity ? 'remote' : 'local';
+              state.selection = yield* retrieveSemanticContextSymbol(
+                config,
+                request,
+                evidence,
+                target,
+                state.binding,
+              ).pipe(Effect.orElseSucceed(() => ({nodeId: null, gap: 'semantic-symbol-lookup-unavailable'})));
+              return result.source;
+            }),
+          ),
         ),
     },
   );
-  return projectSemanticContextKnowledge(projected, binding);
+  const knowledge = projectSemanticContextKnowledge(projected, state.binding);
+  return {
+    ...knowledge,
+    memorySelection:
+      state.selection.nodeId && state.binding && target
+        ? {
+            version: 1 as const,
+            scope: 'symbol-and-file' as const,
+            nodeId: state.selection.nodeId,
+            observation: state.binding.observation,
+            graph: state.binding.graph,
+            definitionRange: target.range,
+          }
+        : null,
+    gaps: [
+      ...new Set([
+        ...knowledge.gaps,
+        ...(state.selection.gap ? [state.selection.gap] : ['semantic-symbol-memory-coverage-incomplete']),
+      ]),
+    ],
+  };
 });
 
 /** Cloud callers supply their validated share roots; unscoped procedure discovery stays disabled. */

@@ -1,7 +1,24 @@
 import {Array as EffectArray} from 'effect';
 import {PageActions} from './workspace.js';
-import {Check, Circle, Cpu, GitBranch, Monitor, Plug, RefreshCw, ShieldCheck} from 'lucide-react';
-import {DetailModal} from './detail_modal.js';
+import {
+  Activity,
+  Check,
+  Circle,
+  Clock3,
+  Cpu,
+  Folder,
+  GitBranch,
+  Hash,
+  Layers,
+  MemoryStick,
+  Monitor,
+  Plug,
+  RefreshCw,
+  ShieldCheck,
+  Tag,
+  Terminal,
+  type LucideIcon,
+} from 'lucide-react';
 import React, {useState} from 'react';
 import {useManagerProcesses} from './process/live.js';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
@@ -20,7 +37,6 @@ export function ProcessesPanel(): React.ReactElement {
   const dialogs = useManagerDialogs();
   const {diagnostics, loadError, load} = useManagerProcesses();
   const [operationError, setOperationError] = useState('');
-  const [inspected, setInspected] = useState<ManageableManagerProcess>();
   const [terminating, setTerminating] = useState<string>();
   const displayedProcesses =
     diagnostics === undefined ? undefined : orderManagerProcessesForPresentation(diagnostics.processes);
@@ -56,58 +72,61 @@ export function ProcessesPanel(): React.ReactElement {
     const active = managerProcessIsActive(process);
     const current = process.terminationBlockedReason === 'current-manager';
     const unverified = process.terminationBlockedReason === 'identity-unverified';
-    const Icon = active
-      ? GitBranch
-      : process.role === 'manager'
-        ? Monitor
-        : process.role === 'mcp' || process.role === 'mcp-broker'
-          ? Plug
-          : Cpu;
+    const Icon =
+      process.role === 'cli'
+        ? Terminal
+        : process.role === 'manager'
+          ? Monitor
+          : process.role === 'mcp' || process.role === 'mcp-broker'
+            ? Plug
+            : Cpu;
     return (
       <article className="workspace-row process-row" key={`${process.processId}:${process.startedAt}`} role="listitem">
         <Icon aria-hidden="true" />
         <div className="row-copy">
-          <strong>
-            {active && process.currentOperation
-              ? operationLabel(process.currentOperation)
-              : processRoleLabel(process.role)}
-          </strong>
-          <p>
-            {current
-              ? 'This session · Verified runtime'
-              : `${processRoleLabel(process.role)}${process.activityRole ? ` · ${processRoleLabel(process.activityRole)} activity` : ''} · Started ${formatDuration(process.ageMilliseconds)} ago`}
-          </p>
-          {process.embeddingProgress ? <p>{recallEmbeddingProgressLabel(process.embeddingProgress)}</p> : null}
+          <div className="process-row-heading">
+            <div className="process-heading-copy">
+              <strong>
+                {active && process.currentOperation ? processOperationLabel(process) : processRoleLabel(process.role)}
+              </strong>
+              {active ? <span className="process-role-badge">{processRoleLabel(process.role)}</span> : null}
+              {process.activityRole ? (
+                <span className="process-role-badge">{processRoleLabel(process.activityRole)} activity</span>
+              ) : null}
+            </div>
+            <div className="process-row-actions">
+              <span
+                className={`workspace-status process-status-${active ? 'running' : process.role === 'legacy' ? 'legacy' : 'idle'}`}
+              >
+                <Circle aria-hidden="true" />
+                {active ? 'Running' : process.role === 'legacy' ? 'Legacy' : 'Idle'}
+              </span>
+              {current ? (
+                <span className="workspace-status neutral process-identity-current">
+                  <Check aria-hidden="true" />
+                  Current
+                </span>
+              ) : null}
+              {unverified ? <span className="workspace-status warn">Unverified</span> : null}
+              {process.terminable ? (
+                <button
+                  aria-label={`Terminate ${processRoleLabel(process.role)} process ${process.processId}`}
+                  className="danger"
+                  disabled={terminating !== undefined}
+                  onClick={() => void terminate(process)}
+                  title={terminationTitle(process)}
+                >
+                  {terminating === process.processRef ? 'Stopping…' : 'Stop…'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <ProcessMetadata process={process} />
+          {process.embeddingProgress ? (
+            <p className="process-progress">{recallEmbeddingProgressLabel(process.embeddingProgress)}</p>
+          ) : null}
+          {!process.terminable ? <p className="process-stop-reason">{terminationTitle(process)}</p> : null}
         </div>
-        <span className={`workspace-status ${current ? '' : unverified ? 'warn' : 'neutral'}`}>
-          {current ? <Check aria-hidden="true" /> : <Circle aria-hidden="true" />}
-          {current
-            ? 'Current'
-            : unverified
-              ? 'Unverified'
-              : active
-                ? 'Running'
-                : process.role === 'legacy'
-                  ? 'Legacy'
-                  : 'Idle'}
-        </span>
-        <button
-          aria-label={`Inspect ${processRoleLabel(process.role)} process ${process.processId}`}
-          onClick={() => setInspected(process)}
-        >
-          {active ? 'Inspect' : 'Details'}
-        </button>
-        {process.terminable ? (
-          <button
-            aria-label={`Terminate ${processRoleLabel(process.role)} process ${process.processId}`}
-            className="danger"
-            disabled={terminating !== undefined}
-            onClick={() => void terminate(process)}
-            title={terminationTitle(process)}
-          >
-            {terminating === process.processRef ? 'Stopping…' : 'Stop…'}
-          </button>
-        ) : null}
       </article>
     );
   };
@@ -123,6 +142,16 @@ export function ProcessesPanel(): React.ReactElement {
         <ShieldCheck aria-hidden="true" />
         Only registered Threadnote processes and identity-verified legacy runtimes appear here.
       </div>
+      {diagnostics &&
+      EffectArray.some(
+        diagnostics.processes,
+        process => (process.role === 'mcp' || process.role === 'mcp-broker') && !process.displayContext?.client,
+      ) ? (
+        <p className="process-notice">
+          Older MCP sessions need a reconnect to an updated runtime to report client names. Chat titles are not supplied
+          by MCP.
+        </p>
+      ) : null}
       {loadError ? <p className="process-notice is-error">{loadError}</p> : null}
       {operationError ? (
         <p aria-live="polite" className="process-notice is-error">
@@ -172,45 +201,133 @@ export function ProcessesPanel(): React.ReactElement {
           </>
         )}
       </div>
-      {inspected ? (
-        <DetailModal title={processRoleLabel(inspected.role)} onClose={() => setInspected(undefined)}>
-          <p className="workspace-note">
-            <ShieldCheck />
-            {inspected.terminationBlockedReason === 'identity-unverified'
-              ? 'The process identity could not be verified. Stop it from its owning application.'
-              : 'Verified Threadnote runtime. Private arguments and environment variables stay hidden.'}
-          </p>
-          <dl className="process-detail-grid">
-            <div>
-              <dt>Process</dt>
-              <dd>PID {inspected.processId}</dd>
-            </div>
-            <div>
-              <dt>Parent</dt>
-              <dd>{parentLabel(inspected)}</dd>
-            </div>
-            <div>
-              <dt>Operation</dt>
-              <dd>{inspected.currentOperation ? operationLabel(inspected.currentOperation) : 'Idle'}</dd>
-            </div>
-            <div>
-              <dt>Running</dt>
-              <dd>{formatDuration(inspected.ageMilliseconds)}</dd>
-            </div>
-            <div>
-              <dt>Memory</dt>
-              <dd>{inspected.rssBytes === undefined ? 'Unavailable' : formatBytes(inspected.rssBytes)}</dd>
-            </div>
-            <div>
-              <dt>Version</dt>
-              <dd>{inspected.releaseVersion ? `v${inspected.releaseVersion}` : 'Current runtime'}</dd>
-            </div>
-          </dl>
-          {!inspected.terminable ? <p className="muted">{terminationTitle(inspected)}</p> : null}
-        </DetailModal>
-      ) : null}
     </div>
   );
+}
+
+function ProcessMetadata({process}: {readonly process: ManageableManagerProcess}): React.ReactElement {
+  const context = process.displayContext;
+  const workspace = context?.workspace;
+  const branch = context?.branch;
+  const client = context?.client;
+  const cpu = process.cpu;
+  const displayedCpu = cpu?.state === 'sampled' ? Number(cpu.percent.toFixed(1)) : undefined;
+  const cpuTone =
+    displayedCpu !== undefined && displayedCpu >= 100
+      ? 'critical'
+      : displayedCpu !== undefined && displayedCpu >= 50
+        ? 'warn'
+        : 'normal';
+  const path =
+    workspace?.state === 'multiple'
+      ? undefined
+      : (workspace?.path ?? context?.processDirectory ?? context?.launchDirectory);
+  const provenance =
+    workspace?.state === 'active'
+      ? 'Active workspace'
+      : workspace?.state === 'last'
+        ? 'Last workspace'
+        : context?.processDirectory
+          ? 'Process directory'
+          : 'Launch directory';
+  const mcp =
+    process.role === 'mcp' || process.role === 'mcp-broker' || client !== undefined || context?.owner !== undefined;
+  const missing = [
+    !path && workspace?.state !== 'multiple' ? 'working directory' : undefined,
+    !branch || branch.state === 'unavailable' ? 'branch' : undefined,
+    !process.releaseVersion ? 'version' : undefined,
+    mcp && !client ? 'MCP client' : undefined,
+    mcp ? 'chat title' : undefined,
+  ];
+  const detail = (name: string, value: React.ReactNode, Icon: LucideIcon, title?: string, className = '') => (
+    <div className={`process-fact ${className}`} title={title}>
+      <Icon aria-hidden="true" />
+      <dt>{name}</dt> <dd>{value}</dd>
+    </div>
+  );
+  return (
+    <>
+      <dl className="process-lane-metadata">
+        {detail(
+          'CPU',
+          cpu?.state === 'sampled'
+            ? `${cpu.percent.toFixed(1)}%`
+            : cpu?.state === 'sampling'
+              ? 'Sampling…'
+              : 'Unavailable',
+          Cpu,
+          cpu
+            ? `Recent CPU · 100% = one logical core · ${cpu.state === 'sampled' ? `${(cpu.windowMilliseconds / 1000).toFixed(1)}s window · ` : ''}Sample ${cpu.sampledAt}`
+            : 'Recent CPU unavailable',
+          `process-fact-metric process-cpu-${cpuTone}`,
+        )}
+        {detail(
+          'Memory',
+          process.rssBytes === undefined ? 'Unavailable' : formatBytes(process.rssBytes),
+          MemoryStick,
+          undefined,
+          'process-fact-metric',
+        )}
+        {detail('Process', `PID ${process.processId}`, Hash)}
+        {detail('Parent', parentLabel(process), Layers)}
+        {detail('Age', formatDuration(process.ageMilliseconds), Clock3, process.startedAt)}
+        {process.releaseVersion ? detail('Version', `v${process.releaseVersion}`, Tag) : null}
+        {!(managerProcessIsActive(process) && process.currentOperation)
+          ? detail('Operation', process.currentOperation ? processOperationLabel(process) : 'Idle', Activity)
+          : null}
+        {client
+          ? detail(
+              'MCP client',
+              `${client.name}${client.version ? ` v${client.version}` : ''}`,
+              Plug,
+              'Client-reported name and version',
+            )
+          : null}
+        {context?.owner
+          ? detail('Context owner', `${processRoleLabel(context.owner.role)} · PID ${context.owner.processId}`, Layers)
+          : null}
+      </dl>
+      {path || workspace?.state === 'multiple' ? (
+        <dl className="process-lane-context">
+          {detail(
+            'Worktree',
+            <>
+              <span className="process-path-value">{path ?? 'Multiple workspaces'}</span>
+              <span className="process-provenance" title={workspace?.observedAt}>
+                {workspace?.state === 'multiple' ? 'Concurrent calls' : provenance}
+              </span>
+            </>,
+            Folder,
+            undefined,
+            'process-fact-path',
+          )}
+          {branch?.state === 'branch'
+            ? detail('Branch', branch.name, GitBranch, undefined, 'process-fact-branch')
+            : branch?.state === 'detached'
+              ? detail('Branch', `Detached · ${branch.commit}`, GitBranch, undefined, 'process-fact-branch')
+              : null}
+          {workspace && context?.launchDirectory && context.launchDirectory !== path
+            ? detail('Launch directory', context.launchDirectory, Folder, undefined, 'process-fact-path')
+            : null}
+        </dl>
+      ) : null}
+      {EffectArray.some(missing, value => value !== undefined) ? (
+        <p className="process-missing">
+          Not reported:{' '}
+          {EffectArray.join(
+            EffectArray.filter(missing, (value): value is string => value !== undefined),
+            ' · ',
+          )}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+function processOperationLabel(process: ManageableManagerProcess): string {
+  if (process.role === 'local-model-worker' && process.currentOperation === 'unknown')
+    return 'Local inference · activity unavailable';
+  return operationLabel(process.currentOperation ?? 'idle');
 }
 
 export function orderManagerProcessesForPresentation(
@@ -235,6 +352,8 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
       return 'Graph parser worker';
     case 'graph-query-worker':
       return 'Graph query worker';
+    case 'recall-read-worker':
+      return 'Recall read';
     case 'graph-waiter':
       return 'Graph waiter';
     case 'integration-sync-worker':
@@ -253,6 +372,16 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
 }
 
 function operationLabel(operation: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    'embed-many': 'Embedding documents',
+    'embed-many-idle': 'Embedding documents in background',
+    'embed-many-capacity': 'Embedding documents with spare capacity',
+    'generate-text': 'Generating text',
+    'rerank-results': 'Reranking results',
+    'check-local-model': 'Checking local model',
+    'local-inference': 'Local inference',
+  };
+  if (labels[operation]) return labels[operation];
   return EffectArray.join(
     EffectArray.map(
       effectPipe(operation, EffectString.split('-'), values =>

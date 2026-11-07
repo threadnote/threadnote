@@ -1,9 +1,9 @@
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
-import {currentRecallCorpusGeneration, loadRecallIndexData} from '@threadnote/recall/index';
-import {purgeVectorIndex, rebuildVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+import {loadRecallVectorAuthorizationKey, purgeVectorIndex, vectorIndexStatus} from '@threadnote/recall/vector-index';
+import {prepareRecallIndexes} from '../lifecycle.js';
 
 class SearchCommandError extends Schema.TaggedError<SearchCommandError, {readonly brand: unique symbol}>()(
   'SearchCommandError',
@@ -19,7 +19,7 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
 ) {
   const catalog = yield* LocalModelCatalog;
   const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = options.model ?? selection.roles.embedding;
+  const modelId = options.model ?? selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) {
     return yield* SearchCommandError.make({
       message: 'No embedding model is selected. Run `threadnote repair` to provision it.',
@@ -29,15 +29,19 @@ export const runIndexRebuild = Effect.fn('index.command.rebuild')(function* (
   if (manifest.role !== 'embedding') {
     return yield* SearchCommandError.make({message: `Model ${modelId} is not an embedding model.`});
   }
-  const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-  yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
-  const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
-    corpusGeneration: index.generation,
-    currentCorpusGeneration: () => currentRecallCorpusGeneration(config),
+  const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+  const verifyInputs = Effect.gen(function* () {
+    if (
+      (options.model === undefined &&
+        selectedEmbeddingModelId(yield* readModelSelection(config.agentContextHome), 'recall') !== modelId) ||
+      (yield* loadRecallVectorAuthorizationKey(config)) !== authorizationKey
+    ) {
+      return yield* SearchCommandError.make({
+        message: 'Recall inputs changed during preparation. Run `threadnote index rebuild` again.',
+      });
+    }
   });
-  yield* Console.log(
-    `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
-  );
+  yield* prepareRecallIndexes(config, manifest, authorizationKey, verifyInputs);
 });
 
 export const runIndexStatus = Effect.fn('index.command.status')(function* (config: RuntimeConfig) {
@@ -45,7 +49,7 @@ export const runIndexStatus = Effect.fn('index.command.status')(function* (confi
   const selection = yield* readModelSelection(config.agentContextHome);
   for (const manifest of yield* catalog.list('embedding')) {
     const status = yield* vectorIndexStatus(config.agentContextHome, manifest);
-    const selected = selection.roles.embedding === manifest.id ? ' selected' : '';
+    const selected = selectedEmbeddingModelId(selection, 'recall') === manifest.id ? ' selected' : '';
     yield* Console.log(
       status.ready
         ? `${manifest.id}\tready\t${status.chunkCount} chunks\t${status.generation}${selected}`
@@ -60,7 +64,7 @@ export const runIndexVerify = Effect.fn('index.command.verify')(function* (
 ) {
   const catalog = yield* LocalModelCatalog;
   const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = options.model ?? selection.roles.embedding;
+  const modelId = options.model ?? selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) {
     return yield* SearchCommandError.make({
       message: 'No embedding model is selected. Run `threadnote repair` to provision it.',
@@ -84,7 +88,7 @@ export const runIndexPurge = Effect.fn('index.command.purge')(function* (
 ) {
   const catalog = yield* LocalModelCatalog;
   const selection = yield* readModelSelection(config.agentContextHome);
-  const modelId = options.model ?? selection.roles.embedding;
+  const modelId = options.model ?? selectedEmbeddingModelId(selection, 'recall');
   if (!modelId) {
     return yield* SearchCommandError.make({
       message: 'No embedding model is selected. Run `threadnote repair` to provision it.',

@@ -7,21 +7,28 @@ import {Array as EffectArray} from 'effect';
 import {Clock, Console, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
+import {
+  runtimeTextDirectoryNamePage,
+  SystemInfo,
+  processCpuObservation,
+  type ProcessCpuObservation,
+  type TimedProcessResourceCounters,
+  type ProcessResourceCounters,
+} from '@threadnote/platform/system';
 import {readLiveStandaloneProcessLeases} from './standalone_lease.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {orderThreadnoteProcessesByAttention} from './attention.js';
 import {observeProcessInstanceIdentity, processInstanceIdentityMatches} from './process_identity.js';
-import {withoutTelemetrySessionEnvironment} from '../telemetry/session.js';
 import {createMissingProcessFile, linkMissingProcessFile} from './owned_file.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {CommandExecutor} from '@threadnote/platform/command';
+import {succeedUndefined} from '@threadnote/platform/optional';
 
 const PROCESS_DIAGNOSTICS_SCHEMA_VERSION = 1;
 const PROCESS_DIAGNOSTICS_LIMIT = 100;
 const PROCESS_DIAGNOSTICS_SCAN_LIMIT = 256;
 const PROCESS_REGISTRATION_LIMIT_BYTES = 16 * 1024;
-const PROCESS_MEMORY_QUERY_TIMEOUT_MS = 5_000;
 const PROCESS_REGISTRATION_RECONCILE_MILLISECONDS = 30_000;
 const PROCESS_REGISTRATION_REPAIR_WARNING_LIMIT = 3;
 const SAFE_OPERATION = /^[a-z][a-z0-9-]{0,47}$/;
@@ -51,6 +58,7 @@ export type ThreadnoteProcessRole =
   | 'graph-diagnostics-worker'
   | 'graph-parser-worker'
   | 'graph-query-worker'
+  | 'recall-read-worker'
   | 'graph-waiter'
   | 'integration-sync-worker'
   | 'legacy'
@@ -60,10 +68,32 @@ export type ThreadnoteProcessRole =
   | 'mcp-broker';
 export type RegisteredThreadnoteProcessRole = Exclude<ThreadnoteProcessRole, 'legacy'>;
 
+export interface ThreadnoteProcessClientInfo {
+  readonly name: string;
+  readonly version?: string;
+}
+export type ThreadnoteProcessWorkspace =
+  | {readonly state: 'active' | 'last'; readonly path: string; readonly observedAt: string}
+  | {readonly state: 'multiple'; readonly observedAt: string};
+export type ThreadnoteProcessBranch =
+  | {readonly state: 'branch'; readonly name: string}
+  | {readonly state: 'detached'; readonly commit: string}
+  | {readonly state: 'unavailable'};
+export interface ThreadnoteProcessDisplayContext {
+  readonly launchDirectory?: string;
+  readonly processDirectory?: string;
+  readonly workspace?: ThreadnoteProcessWorkspace;
+  readonly client?: ThreadnoteProcessClientInfo;
+  readonly owner?: {readonly processId: number; readonly role: RegisteredThreadnoteProcessRole};
+  readonly branch?: ThreadnoteProcessBranch;
+}
+
 interface ProcessRegistrationFile {
   readonly baseRole: RegisteredThreadnoteProcessRole;
   readonly currentOperation?: string;
   readonly parentProcessId: number;
+  readonly parentProcessStartIdentity?: string;
+  readonly displayContext?: ThreadnoteProcessDisplayContext;
   readonly processId: number;
   readonly processStartIdentity?: string;
   readonly role: RegisteredThreadnoteProcessRole;
@@ -77,6 +107,8 @@ export interface ThreadnoteProcessDiagnostic {
   readonly activityRole?: RegisteredThreadnoteProcessRole;
   readonly ageMilliseconds: number;
   readonly currentOperation?: string;
+  readonly cpu?: ProcessCpuObservation;
+  readonly displayContext?: ThreadnoteProcessDisplayContext;
   readonly parentProcessId: number;
   readonly parentRole?: ThreadnoteProcessRole;
   readonly processId: number;
@@ -150,6 +182,10 @@ interface ActiveProcessRegistration {
   repairFailures: number;
   repairFailureReported: boolean;
   readonly parentProcessId: number;
+  readonly parentProcessStartIdentity?: string;
+  readonly launchDirectory?: string;
+  client?: ThreadnoteProcessClientInfo;
+  lastWorkspace?: Extract<ThreadnoteProcessWorkspace, {readonly path: string}>;
   readonly processId: number;
   readonly processStartIdentity?: string;
   queuedStateKey?: string;
@@ -164,6 +200,8 @@ interface ProcessActivity {
   readonly operation: string;
   readonly role: RegisteredThreadnoteProcessRole;
   readonly sequence: number;
+  readonly workingDirectory?: string;
+  readonly startedAt: string;
 }
 
 let registration = Option.none<ActiveProcessRegistration>();
@@ -173,6 +211,7 @@ let activitySequence = 0;
 export interface ThreadnoteProcessActivityOptions {
   /** Keep a completed activity visible briefly so adjacent identical work can be coalesced. */
   readonly idleTransitionDelayMilliseconds?: number;
+  readonly workingDirectory?: string;
 }
 
 export const threadnoteHomeForProcess = Effect.fn('processDiagnostics.home')(function* (
@@ -256,7 +295,7 @@ export function withSignalTransparentThreadnoteWorkerRegistration<A, E, R>(
   home: string,
   role: Extract<
     RegisteredThreadnoteProcessRole,
-    'graph-compaction-worker' | 'graph-diagnostics-worker' | 'graph-query-worker'
+    'graph-compaction-worker' | 'graph-diagnostics-worker' | 'graph-query-worker' | 'recall-read-worker'
   >,
   operation: string,
   effect: Effect.Effect<A, E, R>,
@@ -276,13 +315,26 @@ export function withThreadnoteProcessActivity<A, E, R>(
     Effect.gen(function* () {
       yield* cancelIdleRegistrationWrite();
       const token = Symbol(role);
-      activities.set(token, {operation: safeOperation, role, sequence: ++activitySequence});
+      activities.set(token, {
+        operation: safeOperation,
+        role,
+        sequence: ++activitySequence,
+        workingDirectory: safeDisplayPath(options.workingDirectory),
+        startedAt: DateTime.formatIso(yield* DateTime.now),
+      });
       yield* writeCurrentRegistration().pipe(Effect.ignore);
       return token;
     }),
     () => effect,
     token =>
       Effect.gen(function* () {
+        const completed = activities.get(token);
+        if (completed?.workingDirectory && Option.isSome(registration))
+          registration.value.lastWorkspace = {
+            state: 'last',
+            path: completed.workingDirectory,
+            observedAt: DateTime.formatIso(yield* DateTime.now),
+          };
         activities.delete(token);
         if (idleTransitionDelayMilliseconds === 0) {
           yield* writeCurrentRegistration().pipe(Effect.ignore);
@@ -293,9 +345,61 @@ export function withThreadnoteProcessActivity<A, E, R>(
   );
 }
 
+export function sanitizeThreadnoteProcessClientInfo(value: unknown): ThreadnoteProcessClientInfo | undefined {
+  if (typeof value !== 'object' || value === null || !('name' in value)) return undefined;
+  const name = safeDisplayText(value.name, 128);
+  if (!name || name === 'unknown') return undefined;
+  const version = 'version' in value ? safeDisplayText(value.version, 128) : undefined;
+  return {name, ...(version ? {version} : {})};
+}
+
+export const setThreadnoteProcessClientInfo = Effect.fn('processDiagnostics.clientInfo')(function* (value: unknown) {
+  if (Option.isNone(registration)) return;
+  const client = sanitizeThreadnoteProcessClientInfo(value);
+  if (!client) return;
+  registration.value.client = client;
+  yield* writeCurrentRegistration().pipe(Effect.ignore);
+});
+
+export function withThreadnoteProcessRequestContext<A, E, R>(
+  input: {
+    readonly callerCwd?: unknown;
+    readonly clientInfo?: unknown;
+    readonly transport: 'stdio' | 'http';
+    readonly operation: string;
+  },
+  effect: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    if (input.transport !== 'stdio' || Option.isNone(registration) || registration.value.baseRole !== 'mcp')
+      return yield* effect;
+    yield* setThreadnoteProcessClientInfo(input.clientInfo);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const candidate = safeDisplayPath(input.callerCwd);
+    const workingDirectory =
+      candidate && path.isAbsolute(candidate)
+        ? yield* fs.realPath(candidate).pipe(
+            Effect.flatMap(real =>
+              fs.stat(real).pipe(Effect.map(info => (info.type === 'Directory' ? safeDisplayPath(real) : undefined))),
+            ),
+            Effect.timeoutOrElse({duration: 100, orElse: () => succeedUndefined}),
+            Effect.orElseSucceed(() => undefined),
+          )
+        : undefined;
+    return yield* withThreadnoteProcessActivity(
+      'mcp',
+      Effect2.pipe(input.operation, EffectString.replaceAll('_', '-')),
+      effect,
+      {workingDirectory},
+    );
+  });
+}
+
 const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   selection: 'attention' | 'chronological' = 'chronological',
+  resources = true,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -326,6 +430,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     {concurrency: 8},
   );
   const live: ProcessRegistrationFile[] = [];
+  const observedIdentities = new Map<number, string | undefined>();
   for (const candidate of files) {
     if (Option.isNone(candidate.value)) {
       yield* removeRegistrationFile(fs, candidate.file);
@@ -349,6 +454,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
         .pipe(Effect.ignore);
     }
     live.push(kept);
+    observedIdentities.set(kept.processId, identity);
   }
 
   // Standalone releases before the runtime registry still retain a private,
@@ -377,6 +483,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
   // reported separately so a dedicated graph build is still obvious without an
   // MCP or CLI process appearing to be a graph daemon it never was.
   const roleByProcess = new Map(EffectArray.map(live, value => [value.processId, value.baseRole] as const));
+  const registrationByProcess = new Map(EffectArray.map(live, value => [value.processId, value] as const));
   const current = EffectArray.map(
     live.sort(
       (left, right) =>
@@ -386,6 +493,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
       ...(value.role === value.baseRole ? {} : {activityRole: value.role}),
       ageMilliseconds: Math.max(0, now - Date.parse(value.startedAt)),
       ...(value.currentOperation === undefined ? {} : {currentOperation: value.currentOperation}),
+      displayContext: inheritedDisplayContext(value, registrationByProcess, observedIdentities),
       parentProcessId: value.parentProcessId,
       ...(roleByProcess.get(value.parentProcessId) === undefined
         ? {}
@@ -409,23 +517,39 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     0,
     PROCESS_DIAGNOSTICS_LIMIT,
   );
-  const memoryByProcess = new Map(
-    processMemoryBytes(
-      EffectArray.map(selected, value => value.processId),
-      system.platform,
-      system.environment(),
-    ),
-  );
+  const identities = new Map(EffectArray.map(live, value => [value.processId, value.processStartIdentity] as const));
+  const resourceByProcess = resources
+    ? yield* sampleProcessResources(system, config.agentContextHome, selected, identities)
+    : new Map<number, ResourceDisplay>();
   if (
     EffectArray.some(selected, value => value.processId === system.processId) &&
-    !memoryByProcess.has(system.processId)
+    resources &&
+    resourceByProcess.get(system.processId)?.rssBytes === undefined
   ) {
     const rssBytes = system.memoryUsage().rss;
-    if (Number.isSafeInteger(rssBytes) && rssBytes >= 0) memoryByProcess.set(system.processId, rssBytes);
+    if (Number.isSafeInteger(rssBytes) && rssBytes >= 0)
+      resourceByProcess.set(system.processId, {...resourceByProcess.get(system.processId), rssBytes});
   }
-  const sorted = EffectArray.map(selected, value => ({
+  const contextual = EffectArray.map(selected, (value): ThreadnoteProcessDiagnostic => {
+    const {workingDirectory, ...metrics} = resourceByProcess.get(value.processId) ?? {};
+    const context = 'displayContext' in value ? value.displayContext : undefined;
+    return {
+      ...value,
+      ...metrics,
+      ...(workingDirectory ? {displayContext: {...context, processDirectory: workingDirectory}} : {}),
+    };
+  });
+  const branchByPath = resources ? yield* readDisplayBranches(contextual) : new Map<string, ThreadnoteProcessBranch>();
+  const sorted = EffectArray.map(contextual, value => ({
     ...value,
-    ...(memoryByProcess.get(value.processId) === undefined ? {} : {rssBytes: memoryByProcess.get(value.processId)}),
+    ...('displayContext' in value && value.displayContext
+      ? {
+          displayContext: {
+            ...value.displayContext,
+            branch: branchByPath.get(displayWorkspacePath(value.displayContext) ?? ''),
+          },
+        }
+      : {}),
   }));
   const diagnostics = {
     processes: sorted,
@@ -449,9 +573,10 @@ export const readThreadnoteProcessDiagnostics = Effect.fn('processDiagnostics.re
  */
 export const readManageableThreadnoteProcessDiagnostics = Effect.fn('processDiagnostics.readManageable')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
+  options: {readonly resources?: boolean} = {},
 ) {
   const system = yield* SystemInfo;
-  const snapshot = yield* readThreadnoteProcessSnapshot(config, 'attention');
+  const snapshot = yield* readThreadnoteProcessSnapshot(config, 'attention', options.resources ?? true);
   const diagnostics = snapshot.diagnostics;
   const processes: ManageableThreadnoteProcessDiagnostic[] = yield* Effect.forEach(
     diagnostics.processes,
@@ -532,7 +657,17 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
   options: {readonly json?: boolean},
 ) {
   const system = yield* SystemInfo;
-  const observed = yield* readThreadnoteProcessDiagnostics(config);
+  let observed = yield* readThreadnoteProcessDiagnostics(config);
+  if (
+    system.processResourceCounters &&
+    EffectArray.some(
+      observed.processes,
+      value => value.processId !== system.processId && value.cpu?.state === 'sampling',
+    )
+  ) {
+    yield* Effect.sleep(500);
+    observed = yield* readThreadnoteProcessDiagnostics(config);
+  }
   const diagnostics: ThreadnoteProcessDiagnostics = {
     ...observed,
     processes: EffectArray.filter(observed.processes, process => process.processId !== system.processId),
@@ -556,13 +691,18 @@ export const runProcessDiagnostics = Effect.fn('processDiagnostics.run')(functio
 
 export function renderProcessDiagnosticsTable(processes: readonly ThreadnoteProcessDiagnostic[]): string {
   const rows = [
-    ['PID', 'PPID', 'ROLE', 'VERSION', 'AGE', 'RSS', 'OPERATION'],
+    ['PID', 'PPID', 'ROLE', 'VERSION', 'AGE', 'CPU', 'RSS', 'OPERATION'],
     ...EffectArray.map(processes, process => [
       String(process.processId),
       process.parentProcessId === 0 ? '-' : String(process.parentProcessId),
       process.activityRole === undefined ? process.role : `${process.role} (${process.activityRole})`,
       process.releaseVersion ?? '-',
       formatDuration(process.ageMilliseconds),
+      process.cpu?.state === 'sampled'
+        ? `${process.cpu.percent.toFixed(1)}%`
+        : process.cpu?.state === 'sampling'
+          ? 'sampling'
+          : 'unavailable',
       process.rssBytes === undefined ? 'unknown' : formatBytes(process.rssBytes),
       process.currentOperation ?? '-',
     ]),
@@ -616,6 +756,18 @@ function registerThreadnoteProcess(home: string, baseRole: RegisteredThreadnoteP
     const crypto = yield* SecureRandom.SecureRandom;
     const writeSemaphore = yield* Semaphore.make(1);
     const directory = processDiagnosticsDirectory(path, home);
+    const launchCandidate =
+      safeDisplayPath(system.environment().THREADNOTE_CALLER_CWD) ?? safeDisplayPath(system.currentDirectory());
+    const launchDirectory =
+      launchCandidate && path.isAbsolute(launchCandidate)
+        ? yield* fs.realPath(launchCandidate).pipe(
+            Effect.flatMap(real =>
+              fs.stat(real).pipe(Effect.map(info => (info.type === 'Directory' ? safeDisplayPath(real) : undefined))),
+            ),
+            Effect.timeoutOrElse({duration: 100, orElse: () => succeedUndefined}),
+            Effect.orElseSucceed(() => undefined),
+          )
+        : undefined;
     const active: ActiveProcessRegistration = {
       ...(baseOperation !== undefined && SAFE_OPERATION.test(baseOperation) ? {baseOperation} : {}),
       baseRole,
@@ -623,6 +775,10 @@ function registerThreadnoteProcess(home: string, baseRole: RegisteredThreadnoteP
       file: path.join(directory, `${system.processId}.json`),
       fileSystem: fs,
       parentProcessId: process.ppid,
+      parentProcessStartIdentity: yield* observeProcessInstanceIdentity(system, process.ppid).pipe(
+        Effect.timeoutOrElse({duration: 100, orElse: () => succeedUndefined}),
+      ),
+      launchDirectory,
       processId: system.processId,
       processStartIdentity: yield* observeProcessInstanceIdentity(system, system.processId),
       originalTitle: process.title,
@@ -691,12 +847,15 @@ function writeCurrentRegistration(missingOnly = false): Effect.Effect<void, unkn
         const role = current?.role ?? active.baseRole;
         setBestEffortProcessTitle(role);
         const currentOperation = current?.operation ?? active.baseOperation;
-        const stateKey = `${role}\0${currentOperation ?? ''}`;
+        const displayContext = currentDisplayContext(active);
+        const stateKey = `${role}\0${currentOperation ?? ''}\0${JSON.stringify(displayContext)}`;
         if (active.queuedStateKey === stateKey && exists) return;
         const value: ProcessRegistrationFile = {
           baseRole: active.baseRole,
           ...(currentOperation === undefined ? {} : {currentOperation}),
           parentProcessId: active.parentProcessId,
+          parentProcessStartIdentity: active.parentProcessStartIdentity,
+          displayContext,
           processId: active.processId,
           processStartIdentity: active.processStartIdentity,
           role,
@@ -770,7 +929,14 @@ function writeRegistrationFile(active: ActiveProcessRegistration, value: Process
   const temporary = active.path.join(active.directory, `.${active.processId}.${active.token}.tmp`);
   return Effect.gen(function* () {
     yield* active.fileSystem.makeDirectory(active.directory, {recursive: true, mode: 0o700});
-    const content = `${JSON.stringify(value, undefined, 2)}\n`;
+    let content = `${JSON.stringify(value, undefined, 2)}\n`;
+    // JSON escaping and duplicated paths must never make our own row unreadable.
+    if (new TextEncoder().encode(content).byteLength > PROCESS_REGISTRATION_LIMIT_BYTES) {
+      content = `${JSON.stringify({...value, displayContext: {...value.displayContext, launchDirectory: undefined}}, undefined, 2)}\n`;
+    }
+    if (new TextEncoder().encode(content).byteLength > PROCESS_REGISTRATION_LIMIT_BYTES) {
+      content = `${JSON.stringify({...value, displayContext: undefined}, undefined, 2)}\n`;
+    }
     if (missing) return yield* createMissingProcessFile(active.fileSystem, active.file, temporary, content);
     yield* active.fileSystem.remove(temporary, {force: true});
     yield* active.fileSystem.writeFileString(temporary, content, {mode: 0o600});
@@ -863,7 +1029,12 @@ function readRegistrationFileStrict(fs: FileSystem.FileSystem, file: string) {
 function parseRegistrationFile(source: string): Option.Option<ProcessRegistrationFile> {
   try {
     const value: unknown = JSON.parse(source);
-    return isProcessRegistrationFile(value) ? Option.some(value) : Option.none();
+    if (!isProcessRegistrationFile(value)) return Option.none();
+    return Option.some({
+      ...value,
+      parentProcessStartIdentity: safeDisplayText(value.parentProcessStartIdentity, 256),
+      displayContext: sanitizeDisplayContext(value.displayContext),
+    });
   } catch {
     return Option.none();
   }
@@ -900,6 +1071,7 @@ function isRegisteredThreadnoteProcessRole(value: unknown): value is RegisteredT
     value === 'graph-diagnostics-worker' ||
     value === 'graph-parser-worker' ||
     value === 'graph-query-worker' ||
+    value === 'recall-read-worker' ||
     value === 'graph-waiter' ||
     value === 'integration-sync-worker' ||
     value === 'local-model-worker' ||
@@ -907,6 +1079,172 @@ function isRegisteredThreadnoteProcessRole(value: unknown): value is RegisteredT
     value === 'mcp' ||
     value === 'mcp-broker'
   );
+}
+
+function safeDisplayText(value: unknown, maxBytes: number): string | undefined {
+  return typeof value === 'string' &&
+    Effect2.pipe(value, EffectString.trim).length > 0 &&
+    !/[^\u0020-\u007e\u00a0-\u{10ffff}]/u.test(value) &&
+    new TextEncoder().encode(value).byteLength <= maxBytes
+    ? value
+    : undefined;
+}
+
+function safeDisplayPath(value: unknown): string | undefined {
+  const text = safeDisplayText(value, 4096);
+  return text && /^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/u.test(text) ? text : undefined;
+}
+
+function sanitizeDisplayContext(value: unknown): ThreadnoteProcessDisplayContext | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const launchDirectory = 'launchDirectory' in value ? safeDisplayPath(value.launchDirectory) : undefined;
+  const client = 'client' in value ? sanitizeThreadnoteProcessClientInfo(value.client) : undefined;
+  let workspace: ThreadnoteProcessWorkspace | undefined;
+  const raw = 'workspace' in value ? value.workspace : undefined;
+  if (
+    typeof raw === 'object' &&
+    raw !== null &&
+    'state' in raw &&
+    'observedAt' in raw &&
+    typeof raw.observedAt === 'string' &&
+    Number.isFinite(Date.parse(raw.observedAt))
+  ) {
+    if (raw.state === 'multiple') workspace = {state: 'multiple', observedAt: raw.observedAt};
+    else if ((raw.state === 'active' || raw.state === 'last') && 'path' in raw) {
+      const path = safeDisplayPath(raw.path);
+      if (path) workspace = {state: raw.state, path, observedAt: raw.observedAt};
+    }
+  }
+  return launchDirectory || client || workspace ? {launchDirectory, client, workspace} : undefined;
+}
+
+function currentDisplayContext(active: ActiveProcessRegistration): ThreadnoteProcessDisplayContext {
+  const work = EffectArray.filter([...activities.values()], value => value.workingDirectory !== undefined).sort(
+    (a, b) => b.sequence - a.sequence,
+  );
+  const latest = work[0];
+  const distinct = new Set(EffectArray.map(work, value => value.workingDirectory));
+  const workspace: ThreadnoteProcessWorkspace | undefined = latest
+    ? distinct.size > 1
+      ? {state: 'multiple', observedAt: latest.startedAt}
+      : {state: 'active', path: latest.workingDirectory!, observedAt: latest.startedAt}
+    : active.lastWorkspace;
+  return {launchDirectory: active.launchDirectory, client: active.client, workspace};
+}
+
+function inheritedDisplayContext(
+  value: ProcessRegistrationFile,
+  registrations: ReadonlyMap<number, ProcessRegistrationFile>,
+  identities: ReadonlyMap<number, string | undefined>,
+): ThreadnoteProcessDisplayContext | undefined {
+  let context = value.displayContext;
+  if (!value.processStartIdentity || identities.get(value.processId) !== value.processStartIdentity) return context;
+  let child = value;
+  const seen = new Set([value.processId]);
+  for (let depth = 0; depth < 8; depth++) {
+    const parent = registrations.get(child.parentProcessId);
+    if (
+      !parent ||
+      seen.has(parent.processId) ||
+      !child.parentProcessStartIdentity ||
+      child.parentProcessStartIdentity !== parent.processStartIdentity ||
+      identities.get(parent.processId) !== parent.processStartIdentity
+    )
+      break;
+    seen.add(parent.processId);
+    const inherited = parent.displayContext;
+    if (inherited && ((!context?.client && inherited.client) || (!context?.workspace && inherited.workspace))) {
+      context = {
+        ...context,
+        client: context?.client ?? inherited.client,
+        workspace: context?.workspace ?? inherited.workspace,
+        owner: {processId: parent.processId, role: parent.baseRole},
+      };
+    }
+    child = parent;
+  }
+  return context;
+}
+
+function displayWorkspacePath(context: ThreadnoteProcessDisplayContext): string | undefined {
+  return context.workspace?.state === 'multiple'
+    ? undefined
+    : (context.workspace?.path ?? context.processDirectory ?? context.launchDirectory);
+}
+
+const displayBranchCaches = new WeakMap<
+  CommandExecutor['Service'],
+  Map<string, {at: number; value: ThreadnoteProcessBranch}>
+>();
+const displayBranchGate = Semaphore.makeUnsafe(1);
+function readDisplayBranches(
+  processes: readonly {readonly processId: number; readonly displayContext?: ThreadnoteProcessDisplayContext}[],
+) {
+  return Effect.gen(function* () {
+    const command = yield* Effect.serviceOption(CommandExecutor);
+    if (Option.isNone(command)) return new Map<string, ThreadnoteProcessBranch>();
+    const executor = command.value;
+    const paths = [
+      ...new Set(
+        EffectArray.filter(
+          EffectArray.flatMap(processes, value =>
+            value.displayContext ? [displayWorkspacePath(value.displayContext)] : [],
+          ),
+          (value): value is string => value !== undefined,
+        ),
+      ),
+    ].slice(0, 32);
+    return yield* displayBranchGate
+      .withPermit(
+        Effect.gen(function* () {
+          let cache = displayBranchCaches.get(executor);
+          if (!cache) {
+            cache = new Map();
+            displayBranchCaches.set(executor, cache);
+          }
+          const entries = cache;
+          const now = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+          const results = yield* Effect.forEach(
+            paths,
+            path =>
+              Effect.gen(function* () {
+                const previous = entries.get(path);
+                if (previous && now - previous.at >= 0 && now - previous.at < 2_000)
+                  return [path, previous.value] as const;
+                const options = {cwd: path, timeoutMs: 250, maxOutputBytes: 1024, allowFailure: true};
+                const named = yield* executor
+                  .execute('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], options)
+                  .pipe(Effect.orElseSucceed(() => undefined));
+                const name =
+                  named?.exitCode === 0
+                    ? safeDisplayText(Effect2.pipe(named.stdout, EffectString.trim), 256)
+                    : undefined;
+                let value: ThreadnoteProcessBranch = {state: 'unavailable'};
+                if (name) value = {state: 'branch', name};
+                else if (named?.exitCode === 1) {
+                  const detached = yield* executor
+                    .execute('git', ['rev-parse', '--short=12', 'HEAD'], options)
+                    .pipe(Effect.orElseSucceed(() => undefined));
+                  const commit = detached ? Effect2.pipe(detached.stdout, EffectString.trim) : undefined;
+                  if (detached?.exitCode === 0 && commit && /^[0-9a-f]{7,64}$/u.test(commit))
+                    value = {state: 'detached', commit};
+                }
+                if (entries.size >= 32 && !entries.has(path)) entries.delete(entries.keys().next().value!);
+                entries.set(path, {at: now, value});
+                return [path, value] as const;
+              }),
+            {concurrency: 4},
+          );
+          return new Map(results);
+        }),
+      )
+      .pipe(
+        Effect.timeoutOrElse({
+          duration: 1_000,
+          orElse: () => Effect.succeed(new Map<string, ThreadnoteProcessBranch>()),
+        }),
+      );
+  });
 }
 
 function processReference(value: ProcessRegistrationFile): string {
@@ -1041,84 +1379,96 @@ function removeRegistrationFile(fs: FileSystem.FileSystem, file: string) {
   return fs.remove(file, {force: true}).pipe(Effect.ignore);
 }
 
-function processMemoryBytes(
-  processIds: readonly number[],
-  platform: NodeJS.Platform,
-  environment: NodeJS.ProcessEnv,
-): ReadonlyMap<number, number> {
-  if (processIds.length === 0) return new Map();
-  try {
-    if (platform === 'win32') return windowsProcessMemoryBytes(processIds, environment);
-    const result = Bun.spawnSync({
-      cmd: [
-        'ps',
-        '-o',
-        'pid=,rss=',
-        '-p',
-        EffectArray.join(
-          EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
-          ',',
-        ),
-      ],
-      env: withoutTelemetrySessionEnvironment(environment),
-      stderr: 'pipe',
-      stdout: 'pipe',
-      timeout: PROCESS_MEMORY_QUERY_TIMEOUT_MS,
-    });
-    if (result.exitCode !== 0) return new Map();
-    const memory = new Map<number, number>();
-    for (const line of Effect2.pipe(result.stdout.toString(), EffectString.split(/\r?\n/))) {
-      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-      if (!match) continue;
-      memory.set(Number(match[1]), Number(match[2]) * 1024);
-    }
-    return memory;
-  } catch {
-    return new Map();
-  }
-}
+type ResourceDisplay = {
+  readonly cpu?: ProcessCpuObservation;
+  readonly rssBytes?: number;
+  readonly workingDirectory?: string;
+};
+type ResourceSampleCache = {
+  readonly gate: Semaphore.Semaphore;
+  previous: ReadonlyMap<number, TimedProcessResourceCounters>;
+  result: Map<number, ResourceDisplay>;
+  signature: string;
+  observedAt: number;
+};
+const resourceSampleCaches = new WeakMap<SystemInfo['Service'], Map<string, ResourceSampleCache>>();
 
-function windowsProcessMemoryBytes(
-  processIds: readonly number[],
-  environment: NodeJS.ProcessEnv,
-): ReadonlyMap<number, number> {
-  const result = Bun.spawnSync({
-    cmd: [
-      'powershell.exe',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '$ids=$env:THREADNOTE_PROCESS_IDS -split ","; ' +
-        'Get-Process -Id $ids -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress',
-    ],
-    env: {
-      ...withoutTelemetrySessionEnvironment(environment),
-      THREADNOTE_PROCESS_IDS: EffectArray.join(
-        EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
-        ',',
-      ),
-    },
-    stderr: 'pipe',
-    stdout: 'pipe',
-    timeout: PROCESS_MEMORY_QUERY_TIMEOUT_MS,
-  });
-  if (result.exitCode !== 0 || !result.stdout.length) return new Map();
-  const parsed = JSON.parse(result.stdout.toString()) as unknown;
-  const rows = EffectArray.isArray(parsed) ? parsed : [parsed];
-  const memory = new Map<number, number>();
-  for (const row of rows) {
-    if (
-      typeof row === 'object' &&
-      row !== null &&
-      'Id' in row &&
-      'WorkingSet64' in row &&
-      Number.isSafeInteger(Number(row.Id)) &&
-      Number.isSafeInteger(Number(row.WorkingSet64))
-    ) {
-      memory.set(Number(row.Id), Number(row.WorkingSet64));
+function sampleProcessResources(
+  system: SystemInfo['Service'],
+  home: string,
+  processes: readonly {readonly processId: number}[],
+  identities: ReadonlyMap<number, string | undefined>,
+) {
+  return Effect.suspend(() => {
+    let homes = resourceSampleCaches.get(system);
+    if (!homes) {
+      homes = new Map();
+      resourceSampleCaches.set(system, homes);
     }
-  }
-  return memory;
+    let cache = homes.get(home);
+    if (!cache) {
+      cache = {
+        gate: Semaphore.makeUnsafe(1),
+        previous: new Map(),
+        result: new Map(),
+        signature: '',
+        observedAt: -Infinity,
+      };
+      if (homes.size >= 4) {
+        const oldest = homes.keys().next().value;
+        if (oldest !== undefined) homes.delete(oldest);
+      }
+      homes.set(home, cache);
+    }
+    const currentCache = cache;
+    return currentCache.gate.withPermit(
+      Effect.gen(function* () {
+        const monotonicMilliseconds = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+        const signature = EffectArray.join(
+          EffectArray.map(processes, value => `${value.processId}:${identities.get(value.processId) ?? ''}`),
+          ',',
+        );
+        if (
+          signature === currentCache.signature &&
+          monotonicMilliseconds - currentCache.observedAt >= 0 &&
+          monotonicMilliseconds - currentCache.observedAt < 250
+        )
+          return new Map(currentCache.result);
+        const sampledAt = DateTime.formatIso(yield* DateTime.now);
+        const ids = EffectArray.map(processes, value => value.processId);
+        const probe: Effect.Effect<ReadonlyMap<number, ProcessResourceCounters>> =
+          system.processResourceCounters?.(ids) ?? Effect.succeed(new Map());
+        const counters = yield* probe.pipe(
+          Effect.timeoutOrElse({duration: 1_500, orElse: () => Effect.succeed(new Map())}),
+          Effect.orElseSucceed(() => new Map()),
+        );
+        const observedAt = Number(yield* Clock.monotonicTimeNanos) / 1_000_000;
+        const previous = new Map<number, TimedProcessResourceCounters>();
+        const result = new Map<number, ResourceDisplay>();
+        for (const {processId} of processes) {
+          const value = counters.get(processId);
+          // Counter identity is collected with the counters, closing the PID-reuse gap between OS probes.
+          const verified =
+            value !== undefined && identities.get(processId) === value.processStartIdentity
+              ? {...value, monotonicMilliseconds: observedAt}
+              : undefined;
+          const cpu = processCpuObservation(currentCache.previous.get(processId), verified, sampledAt);
+          const workingDirectory = verified ? safeDisplayPath(verified.workingDirectory) : undefined;
+          result.set(processId, {
+            cpu,
+            ...(value?.rssBytes === undefined ? {} : {rssBytes: value.rssBytes}),
+            ...(workingDirectory ? {workingDirectory} : {}),
+          });
+          if (verified) previous.set(processId, verified);
+        }
+        currentCache.previous = previous;
+        currentCache.result = result;
+        currentCache.signature = signature;
+        currentCache.observedAt = observedAt;
+        return new Map(result);
+      }),
+    );
+  });
 }
 
 function setBestEffortProcessTitle(role: ThreadnoteProcessRole): void {

@@ -1,7 +1,9 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {loadRecallMemoryIdentities, withRecallIdentityPreparation} from '@threadnote/recall/index';
 import {nativeRequestSchema} from './request_schema.js';
 import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
+import {withNativeFileLockWaitBudget} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowWriteIntent} from '@threadnote/workflow-automations/contracts';
 import {
@@ -258,17 +260,6 @@ const resumeWrite = (memory: Memory, intent: WorkflowWriteIntent) =>
         observed.state === 'absent' ? memory.write(intent) : memory.recover(intent.bindingId, intent.operationId),
       ),
     );
-const retryBusyOnce = <A, R>(
-  attempt: Effect.Effect<A, WorkflowAutomationError, R>,
-  retry: Effect.Effect<A, WorkflowAutomationError, R>,
-) =>
-  attempt.pipe(
-    Effect.catchIf(
-      error => error.code === 'evidence-busy' && error.retryable === true,
-      () => Effect.sleep('100 millis').pipe(Effect.andThen(retry)),
-    ),
-  );
-
 const save = Effect.fn('workflowAutomation.save')(function* (
   config: RuntimeConfig,
   stored: Stored,
@@ -289,6 +280,10 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   );
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');
+  if ((intent.relations?.length ?? 0) > 0 || (intent.evidenceRefs?.length ?? 0) > 0)
+    yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []}).pipe(
+      withRecallIdentityPreparation,
+    );
   if (request.action === 'preflight' && existing) {
     if (existing.status !== 'verified' || !existing.artifact)
       return yield* issue(
@@ -315,7 +310,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
       ...version,
       status: 'ok' as const,
       operationId: request.operationId,
-      ...(yield* retryBusyOnce(memory.preflight(intent), memory.preflight(intent))),
+      ...(yield* memory.preflight(intent)),
     };
   const reservation = stored.state.authoringSave;
   if (reservation && (yield* CurrentNativeAuthoringSave) !== reservation.intentDigest)
@@ -340,7 +335,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
     );
   let pending = stored;
   if (!existing) {
-    yield* retryBusyOnce(memory.preflight(intent), memory.preflight(intent));
+    yield* memory.preflight(intent);
     pending = yield* writeNativeWorkflowState(
       config,
       {
@@ -351,7 +346,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
     );
   }
   const first = existing ? resumeWrite(memory, intent) : memory.write(intent);
-  const artifact = yield* retryBusyOnce(first, resumeWrite(memory, intent));
+  const artifact = yield* first;
   if (existing?.status !== 'verified')
     yield* writeNativeWorkflowState(
       config,
@@ -410,7 +405,7 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
     admission.state.operations[operationId] !== undefined
       ? memory.recover(operation.intent.bindingId, operationId)
       : resumeWrite(memory, operation.intent);
-  const artifact = yield* retryBusyOnce(replay, replay);
+  const artifact = yield* replay;
   if (operation.status !== 'verified')
     yield* writeNativeWorkflowState(
       config,
@@ -570,6 +565,7 @@ const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (confi
 
 export const runWorkflowAutomation = (config: RuntimeConfig, input: unknown) =>
   dispatchNative(config, input).pipe(
+    withNativeFileLockWaitBudget,
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
   );

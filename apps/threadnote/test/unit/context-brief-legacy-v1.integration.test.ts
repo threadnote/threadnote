@@ -8,6 +8,7 @@ import {
   type ContextBriefGraphEvidenceV1,
 } from '@threadnote/threadnote/context_brief/index';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as EffectString from 'effect/String';
@@ -57,6 +58,7 @@ describe('Context Brief schema-v1 memory compatibility', () => {
               manifestPath: path.join(home, 'manifest.yaml'),
               user: 'legacy-user',
             };
+            yield* loadRecallMemoryIdentities(config, {allowedUriScopes: [], memoryIds: []});
 
             const result = yield* compileContextBriefWith(
               {

@@ -440,8 +440,8 @@ function withCapturedRepositoryGroup<A, E, R>(
     const query = yield* CodeGraphQueryService;
     const store = yield* CodeGraphStore;
     const fs = yield* FileSystem.FileSystem;
-    const readReadyEvidence =
-      !enforceLeaseBudget && query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
+    // Ready evidence is read on the caller's SQLite session and must still be followed by a fresh fence.
+    const readReadyEvidence = query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
     const captureAtStatus = (before: CodeGraphStatus) =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -459,7 +459,7 @@ function withCapturedRepositoryGroup<A, E, R>(
           if (!readReadyEvidence)
             yield* Effect.acquireRelease(
               store
-                .acquireSnapshotLease(before.databasePath, snapshot.id, 60000, leaseWriterOptions)
+                .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
                 .pipe(
                   Effect.mapError(error =>
                     Schema.is(CodeGraphStoreBusyError)(error)
@@ -687,7 +687,7 @@ function withCapturedRepositoryGroup<A, E, R>(
             // cannot relabel body, ownership, revision or relation failures.
             const result = yield* Effect.exit(use(retainedTargets));
             if (Exit.isFailure(result)) return result;
-            if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1000000 >= 60000)
+            if (enforceLeaseBudget && Number((yield* Clock.monotonicTimeNanos) - leaseStartedAt) / 1_000_000 >= 60_000)
               return yield* MemoryCodeCitationCaptureError.of('Projection citation lease expired.');
             const closingOptions = {
               project,
@@ -724,12 +724,13 @@ function withCapturedRepositoryGroup<A, E, R>(
     const options = {project, manifestPath: config.manifestPath, observeWorktree: true, requestMaintenance: false};
     // Retain one repository session through this capture only. The independent
     // closing status above still reobserves identity, scope, worktree and snapshot.
-    return yield* (
+    const result = yield* (
       query.withStatusSession
         ? query.withStatusSession(config.agentContextHome, cwd, undefined, options, captureAtStatus)
         : query.status(config.agentContextHome, cwd, options).pipe(Effect.flatMap(captureAtStatus))
     ).pipe(Effect.mapError(error => captureError(cwd, error)));
-  }).pipe(Effect.withSpan('memoryCodeCitation.captureRepositoryGroup'), Effect.flatten);
+    return yield* Exit.isFailure(result) ? Effect.failCause(result.cause) : Effect.succeed(result.value);
+  }).pipe(Effect.withSpan('memoryCodeCitation.captureRepositoryGroup'));
 }
 const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpectedCallerIdentity')(function* (
   status: CodeGraphStatus,

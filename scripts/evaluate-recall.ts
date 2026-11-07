@@ -1,13 +1,14 @@
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
-import {BunRuntime} from '@effect/platform-bun';
+import {BunServices, BunRuntime} from '@effect/platform-bun';
 import {Clock, Console, DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {evaluateRecallFixture, parseRecallEvaluationFixture} from '@threadnote/recall/evaluate';
 import {
   clearRecallIndexMemoryCache,
   expireRecallIndexValidation,
-  loadRecallExactMatches,
+  readRecallExactMatches,
+  loadRecallIndexData,
   loadRecallIndex,
 } from '@threadnote/recall/index';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
@@ -16,7 +17,9 @@ import {
   captureRecallEvaluationSource,
   measureRecallEvaluationSample,
   recallEvaluationScenario,
-  writeRecallEvaluationDiagnosticsAndEnforce,
+  writeRecallEvaluationDiagnostics,
+  completeRecallEvaluation,
+  recallEvaluationTeardown,
   type RecallEvaluationSample,
 } from './evaluate-recall-diagnostics.js';
 import * as EffectString from 'effect/String';
@@ -68,7 +71,7 @@ const program = Effect.gen(function* () {
     productionBenchmark,
   };
   yield* Console.log(JSON.stringify(output, undefined, 2));
-  yield* writeRecallEvaluationDiagnosticsAndEnforce('artifacts/recall-production-10000.json', {
+  return yield* writeRecallEvaluationDiagnostics('artifacts/recall-production-10000.json', {
     correctnessFailureCount: result.failures.length,
     fixtureSha256: sha256HexSync(raw),
     observations,
@@ -168,6 +171,8 @@ const runProductionBenchmark = Effect.scoped(
         readRecords: () => Effect.succeed([]),
       });
     const prepare = prepareForQuery(`common retrieval ${PRODUCTION_BENCHMARK_QUERY}`);
+    const maintainAndPrepare = (query: string) =>
+      loadRecallIndexData(config, {includeInactive: false, memoryIds: []}).pipe(Effect.andThen(prepareForQuery(query)));
     for (let index = 0; index < PRODUCTION_BENCHMARK_WARMUP_COUNT; index += 1) {
       const warmup = yield* prepare;
       if (!EffectArray.some(warmup.ranked, hit => hit.uri === 'threadnote://resources/repos/threadnote/09999.md')) {
@@ -203,7 +208,7 @@ const runProductionBenchmark = Effect.scoped(
         const observations: RecallEvaluationSample[] = [];
         for (let sample = 0; sample < EXACT_SEARCH_SAMPLE_COUNT; sample += 1) {
           const measured = yield* measureRecallEvaluationSample(() =>
-            loadRecallExactMatches(config, {
+            readRecallExactMatches(config, {
               includeInactive: false,
               terms: [term],
               uriScopes: ['threadnote://resources/repos/threadnote'],
@@ -228,8 +233,11 @@ const runProductionBenchmark = Effect.scoped(
     const coldDecode = yield* measure(COLD_DECODE_SAMPLE_COUNT, COLD_DECODE_P95_LIMIT_MILLISECONDS, () =>
       clearRecallIndexMemoryCache(),
     );
-    const sourceValidation = yield* measure(VALIDATION_SAMPLE_COUNT, VALIDATION_P95_LIMIT_MILLISECONDS, () =>
-      expireRecallIndexValidation(agentContextHome, false, []),
+    const sourceValidation = yield* measure(
+      VALIDATION_SAMPLE_COUNT,
+      VALIDATION_P95_LIMIT_MILLISECONDS,
+      () => expireRecallIndexValidation(agentContextHome, false, []),
+      () => maintainAndPrepare(`common retrieval ${PRODUCTION_BENCHMARK_QUERY}`),
     );
     const incrementalUpdate = yield* measure(
       INCREMENTAL_UPDATE_SAMPLE_COUNT,
@@ -251,7 +259,7 @@ const runProductionBenchmark = Effect.scoped(
           yield* writeSeedState;
           yield* expireRecallIndexValidation(agentContextHome, false, [targetUri]);
         }),
-      sample => prepareForQuery(`benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`),
+      sample => maintainAndPrepare(`benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`),
     );
     const finalUnchangedQuery = yield* prepare;
     if (!EffectArray.some(finalUnchangedQuery.ranked, hit => hit.uri === targetUri)) {
@@ -289,6 +297,13 @@ function percentile(sorted: readonly number[], quantile: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * quantile))] ?? 0;
 }
 
-BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer), {
-  disableErrorReporting: false,
-});
+BunRuntime.runMain(
+  completeRecallEvaluation(
+    provideScriptLayer(program, ApplicationLayer),
+    'artifacts/recall-production-10000.json',
+    process.env.THREADNOTE_RECALL_ATTEMPT_NONCE,
+    // This executable owns the outer receipt-publication filesystem after application cleanup.
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide
+  ).pipe(Effect.provide(BunServices.layer)),
+  {disableErrorReporting: false, teardown: recallEvaluationTeardown},
+);

@@ -32,6 +32,12 @@ import {
 } from '@threadnote/inference/engine/local-model-runtime';
 import type {LlamaCppDiagnostics} from '@threadnote/inference/engine/llama-cpp-engine';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {
+  CallerReadCancellation,
+  ReadDeadlineContext,
+  readDeadlineRemaining,
+  withinReadDeadline,
+} from '@threadnote/platform/read_deadline';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {withThreadnoteProcessActivity} from '../../process/diagnostics.js';
 import {LOCAL_MODEL_WORKER_ARGUMENT} from '../../worker_protocol.js';
@@ -56,7 +62,10 @@ const WORKER_CRASH_PATTERN =
   /(?:bun has crashed|panic(?:\([^)]*\))?:|segmentation fault|fatal error:|reached heap limit|allocation failed)/i;
 
 type WorkerOperation = 'diagnostics' | 'embedMany' | 'embedManyIdleV1' | 'embedManyCapacityV2' | 'generate' | 'rerank';
-type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write';
+type WorkerFailureReason = 'crash' | 'exit' | 'protocol' | 'spawn' | 'timeout' | 'write' | 'cleanup-unconfirmed';
+interface OwnedReadCleanup {
+  readonly deadlineAtMilliseconds?: number;
+}
 
 interface WorkerRequest {
   readonly id: string;
@@ -89,7 +98,7 @@ export class LocalModelWorkerTransportError extends Schema.TaggedError<
 >()('LocalModelWorkerTransportError', {
   message: Schema.String,
   operation: Schema.String,
-  reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write']),
+  reason: Schema.Literals(['crash', 'exit', 'protocol', 'spawn', 'timeout', 'write', 'cleanup-unconfirmed']),
 }) {}
 
 export interface LocalModelWorkerProcess {
@@ -159,20 +168,54 @@ export function isolatedLocalModelRuntimeLayer(
           operation: WorkerOperation,
           payload: unknown,
           decode: (result: unknown) => Option.Option<A>,
-        ): Effect.Effect<A, DecodedOperationError | LocalModelWorkerTransportError> => {
-          const send = (signal: AbortSignal) => pool.request(operation, payload, signal);
-          const decodeError = (cause: unknown): LocalModelWorkerTransportError =>
-            Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol');
-          const transmitted = options.background
-            ? fromPromiseInterruptibleAwaiting(send, decodeError)
-            : Effect.tryPromise({try: send, catch: decodeError});
-          return Effect.gen(function* () {
-            const response = yield* transmitted;
-            if (!response.ok) return yield* Effect.fail<DecodedOperationError>(response.error);
-            const result = decode(response.result);
-            return Option.isSome(result) ? result.value : yield* transportError(operation, 'protocol');
+        ): Effect.Effect<A, DecodedOperationError | LocalModelWorkerTransportError> =>
+          Effect.gen(function* () {
+            const callerCancelled = !options.background && (yield* CallerReadCancellation);
+            const readDeadline = yield* Effect.serviceOption(ReadDeadlineContext);
+            const remaining =
+              callerCancelled || Option.isNone(readDeadline)
+                ? undefined
+                : yield* readDeadlineRemaining(readDeadline.value);
+            if (remaining !== undefined && remaining <= 0) return yield* transportError(operation, 'timeout');
+            const cleanup: OwnedReadCleanup | undefined = callerCancelled
+              ? {}
+              : Option.isNone(readDeadline)
+                ? undefined
+                : {
+                    deadlineAtMilliseconds: performance.now() + (remaining ?? 0),
+                  };
+            let cleanupFailure: LocalModelWorkerTransportError | undefined;
+            const send = (signal: AbortSignal) =>
+              pool.request(operation, payload, signal, cleanup, callerCancelled).catch(cause => {
+                if (Schema.is(LocalModelWorkerTransportError)(cause) && cause.reason === 'cleanup-unconfirmed')
+                  cleanupFailure = cause;
+                throw cause;
+              });
+            const decodeError = (cause: unknown): LocalModelWorkerTransportError =>
+              Schema.is(LocalModelWorkerTransportError)(cause) ? cause : transportError(operation, 'protocol');
+            const transmitted =
+              options.background || cleanup !== undefined
+                ? fromPromiseInterruptibleAwaiting(send, decodeError)
+                : Effect.tryPromise({try: send, catch: decodeError});
+            return yield* Effect.gen(function* () {
+              const response = yield* callerCancelled && Option.isSome(readDeadline)
+                ? withinReadDeadline(readDeadline.value, transmitted).pipe(
+                    Effect.catchTag('ReadDeadlineExceeded', () => Effect.fail(transportError(operation, 'timeout'))),
+                  )
+                : transmitted;
+              if (!response.ok) return yield* Effect.fail<DecodedOperationError>(response.error);
+              const result = decode(response.result);
+              return Option.isSome(result) ? result.value : yield* transportError(operation, 'protocol');
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  // A scope finalizer defect is deliberately retained through timeout
+                  // interruption: optional inference cannot turn unknown exit into success.
+                  if (cleanupFailure !== undefined) throw withWorkerTransportDiagnostic(cleanupFailure, cleanupFailure);
+                }),
+              ),
+            );
           });
-        };
 
         const service: LocalModelRuntimeWithDiagnostics = {
           diagnostics: withAnonymousTelemetryPhase(
@@ -372,6 +415,7 @@ class LocalModelWorkerPool {
   private spawningConnection: Promise<LocalModelWorkerConnection> | undefined;
   private readonly spawnWorker: LocalModelWorkerSpawner;
   private sequence = 0;
+  private connectionGeneration = 0;
 
   constructor(
     private readonly system: SystemInfoShape,
@@ -410,16 +454,28 @@ class LocalModelWorkerPool {
     await connection.close();
   }
 
-  async request(operation: WorkerOperation, payload: unknown, signal: AbortSignal): Promise<WorkerResponse> {
+  async request(
+    operation: WorkerOperation,
+    payload: unknown,
+    signal: AbortSignal,
+    cleanup?: OwnedReadCleanup,
+    callerCancelled = false,
+  ): Promise<WorkerResponse> {
     if (this.closed) throw transportError(operation, 'exit');
     this.activeRequests += 1;
     this.cancelIdleEviction();
     try {
       for (let attempt = 0; attempt < this.maximumRequestAttempts; attempt += 1) {
+        if (cleanup?.deadlineAtMilliseconds !== undefined && performance.now() >= cleanup.deadlineAtMilliseconds)
+          throw transportError(operation, 'timeout');
         let connection = Option.none<LocalModelWorkerConnection>();
         try {
-          const activeConnection = await this.activeConnection(operation);
+          if (signal.aborted) throw transportError(operation, 'exit');
+          const activeConnection = callerCancelled
+            ? await this.acquireCallerConnection(operation, signal, cleanup ?? {})
+            : await this.activeConnection(operation);
           connection = Option.some(activeConnection);
+          if (signal.aborted) throw transportError(operation, 'exit');
           const id = `${this.system.processId}-${++this.sequence}`;
           return await activeConnection.request(
             {
@@ -428,11 +484,11 @@ class LocalModelWorkerPool {
               payload,
               protocol: PROTOCOL_VERSION,
             },
-            this.deadlineMs,
+            callerCancelled ? undefined : this.deadlineMs,
             signal,
           );
         } catch (cause: unknown) {
-          if (Option.isSome(connection)) await this.discard(connection.value);
+          if (Option.isSome(connection)) await this.discard(connection.value, cleanup, operation);
           if (
             !Schema.is(LocalModelWorkerTransportError)(cause) ||
             attempt + 1 === this.maximumRequestAttempts ||
@@ -448,7 +504,55 @@ class LocalModelWorkerPool {
     }
   }
 
-  private async activeConnection(operation: WorkerOperation): Promise<LocalModelWorkerConnection> {
+  private async acquireCallerConnection(
+    operation: WorkerOperation,
+    signal: AbortSignal,
+    cleanup: OwnedReadCleanup,
+  ): Promise<LocalModelWorkerConnection> {
+    const pending = this.activeConnection(operation, cleanup);
+    const {promise, resolve, reject} = Promise.withResolvers<LocalModelWorkerConnection>();
+    let cancelled = false;
+    const onAbort = () => {
+      if (cancelled) return;
+      cancelled = true;
+      // A late asynchronous spawn belongs to this retired acquisition, never
+      // to the next request. Its eventual process must still be disposed.
+      this.connectionGeneration++;
+      if (this.spawningConnection !== undefined) this.spawningConnection = undefined;
+      const settled = pending.then(
+        connection => this.discard(connection, cleanup, operation),
+        error => {
+          if (Schema.is(LocalModelWorkerTransportError)(error) && error.reason === 'cleanup-unconfirmed') throw error;
+        },
+      );
+      void completesBeforeDeadline(settled, WORKER_SHUTDOWN_DEADLINE_MS).then(confirmed => {
+        signal.removeEventListener('abort', onAbort);
+        reject(transportError(operation, confirmed ? 'exit' : 'cleanup-unconfirmed'));
+      });
+    };
+    signal.addEventListener('abort', onAbort, {once: true});
+    void pending.then(
+      connection => {
+        if (!cancelled) {
+          signal.removeEventListener('abort', onAbort);
+          resolve(connection);
+        }
+      },
+      error => {
+        if (!cancelled) {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        }
+      },
+    );
+    if (signal.aborted) onAbort();
+    return promise;
+  }
+
+  private async activeConnection(
+    operation: WorkerOperation,
+    cleanup?: OwnedReadCleanup,
+  ): Promise<LocalModelWorkerConnection> {
     if (this.closed) throw transportError(operation, 'exit');
     if (Option.isSome(this.connection) && !this.connection.value.isClosed) return this.connection.value;
     const eviction = this.evictingConnection;
@@ -456,7 +560,7 @@ class LocalModelWorkerPool {
     if (this.closed) throw transportError(operation, 'exit');
     if (Option.isSome(this.connection) && !this.connection.value.isClosed) return this.connection.value;
     if (this.spawningConnection) return this.spawningConnection;
-    const spawning = this.spawnConnection(operation);
+    const spawning = this.spawnConnection(operation, cleanup);
     this.spawningConnection = spawning;
     try {
       return await spawning;
@@ -465,8 +569,12 @@ class LocalModelWorkerPool {
     }
   }
 
-  private async spawnConnection(operation: WorkerOperation): Promise<LocalModelWorkerConnection> {
+  private async spawnConnection(
+    operation: WorkerOperation,
+    cleanup?: OwnedReadCleanup,
+  ): Promise<LocalModelWorkerConnection> {
     try {
+      const generation = this.connectionGeneration;
       const process = await this.spawnWorker(localModelWorkerSpawnOptions(this.system, this.options));
       const connection = new LocalModelWorkerConnection(
         process,
@@ -474,8 +582,8 @@ class LocalModelWorkerPool {
         this.responseLimitBytes,
         this.options.background === true,
       );
-      if (this.closed) {
-        await connection.close();
+      if (this.closed || generation !== this.connectionGeneration) {
+        await connection.close(cleanup, operation);
         throw transportError(operation, 'exit');
       }
       this.connection = Option.some(connection);
@@ -486,9 +594,13 @@ class LocalModelWorkerPool {
     }
   }
 
-  private async discard(connection: LocalModelWorkerConnection): Promise<void> {
+  private async discard(
+    connection: LocalModelWorkerConnection,
+    cleanup?: OwnedReadCleanup,
+    operation: WorkerOperation = 'diagnostics',
+  ): Promise<void> {
     if (Option.isSome(this.connection) && this.connection.value === connection) this.connection = Option.none();
-    await connection.close();
+    await connection.close(cleanup, operation);
   }
 
   private cancelIdleEviction(): void {
@@ -529,11 +641,15 @@ class LocalModelWorkerPool {
 class LocalModelWorkerConnection {
   private closed = false;
   private pending = Option.none<PendingResponse>();
+  private pendingWrite: Promise<void> | undefined;
+  private pendingCompletion: ((reason: WorkerFailureReason) => void) | undefined;
   private stderrTail = new Uint8Array();
   private stdoutBuffer = '';
   private stdoutBufferBytes = 0;
   private readonly decoder = new TextDecoder();
   private readonly encoder = new TextEncoder();
+  private readonly stdoutClosed: Promise<void>;
+  private readonly stderrClosed: Promise<void>;
 
   constructor(
     private readonly process: LocalModelWorkerProcess,
@@ -541,8 +657,8 @@ class LocalModelWorkerConnection {
     private readonly responseLimitBytes: number,
     private readonly awaitExit = false,
   ) {
-    void this.consumeStdout();
-    void this.consumeStderr();
+    this.stdoutClosed = this.consumeStdout();
+    this.stderrClosed = this.consumeStderr();
     void process.exited.then(
       () => this.fail('exit'),
       () => this.fail('exit'),
@@ -553,7 +669,30 @@ class LocalModelWorkerConnection {
     return this.closed;
   }
 
-  async close(): Promise<void> {
+  async close(cleanup?: OwnedReadCleanup, operation: WorkerOperation = 'diagnostics'): Promise<void> {
+    if (cleanup !== undefined) {
+      this.closed = true;
+      this.rejectPending('exit');
+      this.kill();
+      const remaining = Math.max(
+        0,
+        cleanup.deadlineAtMilliseconds === undefined
+          ? WORKER_SHUTDOWN_DEADLINE_MS
+          : Math.min(WORKER_SHUTDOWN_DEADLINE_MS, Math.floor(cleanup.deadlineAtMilliseconds - performance.now())),
+      );
+      const closed = Promise.all([
+        this.process.exited,
+        Promise.resolve()
+          .then(() => this.process.closeInput())
+          .catch(() => undefined),
+        this.stdoutClosed,
+        this.stderrClosed,
+        this.pendingWrite?.catch(() => undefined),
+      ]);
+      if (remaining <= 0 || !(await completesBeforeDeadline(closed, remaining)))
+        throw transportError(operation, 'cleanup-unconfirmed');
+      return;
+    }
     if (this.closed) {
       this.kill();
       void Promise.resolve()
@@ -576,7 +715,7 @@ class LocalModelWorkerConnection {
     if (this.awaitExit) await this.process.exited.catch(() => undefined);
   }
 
-  async request(request: WorkerRequest, deadlineMs: number, signal: AbortSignal): Promise<WorkerResponse> {
+  async request(request: WorkerRequest, deadlineMs: number | undefined, signal: AbortSignal): Promise<WorkerResponse> {
     if (this.closed) throw transportError(request.operation, 'exit');
     if (Option.isSome(this.pending)) throw transportError(request.operation, 'protocol');
     if (signal.aborted) {
@@ -592,19 +731,23 @@ class LocalModelWorkerConnection {
       reject,
       resolve,
     });
-    const timeout = setTimeout(() => this.fail('timeout'), deadlineMs);
+    const stopped = Promise.withResolvers<never>();
+    this.pendingCompletion = reason => stopped.reject(transportError(request.operation, reason));
+    const timeout = deadlineMs === undefined ? undefined : setTimeout(() => this.fail('timeout'), deadlineMs);
     const onAbort = () => this.fail('exit');
     signal.addEventListener('abort', onAbort, {once: true});
     removeAbortListener = () => signal.removeEventListener('abort', onAbort);
 
-    try {
-      void Promise.resolve(this.process.write(`${JSON.stringify(request)}\n`)).catch(() => this.fail('write'));
-    } catch {
-      this.fail('write');
-    }
+    const write = Promise.resolve().then(() => {
+      if (signal.aborted) throw transportError(request.operation, 'exit');
+      return this.process.write(`${JSON.stringify(request)}\n`);
+    });
+    this.pendingWrite = write;
+    void write.catch(() => this.fail('write'));
 
-    return response.finally(() => {
-      clearTimeout(timeout);
+    return Promise.race([Promise.all([response, write]).then(([result]) => result), stopped.promise]).finally(() => {
+      this.pendingCompletion = undefined;
+      if (timeout !== undefined) clearTimeout(timeout);
       removeAbortListener();
     });
   }
@@ -711,6 +854,7 @@ class LocalModelWorkerConnection {
   }
 
   private rejectPending(reason: WorkerFailureReason): void {
+    this.pendingCompletion?.(reason);
     if (Option.isNone(this.pending)) return;
     const pending = this.pending.value;
     this.pending = Option.none();
@@ -825,8 +969,16 @@ function handleWorkerLine(runtime: LocalModelRuntimeShape, line: string): Effect
   );
 }
 
-function workerOperationLabel(operation: string): string {
-  return operation === 'embedMany' ? 'embed-many' : operation;
+export function workerOperationLabel(operation: string): string {
+  const labels: Record<WorkerOperation, string> = {
+    diagnostics: 'check-local-model',
+    embedMany: 'embed-many',
+    embedManyIdleV1: 'embed-many-idle',
+    embedManyCapacityV2: 'embed-many-capacity',
+    generate: 'generate-text',
+    rerank: 'rerank-results',
+  };
+  return isWorkerOperation(operation) ? labels[operation] : 'local-inference';
 }
 
 function dispatchWorkerRequest(
@@ -1310,7 +1462,7 @@ function withWorkerTransportDiagnostic<A extends object>(
   return attachAnonymousTelemetryDiagnostic(error, {
     domain: 'model-worker',
     errorType: error._tag ?? 'LocalModelWorkerError',
-    operation: workerOperationLabel(transport.operation),
+    operation: transport.operation === 'embedMany' ? 'embed-many' : transport.operation,
     reason: transport.reason,
   });
 }
@@ -1337,6 +1489,7 @@ function transportError(operation: WorkerOperation, reason: WorkerFailureReason)
 }
 
 function workerTransportMessage(operation: WorkerOperation, reason: WorkerFailureReason): string {
+  if (reason === 'cleanup-unconfirmed') return 'The isolated local AI worker cleanup could not be confirmed.';
   if (reason === 'timeout') return `The isolated local AI worker timed out during ${operation}.`;
   if (reason === 'crash') return `The isolated local AI worker crashed during ${operation}.`;
   if (reason === 'spawn') return `The isolated local AI worker could not start for ${operation}.`;

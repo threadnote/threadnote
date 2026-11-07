@@ -108,6 +108,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'apps/website/test/website-release-content.test.ts',
   ]);
   const recallQualityEntries = [
+    'tools/ci/recall-confirmation.ts',
     'scripts/evaluate-recall.ts',
     'scripts/evaluate-code-graph.ts',
     'scripts/evaluate-code-graph-workset.ts',
@@ -474,6 +475,26 @@ export const createTargetSpecs = async (root = defaultRoot) => {
   const targetSpecs = [
     {
       package: '',
+      name: 'manager_e2e_inputs',
+      kind: 'library',
+      entries: [
+        'playwright.manager.config.ts',
+        ...filesBelow('apps/threadnote/test/e2e/manager'),
+        'scripts/build.ts',
+        'scripts/check-embedded-core-model.ts',
+        'scripts/generate-code-graph-language-catalog.ts',
+        'scripts/clean.ts',
+      ],
+      closureEntries: [
+        'apps/threadnote/src/standalone.ts',
+        'apps/threadnote/src/manager/browser.tsx',
+        'packages/manager/src/mermaid_frame.ts',
+      ],
+      dataRoots: ['assets', 'config', 'packages/manager/static'],
+      data: ['bun.lock', 'package.json', 'apps/threadnote/package.json', 'tsconfig.json', 'tsconfig.test.json'],
+    },
+    {
+      package: '',
       name: 'recall_quality_inputs',
       kind: 'library',
       entries: recallQualityEntries,
@@ -525,6 +546,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
         // smoke-self-contained launches this path from a runtime-resolved root.
         'apps/threadnote/test/fixtures/cli-output-consumer.ts',
+        'scripts/fixtures/owned-pipeline-relay.ts',
       ],
       referencedInputRoots: applicationReferencedInputRoots,
       data: applicationTestData,
@@ -859,6 +881,13 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       kind: 'ci',
       lane: 'workflow_validation',
       inputs: filesBelow('.github/workflows'),
+    },
+    {
+      label: '//:manager_e2e',
+      kind: 'ci',
+      lane: 'manager_e2e',
+      dependsOn: ['//:manager_e2e_inputs'],
+      inputs: ['.github/workflows/ci.yml'],
     },
     {
       label: '//:bazel_validation',

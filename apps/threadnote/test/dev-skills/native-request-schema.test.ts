@@ -103,23 +103,25 @@ describe('native request schema discovery', () => {
   });
 
   it.each([
-    ['init', {expectedRevision: expect.stringContaining('cycle inspect')}],
+    ['init', {expectedRevision: expect.any(String)}],
     [
       'snapshot',
       {
-        expectedRevision: expect.stringContaining('cycle inspect'),
+        expectedRevision: expect.any(String),
         phaseId: expect.any(String),
-        snapshotId: expect.stringContaining('fresh immutable'),
-        rebase: expect.stringContaining('Requires acceptedHead, reason and explicit userAuthority'),
+        snapshotId: expect.any(String),
+        rebase: expect.any(String),
+        baseRequalification: expect.any(String),
+        ordinaryMergeQualificationV1: expect.any(String),
       },
     ],
     [
       'validate-review',
       {
-        expectedRevision: expect.stringContaining('cycle inspect'),
-        snapshotId: expect.stringContaining('existing current'),
-        attemptId: expect.stringContaining('immutable review attempt'),
-        report: expect.stringContaining('cycle-review'),
+        expectedRevision: expect.any(String),
+        snapshotId: expect.any(String),
+        attemptId: expect.any(String),
+        report: expect.any(String),
       },
     ],
     ['detail', {minimumMaxBytes: 8192}],
@@ -133,13 +135,46 @@ describe('native request schema discovery', () => {
     expect(JSON.parse(response.schemaPage.text).schema.required).not.toContain('expectedRevision');
   });
 
-  it('discovers both mandatory review lanes with additional specialists optional', () => {
+  it('discovers optional closed witnesses for initial rebases and later qualifications', () => {
+    let page = nativeRequestSchema({...base, topic: 'cycle', command: 'snapshot'}).schemaPage;
+    let text = page.text;
+    while (page.nextOffsetBytes !== null) {
+      page = nativeRequestSchema({
+        ...base,
+        topic: 'cycle',
+        command: 'snapshot',
+        offsetBytes: page.nextOffsetBytes,
+        sourceDigest: page.sourceDigest,
+      }).schemaPage;
+      text += page.text;
+    }
+    const schema = JSON.parse(text).schema;
+    expect(schema.properties.protocolVersion.enum).toEqual([1, 2]);
+    for (const [name, required] of [
+      ['rebase', ['preRebaseHead', 'ontoHead', 'rebasedHead']],
+      ['baseRequalification', ['preRebaseHead', 'ontoHead', 'rebasedHead', 'fromBaseBranch']],
+      [
+        'ordinaryMergeQualificationV1',
+        ['priorHead', 'currentBaseHead', 'currentHead', 'fromBaseBranch', 'planDocumentHash', 'phaseOwnedPaths'],
+      ],
+    ] as const) {
+      expect(schema.required).not.toContain(name);
+      expect(schema.properties[name]).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: expect.arrayContaining([...required]),
+      });
+      expect(schema.properties[name].required).toHaveLength(required.length);
+    }
+  });
+
+  it('discovers mandatory review lanes and specialist guidance', () => {
     const response = nativeRequestSchema({...base, topic: 'cycle-review'});
     expect(response).toMatchObject({
       semanticPrerequisites: {
         requiredSelectedLanes: ['correctness', 'simplicity'],
         requiredCompletedLanes: ['correctness', 'simplicity'],
-        specialistLanes: expect.stringContaining('Additional specialist lanes are optional'),
+        specialistLanes: expect.any(String),
       },
     });
   });

@@ -59,7 +59,7 @@ const phaseSchema = Schema.Struct({
   definitionHash: digest,
   title: text(256),
   dependsOn: refs,
-  allowedPaths: Schema.Array(text()).check(Schema.isMaxLength(128)),
+  allowedPaths: Schema.Array(text()).check(Schema.isMaxLength(256)),
   acceptanceCriteria: Schema.Array(text()).check(Schema.isBetweenLength(1, 128)),
   safeToMergeReason: text(),
   branch: text(256),
@@ -742,7 +742,12 @@ export function reconcileNativeCyclePlan(
   );
   for (const p of plan.phases) {
     const before = EffectOption.getOrUndefined(EffectArray.findFirst(old.phases, x => x.id === p.id));
-    if (!before || nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)) seeds.push(p.id);
+    if (
+      !before ||
+      before.baseBranch !== p.baseBranch ||
+      nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)
+    )
+      seeds.push(p.id);
   }
   const affected = descendants([old, plan], seeds);
   for (const k of affected) if (s.phases[k]?.status === 'merged') err('Merged history cannot be rewritten.');

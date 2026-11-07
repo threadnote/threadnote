@@ -27,6 +27,11 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {
+  expireRecallIndexValidation,
+  loadRecallMemoryIdentities,
+  recallIndexDatabaseFilename,
+} from '@threadnote/recall/index';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
@@ -167,8 +172,288 @@ const readyMetadata = (f: Effect.Success<ReturnType<typeof nativeFixture>>, doc:
       review: {documentHash: packet.documentHash, outcome: 'accepted', blockingIssueCount: 0},
     };
   });
+const contentionFixture = (pinned = false) =>
+  Effect.gen(function* () {
+    const f = yield* nativeFixture();
+    yield* commit(f.repo, 'source');
+    yield* f.init();
+    const prior = pinned ? object(object(yield* f.call(f.write())).artifact) : undefined;
+    const doc = document();
+    const work = {
+      ...f.base('authoring'),
+      command: 'save',
+      document: prior
+        ? {
+            ...doc,
+            context: {
+              ...doc.context,
+              evidenceRefs: [{uri: prior.uri, memoryId: prior.memoryId, revision: prior.revision}],
+            },
+          }
+        : doc,
+      ready: false,
+      expectedRevision: null,
+    };
+    const accepted = object(yield* submit(f, work));
+    const jobId = requiredString(accepted.jobId);
+    const home = yield* f.fs.realPath(f.home);
+    const receipt = f.path.join(home, 'workflow-automations', 'native-v1', 'jobs', 'native-run', jobId + '.json');
+    const memoryGate = f.path.join(
+      home,
+      'threadnote',
+      'memory-locks',
+      sha256HexSync('threadnote-internal://deferred-code-anchor-mutations/local/tester') + '.lock',
+    );
+    const system = yield* SystemInfo;
+    const rawStart = 'private-job-holder-start';
+    const rawToken = 'private-job-holder-token';
+    const owner = JSON.stringify({
+      version: 1,
+      processId: system.processId,
+      processStartIdentity: rawStart,
+      token: rawToken,
+    });
+    const hold = (file: string) =>
+      f.fs
+        .makeDirectory(f.path.dirname(file), {recursive: true})
+        .pipe(Effect.andThen(f.fs.writeFileString(file, owner)));
+    const operations = f.fs.readFileString(f.statePath()).pipe(
+      Effect.map(raw => Schema.decodeUnknownSync(NativeStateSchema)(JSON.parse(raw)).operations),
+      Effect.map(items => EffectArray.filter(items, item => object(item).status === 'verified')),
+      Effect.map(items =>
+        EffectArray.map(items, item => ({
+          id: object(object(item).intent).operationId,
+          revision: object(object(item).artifact).revision,
+        })),
+      ),
+    );
+    return {...f, accepted, jobId, receipt, memoryGate, system, rawStart, rawToken, hold, operations, prior};
+  });
 
 describe('native private job lifecycle', () => {
+  for (const stage of ['zero', 'partial'] as const)
+    effectIt.effect(`resumes pure memory contention with ${stage} canonical progress and the same identities`, () =>
+      Effect.gen(function* () {
+        const f = yield* contentionFixture();
+        const retainedInput = yield* f.fs.readFileString(f.receipt + '.input.json');
+        const stateFile = yield* f.fs.realPath(f.statePath());
+        let held = false;
+        if (stage === 'zero') {
+          yield* f.hold(f.memoryGate);
+          held = true;
+        }
+        const observed = FileSystem.FileSystem.of({
+          ...f.fs,
+          rename: (from, to) =>
+            f.fs.rename(from, to).pipe(
+              Effect.tap(() =>
+                to !== stateFile || held
+                  ? Effect.void
+                  : f.operations.pipe(
+                      Effect.flatMap(operations => {
+                        if (operations.length === 0) return Effect.void;
+                        held = true;
+                        return f.fs.exists(f.memoryGate).pipe(
+                          Effect.tap(exists => Effect.sync(() => expect(exists).toBe(false))),
+                          Effect.andThen(f.hold(f.memoryGate)),
+                        );
+                      }),
+                    ),
+              ),
+            ),
+        });
+        const blocked = object(
+          yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call).pipe(
+            Effect.provideService(FileSystem.FileSystem, observed),
+          ),
+        );
+        expect(held, JSON.stringify(blocked)).toBe(true);
+        expect(blocked).toMatchObject({
+          jobId: f.jobId,
+          runId: 'native-run',
+          status: 'blocked-with-progress',
+          code: 'memory-busy',
+        });
+        const action = requiredString(blocked.nextAction);
+        expect(action).toContain(f.jobId);
+        expect(action).toContain('resume');
+        expect(action).not.toMatch(/re-review|reconcile.*source|authority/u);
+        expect(action).toContain(`PID ${f.system.processId}`);
+        for (const unsafe of [f.home, f.rawStart, f.rawToken]) expect(action).not.toContain(unsafe);
+        const prefix = yield* f.operations;
+        expect(prefix.length > 0).toBe(stage === 'partial');
+        if (stage === 'partial')
+          expect(object(blocked.progress)).toMatchObject({verifiedOperations: 1, rootVerified: false});
+        const result = object(yield* f.call({...f.base('job'), command: 'result', jobId: f.jobId}));
+        expect(result.status).toBe('blocked-with-progress');
+        expect(result.result).toBeUndefined();
+        expect(object(yield* f.call({...f.base('job'), command: 'status', jobId: f.jobId})).progress).toEqual(
+          blocked.progress,
+        );
+        yield* f.fs.remove(f.memoryGate);
+        if (stage === 'partial') {
+          yield* f.call({...f.base('job'), command: 'cancel', jobId: f.jobId});
+          expect(object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call)).status).toBe(
+            'stopped-with-progress',
+          );
+          expect(yield* f.operations).toEqual(prefix);
+        }
+        expect(object(yield* f.call({...f.base('job'), command: 'resume', jobId: f.jobId}))).toMatchObject({
+          jobId: f.jobId,
+          status: 'accepted',
+        });
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call)).status).toBe('completed');
+        const completed = yield* f.operations;
+        expect(completed.slice(0, prefix.length)).toEqual(prefix);
+        expect(new Set(EffectArray.map(completed, item => item.id)).size).toBe(completed.length);
+        expect(yield* f.fs.readFileString(f.receipt + '.input.json')).toBe(retainedInput);
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call)).status).toBe('completed');
+        expect(yield* f.operations).toEqual(completed);
+      }).pipe(run),
+    );
+
+  effectIt.effect('rebuilds readiness after a blocked job before taking any shared memory lock', () =>
+    Effect.gen(function* () {
+      const f = yield* contentionFixture(true);
+      if (!f.prior) throw new Error('Expected pinned evidence');
+      yield* loadRecallMemoryIdentities(f.config, {
+        allowedUriScopes: [requiredString(f.prior.uri)],
+        memoryIds: [requiredString(f.prior.memoryId)],
+      });
+      yield* expireRecallIndexValidation(f.home, false);
+      const lexical = f.path.join(f.home, 'locks', 'indexes', 'lexical', recallIndexDatabaseFilename(false) + '.lock');
+      yield* f.hold(lexical);
+      const before = yield* f.operations;
+      let memoryAttempts = 0;
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        writeFileString: (file, content, options) => {
+          if (options?.flag === 'wx' && EffectString.includes('memory-locks')(file)) memoryAttempts++;
+          return f.fs.writeFileString(file, content, options);
+        },
+      });
+      const blocked = object(
+        yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call).pipe(
+          Effect.provideService(FileSystem.FileSystem, observed),
+        ),
+      );
+      expect(blocked).toMatchObject({jobId: f.jobId, status: 'blocked-with-progress', code: 'admission-busy'});
+      expect(memoryAttempts).toBe(0);
+      expect(yield* f.operations).toEqual(before);
+      expect(requiredString(blocked.nextAction)).not.toContain('re-review');
+      yield* f.fs.remove(lexical);
+      yield* f.call({...f.base('job'), command: 'resume', jobId: f.jobId});
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call)).status).toBe('completed');
+    }).pipe(run),
+  );
+
+  effectIt.effect('retains evidence reconciliation when pinned canonical evidence changes after admission', () =>
+    Effect.gen(function* () {
+      const f = yield* contentionFixture(true);
+      if (!f.prior) throw new Error('Expected pinned evidence');
+      yield* f.call(
+        f.write({
+          operationId: 'changed-evidence',
+          uri: f.prior.uri,
+          expectedRevision: f.prior.revision,
+          body: 'Changed canonical evidence.\n',
+        }),
+      );
+      const blocked = object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call));
+      expect(blocked).toMatchObject({jobId: f.jobId, status: 'blocked-with-progress', code: 'evidence-conflict'});
+      expect(requiredString(blocked.nextAction)).toContain('re-review');
+      expect(object(yield* f.call({...f.base('job'), command: 'result', jobId: f.jobId})).result).toBeUndefined();
+    }).pipe(run),
+  );
+
+  for (const stage of ['initial', 'final-receipt'] as const)
+    effectIt.effect(`preserves durable status when ${stage} metadata contention prevents a job transition`, () =>
+      Effect.gen(function* () {
+        const f = yield* contentionFixture();
+        const receiptBefore = yield* f.fs.readFileString(f.receipt);
+        const metadata = f.receipt + '.lock';
+        if (stage === 'initial') yield* f.hold(metadata);
+        const attempt = yield* runNativeJobWorker(f.config, 'native-run', f.jobId, input =>
+          f
+            .call(input)
+            .pipe(Effect.tap(() => (stage === 'final-receipt' ? f.hold(metadata).pipe(Effect.orDie) : Effect.void))),
+        ).pipe(Effect.result);
+        expect(attempt).toMatchObject({_tag: 'Failure', failure: {code: 'job-busy', retryable: true}});
+        if (Result.isSuccess(attempt) || !Schema.is(WorkflowAutomationError)(attempt.failure))
+          throw new Error('Expected metadata busy');
+        expect(attempt.failure.message).toContain(f.jobId);
+        expect(attempt.failure.message).toContain('resume');
+        expect(attempt.failure.message).not.toContain('re-review');
+        const status = object(yield* f.call({...f.base('job'), command: 'status', jobId: f.jobId}));
+        const result = object(yield* f.call({...f.base('job'), command: 'result', jobId: f.jobId}));
+        expect(status).toMatchObject({jobId: f.jobId, status: stage === 'initial' ? 'accepted' : 'running'});
+        expect(result.result).toBeUndefined();
+        if (stage === 'initial') expect(yield* f.fs.readFileString(f.receipt)).toBe(receiptBefore);
+        else expect(object(status.progress)).toMatchObject({rootVerified: true, stage: 'finalizing'});
+        const canonical = yield* f.operations;
+        expect(canonical.length === 0).toBe(stage === 'initial');
+        expect(yield* f.fs.exists(f.receipt + '.worker.lock')).toBe(false);
+        yield* f.fs.remove(metadata);
+        yield* f.call({...f.base('job'), command: 'resume', jobId: f.jobId});
+        expect(object(yield* runNativeJobWorker(f.config, 'native-run', f.jobId, f.call)).status).toBe('completed');
+        const after = yield* f.operations;
+        if (stage === 'final-receipt') expect(after).toEqual(canonical);
+        expect(new Set(EffectArray.map(after, item => item.id)).size).toBe(after.length);
+      }).pipe(run),
+    );
+
+  effectIt.effect('direct workers establish acquisition accounting before their first lease admission', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      yield* f.init();
+      const accepted = object(
+        yield* submit(f, {
+          ...f.base('authoring'),
+          command: 'save',
+          document: document(null),
+          ready: false,
+          expectedRevision: null,
+        }),
+      );
+      const jobId = requiredString(accepted.jobId);
+      const system = yield* SystemInfo;
+      const rawStart = 'private-worker-start /sensitive/path';
+      const rawToken = 'private-worker-token';
+      const lock = f.path.join(
+        yield* f.fs.realPath(f.home),
+        'workflow-automations',
+        'native-v1',
+        'jobs',
+        'native-run',
+        jobId + '.json.worker.lock',
+      );
+      yield* f.fs.writeFileString(
+        lock,
+        JSON.stringify({version: 1, processId: system.processId, processStartIdentity: rawStart, token: rawToken}),
+      );
+      let dispatched = false;
+      const result = yield* runNativeJobWorker(f.config, 'native-run', jobId, input => {
+        dispatched = true;
+        return f.call(input);
+      }).pipe(Effect.result);
+      expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'job-busy', retryable: true}});
+      if (Result.isSuccess(result)) throw new Error('Expected contended worker');
+      const error = result.failure;
+      if (!Schema.is(WorkflowAutomationError)(error)) throw new Error('Expected native error');
+      expect(error.message).toContain('native-worker');
+      expect(error.message).toContain(`PID ${system.processId}`);
+      expect(error.message).toMatch(/start [a-f0-9]{16}/u);
+      expect(error.message).toContain('ms in this attempt');
+      expect(error.message).not.toContain(lock);
+      expect(error.message).not.toContain(rawStart);
+      expect(error.message).not.toContain(rawToken);
+      expect(dispatched).toBe(false);
+      yield* f.fs.remove(lock);
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call)).status).toBe('completed');
+    }).pipe(run),
+  );
+
   it('keeps derived identity and bounded status independent of request ordering and payload size', () => {
     fc.assert(
       fc.property(fc.string({minLength: 1, maxLength: 1200}), fc.string({minLength: 1, maxLength: 1200}), (a, b) => {

@@ -10,7 +10,7 @@ import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/fil
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {CodeGraphStore} from '../store.js';
 import {
@@ -22,6 +22,7 @@ import {
 import {withCodeGraphDatabaseWriteLock} from '../maintenance/gate.js';
 import {
   executeCodeGraphVectorGeneration,
+  graphEmbeddingTemplateVersion,
   releaseCodeGraphVectorOwner,
   type CodeGraphEmbeddingStatus,
 } from '../embedding.js';
@@ -164,7 +165,8 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     });
   const manifest = yield* Effect.gen(function* () {
     const selection = yield* readModelSelection(home);
-    return selection.roles.embedding ? yield* catalog.get(selection.roles.embedding) : undefined;
+    const modelId = selectedEmbeddingModelId(selection, 'graph');
+    return modelId ? yield* catalog.get(modelId) : undefined;
   }).pipe(Effect.orElseSucceed(() => undefined));
   if (!manifest || manifest.role !== 'embedding' || !manifest.dimensions) {
     yield* mutate(
@@ -177,7 +179,12 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     );
     return {state: 'unavailable' as const};
   }
-  const model = {id: manifest.id, sha256: manifest.sha256, dimensions: manifest.dimensions, templateVersion: 1};
+  const model = {
+    id: manifest.id,
+    sha256: manifest.sha256,
+    dimensions: manifest.dimensions,
+    templateVersion: graphEmbeddingTemplateVersion(manifest),
+  };
   let abandonedOwnerToken: string | undefined = expiredOwner?.owner.token;
   if (
     lane.active &&
@@ -198,7 +205,10 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       : undefined;
   if (
     claim &&
-    (claim.model.id !== model.id || claim.model.sha256 !== model.sha256 || claim.model.dimensions !== model.dimensions)
+    (claim.model.id !== model.id ||
+      claim.model.sha256 !== model.sha256 ||
+      claim.model.dimensions !== model.dimensions ||
+      claim.model.templateVersion !== model.templateVersion)
   ) {
     abandonedOwnerToken = claim.owner.token;
     claim = undefined;
@@ -242,12 +252,13 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       pinned,
       yield* Clock.currentTimeMillis,
     );
-    const current = (yield* readModelSelection(home)).roles.embedding;
+    const current = selectedEmbeddingModelId(yield* readModelSelection(home), 'graph');
     const currentManifest = current ? yield* catalog.get(current) : undefined;
     if (
       currentManifest?.id !== pinned.model.id ||
       currentManifest.sha256 !== pinned.model.sha256 ||
-      currentManifest.dimensions !== pinned.model.dimensions
+      currentManifest.dimensions !== pinned.model.dimensions ||
+      graphEmbeddingTemplateVersion(currentManifest) !== pinned.model.templateVersion
     )
       return yield* CodeGraphEmbeddingWorkerModelInvalidated.make({message: 'Embedding model selection changed.'});
     if (!valid)
@@ -370,13 +381,14 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
         const publicationModelChanged =
           tag === 'CodeGraphVectorPublicationSuperseded'
             ? yield* Effect.gen(function* () {
-                const selectedId = (yield* readModelSelection(home)).roles.embedding;
+                const selectedId = selectedEmbeddingModelId(yield* readModelSelection(home), 'graph');
                 if (!selectedId) return true;
                 const selected = yield* catalog.get(selectedId);
                 return (
                   selected.id !== pinned.model.id ||
                   selected.sha256 !== pinned.model.sha256 ||
-                  selected.dimensions !== pinned.model.dimensions
+                  selected.dimensions !== pinned.model.dimensions ||
+                  graphEmbeddingTemplateVersion(selected) !== pinned.model.templateVersion
                 );
               }).pipe(Effect.orElseSucceed(() => false))
             : false;
@@ -450,6 +462,8 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
   };
   if (!owner.processStartIdentity)
     return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Cannot identify embedding worker process.'});
+  if (options.lifecycle && !(yield* options.lifecycle.register(owner))) return;
+  const shouldDrain = options.lifecycle?.shouldDrain ?? Effect.succeed(false);
   const receiptPath = codeGraphEmbeddingWorkerReceiptPath(path, canonicalHome);
   // Immutable snapshot counts and page-size hints only; no symbol/vector payloads.
   const memo = new Map<string, WorkerMemo>();
@@ -474,16 +488,19 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
       yield* options.onReady ?? Effect.void;
       let idleSince = yield* Clock.currentTimeMillis;
       do {
+        if (yield* shouldDrain) return;
         yield* options.lifecycle?.beforeScan ?? Effect.void;
         let catalogAfter: string | undefined;
         let runnable = false;
         do {
+          if (yield* shouldDrain) return;
           const page = yield* options.catalogPage(catalogAfter);
           if (page.checkoutIds.length > 64)
             return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Embedding catalog page exceeds bound.'});
           for (const checkoutId of page.checkoutIds) {
             let after: {worktreeId: string; scopeId: string} | undefined;
             do {
+              if (yield* shouldDrain) return;
               const catalogLayout = codeGraphLayout(
                 path,
                 canonicalHome,
@@ -501,6 +518,7 @@ export const runCodeGraphEmbeddingWorker = Effect.fn('codeGraph.embeddingWorker'
                 )
                 .pipe(Effect.catchIf(expectedWorkerFailure, () => Effect.succeed([])));
               for (const lane of lanes) {
+                if (yield* shouldDrain) return;
                 after = lane;
                 if (lane.state === 'ready' || lane.state === 'cancelled') continue;
                 if (lane.notBefore > (yield* Clock.currentTimeMillis)) {

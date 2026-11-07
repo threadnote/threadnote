@@ -128,6 +128,31 @@ const selectedIntegrationPackageTests = (changedFile: string) => {
 };
 
 describe('generated Bazel test contracts', () => {
+  it.each([
+    'packages/manager/src/ui.tsx',
+    'apps/threadnote/src/manager/live.ts',
+    'packages/integration-core/src/source-coordinator.ts',
+    'apps/threadnote/test/e2e/manager/fixtures/runtime.ts',
+    'playwright.manager.config.ts',
+    'packages/manager/static/app.css',
+    'scripts/build.ts',
+    'bun.lock',
+  ])('selects Manager browser E2E for runtime, fixture and build input %s', file => {
+    expect(target('//:manager_e2e_inputs').inputs).toContain(file);
+    const selection = selectForChangedInput(file);
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:manager_e2e');
+  });
+
+  it('does not select Manager browser E2E for website-only content and retains unknown-input fallback', () => {
+    const website = selectForChangedInput('apps/website/src/content/docsAgentIntegrations.ts');
+    expect(website.mode).toBe('selective');
+    expect(website.targets).not.toContain('//:manager_e2e');
+    const unknown = selectForChangedInput('unmodeled/manager-fixture-input.ts');
+    expect(unknown.mode).toBe('fallback');
+    expect(unknown.targets).toContain('//:manager_e2e');
+  });
+
   it('selects Windows smoke when its workflow changes', () => {
     expect(selectForChangedInput('.github/workflows/ci.yml').targets).toContain('//:windows_smoke');
   });
@@ -518,6 +543,8 @@ describe('generated Bazel test contracts', () => {
     ]);
     expect(target('//:compile_targets').dependsOn).toEqual(['//:compile_inputs']);
     expect(target('//:recall_quality').dependsOn).toEqual(['//:recall_quality_inputs']);
+    expect(target('//:recall_quality_inputs').inputs).toContain('tools/ci/recall-confirmation.ts');
+    expect(target('//:recall_quality_inputs').inputs).toContain('scripts/evaluate-recall.ts');
     expect(target('//:windows_smoke').dependsOn).toEqual(['//:windows_smoke_inputs']);
   });
 
@@ -637,6 +664,7 @@ describe('generated Bazel test contracts', () => {
     ],
     ['packages/inference/src/vector-search.ts', '//packages/inference:test', '//:recall_quality'],
     ['scripts/support/code-graph-workset-fixture.ts', '//:recall_quality_inputs', '//:recall_quality'],
+    ['tools/ci/recall-confirmation.ts', '//:recall_quality_inputs', '//:recall_quality'],
     ['apps/threadnote/test/helpers/runtime-policy.ts', '//:windows_smoke_inputs', '//:windows_smoke'],
   ])('selects %s via the transitive lane contract', (changedFile, impactedTarget, lane) => {
     const result = selectTargets({

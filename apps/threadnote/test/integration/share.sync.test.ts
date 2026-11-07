@@ -2466,7 +2466,7 @@ describe('share sync git handling', () => {
       }
       const deferred = await syncSharedReposBeforeAgentRead(config);
 
-      expect(deferred).toEqual({syncedTeams: [], warnings: []});
+      expect(deferred).toEqual({syncedTeams: [], warnings: [], deferred: true});
       await expect(readFile(canonicalResourceFile(home, uri), 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
     } finally {
       await writeFile(release, 'release\n', 'utf8');

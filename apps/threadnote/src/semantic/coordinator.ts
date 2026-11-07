@@ -66,7 +66,13 @@ import {
   cargoToolDigest,
 } from './providers/rust.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {boundedFileDigest, readBoundedText, semanticTreeDigest, semanticSdkDigest} from './fingerprint.js';
+import {
+  boundedFileDigest,
+  readBoundedText,
+  semanticTreeDigest,
+  semanticSdkDigest,
+  typeScriptConfigurationHasExtendsCycle,
+} from './fingerprint.js';
 export {semanticTreeDigest} from './fingerprint.js';
 const Instance = Schema.Struct({pid: Counter, identity: Identifier});
 type Instance = typeof Instance.Type;
@@ -592,6 +598,11 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                   compiler: typeScriptRuntime.compiler,
                   sourceRoot: typeScriptRuntime.sourceRoot,
                   verifyPolicy: typeScriptRuntime.verify,
+                  configurationIncomplete: configuration =>
+                    typeScriptConfigurationHasExtendsCycle(worktree, configuration).pipe(
+                      Effect.provideService(FileSystem.FileSystem, fs),
+                      Effect.provideService(Path.Path, path),
+                    ),
                   challenge: crypto.randomBytes(32).pipe(Effect.map(sha256HexSync)),
                   maxMemoryMb: 512,
                   startupMilliseconds: 10000,

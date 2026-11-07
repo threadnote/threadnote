@@ -1,0 +1,1003 @@
+{
+  "id": "gemma2-graph-families-v1",
+  "queryPolicy": "handwritten semantic paraphrases and adjacent hard negatives; each family is held entirely in one fold",
+  "folds": {
+    "train": ["storage", "search", "queue", "configuration"],
+    "validation": ["workflow", "access"],
+    "test": ["compiler", "observability"]
+  },
+  "families": [
+    {
+      "id": "storage",
+      "symbols": [
+        {
+          "id": "SnapshotCatalog",
+          "kind": "class",
+          "qualifiedName": "SnapshotCatalog",
+          "signature": "class SnapshotCatalog",
+          "packageName": "@fixture/storage",
+          "path": "packages/storage/src/snapshots.ts",
+          "documentation": "Stores metadata for durable repository snapshots and retrieves catalog entries."
+        },
+        {
+          "id": "writeCheckpoint",
+          "kind": "function",
+          "qualifiedName": "writeCheckpoint",
+          "signature": "writeCheckpoint(run: RunState): Promise<void>",
+          "packageName": "@fixture/storage",
+          "path": "packages/storage/src/checkpoint.ts",
+          "documentation": "Persists the current progress cursor and state so interrupted work can continue."
+        },
+        {
+          "id": "restoreCheckpoint",
+          "kind": "function",
+          "qualifiedName": "restoreCheckpoint",
+          "signature": "restoreCheckpoint(runId: string): Promise<RunState>",
+          "packageName": "@fixture/storage",
+          "path": "packages/storage/src/checkpoint.ts",
+          "documentation": "Loads a previously saved progress cursor and state after a process restart."
+        },
+        {
+          "id": "listSnapshots",
+          "kind": "method",
+          "qualifiedName": "SnapshotCatalog.listSnapshots",
+          "signature": "listSnapshots(repository: string): Snapshot[]",
+          "packageName": "@fixture/storage",
+          "path": "packages/storage/src/snapshots.ts",
+          "documentation": "Returns a repository's stored snapshots in creation order."
+        },
+        {
+          "id": "pruneExpiredSnapshots",
+          "kind": "function",
+          "qualifiedName": "pruneExpiredSnapshots",
+          "signature": "pruneExpiredSnapshots(retentionDays: number): Promise<number>",
+          "packageName": "@fixture/storage",
+          "path": "packages/storage/src/retention.ts",
+          "documentation": "Deletes stored snapshot generations that exceed the configured retention window."
+        }
+      ],
+      "queries": [
+        {
+          "id": "storage-persist-progress",
+          "answerable": true,
+          "query": "persist the current work cursor so a restarted task continues from its last completed step",
+          "relevant": ["writeCheckpoint"]
+        },
+        {
+          "id": "storage-reload-state",
+          "answerable": true,
+          "query": "load the saved execution position and state after a process crash",
+          "relevant": ["restoreCheckpoint"]
+        },
+        {
+          "id": "storage-enumerate-copies",
+          "answerable": true,
+          "query": "show repository copies ordered by when each was created",
+          "relevant": ["listSnapshots"]
+        },
+        {
+          "id": "storage-retention-cleanup",
+          "answerable": true,
+          "query": "remove old stored generations outside the retention period",
+          "relevant": ["pruneExpiredSnapshots"]
+        },
+        {
+          "id": "storage-metadata-owner",
+          "answerable": true,
+          "query": "which component keeps the catalog of repository snapshot metadata",
+          "relevant": ["SnapshotCatalog"]
+        },
+        {
+          "id": "storage-resume-mechanism",
+          "answerable": true,
+          "query": "what allows a long running job to resume after interruption",
+          "relevant": ["writeCheckpoint", "restoreCheckpoint"]
+        },
+        {
+          "id": "storage-negative-replication",
+          "answerable": false,
+          "query": "replicate backup artifacts to a second datacenter",
+          "relevant": []
+        },
+        {
+          "id": "storage-negative-diff",
+          "answerable": false,
+          "query": "compare two saved copies and list changed files between them",
+          "relevant": []
+        },
+        {
+          "id": "storage-negative-encryption",
+          "answerable": false,
+          "query": "encrypt archive blocks with a key before remote upload",
+          "relevant": []
+        },
+        {
+          "id": "storage-negative-quota",
+          "answerable": false,
+          "query": "calculate a project's storage quota from its retained data",
+          "relevant": []
+        },
+        {
+          "id": "storage-negative-restore-test",
+          "answerable": false,
+          "query": "restore a database copy into a temporary test environment",
+          "relevant": []
+        },
+        {
+          "id": "storage-negative-compression",
+          "answerable": false,
+          "query": "compress old backup data to reduce disk usage",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "search",
+      "symbols": [
+        {
+          "id": "SymbolVectorIndex",
+          "kind": "class",
+          "qualifiedName": "SymbolVectorIndex",
+          "signature": "class SymbolVectorIndex",
+          "packageName": "@fixture/search",
+          "path": "packages/search/src/vector-index.ts",
+          "documentation": "Owns the stored vector representation for searchable code symbols."
+        },
+        {
+          "id": "embedSymbol",
+          "kind": "function",
+          "qualifiedName": "embedSymbol",
+          "signature": "embedSymbol(symbol: CodeSymbol): Promise<number[]>",
+          "packageName": "@fixture/search",
+          "path": "packages/search/src/embedding.ts",
+          "documentation": "Converts a code symbol projection into a normalized semantic vector."
+        },
+        {
+          "id": "findNearestSymbols",
+          "kind": "function",
+          "qualifiedName": "findNearestSymbols",
+          "signature": "findNearestSymbols(query: number[], limit: number): SymbolMatch[]",
+          "packageName": "@fixture/search",
+          "path": "packages/search/src/vector-index.ts",
+          "documentation": "Finds code symbols with the closest vector similarity to a query."
+        },
+        {
+          "id": "publishVectorGeneration",
+          "kind": "function",
+          "qualifiedName": "publishVectorGeneration",
+          "signature": "publishVectorGeneration(snapshot: string): Promise<void>",
+          "packageName": "@fixture/search",
+          "path": "packages/search/src/generation.ts",
+          "documentation": "Publishes a completed generation of vectors for a repository snapshot."
+        },
+        {
+          "id": "searchIdentifierTokens",
+          "kind": "function",
+          "qualifiedName": "searchIdentifierTokens",
+          "signature": "searchIdentifierTokens(query: string): SymbolMatch[]",
+          "packageName": "@fixture/search",
+          "path": "packages/search/src/lexical.ts",
+          "documentation": "Looks up code symbols by exact words and identifier tokens."
+        }
+      ],
+      "queries": [
+        {
+          "id": "search-encode-node",
+          "answerable": true,
+          "query": "turn the name and description of a code element into a semantic vector",
+          "relevant": ["embedSymbol"]
+        },
+        {
+          "id": "search-neighbors",
+          "answerable": true,
+          "query": "retrieve the closest code elements to this meaning in vector space",
+          "relevant": ["findNearestSymbols"]
+        },
+        {
+          "id": "search-publish-snapshot",
+          "answerable": true,
+          "query": "make a finished set of repository embeddings visible to readers",
+          "relevant": ["publishVectorGeneration"]
+        },
+        {
+          "id": "search-index-owner",
+          "answerable": true,
+          "query": "which component keeps vector representations of source symbols",
+          "relevant": ["SymbolVectorIndex"]
+        },
+        {
+          "id": "search-keyword-lookup",
+          "answerable": true,
+          "query": "find source definitions by exact identifiers and words",
+          "relevant": ["searchIdentifierTokens"]
+        },
+        {
+          "id": "search-neighbor-api",
+          "answerable": true,
+          "query": "what operation returns related code definitions by meaning",
+          "relevant": ["findNearestSymbols"]
+        },
+        {
+          "id": "search-negative-summary",
+          "answerable": false,
+          "query": "generate a plain language summary of a source file",
+          "relevant": []
+        },
+        {
+          "id": "search-negative-callgraph",
+          "answerable": false,
+          "query": "draw caller and callee relationships between code functions",
+          "relevant": []
+        },
+        {
+          "id": "search-negative-render",
+          "answerable": false,
+          "query": "render a dependency graph as an interactive diagram",
+          "relevant": []
+        },
+        {
+          "id": "search-negative-unused",
+          "answerable": false,
+          "query": "find unreachable branches that are never executed",
+          "relevant": []
+        },
+        {
+          "id": "search-negative-document",
+          "answerable": false,
+          "query": "retrieve documentation pages by their heading text",
+          "relevant": []
+        },
+        {
+          "id": "search-negative-rename",
+          "answerable": false,
+          "query": "rename every reference to a selected function safely",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "queue",
+      "symbols": [
+        {
+          "id": "DurableWorkQueue",
+          "kind": "class",
+          "qualifiedName": "DurableWorkQueue",
+          "signature": "class DurableWorkQueue",
+          "packageName": "@fixture/queue",
+          "path": "packages/queue/src/work-queue.ts",
+          "documentation": "Stores pending work durably and coordinates workers that claim jobs."
+        },
+        {
+          "id": "enqueueJob",
+          "kind": "function",
+          "qualifiedName": "enqueueJob",
+          "signature": "enqueueJob(input: JobInput): Promise<void>",
+          "packageName": "@fixture/queue",
+          "path": "packages/queue/src/work-queue.ts",
+          "documentation": "Adds a new job to the work list so a worker can process it."
+        },
+        {
+          "id": "claimJobBatch",
+          "kind": "method",
+          "qualifiedName": "DurableWorkQueue.claimJobBatch",
+          "signature": "claimJobBatch(limit: number): Promise<Job[]>",
+          "packageName": "@fixture/queue",
+          "path": "packages/queue/src/work-queue.ts",
+          "documentation": "Reserves a bounded group of queued jobs for a worker."
+        },
+        {
+          "id": "renewVisibilityLease",
+          "kind": "function",
+          "qualifiedName": "renewVisibilityLease",
+          "signature": "renewVisibilityLease(jobId: string): Promise<void>",
+          "packageName": "@fixture/queue",
+          "path": "packages/queue/src/lease.ts",
+          "documentation": "Extends the time a worker may hold a job before it becomes visible again."
+        },
+        {
+          "id": "moveToDeadLetter",
+          "kind": "function",
+          "qualifiedName": "moveToDeadLetter",
+          "signature": "moveToDeadLetter(jobId: string): Promise<void>",
+          "packageName": "@fixture/queue",
+          "path": "packages/queue/src/dead-letter.ts",
+          "documentation": "Moves a repeatedly failing job into a separate terminal work collection."
+        }
+      ],
+      "queries": [
+        {
+          "id": "queue-add-work",
+          "answerable": true,
+          "query": "place a new unit of background work where workers can receive it",
+          "relevant": ["enqueueJob"]
+        },
+        {
+          "id": "queue-reserve-batch",
+          "answerable": true,
+          "query": "reserve the next group of waiting tasks for one worker",
+          "relevant": ["claimJobBatch"]
+        },
+        {
+          "id": "queue-extend-lease",
+          "answerable": true,
+          "query": "give a worker more time before an unprocessed job is offered again",
+          "relevant": ["renewVisibilityLease"]
+        },
+        {
+          "id": "queue-fail-terminal",
+          "answerable": true,
+          "query": "set aside work items that have failed too many times",
+          "relevant": ["moveToDeadLetter"]
+        },
+        {
+          "id": "queue-coordinator",
+          "answerable": true,
+          "query": "component that durably coordinates pending work and worker claims",
+          "relevant": ["DurableWorkQueue"]
+        },
+        {
+          "id": "queue-submit-job",
+          "answerable": true,
+          "query": "submit a job for asynchronous execution",
+          "relevant": ["enqueueJob"]
+        },
+        {
+          "id": "queue-negative-deduplicate",
+          "answerable": false,
+          "query": "prevent duplicate submissions by enforcing an idempotency key",
+          "relevant": []
+        },
+        {
+          "id": "queue-negative-delay",
+          "answerable": false,
+          "query": "schedule an automatic retry at a later time",
+          "relevant": []
+        },
+        {
+          "id": "queue-negative-subscribe",
+          "answerable": false,
+          "query": "notify a client when background work finishes",
+          "relevant": []
+        },
+        {
+          "id": "queue-negative-rate",
+          "answerable": false,
+          "query": "limit how many tasks each tenant can submit per minute",
+          "relevant": []
+        },
+        {
+          "id": "queue-negative-concurrency",
+          "answerable": false,
+          "query": "cap the number of jobs running at the same time",
+          "relevant": []
+        },
+        {
+          "id": "queue-negative-priority",
+          "answerable": false,
+          "query": "order work by an explicit priority value",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "configuration",
+      "symbols": [
+        {
+          "id": "LayeredConfig",
+          "kind": "class",
+          "qualifiedName": "LayeredConfig",
+          "signature": "class LayeredConfig",
+          "packageName": "@fixture/config",
+          "path": "packages/config/src/config.ts",
+          "documentation": "Combines application settings from several configuration sources."
+        },
+        {
+          "id": "loadConfigFile",
+          "kind": "function",
+          "qualifiedName": "loadConfigFile",
+          "signature": "loadConfigFile(path: string): Config",
+          "packageName": "@fixture/config",
+          "path": "packages/config/src/file.ts",
+          "documentation": "Reads settings stored in a configuration file."
+        },
+        {
+          "id": "mergeEnvironmentOverrides",
+          "kind": "function",
+          "qualifiedName": "mergeEnvironmentOverrides",
+          "signature": "mergeEnvironmentOverrides(config: Config, env: Env): Config",
+          "packageName": "@fixture/config",
+          "path": "packages/config/src/environment.ts",
+          "documentation": "Applies environment variable values on top of file-based settings."
+        },
+        {
+          "id": "validateSettings",
+          "kind": "function",
+          "qualifiedName": "validateSettings",
+          "signature": "validateSettings(config: Config): ValidationResult",
+          "packageName": "@fixture/config",
+          "path": "packages/config/src/validation.ts",
+          "documentation": "Checks configured values against required types and constraints."
+        },
+        {
+          "id": "watchConfigChanges",
+          "kind": "function",
+          "qualifiedName": "watchConfigChanges",
+          "signature": "watchConfigChanges(path: string): Stream<Config>",
+          "packageName": "@fixture/config",
+          "path": "packages/config/src/watch.ts",
+          "documentation": "Emits a new configuration when the source file changes."
+        }
+      ],
+      "queries": [
+        {
+          "id": "config-source-composition",
+          "answerable": true,
+          "query": "combine settings provided by multiple application sources",
+          "relevant": ["LayeredConfig"]
+        },
+        {
+          "id": "config-read-file",
+          "answerable": true,
+          "query": "read the application's settings document from disk",
+          "relevant": ["loadConfigFile"]
+        },
+        {
+          "id": "config-env-priority",
+          "answerable": true,
+          "query": "let process environment values override file entries",
+          "relevant": ["mergeEnvironmentOverrides"]
+        },
+        {
+          "id": "config-check",
+          "answerable": true,
+          "query": "reject configuration values that violate declared constraints",
+          "relevant": ["validateSettings"]
+        },
+        {
+          "id": "config-live-update",
+          "answerable": true,
+          "query": "receive updated settings after the source file is edited",
+          "relevant": ["watchConfigChanges"]
+        },
+        {
+          "id": "config-override",
+          "answerable": true,
+          "query": "apply runtime environment settings over a base config",
+          "relevant": ["mergeEnvironmentOverrides"]
+        },
+        {
+          "id": "config-negative-encrypt",
+          "answerable": false,
+          "query": "encrypt a configuration file before it is written",
+          "relevant": []
+        },
+        {
+          "id": "config-negative-remote",
+          "answerable": false,
+          "query": "download user preferences from a remote account service",
+          "relevant": []
+        },
+        {
+          "id": "config-negative-secrets",
+          "answerable": false,
+          "query": "read credentials from a managed secrets vault",
+          "relevant": []
+        },
+        {
+          "id": "config-negative-rollback",
+          "answerable": false,
+          "query": "restore the previous config when a hot reload fails",
+          "relevant": []
+        },
+        {
+          "id": "config-negative-default",
+          "answerable": false,
+          "query": "generate missing configuration values from defaults",
+          "relevant": []
+        },
+        {
+          "id": "config-negative-redact",
+          "answerable": false,
+          "query": "remove secrets from logged configuration output",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "workflow",
+      "symbols": [
+        {
+          "id": "WorkflowCoordinator",
+          "kind": "class",
+          "qualifiedName": "WorkflowCoordinator",
+          "signature": "class WorkflowCoordinator",
+          "packageName": "@fixture/workflow",
+          "path": "packages/workflow/src/coordinator.ts",
+          "documentation": "Coordinates workflow runs and their lifecycle actions."
+        },
+        {
+          "id": "scheduleWorkflow",
+          "kind": "function",
+          "qualifiedName": "scheduleWorkflow",
+          "signature": "scheduleWorkflow(input: Schedule): Promise<void>",
+          "packageName": "@fixture/workflow",
+          "path": "packages/workflow/src/schedule.ts",
+          "documentation": "Creates a future workflow run from a schedule."
+        },
+        {
+          "id": "pauseWorkflow",
+          "kind": "function",
+          "qualifiedName": "pauseWorkflow",
+          "signature": "pauseWorkflow(runId: string): Promise<void>",
+          "packageName": "@fixture/workflow",
+          "path": "packages/workflow/src/lifecycle.ts",
+          "documentation": "Temporarily suspends an active run while retaining its state."
+        },
+        {
+          "id": "resumeWorkflow",
+          "kind": "function",
+          "qualifiedName": "resumeWorkflow",
+          "signature": "resumeWorkflow(runId: string): Promise<void>",
+          "packageName": "@fixture/workflow",
+          "path": "packages/workflow/src/lifecycle.ts",
+          "documentation": "Continues an interrupted run from its saved progress."
+        },
+        {
+          "id": "cancelWorkflow",
+          "kind": "function",
+          "qualifiedName": "cancelWorkflow",
+          "signature": "cancelWorkflow(runId: string): Promise<void>",
+          "packageName": "@fixture/workflow",
+          "path": "packages/workflow/src/lifecycle.ts",
+          "documentation": "Stops a run and records that it was cancelled."
+        }
+      ],
+      "queries": [
+        {
+          "id": "workflow-coordinator",
+          "answerable": true,
+          "query": "component responsible for directing workflow run lifecycle",
+          "relevant": ["WorkflowCoordinator"]
+        },
+        {
+          "id": "workflow-future-run",
+          "answerable": true,
+          "query": "create a future execution from a time-based plan",
+          "relevant": ["scheduleWorkflow"]
+        },
+        {
+          "id": "workflow-hold",
+          "answerable": true,
+          "query": "temporarily suspend work but keep its current state",
+          "relevant": ["pauseWorkflow"]
+        },
+        {
+          "id": "workflow-continue",
+          "answerable": true,
+          "query": "continue an interrupted process using its saved progress",
+          "relevant": ["resumeWorkflow"]
+        },
+        {
+          "id": "workflow-stop",
+          "answerable": true,
+          "query": "stop a run and mark it as cancelled",
+          "relevant": ["cancelWorkflow"]
+        },
+        {
+          "id": "workflow-scheduler",
+          "answerable": true,
+          "query": "arrange for the next workflow execution later",
+          "relevant": ["scheduleWorkflow"]
+        },
+        {
+          "id": "workflow-negative-approval",
+          "answerable": false,
+          "query": "route an execution to people for approval",
+          "relevant": []
+        },
+        {
+          "id": "workflow-negative-dependency",
+          "answerable": false,
+          "query": "run independent workflow steps concurrently according to a dependency graph",
+          "relevant": []
+        },
+        {
+          "id": "workflow-negative-rollback",
+          "answerable": false,
+          "query": "revert a deployment after the final health check fails",
+          "relevant": []
+        },
+        {
+          "id": "workflow-negative-audit",
+          "answerable": false,
+          "query": "record every configuration change for compliance auditing",
+          "relevant": []
+        },
+        {
+          "id": "workflow-negative-alert",
+          "answerable": false,
+          "query": "send an alert when a workflow exceeds its deadline",
+          "relevant": []
+        },
+        {
+          "id": "workflow-negative-retry",
+          "answerable": false,
+          "query": "retry a failed workflow step using exponential backoff",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "access",
+      "symbols": [
+        {
+          "id": "PermissionEvaluator",
+          "kind": "class",
+          "qualifiedName": "PermissionEvaluator",
+          "signature": "class PermissionEvaluator",
+          "packageName": "@fixture/access",
+          "path": "packages/access/src/permissions.ts",
+          "documentation": "Evaluates whether a principal may perform an operation."
+        },
+        {
+          "id": "authorizeRequest",
+          "kind": "function",
+          "qualifiedName": "authorizeRequest",
+          "signature": "authorizeRequest(user: User, action: Action): Decision",
+          "packageName": "@fixture/access",
+          "path": "packages/access/src/authorize.ts",
+          "documentation": "Allows or rejects a request based on its requested action."
+        },
+        {
+          "id": "AccessGrant",
+          "kind": "interface",
+          "qualifiedName": "AccessGrant",
+          "signature": "interface AccessGrant",
+          "packageName": "@fixture/access",
+          "path": "packages/access/src/grant.ts",
+          "documentation": "Describes a permission that has been granted to a principal."
+        },
+        {
+          "id": "revokeGrant",
+          "kind": "function",
+          "qualifiedName": "revokeGrant",
+          "signature": "revokeGrant(grantId: string): Promise<void>",
+          "packageName": "@fixture/access",
+          "path": "packages/access/src/grant.ts",
+          "documentation": "Removes an existing permission grant."
+        },
+        {
+          "id": "rotateServiceCredential",
+          "kind": "function",
+          "qualifiedName": "rotateServiceCredential",
+          "signature": "rotateServiceCredential(service: string): Promise<void>",
+          "packageName": "@fixture/access",
+          "path": "packages/access/src/credential.ts",
+          "documentation": "Replaces a service credential with a new credential."
+        }
+      ],
+      "queries": [
+        {
+          "id": "access-evaluator",
+          "answerable": true,
+          "query": "component that decides if an identity can perform an operation",
+          "relevant": ["PermissionEvaluator"]
+        },
+        {
+          "id": "access-request",
+          "answerable": true,
+          "query": "allow or deny an incoming operation based on its action",
+          "relevant": ["authorizeRequest"]
+        },
+        {
+          "id": "access-grant-record",
+          "answerable": true,
+          "query": "type that describes a permission assigned to someone",
+          "relevant": ["AccessGrant"]
+        },
+        {
+          "id": "access-remove",
+          "answerable": true,
+          "query": "remove a previously assigned permission",
+          "relevant": ["revokeGrant"]
+        },
+        {
+          "id": "access-renew-secret",
+          "answerable": true,
+          "query": "replace a service's old authentication secret with a fresh one",
+          "relevant": ["rotateServiceCredential"]
+        },
+        {
+          "id": "access-auth-decision",
+          "answerable": true,
+          "query": "decide whether a user may carry out a requested action",
+          "relevant": ["authorizeRequest", "PermissionEvaluator"]
+        },
+        {
+          "id": "access-negative-hash",
+          "answerable": false,
+          "query": "hash a password before saving a user account",
+          "relevant": []
+        },
+        {
+          "id": "access-negative-cookie",
+          "answerable": false,
+          "query": "parse a signed browser session cookie",
+          "relevant": []
+        },
+        {
+          "id": "access-negative-network",
+          "answerable": false,
+          "query": "restrict connections by source IP range",
+          "relevant": []
+        },
+        {
+          "id": "access-negative-billing",
+          "answerable": false,
+          "query": "charge a tenant for monthly service usage",
+          "relevant": []
+        },
+        {
+          "id": "access-negative-expiry",
+          "answerable": false,
+          "query": "expire a temporary password reset code",
+          "relevant": []
+        },
+        {
+          "id": "access-negative-sso",
+          "answerable": false,
+          "query": "exchange an authorization code with an identity provider",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "compiler",
+      "symbols": [
+        {
+          "id": "ImportResolver",
+          "kind": "class",
+          "qualifiedName": "ImportResolver",
+          "signature": "class ImportResolver",
+          "packageName": "@fixture/compiler",
+          "path": "packages/compiler/src/imports.ts",
+          "documentation": "Resolves module dependency references from source files."
+        },
+        {
+          "id": "resolveModulePath",
+          "kind": "function",
+          "qualifiedName": "resolveModulePath",
+          "signature": "resolveModulePath(specifier: string): string",
+          "packageName": "@fixture/compiler",
+          "path": "packages/compiler/src/imports.ts",
+          "documentation": "Finds the file path corresponding to an imported module."
+        },
+        {
+          "id": "parseSyntaxTree",
+          "kind": "function",
+          "qualifiedName": "parseSyntaxTree",
+          "signature": "parseSyntaxTree(source: string): SyntaxTree",
+          "packageName": "@fixture/compiler",
+          "path": "packages/compiler/src/parser.ts",
+          "documentation": "Parses source text into a structured syntax tree."
+        },
+        {
+          "id": "emitBytecode",
+          "kind": "function",
+          "qualifiedName": "emitBytecode",
+          "signature": "emitBytecode(tree: SyntaxTree): Uint8Array",
+          "packageName": "@fixture/compiler",
+          "path": "packages/compiler/src/emitter.ts",
+          "documentation": "Emits executable bytecode from a parsed syntax tree."
+        },
+        {
+          "id": "SourceLocation",
+          "kind": "interface",
+          "qualifiedName": "SourceLocation",
+          "signature": "interface SourceLocation",
+          "packageName": "@fixture/compiler",
+          "path": "packages/compiler/src/location.ts",
+          "documentation": "Stores file and offset coordinates for a source span."
+        }
+      ],
+      "queries": [
+        {
+          "id": "compiler-resolver",
+          "answerable": true,
+          "query": "component that maps dependencies written in source to modules",
+          "relevant": ["ImportResolver"]
+        },
+        {
+          "id": "compiler-find-file",
+          "answerable": true,
+          "query": "find the file for a referenced package or module",
+          "relevant": ["resolveModulePath"]
+        },
+        {
+          "id": "compiler-parse",
+          "answerable": true,
+          "query": "turn program text into a structured tree of syntax nodes",
+          "relevant": ["parseSyntaxTree"]
+        },
+        {
+          "id": "compiler-output",
+          "answerable": true,
+          "query": "produce executable instructions from parsed source structure",
+          "relevant": ["emitBytecode"]
+        },
+        {
+          "id": "compiler-source-span",
+          "answerable": true,
+          "query": "type that stores file and offset information for code spans",
+          "relevant": ["SourceLocation"]
+        },
+        {
+          "id": "compiler-lookup",
+          "answerable": true,
+          "query": "locate a referenced module in the source workspace",
+          "relevant": ["resolveModulePath", "ImportResolver"]
+        },
+        {
+          "id": "compiler-negative-rename",
+          "answerable": false,
+          "query": "rename a local variable and all its references",
+          "relevant": []
+        },
+        {
+          "id": "compiler-negative-diagnostic",
+          "answerable": false,
+          "query": "explain a type checking error to a developer",
+          "relevant": []
+        },
+        {
+          "id": "compiler-negative-minify",
+          "answerable": false,
+          "query": "remove whitespace and shorten identifiers in a bundle",
+          "relevant": []
+        },
+        {
+          "id": "compiler-negative-lint",
+          "answerable": false,
+          "query": "apply style rules to detect questionable source patterns",
+          "relevant": []
+        },
+        {
+          "id": "compiler-negative-test",
+          "answerable": false,
+          "query": "execute unit tests against a compiled module",
+          "relevant": []
+        },
+        {
+          "id": "compiler-negative-format",
+          "answerable": false,
+          "query": "format source code with a consistent indentation style",
+          "relevant": []
+        }
+      ]
+    },
+    {
+      "id": "observability",
+      "symbols": [
+        {
+          "id": "TraceCollector",
+          "kind": "class",
+          "qualifiedName": "TraceCollector",
+          "signature": "class TraceCollector",
+          "packageName": "@fixture/observability",
+          "path": "packages/observability/src/tracing.ts",
+          "documentation": "Collects spans produced by instrumented application operations."
+        },
+        {
+          "id": "recordSpan",
+          "kind": "function",
+          "qualifiedName": "recordSpan",
+          "signature": "recordSpan(span: Span): void",
+          "packageName": "@fixture/observability",
+          "path": "packages/observability/src/tracing.ts",
+          "documentation": "Adds a completed operation span to the local trace."
+        },
+        {
+          "id": "sampleTraces",
+          "kind": "function",
+          "qualifiedName": "sampleTraces",
+          "signature": "sampleTraces(rate: number): Span[]",
+          "packageName": "@fixture/observability",
+          "path": "packages/observability/src/sampling.ts",
+          "documentation": "Selects a subset of traces according to a sampling rate."
+        },
+        {
+          "id": "flushTelemetry",
+          "kind": "function",
+          "qualifiedName": "flushTelemetry",
+          "signature": "flushTelemetry(): Promise<void>",
+          "packageName": "@fixture/observability",
+          "path": "packages/observability/src/export.ts",
+          "documentation": "Sends buffered telemetry data to its configured destination."
+        },
+        {
+          "id": "redactSpanAttributes",
+          "kind": "function",
+          "qualifiedName": "redactSpanAttributes",
+          "signature": "redactSpanAttributes(span: Span): Span",
+          "packageName": "@fixture/observability",
+          "path": "packages/observability/src/privacy.ts",
+          "documentation": "Removes sensitive attribute values from a recorded span."
+        }
+      ],
+      "queries": [
+        {
+          "id": "obs-collector",
+          "answerable": true,
+          "query": "component that gathers timing spans emitted by instrumented work",
+          "relevant": ["TraceCollector"]
+        },
+        {
+          "id": "obs-record",
+          "answerable": true,
+          "query": "add a finished operation's timing record to a trace",
+          "relevant": ["recordSpan"]
+        },
+        {
+          "id": "obs-sampling",
+          "answerable": true,
+          "query": "select only a fraction of traces for collection",
+          "relevant": ["sampleTraces"]
+        },
+        {
+          "id": "obs-export",
+          "answerable": true,
+          "query": "send buffered measurements to their configured destination",
+          "relevant": ["flushTelemetry"]
+        },
+        {
+          "id": "obs-redact",
+          "answerable": true,
+          "query": "remove private values from telemetry attributes before export",
+          "relevant": ["redactSpanAttributes"]
+        },
+        {
+          "id": "obs-collector-api",
+          "answerable": true,
+          "query": "which operation adds timing details to an active trace",
+          "relevant": ["recordSpan"]
+        },
+        {
+          "id": "obs-negative-metric",
+          "answerable": false,
+          "query": "aggregate numeric samples into latency histograms",
+          "relevant": []
+        },
+        {
+          "id": "obs-negative-rotation",
+          "answerable": false,
+          "query": "rotate application log files by size",
+          "relevant": []
+        },
+        {
+          "id": "obs-negative-alert",
+          "answerable": false,
+          "query": "page an on-call engineer when error rate rises",
+          "relevant": []
+        },
+        {
+          "id": "obs-negative-dashboard",
+          "answerable": false,
+          "query": "draw a dashboard from service health measurements",
+          "relevant": []
+        },
+        {
+          "id": "obs-negative-traceparent",
+          "answerable": false,
+          "query": "parse the traceparent header from an inbound request",
+          "relevant": []
+        },
+        {
+          "id": "obs-negative-baggage",
+          "answerable": false,
+          "query": "propagate request baggage between remote services",
+          "relevant": []
+        }
+      ]
+    }
+  ]
+}

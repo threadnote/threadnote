@@ -1,3 +1,4 @@
+import {RECALL_INVENTORY_POLICY_CHANGED_REASON, RECALL_LOGICAL_SCOPE_CHANGED_REASON} from '../index/freshness.js';
 import {loadRecallVectorAuthorizationKey} from '../vector/preparation-identity.js';
 import * as EffectString from 'effect/String';
 import {Cause, Effect, Schema} from 'effect';
@@ -6,7 +7,7 @@ import {
   type ResourceRecallInvalidationReceipt,
 } from '@threadnote/store/resource/recall-invalidation';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {vectorIndexGenerationReadiness} from '../vector-index.js';
 import {expireRecallIndexValidation, loadRecallIndexData, recallIndexStatus, type RecallIndexStatus} from '../index.js';
@@ -26,7 +27,7 @@ export type DerivedIndexRefreshOutcome =
   | {readonly state: 'unavailable'}
   | {readonly state: 'blocked'; readonly repair: string};
 
-import {deferRecallEmbeddings, readRecallEmbeddingDemand, requestRecallEmbeddings} from '../background/demand.js';
+import {deferRecallEmbeddings, requestRecallEmbeddingsReceipt} from '../background/demand.js';
 
 class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
   McpRecallBackgroundRefreshBlocked,
@@ -41,9 +42,7 @@ export const scheduleMcpRecallBackgroundRefresh = Effect.fn('recall.scheduleMcpB
   config: McpRecallRefreshConfig,
   _manifest: LocalModelManifest,
 ) {
-  const previous = yield* readRecallEmbeddingDemand(config);
-  yield* requestRecallEmbeddings(config, true);
-  return previous?.desired ? ('coalesced' as const) : ('scheduled' as const);
+  return (yield* requestRecallEmbeddingsReceipt(config, true)).disposition;
 });
 
 /** Canonical and lexical readiness complete now; document inference is durable idle demand. */
@@ -76,7 +75,7 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
     if (onStage) yield* onStage('recall-demand');
     return yield* Effect.gen(function* () {
       const selection = yield* readModelSelection(config.agentContextHome);
-      const modelId = selection.roles.embedding;
+      const modelId = selectedEmbeddingModelId(selection, 'recall');
       if (modelId === undefined) return {state: 'unavailable' as const};
       const catalog = yield* LocalModelCatalog;
       const manifest = yield* catalog.get(modelId);
@@ -167,7 +166,9 @@ export function lexicalRefreshDisposition(status: RecallIndexStatus): 'current' 
   if (status.ready && status.generation) return 'current';
   if (
     status.reason === 'not built; run `threadnote repair`' ||
-    status.reason === 'canonical documents changed; run `threadnote repair`'
+    status.reason === 'canonical documents changed; run `threadnote repair`' ||
+    status.reason === RECALL_LOGICAL_SCOPE_CHANGED_REASON ||
+    status.reason === RECALL_INVENTORY_POLICY_CHANGED_REASON
   ) {
     return 'refreshable';
   }

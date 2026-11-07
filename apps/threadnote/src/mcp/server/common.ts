@@ -83,7 +83,6 @@ const STALE_NOTICE_TTL_MS = 60_000;
 
 export interface RecallProgressTiming {
   readonly heartbeatMilliseconds: number;
-  readonly sharedSyncDelayMilliseconds: number;
 }
 
 const staleVersionNotice = Effect.fn('mcpServer.staleVersionNotice')(function* () {

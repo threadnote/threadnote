@@ -1,6 +1,7 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {isExternalResourceUri, parseExternalResource} from '@threadnote/store/external-resource';
+import {recallSelectionDefersExternalAuthorization} from './read_policy.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   boundedMemoryAuthority,
@@ -101,7 +102,8 @@ export function recallIndexCandidateIsEligible(
     (candidate.authority !== 'external' ||
       candidate.trust !== 'untrusted' ||
       candidate.contentHash === undefined ||
-      policy?.externalResources?.[stripRecallAnchor(candidate.uri)] !== candidate.contentHash)
+      (!recallSelectionDefersExternalAuthorization(policy) &&
+        policy?.externalResources?.[stripRecallAnchor(candidate.uri)] !== candidate.contentHash))
   )
     return false;
   return (

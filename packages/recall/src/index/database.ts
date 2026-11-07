@@ -7,6 +7,7 @@ import {
   readPathFileSystemIdentity,
   type FileSystemIdentity,
 } from '@threadnote/platform/system';
+import {failFastIdentityPreparation} from './admission.js';
 type DatabaseContext = Context.Context<SqliteClient.SqliteClient | SqlClient.SqlClient>;
 type Identity = {
   readonly database: string;
@@ -84,7 +85,12 @@ const probe = (path: string, requireAuxiliaries = false) =>
       return {database: opened, files: EffectArray.join(files, '|')};
     }),
   ).pipe(Effect.orElseSucceed(() => undefined));
-const databaseLayer = (path: string) => SqliteClient.layer({filename: path}).pipe(Layer.orDie);
+const databaseLayer = (path: string) =>
+  Layer.unwrap(
+    Effect.map(failFastIdentityPreparation, failFast =>
+      SqliteClient.layer({filename: path, ...(failFast ? {busyTimeout: 0} : {})}),
+    ),
+  ).pipe(Layer.orDie);
 const body = <A, E, R>(effect: Effect.Effect<A, E, R | SqlClient.SqlClient>, context: DatabaseContext) =>
   effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'));
 export function useRecallDatabase<A, E, R>(

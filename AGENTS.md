@@ -71,23 +71,31 @@ Threadnote application and runtime behavior is predominantly Effect code. Tests 
 - When touching an existing plain async test that principally calls `runEffect(Effect...)`, convert that test to the
   Effect Vitest integration as part of the change unless a boundary exception above applies.
 
-## Seek property-based testing opportunities
+## Choose proportional test coverage
 
-During development, always assess whether changed behavior has general properties that example tests alone would
-underspecify. Look especially for round trips, idempotence, determinism, ordering, monotonicity, parser and serializer
-boundaries, state-machine transitions, incremental-versus-clean equivalence, and non-mutation guarantees.
+- Use the smallest test at the owning layer that proves the changed externally meaningful behavior or an actual bug.
+  Extend existing tests and helpers before adding fixtures or suites. Cover the same behavior at unit, integration, and
+  end-to-end layers only when each exercises a distinct boundary risk.
+- Prefer cheap deterministic seams to real processes, models, databases, or full fixtures when they prove the contract.
+  Do not add production observability or test hooks solely for speculative coverage. Keep critical cancellation,
+  authorization, ownership, data integrity, state, and cleanup behavior tested at the boundaries that matter.
+- Do not test prose, headings, or exact wording in Markdown or documentation, including skills. Structured executable skill or package contracts may
+  validate schemas, links, and behavior without freezing wording. Do not use arbitrary coverage or test-count targets.
+- Property tests are optional when a meaningful invariant and independent oracle add unique value. Choose examples,
+  properties, or both according to the risk; do not require a paired example and property. Refactor or delete redundant
+  tests when appropriate, and explain the rationale in the change.
 
-- When a meaningful property exists, add a bounded Fast-check property to the normal Vitest suite. Prefer generators
-  that shrink well and assertions against an independent model or invariant rather than reimplementing production code.
-- Keep focused example-based regression tests for important concrete failures, even when a property test also covers the
-  broader contract.
-- Do not force property tests onto static copy, one-off wiring, or behavior with no useful input space or invariant.
-  Close out the task by stating which property-testing opportunity was added, or why none was appropriate.
+## Keep validation tooling lightweight
+
+Treat disposable benchmarks, dogfood experiments, and one-off validation harnesses according to their limited lifetime and impact. Reuse existing helpers and owner mechanisms, add one basic setup smoke, and run the first real validation case as soon as its inputs are ready. Fix concrete execution, accounting, safety, or reproducibility problems revealed by that case. Preserve basic isolation, time and output bounds, owned-process cleanup, and a truthful record of results, failures, and costs.
+
+Stop building harness machinery when it can run the agreed validation and retain reviewable evidence. Do not apply a production-style multilaned review process, extensive synthetic unit matrices, repeated proposal/freeze/versioning cycles, or speculative hardening to disposable tooling. A failed case should lead to a bounded fix or a clear recorded failure; it should not automatically trigger another harness redesign. Unrelated documentation or tooling edits do not invalidate a frozen feature build or restart its validation. Shipped or reusable high-impact runtime and CI tooling still needs proportionate production checks, with coverage aimed at real operational risks and supported behavior.
 
 ## Let pull-request CI run the full suite
 
-Do not run the complete test suite locally. Run focused tests and checks that cover the changed behavior, then open the
-pull request and use CI as the authoritative full-suite run. Investigate and fix any CI failure before merge.
+Do not run the complete test suite locally. Run the narrow tests and checks appropriate to the change, then open the
+pull request and use CI as the authoritative run for the full selected suite. Investigate and fix any CI failure before
+merge.
 
 ## Install logic changes globally
 

@@ -141,7 +141,7 @@ const architecture = Schema.Struct({
   summary: prose,
   components: proseList(1, 128),
   contracts: Schema.Array(prose).check(Schema.isMaxLength(128)),
-  diagram: prose,
+  diagram: boundedText(8192),
 });
 const acceptance = Schema.Struct({
   id: portableId,
@@ -150,17 +150,30 @@ const acceptance = Schema.Struct({
   requirementIds: idList(1, 128),
   scenarioIds: Schema.optionalKey(idList(0, 256)),
 });
+const maximumCombinedPhasePathEntries = 256;
+const phasePathListLimit = Schema.isMaxLength(maximumCombinedPhasePathEntries);
+const combinedPhasePathsLimit = Schema.makeFilter(
+  (phase: {readonly affectedPaths: readonly string[]; readonly newPaths: readonly string[]}) =>
+    phase.affectedPaths.length + phase.newPaths.length <= maximumCombinedPhasePathEntries,
+  {
+    expected: 'at most 256 affected and new path entries combined',
+    toJsonSchema: () => [
+      {description: 'Runtime validation requires affectedPaths and newPaths to contain at most 256 entries combined.'},
+      true,
+    ],
+  },
+);
 const phase = Schema.Struct({
   id: portableId,
   title: boundedText(256, true, true),
   outcome: prose,
   dependsOn: idList(0, 128),
-  affectedPaths: Schema.Array(relativePath).check(Schema.isMaxLength(128)),
-  newPaths: Schema.Array(relativePath).check(Schema.isMaxLength(128)),
+  affectedPaths: Schema.Array(relativePath).check(phasePathListLimit),
+  newPaths: Schema.Array(relativePath).check(phasePathListLimit),
   contracts: Schema.Array(prose).check(Schema.isMaxLength(128)),
   acceptance: Schema.Array(acceptance).check(Schema.isBetweenLength(1, 128)),
   safeBoundary: prose,
-});
+}).check(combinedPhasePathsLimit);
 const alternative = Schema.Struct({id: portableId, design: prose, tradeoffs: prose});
 const maximumDecisionAlternatives = 2;
 const decisionAlternativesLimit = Schema.isMaxLength(maximumDecisionAlternatives);
@@ -238,6 +251,39 @@ const alternativesDiagnostic = (issue: SchemaIssue.Issue, path: readonly Propert
   }
 };
 
+const combinedPhasePathsDiagnostic = (
+  issue: SchemaIssue.Issue,
+  path: readonly PropertyKey[] = [],
+): string | undefined => {
+  if (
+    path.length > 3 ||
+    (path.length > 0 && path[0] !== 'phases') ||
+    (path.length > 1 && (typeof path[1] !== 'number' || !Number.isSafeInteger(path[1]) || path[1] < 0)) ||
+    (path.length > 2 && path[2] !== 'affectedPaths' && path[2] !== 'newPaths')
+  )
+    return undefined;
+  switch (issue._tag) {
+    case 'Pointer':
+      return combinedPhasePathsDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'AnyOf':
+    case 'Composite':
+      for (const child of issue.issues) {
+        const diagnostic = combinedPhasePathsDiagnostic(child, path);
+        if (diagnostic !== undefined) return diagnostic;
+      }
+      return undefined;
+    case 'Filter':
+      if (
+        (path.length === 2 && issue.filter === combinedPhasePathsLimit) ||
+        (path.length === 3 && issue.filter === phasePathListLimit)
+      )
+        return 'A phase may contain at most 256 affectedPaths and newPaths entries combined.';
+      return undefined;
+    default:
+      return undefined;
+  }
+};
+
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
   let document: NativeAuthoringDocument;
   try {
@@ -247,7 +293,8 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
   } catch (error) {
     let message = 'The native authoring document is malformed or contains unsupported fields.';
     try {
-      if (Schema.isSchemaError(error)) message = alternativesDiagnostic(error.issue) ?? message;
+      if (Schema.isSchemaError(error))
+        message = alternativesDiagnostic(error.issue) ?? combinedPhasePathsDiagnostic(error.issue) ?? message;
     } catch {
       // Optional diagnostics must preserve the original rejection if projection fails.
     }
@@ -267,6 +314,22 @@ export function canonicalAuthoringJson(value: unknown): string {
 export function nativeAuthoringDigest(document: NativeAuthoringDocument): string {
   const decoded = decodeNativeAuthoringDocument(document);
   return sha256HexSync(`threadnote.native-authoring.document.v1\n${canonicalAuthoringJson(decoded)}`);
+}
+
+export function isNativeMermaidDiagram(value: string): boolean {
+  const firstLine = Effect.pipe(
+    value,
+    EffectString.trimStart,
+    EffectString.split(/\r?\n/u),
+    EffectArray.findFirst(() => true),
+    EffectOption.getOrElse(() => ''),
+    EffectString.trim,
+  );
+  if (firstLine.length === 0 || Effect.pipe(firstLine, EffectString.startsWith('```'))) return false;
+  return (
+    /^(?:graph|flowchart)\s+(?:TB|TD|BT|RL|LR)(?:\s*;.*)?$/iu.test(firstLine) ||
+    /^(?:sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s*;.*)?$/iu.test(firstLine)
+  );
 }
 
 export function nativeSpecIntentDigest(document: NativeAuthoringDocument): string {
@@ -577,12 +640,8 @@ export function validateNativeAuthoring(
         ['current.diagram', decoded.current.diagram],
         ['target.diagram', decoded.target.diagram],
       ] as const) {
-        if (!validMermaid(diagram))
-          add(
-            'diagram-invalid',
-            label,
-            'Ready architecture diagrams need a supported raw Mermaid declaration without fences.',
-          );
+        if (Effect.pipe(diagram, EffectString.trimStart, EffectString.startsWith('```')))
+          add('diagram-invalid', label, 'Architecture Mermaid diagrams must not be fenced in the authoring document.');
       }
     }
     if (
@@ -694,14 +753,4 @@ function hasDependencyCycle(phases: readonly {readonly id: string; readonly depe
     return false;
   };
   return EffectArray.some([...graph.keys()], visit);
-}
-
-function validMermaid(diagram: string): boolean {
-  const firstLine =
-    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
-    Effect.pipe(Effect.pipe(diagram, EffectString.trimStart).split(/\r?\n/u, 1)[0], effectOptionalString =>
-      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
-    ) ?? '';
-  if (Effect.pipe(diagram, EffectString.trimStart, EffectString.startsWith('```'))) return false;
-  return /^(?:graph|flowchart|sequenceDiagram|stateDiagram(?:-v2)?|classDiagram|erDiagram)(?:\s|$)/u.test(firstLine);
 }

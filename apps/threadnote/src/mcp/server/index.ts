@@ -86,6 +86,7 @@ import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
 import {registerKnowledgeDeltaGitProposalTool, registerTopicMaintenanceGitProposalTool} from './git_proposal.js';
 import {registerProcedurePublicationTools} from './procedure.js';
 import {registerActivationProofTool} from './activation.js';
+import {registerWorkflowTaskTool} from './workflow.js';
 import {resolveMemoryScope, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {
   runInstallSharedSkillTool,
@@ -100,16 +101,6 @@ import {
 } from './share.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-
-const MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_ENV = 'THREADNOTE_TEST_MCP_PROGRESS_SHARED_SYNC_DELAY_MILLISECONDS';
-const MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_MAX_MILLISECONDS = 1_000;
-function mcpProgressTestSharedSyncDelayMilliseconds(environment: NodeJS.ProcessEnv): number {
-  if (environment.NODE_ENV !== 'test') return 0;
-  const configured = Number(environment[MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_ENV]);
-  return Number.isSafeInteger(configured) && configured > 0
-    ? Math.min(configured, MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_MAX_MILLISECONDS)
-    : 0;
-}
 
 export const mcpServerEffect = withAnonymousTelemetry(
   {component: 'mcp', operation: 'mcp-server'},
@@ -129,7 +120,6 @@ export const mcpServerEffect = withAnonymousTelemetry(
         });
         const recallProgressTiming: RecallProgressTiming = {
           heartbeatMilliseconds: mcpProgressHeartbeatMilliseconds(system.environment()),
-          sharedSyncDelayMilliseconds: mcpProgressTestSharedSyncDelayMilliseconds(system.environment()),
         };
         const memoryScope = isCursorCloudPersonalToolset(toolset)
           ? {resolve: () => resolveCursorCloudMemoryScope(config, system.environment())}
@@ -426,6 +416,8 @@ function registerTools(
         );
       },
     );
+
+  if (toolset === 'core' || toolset === 'full') registerWorkflowTaskTool(server, config);
 
   if (capabilities.lifecycle) {
     registerContextHealthTool(server, config);

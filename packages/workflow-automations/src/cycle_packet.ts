@@ -28,7 +28,7 @@ const fail = (message: string): never => {
 const capacitySchema = Schema.Struct({
   model: text(128),
   effort: text(32),
-  selection: Schema.Literals(['main-agent', 'least-sufficient', 'risk', 'user-override', 'escalation']),
+  selection: Schema.Literals(['least-sufficient', 'risk', 'user-override', 'escalation']),
   risk: Schema.Literals(['settled', 'unresolved', 'high']),
   reason: text(512),
   catalogEvidence: text(512),
@@ -39,6 +39,8 @@ const capacitySchema = Schema.Struct({
 });
 
 export function validateNativeCycleCapacityRecord(input: unknown) {
+  if (typeof input === 'object' && input !== null && 'selection' in input && input.selection === 'main-agent')
+    fail('Implementation packets must assign source work to a background worker.');
   let record: typeof capacitySchema.Type;
   try {
     record = Schema.decodeUnknownSync(capacitySchema, {onExcessProperty: 'error'})(input);

@@ -1,6 +1,10 @@
 import {Array as EffectArray} from 'effect';
-import {Clock, Effect, FileSystem, Option, Predicate} from 'effect';
-import type {CanonicalMutationGenerationTransition} from '@threadnote/store/resource/mutation_generation';
+import {Clock, Context, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {
+  canonicalMutationInvalidationIsCurrent,
+  type CanonicalMutationGenerationTransition,
+} from '@threadnote/store/resource/mutation_generation';
+import {withExclusiveFileLock, type ExclusiveFileLockOptions} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {mergeRecallIndexCanonicalMutationContinuity} from './freshness.js';
 import {stripRecallAnchor} from './lexical.js';
@@ -10,6 +14,89 @@ import * as Effect2 from 'effect';
 const RECALL_STALE_MARKER_VERSION = 1;
 const MAX_RECALL_INVALIDATED_URIS = 1_024;
 let staleMarkerGenerationCounter = 0;
+
+interface PublicationFence {
+  readonly lockPath: string;
+  readonly admissionAccount?: string;
+  active: boolean;
+}
+const CurrentPublicationFence = Context.Reference<PublicationFence | undefined>('threadnote/RecallPublicationFence', {
+  defaultValue: () => undefined,
+});
+
+export const recallPublicationFenceHeld = (lockPath: string) =>
+  Effect.gen(function* () {
+    const fence = yield* CurrentPublicationFence;
+    if (!fence?.active) return false;
+    const fs = yield* FileSystem.FileSystem;
+    const canonicalLockPath = yield* fs.realPath(lockPath).pipe(Effect.option);
+    return Option.isSome(canonicalLockPath) && fence.lockPath === canonicalLockPath.value;
+  });
+
+/** Mint only under the real lexical lock; descendants lose authority when its scope ends. */
+export function withRecallPublicationLock<A, E, R>(
+  fs: FileSystem.FileSystem,
+  lockPath: string,
+  options: ExclusiveFileLockOptions,
+  effect: Effect.Effect<A, E, R>,
+  admissionAccount?: string,
+) {
+  return withExclusiveFileLock(
+    fs,
+    lockPath,
+    options,
+    Effect.acquireUseRelease(
+      fs.realPath(lockPath).pipe(
+        Effect.map((canonicalLockPath): PublicationFence => ({
+          lockPath: canonicalLockPath,
+          admissionAccount,
+          active: true,
+        })),
+      ),
+      fence => effect.pipe(Effect.provideService(CurrentPublicationFence, fence)),
+      fence =>
+        Effect.sync(() => {
+          fence.active = false;
+        }),
+    ),
+  );
+}
+
+function withStaleMarkerPublication<A, E, R>(
+  fs: FileSystem.FileSystem,
+  databasePath: string,
+  transition: CanonicalMutationGenerationTransition | undefined,
+  effect: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const home = path.dirname(path.dirname(path.dirname(databasePath)));
+    const lockPath = path.join(home, 'locks', 'indexes', 'lexical', `${path.basename(databasePath)}.lock`);
+    const fence = yield* CurrentPublicationFence;
+    const held = yield* recallPublicationFenceHeld(lockPath);
+    // Refresh owns the lexical lock already. Native commits additionally prove a real canonical mutation.
+    if (
+      held &&
+      fence !== undefined &&
+      (fence.admissionAccount === undefined ||
+        (yield* canonicalMutationInvalidationIsCurrent(home, fence.admissionAccount, transition)))
+    )
+      return yield* effect;
+    return yield* withRecallPublicationLock(
+      fs,
+      lockPath,
+      {
+        category: 'recall-index',
+        heartbeatIntervalMilliseconds: 10_000,
+        retryIntervalMilliseconds: 100,
+        staleAfterMilliseconds: 60_000,
+        // Marker publication stays prompt; account -> lexical must never wait.
+        waitTimeoutMilliseconds: 0,
+      },
+      effect,
+    );
+  });
+}
 
 export interface RecallStaleMarker {
   readonly canonicalMutationGeneration?: string;
@@ -86,7 +173,7 @@ function toRecallStaleMarker(value: unknown): RecallStaleMarker | undefined {
   };
 }
 
-export const writeRecallStaleGeneration = Effect.fn('recall.writeStaleGeneration')(function* (
+const writeRecallStaleGenerationUnlocked = Effect.fn('recall.writeStaleGeneration')(function* (
   fs: FileSystem.FileSystem,
   path: string,
   invalidatedUris?: readonly string[],
@@ -149,7 +236,7 @@ export const writeRecallStaleGeneration = Effect.fn('recall.writeStaleGeneration
   return generation;
 });
 
-export const clearRecallStaleMarkerInvalidations = Effect.fn('recall.clearStaleMarkerInvalidations')(function* (
+const clearRecallStaleMarkerInvalidationsUnlocked = Effect.fn('recall.clearStaleMarkerInvalidations')(function* (
   fs: FileSystem.FileSystem,
   path: string,
   observed: RecallStaleMarker,
@@ -179,6 +266,33 @@ export const clearRecallStaleMarkerInvalidations = Effect.fn('recall.clearStaleM
     .rename(temporaryPath, stalePath)
     .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
 });
+
+export function writeRecallStaleGeneration(
+  fs: FileSystem.FileSystem,
+  path: string,
+  invalidatedUris?: readonly string[],
+  transition?: CanonicalMutationGenerationTransition,
+) {
+  return withStaleMarkerPublication(
+    fs,
+    path,
+    transition,
+    writeRecallStaleGenerationUnlocked(fs, path, invalidatedUris, transition),
+  );
+}
+
+export function clearRecallStaleMarkerInvalidations(
+  fs: FileSystem.FileSystem,
+  path: string,
+  observed: RecallStaleMarker,
+) {
+  return withStaleMarkerPublication(
+    fs,
+    path,
+    undefined,
+    clearRecallStaleMarkerInvalidationsUnlocked(fs, path, observed),
+  );
+}
 
 const nextStaleMarkerGenerationCounter = Effect.sync(() => {
   staleMarkerGenerationCounter += 1;

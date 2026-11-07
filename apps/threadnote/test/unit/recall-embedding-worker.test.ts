@@ -25,8 +25,22 @@ import {
   RecallEmbeddingWorkerControlUnavailable,
   runRecallEmbeddingWorker,
 } from '../../src/recall/embedding_worker.js';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {TestSystemInfoLayer, TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+
+import {wakeBackgroundWorker} from '@threadnote/inference/background/worker-control';
+import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
+import {
+  requestRecallLexicalRefresh,
+  readRecallLexicalDemand,
+  RecallLexicalDemandUnavailable,
+} from '@threadnote/recall/background/lexical-demand';
+import {RecallReadMaintenancePort} from '../../src/recall/read_maintenance.js';
+import {
+  recallEmbeddingWorkerHomeProgram,
+  recallEmbeddingWorkerPaths,
+} from '../../src/recall/embedding_worker_process.js';
+import {RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION} from '../../src/worker_protocol.js';
 
 const manifest = {...BUILTIN_MODEL_MANIFESTS[0], role: 'embedding' as const, dimensions: 2};
 const switchedManifest = {
@@ -340,3 +354,66 @@ describe('recall embedding worker', () => {
     }).pipe(TestClock.withLive, provideTestLayer(base)),
   );
 });
+
+effectIt.effect(
+  'stops the home host when lexical completion cannot persist, retaining both desired scopes',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const path = yield* Path.Path;
+      const home = yield* f.fs.realPath(f.config.agentContextHome);
+      const scope = {
+        ...f.config,
+        agentContextHome: home,
+        includeInactive: false,
+        work: {kind: 'synchronize' as const, sources: false},
+      };
+      const revision = yield* requestRecallLexicalRefresh(scope);
+      let nonce: string | undefined;
+      const launched = yield* wakeBackgroundWorker({
+        home,
+        ...recallEmbeddingWorkerPaths(path, home),
+        version: yield* getThreadnoteVersion(),
+        protocol: RECALL_EMBEDDING_WORKER_PROTOCOL_VERSION,
+        launch: value =>
+          Effect.sync(() => {
+            nonce = value;
+            return true;
+          }),
+      });
+      expect(launched.state).toBe('started');
+      expect(nonce).toBeDefined();
+      let executions = 0;
+      const fs = FileSystem.FileSystem.of({
+        ...f.fs,
+        rename: (from, to) =>
+          path.basename(path.dirname(to)) === 'lexical-demand-v1'
+            ? Effect.fail(PlatformError.systemError({_tag: 'Busy', module: 'FileSystem', method: 'rename'}))
+            : f.fs.rename(from, to),
+      });
+      const result = yield* recallEmbeddingWorkerHomeProgram(home, nonce!).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(RecallReadMaintenancePort, () =>
+          Effect.sync(() => {
+            executions++;
+            return 'complete' as const;
+          }),
+        ),
+        Effect.provideService(LocalModelStore, f.store),
+        Effect.provideService(LocalModelRuntime, f.runtime),
+        Effect.provideService(BackgroundInferenceAdmission, immediate),
+        Effect.timeout('3 seconds'),
+        Effect.result,
+      );
+      expect(result).toMatchObject({_tag: 'Failure', failure: {_tag: 'RecallLexicalDemandUnavailable'}});
+      if (result._tag === 'Failure') expect(result.failure).toBeInstanceOf(RecallLexicalDemandUnavailable);
+      expect(executions).toBe(1);
+      expect(f.calls()).toBe(0);
+      expect((yield* readRecallLexicalDemand(scope))?.revision).toBe(revision);
+      expect((yield* readRecallEmbeddingDemand(f.config))?.desired).toBeDefined();
+    }).pipe(
+      TestClock.withLive,
+      provideTestLayer(Layer.merge(base, TestCommandExecutorLayer.pipe(Layer.provide(base)))),
+    ),
+  10_000,
+);

@@ -22,6 +22,12 @@ import {flattenJsonSchemaConstraints} from '../../mcp/json_schema_constraints.js
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {
+  sanitizeThreadnoteProcessClientInfo,
+  setThreadnoteProcessClientInfo,
+  withThreadnoteProcessRequestContext,
+  type ThreadnoteProcessClientInfo,
+} from '../../process/diagnostics.js';
 
 // Windows antivirus and filesystem scheduling can make an otherwise healthy
 // append exceed 50 ms. Keep MCP diagnostics best-effort and bounded without
@@ -393,13 +399,21 @@ export class EffectMcpServerRegistry {
                         return Effect.flatMap(CurrentMcpRequestContext, requestContext => {
                           const handling = Schema.decodeUnknownEffect(input, {errors: 'all'})(payload).pipe(
                             Effect.flatMap(parsed =>
-                              toolHandlerEffect(
-                                () =>
-                                  registration.handle(parsed, {
-                                    progress,
-                                    requestContext: {...requestContext, liveTransport: true},
-                                  }),
-                                applicationServices,
+                              withThreadnoteProcessRequestContext(
+                                {
+                                  callerCwd: 'callerCwd' in parsed ? parsed.callerCwd : undefined,
+                                  clientInfo: client.clientInfo,
+                                  transport: requestContext.transport,
+                                  operation: registration.name,
+                                },
+                                toolHandlerEffect(
+                                  () =>
+                                    registration.handle(parsed, {
+                                      progress,
+                                      requestContext: {...requestContext, liveTransport: true},
+                                    }),
+                                  applicationServices,
+                                ),
                               ).pipe(
                                 Effect.matchCauseEffect({
                                   onFailure: mcpToolFailureResult,
@@ -588,6 +602,7 @@ interface McpActiveRequest {
   readonly externalId: string | number;
   readonly externalIdKey: string;
   readonly internalId: string;
+  initializeClient?: ThreadnoteProcessClientInfo;
   progressToken?: McpSchema.ProgressToken;
   progressTokenKey?: string;
 }
@@ -707,6 +722,14 @@ export function makeMcpCancellationCompatibleProtocol(
           }
         } else if (externalRequest._tag === 'Request') {
           const activeRequest = registerRequest(clientId, externalRequest.id);
+          if (
+            externalRequest.tag === 'initialize' &&
+            typeof externalRequest.payload === 'object' &&
+            externalRequest.payload !== null &&
+            'clientInfo' in externalRequest.payload
+          ) {
+            activeRequest.initializeClient = sanitizeThreadnoteProcessClientInfo(externalRequest.payload.clientInfo);
+          }
           const progressToken = callProgressToken(externalRequest);
           if (progressToken !== undefined && activeRequest.progressTokenKey === undefined) {
             activeRequest.progressToken = progressToken;
@@ -777,7 +800,11 @@ export function makeMcpCancellationCompatibleProtocol(
       const activeRequest = state?.activeByInternalId.get(internalRequestId);
       const externalResponse =
         activeRequest === undefined ? response : {...response, requestId: activeRequest.externalId};
-      const sending = protocol.send(clientId, externalResponse, transferables);
+      const sending = (
+        response._tag === 'Exit' && response.exit._tag === 'Success' && activeRequest?.initializeClient
+          ? setThreadnoteProcessClientInfo(activeRequest.initializeClient)
+          : Effect.void
+      ).pipe(Effect.andThen(protocol.send(clientId, externalResponse, transferables)));
       return response._tag === 'Exit' && state !== undefined && activeRequest !== undefined
         ? sending.pipe(Effect.ensuring(Effect.sync(() => forgetActiveRequest(state, activeRequest))))
         : sending;

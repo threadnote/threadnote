@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
+import type {ProcessCpuObservation} from '@threadnote/platform/system';
 
 export type ManagerProcessRole =
   | 'cli'
@@ -10,6 +11,7 @@ export type ManagerProcessRole =
   | 'graph-diagnostics-worker'
   | 'graph-parser-worker'
   | 'graph-query-worker'
+  | 'recall-read-worker'
   | 'graph-waiter'
   | 'integration-sync-worker'
   | 'legacy'
@@ -22,6 +24,20 @@ export interface ManageableManagerProcess {
   readonly activityRole?: Exclude<ManagerProcessRole, 'legacy'>;
   readonly ageMilliseconds: number;
   readonly currentOperation?: string;
+  readonly cpu?: ProcessCpuObservation;
+  readonly displayContext?: {
+    readonly launchDirectory?: string;
+    readonly processDirectory?: string;
+    readonly client?: {readonly name: string; readonly version?: string};
+    readonly workspace?:
+      | {readonly state: 'active' | 'last'; readonly path: string; readonly observedAt: string}
+      | {readonly state: 'multiple'; readonly observedAt: string};
+    readonly owner?: {readonly processId: number; readonly role: Exclude<ManagerProcessRole, 'legacy'>};
+    readonly branch?:
+      | {readonly state: 'branch'; readonly name: string}
+      | {readonly state: 'detached'; readonly commit: string}
+      | {readonly state: 'unavailable'};
+  };
   readonly embeddingProgress?: {
     readonly state: 'queued' | 'deferred-cpu' | 'deferred-foreground' | 'preparing' | 'running' | 'blocked' | 'corrupt';
     readonly reason?: string;

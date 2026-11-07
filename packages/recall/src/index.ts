@@ -1,6 +1,8 @@
 import {pipe as EffectArrayPipe} from 'effect';
+import {hasReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {recallLexicalScopeIsValid} from './background/lexical-demand.js';
 import {Array as EffectArray} from 'effect';
-import {Cause, Clock, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
+import {Cause, Clock, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {
   recallCodeLinkMatchesResult,
   recallExactMatchesResult,
@@ -8,41 +10,39 @@ import {
   recallIndexDataResult,
   recallMemoryLinkMatchesResult,
 } from './index/result.js';
-import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {
+  readRecallPublishedMetadataHint,
+  readyRecallSelectionPolicy,
+  useRecallDatabaseReadOnly,
+  recallSelectionDefersExternalAuthorization,
+  DEFAULT_RECALL_QUERY_RESULT_LIMIT as DEFAULT_QUERY_RESULT_LIMIT,
+  MAX_READY_RECALL_SOURCE_CHECKS,
+  normalizeRecallExactTerms,
+  RecallReadyReadIncomplete,
+  type RecallReadyExactWindow,
+  type RecallMetadataRow,
+  loadRecallMetadata,
+  numericMetadata,
+  chunkRecallValues,
+} from './index/read_policy.js';
 import {useRecallDatabase} from './index/database.js';
 export {withRecallDatabaseSession} from './index/database.js';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
   isExternalResourceUri,
   loadExternalResourceAccess,
   externalResourceAccess,
-  parseExternalResourceIdentity,
-  readExternalDocumentManifest,
 } from '@threadnote/store/external-resource';
 import {
   readCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
 } from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
-import {parseMemoryDocument} from '@threadnote/memory/document';
 import {errorMessage} from '@threadnote/platform/errors';
-import {
-  candidatePostings,
-  indexTerms,
-  postingLexicalScore,
-  selectQueryTerms,
-  stripRecallAnchor,
-} from './index/lexical.js';
-import {
-  deduplicateLogicalRecallCandidates,
-  recallDocumentTerms,
-  type RecallCandidate,
-  type RecallCorpusStatistics,
-} from './rank.js';
+import {indexTerms, postingLexicalScore, selectQueryTerms, stripRecallAnchor} from './index/lexical.js';
+import {deduplicateLogicalRecallCandidates, type RecallCandidate, type RecallCorpusStatistics} from './rank.js';
 import {normalizeRecallSearchText} from './tokenize.js';
-import {indexCandidate, recallExactSearchText, recallIndexCandidateIsEligible} from './index/candidate.js';
+import {recallIndexCandidateIsEligible} from './index/candidate.js';
 import {removeLegacyRecallIndexArtifacts} from './index/cleanup.js';
 import {recallEligibilityPolicyRestrictsCandidates, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallCandidateIsValid} from './candidate_validation.js';
@@ -53,14 +53,28 @@ import {
   RECALL_RECENCY_RETRIEVAL_LIMIT,
   recallStatisticTerms,
 } from './index/query.js';
-import {deriveIndexedRecallCodeLinks, selectRecallCodeLinks, type RecallCodeLinkQueryOptions} from './code_links.js';
-import {
-  deriveIndexedRecallMemoryLinks,
-  selectRecallMemoryLinks,
-  type RecallMemoryLinkQueryOptions,
-} from './memory/links.js';
+import {selectRecallCodeLinks, type RecallCodeLinkQueryOptions} from './code_links.js';
+import {selectRecallMemoryLinks, type RecallMemoryLinkQueryOptions} from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
 import {
+  withCanonicalResourceMutationLock,
+  withRecallIndexLock,
+  withVerifiedRecallIndexActivation,
+  type RecallIndexActivation,
+} from './index/locks.js';
+import {
+  failFastIdentityPreparation,
+  normalizeRecallIdentityPreparation,
+  readRecallIdentityAdmissionCut,
+  RecallIdentityAdmissionBusy,
+  withPreparedRecallIdentityAdmission,
+} from './index/admission.js';
+import {
+  RECALL_LOGICAL_SCOPE_CHANGED_REASON,
+  RECALL_INVENTORY_POLICY_CHANGED_REASON,
+  recallInventoryPolicyIsCurrent,
+  recallLogicalScope,
+  recallScopeIsCurrent,
   recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh,
   recallIndexForegroundRefreshRequired,
 } from './index/freshness.js';
@@ -88,27 +102,34 @@ import {
   selectRecallRecentTopicalDocuments,
   selectTopRecallPostingsByTerms,
 } from './index/selection.js';
+import {dropRecallSourceScan} from './index/refresh.js';
+import {prepareRecallDatabase, publishPreparedRecallDatabase} from './index/refresh_database.js';
 import {
-  countRecallSourceChanges,
-  dropRecallSourceScan,
-  forEachChangedRecallSourcePage,
-  hashRecallRefreshGeneration,
-  insertIndexedRecallSources,
-  RECALL_REFRESH_AFFECTED_TERM_TABLE,
-  RECALL_REFRESH_INDEXED_CODE_LINK_TABLE,
-  RECALL_REFRESH_INDEXED_DOCUMENT_TABLE,
-  RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE,
-  RECALL_REFRESH_INDEXED_POSTING_TABLE,
-  RECALL_REFRESH_REPLACED_DOCUMENT_TABLE,
-  RECALL_REFRESH_SOURCE_TABLE,
-  scanRecallSources,
-  stageRecallRefreshAffectedTerms,
-  type IndexedRecallSource,
-} from './index/refresh.js';
+  captureRecallRefreshCut,
+  recallMetadataCut,
+  recallRefreshSuperseded,
+  RecallIndexSourceChanged,
+  verifyRecallSourceInputs,
+} from './index/refresh_cut.js';
+export {RecallIndexSourceChanged} from './index/refresh_cut.js';
+import {validateRecallReadyResult} from './index/ready_result.js';
+import {
+  makeReadyRecallMaintenance,
+  retainReadyRecallMaintenance,
+  withReadyRecallMaintenanceScope,
+} from './index/maintenance.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-import {loadCanonicalResourcePolicy, verifyCanonicalResource} from './index/canonical_resource.js';
+import {recallResourcePolicyInputProof} from './index/canonical_resource.js';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {
+  RecallReadyReadBoundary,
+  recallReadyReadRequestSchema,
+  recallIndexStatusReadSchema,
+  type RecallReadyReadRequest,
+  type RecallReadyReadResponse,
+} from './read_boundary.js';
 
 export {recallUriMatchesScopes} from './index/scope.js';
 
@@ -116,11 +137,21 @@ class RecallIndexOperationError extends Schema.TaggedError<
   RecallIndexOperationError,
   {readonly brand: unique symbol}
 >()('RecallIndexOperationError', {
+  reason: Schema.optionalKey(Schema.Literals(['invalid-protocol', 'worker-failed', 'cleanup-unconfirmed'])),
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
 
-interface RecallIndexConfig {
+/** Expected readiness gaps, distinct from unexpected storage or query failures. */
+export class RecallReadyReadUnavailable extends Schema.TaggedError<
+  RecallReadyReadUnavailable,
+  {readonly brand: unique symbol}
+>()('RecallReadyReadUnavailable', {
+  reason: Schema.optionalKey(Schema.Literal('budget-exhausted')),
+  message: Schema.String,
+}) {}
+
+export interface RecallIndexConfig {
   readonly account: string;
   readonly agentContextHome: string;
   readonly manifestPath?: string;
@@ -133,6 +164,7 @@ export interface RecallIndexData {
   readonly generation: string;
   /** True only when the query selection proves that no matching candidate was truncated. */
   readonly queryExhaustive: boolean;
+  readonly readState?: RecallReadyReadState;
   /** Independent canonical-timestamp lane; callers must still apply normal topical ranking. */
   readonly recentCandidates?: readonly RecallCandidate[];
 }
@@ -181,11 +213,6 @@ interface RecallDocumentRow {
   readonly uri: string;
 }
 
-interface RecallMetadataRow {
-  readonly key: string;
-  readonly value: string;
-}
-
 interface RecallTermStatisticRow {
   readonly document_frequency: number;
   readonly term: string;
@@ -195,7 +222,6 @@ const RECALL_INDEX_DATABASE_VERSION = 13;
 const RECALL_INDEX_POINTER_VERSION = 1;
 const ACTIVE_DATABASE_FILENAME = `active-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
 const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSION}.sqlite`;
-const DEFAULT_QUERY_RESULT_LIMIT = 100;
 const QUERY_POSTING_POOL_MULTIPLIER = 5;
 const MINIMUM_QUERY_POSTING_POOL = 500;
 let staleGenerationCounter = 0;
@@ -221,7 +247,18 @@ class RecallIndexSchemaIncompatible extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
-interface LoadRecallIndexOptions {
+export interface RecallReadyReadState {
+  readonly freshness: 'current' | 'stale';
+  readonly maintenance: 'unneeded' | 'queued' | 'unavailable';
+}
+
+interface RecallReadOptions {
+  /** Internal: never initialize, recover, or refresh the shared database. */
+  readonly readyOnly?: boolean;
+  readonly onReadState?: (state: RecallReadyReadState) => void;
+}
+
+interface LoadRecallIndexOptions extends RecallReadOptions {
   readonly allowedUriScopes?: readonly string[];
   readonly eligibility?: RecallEligibilityPolicy;
   readonly forceRefresh?: boolean;
@@ -242,14 +279,14 @@ interface LoadRecallIndexOptions {
   readonly workspaceScopeMode?: RecallWorkspaceScopeMode;
 }
 
-interface LoadRecallIndexBatchOptions {
+interface LoadRecallIndexBatchOptions extends RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
   readonly selections: readonly Omit<LoadRecallIndexOptions, 'forceRefresh' | 'includeInactive' | 'validateNow'>[];
 }
 
-interface LoadRecallExactMatchesOptions {
+interface LoadRecallExactMatchesOptions extends RecallReadOptions {
   readonly eligibility?: RecallEligibilityPolicy;
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
@@ -259,13 +296,13 @@ interface LoadRecallExactMatchesOptions {
   readonly uriScopes: readonly string[];
 }
 
-export interface LoadRecallCodeLinksOptions extends RecallCodeLinkQueryOptions {
+export interface LoadRecallCodeLinksOptions extends RecallCodeLinkQueryOptions, RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
 }
 
-export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptions {
+export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptions, RecallReadOptions {
   readonly forceRefresh?: boolean;
   readonly includeInactive: boolean;
   readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
@@ -273,25 +310,62 @@ export interface LoadRecallMemoryLinksOptions extends RecallMemoryLinkQueryOptio
   readonly onRefreshRepair?: () => void;
 }
 
+export type RecallIndexReadQuery =
+  | LoadRecallCodeLinksOptions
+  | LoadRecallMemoryLinksOptions
+  | LoadRecallIndexOptions
+  | LoadRecallIndexBatchOptions
+  | LoadRecallExactMatchesOptions;
+export type RecallIndexSelection = LoadRecallIndexOptions;
+
 const loadRecallIndexDataInternal = Effect.fn('recall.loadIndexDataInternal')(function* (
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
+  options: RecallIndexReadQuery,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
+  if (!options.readyOnly)
+    yield* fs.makeDirectory(
+      pathService.dirname(recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive)),
+      {recursive: true, mode: 0o700},
+    );
+  config = {...config, agentContextHome: yield* fs.realPath(config.agentContextHome)};
   const fixedDatabasePath = recallIndexDatabasePath(pathService, config.agentContextHome, options.includeInactive);
-  yield* fs.makeDirectory(pathService.dirname(fixedDatabasePath), {recursive: true, mode: 0o700});
   const databasePath = yield* resolveActiveRecallDatabasePath(
     fs,
     pathService,
     config.agentContextHome,
     options.includeInactive,
   );
+  if (options.readyOnly) {
+    const maintenance = makeReadyRecallMaintenance({...config, includeInactive: options.includeInactive});
+    return yield* Effect.gen(function* () {
+      if (!(yield* fs.exists(databasePath))) {
+        yield* maintenance.missing(databasePath, RECALL_INDEX_DATABASE_VERSION);
+        return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+      }
+      return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options, undefined, maintenance);
+    }).pipe(
+      Effect.onError(maintenance.onError),
+      Effect.catchCauseIf(
+        cause => !Cause.hasInterrupts(cause),
+        cause => {
+          if (hasReadCleanupUnconfirmed(cause)) return Effect.failCause(cause);
+          const error = Cause.squash(cause);
+          return Effect.fail(
+            Schema.is(RecallReadyReadUnavailable)(error) ||
+              Schema.is(RecallReadyReadIncomplete)(error) ||
+              isRecoverableRecallIndexCause(cause)
+              ? RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'})
+              : RecallIndexOperationError.make({
+                  cause,
+                  message: 'No readable ready lexical snapshot is available.',
+                }),
+          );
+        },
+      ),
+    );
+  }
   return yield* executeRecallIndexQuery(databasePath, fixedDatabasePath, config, options).pipe(
     Effect.catchCauseIf(isRecoverableRecallIndexCause, firstCause =>
       recoverRecallIndex(fs, pathService, databasePath, fixedDatabasePath, config, options, firstCause),
@@ -303,22 +377,46 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
   databasePath: string,
   staleMarkerBasePath: string,
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
-  prepareForActivation = false,
-  indexLockHeld = false,
+  options: RecallIndexReadQuery,
+  activation: RecallIndexActivation | undefined = undefined,
+  readyMaintenance: ReturnType<typeof makeReadyRecallMaintenance> = makeReadyRecallMaintenance({
+    ...config,
+    includeInactive: options.includeInactive,
+  }),
 ) {
-  return yield* useRecallDatabase(
-    databasePath,
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* initializeRecallDatabase(sql);
-      const fs = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
+  let metadataStale = false;
+  let selectorCanonicalMismatch = false;
+  const query = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    if (!options.readyOnly) yield* initializeRecallDatabase(sql);
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    let readState: RecallReadyReadState | undefined;
+    const exactWindows: RecallReadyExactWindow[] = [];
+    if (options.readyOnly) {
+      yield* sql.unsafe('PRAGMA busy_timeout = 50');
+      const metadata = yield* loadRecallMetadata(sql);
+      if (
+        metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION) ||
+        metadata.get('initialized') !== 'true' ||
+        !metadata.get('content_generation') ||
+        !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
+        !RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata)
+      )
+        return yield* RecallIndexCorrupt.make({message: 'No compatible ready lexical snapshot is available.'});
+      const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
+      const canonical = yield* readCanonicalMutationGeneration(
+        fs,
+        pathService,
+        config.agentContextHome,
+        config.account,
+      );
+      const stale =
+        !recallInventoryPolicyIsCurrent(metadata) ||
+        recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, {}));
+      metadataStale = stale;
+      readState = {freshness: stale ? 'stale' : 'current', maintenance: 'unneeded'};
+    } else {
       yield* fs.chmod(databasePath, 0o600);
       yield* ensureRecallDatabaseFresh(
         sql,
@@ -333,41 +431,64 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
           onProgress: options.onProgress,
           validateNow: 'validateNow' in options ? options.validateNow : undefined,
         },
-        indexLockHeld,
+        activation,
       );
-      const externalResources = yield* loadExternalResourceAccess({
-        home: config.agentContextHome,
-        account: config.account,
-        user: config.user,
-      });
-      const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
-      const allowedExternalCandidate = (candidate: RecallCandidate) =>
-        !isExternalResourceUri(candidate.uri)
-          ? Effect.succeed(true)
-          : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
-              Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
-            );
-      const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy => ({
-        ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
-        externalResources,
-      });
-      const effectiveOptions =
-        'selections' in options
-          ? {
-              ...options,
-              selections: EffectArray.map(options.selections, selection => ({
-                ...selection,
-                eligibility: accessEligibility(selection.eligibility),
-              })),
-            }
-          : {...options, eligibility: accessEligibility(options.eligibility)};
-      const result = yield* 'anchors' in effectiveOptions
-        ? selectRecallCodeLinks(sql, effectiveOptions).pipe(
-            Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
-          )
-        : 'memorySeeds' in effectiveOptions
-          ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(
-              Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
+    }
+    const externalResources =
+      options.readyOnly || ('memoryIds' in options && options.memoryIds?.length === 0)
+        ? {}
+        : yield* loadExternalResourceAccess({
+            home: config.agentContextHome,
+            account: config.account,
+            user: config.user,
+          });
+    const externalLocation = {home: config.agentContextHome, account: config.account, user: config.user};
+    const allowedExternalCandidate = (candidate: RecallCandidate) =>
+      !isExternalResourceUri(candidate.uri)
+        ? Effect.succeed(true)
+        : externalResourceAccess(externalLocation, candidate.uri, undefined, candidate.contentHash).pipe(
+            Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
+          );
+    const filterUriMatches = <A>(matches: readonly A[]) =>
+      options.readyOnly
+        ? Effect.succeed(matches)
+        : filterExternalUriMatches(matches, externalLocation, externalResources);
+    const filterData = (data: RecallIndexData) =>
+      options.readyOnly ? Effect.succeed(data) : filterExternalRecallData(data, allowedExternalCandidate);
+    const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy =>
+      options.readyOnly
+        ? readyRecallSelectionPolicy(policy)
+        : {
+            ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
+            externalResources,
+          };
+    const scopedOptions =
+      'selections' in options
+        ? {
+            ...options,
+            selections: EffectArray.map(options.selections, selection => ({
+              ...selection,
+              eligibility: accessEligibility(selection.eligibility),
+            })),
+          }
+        : {...options, eligibility: accessEligibility(options.eligibility)};
+    const effectiveOptions =
+      'memorySeeds' in scopedOptions
+        ? {
+            ...scopedOptions,
+            onCanonicalMismatch: (count: number) => {
+              selectorCanonicalMismatch ||= count > 0;
+              scopedOptions.onCanonicalMismatch?.(count);
+            },
+          }
+        : scopedOptions;
+    let result: unknown = yield* 'anchors' in effectiveOptions
+      ? selectRecallCodeLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
+      : 'memorySeeds' in effectiveOptions
+        ? selectRecallMemoryLinks(sql, effectiveOptions).pipe(Effect.flatMap(filterUriMatches))
+        : 'terms' in effectiveOptions
+          ? selectRecallExactMatches(sql, effectiveOptions, options.readyOnly ? exactWindows : undefined).pipe(
+              Effect.flatMap(filterUriMatches),
             )
           : Effect.gen(function* () {
               const metadata = yield* loadRecallMetadata(sql);
@@ -383,32 +504,82 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
                   loadIdentityConflicts,
                   metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
                 );
-              return 'terms' in effectiveOptions
-                ? yield* selectRecallExactMatches(sql, effectiveOptions).pipe(
-                    Effect.flatMap(matches => filterExternalUriMatches(matches, externalLocation, externalResources)),
+              return 'selections' in effectiveOptions
+                ? yield* Effect.forEach(
+                    effectiveOptions.selections,
+                    selection =>
+                      selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
+                        Effect.flatMap(filterData),
+                      ),
+                    {concurrency: 1},
                   )
-                : 'selections' in effectiveOptions
-                  ? yield* Effect.forEach(
-                      effectiveOptions.selections,
-                      selection =>
-                        selectData({...selection, includeInactive: effectiveOptions.includeInactive}).pipe(
-                          Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
-                        ),
-                      {concurrency: 1},
-                    )
-                  : yield* selectData(effectiveOptions).pipe(
-                      Effect.flatMap(data => filterExternalRecallData(data, allowedExternalCandidate)),
-                    );
+                : yield* selectData(effectiveOptions).pipe(Effect.flatMap(filterData));
             });
-      const finalResult = result;
-      if (prepareForActivation) {
-        yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
-        yield* sql.unsafe('PRAGMA journal_mode = DELETE');
-      }
-      return finalResult;
-    }),
-    !prepareForActivation,
+    if (options.readyOnly) {
+      const validated = yield* validateRecallReadyResult(
+        sql,
+        config,
+        options,
+        result,
+        decodeCandidateRow,
+        exactWindows,
+      );
+      result = validated.result;
+      if (validated.reconcileNeeded || selectorCanonicalMismatch || metadataStale) {
+        const maintenance = yield* readyMaintenance.request(validated.reconcileNeeded || selectorCanonicalMismatch);
+        readState = {freshness: 'stale', maintenance};
+      } else if (validated.unverified) readState = {freshness: 'stale', maintenance: 'unavailable'};
+      if (readState) options.onReadState?.(readState);
+    }
+    const withState = (data: RecallIndexData) => (readState ? {...data, readState} : data);
+    const finalResult =
+      'selections' in options
+        ? EffectArray.map(recallIndexDataBatchResult(result), withState)
+        : 'terms' in options || 'anchors' in options || 'memorySeeds' in options
+          ? result
+          : withState(recallIndexDataResult(result));
+    return finalResult;
+  });
+  const runQuery = (
+    options.readyOnly
+      ? useRecallDatabaseReadOnly(databasePath, query)
+      : useRecallDatabase(databasePath, query, activation === undefined)
+  ).pipe(
+    Effect.onError(cause =>
+      options.readyOnly && selectorCanonicalMismatch && !Cause.hasInterrupts(cause)
+        ? readyMaintenance.request(true).pipe(Effect.asVoid)
+        : Effect.void,
+    ),
+    Effect.mapError(error =>
+      Schema.is(RecallReadyReadIncomplete)(error) ? retainReadyRecallMaintenance(error, metadataStale) : error,
+    ),
   );
+  const result = yield* runQuery;
+  if (!activation) return result;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* withVerifiedRecallIndexActivation(
+    fs,
+    path,
+    config,
+    options.includeInactive,
+    {
+      lockPath: recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+      databasePath,
+      activeDatabasePath: activation.expectedActiveDatabasePath,
+      staleMarkerBasePath,
+      pointerPath: recallIndexPointerPath(path, config.agentContextHome, options.includeInactive),
+    },
+    activation.publication,
+    writeActiveRecallDatabasePointer(
+      fs,
+      path,
+      config.agentContextHome,
+      options.includeInactive,
+      activation.relativeDatabasePath,
+    ),
+  );
+  return result;
 });
 
 const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
@@ -417,61 +588,47 @@ const recoverRecallIndex = Effect.fn('recall.recoverIndex')(function* (
   failedDatabasePath: string,
   staleMarkerBasePath: string,
   config: RecallIndexConfig,
-  options:
-    | LoadRecallCodeLinksOptions
-    | LoadRecallMemoryLinksOptions
-    | LoadRecallIndexOptions
-    | LoadRecallIndexBatchOptions
-    | LoadRecallExactMatchesOptions,
+  options: RecallIndexReadQuery,
   firstCause: Cause.Cause<unknown>,
 ) {
-  return yield* withRecallIndexLock(fs, path, config.agentContextHome, options.includeInactive, () =>
-    Effect.gen(function* () {
-      const activePath = yield* resolveActiveRecallDatabasePath(
-        fs,
-        path,
-        config.agentContextHome,
-        options.includeInactive,
-      );
-      if (activePath !== failedDatabasePath) {
-        return yield* executeRecallIndexQuery(activePath, staleMarkerBasePath, config, options);
-      }
-      const system = yield* SystemInfo;
-      const generation = `${yield* Clock.currentTimeMillis}-${system.processId}-${nextRecallGenerationCounter()}`;
-      const root = recallIndexRoot(path, config.agentContextHome);
-      const relativeDatabasePath = path.join(
-        'generations',
-        `${options.includeInactive ? 'with-inactive' : 'active'}-${generation}.sqlite`,
-      );
-      const replacementPath = path.join(root, relativeDatabasePath);
-      yield* fs.makeDirectory(path.dirname(replacementPath), {recursive: true, mode: 0o700});
-      const replacementOptions = {...options, forceRefresh: true};
-      const rebuilt = yield* executeRecallIndexQuery(
-        replacementPath,
-        staleMarkerBasePath,
-        config,
-        replacementOptions,
-        true,
-        true,
-      ).pipe(
-        Effect.catchCause(secondCause =>
-          Effect.fail(
-            RecallIndexOperationError.make({
-              message: `Lexical recall index recovery failed: ${Cause.pretty(firstCause)}; replacement failed: ${Cause.pretty(secondCause)}`,
-            }),
-          ),
+  const activePath = yield* withRecallIndexLock(
+    fs,
+    recallIndexLockPath(path, config.agentContextHome, options.includeInactive),
+    () => resolveActiveRecallDatabasePath(fs, path, config.agentContextHome, options.includeInactive),
+  );
+  if (activePath !== failedDatabasePath)
+    return yield* executeRecallIndexQuery(activePath, staleMarkerBasePath, config, options);
+  const system = yield* SystemInfo;
+  const generation = `${yield* Clock.currentTimeMillis}-${system.processId}-${nextRecallGenerationCounter()}`;
+  const relativeDatabasePath = path.join(
+    'generations',
+    `${options.includeInactive ? 'with-inactive' : 'active'}-${generation}.sqlite`,
+  );
+  const replacementPath = path.join(recallIndexRoot(path, config.agentContextHome), relativeDatabasePath);
+  yield* fs.makeDirectory(path.dirname(replacementPath), {recursive: true, mode: 0o700});
+  return yield* executeRecallIndexQuery(
+    replacementPath,
+    staleMarkerBasePath,
+    config,
+    {...options, forceRefresh: true},
+    {
+      expectedActiveDatabasePath: failedDatabasePath,
+      relativeDatabasePath,
+    },
+  ).pipe(
+    normalizeRecallIdentityPreparation,
+    Effect.catchCauseIf(
+      secondCause =>
+        !Cause.hasInterrupts(secondCause) &&
+        !Schema.is(RecallIdentityAdmissionBusy)(Cause.squash(secondCause)) &&
+        !Schema.is(RecallIndexSourceChanged)(Cause.squash(secondCause)),
+      secondCause =>
+        Effect.fail(
+          RecallIndexOperationError.make({
+            message: `Lexical recall index recovery failed: ${Cause.pretty(firstCause)}; replacement failed: ${Cause.pretty(secondCause)}`,
+          }),
         ),
-        Effect.ensuring(removeRecallDatabaseAuxiliaryFiles(fs, replacementPath).pipe(Effect.ignore)),
-      );
-      yield* writeActiveRecallDatabasePointer(
-        fs,
-        path,
-        config.agentContextHome,
-        options.includeInactive,
-        relativeDatabasePath,
-      );
-      return rebuilt;
-    }),
+    ),
   );
 });
 
@@ -509,9 +666,44 @@ export const loadRecallMemoryIdentities = Effect.fn('recall.loadMemoryIdentities
     includeInactive: false,
     memoryIds: options.memoryIds,
     validateNow: options.validateNow,
-  });
+  }).pipe(normalizeRecallIdentityPreparation);
   return data.candidates;
 });
+
+export {RecallIdentityAdmissionBusy, withRecallIdentityPreparation} from './index/admission.js';
+
+/** Prepare outside memory locks; consume the check once under the canonical account mutation fence. */
+export function withRecallIdentityAdmission<A, E, R, E2, R2>(
+  config: RecallIndexConfig,
+  prepare: Effect.Effect<void, E, R>,
+  use: (check: Effect.Effect<void, unknown, FileSystem.FileSystem | Path.Path>) => Effect.Effect<A, E2, R2>,
+) {
+  const location = {...config};
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* withPreparedRecallIdentityAdmission(
+      loadRecallMemoryIdentities(location, {allowedUriScopes: [], memoryIds: []}).pipe(Effect.asVoid),
+      readRecallIdentityAdmissionCut({
+        account: location.account,
+        home: location.agentContextHome,
+        databasePath: resolveActiveRecallDatabasePath(fs, path, location.agentContextHome, false),
+        pointerPath: recallIndexPointerPath(path, location.agentContextHome, false),
+        fixedDatabasePath: recallIndexDatabasePath(path, location.agentContextHome, false),
+        schemaVersion: RECALL_INDEX_DATABASE_VERSION,
+        logicalScope: recallLogicalScope(location, false),
+      }),
+      prepare,
+      check =>
+        withRecallIndexLock(
+          fs,
+          recallIndexLockPath(path, location.agentContextHome, false),
+          () => use(check),
+          location.account,
+        ),
+    );
+  });
+}
 
 export const loadRecallExactMatches = Effect.fn('recall.loadExactMatches')(function* (
   config: RecallIndexConfig,
@@ -538,7 +730,7 @@ export const loadRecallCodeLinks = Effect.fn('recall.loadCodeLinks')(function* (
       },
     }),
   );
-  if (options.forceRefresh === true || canonicalMismatchCount === 0) {
+  if (options.readyOnly || options.forceRefresh === true || canonicalMismatchCount === 0) {
     if (truncatedSelectorCount > 0) options.onSearchTruncated?.(truncatedSelectorCount);
     return first;
   }
@@ -574,7 +766,7 @@ export const loadRecallMemoryLinks = Effect.fn('recall.loadMemoryLinks')(functio
       },
     }),
   );
-  if (options.forceRefresh === true || canonicalMismatchCount === 0) {
+  if (options.readyOnly || options.forceRefresh === true || canonicalMismatchCount === 0) {
     if (truncatedSeedOrdinals.length > 0) options.onSearchTruncated?.(truncatedSeedOrdinals);
     return first;
   }
@@ -597,7 +789,266 @@ export const loadRecallMemoryLinks = Effect.fn('recall.loadMemoryLinks')(functio
   return refreshed;
 });
 
-export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
+/** Ordinary recall must use these readers. Legacy loaders are maintenance boundaries. */
+export const readRecallIndexData = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallIndexOptions, 'forceRefresh' | 'readyOnly'>,
+) =>
+  throughReadyReadBoundary(
+    'data',
+    config,
+    options,
+    loadRecallIndexData(config, {...options, readyOnly: true}),
+    readyBoundaryData,
+  );
+
+/** An absent lexical directory cannot contain either a fixed or a published ready snapshot. */
+export const requestMissingRecallReadyDirectory = Effect.fn('recall.requestMissingReadyDirectory')(
+  function* (config: RecallIndexConfig, includeInactive: boolean) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const scope = {...config, includeInactive};
+    if (!path.isAbsolute(config.agentContextHome) || !recallLexicalScopeIsValid(path, scope)) return false;
+    const home = yield* fs.realPath(config.agentContextHome).pipe(Effect.option);
+    if (Option.isNone(home) || (yield* fs.stat(home.value)).type !== 'Directory') return false;
+    const directory = recallIndexRoot(path, home.value);
+    const absent = yield* fs.stat(directory).pipe(
+      Effect.as(false),
+      Effect.catchTag('PlatformError', error =>
+        error.reason._tag !== 'NotFound'
+          ? Effect.succeed(false)
+          : fs.lstat(directory).pipe(
+              // stat follows a dangling symlink. Only a missing entry qualifies;
+              // every existing entry and unknown observation uses the native reader.
+              Effect.as(false),
+              Effect.catchTag('PlatformError', entryError => Effect.succeed(entryError.reason._tag === 'NotFound')),
+            ),
+      ),
+    );
+    if (!absent) return false;
+    yield* makeReadyRecallMaintenance({...scope, agentContextHome: home.value}).missing(
+      recallIndexDatabasePath(path, home.value, includeInactive),
+      RECALL_INDEX_DATABASE_VERSION,
+    );
+    return true;
+  },
+  effect =>
+    effect.pipe(
+      withReadyRecallMaintenanceScope,
+      Effect.catchCause(cause => (Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(false))),
+    ),
+);
+
+export const readRecallIndexDataBatch = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallIndexBatchOptions, 'forceRefresh' | 'readyOnly'>,
+) =>
+  options.selections.length === 0
+    ? Effect.succeed([])
+    : throughReadyReadBoundary(
+        'batch',
+        config,
+        options,
+        loadRecallIndexDataBatch(config, {...options, readyOnly: true}),
+        value => EffectArray.map(recallIndexDataBatchResult(value), readyBoundaryData),
+      );
+export const readRecallExactMatches = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallExactMatchesOptions, 'forceRefresh' | 'readyOnly'>,
+) =>
+  throughReadyReadBoundary(
+    'exact',
+    config,
+    options,
+    loadRecallExactMatches(config, {...options, readyOnly: true}),
+    recallExactMatchesResult,
+  );
+export const readRecallCodeLinks = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallCodeLinksOptions, 'forceRefresh' | 'readyOnly'>,
+) =>
+  throughReadyReadBoundary(
+    'code-links',
+    config,
+    options,
+    loadRecallCodeLinks(config, {...options, readyOnly: true}),
+    recallCodeLinkMatchesResult,
+  );
+export const readRecallMemoryLinks = (
+  config: RecallIndexConfig,
+  options: Omit<LoadRecallMemoryLinksOptions, 'forceRefresh' | 'readyOnly'>,
+) =>
+  throughReadyReadBoundary(
+    'memory-links',
+    config,
+    options,
+    loadRecallMemoryLinks(config, {...options, readyOnly: true}),
+    recallMemoryLinkMatchesResult,
+  );
+export const readRecallMemoryIdentities = (
+  config: RecallIndexConfig,
+  options: Parameters<typeof loadRecallMemoryIdentities>[1],
+) =>
+  readRecallIndexData(config, {...options, includeInactive: false}).pipe(
+    Effect.flatMap(data =>
+      data.readState?.freshness === 'stale'
+        ? Effect.fail(
+            RecallReadyReadUnavailable.make({
+              message: 'Stable identity resolution requires a current lexical snapshot.',
+            }),
+          )
+        : Effect.succeed(data.candidates),
+    ),
+  );
+
+function readyBoundaryData(value: unknown): RecallIndexData {
+  const data = recallIndexDataResult(value);
+  if (
+    data.readState === undefined ||
+    !['current', 'stale'].includes(data.readState.freshness) ||
+    !['unneeded', 'queued', 'unavailable'].includes(data.readState.maintenance) ||
+    !EffectArray.every([...data.candidates, ...(data.recentCandidates ?? [])], recallCandidateIsValid) ||
+    !EffectArray.every(
+      [
+        data.corpusStatistics.averageDocumentLength,
+        data.corpusStatistics.documentCount,
+        data.corpusStatistics.totalDocumentLength,
+      ],
+      value => typeof value === 'number' && Number.isFinite(value) && value >= 0,
+    ) ||
+    !Predicate.isObject(data.corpusStatistics.documentFrequency) ||
+    !EffectArray.every(
+      EffectRecord.values(data.corpusStatistics.documentFrequency),
+      value => typeof value === 'number' && Number.isFinite(value) && value >= 0,
+    )
+  )
+    throw RecallIndexOperationError.make({message: 'Ready lexical worker returned an invalid data result.'});
+  return data;
+}
+
+/** A worker returns only fully authorized ready results, then the original callback boundary is replayed. */
+function throughReadyReadBoundary<A, E, R>(
+  operation: RecallReadyReadRequest['operation'],
+  config: RecallIndexConfig,
+  options: RecallIndexReadQuery,
+  direct: Effect.Effect<A, E, R>,
+  decode: (value: unknown) => A,
+) {
+  return Effect.gen(function* () {
+    const boundary = yield* Effect.serviceOption(RecallReadyReadBoundary);
+    if (Option.isNone(boundary)) return yield* direct;
+    const invalid = () =>
+      RecallIndexOperationError.make({
+        reason: 'invalid-protocol',
+        message: 'Ready lexical worker protocol is invalid.',
+      });
+    const wireValue = yield* Effect.try({
+      try: () =>
+        JSON.parse(
+          JSON.stringify({
+            operation,
+            config: {
+              account: config.account,
+              agentContextHome: config.agentContextHome,
+              manifestPath: config.manifestPath,
+              user: config.user,
+            },
+            options,
+          }),
+        ),
+      catch: invalid,
+    });
+    const request = yield* Schema.decodeUnknownEffect(recallReadyReadRequestSchema, {onExcessProperty: 'error'})(
+      wireValue,
+    ).pipe(Effect.mapError(invalid));
+    const response = yield* boundary.value.read(request).pipe(
+      Effect.mapError(error =>
+        error.reason === 'budget-exhausted'
+          ? RecallReadyReadUnavailable.make({
+              reason: 'budget-exhausted',
+              message: 'The lexical read budget is exhausted.',
+            })
+          : RecallIndexOperationError.make({reason: error.reason, message: 'The ready lexical worker failed.'}),
+      ),
+    );
+    if (response.operation !== operation) return yield* invalid();
+    yield* replayReadyReadObservations(response, options);
+    if (response.outcome === 'unavailable')
+      return yield* RecallReadyReadUnavailable.make({message: 'No readable ready lexical snapshot is available.'});
+    if (response.outcome !== 'success')
+      return yield* RecallIndexOperationError.make({
+        reason: 'worker-failed',
+        message: 'The ready lexical worker read failed.',
+      });
+    return yield* Effect.try({try: () => decode(response.value), catch: invalid});
+  });
+}
+
+const replayReadyReadObservations = Effect.fn('recall.replayReadyReadObservations')(function* (
+  response: RecallReadyReadResponse,
+  options: RecallIndexReadQuery,
+) {
+  for (const observation of response.observations) {
+    switch (observation.kind) {
+      case 'state':
+        options.onReadState?.(observation.value);
+        break;
+      case 'query': {
+        const selected =
+          'selections' in options && observation.selectionOrdinal !== undefined
+            ? options.selections[observation.selectionOrdinal]
+            : options;
+        if (selected && 'onQueryDiagnostics' in selected && selected.onQueryDiagnostics)
+          yield* selected.onQueryDiagnostics(observation.value);
+        break;
+      }
+      case 'mismatch':
+        if ('onCanonicalMismatch' in options) options.onCanonicalMismatch?.(observation.value);
+        break;
+      case 'code-truncated':
+        if ('anchors' in options) options.onSearchTruncated?.(observation.value);
+        break;
+      case 'memory-truncated':
+        if ('memorySeeds' in options) options.onSearchTruncated?.(observation.value);
+        break;
+      case 'reread':
+        if ('memorySeeds' in options) options.onCanonicalReread?.(observation.value);
+        break;
+      case 'rows':
+        if ('memorySeeds' in options) options.onRawRows?.(observation.value);
+        break;
+      case 'records':
+        if ('memorySeeds' in options && options.onCanonicalRecords) {
+          const records = EffectArray.map(observation.value, value => {
+            const record = parseMemoryDocument(value.uri, value.content);
+            if (!record)
+              throw RecallIndexOperationError.make({
+                message: 'Ready lexical worker returned an invalid canonical record.',
+              });
+            return record;
+          });
+          options.onCanonicalRecords(records);
+        }
+        break;
+    }
+  }
+});
+
+/** Negative optional-inference hint only; this is never a ready/content/permission proof. */
+export const readRecallPublishedGenerationHint = Effect.fn('recall.publishedGenerationHint')(function* (
+  config: RecallIndexConfig,
+) {
+  const path = yield* Path.Path;
+  return yield* readRecallPublishedMetadataHint({
+    root: recallIndexRoot(path, config.agentContextHome),
+    pointer: recallIndexPointerPath(path, config.agentContextHome, false),
+    fixed: recallIndexDatabasePath(path, config.agentContextHome, false),
+    pointerVersion: RECALL_INDEX_POINTER_VERSION,
+    schemaVersion: RECALL_INDEX_DATABASE_VERSION,
+  });
+});
+
+const directRecallIndexStatus = Effect.fn('recall.indexStatus')(function* (
   config: RecallIndexConfig,
   includeInactive = false,
 ) {
@@ -642,6 +1093,21 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
           reason: 'integrity sequence mismatch; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
+      if (!recallScopeIsCurrent(metadata, config, includeInactive))
+        return {
+          databasePath,
+          documentCount: 0,
+          ready: false,
+          reason: RECALL_LOGICAL_SCOPE_CHANGED_REASON,
+        } satisfies RecallIndexStatus;
+      if (!recallInventoryPolicyIsCurrent(metadata))
+        return {
+          databasePath,
+          documentCount: numericMetadata(metadata, 'document_count'),
+          generation: metadata.get('content_generation'),
+          ready: false,
+          reason: RECALL_INVENTORY_POLICY_CHANGED_REASON,
+        } satisfies RecallIndexStatus;
       const canonicalMutationGeneration = yield* readCanonicalMutationGeneration(
         fs,
         path,
@@ -667,7 +1133,9 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
           reason: 'canonical documents changed; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
-      const rows = yield* sql<{readonly document_count: number}>`SELECT COUNT(*) AS document_count FROM documents`;
+      const rows = yield* sql<{
+        readonly document_count: number;
+      }>`SELECT COUNT(*) AS document_count FROM documents`;
       const documentCount = Number(rows[0]?.document_count ?? 0);
       if (!Number.isSafeInteger(documentCount) || documentCount < 0) {
         return {
@@ -714,12 +1182,31 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
   );
 });
 
-export const currentRecallCorpusGeneration = Effect.fn('recall.currentCorpusGeneration')(function* (
+/** Ordinary read admission also owns metadata/status SQLite work used by optional query inference. */
+export const recallIndexStatus = (config: RecallIndexConfig, includeInactive = false) =>
+  throughReadyReadBoundary(
+    'status',
+    config,
+    {includeInactive},
+    directRecallIndexStatus(config, includeInactive),
+    value => Schema.decodeUnknownSync(recallIndexStatusReadSchema)(value),
+  );
+
+const directCurrentRecallCorpusGeneration = Effect.fn('recall.currentCorpusGeneration')(function* (
   config: RecallIndexConfig,
 ) {
   const status = yield* recallIndexStatus(config, false);
   return status.ready ? Option.fromUndefinedOr(status.generation) : Option.none<string>();
 });
+
+export const currentRecallCorpusGeneration = (config: RecallIndexConfig) =>
+  throughReadyReadBoundary(
+    'generation',
+    config,
+    {includeInactive: false},
+    directCurrentRecallCorpusGeneration(config),
+    value => Option.fromNullishOr(Schema.decodeUnknownSync(Schema.NullOr(Schema.String))(value)),
+  );
 
 export const clearRecallIndexMemoryCache = Effect.fn('recall.clearMemoryCache')(function* () {
   // SQLite owns its page cache and every operation uses a scoped connection.
@@ -747,6 +1234,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   loadIdentityConflicts: ReturnType<typeof RecallIndexIdentity.createRecallIdentityConflictLoader>,
   physicalDocumentCount?: number,
 ) {
+  const readySelection = recallSelectionDefersExternalAuthorization(options.eligibility);
   if (options.query === undefined) {
     const rows =
       options.memoryIds !== undefined
@@ -755,20 +1243,27 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
             [...new Set(options.memoryIds)].sort(),
             options.allowedUriScopes,
             options.eligibility,
+            readySelection ? MAX_READY_RECALL_SOURCE_CHECKS + 1 : undefined,
           )
-        : options.allowedUriScopes?.length ||
+        : readySelection ||
+            options.allowedUriScopes?.length ||
             recallEligibilityPolicyRestrictsCandidates(options.eligibility) ||
             options.limit !== undefined ||
             options.project !== undefined ||
             options.workspaceScope !== undefined
-          ? yield* selectRecallDocumentSample(sql, options)
+          ? yield* selectRecallDocumentSample(
+              sql,
+              readySelection ? {...options, limit: options.limit ?? DEFAULT_QUERY_RESULT_LIMIT} : options,
+            )
           : yield* sql<RecallDocumentRow>`SELECT id, uri, candidate_json FROM documents ORDER BY uri`;
-    const logicalCandidates = deduplicateLogicalRecallCandidates(
-      EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
-        recallIndexCandidateIsEligible(options.eligibility, candidate),
-      ),
+    if (readySelection && rows.length > MAX_READY_RECALL_SOURCE_CHECKS)
+      return yield* RecallReadyReadIncomplete.make({message: 'Ready identity selection exceeds its bounded window.'});
+    const selected = EffectArray.filter(EffectArray.map(rows, decodeCandidateRow), candidate =>
+      recallIndexCandidateIsEligible(options.eligibility, candidate),
     );
-    const candidates = options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
+    const logicalCandidates = readySelection ? selected : deduplicateLogicalRecallCandidates(selected);
+    const candidates =
+      readySelection || options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
     const identityConflicts = yield* loadIdentityConflicts(
       options.allowedUriScopes,
       options.eligibility,
@@ -778,7 +1273,11 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
       candidates: RecallIndexIdentity.markRecallIdentityConflicts(candidates, identityConflicts),
       corpusStatistics,
       generation,
-      queryExhaustive: options.memoryIds !== undefined || options.limit === undefined,
+      queryExhaustive:
+        options.memoryIds !== undefined ||
+        (readySelection
+          ? rows.length < boundedRecallPhysicalCandidateLimit(options.limit ?? DEFAULT_QUERY_RESULT_LIMIT)
+          : options.limit === undefined),
     } satisfies RecallIndexData;
   }
   const selected: RecallCandidate[] = [];
@@ -889,7 +1388,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
       }
     }
   }
-  const deduplicated = deduplicateLogicalRecallCandidates(selected);
+  const deduplicated = readySelection ? selected : deduplicateLogicalRecallCandidates(selected);
   const requiredUriSet = new Set(requiredUris);
   const requiredCandidates = EffectArray.filter(
     deduplicated,
@@ -901,11 +1400,13 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   );
   const rankedCandidates = EffectArray.filter(deduplicated, candidate => !requiredCandidates.includes(candidate)).slice(
     0,
-    resultLimit,
+    readySelection ? candidateDecodeLimit : resultLimit,
   );
   const candidates = [...requiredCandidates, ...rankedCandidates];
   const recentCandidates = EffectArrayPipe(
-    deduplicateLogicalRecallCandidates(EffectArray.map(recentRows, decodeCandidateRow)),
+    readySelection
+      ? EffectArray.map(recentRows, decodeCandidateRow)
+      : deduplicateLogicalRecallCandidates(EffectArray.map(recentRows, decodeCandidateRow)),
     __effectArrayValues =>
       EffectArray.filter(
         __effectArrayValues,
@@ -930,7 +1431,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
     postingTerms: EffectArray.map(postingRows, posting => posting.term),
     queryTerms,
     rankedDocumentCount: rankedIds.length,
-    resultLimit,
+    resultLimit: readySelection ? candidateDecodeLimit : resultLimit,
   });
   const identityConflicts = yield* loadIdentityConflicts(
     options.allowedUriScopes,
@@ -951,30 +1452,26 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
 const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function* (
   sql: SqlClient.SqlClient,
   options: LoadRecallExactMatchesOptions,
+  readyWindows?: RecallReadyExactWindow[],
 ) {
-  const terms = [
-    ...new Map(
-      EffectArray.map(
-        EffectArray.filter(
-          EffectArray.map(options.terms, term => Effect2.pipe(term, EffectString.trim)),
-          Boolean,
-        ),
-        term => [Effect2.pipe(term, EffectString.toLocaleLowerCase()), term] as const,
-      ),
-    ).values(),
-  ];
+  const terms = normalizeRecallExactTerms(options.terms);
   const scopes = [...new Set(EffectArray.map(options.uriScopes, stripRecallAnchor))];
   const limitPerTerm = Math.max(0, Math.floor(options.limitPerTerm ?? 25));
   if (terms.length === 0 || scopes.length === 0 || limitPerTerm === 0) {
     return [] satisfies readonly RecallExactMatch[];
   }
   const matchedTermsByUri = new Map<string, Set<string>>();
+  let remaining = MAX_READY_RECALL_SOURCE_CHECKS;
   for (const scopeUri of scopes) {
     const scope = combineRecallSqlPredicates(
       recallUriScopePredicate('d', [scopeUri]),
       recallEligibilityPredicate('d', options.eligibility),
     );
     for (const term of terms) {
+      if (options.readyOnly && --remaining < 0)
+        return yield* RecallReadyReadIncomplete.make({
+          message: 'Ready exact selection exceeds its bounded work window.',
+        });
       const phrase = `"${Effect2.pipe(normalizeRecallSearchText(term), EffectString.replaceAll('"', '""'))}"`;
       const rows = yield* sql.unsafe<{readonly uri: string}>(
         `SELECT d.uri
@@ -984,13 +1481,23 @@ const selectRecallExactMatches = Effect.fn('recall.selectExactMatches')(function
            AND ${scope.sql}
          ORDER BY d.uri
          LIMIT ?`,
-        [phrase, ...scope.params, limitPerTerm],
+        [phrase, ...scope.params, options.readyOnly ? boundedRecallPhysicalCandidateLimit(limitPerTerm) : limitPerTerm],
       );
       for (const row of rows) {
+        if (options.readyOnly && --remaining < 0)
+          return yield* RecallReadyReadIncomplete.make({
+            message: 'Ready exact selection exceeds its bounded work window.',
+          });
         const matched = matchedTermsByUri.get(row.uri) ?? new Set<string>();
         matched.add(term);
         matchedTermsByUri.set(row.uri, matched);
       }
+      readyWindows?.push({
+        scope: scopeUri,
+        term,
+        uris: EffectArray.map(rows, row => row.uri),
+        complete: rows.length < boundedRecallPhysicalCandidateLimit(limitPerTerm),
+      });
     }
   }
   return EffectArray.map(
@@ -1086,26 +1593,9 @@ const writeActiveRecallDatabasePointer = Effect.fn('recall.writeActiveDatabasePo
     .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
 });
 
-function useRecallDatabaseReadOnly<A, E, R>(
-  databasePath: string,
-  effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-): Effect.Effect<A, E, Exclude<R, SqlClient.SqlClient>> {
-  return Effect.scoped(
-    Layer.build(
-      SqliteClient.layer({
-        create: false,
-        disableWAL: true,
-        filename: databasePath,
-        readonly: true,
-        readwrite: false,
-      }).pipe(Layer.orDie),
-    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
-  );
-}
-
 const initializeRecallDatabase = Effect.fn('recall.initializeDatabase')(function* (sql: SqlClient.SqlClient) {
   yield* sql.unsafe('PRAGMA foreign_keys = ON');
-  yield* sql.unsafe('PRAGMA busy_timeout = 5000');
+  yield* sql.unsafe((yield* failFastIdentityPreparation) ? 'PRAGMA busy_timeout = 0' : 'PRAGMA busy_timeout = 5000');
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS metadata (
       key TEXT PRIMARY KEY NOT NULL,
@@ -1266,63 +1756,126 @@ const ensureRecallDatabaseFresh = Effect.fn('recall.ensureDatabaseFresh')(functi
     readonly onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>;
     readonly validateNow?: boolean;
   },
-  indexLockHeld = false,
+  activation?: RecallIndexActivation,
 ) {
+  const required = (metadata: ReadonlyMap<string, string>, marker: RecallStaleMarker | undefined, canonical: string) =>
+    !recallScopeIsCurrent(metadata, config, options.includeInactive) ||
+    !recallInventoryPolicyIsCurrent(metadata) ||
+    recallIndexForegroundRefreshRequired(recallIndexForegroundFreshness(metadata, marker, canonical, options));
   const metadata = yield* loadRecallMetadata(sql);
-  const staleMarker = yield* readStaleMarker(fs, staleMarkerBasePath);
-  const canonicalMutationGeneration = yield* readCanonicalMutationGeneration(
-    fs,
-    path,
-    config.agentContextHome,
-    config.account,
-  );
-  if (
-    !recallIndexForegroundRefreshRequired(
-      recallIndexForegroundFreshness(metadata, staleMarker, canonicalMutationGeneration, options),
-    )
-  ) {
-    return;
-  }
-  const refresh = withCanonicalResourceMutationLock(
-    fs,
-    path,
-    config.agentContextHome,
-    config.account,
+  const marker = yield* readStaleMarker(fs, staleMarkerBasePath);
+  const canonical = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  if (!activation && !required(metadata, marker, canonical)) return;
+  const fenced = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    withRecallIndexLock(fs, recallIndexLockPath(path, config.agentContextHome, options.includeInactive), () =>
+      withCanonicalResourceMutationLock(fs, path, config.agentContextHome, config.account, effect),
+    );
+  const capture = () =>
     Effect.gen(function* () {
-      const lockedMetadata = yield* loadRecallMetadata(sql);
-      const lockedStaleMarker = yield* readStaleMarker(fs, staleMarkerBasePath);
-      const lockedCanonicalMutationGeneration = yield* readCanonicalMutationGeneration(
+      const activeDatabasePath = yield* resolveActiveRecallDatabasePath(
         fs,
         path,
         config.agentContextHome,
-        config.account,
-      );
-      if (
-        !recallIndexForegroundRefreshRequired(
-          recallIndexForegroundFreshness(lockedMetadata, lockedStaleMarker, lockedCanonicalMutationGeneration, options),
-        )
-      ) {
-        return;
-      }
-      const repairLogicalCorruption =
-        lockedMetadata.get('initialized') === 'true' &&
-        !RecallIndexIdentity.recallIndexMetadataIsCurrent(lockedMetadata);
-      yield* refreshRecallDatabase(
-        sql,
-        fs,
-        path,
-        databasePath,
-        staleMarkerBasePath,
-        config,
         options.includeInactive,
-        options.forceRefresh === true || repairLogicalCorruption,
-        options.onProgress,
       );
-    }),
-  );
-  yield* indexLockHeld
-    ? refresh
-    : withRecallIndexLock(fs, path, config.agentContextHome, options.includeInactive, () => refresh);
+      if (activeDatabasePath !== (activation?.expectedActiveDatabasePath ?? databasePath))
+        return yield* recallRefreshSuperseded();
+      return yield* captureRecallRefreshCut(sql, fs, path, config, options.includeInactive, {
+        databasePath,
+        activeDatabasePath,
+        staleMarkerBasePath,
+        pointerPath: recallIndexPointerPath(path, config.agentContextHome, options.includeInactive),
+      });
+    });
+  const base = yield* fenced(capture());
+  if (!activation && !required(base.metadata, base.staleMarker, base.canonicalMutationGeneration)) return;
+  const force =
+    options.forceRefresh === true ||
+    !RecallIndexIdentity.recallIndexMetadataIsCurrent(base.metadata) ||
+    !recallInventoryPolicyIsCurrent(base.metadata);
+  yield* Effect.gen(function* () {
+    // End this read snapshot before acquiring the publication transaction. TEMP survives COMMIT.
+    const prepared = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          if (
+            recallMetadataCut(yield* loadRecallMetadata(sql)) !== recallMetadataCut(base.metadata) ||
+            (yield* recallResourcePolicyInputProof(config)) !== base.policyInputProof
+          )
+            return yield* recallRefreshSuperseded();
+          const stale = base.staleMarker;
+          const uris = new Set(stale?.invalidatedUris ?? []);
+          const external = yield* sql<{
+            readonly present: number;
+          }>`SELECT EXISTS(SELECT 1 FROM documents WHERE uri LIKE 'threadnote://resources/external/%') AS present`;
+          const touched =
+            !force &&
+            recallScopeIsCurrent(base.metadata, config, options.includeInactive) &&
+            base.policyInputProof !== undefined &&
+            base.metadata.get('source_policy_inputs') === base.policyInputProof &&
+            external[0]?.present === 0 &&
+            stale !== undefined &&
+            !stale.forceRefresh &&
+            stale.generation !== base.metadata.get('stale_generation') &&
+            uris.size > 0 &&
+            uris.size <= 1024 &&
+            EffectArray.every([...uris], uri => !isExternalResourceUri(uri)) &&
+            recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh({
+              markerCurrentGeneration: stale.canonicalMutationGeneration,
+              markerPreviousGeneration: stale.previousCanonicalMutationGeneration,
+              observedGeneration: base.canonicalMutationGeneration,
+              persistedGeneration: base.metadata.get('canonical_mutation_generation') ?? '',
+            });
+          return yield* prepareRecallDatabase(
+            sql,
+            fs,
+            path,
+            config,
+            options.includeInactive,
+            force,
+            base,
+            touched ? {kind: 'touched', contentGeneration: base.metadata.get('content_generation')!} : {kind: 'full'},
+            options.onProgress,
+          );
+        }),
+      )
+      .pipe(Effect.provideService(SqlClient.BeginTransaction, 'BEGIN DEFERRED'));
+    yield* options.onProgress?.({
+      phase: 'writing',
+      completed: 0,
+      removed: prepared.refreshCounts.removedSourceCount,
+      total: prepared.refreshCounts.changedSourceCount,
+    }) ?? Effect.void;
+    const documentCount = yield* fenced(
+      Effect.gen(function* () {
+        yield* verifyRecallSourceInputs(prepared.sourceInputs);
+        const count = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            if ((yield* capture()).seal !== base.seal) return yield* recallRefreshSuperseded();
+            return yield* publishPreparedRecallDatabase(sql, config, options.includeInactive, prepared);
+          }),
+        );
+        if (activation) {
+          yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
+          yield* sql.unsafe('PRAGMA journal_mode = DELETE');
+          yield* removeRecallDatabaseAuxiliaryFiles(fs, databasePath);
+        }
+        if (base.staleMarker && base.metadata.get('stale_generation') !== base.staleMarker.generation)
+          yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, base.staleMarker).pipe(Effect.ignore);
+        yield* fs.chmod(databasePath, 0o600);
+        yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
+        if (activation) activation.publication = {seal: (yield* capture()).seal, sourceInputs: prepared.sourceInputs};
+        return count;
+      }),
+    );
+    yield* options.onProgress?.({
+      phase: 'writing',
+      completed: prepared.refreshCounts.changedSourceCount,
+      removed: prepared.refreshCounts.removedSourceCount,
+      total: prepared.refreshCounts.changedSourceCount,
+    }) ?? Effect.void;
+    yield* options.onProgress?.({phase: 'activating', documentCount}) ?? Effect.void;
+  }).pipe(Effect.withSpan('recall.refreshDatabase'), Effect.ensuring(dropRecallSourceScan(sql).pipe(Effect.ignore)));
 });
 
 function recallIndexForegroundFreshness(
@@ -1342,371 +1895,6 @@ function recallIndexForegroundFreshness(
   };
 }
 
-const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
-  sql: SqlClient.SqlClient,
-  fs: FileSystem.FileSystem,
-  path: Path.Path,
-  databasePath: string,
-  staleMarkerBasePath: string,
-  config: RecallIndexConfig,
-  includeInactive: boolean,
-  forceRefresh: boolean,
-  onProgress?: (progress: RecallIndexProgress) => Effect.Effect<void, unknown>,
-) {
-  const staleMarker = yield* readStaleMarker(fs, staleMarkerBasePath);
-  const staleGeneration = staleMarker?.generation;
-  const canonicalMutationGeneration = yield* readCanonicalMutationGeneration(
-    fs,
-    path,
-    config.agentContextHome,
-    config.account,
-  );
-  const canonicalResourcePolicy = yield* loadCanonicalResourcePolicy(config, input =>
-    RecallIndexOperationError.make(input),
-  );
-  const previousMetadata = yield* loadRecallMetadata(sql);
-  const markerChanged = previousMetadata.get('stale_generation') !== (staleGeneration ?? '');
-  const canonicalMutationGenerationChanged =
-    (previousMetadata.get('canonical_mutation_generation') ?? '') !== canonicalMutationGeneration;
-  const canonicalMutationContinuityAllowsIncrementalRefresh =
-    recallIndexCanonicalMutationContinuityAllowsIncrementalRefresh({
-      ...(staleMarker?.canonicalMutationGeneration === undefined
-        ? {}
-        : {markerCurrentGeneration: staleMarker.canonicalMutationGeneration}),
-      ...(staleMarker?.previousCanonicalMutationGeneration === undefined
-        ? {}
-        : {markerPreviousGeneration: staleMarker.previousCanonicalMutationGeneration}),
-      observedGeneration: canonicalMutationGeneration,
-      persistedGeneration: previousMetadata.get('canonical_mutation_generation') ?? '',
-    });
-  const invalidatedUris = markerChanged ? new Set(staleMarker?.invalidatedUris ?? []) : new Set<string>();
-  const forceFromMarker = markerChanged && staleMarker?.forceRefresh === true;
-  const sourceScan = yield* scanRecallSources(
-    sql,
-    fs,
-    path,
-    config,
-    includeInactive,
-    canonicalResourcePolicy,
-    invalidatedUris,
-  );
-  const forceAllSources =
-    forceRefresh ||
-    forceFromMarker ||
-    (canonicalMutationGenerationChanged && !canonicalMutationContinuityAllowsIncrementalRefresh);
-  const refreshCounts = yield* countRecallSourceChanges(sql, forceAllSources);
-  yield* Effect.annotateCurrentSpan({
-    'recall.refresh.forceAllSources': forceAllSources,
-    'recall.refresh.forceRefresh': forceRefresh,
-    'recall.refresh.forceFromMarker': forceFromMarker,
-    'recall.refresh.canonicalMutationChanged': canonicalMutationGenerationChanged,
-    'recall.refresh.continuityAllowed': canonicalMutationContinuityAllowsIncrementalRefresh,
-    'recall.refresh.scannedSources': sourceScan.scannedSourceCount,
-    'recall.refresh.changedSources': refreshCounts.changedSourceCount,
-    'recall.refresh.removedSources': refreshCounts.removedSourceCount,
-  });
-  yield* onProgress?.({
-    completed: 0,
-    phase: 'indexing',
-    scanned: sourceScan.scannedSourceCount,
-    total: refreshCounts.changedSourceCount,
-  }) ?? Effect.void;
-  let indexedSourceCount = 0;
-  yield* forEachChangedRecallSourcePage(sql, forceAllSources, page =>
-    Effect.gen(function* () {
-      const indexedSources = yield* Effect.forEach(
-        page,
-        source =>
-          Effect.gen(function* () {
-            const content = yield* fs.readFileString(source.path);
-            const canonicalResource = yield* verifyCanonicalResource(fs, source.uri, content, canonicalResourcePolicy);
-            const memory = isExternalResourceUri(source.uri) ? undefined : parseMemoryDocument(source.uri, content);
-            const externalIdentity = parseExternalResourceIdentity(source.uri);
-            const externalManifest =
-              externalIdentity === undefined
-                ? undefined
-                : yield* readExternalDocumentManifest(
-                    {home: config.agentContextHome, account: config.account, user: config.user},
-                    externalIdentity.sourceId,
-                    externalIdentity.documentId,
-                  );
-            const candidate = indexCandidate(
-              source.uri,
-              content,
-              canonicalResource,
-              memory,
-              externalManifest?.fetchedAt,
-            );
-            const memoryLinkProjection = deriveIndexedRecallMemoryLinks(memory);
-            const postings = candidatePostings(candidate);
-            return {
-              candidate,
-              codeLinks: deriveIndexedRecallCodeLinks(memory?.metadata.codeCitations ?? []),
-              documentLength: recallDocumentTerms(candidate).length,
-              exactSearchText: recallExactSearchText(candidate),
-              memoryLinks: memoryLinkProjection.links,
-              memoryLinksTruncated: memoryLinkProjection.truncated,
-              postings,
-              source,
-            } satisfies IndexedRecallSource;
-          }),
-        {concurrency: 16},
-      );
-      yield* insertIndexedRecallSources(sql, indexedSources);
-      indexedSourceCount += indexedSources.length;
-      yield* onProgress?.({
-        completed: indexedSourceCount,
-        phase: 'indexing',
-        scanned: sourceScan.scannedSourceCount,
-        total: refreshCounts.changedSourceCount,
-      }) ?? Effect.void;
-    }),
-  ).pipe(Effect.withSpan('recall.assembleRefreshSources'));
-  const previousContentGeneration = previousMetadata.get('content_generation');
-  const contentGeneration =
-    refreshCounts.changedSourceCount === 0 && refreshCounts.removedSourceCount === 0 && previousContentGeneration
-      ? previousContentGeneration
-      : yield* hashRecallRefreshGeneration(sql, previousContentGeneration).pipe(
-          Effect.withSpan('recall.hashRefreshGeneration'),
-        );
-  const previousValidatedAt = numericMetadata(previousMetadata, 'validated_at');
-  const now = yield* Clock.currentTimeMillis;
-  yield* onProgress?.({
-    completed: 0,
-    phase: 'writing',
-    removed: refreshCounts.removedSourceCount,
-    total: refreshCounts.changedSourceCount,
-  }) ?? Effect.void;
-  const writeRefresh = sql.withTransaction(
-    Effect.gen(function* () {
-      yield* stageRecallRefreshAffectedTerms(sql);
-      yield* sql.unsafe(`
-        DELETE FROM exact_search
-        WHERE rowid IN (SELECT document_id FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE})
-      `);
-      yield* sql.unsafe(`
-        DELETE FROM documents
-        WHERE id IN (SELECT document_id FROM temp.${RECALL_REFRESH_REPLACED_DOCUMENT_TABLE})
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO documents (
-          uri,
-          project,
-          approved_authoritative,
-          workspace_scope,
-          source_path,
-          source_modified_at,
-          recorded_at,
-          source_size,
-          authority_policy_key,
-          candidate_json,
-          logical_key,
-          document_length,
-          memory_links_truncated
-        )
-        SELECT
-          indexed.uri,
-          indexed.project,
-          indexed.approved_authoritative,
-          indexed.workspace_scope,
-          source.source_path,
-          source.source_modified_at,
-          indexed.recorded_at,
-          source.source_size,
-          source.authority_policy_key,
-          indexed.candidate_json,
-          indexed.logical_key,
-          indexed.document_length,
-          indexed.memory_links_truncated
-        FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
-        INNER JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = indexed.uri
-        ORDER BY indexed.uri COLLATE BINARY
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO exact_search (rowid, content)
-        SELECT document.id, indexed.exact_search_text
-        FROM temp.${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} AS indexed
-        INNER JOIN documents AS document ON document.uri = indexed.uri
-        ORDER BY indexed.uri COLLATE BINARY
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO code_links (document_id, document_uri, citation_ordinal, selector_kind, selector_digest)
-        SELECT document.id, document.uri, code_link.citation_ordinal, code_link.selector_kind, code_link.selector_digest
-        FROM temp.${RECALL_REFRESH_INDEXED_CODE_LINK_TABLE} AS code_link
-        INNER JOIN documents AS document ON document.uri = code_link.uri
-        ORDER BY
-          document.id,
-          code_link.citation_ordinal,
-          code_link.selector_kind COLLATE BINARY,
-          code_link.selector_digest COLLATE BINARY
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO memory_links (
-          source_document_id,
-          source_uri,
-          source_memory_id,
-          target_memory_id,
-          target_locator_digest,
-          relation_type,
-          relation_origin,
-          relation_ordinal
-        )
-        SELECT
-          document.id,
-          document.uri,
-          memory_link.source_memory_id,
-          memory_link.target_memory_id,
-          memory_link.target_locator_digest,
-          memory_link.relation_type,
-          memory_link.relation_origin,
-          memory_link.relation_ordinal
-        FROM temp.${RECALL_REFRESH_INDEXED_MEMORY_LINK_TABLE} AS memory_link
-        INNER JOIN documents AS document ON document.uri = memory_link.uri
-        ORDER BY
-          document.id,
-          memory_link.relation_origin COLLATE BINARY,
-          memory_link.relation_ordinal,
-          memory_link.relation_type COLLATE BINARY,
-          memory_link.target_memory_id COLLATE BINARY,
-          memory_link.target_locator_digest COLLATE BINARY
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO postings (term, document_id, field_weight, term_frequency)
-        SELECT posting.term, document.id, posting.field_weight, posting.term_frequency
-        FROM temp.${RECALL_REFRESH_INDEXED_POSTING_TABLE} AS posting
-        INNER JOIN documents AS document ON document.uri = posting.uri
-        ORDER BY posting.term COLLATE BINARY, document.id
-      `);
-      if (refreshCounts.changedSourceCount > 0) {
-        yield* onProgress?.({
-          completed: refreshCounts.changedSourceCount,
-          phase: 'writing',
-          removed: refreshCounts.removedSourceCount,
-          total: refreshCounts.changedSourceCount,
-        }) ?? Effect.void;
-      }
-      yield* RecallIndexIdentity.rebuildRecallIdentityConflicts(sql);
-      yield* resolveLegacyRecallMemoryLinks(sql);
-      yield* sql.unsafe(`
-        DELETE FROM term_statistics
-        WHERE term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
-      `);
-      yield* sql.unsafe(`
-        INSERT INTO term_statistics (term, document_frequency)
-        SELECT posting.term, COUNT(DISTINCT document.logical_key)
-        FROM postings AS posting
-        INNER JOIN documents AS document ON document.id = posting.document_id
-        WHERE posting.term IN (SELECT term FROM temp.${RECALL_REFRESH_AFFECTED_TERM_TABLE})
-        GROUP BY posting.term
-      `);
-      const aggregate = yield* sql<{
-        readonly document_count: number;
-        readonly total_document_length: number | null;
-      }>`
-        SELECT COUNT(*) AS document_count, COALESCE(SUM(document_length), 0) AS total_document_length
-        FROM documents
-      `;
-      const documentCount = aggregate[0]?.document_count ?? 0;
-      const totalDocumentLength = aggregate[0]?.total_document_length ?? 0;
-      const logicalAggregate = yield* sql<{
-        readonly document_count: number;
-        readonly total_document_length: number | null;
-      }>`
-        SELECT COUNT(*) AS document_count, COALESCE(SUM(document_length), 0) AS total_document_length
-        FROM (
-          SELECT logical_key, MAX(document_length) AS document_length
-          FROM documents
-          GROUP BY logical_key
-        )
-      `;
-      const logicalDocumentCount = logicalAggregate[0]?.document_count ?? 0;
-      const logicalTotalDocumentLength = logicalAggregate[0]?.total_document_length ?? 0;
-      const metadataEntries = [
-        ['canonical_mutation_generation', canonicalMutationGeneration],
-        ['content_generation', contentGeneration],
-        ['document_count', String(documentCount)],
-        ['include_inactive', includeInactive ? 'true' : 'false'],
-        ['initialized', 'true'],
-        ['memory_identity_conflict_generation', contentGeneration],
-        ['logical_document_count', String(logicalDocumentCount)],
-        ['logical_total_document_length', String(logicalTotalDocumentLength)],
-        ['oversized_document_count', String(sourceScan.skippedOversizedDocumentCount)],
-        ['stale_generation', staleGeneration ?? ''],
-        ['total_document_length', String(totalDocumentLength)],
-        ['validated_at', String(Math.max(now, previousValidatedAt + 1))],
-      ] as const;
-      yield* sql.unsafe(
-        `INSERT INTO metadata (key, value) VALUES ${EffectArray.join(
-          EffectArray.map(metadataEntries, () => '(?, ?)'),
-          ', ',
-        )}
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-        metadataEntries.flat(),
-      );
-      yield* sql.unsafe(`
-        INSERT INTO metadata (key, value)
-        SELECT 'integrity_sequence', value FROM metadata WHERE key = 'mutation_sequence'
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `);
-      yield* onProgress?.({documentCount, phase: 'activating'}) ?? Effect.void;
-    }).pipe(Effect.withSpan('recall.writeRefreshBody')),
-  );
-  yield* writeRefresh.pipe(Effect.withSpan('recall.writeRefresh'));
-  yield* dropRecallSourceScan(sql);
-  yield* fs.chmod(databasePath, 0o600);
-  if (markerChanged && staleMarker) {
-    yield* clearStaleMarkerInvalidations(fs, staleMarkerBasePath, staleMarker).pipe(Effect.ignore);
-  }
-  yield* removeLegacyRecallIndexArtifacts(fs, path, config.agentContextHome, RECALL_INDEX_DATABASE_VERSION);
-});
-
-function loadRecallMetadata(sql: SqlClient.SqlClient) {
-  return sql<RecallMetadataRow>`SELECT key, value FROM metadata`.pipe(
-    Effect.map(rows => new Map(EffectArray.map(rows, row => [row.key, row.value]))),
-  );
-}
-
-function numericMetadata(metadata: ReadonlyMap<string, string>, key: string): number {
-  const value = Number(metadata.get(key) ?? '0');
-  return Number.isFinite(value) ? value : 0;
-}
-
-/**
- * Legacy URI edges retain only a locator digest. Re-resolve every such row
- * against the exact corpus staged for this database so target add/delete/move
- * operations converge with a clean rebuild even when the source is unchanged.
- */
-const resolveLegacyRecallMemoryLinks = Effect.fn('recall.resolveLegacyMemoryLinks')(function* (
-  sql: SqlClient.SqlClient,
-) {
-  const resolvedTarget = `(SELECT json_extract(target.candidate_json, '$.memoryId')
-    FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS target_source
-    INNER JOIN documents AS target ON target.uri = target_source.uri
-    WHERE target_source.uri_locator_digest = memory_links.target_locator_digest
-      AND json_type(target.candidate_json, '$.memoryId') = 'text'
-      AND COALESCE(json_extract(target.candidate_json, '$.status'), 'active') = 'active'
-      AND length(json_extract(target.candidate_json, '$.memoryId')) BETWEEN 4 AND 131
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 1, 3) = 'tn_'
-      AND substr(json_extract(target.candidate_json, '$.memoryId'), 4) NOT GLOB '*[^A-Za-z0-9_-]*'
-      AND NOT EXISTS (
-        SELECT 1 FROM memory_identity_conflicts AS conflict
-        WHERE conflict.memory_id = json_extract(target.candidate_json, '$.memoryId')
-      )
-      AND (
-        SELECT COUNT(*) FROM documents AS identity_document
-        WHERE json_extract(identity_document.candidate_json, '$.memoryId') =
-          json_extract(target.candidate_json, '$.memoryId')
-      ) = 1
-    ORDER BY target.uri COLLATE BINARY
-    LIMIT 1)`;
-  yield* sql.unsafe(`
-    UPDATE memory_links
-    SET target_memory_id = COALESCE(${resolvedTarget}, '')
-    WHERE target_locator_digest <> ''
-      AND target_memory_id <> COALESCE(${resolvedTarget}, '')
-  `);
-});
-
 const loadRecallCorpusStatistics = Effect.fn('recall.loadCorpusStatistics')(function* (
   sql: SqlClient.SqlClient,
   terms: readonly string[],
@@ -1718,7 +1906,7 @@ const loadRecallCorpusStatistics = Effect.fn('recall.loadCorpusStatistics')(func
         ? Effect.succeed<readonly RecallTermStatisticRow[]>([])
         : Effect.gen(function* () {
             const selected: RecallTermStatisticRow[] = [];
-            for (const batch of chunkValues(terms, 400)) {
+            for (const batch of chunkRecallValues(terms, 400)) {
               selected.push(
                 ...(yield* sql<RecallTermStatisticRow>`
                   SELECT term, document_frequency FROM term_statistics WHERE ${sql.in('term', batch)}
@@ -1755,44 +1943,8 @@ function decodeCandidateRow(row: RecallDocumentRow): RecallCandidate {
   return value;
 }
 
-function withRecallIndexLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  path: Path.Path,
-  home: string,
-  includeInactive: boolean,
-  effect: () => Effect.Effect<A, E, R>,
-) {
-  return withExclusiveFileLock(
-    fs,
-    path.join(home, 'locks', 'indexes', 'lexical', `${recallIndexDatabaseFilename(includeInactive)}.lock`),
-    {
-      heartbeatIntervalMilliseconds: 10_000,
-      retryIntervalMilliseconds: 100,
-      staleAfterMilliseconds: 60_000,
-      waitTimeoutMilliseconds: 120_000,
-    },
-    Effect.suspend(effect),
-  );
-}
-
-function withCanonicalResourceMutationLock<A, E, R>(
-  fs: FileSystem.FileSystem,
-  path: Path.Path,
-  home: string,
-  account: string,
-  effect: Effect.Effect<A, E, R>,
-) {
-  return withExclusiveFileLock(
-    fs,
-    resourceAccountMutationLockPath(path, home, account),
-    {
-      heartbeatIntervalMilliseconds: 10_000,
-      retryIntervalMilliseconds: 25,
-      staleAfterMilliseconds: 30_000,
-      waitTimeoutMilliseconds: 30_000,
-    },
-    effect,
-  );
+function recallIndexLockPath(path: Path.Path, home: string, includeInactive: boolean) {
+  return path.join(home, 'locks', 'indexes', 'lexical', `${recallIndexDatabaseFilename(includeInactive)}.lock`);
 }
 
 function removeRecallDatabaseAuxiliaryFiles(fs: FileSystem.FileSystem, databasePath: string) {
@@ -1815,14 +1967,6 @@ function isRecoverableRecallIndexCause(cause: Cause.Cause<unknown>): boolean {
 function nextRecallGenerationCounter(): number {
   staleGenerationCounter += 1;
   return staleGenerationCounter;
-}
-
-function chunkValues<Value>(values: readonly Value[], size: number): readonly (readonly Value[])[] {
-  const chunks: Value[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-  return chunks;
 }
 
 function filterExternalUriMatches<A>(

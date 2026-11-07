@@ -10,6 +10,9 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
+import fc from 'fast-check';
+import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as PlatformError from 'effect/PlatformError';
 import {Console, Deferred, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
@@ -68,6 +71,7 @@ import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {loadRecallIndexData} from '@threadnote/recall/index';
 import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {Option as EffectOption} from 'effect';
 
@@ -549,6 +553,26 @@ function differentGraphIdentity(value: string): string {
 
 describe('manager catalog', () => {
   const homes: string[] = [];
+  const externalTreeFixture = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-hidden-tree-'});
+    const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'denys'});
+    const resources = path.join(home, 'data', 'local', 'resources');
+    const source = path.join(resources, 'external', 'pocket', 'fixture-pocket');
+    for (const relative of [
+      'external/pocket/fixture-pocket/docs/valid.json/page.md',
+      'external/pocket/fixture-pocket/docs/extensionless/page.md',
+      'external/pocket/fixture-pocket/.access.json',
+      'agent-skills/codex-global/settings.json',
+      'agent-skills/codex-global/.keep.json',
+    ]) {
+      const filename = path.join(resources, relative);
+      yield* fs.makeDirectory(path.dirname(filename), {recursive: true});
+      yield* fs.writeFileString(filename, 'Synthetic fixture content');
+    }
+    return {fs, path, home, config, resources, source};
+  });
 
   afterEach(async () => {
     await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
@@ -666,6 +690,137 @@ describe('manager catalog', () => {
     ).pipe(provideTestLayer(BunServices.layer)),
   );
 
+  effectIt.effect('does not inspect disappearing external atomic receipt siblings', () =>
+    Effect.gen(function* () {
+      const f = yield* externalTreeFixture;
+      const expected = yield* resourcesTree(f.config);
+      const temporary = '..access.json.00000000-0000-4000-8000-000000000001.tmp';
+      const probes: string[] = [];
+      const observe = (target: string) => {
+        if (f.path.dirname(target) === f.source && EffectString.startsWith('.')(f.path.basename(target)))
+          probes.push(target);
+      };
+      const fs = FileSystem.FileSystem.of({
+        ...f.fs,
+        readDirectory: target =>
+          f.fs.readDirectory(target).pipe(Effect.map(names => (target === f.source ? [...names, temporary] : names))),
+        readLink: target => Effect.sync(() => observe(target)).pipe(Effect.andThen(f.fs.readLink(target))),
+        stat: target => Effect.sync(() => observe(target)).pipe(Effect.andThen(f.fs.stat(target))),
+      });
+      const actual = yield* resourcesTree(f.config).pipe(Effect.provideService(FileSystem.FileSystem, fs));
+      expect(actual).toEqual(expected);
+      expect(probes).toEqual([]);
+      const leaves = (node: typeof actual): readonly string[] =>
+        node.isDir ? EffectArray.flatMap(node.children ?? [], leaves) : [node.relativePath];
+      expect(new Set(leaves(actual))).toEqual(
+        new Set([
+          'external/pocket/fixture-pocket/docs/valid.json/page.md',
+          'external/pocket/fixture-pocket/docs/extensionless/page.md',
+          'agent-skills/codex-global/settings.json',
+          'agent-skills/codex-global/.keep.json',
+        ]),
+      );
+      expect(new Set(yield* f.fs.readDirectory(f.source))).toEqual(new Set(['.access.json', 'docs']));
+      expect(yield* f.fs.readFileString(f.path.join(f.source, '.access.json'))).toBe('Synthetic fixture content');
+    }).pipe(provideTestLayer(BunServices.layer)),
+  );
+
+  for (const scenario of [
+    'visible-missing',
+    'visible-permission',
+    'visible-io',
+    'nonexternal-hidden',
+    'memory-hidden',
+  ] as const) {
+    effectIt.effect(`external tree name filtering preserves ${scenario} failures`, () =>
+      Effect.gen(function* () {
+        const f = yield* externalTreeFixture;
+        const memoryRoot = f.path.join(f.home, 'data', 'local', 'user', 'denys', 'memories');
+        yield* f.fs.makeDirectory(memoryRoot, {recursive: true});
+        yield* f.fs.writeFileString(f.path.join(memoryRoot, '.keep.md'), 'Synthetic memory fixture');
+        const target =
+          scenario === 'memory-hidden'
+            ? f.path.join(memoryRoot, '.keep.md')
+            : scenario === 'nonexternal-hidden'
+              ? f.path.join(f.resources, 'agent-skills', 'codex-global', '.keep.json')
+              : f.path.join(f.source, 'docs', 'valid.json', 'page.md');
+        const failure = PlatformError.systemError({
+          _tag:
+            scenario === 'visible-permission' ? 'PermissionDenied' : scenario === 'visible-io' ? 'Unknown' : 'NotFound',
+          module: 'FileSystem',
+          method: 'stat',
+          pathOrDescriptor: target,
+        });
+        let probes = 0;
+        const fs = FileSystem.FileSystem.of({
+          ...f.fs,
+          stat: filename =>
+            filename === target
+              ? Effect.sync(() => probes++).pipe(Effect.andThen(Effect.fail(failure)))
+              : f.fs.stat(filename),
+        });
+        const result = yield* (scenario === 'memory-hidden' ? memoryTree(f.config) : resourcesTree(f.config)).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.flip,
+        );
+        expect(result).toBe(failure);
+        expect(probes).toBe(1);
+      }).pipe(provideTestLayer(BunServices.layer)),
+    );
+  }
+
+  effectIt.effect('external tree name filtering preserves visible symlink exclusion', () =>
+    Effect.gen(function* () {
+      const f = yield* externalTreeFixture;
+      const target = f.path.join(f.source, 'docs', 'valid.json', 'page.md');
+      yield* f.fs.symlink(target, f.path.join(f.source, 'visible-link.md'));
+      const tree = yield* resourcesTree(f.config);
+      const paths = (node: typeof tree): readonly string[] => [
+        node.relativePath,
+        ...EffectArray.flatMap(node.children ?? [], paths),
+      ];
+      expect(paths(tree)).toContain('external/pocket/fixture-pocket/docs/valid.json/page.md');
+      expect(paths(tree)).not.toContain('external/pocket/fixture-pocket/visible-link.md');
+      expect(yield* f.fs.readFileString(target)).toBe('Synthetic fixture content');
+    }).pipe(provideTestLayer(BunServices.layer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'external hidden-name additions and enumeration order preserve the tree without metadata probes or writes',
+    {suffixes: fc.array(fc.integer({min: 0, max: 9999}), {minLength: 1, maxLength: 5}), reverse: fc.boolean()},
+    ({suffixes, reverse}) =>
+      Effect.gen(function* () {
+        const f = yield* externalTreeFixture;
+        const expected = yield* resourcesTree(f.config);
+        const before = yield* f.fs.readDirectory(f.source);
+        const content = yield* f.fs.readFileString(f.path.join(f.source, '.access.json'));
+        const hidden = EffectArray.map(suffixes, value => `..access.json.${value}.tmp`);
+        const probes: string[] = [];
+        const observe = (target: string) => {
+          if (f.path.dirname(target) === f.source && EffectString.startsWith('.')(f.path.basename(target)))
+            probes.push(target);
+        };
+        const fs = FileSystem.FileSystem.of({
+          ...f.fs,
+          readDirectory: target =>
+            f.fs.readDirectory(target).pipe(
+              Effect.map(names => {
+                const combined = target === f.source ? [...names, ...hidden] : names;
+                return reverse ? EffectArray.reverse(combined) : combined;
+              }),
+            ),
+          readLink: target => Effect.sync(() => observe(target)).pipe(Effect.andThen(f.fs.readLink(target))),
+          stat: target => Effect.sync(() => observe(target)).pipe(Effect.andThen(f.fs.stat(target))),
+        });
+        expect(yield* resourcesTree(f.config).pipe(Effect.provideService(FileSystem.FileSystem, fs))).toEqual(expected);
+        expect(probes).toEqual([]);
+        expect(new Set(yield* f.fs.readDirectory(f.source))).toEqual(new Set(before));
+        expect(yield* f.fs.readFileString(f.path.join(f.source, '.access.json'))).toBe(content);
+      }).pipe(provideTestLayer(BunServices.layer)),
+    {fastCheck: {numRuns: 12}},
+  );
+
   it('reads a memory document and returns content plus metadata', async () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
@@ -714,6 +869,7 @@ describe('manager catalog', () => {
       ),
     );
 
+    await runEffect(loadRecallIndexData(config, {includeInactive: false}));
     const result = await runEffect(readManagedMemory(config, 'threadnote://memory/tn_manager_ui'));
 
     expect(result.node.uri).toBe('threadnote://user/denys/memories/durable/projects/threadnote/manager-ui.md');

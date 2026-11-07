@@ -1,7 +1,6 @@
 import {
   readRecallEmbeddingDemand,
   requestRecallEmbeddings,
-  repairRecallEmbeddingDemand,
   recallEmbeddingObservedState,
 } from '@threadnote/recall/background/demand';
 import {recallEmbeddingWorkerControlState} from './recall/embedding_worker_process.js';
@@ -58,6 +57,7 @@ import {
   telemetryEnvironmentOptOut,
 } from './telemetry/config.js';
 import {
+  currentRecallCorpusGeneration,
   loadRecallIndexData,
   recallIndexStatus,
   type RecallIndexProgress,
@@ -71,10 +71,11 @@ import {stopVerifiedLegacyLocalAi} from './migration/legacy-runtime.js';
 import {migrateLegacyLocalModels} from './migration/models.js';
 import {provisionCoreEmbedding} from './models/core-embedding.js';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
   loadRecallVectorAuthorizationKey,
+  rebuildVectorIndex,
   VectorCorpusGenerationChanged,
   type VectorIndexGenerationReadiness,
   vectorIndexGenerationReadiness,
@@ -162,6 +163,45 @@ export const verifyRecallIndexMaintenanceReadiness = Effect.fn('lifecycle.verify
     });
   },
 );
+
+/** Foreground preparation shared by explicit repair and index rebuild. */
+export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(function* <E, R>(
+  config: RuntimeConfig,
+  manifest: LocalModelManifest,
+  authorizationKey: string,
+  verifyInputs: Effect.Effect<void, E, R>,
+) {
+  yield* Console.log('Preparing lexical recall from canonical documents.');
+  const index = yield* Effect.acquireUseRelease(
+    startProgress('Rebuilding lexical recall index from canonical documents.'),
+    progress =>
+      loadRecallIndexData(config, {
+        forceRefresh: true,
+        includeInactive: false,
+        onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
+      }),
+    progress => progress.stop,
+  );
+  yield* verifyInputs;
+  yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
+  yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
+  const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
+    corpusGeneration: index.generation,
+    currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
+  });
+  yield* verifyRecallIndexMaintenanceReadiness({
+    manifestId: manifest.id,
+    readLexicalStatus: () => recallIndexStatus(config, false),
+    readVectorReadiness: () =>
+      vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
+    requestedGeneration: index.generation,
+  });
+  yield* verifyInputs;
+  yield* Console.log(
+    `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
+  );
+  yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+});
 
 interface RunInstallOptions extends InstallOptions {
   readonly skipRecallIndexes?: boolean;
@@ -432,14 +472,17 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
     yield* writeLayoutReceipt(fs, path, config.agentContextHome);
   }
   const embedding = yield* provisionCoreEmbedding(config, {dryRun});
+  const recallSelection = yield* readModelSelection(config.agentContextHome);
+  const recallModelId = selectedEmbeddingModelId(recallSelection, 'recall') ?? embedding.manifest.id;
+  const recallManifest = yield* (yield* LocalModelCatalog).get(recallModelId);
   if (dryRun && options.skipRecallIndexes !== true) {
     yield* Console.log(
-      `Would build the lexical SQLite index and queue ${embedding.manifest.id} document embeddings for idle background work.`,
+      `Would build the lexical SQLite index and queue ${recallManifest.id} document embeddings for idle background work.`,
     );
   } else if (!dryRun && options.skipRecallIndexes !== true) {
-    const {documentCount, vectors} = yield* maintainRecallIndexes(config, embedding.manifest, false);
+    const {documentCount, vectors} = yield* maintainRecallIndexes(config, recallManifest);
     yield* Console.log(
-      `Recall lexical index ready: ${documentCount} document(s). ${vectors.queued ? 'Document embeddings queued for idle background work.' : 'Vector index current.'}`,
+      `Recall lexical index ready: ${documentCount} document(s). ${vectors.queued ? `Document embeddings queued for idle background work. Model: ${recallManifest.id}.` : 'Vector index current.'}`,
     );
   }
   if (options.start !== false) {
@@ -473,20 +516,27 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     start: false,
   });
   if (!dryRun) {
-    yield* maintainRecallIndexes(config, embedding.manifest, true).pipe(
-      Effect.tap(({documentCount, vectors}) =>
-        Console.log(
-          `Rebuilt lexical recall for ${documentCount} document(s). ${vectors.queued ? 'Document embeddings queued for idle background work.' : 'Vector index current.'}`,
-        ),
-      ),
+    const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
+    const selection = yield* readModelSelection(config.agentContextHome);
+    const recallModelId = selectedEmbeddingModelId(selection, 'recall') ?? embedding.manifest.id;
+    const recallManifest = yield* (yield* LocalModelCatalog).get(recallModelId);
+    const verifyInputs = Effect.gen(function* () {
+      if (
+        selectedEmbeddingModelId(yield* readModelSelection(config.agentContextHome), 'recall') !== recallModelId ||
+        (yield* loadRecallVectorAuthorizationKey(config)) !== authorizationKey
+      ) {
+        return yield* LifecycleOperationError.make({
+          message: 'Recall inputs changed during preparation. Run `threadnote repair` again.',
+        });
+      }
+    });
+    yield* prepareRecallIndexes(config, recallManifest, authorizationKey, verifyInputs).pipe(
       Effect.mapError(cause =>
         LifecycleOperationError.make({message: `Recall index repair failed: ${errorMessage(cause)}`}),
       ),
     );
   } else {
-    yield* Console.log(
-      'Would validate and rebuild lexical recall, then queue document embeddings for idle background work.',
-    );
+    yield* Console.log('Would synchronously rebuild lexical and vector recall indexes from canonical documents.');
   }
   if (options.coreOnly === true) {
     yield* Console.log('Skipping host instructions, hooks, and MCP client repair (--core-only).');
@@ -661,14 +711,12 @@ export function runDevelopmentInstallMaintenance(
 const maintainRecallIndexes = Effect.fn('lifecycle.maintainRecallIndexes')(function* (
   config: RuntimeConfig,
   manifest: LocalModelManifest,
-  forceRefresh: boolean,
 ) {
   return yield* Effect.acquireUseRelease(
-    startProgress(`${forceRefresh ? 'Rebuilding' : 'Building'} lexical recall index from canonical documents.`),
+    startProgress('Building lexical recall index from canonical documents.'),
     progress =>
       Effect.gen(function* () {
         const index = yield* loadRecallIndexData(config, {
-          forceRefresh,
           includeInactive: false,
           memoryIds: [],
           onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
@@ -680,7 +728,7 @@ const maintainRecallIndexes = Effect.fn('lifecycle.maintainRecallIndexes')(funct
             index.generation,
             yield* loadRecallVectorAuthorizationKey(config),
           )) === 'current';
-        if (!current) yield* forceRefresh ? repairRecallEmbeddingDemand(config) : requestRecallEmbeddings(config);
+        if (!current) yield* requestRecallEmbeddings(config);
         return {documentCount: index.corpusStatistics.documentCount, vectors: {queued: !current}};
       }),
     progress => progress.stop,
@@ -920,7 +968,7 @@ function recallIndexCheck(status: RecallIndexStatus): DoctorCheck {
 function embeddingModelCheck(config: RuntimeConfig) {
   return Effect.gen(function* () {
     const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'graph');
     if (!modelId) {
       return {
         detail: 'missing; run `threadnote repair` to install the core embedding model',
@@ -967,7 +1015,7 @@ function vectorRecallIndexCheck(config: RuntimeConfig, lexicalStatus: RecallInde
       };
     }
     const selection = yield* readModelSelection(config.agentContextHome);
-    const modelId = selection.roles.embedding;
+    const modelId = selectedEmbeddingModelId(selection, 'recall');
     if (!modelId) {
       return {
         detail: 'unavailable until the core embedding model is installed',

@@ -12,8 +12,8 @@ import {
 } from '../../git_proposal/topic_maintenance_commands.js';
 import type {ApprovedSourceDescriptorV1} from '@threadnote/memory/reviewed-support';
 import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
-import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
-import {verifyAuthoredMemoryRelationTargetIdentities} from '../relations.js';
+import {prepareMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {prepareAuthoredMemoryRelationTargetIdentities} from '../relations.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {
   isAgentArtifactUri,
@@ -1060,7 +1060,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
         : undefined;
     const route = portable
       ? undefined
-      : yield* resolveMemoryIdentityAliases(config, [ref], allowedUriScopes, {
+      : yield* prepareMemoryIdentityAliases(config, [ref], allowedUriScopes, {
           validateNow: true,
         }).pipe(Effect.result);
     if (route && Result.isFailure(route)) {
@@ -1176,7 +1176,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
     if (actual !== read.hash) return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
   }
-  yield* verifyAuthoredMemoryRelationTargetIdentities(
+  yield* prepareAuthoredMemoryRelationTargetIdentities(
     config,
     EffectArray.flatMap([...liveSources], ([sourceUri, source]) =>
       portableReads.has(sourceUri)

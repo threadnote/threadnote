@@ -107,6 +107,7 @@ export const deferredCodeAnchorRefreshSchedulerLayer = Layer.effect(
         watcher
           .refresh({
             admissionClass: 'background',
+            vectorPolicy: 'off',
             cwd: options.cwd,
             key: options.key,
             manifestPath: options.manifestPath,

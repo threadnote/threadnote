@@ -7,7 +7,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {isLegacyLocalModelMigrationPending, migrateLegacyLocalModels} from '@threadnote/threadnote/migration/models';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {readModelSelection, writeModelSelection} from '@threadnote/inference/models/selection';
 
 const modelBytes = new TextEncoder().encode('small deterministic legacy GGUF');
 const manifest: LocalModelManifest = {
@@ -38,6 +38,11 @@ describe('legacy local model migration', () => {
         const source = path.join(home, 'threadnote', 'models', manifest.file);
         yield* fs.makeDirectory(path.dirname(source), {recursive: true});
         yield* fs.writeFile(source, modelBytes);
+        yield* writeModelSelection(home, {
+          purposes: {graph: 'embeddinggemma-2-q8', recall: 'qwen3-embedding-0.6b-q8'},
+          roles: {embedding: 'bge-small-en-v1.5-q8'},
+          version: 1,
+        });
 
         expect(yield* isLegacyLocalModelMigrationPending({home, manifests: [manifest]})).toBe(true);
         expect(yield* migrateLegacyLocalModels({home, manifests: [manifest]})).toEqual({
@@ -53,7 +58,11 @@ describe('legacy local model migration', () => {
         expect(Array.from(yield* fs.readFile(target))).toEqual(Array.from(modelBytes));
         expect(yield* fs.exists(source)).toBe(false);
         expect(yield* isLegacyLocalModelMigrationPending({home, manifests: [manifest]})).toBe(false);
-        expect((yield* readModelSelection(home)).roles.generation).toBe(manifest.id);
+        expect(yield* readModelSelection(home)).toEqual({
+          purposes: {graph: 'embeddinggemma-2-q8', recall: 'qwen3-embedding-0.6b-q8'},
+          roles: {embedding: 'bge-small-en-v1.5-q8', generation: manifest.id},
+          version: 1,
+        });
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

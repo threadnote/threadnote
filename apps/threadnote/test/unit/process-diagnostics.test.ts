@@ -69,6 +69,88 @@ function testRegistration(
 }
 
 describe('process diagnostics', () => {
+  it.effect('shares CPU samples, rejects reused instances and rebaselines stale counters', () =>
+    Effect.gen(function* () {
+      const nativeSystem = yield* SystemInfo;
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cpu-samples-'});
+      const directory = join(home, 'runtime', 'processes');
+      yield* fs.makeDirectory(directory, {recursive: true});
+      const pid = 1234567;
+      yield* fs.writeFileString(
+        join(directory, `${pid}.json`),
+        JSON.stringify(testRegistration(pid, 'mcp', 'identity-a', 'private-token-123456789')),
+      );
+      let cpu = 0;
+      let probes = 0;
+      let resourceIdentity = 'identity-a';
+      const clock = yield* Clock.Clock;
+      let wallTime = 0n;
+      const system = SystemInfo.of({
+        ...nativeSystem,
+        isProcessRunning: id => id === pid,
+        canonicalProcessStartIdentity: () => Effect.succeed('identity-a'),
+        processStartIdentity: () => Effect.succeed('identity-a'),
+        processResourceCounters: () =>
+          Effect.sync(() => {
+            probes++;
+            return new Map([
+              [
+                pid,
+                {
+                  processId: pid,
+                  processStartIdentity: resourceIdentity,
+                  cpuMilliseconds: cpu,
+                  rssBytes: 1234,
+                  workingDirectory: '/observed/worktree',
+                },
+              ],
+            ]);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const reads = yield* Effect.all(
+          [
+            readThreadnoteProcessDiagnostics({agentContextHome: home}),
+            readThreadnoteProcessDiagnostics({agentContextHome: home}),
+          ],
+          {concurrency: 2},
+        );
+        expect(probes).toBe(1);
+        expect(reads[0].processes[0].cpu?.state).toBe('sampling');
+        expect(reads[0].processes[0].displayContext?.processDirectory).toBe('/observed/worktree');
+        cpu = 500;
+        wallTime = 3_600_000_000_000n;
+        yield* TestClock.adjust(500);
+        const active = yield* readThreadnoteProcessDiagnostics({agentContextHome: home});
+        expect(active.processes[0].cpu).toMatchObject({state: 'sampled', percent: 100, windowMilliseconds: 500});
+        expect(renderProcessDiagnosticsTable(active.processes)).toContain('100.0%');
+        yield* TestClock.adjust(11_000);
+        expect((yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].cpu?.state).toBe(
+          'unavailable',
+        );
+        yield* TestClock.adjust(500);
+        expect((yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].cpu).toMatchObject({
+          state: 'sampled',
+          percent: 0,
+        });
+        resourceIdentity = 'reused';
+        wallTime = -3_600_000_000_000n;
+        yield* TestClock.adjust(500);
+        expect((yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].cpu?.state).toBe(
+          'unavailable',
+        );
+        expect(
+          (yield* readThreadnoteProcessDiagnostics({agentContextHome: home})).processes[0].displayContext
+            ?.processDirectory,
+        ).toBeUndefined();
+      }).pipe(
+        Effect.provideService(SystemInfo, system),
+        Effect.provideService(Clock.Clock, {...clock, currentTimeNanos: Effect.sync(() => wallTime)}),
+      );
+    }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer)),
+  );
+
   it.effect('warns once on repeated unsupported publication and repairs when support returns', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -804,9 +886,9 @@ describe('process diagnostics', () => {
     ).toBe(
       EffectArray.join(
         [
-          'PID    PPID   ROLE  VERSION  AGE     RSS        OPERATION',
-          '79155  42478  mcp   4.0.3    12h55m  138.2 MiB  mcp-server',
-          '71873  1100   cli   4.0.3    44m23s  78.0 MiB   repair',
+          'PID    PPID   ROLE  VERSION  AGE     CPU          RSS        OPERATION',
+          '79155  42478  mcp   4.0.3    12h55m  unavailable  138.2 MiB  mcp-server',
+          '71873  1100   cli   4.0.3    44m23s  unavailable  78.0 MiB   repair',
         ],
         '\n',
       ),
@@ -852,10 +934,10 @@ describe('process diagnostics', () => {
     ).toBe(
       EffectArray.join(
         [
-          'PID    PPID   ROLE                 VERSION  AGE   RSS        OPERATION',
-          '27543  23265  cli (graph-builder)  4.0.6    5h3m  746.4 MiB  index-repository',
-          '37407  36027  mcp (graph-waiter)   4.0.6    12s   685.0 MiB  repository-lock',
-          '51730  27543  local-model-worker   4.0.6    30s   634.1 MiB  embed-many',
+          'PID    PPID   ROLE                 VERSION  AGE   CPU          RSS        OPERATION',
+          '27543  23265  cli (graph-builder)  4.0.6    5h3m  unavailable  746.4 MiB  index-repository',
+          '37407  36027  mcp (graph-waiter)   4.0.6    12s   unavailable  685.0 MiB  repository-lock',
+          '51730  27543  local-model-worker   4.0.6    30s   unavailable  634.1 MiB  embed-many',
         ],
         '\n',
       ),
@@ -1099,13 +1181,18 @@ describe('process diagnostics', () => {
           ]);
           const serialized = JSON.stringify(base);
           expect(serialized).not.toContain(temporaryRoot);
-          expect(serialized).not.toContain(process.cwd());
+          const fs = yield* FileSystem.FileSystem;
+          expect(base.processes[0].displayContext?.launchDirectory).toBe(yield* fs.realPath(process.cwd()));
+          const {displayContext: _display, ...publicIdentity} = base.processes[0];
+          expect(JSON.stringify(publicIdentity)).not.toContain(process.cwd());
           expect(serialized).not.toContain('token');
           const privateRegistration = yield* Effect.promise(() =>
             readFile(join(temporaryRoot!, 'runtime', 'processes', `${process.pid}.json`), 'utf8'),
           );
           expect(privateRegistration).not.toContain(temporaryRoot);
-          expect(privateRegistration).not.toContain(process.cwd());
+          const {displayContext: privateContext, ...privateIdentity} = JSON.parse(privateRegistration);
+          expect(privateContext.launchDirectory).toBe(yield* fs.realPath(process.cwd()));
+          expect(JSON.stringify(privateIdentity)).not.toContain(process.cwd());
 
           expect(base.processes[0]).not.toHaveProperty('activityRole');
 

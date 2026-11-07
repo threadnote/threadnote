@@ -51,6 +51,7 @@ export interface McpBrokerDependencies {
   readonly childIdleTimeoutMilliseconds?: number;
   readonly input: AsyncIterable<Uint8Array>;
   readonly onFailure?: (event: McpBrokerFailureEvent) => void;
+  readonly onClientInfo?: (clientInfo: unknown) => void;
   readonly readActiveRelease: () => Promise<StandaloneActiveRelease | undefined>;
   readonly replayTimeoutMilliseconds?: number;
   readonly spawn: (release: StandaloneActiveRelease) => McpBrokerChild;
@@ -324,6 +325,19 @@ class McpBroker {
           if (envelope.error === undefined && envelope.result !== undefined) {
             this.#initializeLine = pending.line;
             this.#initializeRequestId = pending.requestId;
+            const initialize = parseJsonRpcEnvelope(pending.line);
+            if (
+              initialize &&
+              typeof initialize.params === 'object' &&
+              initialize.params !== null &&
+              'clientInfo' in initialize.params
+            ) {
+              try {
+                this.#dependencies.onClientInfo?.(initialize.params.clientInfo);
+              } catch {
+                /* Display metadata must not interrupt the transport. */
+              }
+            }
           }
         }
         if (envelope?.method === undefined) {

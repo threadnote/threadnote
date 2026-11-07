@@ -9,7 +9,7 @@ import {
   type ModelSetupPhase,
   type ModelSetupState,
 } from '@threadnote/inference/models/setup';
-import {parseModelSelection} from '@threadnote/inference/models/selection';
+import {parseModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -94,6 +94,33 @@ describe('model setup domain properties', () => {
         expect(parseModelSelection(JSON.stringify(selection))).toEqual({status: 'valid', selection});
       }),
       {numRuns: 100},
+    );
+  });
+
+  it('round-trips legacy role-only JSON and resolves each purpose independently with shared fallback', () => {
+    FC.assert(
+      FC.property(
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
+        FC.option(FC.stringMatching(/^[a-z0-9][a-z0-9._-]{0,24}$/), {nil: undefined}),
+        (shared, graph, recall) => {
+          const legacy = {version: 1, roles: {embedding: shared ?? 'shared-model'}};
+          const selection = {
+            ...legacy,
+            purposes: {
+              ...(graph === undefined ? {} : {graph}),
+              ...(recall === undefined ? {} : {recall}),
+            },
+          };
+          expect(parseModelSelection(JSON.stringify(legacy))).toEqual({status: 'valid', selection: legacy});
+          expect(parseModelSelection(JSON.stringify(selection))).toEqual({status: 'valid', selection});
+          const parsed = parseModelSelection(JSON.stringify(selection));
+          if (parsed.status !== 'valid') throw new Error('generated selection did not parse');
+          expect(selectedEmbeddingModelId(parsed.selection, 'graph')).toBe(graph ?? shared ?? 'shared-model');
+          expect(selectedEmbeddingModelId(parsed.selection, 'recall')).toBe(recall ?? shared ?? 'shared-model');
+        },
+      ),
+      {numRuns: 150},
     );
   });
 

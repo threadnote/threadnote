@@ -207,6 +207,105 @@ describe('Manager consumer live observation', () => {
     }).pipe(withLayer),
   );
 
+  effectIt.effect(
+    'refreshes shared CPU display samples without invalidating graph structure and stops after display release',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const nativeSystem = yield* SystemInfo;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-process-cpu-live-'});
+        const directory = path.join(home, 'runtime', 'processes');
+        yield* fs.makeDirectory(directory, {recursive: true});
+        const pid = 1_234_699;
+        const startedAt = '2026-11-03T00:00:00.000Z';
+        yield* fs.writeFileString(
+          path.join(directory, `${pid}.json`),
+          JSON.stringify({
+            baseRole: 'mcp',
+            currentOperation: 'mcp-server',
+            parentProcessId: 42,
+            processId: pid,
+            processStartIdentity: 'cpu-instance',
+            role: 'mcp',
+            schemaVersion: 1,
+            startedAt,
+            token: 'private-registration-token',
+            updatedAt: startedAt,
+          }),
+        );
+        let probes = 0;
+        let cpu = 0;
+        let graphChanges = 0;
+        let displayChanges = 0;
+        const system = SystemInfo.of({
+          ...nativeSystem,
+          isProcessRunning: id => id === pid,
+          canonicalProcessStartIdentity: () => Effect.succeed('cpu-instance'),
+          processStartIdentity: () => Effect.succeed('cpu-instance'),
+          processResourceCounters: () =>
+            Effect.sync(() => {
+              probes++;
+              return new Map([
+                [pid, {processId: pid, processStartIdentity: 'cpu-instance', cpuMilliseconds: cpu, rssBytes: 1024}],
+              ]);
+            }),
+        });
+        const observer = yield* makeManagerLiveConsumerObservation(
+          runtimeConfigForTest({agentContextHome: home}),
+          {
+            onInvalidate: resource =>
+              Effect.sync(() => {
+                if (resource.topic === 'processes') displayChanges++;
+              }),
+            onAvailability: () => Effect.void,
+          },
+          {
+            adapters: [
+              {
+                topics: ['graph-status'],
+                subscribe: () => Effect.succeed([]),
+                release: () => Effect.void,
+                processChanged: Effect.sync(() => {
+                  graphChanges++;
+                }),
+              },
+            ],
+          },
+        ).pipe(
+          Effect.provideService(SystemInfo, system),
+          Effect.provideService(FileSystem.FileSystem, {...fs, watch: () => Stream.never}),
+        );
+        const processResource = {topic: 'processes', scope: 'account'} as const;
+        yield* observer.subscribe('first', [processResource]);
+        yield* observer.subscribe('second', [processResource]);
+        yield* observer.subscribe('graph', [{topic: 'graph-status', scope: 'account'}]);
+        expect(probes).toBe(1);
+        cpu = 3000;
+        yield* TestClock.adjust(3000);
+        yield* observer.reconcileNow;
+        expect((yield* observer.processSnapshot)?.processes[0].cpu).toMatchObject({state: 'sampled', percent: 100});
+        expect(probes).toBe(2);
+        expect(displayChanges).toBeGreaterThan(0);
+        expect(graphChanges).toBe(0);
+        const before = displayChanges;
+        cpu = 6000;
+        yield* TestClock.adjust(3000);
+        yield* observer.reconcileNow;
+        expect(probes).toBe(3);
+        expect(displayChanges).toBeGreaterThan(before);
+        expect(graphChanges).toBe(0);
+        yield* observer.release('first');
+        yield* observer.release('second');
+        yield* TestClock.adjust(3000);
+        yield* observer.reconcileNow;
+        expect(probes).toBe(3);
+        expect(graphChanges).toBe(0);
+        yield* observer.release('graph');
+        expect((yield* observer.diagnostics).resources).toBe(0);
+      }).pipe(withLayer),
+  );
+
   effectIt.effect('retains one process sampler for graph-only subscription and releases it', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

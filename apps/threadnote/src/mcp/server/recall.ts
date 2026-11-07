@@ -1,3 +1,8 @@
+import {recordUnavailableProductionPhase} from '../../effect/production_log.js';
+import {prepareDefaultRecallSections} from '@threadnote/recall/sections_read';
+import {deferRecallReadMaintenance} from '../../recall/read_maintenance.js';
+import {isReadCleanupUnconfirmed} from '@threadnote/platform/read_deadline';
+import {optionalReadyRecallRead, withReadyRecallReadBoundary} from '../../recall/ready_read_boundary.js';
 import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
@@ -109,8 +114,7 @@ import {
   RECALL_MCP_RESPONSE_MAXIMUM_ESTIMATED_TOKENS,
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
-import {mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
-import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
+import {recallReadPhaseOutcome, mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
@@ -118,9 +122,10 @@ import {
   buildRecallIndexSelectionCandidates,
   buildRecallSelectionCandidates,
   createRecallRerankerCache,
+  prepareRecallSemanticPreflight,
+  warmRecallReranker,
   loadRecallExpansionVocabulary,
   loadMcpRecallSemanticScoresResult,
-  prepareRecallSections,
   recallSelectionAnchorIds,
   recallSelectionQueries,
   selectedRecallCandidateUris,
@@ -1092,303 +1097,385 @@ function runRecallTool(
 ) {
   return Effect.gen(function* () {
     const syncWarnings: string[] = [];
-    const syncedTeams = yield* withMcpProgressHeartbeat(
-      progress,
-      RECALL_MCP_PROGRESS.sharedSync,
-      withAnonymousTelemetryPhase(
-        'recall.shared-sync',
-        withProductionPhaseTiming(
-          'recall.shared-sync',
-          progressTiming.sharedSyncDelayMilliseconds === 0
-            ? syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)
-            : Effect.sleep(progressTiming.sharedSyncDelayMilliseconds).pipe(
-                Effect.andThen(syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam)),
+    const syncedTeams =
+      params.syncTeam === undefined
+        ? []
+        : yield* withMcpProgressHeartbeat(
+            progress,
+            RECALL_MCP_PROGRESS.sharedSync,
+            withAnonymousTelemetryPhase(
+              'recall.shared-sync',
+              withProductionPhaseTiming(
+                'recall.shared-sync',
+                syncCursorCloudMemoryShares(config, memoryScope, params.syncTeam),
               ),
-        ),
-      ),
-      progressTiming.heartbeatMilliseconds,
-    ).pipe(
-      Effect.map(syncResult => {
-        syncWarnings.push(...syncResult.warnings);
-        return syncResult.syncedTeams;
-      }),
-      Effect.catch(error => {
-        syncWarnings.push(errorMessage(error));
-        return Effect.succeed([] as readonly string[]);
-      }),
-    );
-    const sourceSyncWarnings: string[] = [];
-    const syncedSources = memoryScope
-      ? []
-      : yield* withMcpProgressHeartbeat(
-          progress,
-          RECALL_MCP_PROGRESS.obsidianSync,
-          withAnonymousTelemetryPhase(
-            'recall.obsidian-sync',
-            withProductionPhaseTiming('recall.obsidian-sync', syncSourcesBeforeRecall(config)),
-          ),
-          progressTiming.heartbeatMilliseconds,
-        ).pipe(
-          Effect.map(syncResult => {
-            sourceSyncWarnings.push(...syncResult.warnings);
-            return syncResult.syncedSources;
-          }),
-          Effect.catch(error => {
-            sourceSyncWarnings.push(`Source refresh failed: ${errorMessage(error)}`);
-            return Effect.succeed([] as readonly string[]);
-          }),
+            ),
+            progressTiming.heartbeatMilliseconds,
+          ).pipe(
+            Effect.map(syncResult => {
+              syncWarnings.push(...syncResult.warnings);
+              if ('deferred' in syncResult && syncResult.deferred)
+                syncWarnings.push('Shared synchronization is deferred while another writer is active.');
+              return syncResult.syncedTeams;
+            }),
+            Effect.catch(error => {
+              syncWarnings.push(errorMessage(error));
+              return Effect.succeed([] as readonly string[]);
+            }),
+          );
+    if (params.syncTeam === undefined) {
+      const deferred = yield* deferRecallReadMaintenance(config, {
+        kind: 'synchronize',
+        sources: memoryScope === undefined,
+        ...(memoryScope === undefined ? {} : {teams: cursorCloudScopeTeams(memoryScope)}),
+      });
+      if (deferred !== 'current')
+        syncWarnings.push(
+          deferred === 'queued'
+            ? 'Automatic synchronization is queued in the background; recall uses ready local data.'
+            : 'Automatic synchronization enqueue was not confirmed; recall uses ready local data.',
         );
-    const workspaceContext = yield* withMcpProgressHeartbeat(
-      progress,
-      RECALL_MCP_PROGRESS.workspaceContext,
-      withProductionPhaseTiming('recall.workspace-context', resolveRecallWorkspaceContext(config, params)),
-      progressTiming.heartbeatMilliseconds,
-    );
-    const query = workspaceContext.query;
-    const navigationOnly = workspaceContext.navigationOnly;
-    const workspaceComponent = workspaceContext.workspaceComponent;
-    const workspaceBranch = workspaceContext.workspaceBranch;
-    const recallProjectName = workspaceContext.recallProjectName;
-    const threshold = workspaceContext.threshold;
-    const thresholdConfigured = workspaceContext.thresholdConfigured;
-    const passes = workspaceContext.passes;
-    const scopedRecallUris = workspaceContext.scopedRecallUris;
-    const seededUri = workspaceContext.seededUri;
-    const sections = workspaceContext.sections;
-    const eligibility = workspaceContext.eligibility;
-    const exactMatches = workspaceContext.exactMatches;
-    let operationalWarnings = workspaceContext.operationalWarnings;
-    const effectAi = workspaceContext.effectAi;
-    const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
-    let hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
-    const expansionQueries: string[] = [];
-    const recallLimit = params.nodeLimit ?? 12;
-    const semanticRetrieval: McpRecallSemanticScoresResult = navigationOnly
-      ? {
-          result: {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()},
-          status: 'unavailable',
-        }
-      : yield* withMcpProgressHeartbeat(
+    }
+    return yield* withReadyRecallReadBoundary(
+      Effect.gen(function* () {
+        const workspaceContext = yield* withMcpProgressHeartbeat(
+          progress,
+          RECALL_MCP_PROGRESS.workspaceContext,
+          withProductionPhaseTiming('recall.workspace-context', resolveRecallWorkspaceContext(config, params)),
+          progressTiming.heartbeatMilliseconds,
+        );
+        const query = workspaceContext.query;
+        const navigationOnly = workspaceContext.navigationOnly;
+        const workspaceComponent = workspaceContext.workspaceComponent;
+        const workspaceBranch = workspaceContext.workspaceBranch;
+        const recallProjectName = workspaceContext.recallProjectName;
+        const threshold = workspaceContext.threshold;
+        const thresholdConfigured = workspaceContext.thresholdConfigured;
+        const passes = workspaceContext.passes;
+        const scopedRecallUris = workspaceContext.scopedRecallUris;
+        const seededUri = workspaceContext.seededUri;
+        const sections = workspaceContext.sections;
+        const eligibility = workspaceContext.eligibility;
+        let exactMatches = workspaceContext.exactMatches;
+        let operationalWarnings = workspaceContext.operationalWarnings;
+        const effectAi = workspaceContext.effectAi;
+        const selectRecallCandidates = makeMcpRecallCandidateSelector(config, effectAi, workspaceContext.jev, sections);
+        let hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
+        const expansionQueries: string[] = [];
+        const recallLimit = params.nodeLimit ?? 12;
+        let semanticResult: McpRecallSemanticScoresResult['result'] = {
+          corpusGeneration: Option.none(),
+          scores: Option.none(),
+          warning: Option.none(),
+        };
+        const surfacedSemanticWarnings = new Set<string>();
+        const appendSemanticWarning = (result: typeof semanticResult) => {
+          if (Option.isNone(result.warning) || surfacedSemanticWarnings.has(result.warning.value)) return;
+          surfacedSemanticWarnings.add(result.warning.value);
+          sections.push(result.warning.value);
+        };
+        appendSemanticWarning(semanticResult);
+        const rerankerCache = createRecallRerankerCache();
+        let allowReranker = false;
+        const semanticPreflightModel = navigationOnly ? undefined : yield* prepareRecallSemanticPreflight(config);
+        let lexicalProgressPending = true;
+        const prepareSections = (candidateUris?: readonly string[], closingRead = false) => {
+          const work = withAnonymousTelemetryPhase(
+            'recall.lexical-ranking',
+            withProductionPhaseTiming(
+              'recall.lexical-ranking',
+              Effect.gen(function* () {
+                const prepared = yield* prepareDefaultRecallSections(config, {
+                  ...(closingRead || semanticPreflightModel === undefined ? {} : {semanticPreflightModel}),
+                  allowReranker,
+                  allowExactRescue: !thresholdConfigured,
+                  allowSemanticRescue: !thresholdConfigured,
+                  allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                  candidateUris,
+                  closingCandidateUris: closingRead ? candidateUris : undefined,
+                  eligibility,
+                  exactMatches: closingRead ? [] : exactMatches,
+                  exact: closingRead ? undefined : workspaceContext.exactRead,
+                  feedbackQuery: params.query,
+                  includeInactive: params.includeArchived,
+                  limit: recallLimit,
+                  memoryRefs: params.memoryRefs,
+                  minimumScore: hybridMinimumScore,
+                  passes: closingRead ? [] : passes,
+                  preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
+                  project: recallProjectName,
+                  query,
+                  queryVariants: expansionQueries,
+                  relationTypes: params.relationTypes,
+                  rerankerCache,
+                  seedUris: EffectArray.filter(
+                    [params.pinnedUri, seededUri],
+                    (uri): uri is string => uri !== undefined,
+                  ),
+                  semanticGenerationMismatchPolicy: 'fallback',
+                  semanticResult: Option.some(semanticResult),
+                  workspaceBranch,
+                  workspaceScope: workspaceComponent?.scope,
+                });
+                if (!closingRead) exactMatches = prepared.exactMatches;
+                semanticResult = prepared.semanticResult;
+                operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
+                appendSemanticWarning(semanticResult);
+                return prepared;
+              }),
+              prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+            ),
+            prepared => recallReadPhaseOutcome(prepared.operationalWarnings),
+          );
+          if (!lexicalProgressPending) return work;
+          lexicalProgressPending = false;
+          return withMcpProgressHeartbeat(
+            progress,
+            RECALL_MCP_PROGRESS.lexicalRanking,
+            work,
+            progressTiming.heartbeatMilliseconds,
+          );
+        };
+        let recallSections = yield* prepareSections();
+        const baselineSections = recallSections;
+        const baselineNoticeCount = sections.length;
+        // Rejected admission performs no optional work, so its completed lexical proof can stand.
+        let refinementStarted = false;
+        let semanticPhaseOutcome: 'success' | 'unavailable' | 'timed-out' | 'failure' = 'unavailable';
+        yield* withMcpProgressHeartbeat(
           progress,
           RECALL_MCP_PROGRESS.semanticRetrieval,
           withAnonymousTelemetryPhase(
             'recall.semantic-retrieval',
-            withProductionPhaseTiming(
-              'recall.semantic-retrieval',
-              loadMcpRecallSemanticScoresResult(
-                config,
-                query,
-                recallLimit,
-                eligibility,
-                params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-              ),
-              result =>
-                result.status === 'available'
-                  ? 'success'
-                  : result.status === 'unavailable'
-                    ? 'unavailable'
-                    : result.status === 'timed-out'
-                      ? 'timed-out'
-                      : 'failure',
-            ),
-            result =>
-              result.status === 'available'
-                ? 'success'
-                : result.status === 'unavailable'
-                  ? 'unavailable'
-                  : result.status === 'timed-out'
-                    ? 'timed-out'
-                    : 'failure',
+            Effect.gen(function* () {
+              const refined = yield* optionalReadyRecallRead(
+                Effect.gen(function* () {
+                  if (navigationOnly) return recallSections;
+                  refinementStarted = true;
+                  allowReranker = true;
+                  const semanticRetrieval = yield* withProductionPhaseTiming(
+                    'recall.semantic-retrieval',
+                    loadMcpRecallSemanticScoresResult(
+                      config,
+                      query,
+                      recallLimit,
+                      eligibility,
+                      params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                      baselineSections.semanticPreflight,
+                    ),
+                    result =>
+                      result.status === 'available'
+                        ? 'success'
+                        : result.status === 'unavailable'
+                          ? 'unavailable'
+                          : result.status === 'timed-out'
+                            ? 'timed-out'
+                            : 'failure',
+                  );
+                  semanticPhaseOutcome =
+                    semanticRetrieval.status === 'available'
+                      ? 'success'
+                      : semanticRetrieval.status === 'unavailable'
+                        ? 'unavailable'
+                        : semanticRetrieval.status === 'timed-out'
+                          ? 'timed-out'
+                          : 'failure';
+                  semanticResult = semanticRetrieval.result;
+                  appendSemanticWarning(semanticResult);
+                  yield* warmRecallReranker(
+                    config.agentContextHome,
+                    query,
+                    baselineSections.expansionCandidates,
+                    rerankerCache,
+                  );
+                  if (Option.isSome(semanticResult.scores) || rerankerCache.scores.size > 0)
+                    recallSections = yield* prepareSections();
+                  const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
+                  const indexSelectionCandidates = shouldAttemptAiExpansion
+                    ? buildRecallIndexSelectionCandidates(
+                        recallSections.expansionCandidates,
+                        recallProjectName,
+                        24,
+                        eligibility,
+                      )
+                    : [];
+                  const indexSelectionIds =
+                    indexSelectionCandidates.length > 0
+                      ? yield* selectRecallCandidates({candidates: indexSelectionCandidates, query: params.query})
+                      : undefined;
+                  const groundedExpansionQueries =
+                    indexSelectionIds && indexSelectionIds.length > 0
+                      ? limitRecallRewritesForConfidence(
+                          recallSections.confidence,
+                          recallSelectionQueries(
+                            indexSelectionCandidates,
+                            recallSections.expansionCandidates,
+                            indexSelectionIds,
+                            params.query,
+                            2,
+                          ),
+                        )
+                      : [];
+                  const needsFallbackExpansion =
+                    shouldAttemptAiExpansion &&
+                    groundedExpansionQueries.length < recallRewriteLimitForConfidence(recallSections.confidence);
+                  const expansionVocabulary = needsFallbackExpansion
+                    ? yield* loadRecallExpansionVocabulary(config, {
+                        allowedUriScopes:
+                          params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
+                        eligibility,
+                        includeInactive: params.includeArchived,
+                        project: recallProjectName,
+                        rankedCandidates: recallSections.expansionCandidates,
+                      }).pipe(
+                        Effect.catchIf(
+                          error => !isReadCleanupUnconfirmed(error),
+                          () => Effect.succeed([]),
+                        ),
+                      )
+                    : [];
+                  const fallbackExpansionQueries = needsFallbackExpansion
+                    ? yield* expandWeakRecallQueryEffect(
+                        {
+                          confidence: recallSections.confidence,
+                          project: recallProjectName,
+                          query: params.query,
+                          vocabulary: expansionVocabulary,
+                        },
+                        config,
+                        effectAi,
+                      )
+                    : [];
+                  const proposedExpansionQueries = mergeRecallRewritesForConfidence(
+                    recallSections.confidence,
+                    groundedExpansionQueries,
+                    fallbackExpansionQueries,
+                  );
+                  for (const expansionQuery of proposedExpansionQueries) {
+                    expansionQueries.push(expansionQuery);
+                    hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
+                    recallSections = yield* prepareSections();
+                  }
+                  if (expansionQueries.length > 0) {
+                    sections.push(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
+                    const selectionCandidates = buildRecallSelectionCandidates(
+                      recallSections.ranked,
+                      recallSections.expansionCandidates,
+                      Math.max(params.nodeLimit ?? 12, 12) * 2,
+                    );
+                    const selectedIds = yield* selectRecallCandidates({
+                      candidates: selectionCandidates,
+                      query: params.query,
+                    });
+                    if (selectedIds !== undefined) {
+                      const selectedUris = selectedRecallCandidateUris(
+                        selectionCandidates,
+                        selectedIds,
+                        recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
+                      );
+                      recallSections = yield* prepareSections(selectedUris);
+                      sections.push(
+                        `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
+                      );
+                    }
+                  }
+                  return recallSections;
+                }),
+              );
+              if (!refinementStarted && !navigationOnly)
+                yield* recordUnavailableProductionPhase('recall.semantic-retrieval');
+              if (refinementStarted) {
+                const selectedSections = Option.getOrElse(refined, () => baselineSections);
+                allowReranker = false;
+                if (Option.isNone(refined)) {
+                  semanticResult = {corpusGeneration: Option.none(), scores: Option.none(), warning: Option.none()};
+                  hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
+                  expansionQueries.length = 0;
+                  sections.length = baselineNoticeCount;
+                  rerankerCache.scores.clear();
+                }
+                recallSections = yield* prepareSections(
+                  EffectArray.map(selectedSections.ranked.slice(0, recallLimit), hit => hit.uri),
+                  true,
+                );
+                if (recallReadPhaseOutcome(recallSections.operationalWarnings) !== 'success')
+                  recallSections = {
+                    ...recallSections,
+                    confidence: undefined,
+                    ranked: [],
+                    expansionCandidates: [],
+                    semanticSection: undefined,
+                    exactTail: undefined,
+                    memoryConnections: undefined,
+                  };
+              }
+            }),
+            () => semanticPhaseOutcome,
           ),
           progressTiming.heartbeatMilliseconds,
         );
-    let semanticResult = semanticRetrieval.result;
-    const surfacedSemanticWarnings = new Set<string>();
-    const appendSemanticWarning = (result: typeof semanticResult) => {
-      if (Option.isNone(result.warning) || surfacedSemanticWarnings.has(result.warning.value)) return;
-      surfacedSemanticWarnings.add(result.warning.value);
-      sections.push(result.warning.value);
-    };
-    appendSemanticWarning(semanticResult);
-    const rerankerCache = createRecallRerankerCache();
-    const prepareSections = (candidateUris?: readonly string[]) =>
-      withMcpProgressHeartbeat(
-        progress,
-        RECALL_MCP_PROGRESS.lexicalRanking,
-        withAnonymousTelemetryPhase(
-          'recall.lexical-ranking',
-          withProductionPhaseTiming(
-            'recall.lexical-ranking',
-            Effect.gen(function* () {
-              const prepared = yield* prepareRecallSections(config, {
-                allowExactRescue: !thresholdConfigured,
-                allowSemanticRescue: !thresholdConfigured,
-                allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-                candidateUris,
-                eligibility,
-                exactMatches,
-                feedbackQuery: params.query,
-                includeInactive: params.includeArchived,
-                limit: recallLimit,
-                memoryRefs: params.memoryRefs,
-                minimumScore: hybridMinimumScore,
-                passes,
-                preferredUriScopes: params.pinnedUri ? undefined : [...scopedRecallUris],
-                project: recallProjectName,
-                query,
-                queryVariants: expansionQueries,
-                readRecords: uris => readMemoryRecordsByUri(config, uris),
-                relationTypes: params.relationTypes,
-                rerankerCache,
-                seedUris: EffectArray.filter([params.pinnedUri, seededUri], (uri): uri is string => uri !== undefined),
-                semanticGenerationMismatchPolicy: 'fallback',
-                semanticResult: Option.some(semanticResult),
-                workspaceBranch,
-                workspaceScope: workspaceComponent?.scope,
-              });
-              semanticResult = prepared.semanticResult;
-              operationalWarnings = mergeRecallOperationalWarnings(operationalWarnings, prepared.operationalWarnings);
-              appendSemanticWarning(semanticResult);
-              return prepared;
-            }),
+        const {semanticSection, exactTail} = recallSections;
+        if (semanticSection) sections.push(semanticSection);
+        if (exactTail) sections.push(exactTail);
+        const referencedContext = Option.getOrUndefined(
+          yield* optionalReadyRecallRead(
+            referencedContextSection(config, semanticSection ?? '', params.allowedUriScopes),
           ),
-        ),
-        progressTiming.heartbeatMilliseconds,
-      );
-    let recallSections = yield* prepareSections();
-    const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
-    const indexSelectionCandidates = shouldAttemptAiExpansion
-      ? buildRecallIndexSelectionCandidates(recallSections.expansionCandidates, recallProjectName, 24, eligibility)
-      : [];
-    const indexSelectionIds =
-      indexSelectionCandidates.length > 0
-        ? yield* selectRecallCandidates({candidates: indexSelectionCandidates, query: params.query})
-        : undefined;
-    const groundedExpansionQueries =
-      indexSelectionIds && indexSelectionIds.length > 0
-        ? limitRecallRewritesForConfidence(
-            recallSections.confidence,
-            recallSelectionQueries(
-              indexSelectionCandidates,
-              recallSections.expansionCandidates,
-              indexSelectionIds,
-              params.query,
-              2,
+        );
+        if (referencedContext) {
+          sections.push(referencedContext);
+        }
+        const hygieneHints = Option.getOrUndefined(
+          yield* optionalReadyRecallRead(recallHygieneHintsSection(config, semanticSection ?? '')),
+        );
+        if (hygieneHints) {
+          sections.push(hygieneHints);
+        }
+        if (syncedTeams.length > 0) {
+          sections.push(`Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}`);
+        }
+        for (const warning of syncWarnings) {
+          sections.push(`Auto-sync warning: ${warning}`);
+        }
+
+        const rankedResultSections = new Set(
+          EffectArray.filter([semanticSection, exactTail], (value): value is string => !!value),
+        );
+        const responseNotices = EffectArray.filter(
+          sections,
+          (section, __effectArrayIndex) => __effectArrayIndex in sections && !rankedResultSections.has(section),
+        );
+        const projected = yield* Effect.try({
+          try: () =>
+            projectRecallMcpResponse(
+              {
+                confidence: recallSections.confidence,
+                projectBoundary: workspaceContext.scopeProvenance,
+                ...(memoryScope ? {memoryScope: cursorCloudMemoryScopeReceipt(memoryScope)} : {}),
+                ...(recallSections.memoryConnections ? {memoryConnections: recallSections.memoryConnections} : {}),
+                notices: responseNotices,
+                warnings: operationalWarnings,
+                queryExpansions: expansionQueries,
+                rankerVersion: RECALL_RANKER_VERSION,
+                results: recallSections.ranked.slice(0, params.nodeLimit ?? 12),
+              },
+              params,
             ),
-          )
-        : [];
-    const needsFallbackExpansion =
-      shouldAttemptAiExpansion &&
-      groundedExpansionQueries.length < recallRewriteLimitForConfidence(recallSections.confidence);
-    const expansionVocabulary = needsFallbackExpansion
-      ? yield* loadRecallExpansionVocabulary(config, {
-          allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
-          eligibility,
-          includeInactive: params.includeArchived,
-          project: recallProjectName,
-          rankedCandidates: recallSections.expansionCandidates,
-        }).pipe(Effect.orElseSucceed(() => []))
-      : [];
-    const fallbackExpansionQueries = needsFallbackExpansion
-      ? yield* expandWeakRecallQueryEffect(
-          {
-            confidence: recallSections.confidence,
-            project: recallProjectName,
-            query: params.query,
-            vocabulary: expansionVocabulary,
-          },
-          config,
-          effectAi,
-        )
-      : [];
-    const proposedExpansionQueries = mergeRecallRewritesForConfidence(
-      recallSections.confidence,
-      groundedExpansionQueries,
-      fallbackExpansionQueries,
+          catch: error =>
+            Schema.is(AgentResponseBudgetTooSmallError)(error)
+              ? error
+              : McpServerOperationError.make({message: 'Recall response projection failed.', cause: error}),
+        });
+        const text = compactPersonalMemoryReferences(projected.text, config.user);
+        return {
+          content: [{type: 'text' as const, text}],
+          ...(projected.responseFormat === 'dual'
+            ? {structuredContent: compactStructuredReferences(projected.structuredContent, config.user)}
+            : {}),
+        };
+      }),
+      {boundProgram: true, callerCancellation: true},
     );
-    for (const expansionQuery of proposedExpansionQueries) {
-      expansionQueries.push(expansionQuery);
-      hybridMinimumScore = recallHybridMinimumScore(Number(threshold));
-      recallSections = yield* prepareSections();
-    }
-    if (expansionQueries.length > 0) {
-      sections.push(`Recall query expansion: evaluated ${expansionQueries.length} model rewrite(s).`);
-      const selectionCandidates = buildRecallSelectionCandidates(
-        recallSections.ranked,
-        recallSections.expansionCandidates,
-        Math.max(params.nodeLimit ?? 12, 12) * 2,
-      );
-      const selectedIds = yield* selectRecallCandidates({candidates: selectionCandidates, query: params.query});
-      if (selectedIds !== undefined) {
-        const selectedUris = selectedRecallCandidateUris(
-          selectionCandidates,
-          selectedIds,
-          recallSelectionAnchorIds(selectionCandidates, recallSections.ranked),
-        );
-        recallSections = yield* prepareSections(selectedUris);
-        sections.push(
-          `Recall local AI post-filter: kept ${selectedUris.length} of ${selectionCandidates.length} candidate(s).`,
-        );
-      }
-    }
-    const {semanticSection, exactTail} = recallSections;
-    if (semanticSection) sections.push(semanticSection);
-    if (exactTail) sections.push(exactTail);
-    const referencedContext = yield* referencedContextSection(config, semanticSection ?? '', params.allowedUriScopes);
-    if (referencedContext) {
-      sections.push(referencedContext);
-    }
-    const hygieneHints = yield* recallHygieneHintsSection(config, semanticSection ?? '');
-    if (hygieneHints) {
-      sections.push(hygieneHints);
-    }
-    if (syncedTeams.length > 0) {
-      sections.push(`Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}`);
-    }
-    if (syncedSources.length > 0) {
-      sections.push(`Auto-synced sources: ${EffectArray.join(syncedSources, ', ')}`);
-    }
-    for (const warning of syncWarnings) {
-      sections.push(`Auto-sync warning: ${warning}`);
-    }
-    for (const warning of sourceSyncWarnings) {
-      sections.push(`Auto-sync warning: ${warning}`);
-    }
-    const rankedResultSections = new Set(
-      EffectArray.filter([semanticSection, exactTail], (value): value is string => !!value),
-    );
-    const responseNotices = EffectArray.filter(
-      sections,
-      (section, __effectArrayIndex) => __effectArrayIndex in sections && !rankedResultSections.has(section),
-    );
-    const projected = yield* Effect.try({
-      try: () =>
-        projectRecallMcpResponse(
-          {
-            confidence: recallSections.confidence,
-            projectBoundary: workspaceContext.scopeProvenance,
-            ...(memoryScope ? {memoryScope: cursorCloudMemoryScopeReceipt(memoryScope)} : {}),
-            ...(recallSections.memoryConnections ? {memoryConnections: recallSections.memoryConnections} : {}),
-            notices: responseNotices,
-            warnings: operationalWarnings,
-            queryExpansions: expansionQueries,
-            rankerVersion: RECALL_RANKER_VERSION,
-            results: recallSections.ranked.slice(0, params.nodeLimit ?? 12),
-          },
-          params,
-        ),
-      catch: error =>
-        Schema.is(AgentResponseBudgetTooSmallError)(error)
-          ? error
-          : McpServerOperationError.make({message: 'Recall response projection failed.', cause: error}),
-    });
-    const text = compactPersonalMemoryReferences(projected.text, config.user);
-    return {
-      content: [{type: 'text' as const, text}],
-      ...(projected.responseFormat === 'dual'
-        ? {structuredContent: compactStructuredReferences(projected.structuredContent, config.user)}
-        : {}),
-    };
   });
 }
 
@@ -1509,109 +1596,118 @@ export function registerReadTool(
             ? [...new Set(EffectArray.map(requestedShares, share => share.team))]
             : undefined;
         const syncWarnings: string[] = [];
-        const syncedTeams = yield* syncCursorCloudMemoryShares(config, memoryScope, syncTeams).pipe(
-          Effect.map(result => {
-            syncWarnings.push(...result.warnings);
-            return result.syncedTeams;
-          }),
-          Effect.catch(error => {
-            syncWarnings.push(error instanceof Error ? error.message : String(error));
-            return Effect.succeed([] as readonly string[]);
-          }),
-        );
-        const result = yield* runNativeReadTool(config, requestedUris, {
-          allowedUriScopes: memoryScope
-            ? cursorCloudScopeRoots(memoryScope)
-            : [`threadnote://user/${uriSegment(config.user)}/memories`],
-          resolveIdentityAliases: true,
+        const syncedTeams: readonly string[] = [];
+        const deferred = yield* deferRecallReadMaintenance(config, {
+          kind: 'synchronize',
+          sources: memoryScope === undefined,
+          ...(syncTeams === undefined ? {} : {teams: syncTeams}),
         });
-        const scopedResult = memoryScope
-          ? {
-              ...result,
-              _meta: {
-                ...result._meta,
-                'threadnote.io/memory-scope': cursorCloudMemoryScopeReceipt(memoryScope),
-              },
+        if (deferred !== 'current')
+          syncWarnings.push(
+            deferred === 'queued'
+              ? 'Automatic synchronization is queued in the background; read uses ready local data.'
+              : 'Automatic synchronization enqueue was not confirmed; read uses ready local data.',
+          );
+        return yield* withReadyRecallReadBoundary(
+          Effect.gen(function* () {
+            const result = yield* runNativeReadTool(config, requestedUris, {
+              allowedUriScopes: memoryScope
+                ? cursorCloudScopeRoots(memoryScope)
+                : [`threadnote://user/${uriSegment(config.user)}/memories`],
+              resolveIdentityAliases: true,
+            });
+            const scopedResult = memoryScope
+              ? {
+                  ...result,
+                  _meta: {
+                    ...result._meta,
+                    'threadnote.io/memory-scope': cursorCloudMemoryScopeReceipt(memoryScope),
+                  },
+                }
+              : result;
+            if (result.isError === true) {
+              return scopedResult;
             }
-          : result;
-        if (result.isError === true) {
-          return scopedResult;
-        }
-        const syncMessages = EffectArray.filter(
-          [
-            syncedTeams.length > 0 ? `Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}` : undefined,
-            ...EffectArray.map(syncWarnings, warning => `Auto-sync warning: ${warning}`),
-          ],
-          (part): part is string => part !== undefined,
-        );
-        const resources = memoryReadResourcesFromNativeResult(result, requestedUris);
-        if (!resources) return argumentError(`${name} could not project the canonical read response.`);
-        const missing = canonicalReadMissing(result);
-        const missingWarnings = EffectArray.map(missing, uri => `Missing memory: ${uri}`);
-        const missingRecoveries = EffectArray.flatMap(missing, (uri, index) => {
-          if (!(index in missing)) return [];
-          const recovery = memoryReadRecoveryForRequestedUri(uri);
-          return recovery === undefined ? [] : [memoryReadRecoveryText(recovery)];
-        });
-        const canonicalRead = canonicalReadMetadata(result);
-        const relocatedOutsideScope = memoryScope
-          ? Option.getOrUndefined(
-              Option.map(Option.fromNullishOr(canonicalRead), __effectCanonicalRead =>
-                Option.getOrUndefined(
-                  EffectArray.findFirst(
-                    __effectCanonicalRead.resources,
-                    resource => !cursorCloudUriWithinScope(memoryScope, resource.canonicalUri),
+            const syncMessages = EffectArray.filter(
+              [
+                syncedTeams.length > 0
+                  ? `Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}`
+                  : undefined,
+                ...EffectArray.map(syncWarnings, warning => `Auto-sync warning: ${warning}`),
+              ],
+              (part): part is string => part !== undefined,
+            );
+            const resources = memoryReadResourcesFromNativeResult(result, requestedUris);
+            if (!resources) return argumentError(`${name} could not project the canonical read response.`);
+            const missing = canonicalReadMissing(result);
+            const missingWarnings = EffectArray.map(missing, uri => `Missing memory: ${uri}`);
+            const missingRecoveries = EffectArray.flatMap(missing, (uri, index) => {
+              if (!(index in missing)) return [];
+              const recovery = memoryReadRecoveryForRequestedUri(uri);
+              return recovery === undefined ? [] : [memoryReadRecoveryText(recovery)];
+            });
+            const canonicalRead = canonicalReadMetadata(result);
+            const relocatedOutsideScope = memoryScope
+              ? Option.getOrUndefined(
+                  Option.map(Option.fromNullishOr(canonicalRead), __effectCanonicalRead =>
+                    Option.getOrUndefined(
+                      EffectArray.findFirst(
+                        __effectCanonicalRead.resources,
+                        resource => !cursorCloudUriWithinScope(memoryScope, resource.canonicalUri),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            )
-          : undefined;
-        if (relocatedOutsideScope) {
-          return argumentError(`${name} relocated uri must stay within a configured ${profileLabel} share.`);
-        }
-        const projected = Result.try(() =>
-          projectMemoryRead(resources, {
-            mode,
-            offsetBytes,
-            section,
-            sourceHash,
-            toolName: name,
-            warnings: [...syncMessages, ...missingWarnings],
+                )
+              : undefined;
+            if (relocatedOutsideScope) {
+              return argumentError(`${name} relocated uri must stay within a configured ${profileLabel} share.`);
+            }
+            const projected = Result.try(() =>
+              projectMemoryRead(resources, {
+                mode,
+                offsetBytes,
+                section,
+                sourceHash,
+                toolName: name,
+                warnings: [...syncMessages, ...missingWarnings],
+              }),
+            );
+            if (Result.isFailure(projected)) {
+              const failure = projected.failure;
+              if (Schema.is(MemoryReadTooLargeError)(failure) || Schema.is(MemoryReadProjectionError)(failure)) {
+                return argumentError(failure.message);
+              }
+              return argumentError(errorMessage(failure));
+            }
+            const read = projected.success;
+            return {
+              _meta: {
+                ...(memoryScope ? {'threadnote.io/memory-scope': cursorCloudMemoryScopeReceipt(memoryScope)} : {}),
+                'threadnote.io/read': {
+                  contentIndex: 0,
+                  resourceCount: read.structuredContent.resourceCount,
+                  type: 'threadnote-read',
+                  uri: read.uri,
+                  ...(read.structuredContent.requestedUri === undefined
+                    ? {}
+                    : {requestedUri: read.structuredContent.requestedUri}),
+                  ...(read.structuredContent.canonicalUri === undefined
+                    ? {}
+                    : {canonicalUri: read.structuredContent.canonicalUri}),
+                  version: 1,
+                },
+              },
+              content: [
+                {type: 'text' as const, text: memoryReadMcpText(read, responseFormat)},
+                ...(read.continuation === undefined ? [] : [{type: 'text' as const, text: read.continuation}]),
+                ...(read.receipt === undefined ? [] : [{type: 'text' as const, text: read.receipt}]),
+                ...EffectArray.map(missingRecoveries, text => ({type: 'text' as const, text})),
+              ],
+              structuredContent: memoryReadMcpStructuredContent(read, responseFormat),
+            };
           }),
+          {boundProgram: true},
         );
-        if (Result.isFailure(projected)) {
-          const failure = projected.failure;
-          if (Schema.is(MemoryReadTooLargeError)(failure) || Schema.is(MemoryReadProjectionError)(failure)) {
-            return argumentError(failure.message);
-          }
-          return argumentError(errorMessage(failure));
-        }
-        const read = projected.success;
-        return {
-          _meta: {
-            ...(memoryScope ? {'threadnote.io/memory-scope': cursorCloudMemoryScopeReceipt(memoryScope)} : {}),
-            'threadnote.io/read': {
-              contentIndex: 0,
-              resourceCount: read.structuredContent.resourceCount,
-              type: 'threadnote-read',
-              uri: read.uri,
-              ...(read.structuredContent.requestedUri === undefined
-                ? {}
-                : {requestedUri: read.structuredContent.requestedUri}),
-              ...(read.structuredContent.canonicalUri === undefined
-                ? {}
-                : {canonicalUri: read.structuredContent.canonicalUri}),
-              version: 1,
-            },
-          },
-          content: [
-            {type: 'text' as const, text: memoryReadMcpText(read, responseFormat)},
-            ...(read.continuation === undefined ? [] : [{type: 'text' as const, text: read.continuation}]),
-            ...(read.receipt === undefined ? [] : [{type: 'text' as const, text: read.receipt}]),
-            ...EffectArray.map(missingRecoveries, text => ({type: 'text' as const, text})),
-          ],
-          structuredContent: memoryReadMcpStructuredContent(read, responseFormat),
-        };
       });
     },
   );

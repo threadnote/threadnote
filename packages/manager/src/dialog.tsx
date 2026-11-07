@@ -1,5 +1,15 @@
 import {Array as EffectArray} from 'effect';
-import React, {createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState} from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -309,7 +319,7 @@ function ManagerDialog(props: {
   const titleId = `${dialogId}-title`;
   const descriptionId = options.message ? `${dialogId}-description` : undefined;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setValidationField(undefined);
     setFieldValues(initialDialogValues(fields));
     const dialog = dialogRef.current;

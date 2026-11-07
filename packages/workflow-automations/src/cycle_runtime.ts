@@ -1,4 +1,4 @@
-import {Array as EffectArray} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {
   NativeCyclePlanSchema,
@@ -12,6 +12,8 @@ import {
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
   nativeCycleRebaseReceiptDigest,
+  nativeCycleBaseRequalificationReceiptDigest,
+  validateNativeCycleMergeReceipt,
 } from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -75,6 +77,38 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
 });
 export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
 
+/** Counts accepted reports continuously across every snapshot for the phase. */
+export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
+  const count = EffectArray.filter(
+    runtime.reviews,
+    item =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, entry => entry.snapshot.snapshotId === item.snapshotId),
+      )?.snapshot.phaseId === phaseId,
+  ).length;
+  const limit = runtime.reviewLimits[phaseId] ?? 5;
+  return {count, limit, exhausted: count >= limit};
+}
+
+export function nativeCycleHasBasePlanTransition(
+  plans: NativeCycleRuntime['plans'],
+  prior: typeof NativeCycleSnapshotSchema.Type,
+  phaseHash: string,
+  fromBaseBranch: string,
+  toBaseBranch: string,
+): boolean {
+  if (fromBaseBranch === toBaseBranch) return false;
+  let fromFound = false;
+  for (const plan of plans) {
+    const phase = EffectArray.findFirst(plan.phases, item => item.id === prior.phaseId);
+    if (phase._tag === 'None') continue;
+    const hash = nativeCyclePhaseHash(plan, prior.phaseId);
+    if (fromFound && phase.value.baseBranch === toBaseBranch && hash === phaseHash) return true;
+    if (phase.value.baseBranch === fromBaseBranch && hash === prior.phaseHash) fromFound = true;
+  }
+  return false;
+}
+
 export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   const runtime = Schema.decodeUnknownSync(NativeCycleRuntimeSchema, {onExcessProperty: 'error'})(input);
   decodeNativeCycleState(runtime.state);
@@ -112,11 +146,72 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     if (!runtime.state.phases[phaseId] || new Set(baseline.preservedFiles).size !== baseline.preservedFiles.length)
       fail('The pre-implementation baseline lost its phase or preserved-work manifest.');
   }
+  const capturedSnapshots = new Set<string>();
   const capturedPhases = new Set<string>();
   for (const {snapshot, incoming} of runtime.snapshots) {
     const baseline = runtime.baselines[snapshot.phaseId];
     if (!baseline || baseline.tree !== snapshot.baseTree || baseline.repo !== snapshot.repo)
       fail('Snapshot baseline differs from its pre-implementation source pin.');
+    if (snapshot.baseRequalification) {
+      const receipt = snapshot.baseRequalification;
+      const predecessor = snapshot.previous ?? snapshot.supersedes;
+      const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
+      if (
+        !prior ||
+        !capturedSnapshots.has(prior.snapshotId) ||
+        !reviews.has(prior.snapshotId) ||
+        receipt.preRebaseHead !== prior.head ||
+        receipt.priorDeclaredBaseHead !== prior.declaredBaseHead ||
+        receipt.ontoHead !== snapshot.declaredBaseHead ||
+        receipt.rebasedHead !== snapshot.head ||
+        receipt.preRebaseHead === snapshot.head ||
+        receipt.priorDeclaredBaseHead === snapshot.declaredBaseHead ||
+        snapshot.acceptedHead !== snapshot.head ||
+        !EffectString.trim(receipt.reason) ||
+        !EffectString.trim(receipt.authority) ||
+        !nativeCycleHasBasePlanTransition(
+          runtime.plans,
+          prior,
+          snapshot.phaseHash,
+          receipt.fromBaseBranch,
+          receipt.toBaseBranch,
+        ) ||
+        receipt.receiptDigest !== nativeCycleBaseRequalificationReceiptDigest(snapshot, receipt)
+      )
+        fail('Base requalification lost its reviewed predecessor, approved plan transition or immutable witness.');
+    }
+    if (snapshot.ordinaryMergeQualificationV1) {
+      const predecessor = snapshot.previous ?? snapshot.supersedes;
+      const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
+      if (!prior || !capturedSnapshots.has(prior.snapshotId) || !reviews.has(prior.snapshotId))
+        fail('Ordinary merge qualification requires its retained reviewed predecessor.');
+      validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const proof = snapshot.ordinaryMergeQualificationV1;
+      const plan = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
+      )!;
+      const phase = EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.phases, item => item.id === snapshot.phaseId),
+      )!;
+      const expected = EffectArray.filter(proof.upstreamEvidence, item => !phase.allowedPaths.includes(item.path));
+      if (
+        incoming.length !== expected.length ||
+        EffectArray.some(incoming, (item, index) => {
+          const entry = expected[index];
+          return (
+            !entry ||
+            item.path !== entry.path ||
+            item.source !== 'upstream' ||
+            item.commit !== proof.currentBaseHead ||
+            item.tree !== proof.currentBaseTree ||
+            item.mode !== entry.head.mode ||
+            item.blob !== entry.head.blob
+          );
+        })
+      )
+        fail('Keep the exact per-phase upstream incoming subset separate from the complete merge proof.');
+    }
+    capturedSnapshots.add(snapshot.snapshotId);
     if (
       snapshot.rebase &&
       (capturedPhases.has(snapshot.phaseId) ||

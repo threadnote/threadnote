@@ -9,7 +9,7 @@ import {
   isOutputResponse,
   isProjectedContextBriefV1,
 } from '../api/response_guards.js';
-import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   CONTEXT_BRIEF_MODES,
@@ -38,7 +38,7 @@ import type {ManagerMemoryRelationsResponse} from '@threadnote/manager/memory/co
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {MEMORY_RELATION_TYPES, type MemoryRelation} from '@threadnote/memory/document';
 import {MANAGER_CONTEXT_RECALL_PAGE_SIZE_DEFAULT, projectManagerRecallPage} from '@threadnote/manager/context/paging';
-import {api, errorMessage} from '@threadnote/manager/ui/support';
+import {api, errorMessage, ManagerApiError} from '@threadnote/manager/ui/support';
 import type {ManagerWorksetCatalog, ManagerWorksetPrepareJob} from '@threadnote/manager/workset/contracts';
 import {ValuePanel} from '../value_view.js';
 import * as EffectString from 'effect/String';
@@ -112,6 +112,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
   const [connections, setConnections] = useState<ManagerContextConnectionsResponse>();
   const [connectionsBusy, setConnectionsBusy] = useState(false);
   const [connectionsError, setConnectionsError] = useState('');
+  const [connectionsPending, setConnectionsPending] = useState(false);
   const [relationsBusy, setRelationsBusy] = useState(false);
   const [relationsError, setRelationsError] = useState('');
   const briefRequest = useRef<AbortController>(undefined);
@@ -402,6 +403,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
       setConnections(undefined);
       setConnectionsBusy(false);
       setConnectionsError('');
+      setConnectionsPending(false);
       setRelationsBusy(false);
       setRelationsError('');
       setReadResult(undefined);
@@ -425,8 +427,10 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     connectionsRequest.current?.abort();
     const controller = new AbortController();
     connectionsRequest.current = controller;
+    setConnections(undefined);
     setConnectionsBusy(true);
     setConnectionsError('');
+    setConnectionsPending(false);
     try {
       const result = await api<ManagerContextConnectionsResponse>(
         '/api/context/connections',
@@ -436,7 +440,11 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
       );
       if (!controller.signal.aborted) setConnections(result);
     } catch (cause) {
-      if (!controller.signal.aborted) setConnectionsError(errorMessage(cause));
+      if (!controller.signal.aborted) {
+        if (Schema.is(ManagerApiError)(cause) && cause.status === 503 && cause.code === 'connections-unavailable')
+          setConnectionsPending(true);
+        else setConnectionsError(errorMessage(cause));
+      }
     } finally {
       if (!controller.signal.aborted) setConnectionsBusy(false);
     }
@@ -459,18 +467,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         isManagerMemoryRelationsResponse,
       );
       if (controller.signal.aborted || readerNavigationRevision.current !== navigationRevision) return;
-      setConnections(current =>
-        current?.editor
-          ? {
-              ...current,
-              editor: {
-                expectedContent: updated.content,
-                relations: updated.relations,
-                uri: updated.uri,
-              },
-            }
-          : current,
-      );
+      setConnections(undefined);
       await readContext(updated.uri, 0, false);
       if (controller.signal.aborted || readerNavigationRevision.current !== navigationRevision) return;
       await readConnections(updated.uri);
@@ -834,12 +831,14 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
             setConnections(undefined);
             setReadError('');
             setConnectionsError('');
+            setConnectionsPending(false);
             setRelationsError('');
             setReaderView('content');
           }}
           connections={connections}
           connectionsBusy={connectionsBusy}
           connectionsError={connectionsError}
+          connectionsPending={connectionsPending}
           onInspectCode={inspectConnectionCitation}
           onLoadConnections={uri => void readConnections(uri)}
           onOpen={uri => void readContext(uri)}
@@ -850,6 +849,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
               connectionsRequest.current?.abort();
               setConnectionsBusy(false);
               setConnectionsError('');
+              setConnectionsPending(false);
             }
             setReaderView(nextView);
           }}
@@ -1234,6 +1234,7 @@ function ContextReader(props: {
   readonly connections?: ManagerContextConnectionsResponse;
   readonly connectionsBusy: boolean;
   readonly connectionsError: string;
+  readonly connectionsPending: boolean;
   readonly error: string;
   readonly onClose: () => void;
   readonly onInspectCode: (citation: MemoryCodeCitationV1) => void;
@@ -1305,6 +1306,10 @@ function ContextReader(props: {
         <ContextConnections
           busy={props.connectionsBusy}
           error={props.connectionsError}
+          pending={props.connectionsPending}
+          onRetry={() => {
+            if (result) props.onLoadConnections(result.requestedUri);
+          }}
           onInspectCode={props.onInspectCode}
           onOpen={props.onOpen}
           onSaveRelations={props.onSaveRelations}
@@ -1347,14 +1352,25 @@ function ContextReader(props: {
 function ContextConnections(props: {
   readonly busy: boolean;
   readonly error: string;
+  readonly pending: boolean;
   readonly onInspectCode: (citation: MemoryCodeCitationV1) => void;
   readonly onOpen: (uri: string) => void;
+  readonly onRetry: () => void;
   readonly onSaveRelations: (relations: readonly MemoryRelation[]) => void;
   readonly relationsBusy: boolean;
   readonly relationsError: string;
   readonly result?: ManagerContextConnectionsResponse;
 }): React.ReactElement {
   if (props.busy) return <ContextStatus error="" loading loadingText="Verifying direct memory connections…" />;
+  if (props.pending)
+    return (
+      <div className="context-status" role="status">
+        <p>Connections are being prepared in the background. Canonical memory remains available.</p>
+        <button onClick={props.onRetry} type="button">
+          Retry connections
+        </button>
+      </div>
+    );
   if (props.error) return <ContextStatus error={props.error} loading={false} loadingText="" />;
   if (!props.result)
     return <ContextEmpty title="Connections not loaded" text="Open this tab to verify direct links." />;
