@@ -360,15 +360,55 @@ describe('owned fixture cooperative drain', () => {
               Effect.forkScoped,
             );
           yield* Deferred.await(activated);
+          const controlLockPath = f.options.receiptPath + '.launch-v2.lock';
+          const controlLockHeld = yield* Deferred.make<void>();
+          const releaseControlLock = yield* Deferred.make<void>();
+          const controlLockHolder = yield* withExclusiveFileLock(
+            f.fs,
+            controlLockPath,
+            {
+              createParentDirectory: false,
+              retryIntervalMilliseconds: 5,
+              staleAfterMilliseconds: 120_000,
+              waitTimeoutMilliseconds: 2_000,
+              useCanonicalProcessStartIdentity: true,
+            },
+            Effect.gen(function* () {
+              yield* Deferred.succeed(controlLockHeld, undefined);
+              yield* Deferred.await(releaseControlLock);
+            }),
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(controlLockHeld);
+          const controlLockContended = yield* Deferred.make<void>();
+          const observedFs = FileSystem.FileSystem.of({
+            ...f.fs,
+            writeFileString: (target, content, writeOptions) => {
+              const write = f.fs.writeFileString(target, content, writeOptions);
+              if (target !== controlLockPath || writeOptions?.flag !== 'wx') return write;
+              return write.pipe(
+                Effect.tapError(error =>
+                  PlatformError.isPlatformError(error) && error.reason._tag === 'AlreadyExists'
+                    ? Deferred.succeed(controlLockContended, undefined).pipe(Effect.asVoid)
+                    : Effect.void,
+                ),
+              );
+            },
+          });
           let finished = false;
-          const drain = yield* drainBackgroundWorkerFixture(f.capability, (yield* Clock.currentTimeMillis) + 2000).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                finished = true;
-              }),
-            ),
+          const drainExited = yield* Deferred.make<void>();
+          const drainDeadline = (yield* Clock.currentTimeMillis) + 2000;
+          const drain = yield* drainBackgroundWorkerFixture(f.capability, drainDeadline).pipe(
+            Effect.provideService(FileSystem.FileSystem, observedFs),
+            Effect.tap(() => Effect.sync(() => (finished = true))),
+            Effect.onExit(() => Deferred.succeed(drainExited, undefined).pipe(Effect.asVoid)),
             Effect.forkScoped,
           );
+          yield* Deferred.await(controlLockContended);
+          yield* Effect.sleep(150);
+          expect(yield* Deferred.isDone(drainExited)).toBe(false);
+          expect(finished).toBe(false);
+          yield* Deferred.succeed(releaseControlLock, undefined);
+          yield* Fiber.join(controlLockHolder);
           yield* f.closed;
           expect(yield* lifecycle.shouldDrain).toBe(true);
           expect(yield* wakeBackgroundWorker(f.options)).toMatchObject({state: 'deferred'});
@@ -376,6 +416,7 @@ describe('owned fixture cooperative drain', () => {
           yield* Fiber.join(host);
           expect(yield* f.fs.exists(f.options.receiptPath)).toBe(false);
           yield* Effect.sleep(30);
+          expect(yield* Deferred.isDone(drainExited)).toBe(false);
           expect(finished).toBe(false);
           expect(f.launches).toHaveLength(1);
           f.identities.delete(owner.processId);

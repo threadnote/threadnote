@@ -219,6 +219,7 @@ function guarded<A, E, R>(
   options: BackgroundWorkerControlOptions,
   program: Effect.Effect<A, E, R>,
   waitTimeoutMilliseconds = 100,
+  allowUnverifiedStaleRecovery = true,
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -260,6 +261,7 @@ function guarded<A, E, R>(
         staleAfterMilliseconds: 5000,
         waitTimeoutMilliseconds,
         useCanonicalProcessStartIdentity: true,
+        allowUnverifiedStaleRecovery,
       },
       program,
     );
@@ -564,7 +566,8 @@ export const drainBackgroundWorkerFixture = Effect.fn('backgroundWorker.drainFix
             }
             return true;
           }),
-          Math.min(100, remaining),
+          remaining,
+          false,
         ),
       ),
       Effect.timeoutOption(remaining),
