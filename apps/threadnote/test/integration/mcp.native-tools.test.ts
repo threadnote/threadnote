@@ -767,7 +767,12 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...snapshotByCommand.keys()]).toEqual(['record', 'supersede-unreviewed', 'requalify-base']);
+        expect([...snapshotByCommand.keys()]).toEqual([
+          'record',
+          'supersede-unreviewed',
+          'requalify-base',
+          'integrate-same-label-base',
+        ]);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
         expect(snapshotByCommand.get('requalify-base')?.required).toEqual([
@@ -776,6 +781,16 @@ describe('Threadnote MCP toolsets', () => {
           'reason',
           'userAuthority',
         ]);
+        const sameLabelSnapshot = snapshotByCommand.get('integrate-same-label-base');
+        expect(sameLabelSnapshot?.required).toEqual(['command', 'snapshotRef', 'reason', 'userAuthority']);
+        const sameLabelProperties = decodeJsonObject(sameLabelSnapshot?.properties);
+        expect(EffectRecord.keys(sameLabelProperties).sort()).toEqual([
+          'command',
+          'reason',
+          'snapshotRef',
+          'userAuthority',
+        ]);
+        expect(decodeJsonObject(sameLabelProperties.command).enum).toEqual(['integrate-same-label-base']);
 
         const workflowTaskDeliver = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_deliver'),
