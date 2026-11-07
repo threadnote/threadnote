@@ -132,12 +132,18 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* (
   );
   const query = Context.get(queryContext, CodeGraphQueryService);
   const counts = {opening: 0, closing: 0, leases: 0, releases: 0};
+  let atomicReads = 0;
+  let freshFenceSessions = 0;
   let drift = false;
   const session = query.withStatusSession;
   if (!session) throw new Error('Expected real status sessions');
   const observedQuery = CodeGraphQueryService.of({
     ...query,
-    withStatusSession: (...args) => Effect.sync(() => void counts.opening++).pipe(Effect.andThen(session(...args))),
+    withStatusSession: (...args) =>
+      Effect.sync(() => {
+        counts.opening++;
+        if (counts.opening > 1) freshFenceSessions++;
+      }).pipe(Effect.andThen(session(...args))),
     status: (...args) =>
       Effect.gen(function* () {
         counts.closing++;
@@ -147,10 +153,13 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* (
   });
   const observedStore = CodeGraphStore.of({
     ...graphStore,
-    // Counter assertions exercise legacy capture. Scoped projection must also retain
-    // its lease when the optional atomic reader is available.
+    // Exercise the atomic reader production selects and count calls without changing
+    // its fresh read transaction or evidence result.
     readReadySnapshotCitationEvidence: options.atomicAvailable
-      ? () => Effect.die('Scoped projection must retain its lease instead of copying anchors')
+      ? (...args) =>
+          Effect.sync(() => void atomicReads++).pipe(
+            Effect.andThen(graphStore.readReadySnapshotCitationEvidence!(...args)),
+          )
       : undefined,
     acquireSnapshotLease: (...args) =>
       graphStore.acquireSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => void counts.leases++))),
@@ -189,12 +198,21 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* (
     ...f,
     journal,
     state: stored.state,
+    headCommit: identity.headCommit,
     counts,
+    get atomicReads() {
+      return atomicReads;
+    },
+    get freshFenceSessions() {
+      return freshFenceSessions;
+    },
     apply,
     request,
     document,
     reset: () => {
       for (const key of ['opening', 'closing', 'leases', 'releases'] as const) counts[key] = 0;
+      atomicReads = 0;
+      freshFenceSessions = 0;
     },
     drift: () => {
       drift = true;
@@ -207,15 +225,19 @@ const fixture = Effect.fn('test.closeoutCitationProjection')(function* (
     ) => projectNativeCloseoutKnowledge(f.config, state, original, transaction, documents, refs).pipe(apply),
   };
 });
-it.effect('retains the scoped projection lease when atomic citation reads are available', () =>
+it.effect('projects exact citations through atomic reads and closes with a fresh fence without leases', () =>
   Effect.gen(function* () {
     const f = yield* fixture({atomicAvailable: true});
     const document = yield* f.document('atomic-available', 'Scoped output.\n');
     const projected = yield* f.project([document]);
     const operations = EffectRecord.values(projected.journal.operations);
     expect(operations).toHaveLength(1);
-    expect(parseMemoryDocument(document.uri, operations[0].desired)?.metadata.codeCitations).toHaveLength(1);
-    expect(f.counts).toEqual({opening: 1, closing: 1, leases: 1, releases: 1});
+    expect(parseMemoryDocument(document.uri, operations[0].desired)?.metadata.codeCitations).toMatchObject([
+      {path: 'source.ts', sourceCommit: f.headCommit, target: {kind: 'file'}},
+    ]);
+    expect(f.counts).toEqual({opening: 2, closing: 0, leases: 0, releases: 0});
+    expect(f.atomicReads).toBe(1);
+    expect(f.freshFenceSessions).toBe(1);
   }).pipe(provideNative, TestClock.withLive),
 );
 it.effect(

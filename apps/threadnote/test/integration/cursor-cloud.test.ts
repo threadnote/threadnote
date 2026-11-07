@@ -35,6 +35,9 @@ const CLOUD_TOOL_NAMES = [
 const CLOUD_LOCAL_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
+  'semantic_capabilities',
+  'semantic_view',
+  'semantic_query',
   'cursor_cloud_status',
   'complete_cursor_attestation',
   'threadnote_guide',
