@@ -102,11 +102,7 @@ import {discardDeferredCodeAnchorIntent} from '../memory/deferred/code_anchor.js
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
 import {verifyResolvedMemoryIdentity, type ResolvedMemoryIdentityAlias} from '@threadnote/recall/memory/identity';
 import {resolveManagerMemoryIdentity} from './memory/identity.js';
-import {
-  MAX_PREVIEW_IDENTITY_FILE_BYTES,
-  resolvePreviewMemoryIdentity,
-  validatePreviewMemoryPath,
-} from './memory/read.js';
+import {MAX_PREVIEW_DOCUMENT_BYTES, resolvePreviewMemoryIdentity, validatePreviewMemoryPath} from './memory/read.js';
 import {
   ensureSharedDirectoryChain,
   assertSharedWorktreeFileReady,
@@ -238,20 +234,10 @@ function readFile(
     return encoding ? yield* fs.readFileString(target, encoding) : yield* fs.readFile(target);
   });
 }
-interface ManagerDirectoryEntry {
-  readonly name: string;
-  readonly isDirectory: () => boolean;
-  readonly isFile: () => boolean;
-}
-
-const readdir = Effect.fn('manager.readdir')(function* (
-  target: string,
-  options?: ((name: string) => boolean) | {readonly withFileTypes: true},
-) {
+const readdir = Effect.fn('manager.readdir')(function* (target: string, includeName?: (name: string) => boolean) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const names = yield* fs.readDirectory(target);
-  const includeName = typeof options === 'function' ? options : undefined;
   return yield* Effect.forEach(includeName ? EffectArray.filter(names, includeName) : names, name =>
     lstat(path.join(target, name)).pipe(
       Effect.map(info => ({name, isDirectory: info.isDirectory, isFile: info.isFile})),
@@ -475,7 +461,7 @@ export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function
   const pathStat = yield* lstat(path);
   if (!pathStat.isFile())
     return yield* ManagerOperationError.make({message: `Manager requires regular memory files: ${canonicalUri}`});
-  if (options.preview && resolved.expectedMemoryId && pathStat.size > MAX_PREVIEW_IDENTITY_FILE_BYTES)
+  if (options.preview && pathStat.size > MAX_PREVIEW_DOCUMENT_BYTES)
     return yield* ManagerOperationError.make({message: 'Memory preview target is unavailable.'});
   const content = yield* readFile(path, 'utf8');
   yield* verifyResolvedMemoryIdentity(resolved, canonicalUri, content);

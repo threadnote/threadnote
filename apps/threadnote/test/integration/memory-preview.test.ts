@@ -13,6 +13,7 @@ import {
   String as EffectString,
 } from 'effect';
 import {TestClock} from 'effect/testing';
+import {vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryLaunchUri} from '@threadnote/memory/navigation-link';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
@@ -433,6 +434,30 @@ it.effect('excludes oversized and packed files without hiding eligible memories'
     expect(
       Exit.isFailure(yield* Effect.exit(readManagedMemory(config, 'threadnote://memory/tn_packed', {preview: true}))),
     ).toBe(true);
+  }).pipe(provide),
+);
+
+it.effect('rejects an oversized canonical URI preview before reading the document', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'preview-canonical-size-'});
+    const config = {...unusedConfig, agentContextHome: home};
+    const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
+    yield* fs.makeDirectory(root, {recursive: true});
+    yield* fs.writeFileString(
+      path.join(root, 'large.md'),
+      `MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_large_canonical\n\n${EffectString.repeat(512 * 1024)('x')}`,
+    );
+
+    const readFileString = vi.spyOn(fs, 'readFileString');
+    const result = yield* Effect.exit(
+      readManagedMemory(config, 'threadnote://user/tester/memories/large.md', {preview: true}),
+    );
+
+    expect(Exit.isFailure(result)).toBe(true);
+    expect(readFileString).not.toHaveBeenCalled();
+    readFileString.mockRestore();
   }).pipe(provide),
 );
 

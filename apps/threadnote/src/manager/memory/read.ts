@@ -12,6 +12,7 @@ import {fromPromise, fromPromiseInterruptible} from '@threadnote/platform/errors
 import type {PreviewScanGrant} from '../../preview/server.js';
 
 export const MAX_PREVIEW_IDENTITY_FILE_BYTES = 512 * 1024;
+export const MAX_PREVIEW_DOCUMENT_BYTES = MAX_PREVIEW_IDENTITY_FILE_BYTES;
 /** A header may span the entire allowed file. Never truncate it to infer absence. */
 const readIdentityHeader = (
   fs: FileSystem.FileSystem,
