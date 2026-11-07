@@ -1,3 +1,4 @@
+import {makeSemanticAgentChanges} from '../../src/semantic/agent_changes.js';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -5,7 +6,7 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {cryptoLayer} from '@threadnote/platform/crypto';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -1412,5 +1413,276 @@ describe('selected TypeScript configuration resolution', () => {
       // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow selected-configuration filesystem test.
       Effect.provide(coordinatorIo),
     ),
+  );
+});
+
+describe.skipIf(process.platform === 'win32')('pinned TypeScript rename source closure', () => {
+  effectIt.effect(
+    'recomputes all three files from synchronized exact input and never changes disk bytes',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-rename-'}));
+        const project = (yield* path.toFileUrl(root)).href;
+        const texts = new Map([
+          ['a.ts', 'export function target() { return 1; }\n'],
+          ['b.ts', '\ufeffimport {target} from "./a"; target();\r\n'],
+          ['c.ts', 'import {target} from "./a"; export const value = target();\r\n'],
+        ]);
+        for (const [name, text] of texts) yield* fs.writeFileString(path.join(root, name), text);
+        yield* fs.writeFileString(
+          path.join(root, 'tsconfig.json'),
+          JSON.stringify({compilerOptions: {strict: true}, files: [...texts.keys()]}),
+        );
+        const resolveFrom = path.dirname(yield* path.fromFileUrl(new URL(import.meta.url)));
+        const privateHome = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn7-host-'}));
+        const sdkDirectory = yield* fs.realPath(path.dirname(Bun.resolveSync('typescript/package.json', resolveFrom)));
+        const runtime = yield* makeTypeScriptRuntime({
+          home: privateHome,
+          sdkDirectory,
+          sdkTreeDigest: yield* semanticTreeDigest(sdkDirectory),
+          worktree: root,
+        });
+        const node = process.execPath;
+        const client = yield* makeLspClient(
+          yield* spawnLspWire({
+            command: node,
+            args: [Bun.resolveSync('typescript-language-server/lib/cli.mjs', resolveFrom), '--stdio'],
+            cwd: root,
+            environment: {},
+          }),
+        );
+        const basis = observation(texts.get('a.ts')!, {
+          worktree: project,
+          project,
+          uri: project + '/a.ts',
+          view: {kind: 'disk', id: 'rename-disk', owner: 'rename-test', epoch: 0},
+          documentVersion: null,
+        });
+        let mutateOnRead = false;
+        const session = yield* makeTypeScriptSession(client, {
+          ...options(basis),
+          tsserver: runtime.launcher,
+          compiler: runtime.compiler,
+          sourceRoot: runtime.sourceRoot,
+          verifyPolicy: runtime.verify,
+          startupMilliseconds: 15000,
+          captureEditSource: uri =>
+            Effect.gen(function* () {
+              const file = yield* path.fromFileUrl(new URL(uri));
+              const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(yield* fs.readFile(file));
+              if (mutateOnRead && EffectString.endsWith('/b.ts')(file))
+                yield* fs.writeFileString(file, text + '// changed\n');
+              const stat = yield* fs.stat(file);
+              return {
+                uri,
+                text,
+                content: sha256HexSync(text),
+                identity: JSON.stringify([String(stat.dev), String(Option.getOrThrow(stat.ino))]),
+              };
+            }),
+        });
+        const attached = yield* session.upsert(basis, texts.get('a.ts')!, 'typescript', 15000);
+        const result = yield* session.prepare('rename', attached, {line: 0, character: 18}, 'renamed', 15000);
+        expect(result.status).toBe('ok');
+        if (result.status !== 'ok') throw new Error('Pinned rename did not prepare');
+        const item = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            files: Schema.Array(
+              Schema.Struct({
+                uri: Schema.String,
+                beforeText: Schema.String,
+                edits: Schema.Array(
+                  Schema.Struct({range: Schema.Struct({start: Position, end: Position}), newText: Schema.String}),
+                ),
+              }),
+            ),
+          }),
+        )(result.items[0]);
+        expect(item.files).toHaveLength(3);
+        for (const file of item.files) {
+          const original = texts.get(EffectString.split('/')(file.uri).pop()!)!;
+          expect(file.beforeText).toBe(original);
+          let after = original;
+          const edits = [...file.edits].sort((a, b) => b.range.start.character - a.range.start.character);
+          for (const edit of edits) {
+            expect(edit.range.start.line).toBe(0);
+            expect(edit.range.end.line).toBe(0);
+            after =
+              EffectString.slice(0, edit.range.start.character)(after) +
+              edit.newText +
+              EffectString.slice(edit.range.end.character)(after);
+          }
+          expect(after).toBe(EffectString.replaceAll('target', 'renamed')(original));
+          expect(Array.from(yield* fs.readFile(yield* path.fromFileUrl(new URL(file.uri))))).toEqual(
+            Array.from(new TextEncoder().encode(original)),
+          );
+        }
+        const changes = yield* makeSemanticAgentChanges(
+          {
+            attach: (seed, text) =>
+              session
+                .upsert({...basis, uri: seed.uri, content: seed.content}, text, 'typescript', 15000)
+                .pipe(Effect.map(observation => ({observation}))),
+            use: (_observation, _milliseconds, f) =>
+              f({
+                ...session,
+                upsert: (o, t) => session.upsert(o, t, 'typescript', 15000),
+                query: () =>
+                  Effect.succeed({version: 1, status: 'unsupported', reason: 'unused test query', evidence: null}),
+              }),
+            observe: observed => session.observation(observed.uri),
+          },
+          {directory: privateHome, worktree: project, runtimeIdentity: sha256HexSync('pinned-test-runtime')},
+        );
+        const request = {
+          version: 1 as const,
+          worktree: project,
+          project,
+          uri: basis.uri,
+          language: 'typescript' as const,
+          profile: sha256HexSync('test-profile'),
+          action: 'prepare' as const,
+          operation: 'rename' as const,
+          position: {line: 0, character: 18},
+          newName: 'renamed',
+          milliseconds: 15000,
+          maxBytes: 32768,
+        };
+        const preview = yield* changes.execute(request);
+        expect(preview).toMatchObject({status: 'ok', applicable: false, targetCount: 3});
+        const {handle} = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
+        )(preview);
+        const retrieved = yield* changes.execute({...request, action: 'status', handle});
+        expect(retrieved).toMatchObject({status: 'ok', applicable: false});
+        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+          status: 'ok',
+          applicable: false,
+          writerAuthorityRequired: true,
+          conflicts: [],
+        });
+        yield* fs.chmod(path.join(root, 'c.ts'), 0o400);
+        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+          status: 'conflict',
+          applicable: false,
+          conflicts: [{uri: project + '/c.ts', reason: 'readonly'}],
+        });
+        yield* fs.chmod(path.join(root, 'c.ts'), 0o600);
+        yield* fs.rename(path.join(root, 'c.ts'), path.join(root, 'original-c.ts'));
+        yield* fs.symlink(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
+        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+          status: 'conflict',
+          applicable: false,
+          conflicts: [{uri: project + '/c.ts', reason: 'path-conflict'}],
+        });
+        yield* fs.remove(path.join(root, 'c.ts'));
+        yield* fs.rename(path.join(root, 'original-c.ts'), path.join(root, 'c.ts'));
+        yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')! + '// changed\n');
+        expect(yield* changes.execute({...request, action: 'preflight', handle})).toMatchObject({
+          status: 'conflict',
+          applicable: false,
+          conflicts: [{uri: project + '/c.ts', reason: 'source-changed'}],
+        });
+        yield* fs.writeFileString(path.join(root, 'c.ts'), texts.get('c.ts')!);
+        mutateOnRead = true;
+        const current = yield* session.observation(basis.uri);
+        expect(current).toBeDefined();
+        expect(
+          (yield* session.prepare('rename', current!, {line: 0, character: 18}, 'other', 15000).pipe(Effect.exit))._tag,
+        ).toBe('Failure');
+        const closed = yield* client.close;
+        expect(closed.drained && closed.stdioClosed).toBe(true);
+      }).pipe(
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped real process/filesystem boundary test.
+        Effect.provide(coordinatorIo),
+        Effect.provideService(ChildEnvironmentPolicy, {
+          sanitizeExternal: env => env,
+          preserveIntendedChild: env => env,
+        }),
+        TestClock.withLive,
+      ),
+    45000,
+  );
+});
+
+describe('rename closure project barriers', () => {
+  effectIt.effect('preserves JS module languages and refuses absent or changing effective project membership', () =>
+    Effect.gen(function* () {
+      for (const scenario of [
+        'js',
+        'mjs',
+        'cjs',
+        'missing-initiator',
+        'missing-target',
+        'target-config',
+        'closing-membership',
+        'closing-config',
+      ]) {
+        const extension = ['js', 'mjs', 'cjs'].includes(scenario) ? scenario : 'ts';
+        const text = 'const target = 1;';
+        const a = 'file:///test/a.' + extension;
+        const b = 'file:///test/b.' + extension;
+        const basis = observation(text, {
+          uri: a,
+          documentVersion: null,
+          view: {kind: 'disk', id: 'disk', owner: 'test', epoch: 0},
+        });
+        let renames = 0;
+        const base = fakeClient(method => {
+          if (method !== 'textDocument/rename') return Effect.succeed(null);
+          renames++;
+          const edit = {range: {start: {line: 0, character: 6}, end: {line: 0, character: 12}}, newText: 'renamed'};
+          return Effect.succeed({changes: {[a]: [edit], [b]: [edit]}});
+        });
+        const session = yield* makeTypeScriptSession(
+          {
+            ...base,
+            request: (method, params, milliseconds) => {
+              const project = Schema.Struct({
+                arguments: Schema.Tuple([
+                  Schema.Literal('projectInfo'),
+                  Schema.Struct({file: Schema.String}),
+                  Schema.Json,
+                ]),
+              });
+              if (method === 'workspace/executeCommand' && Schema.is(project)(params)) {
+                const members = scenario === 'missing-initiator' ? [b] : scenario === 'missing-target' ? [a] : [a, b];
+                return Effect.succeed({
+                  success: true,
+                  body: {
+                    configFileName:
+                      (scenario === 'target-config' && params.arguments[1].file === b) ||
+                      (scenario === 'closing-config' && renames === 2)
+                        ? '/test/other.json'
+                        : '/test/tsconfig.json',
+                    fileNames: EffectArray.map(
+                      scenario === 'closing-membership' && renames === 2 ? [a] : members,
+                      uri => new URL(uri).pathname,
+                    ),
+                  },
+                });
+              }
+              return base.request(method, params, milliseconds);
+            },
+          },
+          {
+            ...options(basis),
+            captureEditSource: uri => Effect.succeed({uri, text, content: sha256HexSync(text), identity: 'inode'}),
+          },
+        );
+        const attached = yield* session.upsert(basis, text, extension === 'ts' ? 'typescript' : 'javascript', 1000);
+        const result = yield* session
+          .prepare('rename', attached, {line: 0, character: 7}, 'renamed', 1000)
+          .pipe(Effect.result);
+        if (['js', 'mjs', 'cjs'].includes(scenario)) {
+          expect(result).toMatchObject({_tag: 'Success', success: {status: 'ok'}});
+          expect(renames).toBe(2);
+        } else {
+          expect(result._tag === 'Failure' || result.success.status !== 'ok').toBe(true);
+        }
+      }
+    }),
   );
 });

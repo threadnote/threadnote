@@ -5,7 +5,8 @@
   "exports": {
     "./contracts": "./src/contracts.ts",
     "./views": "./src/views.ts",
-    "./changes": "./src/changes.ts"
+    "./changes": "./src/changes.ts",
+    "./proposals": "./src/proposals.ts"
   },
   "dependencies": {
     "effect": "4.1.2"

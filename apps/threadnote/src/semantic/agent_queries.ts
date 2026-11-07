@@ -89,9 +89,9 @@ export interface SemanticAgentQueryHost<ContextR = never> {
     target: SemanticContextSymbolTarget | null,
   ) => Effect.Effect<SemanticContextKnowledgeV1, unknown, ContextR>;
 }
-const host = {
+export const semanticAgentQueryHost = {
   runtimeIdentity: compiledRuntimeIdentity,
-  connect: ensureSemanticEndpoint,
+  connect: (...args: Parameters<typeof ensureSemanticEndpoint>) => ensureSemanticEndpoint(...args),
   context: compileSemanticContextKnowledge,
 };
 
@@ -480,9 +480,9 @@ export const runSemanticAgentQueryWith = <ContextR = never>(
 export const runSemanticAgentQuery = (config: RuntimeConfig, input: unknown, knowledgeAuthorized = true) =>
   runSemanticAgentQueryWith(
     knowledgeAuthorized
-      ? host
+      ? semanticAgentQueryHost
       : {
-          ...host,
+          ...semanticAgentQueryHost,
           knowledgeAuthorized: false,
           context: () =>
             Effect.succeed<SemanticContextKnowledgeV1>({
@@ -611,4 +611,4 @@ export const runSemanticAgentViewWith = <ContextR = never>(
     ),
   );
 export const runSemanticAgentView = (config: RuntimeConfig, input: unknown) =>
-  runSemanticAgentViewWith(host, config, input);
+  runSemanticAgentViewWith(semanticAgentQueryHost, config, input);

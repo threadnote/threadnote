@@ -185,6 +185,9 @@ const CORE_TOOL_NAMES = [
   'inspect_code_graph',
   'analyze_code_graph',
   'semantic_capabilities',
+  'semantic_change_prepare',
+  'semantic_change_status',
+  'semantic_change_preflight',
   'semantic_view',
   'semantic_query',
   'context_brief',
@@ -810,6 +813,19 @@ describe('Threadnote MCP toolsets', () => {
           expect(tool?.annotations).toMatchObject({readOnlyHint: false, destructiveHint: false});
           expect(Buffer.byteLength(JSON.stringify(tool)), name).toBeLessThanOrEqual(maximumBytes);
         }
+        const changeTools = EffectArray.filter(
+          tools.tools,
+          tool =>
+            tool.name === 'semantic_change_prepare' ||
+            tool.name === 'semantic_change_status' ||
+            tool.name === 'semantic_change_preflight',
+        );
+        expect(changeTools).toHaveLength(3);
+        for (const tool of changeTools) {
+          expect(tool.annotations).toMatchObject({readOnlyHint: true, destructiveHint: false});
+          // Measured prepare/status/preflight are 538/535/541 bytes. Bound this additive surface separately.
+          expect(Buffer.byteLength(JSON.stringify(tool)), tool.name).toBeLessThanOrEqual(576);
+        }
         const priorCore = EffectArray.filter(
           tools.tools,
           tool =>
@@ -818,7 +834,8 @@ describe('Threadnote MCP toolsets', () => {
             !isWorkflowTaskMutatingTool(tool.name) &&
             tool.name !== 'semantic_capabilities' &&
             tool.name !== 'semantic_query' &&
-            tool.name !== 'semantic_view',
+            tool.name !== 'semantic_view' &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         const withoutWorkflowTaskTools = EffectArray.filter(
           tools.tools,
@@ -827,7 +844,8 @@ describe('Threadnote MCP toolsets', () => {
             !isWorkflowTaskMutatingTool(tool.name) &&
             tool.name !== 'semantic_capabilities' &&
             tool.name !== 'semantic_query' &&
-            tool.name !== 'semantic_view',
+            tool.name !== 'semantic_view' &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         const withoutMutatingWorkflowTaskTools = EffectArray.filter(
           tools.tools,
@@ -835,7 +853,8 @@ describe('Threadnote MCP toolsets', () => {
             !isWorkflowTaskMutatingTool(tool.name) &&
             tool.name !== 'semantic_capabilities' &&
             tool.name !== 'semantic_query' &&
-            tool.name !== 'semantic_view',
+            tool.name !== 'semantic_view' &&
+            !EffectArray.some(changeTools, change => change.name === tool.name),
         );
         // Preserve the P1 budgets for the catalog without the later workflow-task additions.
         expect(Buffer.byteLength(JSON.stringify(priorCore))).toBeLessThanOrEqual(36_000);
@@ -858,7 +877,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(Buffer.byteLength(JSON.stringify(queryTool))).toBeLessThanOrEqual(1024);
         expect(Buffer.byteLength(JSON.stringify(viewTool))).toBeLessThanOrEqual(768);
         // Preserve main's workflow catalog cap with only the separately bounded semantic descriptors and separators.
-        expect(totalCatalogBytes).toBeLessThanOrEqual(65_000 + 512 + 1024 + 768 + 3);
+        expect(totalCatalogBytes).toBeLessThanOrEqual(65_000 + 512 + 1024 + 768 + 576 * 3 + 6);
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,
