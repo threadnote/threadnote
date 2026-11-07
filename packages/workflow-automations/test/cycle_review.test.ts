@@ -580,3 +580,47 @@ describe('native cycle review validation', () => {
     );
   });
 });
+
+it('forces full independent manifest3 review and retains blockers from the historical predecessor', () => {
+  const current = snapshot({version: 3});
+  const complete = review({mode: 'full'}, current);
+  expect(() => validateNativeCycleReview(current, complete, previous)).not.toThrow();
+  expect(() => validateNativeCycleReview(current, {...complete, mode: 'incremental'}, previous)).toThrow();
+  expect(() => validateNativeCycleReview(current, {...complete, findings: []}, previous)).toThrow();
+  expect(() =>
+    validateNativeCycleReview(
+      current,
+      {
+        ...complete,
+        selected: ['orchestrator', 'simplicity'],
+        lanes: [
+          {name: 'orchestrator', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+      },
+      previous,
+    ),
+  ).toThrow();
+});
+
+it('rejects explicit self-review for a manifest3 current-source review', () => {
+  const current = snapshot({version: 3});
+  expect(() =>
+    validateNativeCycleReview(
+      current,
+      review(
+        {
+          mode: 'full',
+          selected: ['correctness', 'simplicity', 'self'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+            {name: 'self', status: 'complete'},
+          ],
+        },
+        current,
+      ),
+      previous,
+    ),
+  ).toThrow();
+});

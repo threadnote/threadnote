@@ -1,11 +1,17 @@
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Array as EffectArray, String as EffectString, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import fc from 'fast-check';
+import {decodeNativeCycleRuntime, nativeCyclePhaseReviewUsage, type NativeCycleRuntime} from '../src/cycle_runtime.js';
 import {describe, expect, it} from 'vitest';
-import {decodeNativeCyclePlan, nativeCyclePhaseHash} from '../src/cycle.js';
+import {decodeNativeCyclePlan, nativeCyclePhaseHash, initializeNativeCycle} from '../src/cycle.js';
 import {NativeCycleSnapshotSchema, validateNativeCycleReview, type NativeCycleSnapshot} from '../src/cycle_review.js';
 import {
   nativeCycleMergeReceiptDigest,
+  nativeCycleQualificationEvidenceDigest,
+  nativeCycleQualificationHistory,
+  nativeCycleSameLabelRebasedBaseReceiptDigest,
+  validateNativeCycleSameLabelRebasedBaseReceipt,
+  type NativeCycleSameLabelRebasedBaseReceipt,
   validateNativeCycleMergeOwners,
   validateNativeCycleMergeReceipt,
   type NativeCycleOrdinaryMergeReceipt,
@@ -255,5 +261,291 @@ describe('ordinary merge qualification contract', () => {
       ),
       {numRuns: 40},
     );
+  });
+});
+
+function rewrittenBaseFixture() {
+  const f = fixture();
+  const priorReview = {
+    snapshotId: f.prior.snapshotId,
+    phaseHash: f.prior.phaseHash,
+    snapshotTree: f.prior.tree,
+    status: 'complete' as const,
+    mode: 'full' as const,
+    selected: ['correctness', 'simplicity'],
+    lanes: [
+      {name: 'correctness', status: 'complete' as const},
+      {name: 'simplicity', status: 'complete' as const},
+    ],
+    findings: [],
+  };
+  const runtime: NativeCycleRuntime = {
+    state: initializeNativeCycle(f.plan),
+    plans: [f.plan],
+    baselines: {
+      one: {
+        repo: f.prior.repo,
+        head: object('4'),
+        tree: f.prior.baseTree,
+        preservedFiles: [],
+        pinnedRef: 'refs/threadnote/cycles/baseline/' + hash('3'),
+      },
+    },
+    snapshots: [{snapshot: f.prior, incoming: []}],
+    reviews: [{snapshotId: f.prior.snapshotId, report: priorReview}],
+    attempts: [
+      {
+        id: 'prior-attempt',
+        snapshotId: f.prior.snapshotId,
+        digest: hash('1'),
+        status: 'accepted',
+        message: '',
+        report: '{}',
+      },
+    ],
+    reviewLimits: {one: 10},
+    reviewExpansions: [{phaseId: 'one', from: 5, to: 10, authority: 'Continue existing review rounds'}],
+  };
+  const {ordinaryMergeQualificationV1: _legacy, ...source} = f.snapshot;
+  const snapshot: NativeCycleSnapshot = {...source, version: 3};
+  const proof: NativeCycleSameLabelRebasedBaseReceipt = {
+    ...f.receipt,
+    format: 'threadnote-native-same-label-rebased-base-integration',
+    independentReviewRequired: true,
+    runId: 'run',
+    generation: 'gen',
+    bindingId: f.plan.source.binding.bindingId,
+    project: f.plan.project,
+    repo: f.prior.repo,
+    worktreeDirectory: f.prior.repo,
+    commonDirectory: '/fixture/.git',
+    gitDirectory: '/fixture/.git',
+    phaseBranch: f.plan.phases[0].branch,
+    priorScopeBase: f.prior.scopeBase,
+    priorPinnedRef: f.prior.pinnedRef,
+    priorScopeRef: 'refs/threadnote/cycles/merge-scope/' + hash('4'),
+    baselineTree: f.prior.baseTree,
+    baselinePinnedRef: runtime.baselines.one.pinnedRef,
+    priorSnapshotId: f.prior.snapshotId,
+    expectedPriorEntryDigest: nativeCycleQualificationEvidenceDigest('predecessor-entry', runtime.snapshots[0]),
+    expectedPriorReviewDigest: nativeCycleQualificationEvidenceDigest('predecessor-review', runtime.reviews[0]),
+    sameBaseBranch: 'main',
+    authorityKind: 'same-label-upstream-rebase-integration',
+    history: nativeCycleQualificationHistory(runtime),
+    historicalMergeBases: [object('9')],
+    mergeBases: {prior: f.prior.head, current: f.snapshot.declaredBaseHead},
+    sourceEvidence: [],
+    reconciliationPaths: ['staged-only.ts'],
+    reconciliationEvidence: [
+      {
+        path: 'staged-only.ts',
+        baseline: entry('0', '000000'),
+        declaredBase: entry('0', '000000'),
+        priorScope: entry('0', '000000'),
+        prior: entry('a'),
+        currentBase: entry('0', '000000'),
+        head: entry('0', '000000'),
+      },
+    ],
+  };
+  const absent = entry('0', '000000');
+  const sourceEvidence = EffectArray.map([...snapshot.files, 'staged-only.ts'].sort(), path => {
+    const current = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...proof.currentBaseEvidence, ...proof.upstreamEvidence], item => item.path === path),
+    );
+    return current
+      ? {
+          path,
+          baseline: current.baseline,
+          declaredBase: absent,
+          priorScope: current.oldBase,
+          prior: current.head,
+          currentBase: current.currentBase,
+          head: current.head,
+        }
+      : proof.reconciliationEvidence[0];
+  });
+  const completeProof = {...proof, sourceEvidence};
+  const seal = (receipt = completeProof) => ({
+    ...snapshot,
+    sameLabelRebasedBaseIntegrationV1: {
+      ...receipt,
+      receiptDigest: nativeCycleSameLabelRebasedBaseReceiptDigest(snapshot, receipt),
+    },
+  });
+  const current = seal();
+  const completed: NativeCycleRuntime = {
+    ...runtime,
+    snapshots: [
+      ...runtime.snapshots,
+      {
+        snapshot: current,
+        incoming: EffectArray.map(f.receipt.upstreamEvidence, item => ({
+          path: item.path,
+          source: 'upstream' as const,
+          tree: current.scopeBase,
+          commit: current.declaredBaseHead,
+          ...item.head,
+        })),
+      },
+    ],
+  };
+  return {...f, runtime, completed, current, proof: completeProof, seal, priorReview};
+}
+
+describe('same-label rewritten-base qualification contract', () => {
+  it('round trips manifest3, rejects old readers and conflicting witnesses, and retains independent staged reconciliation', () => {
+    const f = rewrittenBaseFixture();
+    const decoded = Schema.decodeUnknownSync(NativeCycleSnapshotSchema, {onExcessProperty: 'error'})(
+      JSON.parse(JSON.stringify(f.current)),
+    );
+    expect(decoded).toEqual(f.current);
+    expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(f.completed)))).not.toThrow();
+    expect(() => Schema.decodeUnknownSync(Schema.Struct({version: Schema.Literals([1, 2])}))(decoded)).toThrow();
+    for (const change of [
+      {version: 2},
+      {version: 1},
+      {ordinaryMergeQualificationV1: f.receipt},
+      {sameLabelRebasedBaseIntegrationV1: undefined},
+    ])
+      expect(() => Schema.decodeUnknownSync(NativeCycleSnapshotSchema)({...decoded, ...change})).toThrow();
+    expect(f.current.files).not.toContain('staged-only.ts');
+    expect(f.proof.reconciliationPaths).toEqual(['staged-only.ts']);
+    expect(f.proof.priorDeclaredBaseHead).not.toBe(f.proof.historicalMergeBases[0]);
+    expect(nativeCyclePhaseReviewUsage(f.completed, 'one')).toEqual({count: 1, limit: 10, exhausted: false});
+  });
+
+  it('rejects forged retained provenance and history/budget resets even after resealing the outer receipt', () => {
+    const f = rewrittenBaseFixture();
+    for (const patch of [
+      {expectedPriorEntryDigest: hash('f')},
+      {expectedPriorReviewDigest: hash('f')},
+      {priorScopeBase: object('f')},
+      {priorDeclaredBaseHead: object('f')},
+      {priorTree: object('f')},
+      {runId: 'other'},
+      {generation: 'other'},
+      {bindingId: hash('f')},
+      {project: 'other'},
+      {repo: '/other'},
+      {worktreeDirectory: '/linked'},
+      {phaseBranch: 'other'},
+      {sameBaseBranch: 'other'},
+      {planDocumentHash: hash('f')},
+      {authority: ' '},
+      {phaseOwnedPaths: [{phaseId: 'one', paths: ['upstream.ts']}]},
+    ]) {
+      const forged = f.seal({...f.proof, ...patch});
+      expect(() =>
+        validateNativeCycleSameLabelRebasedBaseReceipt(
+          forged,
+          {...f.completed, snapshots: [...f.runtime.snapshots, {snapshot: forged, incoming: []}]},
+          1,
+        ),
+      ).toThrow();
+    }
+    for (const patch of [
+      {reviews: []},
+      {attempts: []},
+      {reviewExpansions: [], reviewLimits: {}},
+      {baselines: {...f.completed.baselines, one: {...f.completed.baselines.one, tree: object('f')}}},
+      {snapshots: f.completed.snapshots.slice(1)},
+    ])
+      expect(() => decodeNativeCycleRuntime({...f.completed, ...patch})).toThrow();
+  });
+
+  it('rejects omitted or altered prior-tree reconciliation after resealing and serialized readback', () => {
+    const f = rewrittenBaseFixture();
+    const altered = {...f.proof.reconciliationEvidence[0], prior: entry('d')};
+    for (const patch of [
+      {reconciliationPaths: []},
+      {reconciliationEvidence: []},
+      {reconciliationPaths: [], reconciliationEvidence: []},
+      {reconciliationEvidence: [altered]},
+      {sourceEvidence: EffectArray.filter(f.proof.sourceEvidence, item => item.path !== 'staged-only.ts')},
+      {
+        sourceEvidence: EffectArray.map(f.proof.sourceEvidence, item =>
+          item.path === 'staged-only.ts' ? altered : item,
+        ),
+      },
+    ]) {
+      const forged = f.seal({...f.proof, ...patch});
+      const runtime = {
+        ...f.completed,
+        snapshots: [...f.runtime.snapshots, {...f.completed.snapshots[1], snapshot: forged}],
+      };
+      expect(forged.sameLabelRebasedBaseIntegrationV1.receiptDigest).toBe(
+        nativeCycleSameLabelRebasedBaseReceiptDigest(forged, forged.sameLabelRebasedBaseIntegrationV1),
+      );
+      expect(() => validateNativeCycleSameLabelRebasedBaseReceipt(forged, runtime, 1)).toThrow(
+        /reconciliation|source evidence/u,
+      );
+      expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtime)))).toThrow(
+        /reconciliation|source evidence/u,
+      );
+    }
+  });
+
+  it('binds reconciliation inventory and source evidence to the receipt digest through serialized readback', () => {
+    const f = rewrittenBaseFixture();
+    const changedPrior = {...f.proof.reconciliationEvidence[0], prior: entry('d')};
+    const renamed = {...f.proof.reconciliationEvidence[0], path: 'renamed-staged-only.ts'};
+    for (const patch of [
+      {
+        reconciliationPaths: [renamed.path],
+        reconciliationEvidence: [renamed],
+        sourceEvidence: EffectArray.map(f.proof.sourceEvidence, item =>
+          item.path === 'staged-only.ts' ? renamed : item,
+        ).sort((a, b) => EffectString.Order(a.path, b.path)),
+      },
+      {
+        reconciliationEvidence: [changedPrior],
+        sourceEvidence: EffectArray.map(f.proof.sourceEvidence, item =>
+          item.path === 'staged-only.ts' ? changedPrior : item,
+        ),
+      },
+      {
+        sourceEvidence: EffectArray.map(f.proof.sourceEvidence, item =>
+          item.path === 'owned.ts' ? {...item, declaredBase: entry('d')} : item,
+        ),
+      },
+    ]) {
+      const changed = {...f.proof, ...patch};
+      const resealed = f.seal(changed);
+      const runtime = (snapshot: NativeCycleSnapshot) => ({
+        ...f.completed,
+        snapshots: [...f.runtime.snapshots, {...f.completed.snapshots[1], snapshot}],
+      });
+      // These mutations preserve the inner consistency checks, isolating receipt integrity.
+      expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtime(resealed))))).not.toThrow();
+      const forged = {
+        ...f.current,
+        sameLabelRebasedBaseIntegrationV1: {
+          ...changed,
+          receiptDigest: f.current.sameLabelRebasedBaseIntegrationV1.receiptDigest,
+        },
+      };
+      expect(() => validateNativeCycleSameLabelRebasedBaseReceipt(forged, runtime(forged), 1)).toThrow(
+        /receipt digest changed/u,
+      );
+      expect(() => decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtime(forged))))).toThrow(
+        /receipt digest changed/u,
+      );
+    }
+  });
+
+  it('forces full independent review and preserves the prior finding ledger', () => {
+    const f = rewrittenBaseFixture();
+    const current = {...f.priorReview, snapshotId: f.current.snapshotId, snapshotTree: f.current.tree};
+    expect(() =>
+      validateNativeCycleReview(f.current, current, {snapshot: f.prior, review: f.priorReview}),
+    ).not.toThrow();
+    for (const patch of [
+      {mode: 'incremental'},
+      {selected: ['orchestrator'], lanes: [{name: 'orchestrator', status: 'complete'}]},
+    ])
+      expect(() =>
+        validateNativeCycleReview(f.current, {...current, ...patch}, {snapshot: f.prior, review: f.priorReview}),
+      ).toThrow();
   });
 });

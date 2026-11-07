@@ -11,9 +11,11 @@ import {
   NativeCycleSnapshotSchema,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
+  validateNativeCycleReview,
   nativeCycleRebaseReceiptDigest,
   nativeCycleBaseRequalificationReceiptDigest,
   validateNativeCycleMergeReceipt,
+  validateNativeCycleSameLabelRebasedBaseReceipt,
 } from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -180,13 +182,16 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Base requalification lost its reviewed predecessor, approved plan transition or immutable witness.');
     }
-    if (snapshot.ordinaryMergeQualificationV1) {
+    if (snapshot.sameLabelRebasedBaseIntegrationV1)
+      validateNativeCycleSameLabelRebasedBaseReceipt(snapshot, runtime, capturedSnapshots.size);
+    if (snapshot.ordinaryMergeQualificationV1 || snapshot.sameLabelRebasedBaseIntegrationV1) {
       const predecessor = snapshot.previous ?? snapshot.supersedes;
       const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
       if (!prior || !capturedSnapshots.has(prior.snapshotId) || !reviews.has(prior.snapshotId))
         fail('Ordinary merge qualification requires its retained reviewed predecessor.');
-      validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
-      const proof = snapshot.ordinaryMergeQualificationV1;
+      if (snapshot.ordinaryMergeQualificationV1)
+        validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const proof = (snapshot.ordinaryMergeQualificationV1 ?? snapshot.sameLabelRebasedBaseIntegrationV1)!;
       const plan = EffectOption.getOrUndefined(
         EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
       )!;
@@ -279,7 +284,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     const previous = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
     const priorReport = previous ? reviews.get(previous.snapshotId) : undefined;
     if (previous && !priorReport) fail('Review history lost its prior finding ledger.');
-    validateNativeCycleReviewHistory(
+    (snapshot.sameLabelRebasedBaseIntegrationV1 ? validateNativeCycleReview : validateNativeCycleReviewHistory)(
       snapshot,
       report,
       previous && priorReport ? {snapshot: previous, review: priorReport} : undefined,
