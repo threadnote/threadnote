@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "kind": "diagnostic-artifact-validation",
+  "serialCaptureIntervals": true,
+  "runs": [
+    {
+      "file": "vector-10000-dense-baseline-1.json",
+      "start": "2026-11-08T08:45:22.721Z",
+      "end": "2026-11-08T08:45:33.810Z",
+      "config": "1c990ee4a9d42717a5f4525bed187c2ef92bcee9a6db88307e53d7e18c24ca03",
+      "digest": "67fde69a0f93d303dd33da8403174b046db246e9ba69b313cc75ffabe0b44673",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-10000-dense-baseline-2.json",
+      "start": "2026-11-08T08:45:34.445Z",
+      "end": "2026-11-08T08:45:41.106Z",
+      "config": "1c990ee4a9d42717a5f4525bed187c2ef92bcee9a6db88307e53d7e18c24ca03",
+      "digest": "67fde69a0f93d303dd33da8403174b046db246e9ba69b313cc75ffabe0b44673",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-10000-dense-baseline-3.json",
+      "start": "2026-11-08T08:45:41.693Z",
+      "end": "2026-11-08T08:45:48.117Z",
+      "config": "1c990ee4a9d42717a5f4525bed187c2ef92bcee9a6db88307e53d7e18c24ca03",
+      "digest": "67fde69a0f93d303dd33da8403174b046db246e9ba69b313cc75ffabe0b44673",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-10000-tied-baseline-1.json",
+      "start": "2026-11-08T08:45:48.732Z",
+      "end": "2026-11-08T08:45:55.083Z",
+      "config": "3cd9223a0f30a8d6717a1b614d69e9522c2253a7e2da932cc721cb5576f1d8fa",
+      "digest": "dbacbfcdfff0e212da55ca1e8a48f817fb6e2439f7a6322b52ffe76c1934974d",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-10000-tied-baseline-2.json",
+      "start": "2026-11-08T08:45:55.729Z",
+      "end": "2026-11-08T08:46:02.134Z",
+      "config": "3cd9223a0f30a8d6717a1b614d69e9522c2253a7e2da932cc721cb5576f1d8fa",
+      "digest": "dbacbfcdfff0e212da55ca1e8a48f817fb6e2439f7a6322b52ffe76c1934974d",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-10000-tied-baseline-3.json",
+      "start": "2026-11-08T08:46:02.750Z",
+      "end": "2026-11-08T08:46:09.229Z",
+      "config": "3cd9223a0f30a8d6717a1b614d69e9522c2253a7e2da932cc721cb5576f1d8fa",
+      "digest": "dbacbfcdfff0e212da55ca1e8a48f817fb6e2439f7a6322b52ffe76c1934974d",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-dense-baseline-1.json",
+      "start": "2026-11-08T08:46:09.823Z",
+      "end": "2026-11-08T08:47:24.669Z",
+      "config": "8022d6a2a1150b903c150fe04efa3aa38c6d9cf8606e94ffc1fe53341ba7c484",
+      "digest": "9d3db91c1b04e1c541eb67fa6544e7f4d28f265313e2ef88be6226befb4162ef",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-dense-baseline-2.json",
+      "start": "2026-11-08T08:47:25.349Z",
+      "end": "2026-11-08T08:48:38.987Z",
+      "config": "8022d6a2a1150b903c150fe04efa3aa38c6d9cf8606e94ffc1fe53341ba7c484",
+      "digest": "9d3db91c1b04e1c541eb67fa6544e7f4d28f265313e2ef88be6226befb4162ef",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-dense-baseline-3.json",
+      "start": "2026-11-08T08:48:39.666Z",
+      "end": "2026-11-08T08:49:52.146Z",
+      "config": "8022d6a2a1150b903c150fe04efa3aa38c6d9cf8606e94ffc1fe53341ba7c484",
+      "digest": "9d3db91c1b04e1c541eb67fa6544e7f4d28f265313e2ef88be6226befb4162ef",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-tied-baseline-1.json",
+      "start": "2026-11-08T08:49:52.816Z",
+      "end": "2026-11-08T08:51:05.532Z",
+      "config": "783617a6778fb7c556ac2a142aeda10822dfb3a7a9abf9755401c28006cdaeac",
+      "digest": "64f1278c79350e9ada2fcc4d8fc563f209d263f022a81ffd67ea37e2f24d2af4",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-tied-baseline-2.json",
+      "start": "2026-11-08T08:51:06.214Z",
+      "end": "2026-11-08T08:52:21.517Z",
+      "config": "783617a6778fb7c556ac2a142aeda10822dfb3a7a9abf9755401c28006cdaeac",
+      "digest": "64f1278c79350e9ada2fcc4d8fc563f209d263f022a81ffd67ea37e2f24d2af4",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    },
+    {
+      "file": "vector-100000-tied-baseline-3.json",
+      "start": "2026-11-08T08:52:22.233Z",
+      "end": "2026-11-08T08:53:38.110Z",
+      "config": "783617a6778fb7c556ac2a142aeda10822dfb3a7a9abf9755401c28006cdaeac",
+      "digest": "64f1278c79350e9ada2fcc4d8fc563f209d263f022a81ffd67ea37e2f24d2af4",
+      "source": "908cc8a8bcb266525b41e10ad9870c08dcfd8717"
+    }
+  ]
+}

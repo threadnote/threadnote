@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kind": "source-fence-regression-control",
+  "executedSourceCommit": "002f5c8f86d36c625133c9bc0db6cd1559c71985",
+  "expectedNonzeroExit": 1,
+  "changedHead": false,
+  "changedRunnerSource": false,
+  "changedTrackedTestSource": true,
+  "measurementsDiscarded": true,
+  "sourceRestoredClean": true,
+  "result": "passed"
+}

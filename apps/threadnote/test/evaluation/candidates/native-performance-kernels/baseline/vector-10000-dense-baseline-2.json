@@ -1,0 +1,356 @@
+{
+  "nativePerformance": {
+    "contract": {
+      "version": 1,
+      "primaryP95ImprovementRatio": 0.2,
+      "secondaryP95RegressionRatio": 0.05,
+      "secondaryNoiseMilliseconds": 5,
+      "processTreePeakRssGrowthRatio": 0.1,
+      "minimumPairedRuns": 3,
+      "minimumWarmVectorQueries": 30,
+      "platforms": ["darwin-arm64", "linux-x64"],
+      "vectorDocuments": [10000, 100000],
+      "vectorDistributions": ["dense", "tied"],
+      "primaryBoundaries": {
+        "vector": "complete semantic retrieval including pinned-model inference and authorized SQLite reads",
+        "parser": "cold polyglot indexing and whole worker request including serialization and persistence",
+        "topology": "each CLI analysis operation including snapshot loading and output projection; more than 100000 nodes"
+      },
+      "controls": ["first-use separately", "incremental indexing", "small-scale secondary flows"],
+      "refresh": "refresh after separately owned crypto lands; identical configuration apart from candidate change"
+    },
+    "artifact": {
+      "createdAt": "2026-11-08T08:45:41.106Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "908cc8a8bcb266525b41e10ad9870c08dcfd8717",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "measurements": [
+        {
+          "maximum": 352.1755,
+          "mean": 352.1755,
+          "minimum": 352.1755,
+          "name": "first-use-request",
+          "p50": 352.1755,
+          "p95": 352.1755,
+          "p99": 352.1755,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 61.165875,
+          "mean": 52.75978209999999,
+          "minimum": 46.65575,
+          "name": "warm-request",
+          "p50": 51.997292,
+          "p95": 60.194167,
+          "p99": 61.165875,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 142.27,
+          "mean": 93.24080000000001,
+          "minimum": 69.343,
+          "name": "warm-parent-cpu",
+          "p50": 86.518,
+          "p95": 139.21,
+          "p99": 142.27,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 263554608,
+          "mean": 263554608,
+          "minimum": 263554608,
+          "name": "parent-peak-rss",
+          "p50": 263554608,
+          "p95": 263554608,
+          "p99": 263554608,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 597311488,
+          "mean": 597311488,
+          "minimum": 597311488,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 597311488,
+          "p95": 597311488,
+          "p99": 597311488,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 32227328,
+          "mean": 32227328,
+          "minimum": 32227328,
+          "name": "database",
+          "p50": 32227328,
+          "p95": 32227328,
+          "p99": 32227328,
+          "samples": 1,
+          "unit": "bytes"
+        }
+      ],
+      "metadata": {
+        "documents": 10000,
+        "distribution": "dense",
+        "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "modelPurpose": "recall",
+        "inference": "real-query",
+        "correctnessDigest": "67fde69a0f93d303dd33da8403174b046db246e9ba69b313cc75ffabe0b44673",
+        "qualification": false
+      },
+      "suite": "native-performance-recall-vector-diagnostic-v1",
+      "version": 1,
+      "warmups": 1
+    },
+    "capture": {
+      "version": 1,
+      "kind": "diagnostic",
+      "component": "vector",
+      "pair": 2,
+      "arm": "baseline",
+      "configurationHash": "1c990ee4a9d42717a5f4525bed187c2ef92bcee9a6db88307e53d7e18c24ca03",
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "dimensions": "384",
+        "fixture": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "correctnessDigest": "67fde69a0f93d303dd33da8403174b046db246e9ba69b313cc75ffabe0b44673",
+      "firstUseMeasurement": "first-use-request",
+      "warmMeasurement": "warm-request",
+      "processTreePeakRssMeasurement": "process-tree-sampled-peak-rss",
+      "cpuMeasurement": "warm-parent-cpu",
+      "diskMeasurement": "database",
+      "stages": {
+        "sql-row-transport": {
+          "state": "unavailable",
+          "reason": "Fused authorized reader has no benchmark-only isolation seam"
+        },
+        "validation-scoring-top-k": {
+          "state": "unavailable",
+          "reason": "Fused authorized reader has no benchmark-only isolation seam"
+        },
+        "parse": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "query": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "fact-construction": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "ipc": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-load": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-compute": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        }
+      },
+      "limitations": [
+        "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+        "SQL/row transport and validation/scoring/top-k remain fused in the authorized read; no isolated stage claimed.",
+        "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+        "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+        "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+        "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+      ]
+    },
+    "instrumentationHash": "292b86a2ad133ade52389b4f4e7fd05920db5f44c0ef876c183c25701d3615b1",
+    "processTreeSampler": {
+      "intervalMilliseconds": 25,
+      "phases": {
+        "finish": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 0,
+          "processSampleAttempts": 0,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 0,
+          "processSamples": 0,
+          "rssPeakBytes": 0,
+          "temporaryLinkedPeakBytes": 63170178,
+          "temporaryOpenAttempts": 0,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 0,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170178,
+          "walPeakBytes": 0
+        },
+        "start": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 1,
+          "processSampleAttempts": 1,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 6,
+          "processSamples": 1,
+          "rssPeakBytes": 415514624,
+          "temporaryLinkedPeakBytes": 63168594,
+          "temporaryOpenAttempts": 1,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 1,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63168594,
+          "walPeakBytes": 0
+        },
+        "vector-query": {
+          "cpuMilliseconds": 2890,
+          "processPeakCount": 1,
+          "processSampleAttempts": 6,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 306,
+          "processSamples": 6,
+          "rssPeakBytes": 597311488,
+          "temporaryLinkedPeakBytes": 63170176,
+          "temporaryOpenAttempts": 1,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 32260096,
+          "temporaryOpenSamples": 1,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 58,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170176,
+          "walPeakBytes": 0
+        }
+      },
+      "platform": "darwin",
+      "processTelemetry": {
+        "availability": "available",
+        "parentIdentityValidation": "darwin-ps-lstart",
+        "sampleIntervalMilliseconds": 250,
+        "scope": "recursive-process-tree",
+        "source": "darwin-ps"
+      },
+      "samples": 60,
+      "temporaryTelemetry": {
+        "availability": "available",
+        "maximumOpenFileDescriptors": 65536,
+        "maximumProcesses": 4096,
+        "openFileSampleIntervalMilliseconds": 1000,
+        "projectionByteLimit": 8388608,
+        "scope": "temporary-root-linked-plus-process-tree-open-files",
+        "source": "darwin-lsof"
+      },
+      "version": 4
+    },
+    "captureStartedAt": "2026-11-08T08:45:34.445Z",
+    "captureFinishedAt": "2026-11-08T08:45:41.106Z",
+    "rawWarmMilliseconds": [
+      53.929042, 50.3205, 49.04275, 61.165875, 47.976125, 50.606667, 46.65575, 53.763709, 49.561, 60.194167, 55.485416,
+      56.508666, 49.02975, 47.9925, 55.518625, 59.7295, 54.244542, 50.200542, 47.228292, 51.630875, 51.62575, 51.997292,
+      54.881375, 51.005875, 54.377084, 59.586459, 52.096834, 48.061292, 57.074959, 51.30225
+    ],
+    "rawWarmCpuMilliseconds": [
+      94.96, 80.254, 79.717, 122.562, 78.664, 98.69, 69.558, 86.518, 69.343, 133.976, 98.869, 101.439, 77.932, 72.101,
+      84.753, 142.27, 82.77, 84.868, 77.187, 83.215, 88.735, 94.306, 90.668, 82.449, 97.193, 136.172, 85.154, 72.06,
+      139.21, 91.631
+    ],
+    "rawFirstUseMilliseconds": [352.1755],
+    "limitations": [
+      "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+      "SQL/row transport and validation/scoring/top-k remain fused in the authorized read; no isolated stage claimed.",
+      "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+      "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+      "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+      "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+    ]
+  },
+  "budgets": {
+    "performance": {
+      "incrementalBuildLinearMaximumMilliseconds": 3000,
+      "incrementalBuildMaximumMilliseconds": 3000,
+      "incrementalBuildSameRunnerMaximumMilliseconds": 1333.7247252,
+      "incrementalBuildWithinBudget": true,
+      "initialBuildMaximumMilliseconds": 15000,
+      "initialBuildWithinBudget": true,
+      "semanticQueryP95MaximumMilliseconds": 750,
+      "semanticQueryWithinBudget": true,
+      "sharedRunnerAdjustmentApplied": false
+    }
+  },
+  "database": {
+    "bytesAfterIncremental": 42946560,
+    "bytesAfterInitial": 32227328,
+    "compactedBytesAfterIncremental": 30908416,
+    "compactedBytesAfterInitial": 30908416,
+    "incrementalBytes": 10719232,
+    "incrementalCompactedBytes": 0,
+    "chunkMappings": 10000,
+    "generations": 1,
+    "vectorValues": 10000
+  },
+  "environment": {
+    "architecture": "arm64",
+    "bun": "1.4.4",
+    "operatingSystem": "darwin"
+  },
+  "fixture": {
+    "dimensions": 384,
+    "documents": 10000,
+    "querySamples": 30
+  },
+  "scenarios": {
+    "incrementalBuild": {
+      "embeddedChunks": 1,
+      "milliseconds": 640.968166,
+      "peakRssBytes": 264636024,
+      "reusedChunks": 9999
+    },
+    "initialBuild": {
+      "embeddedChunks": 10000,
+      "milliseconds": 2222.874542,
+      "peakRssBytes": 309281920
+    },
+    "semanticQuery": {
+      "p50Milliseconds": 51.630875,
+      "p95Milliseconds": 60.194167,
+      "peakRssBytes": 263554608,
+      "resultCount": 25,
+      "rssDeltaBytes": 114753968,
+      "rssAfterBytes": 263554608,
+      "rssBeforeBytes": 148800640,
+      "samples": 30
+    }
+  },
+  "suite": "recall-vector-storage-v1",
+  "version": 1
+}

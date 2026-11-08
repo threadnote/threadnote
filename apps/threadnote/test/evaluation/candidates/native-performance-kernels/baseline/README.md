@@ -1,0 +1,23 @@
+# Native performance baseline diagnostics
+
+These are P1 measurement artifacts, **not native qualification or adoption evidence**. The frozen gates remain a 20% primary end-to-end p95 improvement, at most 5% secondary regression beyond the fixed 5ms noise floor, and at most 10% process-tree peak RSS growth. Each component/platform must qualify independently with at least three serial pairs; vector arms require at least 30 warm queries. First use stays separate.
+
+The twelve `vector-*-baseline-*.json` files, parser probe, heavy-tail smoke and CLI topology summary were measured from clean source `908cc8a8bcb266525b41e10ad9870c08dcfd8717`, whose product-code base is `a22b434b01e4d2a5aa9463714a35942ced38e731`. They remain **legacy diagnostics**: later qualification/source-fence fixes are not retrofitted into them. They contain baseline replicas, with no candidate arms or native comparison. `evidence-status.json` records the exact scope and remaining work.
+
+- Vectors: 10k/100k documents × dense/tied × three serial replicas. Each has real, SHA-verified BGE384 query inference, 30 warm requests and one separate first retrieval. Document embeddings are synthetic controlled vectors; these captures do not demonstrate realistic retrieval quality. Independent scalar/full-sort controls run after the measured query/sampler phase. RSS is sampled over first use plus warm requests, with actual tree counts, availability and gaps retained. Query CPU is the parent-process delta.
+- Parser probe: Java/Python/Go first use plus 30 warm in-process calls, with production grammar/cache identities. The runtime/parse envelope, query timing, callback and cleanup overlap as documented. `callback - query` is a derived fact-construction **plus extraction-control/projection residual**, not pure fact construction. The separate reduced heavy-tail workload verifies worker/cache/resume controls; child extraction and parent request timings do not isolate pure IPC.
+- Topology: three source-mode CLI full-analysis runs over 180,749 nodes with complete coverage. The pinned graph fixture is the `a22b434b` snapshot, so source freshness is stale while analysis coverage is complete. Wall time includes startup, loading, computation and JSON projection. OS command maximum RSS is not a process-tree peak. Structural digests omit only request usage, dynamic remaining-duration budgets and lease expiry. Raw CLI output/logs are excluded.
+
+SQL/row transport versus validation/scoring/top-k, pure parser/fact/IPC costs, and topology loading versus computation are not falsely reported as isolated stages. BGE384 measurements are not extrapolated to the fixed graph-purpose Gemma768 model. No globally installed binary was exercised.
+
+`source-fenced-setup-smoke.json` is a separate clean-source diagnostic from `002f5c8f86d36c625133c9bc0db6cd1559c71985`: 100 documents, two warm requests and first use. It proves setup/new endpoint-fence operation, not representative performance. `source-fence-mixed-source.json` is an **expected failure**, not a benchmark result: changing an owned tracked test file while HEAD and runner hash remained fixed caused measurements to be discarded. The control receipt confirms restoration to clean source. Endpoint fences detect net tracked diff/index/status changes; they do not monitor ignored dependencies or transient edits reverted before closing.
+
+For local reproduction, run each cell serially from a clean checkout, writing outside the checkout:
+
+```sh
+bun scripts/benchmark-recall-vectors.ts --documents 10000 --distribution dense --pair 1 --arm baseline --samples 30 --model bge-small-en-v1.5-q8 --model-file apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf --output /tmp/recall-vector-10000-dense-1.json
+bun scripts/benchmark-code-graph.ts --native-stage-probe --samples 30 --output /tmp/parser-stage-probe.json
+bun scripts/benchmark-code-graph-heavy-tail.ts --smoke --output /tmp/heavy-tail-smoke.json
+```
+
+Repeat vector cells for both document counts/distributions and replica numbers 1–3. The default-off `include_native_recall_vector_capture` input in `benchmarks.yml` runs all twelve cells serially on one Linux x64 runner using the committed, verified BGE model, with a 40-minute capture bound, 45-minute job bound and 30-day JSON retention outside the checkout. **Linux execution/results are still pending**. Refresh final native-comparison baselines after separately owned crypto integration, and compare against the best current TypeScript implementation. No gates are widened by these diagnostics.
