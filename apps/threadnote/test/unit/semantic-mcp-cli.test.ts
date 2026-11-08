@@ -1,3 +1,4 @@
+import * as HostProfile from '../../src/semantic/host_profile.js';
 import {isJsonObject} from '@threadnote/platform/json';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
@@ -15,7 +16,7 @@ import {
 } from 'effect';
 import {Command} from 'effect/cli';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {
   semanticCapabilities,
   formatSemanticCapabilities,
@@ -48,6 +49,75 @@ import {makeSemanticAgentDiskQueries} from '../../src/semantic/agent_query_store
 import type {SemanticSession} from '../../src/semantic/provider.js';
 import {ReadyRecallReadWorkerAdmission} from '../../src/recall/ready_read_boundary.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
+
+// This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
+const protocolProfiles = new Map<
+  string,
+  {readonly account: string; readonly user: string; readonly worktree: string}
+>();
+const protocolProfileKey = (config: RuntimeConfig, worktree: string) =>
+  JSON.stringify([config.agentContextHome, config.account, config.user, worktree]);
+const nativeReadProfile = HostProfile.readSemanticHostProfile;
+let restoreProtocolProfiles: (() => void) | undefined;
+const trustProtocolProfile = (config: RuntimeConfig, worktree: string) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      if (!restoreProtocolProfiles) {
+        const spy = vi.spyOn(HostProfile, 'readSemanticHostProfile').mockImplementation((current, requested) => {
+          const owned = protocolProfiles.get(protocolProfileKey(current, requested));
+          if (!owned) return nativeReadProfile(current, requested);
+          const reject = (reason: typeof HostProfile.SemanticHostProfileFault.prototype.reason) =>
+            HostProfile.SemanticHostProfileFault.make({reason});
+          return Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            if (current.account !== owned.account || current.user !== owned.user) return yield* reject('untrusted');
+            if (requested !== owned.worktree) return yield* reject('incompatible');
+            if ((yield* fs.realPath(current.agentContextHome)) !== current.agentContextHome)
+              return yield* reject('untrusted');
+            const file = path.join(
+              current.agentContextHome,
+              'semantic',
+              'profiles',
+              semanticHostProfileName(current, requested),
+            );
+            if (!(yield* fs.exists(file))) return yield* reject('missing');
+            const bytes = yield* fs.readFile(file);
+            if (bytes.length > 16384) return yield* reject('invalid');
+            const text = yield* Effect.try({
+              try: () => new TextDecoder('utf-8', {fatal: true}).decode(bytes),
+              catch: () => reject('invalid'),
+            });
+            const value = yield* Effect.try({try: () => JSON.parse(text), catch: () => reject('invalid')});
+            const profile = yield* Schema.decodeUnknownEffect(HostProfile.SemanticHostProfile, {
+              onExcessProperty: 'error',
+            })(value).pipe(Effect.mapError(() => reject('invalid')));
+            if (profile.worktree !== requested) return yield* reject('incompatible');
+            if (!profile.enabled) return yield* reject('disabled');
+            return {home: current.agentContextHome, profile, digest: sha256HexSync(text)};
+          }).pipe(
+            Effect.mapError(error =>
+              Schema.is(HostProfile.SemanticHostProfileFault)(error) ? error : reject('untrusted'),
+            ),
+          );
+        });
+        restoreProtocolProfiles = () => spy.mockRestore();
+      }
+      protocolProfiles.set(protocolProfileKey(config, worktree), {
+        account: config.account,
+        user: config.user,
+        worktree,
+      });
+    }),
+    () =>
+      Effect.sync(() => {
+        protocolProfiles.delete(protocolProfileKey(config, worktree));
+        if (protocolProfiles.size === 0) {
+          restoreProtocolProfiles?.();
+          restoreProtocolProfiles = undefined;
+        }
+      }),
+  );
 
 const memoryByUri = <A extends {readonly uri: string}>(cards: readonly A[], uri: string) =>
   Option.getOrUndefined(EffectArray.findFirst(cards, card => card.uri === uri));
@@ -92,6 +162,7 @@ const memoryContextFixture = Effect.gen(function* () {
     manifestSource: 'bundled-example',
   };
   const worktree = canonicalFileUri((yield* path.toFileUrl(repository)).href);
+  yield* trustProtocolProfile(config, worktree);
   const uri = canonicalFileUri((yield* path.toFileUrl(file)).href);
   yield* fs.writeFileString(
     path.join(home, 'semantic', 'profiles', semanticHostProfileName(config, worktree)),

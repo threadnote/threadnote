@@ -1,3 +1,4 @@
+import * as HostProfile from '../../src/semantic/host_profile.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {
@@ -26,7 +27,7 @@ import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_ident
 import type {CodeGraphStatus, CodeGraphQueryResult} from '@threadnote/graph/types';
 import {compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {canonicalFileUri, Counter, type Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
 import type {Continuation} from '@threadnote/semantic/views';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -60,6 +61,75 @@ import {SemanticSessionFault, type SemanticSession} from '../../src/semantic/pro
 import type {ContextBriefFollowUpV1, SemanticContextKnowledgeV1} from '@threadnote/context/types';
 import {parseContextBriefJsonText} from '@threadnote/context/projector';
 import {compactSemanticContextKnowledge} from '@threadnote/context/compiler';
+
+// This fixture grants protocol tests only their own current profile bytes; native ACL proof is tested separately.
+const protocolProfiles = new Map<
+  string,
+  {readonly account: string; readonly user: string; readonly worktree: string}
+>();
+const protocolProfileKey = (config: RuntimeConfig, worktree: string) =>
+  JSON.stringify([config.agentContextHome, config.account, config.user, worktree]);
+const nativeReadProfile = HostProfile.readSemanticHostProfile;
+let restoreProtocolProfiles: (() => void) | undefined;
+const trustProtocolProfile = (config: RuntimeConfig, worktree: string) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      if (!restoreProtocolProfiles) {
+        const spy = vi.spyOn(HostProfile, 'readSemanticHostProfile').mockImplementation((current, requested) => {
+          const owned = protocolProfiles.get(protocolProfileKey(current, requested));
+          if (!owned) return nativeReadProfile(current, requested);
+          const reject = (reason: typeof HostProfile.SemanticHostProfileFault.prototype.reason) =>
+            HostProfile.SemanticHostProfileFault.make({reason});
+          return Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            if (current.account !== owned.account || current.user !== owned.user) return yield* reject('untrusted');
+            if (requested !== owned.worktree) return yield* reject('incompatible');
+            if ((yield* fs.realPath(current.agentContextHome)) !== current.agentContextHome)
+              return yield* reject('untrusted');
+            const file = path.join(
+              current.agentContextHome,
+              'semantic',
+              'profiles',
+              semanticHostProfileName(current, requested),
+            );
+            if (!(yield* fs.exists(file))) return yield* reject('missing');
+            const bytes = yield* fs.readFile(file);
+            if (bytes.length > 16384) return yield* reject('invalid');
+            const text = yield* Effect.try({
+              try: () => new TextDecoder('utf-8', {fatal: true}).decode(bytes),
+              catch: () => reject('invalid'),
+            });
+            const value = yield* Effect.try({try: () => JSON.parse(text), catch: () => reject('invalid')});
+            const profile = yield* Schema.decodeUnknownEffect(HostProfile.SemanticHostProfile, {
+              onExcessProperty: 'error',
+            })(value).pipe(Effect.mapError(() => reject('invalid')));
+            if (profile.worktree !== requested) return yield* reject('incompatible');
+            if (!profile.enabled) return yield* reject('disabled');
+            return {home: current.agentContextHome, profile, digest: sha256HexSync(text)};
+          }).pipe(
+            Effect.mapError(error =>
+              Schema.is(HostProfile.SemanticHostProfileFault)(error) ? error : reject('untrusted'),
+            ),
+          );
+        });
+        restoreProtocolProfiles = () => spy.mockRestore();
+      }
+      protocolProfiles.set(protocolProfileKey(config, worktree), {
+        account: config.account,
+        user: config.user,
+        worktree,
+      });
+    }),
+    () =>
+      Effect.sync(() => {
+        protocolProfiles.delete(protocolProfileKey(config, worktree));
+        if (protocolProfiles.size === 0) {
+          restoreProtocolProfiles?.();
+          restoreProtocolProfiles = undefined;
+        }
+      }),
+  );
 
 const profileIo = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 const queryIo = Layer.merge(profileIo, TestCommandExecutorLayer.pipe(Layer.provide(profileIo)));
@@ -241,7 +311,7 @@ describe('coordinator retained semantic pages', () => {
   );
 });
 
-const profileFixtureAt = (subdirectory = '') =>
+const profileFixtureAt = (subdirectory = '', protocol = true) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -273,6 +343,7 @@ const profileFixtureAt = (subdirectory = '') =>
         },
       },
     };
+    if (protocol) yield* trustProtocolProfile(config, worktree);
     const profileFile = path.join(home, 'semantic', 'profiles', semanticHostProfileName(config, worktree));
     const write = (value: unknown) => fs.writeFileString(profileFile, JSON.stringify(value), {mode: 0o600});
     return {fs, path, home, root, file, worktree, config, profile, profileFile, write};
@@ -563,47 +634,53 @@ describe('private semantic host profiles and the canonical application read', ()
       }).pipe(provideTestLayer(queryIo)),
   );
 
-  effectIt.effect('requires explicit enabled private regular worktree-bound profile bytes', () =>
-    Effect.gen(function* () {
-      const f = yield* profileFixture;
-      const missing = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
-      expect(missing._tag).toBe('Failure');
-      if (missing._tag === 'Failure')
-        expect(Schema.is(SemanticHostProfileFault)(missing.failure) && missing.failure.reason).toBe('missing');
-      yield* f.write(f.profile);
-      const accepted = yield* readSemanticHostProfile(f.config, f.worktree);
-      expect(accepted.profile).toEqual(f.profile);
-      for (const [profile, reason] of [
-        [{...f.profile, enabled: false}, 'disabled'],
-        [{...f.profile, worktree: 'file:///different-worktree'}, 'incompatible'],
-        [{...f.profile, executable: '/repository/run'}, 'invalid'],
-      ] as const) {
-        yield* f.write(profile);
-        const rejected = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
-        expect(rejected._tag).toBe('Failure');
-        if (rejected._tag === 'Failure')
-          expect(Schema.is(SemanticHostProfileFault)(rejected.failure) && rejected.failure.reason).toBe(reason);
-      }
-      yield* f.write(f.profile);
-      yield* f.fs.chmod(f.profileFile, 0o644);
-      const publicFile = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
-      expect(publicFile._tag).toBe('Failure');
-      if (publicFile._tag === 'Failure')
-        expect(Schema.is(SemanticHostProfileFault)(publicFile.failure) && publicFile.failure.reason).toBe('untrusted');
-    }).pipe(provideTestLayer(profileIo)),
+  effectIt.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    'requires explicit enabled private regular worktree-bound profile bytes',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixtureAt('', false);
+        const missing = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+        expect(missing._tag).toBe('Failure');
+        if (missing._tag === 'Failure')
+          expect(Schema.is(SemanticHostProfileFault)(missing.failure) && missing.failure.reason).toBe('missing');
+        yield* f.write(f.profile);
+        const accepted = yield* readSemanticHostProfile(f.config, f.worktree);
+        expect(accepted.profile).toEqual(f.profile);
+        for (const [profile, reason] of [
+          [{...f.profile, enabled: false}, 'disabled'],
+          [{...f.profile, worktree: 'file:///different-worktree'}, 'incompatible'],
+          [{...f.profile, executable: '/repository/run'}, 'invalid'],
+        ] as const) {
+          yield* f.write(profile);
+          const rejected = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+          expect(rejected._tag).toBe('Failure');
+          if (rejected._tag === 'Failure')
+            expect(Schema.is(SemanticHostProfileFault)(rejected.failure) && rejected.failure.reason).toBe(reason);
+        }
+        yield* f.write(f.profile);
+        yield* f.fs.chmod(f.profileFile, 0o644);
+        const publicFile = yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result);
+        expect(publicFile._tag).toBe('Failure');
+        if (publicFile._tag === 'Failure')
+          expect(Schema.is(SemanticHostProfileFault)(publicFile.failure) && publicFile.failure.reason).toBe(
+            'untrusted',
+          );
+      }).pipe(provideTestLayer(profileIo)),
   );
 
-  effectIt.effect('refuses a symlinked profile and an oversized profile before consuming host configuration', () =>
-    Effect.gen(function* () {
-      const f = yield* profileFixture;
-      const other = f.path.join(f.home, 'other.json');
-      yield* f.fs.writeFileString(other, JSON.stringify(f.profile), {mode: 0o600});
-      yield* f.fs.symlink(other, f.profileFile);
-      expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
-      yield* f.fs.remove(f.profileFile);
-      yield* f.fs.writeFileString(f.profileFile, EffectString.repeat(16385)(' '), {mode: 0o600});
-      expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
-    }).pipe(provideTestLayer(profileIo)),
+  effectIt.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    'refuses a symlinked profile and an oversized profile before consuming host configuration',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* profileFixtureAt('', false);
+        const other = f.path.join(f.home, 'other.json');
+        yield* f.fs.writeFileString(other, JSON.stringify(f.profile), {mode: 0o600});
+        yield* f.fs.symlink(other, f.profileFile);
+        expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
+        yield* f.fs.remove(f.profileFile);
+        yield* f.fs.writeFileString(f.profileFile, EffectString.repeat(16385)(' '), {mode: 0o600});
+        expect((yield* readSemanticHostProfile(f.config, f.worktree).pipe(Effect.result))._tag).toBe('Failure');
+      }).pipe(provideTestLayer(profileIo)),
   );
 
   effectIt.effect('rejects public execution authority and unavailable languages without connecting', () =>

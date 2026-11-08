@@ -175,6 +175,35 @@ describe.skipIf(!privateProfileSupported)('semantic operational inspection', () 
 });
 
 describe('semantic private profile proof', () => {
+  effectIt.effect.skipIf(privateProfileSupported)(
+    'refuses real unsupported-host private proof without creating or rewriting profile state',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const profile = {version: 1, enabled: true, worktree: f.worktree, catalog: {}};
+        const refused = yield* writeSemanticHostProfile(f.config, f.worktree, profile).pipe(Effect.result);
+        expect(refused).toMatchObject({_tag: 'Failure', failure: {reason: 'unsupported-platform'}});
+        expect(yield* runSemanticDoctor(f.config, f.request)).toMatchObject({
+          state: 'unsupported-platform',
+          graphAndMemory: 'available-independently',
+        });
+        expect(yield* f.fs.exists(f.path.join(f.home, 'semantic'))).toBe(false);
+        const directory = f.path.join(f.home, 'semantic', 'profiles');
+        yield* f.fs.makeDirectory(directory, {recursive: true, mode: 0o700});
+        const file = f.path.join(directory, semanticHostProfileName(f.config, f.worktree));
+        const retained = '{"version":2,"private":"UNSUPPORTED_PROFILE_SENTINEL"}';
+        yield* f.fs.writeFileString(file, retained, {mode: 0o600});
+        expect(yield* inspectSemanticHostProfile(f.config, f.worktree).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {reason: 'unsupported-platform'},
+        });
+        expect(yield* writeSemanticHostProfile(f.config, f.worktree, profile).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {reason: 'unsupported-platform'},
+        });
+        expect(yield* f.fs.readFileString(file)).toBe(retained);
+      }).pipe(provideTestLayer(layer)),
+  );
   effectIt.effect('refuses unsupported or unknown native proof before creating private profile bytes', () =>
     Effect.acquireUseRelease(
       Effect.sync(() => vi.spyOn(Native, 'runtimeOpenPrivateWriterDirectory')),
