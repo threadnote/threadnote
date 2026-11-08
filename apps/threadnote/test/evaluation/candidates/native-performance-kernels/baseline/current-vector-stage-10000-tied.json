@@ -1,0 +1,2168 @@
+{
+  "nativePerformance": {
+    "contract": {
+      "version": 1,
+      "primaryP95ImprovementRatio": 0.2,
+      "secondaryP95RegressionRatio": 0.05,
+      "secondaryNoiseMilliseconds": 5,
+      "processTreePeakRssGrowthRatio": 0.1,
+      "minimumPairedRuns": 3,
+      "minimumWarmVectorQueries": 30,
+      "platforms": ["darwin-arm64", "linux-x64"],
+      "vectorDocuments": [10000, 100000],
+      "vectorDistributions": ["dense", "tied"],
+      "primaryBoundaries": {
+        "vector": "complete semantic retrieval including pinned-model inference and authorized SQLite reads",
+        "parser": "cold polyglot indexing and whole worker request including serialization and persistence",
+        "topology": "each CLI analysis operation including snapshot loading and output projection; more than 100000 nodes"
+      },
+      "controls": ["first-use separately", "incremental indexing", "small-scale secondary flows"],
+      "refresh": "refresh after separately owned crypto lands; identical configuration apart from candidate change"
+    },
+    "artifact": {
+      "createdAt": "2026-11-08T10:45:44.191Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "measurements": [
+        {
+          "maximum": 331.797625,
+          "mean": 331.797625,
+          "minimum": 331.797625,
+          "name": "first-use-request",
+          "p50": 331.797625,
+          "p95": 331.797625,
+          "p99": 331.797625,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 56.849083,
+          "mean": 45.947325,
+          "minimum": 36.814167,
+          "name": "warm-request",
+          "p50": 46.25375,
+          "p95": 53.527417,
+          "p99": 56.849083,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 114.722,
+          "mean": 76.77430000000001,
+          "minimum": 49.76,
+          "name": "warm-parent-cpu",
+          "p50": 74.148,
+          "p95": 104.041,
+          "p99": 114.722,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 275088944,
+          "mean": 275088944,
+          "minimum": 275088944,
+          "name": "parent-peak-rss",
+          "p50": 275088944,
+          "p95": 275088944,
+          "p99": 275088944,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 618741760,
+          "mean": 618741760,
+          "minimum": 618741760,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 618741760,
+          "p95": 618741760,
+          "p99": 618741760,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 32227328,
+          "mean": 32227328,
+          "minimum": 32227328,
+          "name": "database",
+          "p50": 32227328,
+          "p95": 32227328,
+          "p99": 32227328,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 52.171792,
+          "mean": 44.571256966666674,
+          "minimum": 37.3515,
+          "name": "warm-observer-disabled-control",
+          "p50": 44.414125,
+          "p95": 50.1445,
+          "p99": 52.171792,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.08816700000079436,
+          "mean": 0.04689019999991615,
+          "minimum": 0.03508299999975861,
+          "name": "observer-postprocessing",
+          "p50": 0.043500000000676664,
+          "p95": 0.07820799999990413,
+          "p99": 0.08816700000079436,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 40.032711,
+          "mean": 28.866894666666667,
+          "minimum": 24.788874,
+          "name": "warm-sql-row-transport",
+          "p50": 28.415666,
+          "p95": 31.681296,
+          "p99": 40.032711,
+          "samples": 30,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 15.383168,
+          "mean": 9.3241722,
+          "minimum": 8.480335,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 9.107333,
+          "p95": 9.94908,
+          "p99": 15.383168,
+          "samples": 30,
+          "unit": "milliseconds"
+        }
+      ],
+      "metadata": {
+        "documents": 10000,
+        "distribution": "tied",
+        "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "modelPurpose": "recall",
+        "inference": "real-query",
+        "correctnessDigest": "ab9c34813ff2f2267ba210f257caee99ba332687fb7f81ae174876f628bb02c3",
+        "qualification": false,
+        "stageMethod": "actual-sql-spans-union-v1/interleaved-observer-control"
+      },
+      "suite": "native-performance-recall-vector-diagnostic-v1",
+      "version": 1,
+      "warmups": 1
+    },
+    "capture": {
+      "version": 1,
+      "kind": "diagnostic",
+      "component": "vector",
+      "pair": 1,
+      "arm": "baseline",
+      "configurationHash": "6688fdc6e7b6cf096c43741fa01730de823b6079ad45ed7b4ebe35184edaa41d",
+      "platform": "darwin-arm64",
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "sourceFence": {
+        "opening": {
+          "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "8789cf8247e815b02195b5567160c7176c7de7d9309819582d177a8306c59655",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "c37b2435224818630c523db9197c31b1acbac090752aaf3c1a846cb9deb6f4e0"
+        },
+        "closing": {
+          "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "8789cf8247e815b02195b5567160c7176c7de7d9309819582d177a8306c59655",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "c37b2435224818630c523db9197c31b1acbac090752aaf3c1a846cb9deb6f4e0"
+        }
+      },
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "correctnessDigest": "ab9c34813ff2f2267ba210f257caee99ba332687fb7f81ae174876f628bb02c3",
+      "firstUseMeasurement": "first-use-request",
+      "warmMeasurement": "warm-request",
+      "processTreePeakRssMeasurement": "process-tree-sampled-peak-rss",
+      "cpuMeasurement": "warm-parent-cpu",
+      "diskMeasurement": "database",
+      "stages": {
+        "sql-row-transport": {
+          "state": "measured",
+          "measurement": "warm-sql-row-transport",
+          "boundary": "Actual request SQLite span UNION: SQL compilation/acquisition/native execution and row construction"
+        },
+        "validation-scoring-top-k": {
+          "state": "measured",
+          "measurement": "warm-reader-exclusive-sql-residual",
+          "boundary": "Observed reader envelope minus UNION of its SQLite intervals: validation/scoring/top-k plus reader/transaction/control residual, not pure math"
+        },
+        "parse": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "query": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "fact-construction": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "ipc": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-load": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-compute": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        }
+      },
+      "limitations": [
+        "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+        "Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.",
+        "Stage mode alternates observed/control order for30 matched warm query pairs. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.",
+        "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+        "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+        "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+        "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+      ]
+    },
+    "instrumentationHash": "c37b2435224818630c523db9197c31b1acbac090752aaf3c1a846cb9deb6f4e0",
+    "processTreeSampler": {
+      "intervalMilliseconds": 25,
+      "phases": {
+        "finish": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 0,
+          "processSampleAttempts": 0,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 0,
+          "processSamples": 0,
+          "rssPeakBytes": 0,
+          "temporaryLinkedPeakBytes": 63170178,
+          "temporaryOpenAttempts": 0,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 0,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170178,
+          "walPeakBytes": 0
+        },
+        "start": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 1,
+          "processSampleAttempts": 1,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 6,
+          "processSamples": 1,
+          "rssPeakBytes": 415940608,
+          "temporaryLinkedPeakBytes": 63168594,
+          "temporaryOpenAttempts": 1,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 1,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63168594,
+          "walPeakBytes": 0
+        },
+        "vector-query": {
+          "cpuMilliseconds": 4530,
+          "processPeakCount": 1,
+          "processSampleAttempts": 10,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 304,
+          "processSamples": 10,
+          "rssPeakBytes": 618741760,
+          "temporaryLinkedPeakBytes": 63170176,
+          "temporaryOpenAttempts": 2,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 32260096,
+          "temporaryOpenSamples": 2,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 92,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170176,
+          "walPeakBytes": 0
+        }
+      },
+      "platform": "darwin",
+      "processTelemetry": {
+        "availability": "available",
+        "parentIdentityValidation": "darwin-ps-lstart",
+        "sampleIntervalMilliseconds": 250,
+        "scope": "recursive-process-tree",
+        "source": "darwin-ps"
+      },
+      "samples": 94,
+      "temporaryTelemetry": {
+        "availability": "available",
+        "maximumOpenFileDescriptors": 65536,
+        "maximumProcesses": 4096,
+        "openFileSampleIntervalMilliseconds": 1000,
+        "projectionByteLimit": 8388608,
+        "scope": "temporary-root-linked-plus-process-tree-open-files",
+        "source": "darwin-lsof"
+      },
+      "version": 4
+    },
+    "captureStartedAt": "2026-11-08T10:45:35.714Z",
+    "captureFinishedAt": "2026-11-08T10:45:44.232Z",
+    "rawWarmMilliseconds": [
+      45.969708, 56.849083, 43.548208, 53.527417, 42.541125, 49.29925, 40.617541, 49.60275, 43.216792, 44.838833,
+      44.408292, 48.992167, 46.25375, 47.952583, 48.688084, 42.623958, 49.610792, 46.439, 47.15925, 45.83375, 46.386625,
+      48.758542, 42.643709, 41.482083, 40.703291, 44.969167, 47.051875, 47.343875, 36.814167, 44.294083
+    ],
+    "rawWarmCpuMilliseconds": [
+      74.148, 114.722, 72.458, 100.956, 68.362, 78.517, 56.844, 81.834, 69.664, 84.418, 63.249, 72.045, 74.762, 92.839,
+      89.229, 68.586, 104.041, 75.39, 80.512, 75.85, 72.977, 72.788, 68.643, 64.9, 71.876, 73.301, 75.938, 84.023,
+      49.76, 70.597
+    ],
+    "rawFirstUseMilliseconds": [331.797625],
+    "stageAttribution": {
+      "observerPairs": [
+        {
+          "sample": 1,
+          "order": "observed-first",
+          "observedMilliseconds": 45.969708,
+          "controlMilliseconds": 43.898417,
+          "signedRequestDeltaMilliseconds": 2.071290999999995,
+          "postprocessingMilliseconds": 0.07820799999990413
+        },
+        {
+          "sample": 2,
+          "order": "control-first",
+          "observedMilliseconds": 56.849083,
+          "controlMilliseconds": 44.414125,
+          "signedRequestDeltaMilliseconds": 12.434958000000002,
+          "postprocessingMilliseconds": 0.0644999999999527
+        },
+        {
+          "sample": 3,
+          "order": "observed-first",
+          "observedMilliseconds": 43.548208,
+          "controlMilliseconds": 38.213791,
+          "signedRequestDeltaMilliseconds": 5.334417000000002,
+          "postprocessingMilliseconds": 0.06654200000002675
+        },
+        {
+          "sample": 4,
+          "order": "control-first",
+          "observedMilliseconds": 53.527417,
+          "controlMilliseconds": 42.056833,
+          "signedRequestDeltaMilliseconds": 11.470584000000002,
+          "postprocessingMilliseconds": 0.03508299999975861
+        },
+        {
+          "sample": 5,
+          "order": "observed-first",
+          "observedMilliseconds": 42.541125,
+          "controlMilliseconds": 43.092833,
+          "signedRequestDeltaMilliseconds": -0.5517079999999979,
+          "postprocessingMilliseconds": 0.038541999999779364
+        },
+        {
+          "sample": 6,
+          "order": "control-first",
+          "observedMilliseconds": 49.29925,
+          "controlMilliseconds": 44.688875,
+          "signedRequestDeltaMilliseconds": 4.610374999999998,
+          "postprocessingMilliseconds": 0.039624999999432475
+        },
+        {
+          "sample": 7,
+          "order": "observed-first",
+          "observedMilliseconds": 40.617541,
+          "controlMilliseconds": 45.433042,
+          "signedRequestDeltaMilliseconds": -4.815500999999998,
+          "postprocessingMilliseconds": 0.03866699999980483
+        },
+        {
+          "sample": 8,
+          "order": "control-first",
+          "observedMilliseconds": 49.60275,
+          "controlMilliseconds": 44.119958,
+          "signedRequestDeltaMilliseconds": 5.482792000000003,
+          "postprocessingMilliseconds": 0.04025000000001455
+        },
+        {
+          "sample": 9,
+          "order": "observed-first",
+          "observedMilliseconds": 43.216792,
+          "controlMilliseconds": 44.870542,
+          "signedRequestDeltaMilliseconds": -1.6537500000000023,
+          "postprocessingMilliseconds": 0.039791000000150234
+        },
+        {
+          "sample": 10,
+          "order": "control-first",
+          "observedMilliseconds": 44.838833,
+          "controlMilliseconds": 46.788875,
+          "signedRequestDeltaMilliseconds": -1.9500419999999963,
+          "postprocessingMilliseconds": 0.043500000000676664
+        },
+        {
+          "sample": 11,
+          "order": "observed-first",
+          "observedMilliseconds": 44.408292,
+          "controlMilliseconds": 42.042084,
+          "signedRequestDeltaMilliseconds": 2.3662080000000003,
+          "postprocessingMilliseconds": 0.04683299999942392
+        },
+        {
+          "sample": 12,
+          "order": "control-first",
+          "observedMilliseconds": 48.992167,
+          "controlMilliseconds": 43.042041,
+          "signedRequestDeltaMilliseconds": 5.9501260000000045,
+          "postprocessingMilliseconds": 0.04683299999942392
+        },
+        {
+          "sample": 13,
+          "order": "observed-first",
+          "observedMilliseconds": 46.25375,
+          "controlMilliseconds": 46.174,
+          "signedRequestDeltaMilliseconds": 0.0797499999999971,
+          "postprocessingMilliseconds": 0.04399999999986903
+        },
+        {
+          "sample": 14,
+          "order": "control-first",
+          "observedMilliseconds": 47.952583,
+          "controlMilliseconds": 48.174625,
+          "signedRequestDeltaMilliseconds": -0.22204200000000185,
+          "postprocessingMilliseconds": 0.042250000000422006
+        },
+        {
+          "sample": 15,
+          "order": "observed-first",
+          "observedMilliseconds": 48.688084,
+          "controlMilliseconds": 43.2625,
+          "signedRequestDeltaMilliseconds": 5.425584000000001,
+          "postprocessingMilliseconds": 0.041499999999359716
+        },
+        {
+          "sample": 16,
+          "order": "control-first",
+          "observedMilliseconds": 42.623958,
+          "controlMilliseconds": 52.171792,
+          "signedRequestDeltaMilliseconds": -9.547834000000002,
+          "postprocessingMilliseconds": 0.04712500000005093
+        },
+        {
+          "sample": 17,
+          "order": "observed-first",
+          "observedMilliseconds": 49.610792,
+          "controlMilliseconds": 47.777417,
+          "signedRequestDeltaMilliseconds": 1.8333749999999966,
+          "postprocessingMilliseconds": 0.04158300000017334
+        },
+        {
+          "sample": 18,
+          "order": "control-first",
+          "observedMilliseconds": 46.439,
+          "controlMilliseconds": 46.057708,
+          "signedRequestDeltaMilliseconds": 0.38129200000000196,
+          "postprocessingMilliseconds": 0.04487500000050204
+        },
+        {
+          "sample": 19,
+          "order": "observed-first",
+          "observedMilliseconds": 47.15925,
+          "controlMilliseconds": 50.1445,
+          "signedRequestDeltaMilliseconds": -2.9852500000000006,
+          "postprocessingMilliseconds": 0.04570799999964947
+        },
+        {
+          "sample": 20,
+          "order": "control-first",
+          "observedMilliseconds": 45.83375,
+          "controlMilliseconds": 48.079667,
+          "signedRequestDeltaMilliseconds": -2.2459169999999986,
+          "postprocessingMilliseconds": 0.04624999999941792
+        },
+        {
+          "sample": 21,
+          "order": "observed-first",
+          "observedMilliseconds": 46.386625,
+          "controlMilliseconds": 37.3515,
+          "signedRequestDeltaMilliseconds": 9.035125,
+          "postprocessingMilliseconds": 0.04033300000082818
+        },
+        {
+          "sample": 22,
+          "order": "control-first",
+          "observedMilliseconds": 48.758542,
+          "controlMilliseconds": 41.95225,
+          "signedRequestDeltaMilliseconds": 6.806291999999999,
+          "postprocessingMilliseconds": 0.046332999999322055
+        },
+        {
+          "sample": 23,
+          "order": "observed-first",
+          "observedMilliseconds": 42.643709,
+          "controlMilliseconds": 42.82125,
+          "signedRequestDeltaMilliseconds": -0.17754099999999795,
+          "postprocessingMilliseconds": 0.041249999999308784
+        },
+        {
+          "sample": 24,
+          "order": "control-first",
+          "observedMilliseconds": 41.482083,
+          "controlMilliseconds": 47.741792,
+          "signedRequestDeltaMilliseconds": -6.259708999999994,
+          "postprocessingMilliseconds": 0.04008299999986775
+        },
+        {
+          "sample": 25,
+          "order": "observed-first",
+          "observedMilliseconds": 40.703291,
+          "controlMilliseconds": 48.517583,
+          "signedRequestDeltaMilliseconds": -7.814292000000002,
+          "postprocessingMilliseconds": 0.04195799999979499
+        },
+        {
+          "sample": 26,
+          "order": "control-first",
+          "observedMilliseconds": 44.969167,
+          "controlMilliseconds": 41.701459,
+          "signedRequestDeltaMilliseconds": 3.267707999999999,
+          "postprocessingMilliseconds": 0.08816700000079436
+        },
+        {
+          "sample": 27,
+          "order": "observed-first",
+          "observedMilliseconds": 47.051875,
+          "controlMilliseconds": 40.9125,
+          "signedRequestDeltaMilliseconds": 6.139375000000001,
+          "postprocessingMilliseconds": 0.042833000000428
+        },
+        {
+          "sample": 28,
+          "order": "control-first",
+          "observedMilliseconds": 47.343875,
+          "controlMilliseconds": 43.007167,
+          "signedRequestDeltaMilliseconds": 4.3367079999999945,
+          "postprocessingMilliseconds": 0.04454199999963748
+        },
+        {
+          "sample": 29,
+          "order": "observed-first",
+          "observedMilliseconds": 36.814167,
+          "controlMilliseconds": 46.681333,
+          "signedRequestDeltaMilliseconds": -9.867166000000005,
+          "postprocessingMilliseconds": 0.04204200000003766
+        },
+        {
+          "sample": 30,
+          "order": "control-first",
+          "observedMilliseconds": 44.294083,
+          "controlMilliseconds": 41.94725,
+          "signedRequestDeltaMilliseconds": 2.3468330000000037,
+          "postprocessingMilliseconds": 0.04749999999967258
+        }
+      ],
+      "enabled": true,
+      "stagesAvailable": true,
+      "samples": [
+        {
+          "sample": 0,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 331.655958,
+              "intervals": [
+                {
+                  "startMilliseconds": 2.25075,
+                  "endMilliseconds": 2.298208
+                },
+                {
+                  "startMilliseconds": 2.319291,
+                  "endMilliseconds": 2.333125
+                },
+                {
+                  "startMilliseconds": 2.33725,
+                  "endMilliseconds": 2.73625
+                },
+                {
+                  "startMilliseconds": 2.768416,
+                  "endMilliseconds": 2.86
+                },
+                {
+                  "startMilliseconds": 2.869083,
+                  "endMilliseconds": 2.891125
+                },
+                {
+                  "startMilliseconds": 2.896875,
+                  "endMilliseconds": 2.917833
+                },
+                {
+                  "startMilliseconds": 2.923916,
+                  "endMilliseconds": 2.939541
+                },
+                {
+                  "startMilliseconds": 2.944125,
+                  "endMilliseconds": 2.95825
+                },
+                {
+                  "startMilliseconds": 2.976625,
+                  "endMilliseconds": 3.938541
+                },
+                {
+                  "startMilliseconds": 285.965625,
+                  "endMilliseconds": 285.989583
+                },
+                {
+                  "startMilliseconds": 285.994458,
+                  "endMilliseconds": 286.024541
+                },
+                {
+                  "startMilliseconds": 286.02825,
+                  "endMilliseconds": 286.896125
+                },
+                {
+                  "startMilliseconds": 286.960833,
+                  "endMilliseconds": 287.104291
+                },
+                {
+                  "startMilliseconds": 287.112458,
+                  "endMilliseconds": 287.125416
+                },
+                {
+                  "startMilliseconds": 287.133083,
+                  "endMilliseconds": 287.143375
+                },
+                {
+                  "startMilliseconds": 287.155333,
+                  "endMilliseconds": 287.166041
+                },
+                {
+                  "startMilliseconds": 287.169083,
+                  "endMilliseconds": 287.176625
+                },
+                {
+                  "startMilliseconds": 287.202291,
+                  "endMilliseconds": 288.202875
+                },
+                {
+                  "startMilliseconds": 288.624416,
+                  "endMilliseconds": 289.809958
+                },
+                {
+                  "startMilliseconds": 291.917041,
+                  "endMilliseconds": 293.117625
+                },
+                {
+                  "startMilliseconds": 293.838833,
+                  "endMilliseconds": 294.968333
+                },
+                {
+                  "startMilliseconds": 295.622666,
+                  "endMilliseconds": 296.7565
+                },
+                {
+                  "startMilliseconds": 297.406291,
+                  "endMilliseconds": 298.348583
+                },
+                {
+                  "startMilliseconds": 298.686166,
+                  "endMilliseconds": 299.611291
+                },
+                {
+                  "startMilliseconds": 299.94175,
+                  "endMilliseconds": 300.968416
+                },
+                {
+                  "startMilliseconds": 301.299041,
+                  "endMilliseconds": 302.217166
+                },
+                {
+                  "startMilliseconds": 302.513583,
+                  "endMilliseconds": 303.360458
+                },
+                {
+                  "startMilliseconds": 303.660916,
+                  "endMilliseconds": 304.635208
+                },
+                {
+                  "startMilliseconds": 304.956916,
+                  "endMilliseconds": 305.8945
+                },
+                {
+                  "startMilliseconds": 306.189916,
+                  "endMilliseconds": 307.065208
+                },
+                {
+                  "startMilliseconds": 307.381083,
+                  "endMilliseconds": 308.266083
+                },
+                {
+                  "startMilliseconds": 308.56225,
+                  "endMilliseconds": 309.420708
+                },
+                {
+                  "startMilliseconds": 309.733416,
+                  "endMilliseconds": 310.688833
+                },
+                {
+                  "startMilliseconds": 311.070166,
+                  "endMilliseconds": 312.293708
+                },
+                {
+                  "startMilliseconds": 312.65975,
+                  "endMilliseconds": 313.773583
+                },
+                {
+                  "startMilliseconds": 314.10175,
+                  "endMilliseconds": 315.248
+                },
+                {
+                  "startMilliseconds": 315.589708,
+                  "endMilliseconds": 316.651666
+                },
+                {
+                  "startMilliseconds": 317.543291,
+                  "endMilliseconds": 322.52125
+                },
+                {
+                  "startMilliseconds": 322.91575,
+                  "endMilliseconds": 324.08375
+                },
+                {
+                  "startMilliseconds": 324.448625,
+                  "endMilliseconds": 325.529708
+                },
+                {
+                  "startMilliseconds": 325.862666,
+                  "endMilliseconds": 327.018208
+                },
+                {
+                  "startMilliseconds": 327.353041,
+                  "endMilliseconds": 328.41225
+                },
+                {
+                  "startMilliseconds": 328.724416,
+                  "endMilliseconds": 329.762125
+                },
+                {
+                  "startMilliseconds": 330.081,
+                  "endMilliseconds": 330.17175
+                },
+                {
+                  "startMilliseconds": 330.51225,
+                  "endMilliseconds": 330.808833
+                }
+              ],
+              "coveredMilliseconds": 33.901004,
+              "exclusiveResidualMilliseconds": 297.754954
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 47.188625,
+              "intervals": [
+                {
+                  "startMilliseconds": 1.521959,
+                  "endMilliseconds": 1.545917
+                },
+                {
+                  "startMilliseconds": 1.550792,
+                  "endMilliseconds": 1.580875
+                },
+                {
+                  "startMilliseconds": 1.584584,
+                  "endMilliseconds": 2.452459
+                },
+                {
+                  "startMilliseconds": 2.517167,
+                  "endMilliseconds": 2.660625
+                },
+                {
+                  "startMilliseconds": 2.668792,
+                  "endMilliseconds": 2.68175
+                },
+                {
+                  "startMilliseconds": 2.689417,
+                  "endMilliseconds": 2.699709
+                },
+                {
+                  "startMilliseconds": 2.711667,
+                  "endMilliseconds": 2.722375
+                },
+                {
+                  "startMilliseconds": 2.725417,
+                  "endMilliseconds": 2.732959
+                },
+                {
+                  "startMilliseconds": 2.758625,
+                  "endMilliseconds": 3.759209
+                },
+                {
+                  "startMilliseconds": 4.18075,
+                  "endMilliseconds": 5.366292
+                },
+                {
+                  "startMilliseconds": 7.473375,
+                  "endMilliseconds": 8.673959
+                },
+                {
+                  "startMilliseconds": 9.395167,
+                  "endMilliseconds": 10.524667
+                },
+                {
+                  "startMilliseconds": 11.179,
+                  "endMilliseconds": 12.312834
+                },
+                {
+                  "startMilliseconds": 12.962625,
+                  "endMilliseconds": 13.904917
+                },
+                {
+                  "startMilliseconds": 14.2425,
+                  "endMilliseconds": 15.167625
+                },
+                {
+                  "startMilliseconds": 15.498084,
+                  "endMilliseconds": 16.52475
+                },
+                {
+                  "startMilliseconds": 16.855375,
+                  "endMilliseconds": 17.7735
+                },
+                {
+                  "startMilliseconds": 18.069917,
+                  "endMilliseconds": 18.916792
+                },
+                {
+                  "startMilliseconds": 19.21725,
+                  "endMilliseconds": 20.191542
+                },
+                {
+                  "startMilliseconds": 20.51325,
+                  "endMilliseconds": 21.450834
+                },
+                {
+                  "startMilliseconds": 21.74625,
+                  "endMilliseconds": 22.621542
+                },
+                {
+                  "startMilliseconds": 22.937417,
+                  "endMilliseconds": 23.822417
+                },
+                {
+                  "startMilliseconds": 24.118584,
+                  "endMilliseconds": 24.977042
+                },
+                {
+                  "startMilliseconds": 25.28975,
+                  "endMilliseconds": 26.245167
+                },
+                {
+                  "startMilliseconds": 26.6265,
+                  "endMilliseconds": 27.850042
+                },
+                {
+                  "startMilliseconds": 28.216084,
+                  "endMilliseconds": 29.329917
+                },
+                {
+                  "startMilliseconds": 29.658084,
+                  "endMilliseconds": 30.804334
+                },
+                {
+                  "startMilliseconds": 31.146042,
+                  "endMilliseconds": 32.208
+                },
+                {
+                  "startMilliseconds": 33.099625,
+                  "endMilliseconds": 38.077584
+                },
+                {
+                  "startMilliseconds": 38.472084,
+                  "endMilliseconds": 39.640084
+                },
+                {
+                  "startMilliseconds": 40.004959,
+                  "endMilliseconds": 41.086042
+                },
+                {
+                  "startMilliseconds": 41.419,
+                  "endMilliseconds": 42.574542
+                },
+                {
+                  "startMilliseconds": 42.909375,
+                  "endMilliseconds": 43.968584
+                },
+                {
+                  "startMilliseconds": 44.28075,
+                  "endMilliseconds": 45.318459
+                },
+                {
+                  "startMilliseconds": 45.637334,
+                  "endMilliseconds": 45.728084
+                },
+                {
+                  "startMilliseconds": 46.068584,
+                  "endMilliseconds": 46.365167
+                }
+              ],
+              "coveredMilliseconds": 32.314462,
+              "exclusiveResidualMilliseconds": 14.874163
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 1,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 45.937541,
+              "intervals": [
+                {
+                  "startMilliseconds": 2.944458,
+                  "endMilliseconds": 2.97525
+                },
+                {
+                  "startMilliseconds": 2.980375,
+                  "endMilliseconds": 3.001916
+                },
+                {
+                  "startMilliseconds": 3.004416,
+                  "endMilliseconds": 3.422625
+                },
+                {
+                  "startMilliseconds": 3.461458,
+                  "endMilliseconds": 3.578791
+                },
+                {
+                  "startMilliseconds": 3.586625,
+                  "endMilliseconds": 3.615875
+                },
+                {
+                  "startMilliseconds": 3.620291,
+                  "endMilliseconds": 3.639458
+                },
+                {
+                  "startMilliseconds": 3.644791,
+                  "endMilliseconds": 3.6595
+                },
+                {
+                  "startMilliseconds": 3.665083,
+                  "endMilliseconds": 3.690458
+                },
+                {
+                  "startMilliseconds": 3.744791,
+                  "endMilliseconds": 4.7835
+                },
+                {
+                  "startMilliseconds": 10.376708,
+                  "endMilliseconds": 10.393833
+                },
+                {
+                  "startMilliseconds": 10.397125,
+                  "endMilliseconds": 10.406625
+                },
+                {
+                  "startMilliseconds": 10.408458,
+                  "endMilliseconds": 10.805083
+                },
+                {
+                  "startMilliseconds": 10.832,
+                  "endMilliseconds": 10.923875
+                },
+                {
+                  "startMilliseconds": 10.933875,
+                  "endMilliseconds": 10.95325
+                },
+                {
+                  "startMilliseconds": 10.957791,
+                  "endMilliseconds": 10.98525
+                },
+                {
+                  "startMilliseconds": 10.989083,
+                  "endMilliseconds": 11.000083
+                },
+                {
+                  "startMilliseconds": 11.002375,
+                  "endMilliseconds": 11.0095
+                },
+                {
+                  "startMilliseconds": 11.033958,
+                  "endMilliseconds": 11.946416
+                },
+                {
+                  "startMilliseconds": 12.114291,
+                  "endMilliseconds": 13.337958
+                },
+                {
+                  "startMilliseconds": 13.666375,
+                  "endMilliseconds": 14.784958
+                },
+                {
+                  "startMilliseconds": 15.119583,
+                  "endMilliseconds": 16.26075
+                },
+                {
+                  "startMilliseconds": 16.589625,
+                  "endMilliseconds": 17.659
+                },
+                {
+                  "startMilliseconds": 17.98225,
+                  "endMilliseconds": 18.884041
+                },
+                {
+                  "startMilliseconds": 19.2055,
+                  "endMilliseconds": 20.103166
+                },
+                {
+                  "startMilliseconds": 20.416541,
+                  "endMilliseconds": 21.296708
+                },
+                {
+                  "startMilliseconds": 21.618333,
+                  "endMilliseconds": 22.545875
+                },
+                {
+                  "startMilliseconds": 22.860416,
+                  "endMilliseconds": 23.777291
+                },
+                {
+                  "startMilliseconds": 24.106875,
+                  "endMilliseconds": 25.014041
+                },
+                {
+                  "startMilliseconds": 25.332625,
+                  "endMilliseconds": 26.241375
+                },
+                {
+                  "startMilliseconds": 26.559791,
+                  "endMilliseconds": 27.480708
+                },
+                {
+                  "startMilliseconds": 27.794291,
+                  "endMilliseconds": 28.768708
+                },
+                {
+                  "startMilliseconds": 29.084833,
+                  "endMilliseconds": 30.064416
+                },
+                {
+                  "startMilliseconds": 30.382083,
+                  "endMilliseconds": 31.321625
+                },
+                {
+                  "startMilliseconds": 31.636583,
+                  "endMilliseconds": 32.60525
+                },
+                {
+                  "startMilliseconds": 32.91475,
+                  "endMilliseconds": 33.889083
+                },
+                {
+                  "startMilliseconds": 34.193083,
+                  "endMilliseconds": 35.178416
+                },
+                {
+                  "startMilliseconds": 35.497541,
+                  "endMilliseconds": 36.47375
+                },
+                {
+                  "startMilliseconds": 36.793166,
+                  "endMilliseconds": 37.795416
+                },
+                {
+                  "startMilliseconds": 38.106916,
+                  "endMilliseconds": 39.093666
+                },
+                {
+                  "startMilliseconds": 39.403958,
+                  "endMilliseconds": 40.390291
+                },
+                {
+                  "startMilliseconds": 40.719458,
+                  "endMilliseconds": 41.790958
+                },
+                {
+                  "startMilliseconds": 42.120791,
+                  "endMilliseconds": 43.141958
+                },
+                {
+                  "startMilliseconds": 43.455625,
+                  "endMilliseconds": 44.426708
+                },
+                {
+                  "startMilliseconds": 44.768791,
+                  "endMilliseconds": 44.862291
+                },
+                {
+                  "startMilliseconds": 44.971708,
+                  "endMilliseconds": 45.264333
+                }
+              ],
+              "coveredMilliseconds": 28.244585,
+              "exclusiveResidualMilliseconds": 17.692956
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.07225,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.532042,
+                  "endMilliseconds": 0.549167
+                },
+                {
+                  "startMilliseconds": 0.552459,
+                  "endMilliseconds": 0.561959
+                },
+                {
+                  "startMilliseconds": 0.563792,
+                  "endMilliseconds": 0.960417
+                },
+                {
+                  "startMilliseconds": 0.987334,
+                  "endMilliseconds": 1.079209
+                },
+                {
+                  "startMilliseconds": 1.089209,
+                  "endMilliseconds": 1.108584
+                },
+                {
+                  "startMilliseconds": 1.113125,
+                  "endMilliseconds": 1.140584
+                },
+                {
+                  "startMilliseconds": 1.144417,
+                  "endMilliseconds": 1.155417
+                },
+                {
+                  "startMilliseconds": 1.157709,
+                  "endMilliseconds": 1.164834
+                },
+                {
+                  "startMilliseconds": 1.189292,
+                  "endMilliseconds": 2.10175
+                },
+                {
+                  "startMilliseconds": 2.269625,
+                  "endMilliseconds": 3.493292
+                },
+                {
+                  "startMilliseconds": 3.821709,
+                  "endMilliseconds": 4.940292
+                },
+                {
+                  "startMilliseconds": 5.274917,
+                  "endMilliseconds": 6.416084
+                },
+                {
+                  "startMilliseconds": 6.744959,
+                  "endMilliseconds": 7.814334
+                },
+                {
+                  "startMilliseconds": 8.137584,
+                  "endMilliseconds": 9.039375
+                },
+                {
+                  "startMilliseconds": 9.360834,
+                  "endMilliseconds": 10.2585
+                },
+                {
+                  "startMilliseconds": 10.571875,
+                  "endMilliseconds": 11.452042
+                },
+                {
+                  "startMilliseconds": 11.773667,
+                  "endMilliseconds": 12.701209
+                },
+                {
+                  "startMilliseconds": 13.01575,
+                  "endMilliseconds": 13.932625
+                },
+                {
+                  "startMilliseconds": 14.262209,
+                  "endMilliseconds": 15.169375
+                },
+                {
+                  "startMilliseconds": 15.487959,
+                  "endMilliseconds": 16.396709
+                },
+                {
+                  "startMilliseconds": 16.715125,
+                  "endMilliseconds": 17.636042
+                },
+                {
+                  "startMilliseconds": 17.949625,
+                  "endMilliseconds": 18.924042
+                },
+                {
+                  "startMilliseconds": 19.240167,
+                  "endMilliseconds": 20.21975
+                },
+                {
+                  "startMilliseconds": 20.537417,
+                  "endMilliseconds": 21.476959
+                },
+                {
+                  "startMilliseconds": 21.791917,
+                  "endMilliseconds": 22.760584
+                },
+                {
+                  "startMilliseconds": 23.070084,
+                  "endMilliseconds": 24.044417
+                },
+                {
+                  "startMilliseconds": 24.348417,
+                  "endMilliseconds": 25.33375
+                },
+                {
+                  "startMilliseconds": 25.652875,
+                  "endMilliseconds": 26.629084
+                },
+                {
+                  "startMilliseconds": 26.9485,
+                  "endMilliseconds": 27.95075
+                },
+                {
+                  "startMilliseconds": 28.26225,
+                  "endMilliseconds": 29.249
+                },
+                {
+                  "startMilliseconds": 29.559292,
+                  "endMilliseconds": 30.545625
+                },
+                {
+                  "startMilliseconds": 30.874792,
+                  "endMilliseconds": 31.946292
+                },
+                {
+                  "startMilliseconds": 32.276125,
+                  "endMilliseconds": 33.297292
+                },
+                {
+                  "startMilliseconds": 33.610959,
+                  "endMilliseconds": 34.582042
+                },
+                {
+                  "startMilliseconds": 34.924125,
+                  "endMilliseconds": 35.017625
+                },
+                {
+                  "startMilliseconds": 35.127042,
+                  "endMilliseconds": 35.419667
+                }
+              ],
+              "coveredMilliseconds": 26.5295,
+              "exclusiveResidualMilliseconds": 9.54275
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 2,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 56.828375,
+              "coveredMilliseconds": 40.032711,
+              "exclusiveResidualMilliseconds": 16.795664,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 48.338333,
+              "coveredMilliseconds": 38.389253,
+              "exclusiveResidualMilliseconds": 9.94908,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 3,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 43.522709,
+              "coveredMilliseconds": 28.176041,
+              "exclusiveResidualMilliseconds": 15.346668,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.358208,
+              "coveredMilliseconds": 26.625457,
+              "exclusiveResidualMilliseconds": 8.732751,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 4,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 53.510459,
+              "coveredMilliseconds": 29.356498,
+              "exclusiveResidualMilliseconds": 24.153961,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 43.183833,
+              "coveredMilliseconds": 27.800665,
+              "exclusiveResidualMilliseconds": 15.383168,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 5,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 42.512208,
+              "coveredMilliseconds": 27.615415,
+              "exclusiveResidualMilliseconds": 14.896793,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.006917,
+              "coveredMilliseconds": 25.878664,
+              "exclusiveResidualMilliseconds": 9.128253,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 6,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 49.263209,
+              "coveredMilliseconds": 28.408334,
+              "exclusiveResidualMilliseconds": 20.854875,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.85075,
+              "coveredMilliseconds": 26.891791,
+              "exclusiveResidualMilliseconds": 8.958959,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 7,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 40.592291,
+              "coveredMilliseconds": 24.929921,
+              "exclusiveResidualMilliseconds": 15.66237,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 32.195583,
+              "coveredMilliseconds": 23.463628,
+              "exclusiveResidualMilliseconds": 8.731955,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 8,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 49.58025,
+              "coveredMilliseconds": 28.733289,
+              "exclusiveResidualMilliseconds": 20.846961,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.560208,
+              "coveredMilliseconds": 27.246206,
+              "exclusiveResidualMilliseconds": 9.314002,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 9,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 43.195917,
+              "coveredMilliseconds": 28.415666,
+              "exclusiveResidualMilliseconds": 14.780251,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.122125,
+              "coveredMilliseconds": 27.000748,
+              "exclusiveResidualMilliseconds": 9.121377,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 10,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 44.814291,
+              "coveredMilliseconds": 27.966501,
+              "exclusiveResidualMilliseconds": 16.84779,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.349958,
+              "coveredMilliseconds": 26.242625,
+              "exclusiveResidualMilliseconds": 9.107333,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 11,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 44.383917,
+              "coveredMilliseconds": 26.94896,
+              "exclusiveResidualMilliseconds": 17.434957,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 34.542209,
+              "coveredMilliseconds": 25.451251,
+              "exclusiveResidualMilliseconds": 9.090958,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 12,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 48.969042,
+              "coveredMilliseconds": 29.7255,
+              "exclusiveResidualMilliseconds": 19.243542,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 37.238333,
+              "coveredMilliseconds": 28.180543,
+              "exclusiveResidualMilliseconds": 9.05779,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 13,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 46.231417,
+              "coveredMilliseconds": 30.101124,
+              "exclusiveResidualMilliseconds": 16.130293,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 37.928583,
+              "coveredMilliseconds": 28.48275,
+              "exclusiveResidualMilliseconds": 9.445833,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 14,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 47.925459,
+              "coveredMilliseconds": 29.222371,
+              "exclusiveResidualMilliseconds": 18.703088,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.782208,
+              "coveredMilliseconds": 27.573246,
+              "exclusiveResidualMilliseconds": 9.208962,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 15,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 48.668791,
+              "coveredMilliseconds": 31.681296,
+              "exclusiveResidualMilliseconds": 16.987495,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 39.887875,
+              "coveredMilliseconds": 30.301588,
+              "exclusiveResidualMilliseconds": 9.586287,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 16,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 42.601709,
+              "coveredMilliseconds": 27.925292,
+              "exclusiveResidualMilliseconds": 14.676417,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.766916,
+              "coveredMilliseconds": 26.413125,
+              "exclusiveResidualMilliseconds": 9.353791,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 17,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 49.589875,
+              "coveredMilliseconds": 30.081084,
+              "exclusiveResidualMilliseconds": 19.508791,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 38.006417,
+              "coveredMilliseconds": 28.471126,
+              "exclusiveResidualMilliseconds": 9.535291,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 18,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 46.414292,
+              "coveredMilliseconds": 31.081503,
+              "exclusiveResidualMilliseconds": 15.332789,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 38.809208,
+              "coveredMilliseconds": 29.636877,
+              "exclusiveResidualMilliseconds": 9.172331,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 19,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 47.138667,
+              "coveredMilliseconds": 31.200996,
+              "exclusiveResidualMilliseconds": 15.937671,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 38.9845,
+              "coveredMilliseconds": 29.577705,
+              "exclusiveResidualMilliseconds": 9.406795,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 20,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 45.811875,
+              "coveredMilliseconds": 29.734711,
+              "exclusiveResidualMilliseconds": 16.077164,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 37.240625,
+              "coveredMilliseconds": 28.033002,
+              "exclusiveResidualMilliseconds": 9.207623,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 21,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 46.363875,
+              "coveredMilliseconds": 27.494006,
+              "exclusiveResidualMilliseconds": 18.869869,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 34.711667,
+              "coveredMilliseconds": 25.84363,
+              "exclusiveResidualMilliseconds": 8.868037,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 22,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 48.735792,
+              "coveredMilliseconds": 29.420371,
+              "exclusiveResidualMilliseconds": 19.315421,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.911167,
+              "coveredMilliseconds": 27.846621,
+              "exclusiveResidualMilliseconds": 9.064546,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 23,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 42.624125,
+              "coveredMilliseconds": 27.757332,
+              "exclusiveResidualMilliseconds": 14.866793,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 35.052833,
+              "coveredMilliseconds": 26.055125,
+              "exclusiveResidualMilliseconds": 8.997708,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 24,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 41.45825,
+              "coveredMilliseconds": 27.355753,
+              "exclusiveResidualMilliseconds": 14.102497,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 34.580833,
+              "coveredMilliseconds": 25.767752,
+              "exclusiveResidualMilliseconds": 8.813081,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 25,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 40.684834,
+              "coveredMilliseconds": 26.749786,
+              "exclusiveResidualMilliseconds": 13.935048,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 34.070959,
+              "coveredMilliseconds": 25.282704,
+              "exclusiveResidualMilliseconds": 8.788255,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 26,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 44.945459,
+              "coveredMilliseconds": 29.986456,
+              "exclusiveResidualMilliseconds": 14.959003,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 37.337,
+              "coveredMilliseconds": 28.359999,
+              "exclusiveResidualMilliseconds": 8.977001,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 27,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 47.011958,
+              "coveredMilliseconds": 27.045541,
+              "exclusiveResidualMilliseconds": 19.966417,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 34.288834,
+              "coveredMilliseconds": 25.422292,
+              "exclusiveResidualMilliseconds": 8.866542,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 28,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 47.31525,
+              "coveredMilliseconds": 26.26388,
+              "exclusiveResidualMilliseconds": 21.05137,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 33.090083,
+              "coveredMilliseconds": 24.289711,
+              "exclusiveResidualMilliseconds": 8.800372,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 29,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 36.797208,
+              "coveredMilliseconds": 24.788874,
+              "exclusiveResidualMilliseconds": 12.008334,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 31.922584,
+              "coveredMilliseconds": 23.442249,
+              "exclusiveResidualMilliseconds": 8.480335,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 30,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 44.271375,
+              "coveredMilliseconds": 29.563043,
+              "exclusiveResidualMilliseconds": 14.708332,
+              "intervalCount": 45,
+              "intervalsRetained": false
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 37.178417,
+              "coveredMilliseconds": 28.144417,
+              "exclusiveResidualMilliseconds": 9.034,
+              "intervalCount": 36,
+              "intervalsRetained": false
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        }
+      ],
+      "observerControlMilliseconds": [
+        43.898417, 44.414125, 38.213791, 42.056833, 43.092833, 44.688875, 45.433042, 44.119958, 44.870542, 46.788875,
+        42.042084, 43.042041, 46.174, 48.174625, 43.2625, 52.171792, 47.777417, 46.057708, 50.1445, 48.079667, 37.3515,
+        41.95225, 42.82125, 47.741792, 48.517583, 41.701459, 40.9125, 43.007167, 46.681333, 41.94725
+      ],
+      "observerProjectionMilliseconds": [
+        0.07820799999990413, 0.0644999999999527, 0.06654200000002675, 0.03508299999975861, 0.038541999999779364,
+        0.039624999999432475, 0.03866699999980483, 0.04025000000001455, 0.039791000000150234, 0.043500000000676664,
+        0.04683299999942392, 0.04683299999942392, 0.04399999999986903, 0.042250000000422006, 0.041499999999359716,
+        0.04712500000005093, 0.04158300000017334, 0.04487500000050204, 0.04570799999964947, 0.04624999999941792,
+        0.04033300000082818, 0.046332999999322055, 0.041249999999308784, 0.04008299999986775, 0.04195799999979499,
+        0.08816700000079436, 0.042833000000428, 0.04454199999963748, 0.04204200000003766, 0.04749999999967258
+      ],
+      "accounting": "exclusive wall time subtracts interval UNION; overlapping envelopes are not additive; invalid coverage is unavailable and never clamped"
+    },
+    "limitations": [
+      "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+      "Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.",
+      "Stage mode alternates observed/control order for30 matched warm query pairs. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.",
+      "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+      "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+      "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+      "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+    ]
+  },
+  "budgets": {
+    "performance": {
+      "incrementalBuildLinearMaximumMilliseconds": 3000,
+      "incrementalBuildMaximumMilliseconds": 3000,
+      "incrementalBuildSameRunnerMaximumMilliseconds": 1211.8010754,
+      "incrementalBuildWithinBudget": true,
+      "initialBuildMaximumMilliseconds": 15000,
+      "initialBuildWithinBudget": true,
+      "semanticQueryP95MaximumMilliseconds": 750,
+      "semanticQueryWithinBudget": true,
+      "sharedRunnerAdjustmentApplied": false
+    }
+  },
+  "database": {
+    "bytesAfterIncremental": 42946560,
+    "bytesAfterInitial": 32227328,
+    "compactedBytesAfterIncremental": 30908416,
+    "compactedBytesAfterInitial": 30908416,
+    "incrementalBytes": 10719232,
+    "incrementalCompactedBytes": 0,
+    "chunkMappings": 10000,
+    "generations": 1,
+    "vectorValues": 10000
+  },
+  "environment": {
+    "architecture": "arm64",
+    "bun": "1.4.4",
+    "operatingSystem": "darwin"
+  },
+  "fixture": {
+    "dimensions": 384,
+    "documents": 10000,
+    "querySamples": 30
+  },
+  "scenarios": {
+    "incrementalBuild": {
+      "embeddedChunks": 1,
+      "milliseconds": 620.079875,
+      "peakRssBytes": 259802744,
+      "reusedChunks": 9999
+    },
+    "initialBuild": {
+      "embeddedChunks": 10000,
+      "milliseconds": 2019.668459,
+      "peakRssBytes": 315360360
+    },
+    "semanticQuery": {
+      "p50Milliseconds": 45.969708,
+      "p95Milliseconds": 53.527417,
+      "peakRssBytes": 275088944,
+      "resultCount": 25,
+      "rssDeltaBytes": 130761184,
+      "rssAfterBytes": 275088944,
+      "rssBeforeBytes": 144327760,
+      "samples": 30
+    }
+  },
+  "suite": "recall-vector-storage-v1",
+  "version": 1,
+  "retentionProjection": {
+    "kind": "bounded-diagnostic-projection",
+    "rawCaptureSha256": "6bdd84cbdfa1ce13ac5d453ff96dc93bee3328e1418ee847ab318891ee7ebbf2",
+    "rawCaptureFilename": "vector-stage-10000-tied.json",
+    "scope": "All primary/control raw latencies, all scalar stage components/coverage/errors and first-use+first-warm interval sets retained. Other valid interval sets omitted only for bounded retention. Full raw file remains private scratch; no timings or identities recomputed."
+  }
+}

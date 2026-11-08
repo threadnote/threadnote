@@ -96,9 +96,11 @@
     "Run graph-purpose semantic retrieval separately before drawing graph-vector performance conclusions"
   ],
   "attributionLimits": [
-    "SQL/row transport versus validation/scoring/top-k remain a combined authorized-read envelope; no isolated split is claimed",
-    "Topology loading versus computation remains a whole CLI envelope",
-    "Direct parser probe and worker indexing are distinct workloads; overlapping timers and residuals cannot be added as independent stage totals"
+    "Legacy908 captures retain their original unisolated stage interpretation; no current fields are retrofitted",
+    "Current SQL timing directly observes actual SQLite spans, including compile/acquire/native execution/row construction; reader-exclusive SQL residual includes validation/scoring/top-k plus control, not pure math",
+    "Current topology loading directly observes production store methods; exclusive body residual includes computation/projection/Effect overhead, not pure algorithm CPU",
+    "Parser query timing is observed directly; callback-exclusive query residual is fact construction plus extraction control. Parser observer-disabled overhead is not isolated. Worker transport remains a mixed envelope, never pure IPC",
+    "Raw marginal p95 stage components cannot be added or interpreted as native adoption gains; observer controls are noisy diagnostics"
   ],
   "reproduction": {
     "vector": "bun scripts/benchmark-recall-vectors.ts --documents <10000|100000> --distribution <dense|tied> --pair <1|2|3> --samples 30 --model-file <SHA-verified-local-BGE-GGUF> --output <outside-checkout.json>",
@@ -125,6 +127,23 @@
     "retentionDays": 30,
     "model": "SHA-verified committed core BGE file; no model download",
     "outputs": "runner.temp outside checkout",
-    "observations": "not executed locally; Linux receipts remain pending CI dispatch"
+    "observations": "not executed locally; Linux receipts remain pending CI dispatch",
+    "primaryWarmQueriesPerCell": 30,
+    "separateObserverControlsPerCell": 30,
+    "firstUseQueriesPerCell": 1,
+    "methodFlag": "--stage-attribution",
+    "contextFix": "Output path derived from RUNNER_TEMP in shell steps; no runner context in job-level env",
+    "semanticValidation": "Pinned actionlintv1.7.12 passed locally; actual Linux execution still pending"
+  },
+  "currentStageProbes": {
+    "sourceCommit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+    "summary": "current-stage-summary.json",
+    "vectorMethod": "30 primary observed warm queries plus30 separately labeled controls, alternating first/second order;1 observed first use; exact paired-output equality and independent scalar controls passed",
+    "topologyFixtureCommit": "a4471c4770184aa32e4297afced96952e4235ecb",
+    "topologySnapshotId": "cgsn_52e6cad06e76560014b62fe86161f96cdff52856",
+    "topologyGraphContentId": "cgc_8403408d70c2979739678c66217b9b62bdd4ecce",
+    "topologySamples": "4 observed/control pairs; same pinned snapshot, full coverage and exact structural digest parity",
+    "retention": "Controlled JSON diagnostic projections; full intervals for first-use/first-warm vector examples and all topology/parser samples; raw capture hashes retained; no private paths or raw CLI/source/logs",
+    "contention": "current-contention-diagnostic.json records first failed attempt and successful quiescent retry; no successful measurements claimed from the failed attempt"
   }
 }

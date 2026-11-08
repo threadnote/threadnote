@@ -403,7 +403,9 @@ const program = Effect.scoped(
       options.stageAttribution
         ? 'Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.'
         : 'Stage attribution disabled; no SQL/scoring split claimed.',
-      'Stage mode alternates observed/control order for30 matched warm query pairs. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.',
+      options.stageAttribution
+        ? `Stage mode alternates observed/control order for${options.samples} matched warm query pairs: ${options.samples} primary observed requests and${options.samples} separately labeled observer-disabled controls. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.`
+        : 'Stage attribution disabled: no observer-control requests or interval projection are recorded.',
       'Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.',
       'First-use is the first retrieval after fixture build, not cold process or filesystem cache.',
       'Independent fixture-oracle work runs after the query phase and external sampler have stopped.',
