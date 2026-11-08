@@ -1649,7 +1649,11 @@ effectIt.effect(
   () =>
     Effect.gen(function* () {
       const f = yield* setup;
-      const featureNames = ['Malformed evidence reference diagnostics', 'Read-only detail diagnostics'] as const;
+      const featureNames = [
+        'Malformed evidence reference diagnostics',
+        'Read-only detail diagnostics',
+        'Missing evidence references diagnostics',
+      ] as const;
       const contentFile = f.path.join(f.root, 'malformed-evidence.json');
       const marker = 'sensitive-evidence-value-must-not-be-echoed';
       yield* f.fs.writeFileString(
@@ -1684,6 +1688,36 @@ effectIt.effect(
           48,
         )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[0])));
       expect(yield* readNativeWorkflowState(f.config, missingEvidenceRunId)).toBeUndefined();
+
+      const missingFeature = featureNames[2];
+      const {evidenceRefs: _omittedEvidenceRefs, ...contextWithoutEvidenceRefs} = specBusiness.context;
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          objective: marker,
+          context: contextWithoutEvidenceRefs,
+        }),
+      );
+      const missing = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: missingFeature,
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missing).toMatchObject({failure: {code: 'invalid-content'}});
+      if (missing._tag !== 'Failure') throw new Error('Missing evidence references unexpectedly initialized a run.');
+      expect(missing.failure.message).toContain('context.evidenceRefs');
+      expect(missing.failure.message).toContain('{uri,memoryId,revision}');
+      expect(missing.failure.message).not.toContain(marker);
+      const omittedEvidenceRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(missingFeature)));
+      expect(yield* readNativeWorkflowState(f.config, omittedEvidenceRunId)).toBeUndefined();
 
       const excessiveFeature = 'Too many evidence references';
       const validEvidence = {

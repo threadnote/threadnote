@@ -169,7 +169,7 @@ const contentOf = (document: NativeAuthoringDocument) =>
 const evidenceRefsIssue = (value: unknown) => {
   if (!Predicate.isObject(value) || !Predicate.isObject(value.context)) return undefined;
   const refs = value.context.evidenceRefs;
-  if (refs === undefined) return undefined;
+  if (refs === undefined) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
   if (!A.isArray(refs)) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
   if (refs.length > maximumEvidenceRefs)
     return `context.evidenceRefs must contain at most ${maximumEvidenceRefs} references.`;
