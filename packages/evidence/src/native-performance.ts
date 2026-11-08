@@ -1,4 +1,4 @@
-import {Array as EffectArray, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Record as EffectRecord, Schema, Context, Exit, Option, Tracer} from 'effect';
 import {parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from './benchmark.js';
 
 /** Fixed before optimization. Diagnostic or incomplete captures never authorize adoption. */
@@ -374,4 +374,105 @@ export function validateNativePerformancePairs(
     if (!pair.baseline || !pair.candidate) throw new Error('Incomplete pair');
   }
   return {pairs: pairs.size, platform, component: first.capture.component};
+}
+
+export interface NativeStageInterval {
+  readonly start: bigint;
+  readonly end: bigint;
+}
+export interface NativeStageSpan extends NativeStageInterval {
+  readonly name: string;
+  readonly success: boolean;
+}
+
+/** Exclusive wall accounting: union overlapping children; never clamp inconsistent observations. */
+export function nativeStagePartition(envelope: NativeStageInterval, children: readonly NativeStageInterval[]) {
+  const errors: string[] = [];
+  if (envelope.end < envelope.start) errors.push('negative-envelope');
+  for (const child of children) {
+    if (child.end < child.start) errors.push('negative-child');
+    if (child.start < envelope.start || child.end > envelope.end) errors.push('child-outside-envelope');
+  }
+  const intervals = EffectArray.map(children, child => ({
+    startMilliseconds: Number(child.start - envelope.start) / 1_000_000,
+    endMilliseconds: Number(child.end - envelope.start) / 1_000_000,
+  }));
+  const envelopeMilliseconds = Number(envelope.end - envelope.start) / 1_000_000;
+  if (errors.length > 0) return {available: false as const, errors, envelopeMilliseconds, intervals};
+  const sorted = [...children].sort((left, right) =>
+    left.start < right.start ? -1 : left.start > right.start ? 1 : 0,
+  );
+  let covered = 0n;
+  let start: bigint | undefined;
+  let end = 0n;
+  for (const interval of sorted) {
+    if (start === undefined) {
+      start = interval.start;
+      end = interval.end;
+    } else if (interval.start <= end) {
+      if (interval.end > end) end = interval.end;
+    } else {
+      covered += end - start;
+      start = interval.start;
+      end = interval.end;
+    }
+  }
+  if (start !== undefined) covered += end - start;
+  return {
+    available: true as const,
+    errors,
+    envelopeMilliseconds,
+    intervals,
+    coveredMilliseconds: Number(covered) / 1_000_000,
+    exclusiveResidualMilliseconds: Number(envelope.end - envelope.start - covered) / 1_000_000,
+  };
+}
+
+class NativeStageTraceSpan extends Tracer.NativeSpan {
+  constructor(
+    private readonly selected: string | undefined,
+    start: bigint,
+    private readonly record: (span: NativeStageSpan) => void,
+  ) {
+    super({
+      name: selected ?? 'ignored',
+      startTime: start,
+      parent: Option.none(),
+      annotations: Context.empty(),
+      links: [],
+      kind: 'internal',
+      sampled: true,
+    });
+  }
+  override end(at: bigint, exit: Exit.Exit<unknown, unknown>) {
+    if (this.status._tag === 'Ended') return;
+    if (this.selected)
+      this.record({name: this.selected, start: this.startTime, end: at, success: Exit.isSuccess(exit)});
+    super.end(at, exit);
+  }
+  // SQL statement text/bindings and arbitrary attributes must never be retained.
+  override attribute() {}
+  override event() {}
+  override addLinks() {}
+}
+
+/** Per-operation bounded observer; it records only caller-selected static span names and clocks. */
+export function createNativeStageTracing(names: readonly string[], maximumSpans = 4096) {
+  const selected = new Set(names);
+  const spans: NativeStageSpan[] = [];
+  let overflow = false;
+  const record = (span: NativeStageSpan) => {
+    if (spans.length >= maximumSpans) {
+      overflow = true;
+      return;
+    }
+    spans.push(span);
+  };
+  return {
+    tracer: Tracer.make({
+      span: options =>
+        new NativeStageTraceSpan(selected.has(options.name) ? options.name : undefined, options.startTime, record),
+    }),
+    snapshot: () => ({spans: [...spans], overflow}),
+  };
 }

@@ -15,6 +15,8 @@ import {
   NATIVE_PERFORMANCE_STAGES,
   parseNativePerformanceCapture,
   nativePerformanceSourceChanges,
+  createNativeStageTracing,
+  nativeStagePartition,
 } from '@threadnote/evidence/native-performance';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 
@@ -48,7 +50,10 @@ const options = parseOptions(process.argv.slice(2));
 let queryPhase = false;
 let lastQueryVector: readonly number[] = [];
 const manifest = EffectOption.getOrUndefined(
-  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === options.model),
+  EffectArray.findFirst(
+    EffectArray.filter(BUILTIN_MODEL_MANIFESTS, model => model.role === 'embedding'),
+    model => model.id === options.model,
+  ),
 )!;
 
 if (!manifest) throw ScriptError.make({message: `Unknown benchmark model: ${options.model}`});
@@ -174,6 +179,9 @@ const program = Effect.scoped(
     const queryDurations: number[] = [];
     const firstUseDurations: number[] = [];
     const queryCpu: number[] = [];
+    const observerControlDurations: number[] = [];
+    const observerProjectionDurations: number[] = [];
+    const stageSamples: {sample: number; observation: ReturnType<typeof vectorStageObservation>}[] = [];
     const correctness: string[] = [];
     const oracleControls: {query: readonly number[]; scores: ReadonlyMap<string, number>}[] = [];
     queryPhase = true;
@@ -181,34 +189,60 @@ const program = Effect.scoped(
     yield* Effect.gen(function* () {
       for (let sample = 0; sample < options.samples + 1; sample += 1) {
         const targetIndex = sample % options.documents;
-        const cpuBefore = process.cpuUsage();
-        const startedAt = yield* Clock.currentTimeNanos;
-        const scores = yield* selectedSemanticScores(
-          {agentContextHome: home},
-          `vector benchmark query ${targetIndex}`,
-          {limit: VECTOR_QUERY_RESULT_LIMIT},
-        );
-        const finishedAt = yield* Clock.currentTimeNanos;
-        const cpu = process.cpuUsage(cpuBefore);
-        const expectedSize = Math.min(VECTOR_QUERY_RESULT_LIMIT, options.documents);
-        const expectedUri = candidates[targetIndex].uri;
-        if (
-          scores?.size !== expectedSize ||
-          (!options.modelFile && options.distribution === 'sparse' && (scores.get(expectedUri) ?? -1) < 0.999)
-        ) {
-          return yield* ScriptError.make({
-            message: `Vector benchmark returned ${scores?.size ?? 0}/${expectedSize} results without the exact target ${expectedUri}.`,
+        let pairedDigest: string | undefined;
+        const modes =
+          options.stageAttribution && sample > 0
+            ? sample % 2 === 0
+              ? [false, true]
+              : [true, false]
+            : [options.stageAttribution];
+        for (const observed of modes) {
+          const cpuBefore = process.cpuUsage();
+          const startedAt = yield* Clock.currentTimeNanos;
+          const tracing = observed
+            ? createNativeStageTracing([
+                'vectorIndex.selectedSemanticScores',
+                'vectorIndex.readSelectedScores',
+                'sqlite',
+              ])
+            : undefined;
+          const read = selectedSemanticScores({agentContextHome: home}, `vector benchmark query ${targetIndex}`, {
+            limit: VECTOR_QUERY_RESULT_LIMIT,
           });
+          const scores = yield* tracing ? Effect.withTracer(read, tracing.tracer) : read;
+          const finishedAt = yield* Clock.currentTimeNanos;
+          const cpu = process.cpuUsage(cpuBefore);
+          const expectedSize = Math.min(VECTOR_QUERY_RESULT_LIMIT, options.documents);
+          const expectedUri = candidates[targetIndex].uri;
+          if (
+            scores?.size !== expectedSize ||
+            (!options.modelFile && options.distribution === 'sparse' && (scores.get(expectedUri) ?? -1) < 0.999)
+          ) {
+            return yield* ScriptError.make({
+              message: `Vector benchmark returned ${scores?.size ?? 0}/${expectedSize} results without the exact target ${expectedUri}.`,
+            });
+          }
+          oracleControls.push({query: [...lastQueryVector], scores: new Map(scores)});
+          const digest = sha256HexSync(JSON.stringify([...(scores ?? [])]));
+          if (pairedDigest !== undefined && pairedDigest !== digest)
+            return yield* ScriptError.make({
+              message: 'Observed/control request outputs differ; overhead comparison discarded.',
+            });
+          pairedDigest = digest;
+          correctness.push(digest);
+          const milliseconds = Number(finishedAt - startedAt) / NANOSECONDS_PER_MILLISECOND;
+          if (sample === 0) firstUseDurations.push(milliseconds);
+          else if (observed || !options.stageAttribution) {
+            queryDurations.push(milliseconds);
+            queryCpu.push((cpu.user + cpu.system) / 1000);
+          } else observerControlDurations.push(milliseconds);
+          if (tracing) {
+            const projectionStarted = performance.now();
+            stageSamples.push({sample, observation: vectorStageObservation(tracing.snapshot())});
+            if (sample > 0) observerProjectionDurations.push(performance.now() - projectionStarted);
+          }
+          queryRssAfterBytes = Math.max(queryRssAfterBytes, process.memoryUsage().rss);
         }
-        oracleControls.push({query: [...lastQueryVector], scores: new Map(scores)});
-        correctness.push(sha256HexSync(JSON.stringify([...(scores ?? [])])));
-        const milliseconds = Number(finishedAt - startedAt) / NANOSECONDS_PER_MILLISECOND;
-        if (sample === 0) firstUseDurations.push(milliseconds);
-        else {
-          queryDurations.push(milliseconds);
-          queryCpu.push((cpu.user + cpu.system) / 1000);
-        }
-        queryRssAfterBytes = Math.max(queryRssAfterBytes, process.memoryUsage().rss);
       }
     }).pipe(Effect.ensuring(Effect.sync(() => queryRss.stop())));
     queryRssAfterBytes = Math.max(queryRssAfterBytes, queryRss.peak());
@@ -271,6 +305,11 @@ const program = Effect.scoped(
       initialBuildMilliseconds,
       semanticQueryP95Milliseconds,
     });
+    const warmStageSamples = EffectArray.filter(stageSamples, sample => sample.sample > 0);
+    const stagesAvailable =
+      options.stageAttribution &&
+      warmStageSamples.length === options.samples &&
+      EffectArray.every(warmStageSamples, sample => sample.observation.available);
     const artifact = parseBenchmarkArtifactV1({
       version: 1,
       createdAt: DateTime.formatIso(yield* DateTime.now),
@@ -309,6 +348,30 @@ const program = Effect.scoped(
           ? []
           : [benchmarkMeasurement('process-tree-sampled-peak-rss', 'bytes', [treePeakRssBytes])]),
         benchmarkMeasurement('database', 'bytes', [initialDatabaseBytes]),
+        ...(observerControlDurations.length
+          ? [
+              benchmarkMeasurement('warm-observer-disabled-control', 'milliseconds', observerControlDurations),
+              benchmarkMeasurement('observer-postprocessing', 'milliseconds', observerProjectionDurations),
+            ]
+          : []),
+        ...(stagesAvailable
+          ? [
+              benchmarkMeasurement(
+                'warm-sql-row-transport',
+                'milliseconds',
+                EffectArray.flatMap(warmStageSamples, sample =>
+                  sample.observation.available ? [sample.observation.request.coveredMilliseconds] : [],
+                ),
+              ),
+              benchmarkMeasurement(
+                'warm-reader-exclusive-sql-residual',
+                'milliseconds',
+                EffectArray.flatMap(warmStageSamples, sample =>
+                  sample.observation.available ? [sample.observation.reader.exclusiveResidualMilliseconds] : [],
+                ),
+              ),
+            ]
+          : []),
       ],
       metadata: {
         documents: options.documents,
@@ -318,6 +381,7 @@ const program = Effect.scoped(
         inference: options.modelFile ? 'real-query' : 'mock',
         correctnessDigest: sha256HexSync(JSON.stringify(correctness)),
         qualification: false,
+        stageMethod: options.stageAttribution ? 'actual-sql-spans-union-v1/interleaved-observer-control' : 'disabled',
       },
     });
     const closingSource = yield* readBenchmarkSourceFence();
@@ -336,7 +400,10 @@ const program = Effect.scoped(
     }
     const limitations = [
       'Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.',
-      'SQL/row transport and validation/scoring/top-k remain fused in the authorized read; no isolated stage claimed.',
+      options.stageAttribution
+        ? 'Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.'
+        : 'Stage attribution disabled; no SQL/scoring split claimed.',
+      'Stage mode alternates observed/control order for30 matched warm query pairs. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.',
       'Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.',
       'First-use is the first retrieval after fixture build, not cold process or filesystem cache.',
       'Independent fixture-oracle work runs after the query phase and external sampler have stopped.',
@@ -377,13 +444,16 @@ const program = Effect.scoped(
             architecture: process.arch,
             instrumentationHash,
             samples: options.samples,
+            stageAttribution: options.stageAttribution,
           }),
         ),
         identities: {
           model: `${manifest.id}:${manifest.revision}:${manifest.sha256}`,
           purpose: 'recall',
           platform: `${process.platform}-${process.arch}`,
-          method: 'selectedSemanticScores',
+          method: options.stageAttribution
+            ? 'selectedSemanticScores/sql-span-union-v1/interleaved-observer-control'
+            : 'selectedSemanticScores',
           template: `manifest-query-prefix-v1:${sha256HexSync(JSON.stringify(manifest.promptPrefixes))}`,
           dimensions: String(manifest.dimensions),
           fixture: artifact.environment.fixtureHash,
@@ -406,9 +476,31 @@ const program = Effect.scoped(
             stage =>
               [
                 stage,
-                stage === 'sql-row-transport' || stage === 'validation-scoring-top-k'
-                  ? {state: 'unavailable', reason: 'Fused authorized reader has no benchmark-only isolation seam'}
-                  : {state: 'not-applicable', reason: 'Vector workload'},
+                stage === 'sql-row-transport'
+                  ? stagesAvailable
+                    ? {
+                        state: 'measured',
+                        measurement: 'warm-sql-row-transport',
+                        boundary:
+                          'Actual request SQLite span UNION: SQL compilation/acquisition/native execution and row construction',
+                      }
+                    : {
+                        state: 'unavailable',
+                        reason: 'Observer disabled or incomplete span coverage; see raw stage observations',
+                      }
+                  : stage === 'validation-scoring-top-k'
+                    ? stagesAvailable
+                      ? {
+                          state: 'measured',
+                          measurement: 'warm-reader-exclusive-sql-residual',
+                          boundary:
+                            'Observed reader envelope minus UNION of its SQLite intervals: validation/scoring/top-k plus reader/transaction/control residual, not pure math',
+                        }
+                      : {
+                          state: 'unavailable',
+                          reason: 'Observer disabled or inconsistent span coverage; see raw stage observations',
+                        }
+                    : {state: 'not-applicable', reason: 'Vector workload'},
               ] as const,
           ),
         ),
@@ -428,6 +520,25 @@ const program = Effect.scoped(
         rawWarmMilliseconds: queryDurations,
         rawWarmCpuMilliseconds: queryCpu,
         rawFirstUseMilliseconds: firstUseDurations,
+        stageAttribution: {
+          observerPairs: options.stageAttribution
+            ? EffectArray.map(queryDurations, (observedMilliseconds, index) => ({
+                sample: index + 1,
+                order: (index + 1) % 2 === 0 ? 'control-first' : 'observed-first',
+                observedMilliseconds,
+                controlMilliseconds: observerControlDurations[index],
+                signedRequestDeltaMilliseconds: observedMilliseconds - observerControlDurations[index],
+                postprocessingMilliseconds: observerProjectionDurations[index],
+              }))
+            : [],
+          enabled: options.stageAttribution,
+          stagesAvailable,
+          samples: stageSamples,
+          observerControlMilliseconds: observerControlDurations,
+          observerProjectionMilliseconds: observerProjectionDurations,
+          accounting:
+            'exclusive wall time subtracts interval UNION; overlapping envelopes are not additive; invalid coverage is unavailable and never clamped',
+        },
         limitations,
       },
       budgets: {
@@ -546,7 +657,7 @@ const readBenchmarkSourceFence = Effect.fn('benchmarkRecallVectors.sourceFence')
     trackedDiffHash: sha256HexSync(trackedDiff.stdout),
     indexHash: sha256HexSync(index.stdout),
     statusHash: sha256HexSync(status.stdout),
-    instrumentationHash: sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(import.meta.url))),
+    instrumentationHash: sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(new URL(import.meta.url)))),
   };
 });
 
@@ -612,6 +723,7 @@ function parseOptions(arguments_: readonly string[]): {
   readonly failOnBudget: boolean;
   readonly output?: string;
   readonly samples: number;
+  readonly stageAttribution: boolean;
 } {
   let arm: 'baseline' | 'candidate' = 'baseline';
   let pair = 1;
@@ -622,6 +734,7 @@ function parseOptions(arguments_: readonly string[]): {
   let failOnBudget = false;
   let output: string | undefined;
   let samples = DEFAULT_QUERY_SAMPLES;
+  let stageAttribution = false;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === '--pair') pair = positiveInteger(arguments_[++index], '--pair');
@@ -639,6 +752,7 @@ function parseOptions(arguments_: readonly string[]): {
     else if (argument === '--documents') documents = positiveInteger(arguments_[++index], '--documents');
     else if (argument === '--samples') samples = positiveInteger(arguments_[++index], '--samples');
     else if (argument === '--output') output = arguments_[++index];
+    else if (argument === '--stage-attribution') stageAttribution = true;
     else if (argument === '--fail-on-budget') failOnBudget = true;
     else throw ScriptError.make({message: `Unknown vector benchmark option: ${argument}`});
   }
@@ -652,6 +766,7 @@ function parseOptions(arguments_: readonly string[]): {
     documents,
     failOnBudget,
     samples,
+    stageAttribution,
   };
 }
 
@@ -692,4 +807,31 @@ function assertScalarOracle(databasePath: string, query: readonly number[], actu
   } finally {
     database.close();
   }
+}
+
+function vectorStageObservation(snapshot: ReturnType<ReturnType<typeof createNativeStageTracing>['snapshot']>) {
+  const requests = EffectArray.filter(snapshot.spans, span => span.name === 'vectorIndex.selectedSemanticScores');
+  const readers = EffectArray.filter(snapshot.spans, span => span.name === 'vectorIndex.readSelectedScores');
+  const sql = EffectArray.filter(snapshot.spans, span => span.name === 'sqlite');
+  if (
+    snapshot.overflow ||
+    requests.length !== 1 ||
+    readers.length !== 1 ||
+    sql.length === 0 ||
+    EffectArray.some(snapshot.spans, span => !span.success)
+  ) {
+    return {
+      available: false as const,
+      errors: ['missing/failed/overflowed request, reader or SQL spans'],
+      requestCount: requests.length,
+      readerCount: readers.length,
+      sqlCount: sql.length,
+    };
+  }
+  const request = nativeStagePartition(requests[0], sql);
+  const readerSql = EffectArray.filter(sql, span => span.end > readers[0].start && span.start < readers[0].end);
+  const reader = nativeStagePartition(readers[0], readerSql);
+  if (!request.available || !reader.available || readerSql.length === 0)
+    return {available: false as const, errors: ['inconsistent or missing SQL coverage'], request, reader};
+  return {available: true as const, request, reader, requestSqlCount: sql.length, readerSqlCount: readerSql.length};
 }

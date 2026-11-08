@@ -4,6 +4,7 @@ import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {
   nativePerformanceGates,
+  nativeStagePartition,
   validateNativePerformancePairs,
   NATIVE_PERFORMANCE_STAGES,
   parseNativePerformanceCapture,
@@ -416,5 +417,58 @@ describe('native performance evidence admission', () => {
     });
     expect(() => nativePerformanceGates({...input, baselinePrimaryP95: 0})).toThrow();
     expect(() => nativePerformanceGates({...input, candidatePrimaryP95: Number.NaN})).toThrow();
+  });
+});
+
+describe('exclusive stage interval accounting', () => {
+  it('matches independent discrete coverage under permutation, duplication and nesting without mutation', () => {
+    FC.assert(
+      FC.property(
+        FC.array(FC.tuple(FC.integer({min: 0, max: 20}), FC.integer({min: 0, max: 20})), {maxLength: 24}),
+        raw => {
+          const intervals = EffectArray.map(raw, ([a, b]) => ({
+            start: BigInt(Math.min(a, b)) * 1_000_000n,
+            end: BigInt(Math.max(a, b)) * 1_000_000n,
+          }));
+          const original = EffectArray.map(intervals, interval => ({...interval}));
+          const expected = new Set<number>();
+          for (const [a, b] of raw)
+            for (let point = Math.min(a, b); point < Math.max(a, b); point += 1) expected.add(point);
+          const envelope = {start: 0n, end: 20_000_000n};
+          const first = nativeStagePartition(envelope, intervals);
+          const duplicated = nativeStagePartition(
+            envelope,
+            EffectArray.flatMap([...intervals].reverse(), interval => [interval, interval]),
+          );
+          expect(intervals).toEqual(original);
+          expect(first.available).toBe(true);
+          if (!first.available || !duplicated.available) throw new Error('Valid interval fixture');
+          expect(first.coveredMilliseconds).toBe(expected.size);
+          expect(first.exclusiveResidualMilliseconds).toBe(20 - expected.size);
+          expect(duplicated.coveredMilliseconds).toBe(first.coveredMilliseconds);
+          expect(duplicated.exclusiveResidualMilliseconds).toBe(first.exclusiveResidualMilliseconds);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
+  it('keeps empty coverage and inconsistent clocks explicit instead of clamping them', () => {
+    expect(nativeStagePartition({start: 0n, end: 10_000_000n}, [])).toMatchObject({
+      available: true,
+      coveredMilliseconds: 0,
+      exclusiveResidualMilliseconds: 10,
+    });
+    const inconsistent = nativeStagePartition({start: 0n, end: 10_000_000n}, [{start: -1_000_000n, end: 11_000_000n}]);
+    expect(inconsistent).toMatchObject({
+      available: false,
+      errors: ['child-outside-envelope'],
+      intervals: [{startMilliseconds: -1, endMilliseconds: 11}],
+    });
+    expect('exclusiveResidualMilliseconds' in inconsistent).toBe(false);
+    expect(nativeStagePartition({start: 2n, end: 1n}, [])).toMatchObject({
+      available: false,
+      errors: ['negative-envelope'],
+    });
   });
 });
