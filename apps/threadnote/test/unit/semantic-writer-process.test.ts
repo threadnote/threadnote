@@ -1,9 +1,20 @@
 /* oxlint-disable effecttsgo/strict-effect-provide -- Each test is a scoped native filesystem/authority entrypoint with one narrow layer. */
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Array as EffectArray, Clock, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Clock,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+  Predicate,
+  Record as EffectRecord,
+  Schema,
+  String as EffectString,
+} from 'effect';
 import {TestClock} from 'effect/testing';
-import {expect} from 'vitest';
+import {describe, expect} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -18,10 +29,25 @@ import {restoreApplyJournal} from '@threadnote/semantic/journal';
 import {makeSemanticWriterAuthorityFromDirectory} from '../../src/semantic/writer_authority.js';
 import {makeSemanticHostWriterFromAuthority} from '../../src/semantic/writer.js';
 import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
+import {SemanticWriterAdmissionRequest} from '../../src/semantic/agent_change_protocol.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, cryptoLayer);
 const supported = process.platform === 'darwin' && process.arch === 'arm64';
+const reorderObjectKeys = (value: unknown, shifts: readonly number[], depth = 0): unknown => {
+  if (EffectArray.isArray(value)) return EffectArray.map(value, child => reorderObjectKeys(child, shifts, depth + 1));
+  if (!Predicate.isObject(value)) return value;
+  const entries = EffectRecord.toEntries(value);
+  const shift = shifts[depth % shifts.length];
+  const offset = shift % Math.max(1, entries.length);
+  const rotated = [...EffectArray.drop(entries, offset), ...EffectArray.take(entries, offset)];
+  return EffectRecord.fromEntries(
+    EffectArray.map(shift % 2 ? EffectArray.reverse(rotated) : rotated, ([key, child]) => [
+      key,
+      reorderObjectKeys(child, shifts, depth + 1),
+    ]),
+  );
+};
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -126,13 +152,12 @@ const fixture = Effect.gen(function* () {
     diskOwnership: 'closed-disk' as const,
   };
   const admit = () =>
-    writer
-      .admit(scope, admissionRequest, resolved)
-      .pipe(
-        Effect.flatMap(result =>
-          'writer' in result && result.writer ? Effect.succeed(result.writer) : Effect.die('Fixture admission refused'),
-        ),
-      );
+    Schema.decodeEffect(SemanticWriterAdmissionRequest)(admissionRequest).pipe(
+      Effect.flatMap(request => writer.admit(scope, request, resolved)),
+      Effect.flatMap(result =>
+        'writer' in result && result.writer ? Effect.succeed(result.writer) : Effect.die('Fixture admission refused'),
+      ),
+    );
   const refresh = () =>
     Effect.succeed({
       ...resolved,
@@ -167,6 +192,196 @@ const fixture = Effect.gen(function* () {
     refresh,
   };
 });
+
+effectIt.effect.skipIf(!supported)(
+  'public admission decoding preserves native writer authentication through retirement',
+  () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const raw: unknown = JSON.parse(JSON.stringify(f.admissionRequest));
+        const request = yield* Schema.decodeUnknownEffect(SemanticWriterAdmissionRequest)(raw);
+        expect(EffectRecord.keys(request.handle)).toEqual(['id', 'capability', 'digest']);
+        const admitted = yield* f.writer.admit(f.scope, request, f.resolved);
+        if (!('writer' in admitted) || !admitted.writer) return yield* Effect.die('Public-shaped admission refused');
+        const handle = admitted.writer;
+        const record = yield* f.writer.resolve(f.scope, handle);
+        expect((yield* f.writer.status(f.scope, handle)).status).toBe('not-started');
+        expect((yield* f.writer.apply(f.scope, handle, record, f.refresh)).status).toBe('applied');
+        expect((yield* f.writer.recover(f.scope, handle, record)).status).toBe('applied');
+        expect((yield* f.writer.retire(f.scope, handle, 'terminal', request.taskAuthorization)).status).toBe('retired');
+        for (const [index, target] of f.proposal.targets.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(target.afterText);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+describe.skipIf(!supported)('native admission serialization', () => {
+  effectIt.effect.prop(
+    'authenticates equivalent serialized admission values independently of object key order',
+    [
+      Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65535}))).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(12),
+      ),
+    ],
+    ([shifts]) =>
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const handle = yield* f.admit();
+          const original = yield* f.writer.resolve(f.scope, handle);
+          const serialized: unknown = JSON.parse(JSON.stringify(original));
+          const reordered = reorderObjectKeys(serialized, shifts);
+          expect(reordered).toEqual(serialized); // Deep values and ordered arrays are the independent invariant.
+          yield* f.authority.withAdmission(
+            handle.operation,
+            Effect.sync(() => {
+              const result = runtimePublishPrivateWriterFile(
+                f.authority.directory,
+                handle.operation + '.admission.json',
+                new TextEncoder().encode(JSON.stringify(reordered)),
+                {
+                  mode: 'replace',
+                  nonce: sha256HexSync('key-order-roundtrip'),
+                  assertCurrentSync: () => f.authority.assertOperationSync(handle.operation),
+                },
+              );
+              expect(result.status).toBe('published');
+            }),
+          );
+          const restored = yield* f.writer.resolve(f.scope, handle);
+          expect(restored).toEqual(original);
+          expect((yield* f.writer.status(f.scope, handle)).status).toBe('not-started');
+          expect(
+            (yield* f.writer.retire(f.scope, handle, 'discarded', 'Explicit property fixture cleanup')).status,
+          ).toBe('retired');
+          for (const [index, original] of f.sources.entries())
+            expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
+        }),
+      ).pipe(Effect.provide(layer)),
+    {arbitrary: {runs: 8}},
+  );
+});
+
+effectIt.effect.skipIf(!supported)(
+  'rejects changed admission values, target order and unsupported preview verifiers',
+  () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const handle = yield* f.admit();
+        const record = yield* f.writer.resolve(f.scope, handle);
+        const name = handle.operation + '.admission.json';
+        const replace = (value: unknown) =>
+          f.authority.withAdmission(
+            handle.operation,
+            Effect.sync(() => {
+              const result = runtimePublishPrivateWriterFile(
+                f.authority.directory,
+                name,
+                new TextEncoder().encode(JSON.stringify(value)),
+                {
+                  mode: 'replace',
+                  nonce: sha256HexSync('tampered-value-fixture'),
+                  assertCurrentSync: () => f.authority.assertOperationSync(handle.operation),
+                },
+              );
+              expect(result.status).toBe('published');
+            }),
+          );
+        expect(
+          (yield* f.writer
+            .resolve(f.scope, {...handle, capability: sha256HexSync('wrong-writer-secret')})
+            .pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(
+          (yield* f.writer
+            .resolve({...f.scope, principal: sha256HexSync('other-principal')}, handle)
+            .pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        const tampered = [
+          {...record, operation: sha256HexSync('other-operation')},
+          {...record, profile: sha256HexSync('other-profile')},
+          {...record, expiresAt: record.expiresAt + 1},
+          {...record, rootIdentity: {...record.rootIdentity, ino: record.rootIdentity.ino + '1'}},
+          {...record, handle: {...record.handle, capability: sha256HexSync('other-read-secret')}},
+          {
+            ...record,
+            session: {...record.session, processStartIdentity: record.session.processStartIdentity + '-different'},
+          },
+          {...record, session: {...record.session, runtimeIdentity: sha256HexSync('other-runtime')}},
+          {...record, taskAuthorization: sha256HexSync('other-task')},
+          {
+            ...record,
+            claims: EffectArray.map(record.claims, (claim, index) =>
+              index === 0 ? {...claim, owner: 'other-owner'} : claim,
+            ),
+          },
+          {
+            ...record,
+            owners: EffectArray.map(record.owners, (owner, index) =>
+              index === 0
+                ? {...owner, observation: {...owner.observation, projectEpoch: owner.observation.projectEpoch + 1}}
+                : owner,
+            ),
+          },
+          {...record, claims: EffectArray.reverse(record.claims), owners: EffectArray.reverse(record.owners)},
+        ];
+        for (const value of tampered) {
+          yield* replace(value);
+          expect((yield* f.writer.resolve(f.scope, handle).pipe(Effect.result))._tag).toBe('Failure');
+        }
+        yield* replace(record);
+        expect(yield* f.writer.resolve(f.scope, handle)).toEqual(record);
+        // The old unqualified preview encoding is retained as evidence, never migrated or accepted.
+        const preview = {
+          ...record,
+          capabilityVerifier: sha256HexSync(
+            JSON.stringify([
+              'threadnote-writer-admission-v1',
+              handle.capability,
+              record.operation,
+              record.principal,
+              record.worktree,
+              record.home,
+              record.profile,
+              record.createdAt,
+              record.expiresAt,
+              record.rootIdentity,
+              record.handle,
+              record.session,
+              record.taskAuthorization,
+              record.diskOwnership,
+              f.proposal.digest,
+              record.claims,
+              record.owners,
+            ]),
+          ),
+        };
+        yield* replace(preview);
+        expect((yield* f.writer.resolve(f.scope, handle).pipe(Effect.result))._tag).toBe('Failure');
+        expect(
+          (yield* f.writer.retire(f.scope, handle, 'discarded', 'No preview migration').pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(
+          JSON.parse(
+            new TextDecoder().decode(
+              runtimeReadPrivateWriterFile(f.authority.directory, name, 16 * 1024 * 1024)!.bytes,
+            ),
+          ),
+        ).toEqual(preview);
+        expect(
+          runtimeReadPrivateWriterFile(f.authority.directory, handle.operation + '.started.json', 16384),
+        ).toBeUndefined();
+        expect(
+          runtimeReadPrivateWriterFile(f.authority.directory, handle.operation + '.journal.json', 16 * 1024 * 1024),
+        ).toBeUndefined();
+        for (const [index, original] of f.sources.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
 
 effectIt.effect.skipIf(!supported)(
   'committed admission registration with lost acknowledgement remains recoverable',
