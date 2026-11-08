@@ -11,10 +11,53 @@ import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 import {
   installProbeSignalCleanup,
+  withinProbeDeadline,
   ownedProbeGroup,
   releaseProbeHandles,
 } from '../tools/semantic/semantic_probe_process.js';
 import type {ChildProcess} from 'node:child_process';
+if (process.argv.includes('--inventory') || process.argv.includes('--candidate-manifest')) {
+  const child = spawn(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL('../apps/threadnote/test/evaluation/semantic-qualification/entrypoint.ts', import.meta.url),
+      ),
+      'editors',
+      ...EffectArray.drop(process.argv, 2),
+    ],
+    {stdio: 'inherit', detached: process.platform !== 'win32'},
+  );
+  const group = ownedProbeGroup(child);
+  const exited = new Promise<number>((accept, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => accept(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1)));
+  });
+  const signals = installProbeSignalCleanup(async signal => {
+    group.signal(signal);
+    await withinProbeDeadline(exited, 6000);
+    const cleanup = await group.cleanup();
+    if (!cleanup.drained)
+      process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
+    releaseProbeHandles(child);
+  });
+  const providerBudget = process.argv.includes('--provider-inputs') ? 200000 : 50000;
+  const deadline = setTimeout(() => group.signal('SIGTERM'), providerBudget);
+  let code = 1;
+  try {
+    code = (await withinProbeDeadline(exited, providerBudget + 8000)) ?? 1;
+  } finally {
+    clearTimeout(deadline);
+    const cleanup = await group.cleanup();
+    if (!cleanup.drained) {
+      code = 1;
+      process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
+    }
+    signals.dispose();
+    releaseProbeHandles(child);
+  }
+  process.exit(signals.interrupted === 'SIGINT' ? 130 : signals.interrupted === 'SIGTERM' ? 143 : code);
+}
 const {values} = parseArgs({
   options: {probe: {type: 'boolean'}, editor: {type: 'string'}, output: {type: 'string'}},
   strict: true,

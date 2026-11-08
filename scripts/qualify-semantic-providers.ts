@@ -5,21 +5,69 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Disposable qualification harness owns explicit OS process and evidence-file boundaries. */
 import {createHash} from 'node:crypto';
+import {spawn} from 'node:child_process';
 import {copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
 import {Schema} from 'effect';
 import {ProbeConfig, expandProbeScratch, providerFixture} from '../tools/semantic/semantic_provider_fixture.js';
 import {observeProbeReadiness, startSemanticProbe} from '../tools/semantic/semantic_lsp_probe.js';
-import {installProbeSignalCleanup} from '../tools/semantic/semantic_probe_process.js';
+import {
+  installProbeSignalCleanup,
+  withinProbeDeadline,
+  ownedProbeGroup,
+  releaseProbeHandles,
+} from '../tools/semantic/semantic_probe_process.js';
 import {
   checkProbeDefinition,
   checkProbeReferences,
   checkProbeRename,
   checkProbeShutdown,
 } from '../tools/semantic/semantic_probe_assertions.js';
+if (process.argv.includes('--inventory') || process.argv.includes('--candidate-manifest')) {
+  const child = spawn(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL('../apps/threadnote/test/evaluation/semantic-qualification/entrypoint.ts', import.meta.url),
+      ),
+      'providers',
+      ...EffectArray.drop(process.argv, 2),
+    ],
+    {stdio: 'inherit', detached: process.platform !== 'win32'},
+  );
+  const group = ownedProbeGroup(child);
+  const exited = new Promise<number>((accept, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => accept(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1)));
+  });
+  const signals = installProbeSignalCleanup(async signal => {
+    group.signal(signal);
+    await withinProbeDeadline(exited, 6000);
+    const cleanup = await group.cleanup();
+    if (!cleanup.drained)
+      process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
+    releaseProbeHandles(child);
+  });
+  const providerBudget = process.argv.includes('--provider-inputs') ? 200000 : 50000;
+  const deadline = setTimeout(() => group.signal('SIGTERM'), providerBudget);
+  let code = 1;
+  try {
+    code = (await withinProbeDeadline(exited, providerBudget + 8000)) ?? 1;
+  } finally {
+    clearTimeout(deadline);
+    const cleanup = await group.cleanup();
+    if (!cleanup.drained) {
+      code = 1;
+      process.stderr.write('Qualification dispatcher owned process group did not drain; outcome unknown.\n');
+    }
+    signals.dispose();
+    releaseProbeHandles(child);
+  }
+  process.exit(signals.interrupted === 'SIGINT' ? 130 : signals.interrupted === 'SIGTERM' ? 143 : code);
+}
 const {values} = parseArgs({
   options: {
     probe: {type: 'boolean'},

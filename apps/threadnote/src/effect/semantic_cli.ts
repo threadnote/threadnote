@@ -20,7 +20,7 @@ import {LspFault} from '../semantic/lsp_transport.js';
 import {Array as EffectArray, Console, Effect, Schema, Stdio, Stream} from 'effect';
 import {Command} from 'effect/cli';
 import {Identifier} from '@threadnote/semantic/contracts';
-import {runtimePlatform, runtimeArchitecture} from '@threadnote/platform/system';
+import {runtimePlatform, runtimeArchitecture, runtimeNativePlatformSupport} from '@threadnote/platform/system';
 import {boolean, optionalString} from './cli/flags.js';
 import {runSemanticDoctor} from '../semantic/doctor.js';
 
@@ -95,10 +95,9 @@ export function semanticCapabilities(input: unknown = {}) {
           host: {
             platform: runtimePlatform,
             architecture: runtimeArchitecture,
-            readiness:
-              runtimePlatform === 'darwin' && runtimeArchitecture === 'arm64'
-                ? 'native-candidate-requires-qualification'
-                : 'unsupported-host-writer',
+            readiness: runtimeNativePlatformSupport().writer
+              ? 'native-candidate-requires-qualification'
+              : 'unsupported-host-writer',
           },
         },
         codeActions: {

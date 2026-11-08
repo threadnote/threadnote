@@ -1,6 +1,6 @@
 # Semantic provider and editor qualification
 
-This dossier records disposable P00 feasibility probes, later phase-labelled component evidence and a candidate ledger. It does not enable a Threadnote semantic
+This dossier records disposable P00 feasibility probes, later phase-labelled component evidence, a candidate ledger and executable P11 candidate checks. It does not enable a Threadnote semantic
 service, ship providers, certify production support, or complete a release gate on its own. Native cycle receipts own
 phase acceptance; every provider's `productionQualified` flag remains false.
 
@@ -9,7 +9,7 @@ The current release scope is TypeScript/JavaScript, Python, Go, Rust and Java. K
 current release gates. Existing Kotlin observations remain in the ledger as historical evidence; they do not qualify
 Java or block its independent qualification.
 
-## Ownership and execution
+## Historical P00 probe ownership and execution
 
 - `scripts/qualify-semantic-providers.ts` runs an explicitly selected, already available executable against a temporary
   two-file TypeScript, JavaScript, Python, Go, Rust or Java project. It never installs a provider or applies returned edits.
@@ -226,3 +226,74 @@ NOTICE also identify third-party terms. A source project's root license alone do
 Selected-profile license review remains pending; redistribution is release-gated. The runtime's Java status reports that
 pending state alongside its exact platform and separate SDK requirements. No distribution approval or paid-entitlement
 claim follows from the component probes or this inventory.
+
+## P11 candidate qualification
+
+The runner executes the unavailable-profile branch of S33 through actual CLI JSON and stdio MCP. It compares the
+complete canonical result, checks unchanged Unicode/CRLF fixture bytes and absence of semantic
+profile/admission/bootstrap/socket state, observes transport closure and records owned-child absence before removing
+its disposable fixture. With explicit verified local provider inputs, it also executes fixed TypeScript, JavaScript or
+Python navigation, owned volatile-buffer version/refusal checks and complete unapplied disk rename previews. These
+operations contribute partial scenario evidence only. Every complete scenario and all 40
+family/platform and 80 active CLI/MCP cells remain unqualified. The fixed inventory follows the eight release targets
+and five provider families; TypeScript and JavaScript share a family but both language obligations remain required.
+
+```sh
+bun scripts/qualify-semantic-providers.ts --inventory --output /absolute/new-inventory.json
+bun scripts/qualify-semantic-providers.ts --candidate-manifest /absolute/candidate.json --output /absolute/new-branch-receipt.json
+bun scripts/qualify-semantic-editors.ts --inventory --output /absolute/new-editor-inventory.json
+bun scripts/qualify-semantic-providers.ts --candidate-manifest /absolute/candidate.json --provider-inputs /absolute/pinned-provider.json --output /absolute/new-provider-receipt.json
+```
+
+The candidate manifest contains exactly `binary` (absolute executable path), `binarySha256`, `releaseSha256`,
+`sourceCommit` and `sourceTree`. Digests use lowercase SHA-256; source identities use full Git object IDs. The adjacent
+`release.json` must identify a host-compatible local build whose version ends in `.g<sourceCommit>`, and the repository
+must contain that commit with the supplied tree. The runner verifies these values and hashes the manifest, runner,
+oracle, inventory, scenario contract, release-target source, qualification lock, dependency lock and SDK package
+metadata. Build provenance remains the operator-captured manifest; hashing a binary does not independently prove how
+it was built. A dirty harness never changes the compiled candidate's source attribution.
+
+Receipts record the app release/runtime, OS release/architecture, harness Bun, isolated environment, fixed fixture
+version and byte hashes, bounded transport output and cleanup. Without provider inputs, provider artifact and runtime
+are explicitly null. Provider inputs are a strict version-1 record: language, exact Node runtime path/version/hash,
+server directory/full-tree digest, explicit component notice paths/hashes, and for TypeScript/JavaScript the SDK
+directory/full-tree digest. The runner recomputes these before and after execution. Python uses an authored static
+environment manifest and dependency stub; it executes no interpreter. Available branches prove their own inputs rather
+than borrowing historical P00 results. Metadata and notice bytes do not confer legal/distribution approval.
+
+The provider fixture checks exact definition/reference sets through both transports, unsaved buffer symbols/version
+transitions, stale-version refusal, every paged rename target and source physical identity, full retained status parity
+with bounded ordered `checkedAt` timestamps, and preflight refusal to grant writer authority. Supplying a read handle
+to the strict apply request is rejected before writer-ledger lookup. The read-only path additionally prepares a tiny
+source-only graph with `--no-vectors` and private explicit-keyword memories, then checks actual semantic context/source
+binding and graph-source drift. Its full S08/S09 policy coverage remains unqualified. Model setup and Effect AI are
+explicitly off. No default user store, provider installation or global runtime is changed.
+
+The separate explicit `--writer-fixture` switch admits only the newly authored isolated project under its task
+authorization and closed-disk contract. It checks exact application, retry without rewriting bytes or file identity,
+observational recovery without replay, and supported terminal retirement of its exact returned operation. Capability
+values are redacted; a transient private recovery credential is removed only after known retirement. An unknown writer
+outcome retains the fixture and credential for supported recovery. This option requires an exclusive real-user writer
+test window coordinated by the task owner; ordinary read-only runs create no writer admission.
+
+Provider branches have a 180-second overall budget; the provider-free branch has 42 seconds. Reports retain actual
+CLI/MCP/coordinator/provider cleanup observations. Cooperative bootstrap withdrawal and positive known-process/group
+absence precede fixture removal. An unknown process or writer outcome is a failure and retains scratch. This bounded
+fixture cleanup is not qualification of detached descendants or every platform backend. Reports are private operator artifacts created exclusively with mode 0600; an existing
+report refuses execution. Cooperative interruption records failure and runs bounded cleanup. SIGKILL or a runtime crash
+can leave a `started` receipt and retained scratch; neither is success. The provider-free branch also waits for the original SDK close operation and actual transport closure after failed
+initialize; early SDK PID clearing cannot be interpreted as process absence.
+
+Inventory commands return zero after writing a blocked/deferred inventory. Candidate execution returns 1 for failed
+execution/assertions and 2 for a passing branch whose release gate remains blocked. The receipt's `status: passed`
+means only that branch; `fullScenarioQualified` is false and `releaseGate.status` remains blocked. There is no generic
+result importer, caller-qualified flag or path that upgrades pilot observations into production support. Extend the
+existing scenario-contract inventory and runner-owned fixtures/oracles when further genuine candidate inputs become
+available; retain each earlier receipt with its actual hashes.
+
+Kotlin and P09 editor LSP, coexistence, hover/CodeLens and first-party guarded integration are DEFERRED. The editor
+inventory launches no host and cannot qualify a client. Historical `--probe` commands remain available with their
+original feasibility meaning. Deferral never waives active MCP/CLI, editor-owned-buffer refusal, writer authority,
+concurrent-writer preservation, recovery, privacy or security obligations, including cross-cutting branches of S29-S32
+and S43. All 43 approved functional scenarios remain verbatim in the source-bound scenario inventory; S39 belongs to
+P12. See [release evidence](semantic-release-evidence.md) for current gates.

@@ -1,102 +1,44 @@
-import {dlopen, ptr} from 'bun:ffi';
 import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 
-export class RuntimeWriterFault extends Schema.TaggedError<RuntimeWriterFault, {readonly brand: unique symbol}>()(
-  'RuntimeWriterFault',
-  {
-    reason: Schema.Literals([
-      'unsupported-platform',
-      'identity',
-      'path',
-      'readonly',
-      'source-changed',
-      'private-storage',
-      'io',
-    ]),
-  },
-) {}
-const native = process.getBuiltinModule('fs');
-const constants = native.constants;
-const directoryFlags = constants.O_RDONLY | 0x00100000 | constants.O_NOFOLLOW | 0x01000000;
-const fileFlags = constants.O_NOFOLLOW | constants.O_NONBLOCK | 0x01000000;
-const maximumFileBytes = 16 * 1024 * 1024;
-const fail = (reason: RuntimeWriterFault['reason']): never => {
-  throw RuntimeWriterFault.make({reason});
-};
-export interface RuntimeStableOsUserIdentity {
-  readonly platform: 'darwin';
-  readonly architecture: 'arm64';
-  readonly userId: number;
+export {RuntimeWriterFault} from './writer-system/fault.js';
+import {RuntimeWriterFault, writerFail as fail} from './writer-system/fault.js';
+import {
+  posixWriterLibrary as library,
+  requirePosixWriterPlatform as supported,
+  readPosixAccountIdentity,
+  assertPosixPrivateAcl,
+  readPosixProcessIdentity,
+  posixDirectoryFlags,
+  posixFileFlags,
+} from './writer-system/posix-native.js';
+import {
+  windowsTokenPrincipal,
+  requireWindowsNative,
+  readWindowsWriterProcessIdentity,
+} from './writer-system/windows-native.js';
+export interface RuntimeWindowsStableOsUserIdentity {
+  readonly platform: 'win32';
+  readonly architecture: 'arm64' | 'x64';
+  readonly userId: string;
   readonly accountHome: string;
 }
+export type RuntimeStableOsUserIdentity = RuntimePosixStableOsUserIdentity | RuntimeWindowsStableOsUserIdentity;
+import type {RuntimeStableOsUserIdentity as RuntimePosixStableOsUserIdentity} from './writer-system/posix-native.js';
 
-/** Native account database identity; Bun 1.4.4 userInfo().homedir follows HOME. */
+const native = process.getBuiltinModule('fs');
+const constants = native.constants;
+const directoryFlags = posixDirectoryFlags;
+const fileFlags = posixFileFlags;
+const maximumFileBytes = 16 * 1024 * 1024;
 export function runtimeReadStableOsUserIdentity(): RuntimeStableOsUserIdentity {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64')
-    throw RuntimeWriterFault.make({reason: 'unsupported-platform'});
-  const library = dlopen('/usr/lib/libSystem.B.dylib', {
-    getuid: {args: [], returns: 'u32'},
-    geteuid: {args: [], returns: 'u32'},
-    getpwuid_r: {args: ['u32', 'buffer', 'buffer', 'u64', 'buffer'], returns: 'i32'},
-  });
-  try {
-    const userId = library.symbols.geteuid();
-    if (userId !== library.symbols.getuid() || userId !== process.getuid?.()) fail('identity');
-    // Darwin arm64 LP64, current pwd.h: uid offset16, pw_dir offset48, size72.
-    const storage = new BigUint64Array(32);
-    const structure = new Uint8Array(storage.buffer);
-    structure.fill(0xa5);
-    structure.fill(0, 0, 72);
-    const scratch = new Uint8Array(65_536 + 32);
-    scratch.fill(0xa5);
-    scratch.fill(0, 0, 65_536);
-    const result = new BigUint64Array(1);
-    const record = structure.subarray(0, 72);
-    const buffer = scratch.subarray(0, 65_536);
-    const status = library.symbols.getpwuid_r(userId, record, buffer, 65_536n, result);
-    const recordAddress = ptr(record),
-      bufferAddress = ptr(buffer);
-    if (
-      status !== 0 ||
-      !Number.isSafeInteger(recordAddress) ||
-      !Number.isSafeInteger(bufferAddress) ||
-      result[0] !== BigInt(recordAddress) ||
-      !structure.subarray(72).every(value => value === 0xa5) ||
-      !scratch.subarray(65_536).every(value => value === 0xa5)
-    )
-      fail('identity');
-    const view = new DataView(storage.buffer);
-    if (view.getUint32(16, true) !== userId) fail('identity');
-    const offset = view.getBigUint64(48, true) - BigInt(bufferAddress);
-    if (offset < 0n || offset >= 65_536n) fail('identity');
-    const start = Number(offset),
-      end = buffer.indexOf(0, start);
-    if (end <= start) fail('identity');
-    const accountHome = new TextDecoder('utf-8', {fatal: true}).decode(buffer.subarray(start, end));
-    if (!/^\//u.test(accountHome) || /[\p{Cc}]/u.test(accountHome)) fail('identity');
-    return {platform: 'darwin', architecture: 'arm64', userId, accountHome};
-  } catch {
-    throw RuntimeWriterFault.make({reason: 'identity'});
-  } finally {
-    library.close();
-  }
+  if (process.platform !== 'win32') return readPosixAccountIdentity();
+  requireWindowsNative();
+  const identity = windowsTokenPrincipal();
+  const architecture = process.arch;
+  if (architecture !== 'arm64' && architecture !== 'x64') return fail('unsupported-platform');
+  return {platform: 'win32', architecture, userId: identity.sid, accountHome: identity.accountHome};
 }
 
-const supported = () => {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') fail('unsupported-platform');
-};
-// Darwin openat is variadic: its fixed-arity __openat syscall entry is required on arm64.
-// Apple xnu/libsyscall/wrappers/open-base.c declares __openat(fd,path,flags,mode_t).
-const library = () => {
-  supported();
-  return dlopen('/usr/lib/libSystem.B.dylib', {
-    __openat: {args: ['i32', 'buffer', 'i32', 'u32'], returns: 'i32'},
-    mkdirat: {args: ['i32', 'buffer', 'u32'], returns: 'i32'},
-    renameat: {args: ['i32', 'buffer', 'i32', 'buffer'], returns: 'i32'},
-    unlinkat: {args: ['i32', 'buffer', 'i32'], returns: 'i32'},
-    fcntl: {args: ['i32', 'i32'], returns: 'i32'},
-  });
-};
 const nameBytes = (name: string) => {
   if (
     !name ||
@@ -140,82 +82,10 @@ function requireStable(
   fail(reason);
 }
 
-/** Bounded descriptor security record: missing/truncated records are unknown, never an empty ACL. */
 function assertPrivateAcl(fd: number, privateObject: boolean, stabilizeLockToken = false): void {
-  supported();
-  const lib = dlopen('/usr/lib/libSystem.B.dylib', {
-    __fstat64_extended: {args: ['i32', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
-    fpathconf: {args: ['i32', 'i32'], returns: 'i64'},
-    fstatfs: {args: ['i32', 'buffer'], returns: 'i32'},
-  });
-  try {
-    // Current Darwin arm64 headers: stat144, statfs2168/flags64, kauth_filesec44 + ACE24.
-    if (lib.symbols.fpathconf(fd, 13) !== 1n || lib.symbols.fpathconf(fd, 14) !== 0n) fail('private-storage');
-    const volume = new Uint8Array(2168 + 32);
-    volume.fill(0xa5);
-    if (
-      lib.symbols.fstatfs(fd, volume.subarray(0, 2168)) !== 0 ||
-      !volume.subarray(2168).every(value => value === 0xa5) ||
-      (new DataView(volume.buffer).getUint32(64, true) & 0x00200000) !== 0
-    )
-      fail('private-storage');
-    const before = stat(fd);
-    const metadata = new Uint8Array(144 + 32);
-    metadata.fill(0xa5);
-    const maximum = 44 + 24 * 128;
-    const security = new Uint8Array(maximum + 32);
-    security.fill(0xa5);
-    const length = new BigUint64Array([BigInt(maximum), 0xa5a5a5a5a5a5a5a5n]);
-    if (
-      lib.symbols.__fstat64_extended(
-        fd,
-        metadata.subarray(0, 144),
-        security.subarray(0, maximum),
-        new Uint8Array(length.buffer, 0, 8),
-      ) !== 0 ||
-      !metadata.subarray(144).every(value => value === 0xa5) ||
-      !security.subarray(maximum).every(value => value === 0xa5) ||
-      length[1] !== 0xa5a5a5a5a5a5a5a5n ||
-      length[0] < 44n ||
-      length[0] > BigInt(maximum)
-    )
-      fail('private-storage');
-    const observed = new DataView(metadata.buffer);
-    if (
-      BigInt(observed.getInt32(0, true)) !== before.dev ||
-      observed.getBigUint64(8, true) !== before.ino ||
-      BigInt(observed.getUint16(4, true)) !== before.mode ||
-      BigInt(observed.getUint32(16, true)) !== before.uid ||
-      BigInt(observed.getUint32(20, true)) !== before.gid
-    )
-      fail('private-storage');
-    const acl = new DataView(security.buffer);
-    const count = acl.getUint32(36, true);
-    // NOACL is an explicit kernel record; an omitted ACL/property or getter error is not equivalent.
-    if (
-      acl.getUint32(0, true) !== 0x012cc16d ||
-      (acl.getUint32(40, true) & ~0x00020000) !== 0 ||
-      (count !== 0xffffffff && count > 128) ||
-      Number(length[0]) !== 44 + (count === 0xffffffff ? 0 : count * 24)
-    )
-      fail('private-storage');
-    if (count !== 0xffffffff)
-      for (let index = 0; index < count; index++) {
-        const flags = acl.getUint32(44 + index * 24 + 16, true);
-        const rights = acl.getUint32(44 + index * 24 + 20, true);
-        const kind = flags & 0xf;
-        if ((kind !== 1 && kind !== 2) || (flags & ~0x1ff) !== 0 || (rights & ~0x00103ffe) !== 0)
-          fail('private-storage');
-        // Conservative: no principal/group resolution, and no repair of unexpected ACLs.
-        if (kind === 1 && (privateObject || (rights & 0x3574) !== 0 || (flags & 0x1e0) !== 0)) fail('private-storage');
-      }
-    requireStable(before, stat(fd), 'private-storage', stabilizeLockToken);
-  } catch (error) {
-    if (stabilizeLockToken && Schema.is(LockTokenTimestampMovement)(error)) throw error;
-    fail('private-storage');
-  } finally {
-    lib.close();
-  }
+  const before = stat(fd);
+  assertPosixPrivateAcl(fd, privateObject, before);
+  requireStable(before, stat(fd), 'private-storage', stabilizeLockToken);
 }
 const physical = (info: RuntimeWriterIdentity) => JSON.stringify([String(info.dev), String(info.ino)]);
 const equalBytes = (a: Uint8Array, b: Uint8Array) =>
@@ -329,6 +199,39 @@ function checkDirectory(state: DirectoryState) {
   if (state.closed) fail('identity');
   checkEdges(state.chain);
 }
+// A directory's entries may move ctime/mtime/size/nlink without changing its retained
+// identity or security. Recheck the complete ACL and current parent name once; never
+// retry a failed ACL/volume proof or a sampled identity/owner/mode change.
+function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, privateObject: boolean): void {
+  const sameCritical = (info: ReturnType<typeof stat>) =>
+    info.isDirectory() &&
+    same(edge.identity, info) &&
+    info.uid === edge.identity.uid &&
+    info.gid === edge.identity.gid &&
+    info.mode === edge.identity.mode;
+  const namedStat = () => {
+    if (!parent) return stat(edge.fd);
+    const reopened = openAt(parent.fd, edge.name, directoryFlags);
+    try {
+      return stat(reopened);
+    } finally {
+      native.closeSync(reopened);
+    }
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = stat(edge.fd),
+      namedBefore = namedStat();
+    if (!sameCritical(before) || !sameCritical(namedBefore)) fail('private-storage');
+    assertPosixPrivateAcl(edge.fd, privateObject, before);
+    // This fresh nofollow reopen cannot inherit an earlier allowed ACL sample across
+    // directory-data movement: incoherence requires another full ACL sample.
+    const namedAfter = namedStat(),
+      after = stat(edge.fd);
+    if (!sameCritical(after) || !sameCritical(namedAfter)) fail('private-storage');
+    if (stable(before, namedBefore) && stable(before, namedAfter) && stable(before, after)) return;
+    if (attempt !== 0) fail('private-storage');
+  }
+}
 function directoryState(directory: RuntimePrivateWriterDirectory) {
   const state = directories.get(directory);
   if (!state) return fail('identity');
@@ -336,7 +239,7 @@ function directoryState(directory: RuntimePrivateWriterDirectory) {
   const info = stat(last(state).fd);
   if (info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
   for (let index = 0; index < state.chain.length; index++)
-    assertPrivateAcl(state.chain[index].fd, index === state.chain.length - 1);
+    assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1);
   return state;
 }
 function requireFile(info: ReturnType<typeof stat>, bound: number, writable: boolean) {
@@ -478,6 +381,7 @@ export type RuntimeGuardedDiskWriteResult =
   | {readonly status: 'unknown'};
 function syncFile(fd: number) {
   native.fsyncSync(fd);
+  if (process.platform !== 'darwin') return;
   const lib = library();
   try {
     if (lib.symbols.fcntl(fd, 51) !== 0) fail('io');
@@ -574,7 +478,7 @@ export function runtimeOpenPrivateWriterChild(
     const info = stat(child);
     if (!info.isDirectory() || info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n)
       fail('private-storage');
-    assertPrivateAcl(child, true);
+    assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true);
   } finally {
     native.closeSync(child);
   }
@@ -592,10 +496,12 @@ export function runtimeOpenPrivateWriterAuthority(
   identity: RuntimeStableOsUserIdentity,
 ): RuntimePrivateWriterDirectory {
   supported();
+  if (identity.platform === 'win32') return fail('unsupported-platform');
   if (identity.userId !== process.getuid?.()) fail('identity');
   const home = openDirectory(identity.accountHome);
   try {
-    for (const edge of home.chain) assertPrivateAcl(edge.fd, false);
+    for (let index = 0; index < home.chain.length; index++)
+      assertPrivateDirectoryAcl(home.chain[index], home.chain[index - 1], false);
     if (
       EffectArray.some(
         home.chain,
@@ -801,34 +707,7 @@ export function runtimeReadWriterLockToken(path: string): {
   return fail('identity');
 }
 
-/** Darwin proc_bsdinfo binds a live process to microsecond start time, not PID alone. */
 export function runtimeReadWriterProcessIdentity(processId: number): string {
-  supported();
-  if (!Number.isSafeInteger(processId) || processId <= 0 || processId > 0x7fffffff) return fail('identity');
-  const lib = dlopen('/usr/lib/libproc.dylib', {
-    proc_pidinfo: {args: ['i32', 'i32', 'u64', 'buffer', 'i32'], returns: 'i32'},
-  });
-  try {
-    // Current Darwin arm64 proc_info.h: proc_bsdinfo size136, pid12, uid20, start120/128.
-    const storage = new BigUint64Array(21);
-    const bytes = new Uint8Array(storage.buffer);
-    bytes.fill(0xa5);
-    const count = lib.symbols.proc_pidinfo(processId, 3, 0n, bytes.subarray(0, 136), 136);
-    if (count !== 136 || !bytes.subarray(136).every(value => value === 0xa5)) return fail('identity');
-    const view = new DataView(storage.buffer);
-    const seconds = view.getBigUint64(120, true),
-      micros = view.getBigUint64(128, true);
-    if (
-      view.getUint32(12, true) !== processId ||
-      view.getUint32(20, true) !== process.getuid?.() ||
-      seconds === 0n ||
-      micros >= 1_000_000n
-    )
-      return fail('identity');
-    return `darwin-proc-bsd-v1:${seconds}:${micros}`;
-  } catch {
-    return fail('identity');
-  } finally {
-    lib.close();
-  }
+  if (process.platform !== 'win32') return readPosixProcessIdentity(processId);
+  return readWindowsWriterProcessIdentity(processId);
 }

@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 export * from './writer_system.js';
+export * from './writer-system/provider.js';
 import {readProcessResourceCounters, type ProcessResourceCounters} from './process-resources.js';
 export {
   processCpuObservation,
@@ -25,7 +26,10 @@ import {
 import {succeedUndefined} from './optional.js';
 import {effectiveLinuxMemoryBytes, linuxCgroupMemoryFiles} from './linux_cgroup.js';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
-import {readWindowsHardwareInfo, readWindowsProcessStartIdentity} from './windows_system.js';
+import {readWindowsHardwareInfo} from './windows_system.js';
+import {readNativeWindowsProcessStartIdentity} from './writer-system/windows-native.js';
+const readWindowsProcessStartIdentity = (pid: number): Effect.Effect<string | undefined> =>
+  Effect.sync(() => readNativeWindowsProcessStartIdentity(pid));
 import {
   WINDOWS_DISK_CAPACITY_WORKER_ARGUMENT,
   WINDOWS_DISK_CAPACITY_WORKER_PROTOCOL_VERSION,

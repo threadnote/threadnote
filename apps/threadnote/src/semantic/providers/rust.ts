@@ -4,6 +4,7 @@ import * as EffectString from 'effect/String';
 import {Deferred, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {parse as parseToml} from 'smol-toml';
 import {CommandExecutor} from '@threadnote/platform/command';
+import {runtimePlatform, runtimeNativePlatformTarget, platformPathFor} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {LspFault, type LspClient} from '../lsp_transport.js';
 import {boundedFileDigest, readBounded} from '../fingerprint.js';
@@ -13,33 +14,66 @@ export const rustProviderVersion = '0.3.3097-standalone (0c4d74686b 2026-10-22)'
 export const rustExecutableDigest = '29e8a7d408e7d6936c6d762f2982820812578d7f97a3f5013789de6fc8a711d4';
 export const rustToolDigest = '1ba7bb8e273bd64125f4048d2ecce530e0a6470e565ab1b3aecf0b82b532f7b1';
 export const cargoToolDigest = '6d576d8058f8ca643e8fce55b64ee3c614ba64c9da2e536bae843e6a2e1f3951';
+// Only reviewed shipped bytes can enter this allowlist; ledger rows cannot grant execution.
+const rustRuntimePins = Object.freeze({
+  provider: 'rust-analyzer' as const,
+  providerExecutableDigest: rustExecutableDigest,
+  rustcExecutableDigest: rustToolDigest,
+  cargoExecutableDigest: cargoToolDigest,
+  sdkTreeDigest: undefined as string | undefined,
+});
+export function rustRuntimePinsForHost() {
+  return runtimeNativePlatformTarget() === 'darwin-arm64' ? rustRuntimePins : undefined;
+}
 const fail = () => LspFault.make({code: 'prerequisite'});
 const staticPath = (value: string) =>
-  value.length > 0 && value.length <= 8192 && !/[\p{Cc}:\\$]/u.test(value) && !EffectString.startsWith('~')(value);
+  value.length > 0 &&
+  value.length <= 8192 &&
+  !/[\p{Cc}$]/u.test(value) &&
+  !EffectString.startsWith('~')(value) &&
+  (runtimePlatform === 'win32'
+    ? !EffectString.includes(':')(EffectString.replace(/^[a-z]:[\\/]/iu, '')(value)) &&
+      !EffectString.startsWith('\\\\')(value)
+    : !/[:\\]/u.test(value));
 const record = (value: unknown): Record<string, unknown> => (isJsonObject(value) ? value : {});
-export const rustEnvironment = (sdk: string, directory: string): Record<string, string> => ({
-  PATH: sdk + '/bin:/usr/bin:/bin',
-  HOME: directory + '/home',
-  CARGO_HOME: directory + '/cargo',
-  CARGO: sdk + '/bin/cargo',
-  RUSTC: sdk + '/bin/rustc',
-  RUSTDOC: sdk + '/bin/rustdoc',
-  RUSTUP_TOOLCHAIN: sdk,
-  RUSTUP_AUTO_INSTALL: '0',
-  CARGO_NET_OFFLINE: 'true',
-  CARGO_TARGET_DIR: directory + '/target',
-  CARGO_BUILD_BUILD_DIR: directory + '/build',
-  CARGO_CACHE_RUSTC_INFO: '0',
-  RUSTC_WRAPPER: '',
-  RUSTC_WORKSPACE_WRAPPER: '',
-  CARGO_BUILD_RUSTC_WRAPPER: '',
-  CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: '',
-  RUSTFLAGS: '',
-  CARGO_ENCODED_RUSTFLAGS: '',
-  XDG_CACHE_HOME: directory + '/cache',
-  XDG_CONFIG_HOME: directory + '/config',
-  TMPDIR: directory + '/tmp',
-});
+export const rustToolPath = (
+  sdk: string,
+  tool: 'cargo' | 'rustc' | 'rustdoc',
+  platform: NodeJS.Platform = runtimePlatform,
+) => platformPathFor(platform).join(sdk, 'bin', tool + (platform === 'win32' ? '.exe' : ''));
+export const rustEnvironment = (
+  sdk: string,
+  directory: string,
+  platform: NodeJS.Platform = runtimePlatform,
+): Record<string, string> => {
+  const path = platformPathFor(platform);
+  return {
+    PATH: path.join(sdk, 'bin') + (platform === 'win32' ? '' : ':/usr/bin:/bin'),
+    HOME: path.join(directory, 'home'),
+    CARGO_HOME: path.join(directory, 'cargo'),
+    CARGO: rustToolPath(sdk, 'cargo', platform),
+    RUSTC: rustToolPath(sdk, 'rustc', platform),
+    RUSTDOC: rustToolPath(sdk, 'rustdoc', platform),
+    RUSTUP_TOOLCHAIN: sdk,
+    RUSTUP_AUTO_INSTALL: '0',
+    CARGO_NET_OFFLINE: 'true',
+    CARGO_TARGET_DIR: path.join(directory, 'target'),
+    CARGO_BUILD_BUILD_DIR: path.join(directory, 'build'),
+    CARGO_CACHE_RUSTC_INFO: '0',
+    RUSTC_WRAPPER: '',
+    RUSTC_WORKSPACE_WRAPPER: '',
+    CARGO_BUILD_RUSTC_WRAPPER: '',
+    CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: '',
+    RUSTFLAGS: '',
+    CARGO_ENCODED_RUSTFLAGS: '',
+    XDG_CACHE_HOME: path.join(directory, 'cache'),
+    XDG_CONFIG_HOME: path.join(directory, 'config'),
+    TMPDIR: path.join(directory, 'tmp'),
+    ...(platform === 'win32'
+      ? {TEMP: path.join(directory, 'tmp'), TMP: path.join(directory, 'tmp'), USERPROFILE: path.join(directory, 'home')}
+      : {}),
+  };
+};
 export const makeRustProject = Effect.fn('semantic.makeRustProject')(function* (options: {
   readonly project: string;
   readonly worktree: string;
@@ -126,12 +160,12 @@ export const makeRustProject = Effect.fn('semantic.makeRustProject')(function* (
       if (typeof member !== 'string' || !staticPath(member)) return yield* fail();
       if (!/[?*[]/u.test(member)) yield* addPath(directory, member, true);
       else {
-        if (path.isAbsolute(member) || EffectString.split('/')(member).includes('..')) return yield* fail();
+        if (path.isAbsolute(member) || EffectString.split(/[\\/]/u)(member).includes('..')) return yield* fail();
         const glob = new Bun.Glob(member + '/Cargo.toml');
         for (const candidate of candidates)
           if (
             EffectString.startsWith(directory + path.sep)(candidate) &&
-            glob.match(path.relative(directory, candidate))
+            glob.match(EffectString.replaceAll('\\', '/')(path.relative(directory, candidate)))
           )
             pending.push(candidate);
       }

@@ -1,0 +1,533 @@
+/* oxlint-disable effecttsgo/node-builtin-import -- Qualification verifies explicit local artifacts and disposable fixture bytes. */
+import {createHash} from 'node:crypto';
+import {readFile, mkdir, writeFile, lstat} from 'node:fs/promises';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {strict as assert} from 'node:assert';
+import {isDeepStrictEqual} from 'node:util';
+import {Array as EffectArray, Effect, Layer, Record as EffectRecord, Schema, String as EffectString} from 'effect';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {isJsonObject} from '@threadnote/platform/json';
+import {semanticTreeDigest} from '../../../src/semantic/fingerprint.js';
+import {providerFixture} from '../../../../../tools/semantic/semantic_provider_fixture.js';
+import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/semantic/semantic_probe_assertions.js';
+import {checkProposalStatusTransportParity} from './transport-oracle.js';
+import type {Client} from '@modelcontextprotocol/sdk/client/index.js';
+
+const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+const common = {
+  version: Schema.Literal(1),
+  runtime: Schema.String,
+  runtimeDigest: digest,
+  runtimeVersion: Schema.Literal('24.19.0'),
+  serverDirectory: Schema.String,
+  serverTreeDigest: digest,
+  notices: Schema.Array(Schema.Struct({component: Schema.String, file: Schema.String, sha256: digest})).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(64),
+  ),
+};
+export const ProviderInputs = Schema.Union([
+  Schema.Struct({
+    ...common,
+    language: Schema.Literals(['typescript', 'javascript']),
+    sdkDirectory: Schema.String,
+    sdkTreeDigest: digest,
+  }),
+  Schema.Struct({...common, language: Schema.Literal('python')}),
+]);
+export type ProviderInputs = typeof ProviderInputs.Type;
+const hash = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
+const tree = (directory: string) =>
+  // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Standalone operator boundary owns this complete byte-verification program and its narrow services.
+  Effect.runPromise(semanticTreeDigest(directory).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))));
+
+export async function readProviderInputs(file: string) {
+  const bytes = await readFile(file);
+  const input = Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})(JSON.parse(bytes.toString()));
+  assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
+  assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
+  if ('sdkDirectory' in input) assert.equal(await tree(input.sdkDirectory), input.sdkTreeDigest, 'Complete SDK tree');
+  for (const notice of input.notices)
+    assert.equal(hash(await readFile(notice.file)), notice.sha256, 'Exact local notice bytes');
+  return {
+    input,
+    manifestSha256: hash(bytes),
+    notices: input.notices,
+    licenseDisposition: 'notice-bytes-recorded; selected-profile and redistribution review remain required',
+  };
+}
+
+export function selectedFixture(input: ProviderInputs) {
+  const fixture = providerFixture({language: input.language});
+  const sources = EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(fixture.sources), ([name, text]) => [
+      name,
+      EffectString.replaceAll('SavedName', 'UnsavedName')(text),
+    ]),
+  );
+  return {sources, projectFiles: fixture.projectFiles};
+}
+
+export async function providerCatalog(input: ProviderInputs, scratch: string) {
+  const base = {
+    runtime: input.runtime,
+    runtimeDigest: input.runtimeDigest,
+    runtimeVersion: input.runtimeVersion,
+    serverDirectory: input.serverDirectory,
+    serverTreeDigest: input.serverTreeDigest,
+  };
+  if ('sdkDirectory' in input)
+    return {
+      catalog: {candidate: {...base, sdkDirectory: input.sdkDirectory, sdkTreeDigest: input.sdkTreeDigest}},
+      environment: undefined,
+    };
+  const prefix = join(scratch, 'python-environment');
+  const library = join(prefix, 'static-library');
+  await mkdir(library, {recursive: true, mode: 0o700});
+  await writeFile(join(library, 'dependency.pyi'), 'def selected() -> str: ...\n');
+  const metadata = {
+    format: 'threadnote-static-python-environment-v1',
+    version: [3, 12, 13],
+    provenance: 'P11 synthetic static environment fixture; no interpreter execution',
+    prefix,
+    roots: [{directory: library, digest: await tree(library)}],
+  };
+  const metadataFile = join(prefix, 'environment.json');
+  const text = JSON.stringify(metadata);
+  await writeFile(metadataFile, text, {mode: 0o600});
+  const environment = {id: 'p11-static-environment', metadataFile, metadataDigest: hash(text)};
+  return {catalog: {python: {...base, environments: [environment]}}, environment: {...environment, metadata}};
+}
+
+export function redactCapabilities(value: unknown): unknown {
+  if (EffectArray.isArray(value)) return EffectArray.map(value, redactCapabilities);
+  if (isJsonObject(value))
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [
+        key,
+        key === 'capability' || key === 'token' ? '<redacted>' : redactCapabilities(item),
+      ]),
+    );
+  return value;
+}
+
+export function protocolCapabilities(value: unknown): string[] {
+  if (EffectArray.isArray(value)) return EffectArray.flatMap(value, protocolCapabilities);
+  if (isJsonObject(value))
+    return EffectArray.flatMap(EffectRecord.toEntries(value), ([key, item]) =>
+      (key === 'capability' || key === 'token') && typeof item === 'string' ? [item] : protocolCapabilities(item),
+    );
+  return [];
+}
+
+interface CliResult {
+  pid: number;
+  code: number;
+  stdout: string;
+  stderr: string;
+  value: unknown;
+}
+export type QualificationCli = (args: readonly string[], request: object) => Promise<CliResult>;
+
+/** Fixed authored fixture operations, never caller-supplied results or assertions. */
+export async function runProviderNavigation(
+  input: ProviderInputs,
+  project: string,
+  sources: Record<string, string>,
+  run: QualificationCli,
+  client: Client,
+  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
+  deadline: number,
+  results: unknown[],
+) {
+  const names = EffectRecord.keys(sources);
+  const declaration = names[0],
+    dependent = names[1];
+  const position = (file: string, line: number) => {
+    const marker = EffectString.indexOf('UnsavedName')(EffectString.split('\n')(sources[file])[line]);
+    assert.ok(marker._tag === 'Some');
+    return {line, character: marker.value + 2};
+  };
+  const request = {
+    callerCwd: project,
+    language: input.language,
+    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    milliseconds: 10000,
+    maxBytes: 8192,
+    maxItems: 32,
+  };
+  for (const operation of ['definition', 'references'] as const) {
+    const selected = {
+      ...request,
+      file: join(project, operation === 'definition' ? dependent : declaration),
+      operation,
+      position: position(operation === 'definition' ? dependent : declaration, operation === 'definition' ? 1 : 0),
+    };
+    const cli = await run(['semantic', 'query', '--json'], selected);
+    const mcp = await within(
+      client.callTool({name: 'semantic_query', arguments: {request: selected, responseFormat: 'dual'}}, undefined, {
+        timeout: Math.max(1, Math.min(15000, deadline - Date.now())),
+      }),
+      deadline - Date.now(),
+    );
+    const canonical = cli.value;
+    results.push({
+      operation,
+      request: selected,
+      status: 'observed',
+      fullScenarioQualified: false,
+      cli: {pid: cli.pid, code: cli.code, stderr: cli.stderr},
+      canonical: redactCapabilities(canonical),
+      mcp: {isError: mcp.isError ?? false, canonical: redactCapabilities(mcp.structuredContent)},
+    });
+    assert.ok(
+      isJsonObject(canonical) &&
+        canonical.version === 1 &&
+        canonical.status === 'ok' &&
+        isJsonObject(canonical.evidence),
+    );
+    assert.ok(isDeepStrictEqual(canonical, mcp.structuredContent), 'Complete CLI/MCP evidence parity');
+    assert.ok(
+      !mcp.isError &&
+        EffectArray.isArray(mcp.content) &&
+        mcp.content.length === 1 &&
+        isJsonObject(mcp.content[0]) &&
+        mcp.content[0].type === 'text' &&
+        typeof mcp.content[0].text === 'string',
+    );
+    assert.deepEqual(JSON.parse(mcp.content[0].text), canonical, 'Compact MCP canonical parity');
+    assert.ok(
+      operation === 'definition'
+        ? checkProbeDefinition(sources, canonical.items, pathToFileURL(project).href)
+        : checkProbeReferences(sources, canonical.items, pathToFileURL(project).href),
+      `Exact fixture ${operation}`,
+    );
+  }
+  return {status: 'passed', branches: results, fullScenarioQualified: false};
+}
+
+const Handle = Schema.Struct({id: digest, capability: digest, digest});
+const Page = Schema.Struct({
+  digest,
+  offset: Schema.Finite,
+  next: Schema.NullOr(Schema.Finite),
+  chunkCount: Schema.Finite,
+  chunks: Schema.Array(
+    Schema.Struct({kind: Schema.String, text: Schema.String, target: Schema.optionalKey(Schema.NullOr(Schema.Finite))}),
+  ),
+});
+const Prepared = Schema.Struct({
+  status: Schema.Literal('ok'),
+  applicable: Schema.Literal(false),
+  writerAuthorityRequired: Schema.Literal(true),
+  targetCount: Schema.Finite,
+  handle: Handle,
+  page: Page,
+});
+const Target = Schema.Struct({
+  observation: Schema.Struct({uri: Schema.String, content: digest}),
+  precondition: Schema.Struct({rawDigest: digest, sourceKind: Schema.String, physicalIdentity: Schema.String}),
+});
+
+/** The independent expected before/after bytes cover every provider-returned target and operation. */
+export async function runProviderPreview(
+  input: ProviderInputs,
+  project: string,
+  sources: Record<string, string>,
+  run: QualificationCli,
+  client: Client,
+  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
+  deadline: number,
+  results: unknown[],
+) {
+  const declaration = EffectRecord.keys(sources)[0];
+  const marker = EffectString.indexOf('UnsavedName')(EffectString.split('\n')(sources[declaration])[0]);
+  assert.ok(marker._tag === 'Some');
+  const common = {version: 1, callerCwd: project, milliseconds: 10000, maxBytes: 8192};
+  const mcpChange = async (action: 'status' | 'preflight' | 'apply', request: object) => {
+    const response = await within(
+      client.callTool({name: 'semantic_change_' + action, arguments: {request: {...common, ...request}}}, undefined, {
+        timeout: Math.max(1, Math.min(15000, deadline - Date.now())),
+      }),
+      deadline - Date.now(),
+    );
+    assert.ok(
+      !response.isError &&
+        EffectArray.isArray(response.content) &&
+        response.content.length === 1 &&
+        isJsonObject(response.content[0]) &&
+        typeof response.content[0].text === 'string',
+      'One canonical change page',
+    );
+    const value: unknown = JSON.parse(response.content[0].text);
+    assert.ok(isDeepStrictEqual(value, response.structuredContent), 'Complete MCP change canonical parity');
+    return value;
+  };
+  const selected = {
+    ...common,
+    operation: 'rename',
+    language: input.language,
+    file: join(project, declaration),
+    position: {line: 0, character: marker.value + 2},
+    newName: 'RenamedName',
+    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+  };
+  const cli = await run(['semantic', 'change', 'prepare', '--json'], selected);
+  const record = {
+    operation: 'complete-rename-preview',
+    status: 'observed',
+    fullScenarioQualified: false,
+    prepared: redactCapabilities(cli.value),
+    pages: 0,
+  };
+  results.push(record);
+  const prepared = Schema.decodeUnknownSync(Prepared)(cli.value);
+  assert.equal(prepared.targetCount, EffectRecord.keys(sources).length, 'Every fixture file in complete proposal');
+  const chunks: (typeof Page.Type.chunks)[number][] = [];
+  let page = prepared.page;
+  for (;;) {
+    assert.ok(
+      page.digest === prepared.handle.digest && page.offset === chunks.length,
+      'Stable proposal digest and contiguous pages',
+    );
+    chunks.push(...page.chunks);
+    record.pages++;
+    assert.ok(
+      record.pages <= 128 && Buffer.byteLength(JSON.stringify(chunks)) <= 1024 * 1024,
+      'Bounded complete preview',
+    );
+    if (page.next === null) break;
+    assert.ok(page.next === chunks.length && page.next > page.offset, 'Monotonic proposal continuation');
+    const next = await mcpChange('status', {handle: prepared.handle, offset: page.next});
+    assert.ok(isJsonObject(next));
+    page = Schema.decodeUnknownSync(Page)(next.page);
+  }
+  assert.equal(chunks.length, page.chunkCount, 'All proposal chunks retrieved');
+  const chunkText = (selected: readonly (typeof chunks)[number][]) =>
+    EffectArray.join(
+      EffectArray.map(selected, chunk => chunk.text),
+      '',
+    );
+  const manifest = Schema.decodeUnknownSync(Schema.Struct({targets: Schema.Array(Target)}))(
+    JSON.parse(chunkText(EffectArray.filter(chunks, chunk => chunk.kind === 'manifest'))),
+  );
+  const expectedUris = EffectArray.map(
+    EffectRecord.keys(sources),
+    name => pathToFileURL(join(project, name)).href,
+  ).sort();
+  assert.ok(
+    isDeepStrictEqual(EffectArray.map(manifest.targets, target => target.observation.uri).sort(), expectedUris),
+    'Exact complete target identity set',
+  );
+  for (let index = 0; index < manifest.targets.length; index++) {
+    const target = manifest.targets[index];
+    const found = EffectArray.findFirst(
+      EffectRecord.keys(sources),
+      name => pathToFileURL(join(project, name)).href === target.observation.uri,
+    );
+    assert.ok(found._tag === 'Some', 'No foreign proposal target');
+    const name = found.value;
+    const before = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'before'));
+    const after = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'after'));
+    assert.equal(before, sources[name], 'Complete original proposal bytes');
+    assert.equal(
+      after,
+      EffectString.replaceAll('UnsavedName', 'RenamedName')(sources[name]),
+      'Complete exact rename bytes',
+    );
+    const identity = await lstat(join(project, name), {bigint: true});
+    assert.ok(
+      target.precondition.rawDigest === hash(before) &&
+        target.observation.content === hash(before) &&
+        target.precondition.sourceKind === 'disk' &&
+        target.precondition.physicalIdentity === JSON.stringify([identity.dev.toString(), identity.ino.toString()]),
+      'Exact raw-byte physical source preconditions',
+    );
+  }
+  const statusStarted = Date.now();
+  const cliStatus = await run(['semantic', 'change', 'status', '--json'], {
+    ...common,
+    handle: prepared.handle,
+    offset: 0,
+  });
+  const mcpStatus = await mcpChange('status', {handle: prepared.handle, offset: 0});
+  results.push({
+    operation: 'proposal-status-parity',
+    status: 'observed',
+    fullScenarioQualified: false,
+    cli: redactCapabilities(cliStatus.value),
+    mcp: redactCapabilities(mcpStatus),
+  });
+  assert.ok(
+    checkProposalStatusTransportParity(cliStatus.value, mcpStatus, statusStarted, Date.now()),
+    'Same retained proposal across actual CLI/MCP with bounded ordered check timestamps',
+  );
+  const preflight = await mcpChange('preflight', {handle: prepared.handle});
+  results.push({
+    operation: 'unapplied-preflight',
+    status: 'observed',
+    fullScenarioQualified: false,
+    result: redactCapabilities(preflight),
+  });
+  assert.ok(
+    isJsonObject(preflight) &&
+      preflight.status === 'ok' &&
+      preflight.applicable === false &&
+      preflight.writerAuthorityRequired === true,
+    'Preflight does not grant writer authority',
+  );
+  const unauthorized = await mcpChange('apply', {
+    handle: prepared.handle,
+  });
+  results.push({
+    operation: 'read-capability-cannot-authorize-write',
+    status: 'observed',
+    fullScenarioQualified: false,
+    result: redactCapabilities(unauthorized),
+  });
+  assert.ok(
+    isJsonObject(unauthorized) && unauthorized.status === 'invalid-request' && unauthorized.applicable === false,
+    'Read capability cannot authorize source writes',
+  );
+  record.status = 'passed';
+  return prepared;
+}
+
+/** Volatile owned buffers must preserve disk and reject stale document versions without an editor integration. */
+export async function runOwnedBufferFixture(
+  input: ProviderInputs,
+  project: string,
+  sources: Record<string, string>,
+  run: QualificationCli,
+  client: Client,
+  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
+  deadline: number,
+  results: unknown[],
+) {
+  const declaration = EffectRecord.keys(sources)[0];
+  const text = EffectString.replaceAll('UnsavedName', 'BufferName')(sources[declaration]);
+  const common = {callerCwd: project, milliseconds: 10000};
+  const opened = await run(['semantic', 'view', '--json'], {
+    ...common,
+    action: 'open',
+    file: join(project, declaration),
+    language: input.language,
+    text,
+    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+  });
+  results.push({
+    operation: 'owned-buffer-open',
+    fullScenarioQualified: false,
+    result: redactCapabilities(opened.value),
+  });
+  assert.ok(isJsonObject(opened.value) && opened.value.status === 'ok', 'Explicit owned buffer opens');
+  const handle = Schema.decodeUnknownSync(Schema.Struct({id: digest, capability: digest}))(opened.value.handle);
+  const query = {
+    callerCwd: project,
+    language: input.language,
+    file: join(project, declaration),
+    operation: 'symbols',
+    view: {kind: 'buffer', handle, documentVersion: 1},
+    milliseconds: 10000,
+    maxBytes: 8192,
+    maxItems: 32,
+    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+  };
+  try {
+    const cli = await run(['semantic', 'query', '--json'], query);
+    const response = await within(
+      client.callTool({name: 'semantic_query', arguments: {request: query, responseFormat: 'dual'}}, undefined, {
+        timeout: Math.max(1, Math.min(15000, deadline - Date.now())),
+      }),
+      deadline - Date.now(),
+    );
+    results.push({
+      operation: 'owned-buffer-symbols',
+      fullScenarioQualified: false,
+      canonical: redactCapabilities(cli.value),
+      mcp: redactCapabilities(response.structuredContent),
+    });
+    assert.ok(
+      isJsonObject(cli.value) &&
+        cli.value.status === 'ok' &&
+        isJsonObject(cli.value.evidence) &&
+        isJsonObject(cli.value.evidence.observation),
+      'Owned buffer query has current evidence',
+    );
+    assert.ok(
+      cli.value.evidence.observation.content === hash(text) && cli.value.evidence.observation.documentVersion === 1,
+      'Exact unsaved byte/version evidence',
+    );
+    assert.ok(
+      EffectArray.isArray(cli.value.items) &&
+        EffectArray.some(cli.value.items, item => isJsonObject(item) && item.name === 'BufferName'),
+      'Compiler sees exact unsaved symbol',
+    );
+    assert.ok(isDeepStrictEqual(cli.value, response.structuredContent), 'Owned buffer CLI/MCP evidence parity');
+    const marker = EffectString.indexOf('BufferName')(EffectString.split('\n')(text)[0]);
+    assert.ok(marker._tag === 'Some');
+    const preview = await run(['semantic', 'change', 'prepare', '--json'], {
+      version: 1,
+      ...common,
+      file: join(project, declaration),
+      language: input.language,
+      operation: 'rename',
+      position: {line: 0, character: marker.value + 2},
+      newName: 'BufferRenamed',
+      view: query.view,
+      ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    });
+    results.push({
+      operation: 'owned-buffer-unapplied-preview',
+      fullScenarioQualified: false,
+      result: redactCapabilities(preview.value),
+    });
+    assert.ok(
+      isJsonObject(preview.value) &&
+        preview.value.applicable === false &&
+        preview.value.writerAuthorityRequired === true,
+      'Buffer preview cannot become an immediate disk mutation',
+    );
+    for (const [name, bytes] of EffectRecord.toEntries(sources))
+      assert.equal(await readFile(join(project, name), 'utf8'), bytes, 'Unsaved owner never rewrites disk');
+    const updated = await run(['semantic', 'view', '--json'], {
+      ...common,
+      action: 'update',
+      handle,
+      expectedVersion: 1,
+      text: text + '// owned-version-2\r\n',
+    });
+    results.push({
+      operation: 'owned-buffer-version-update',
+      fullScenarioQualified: false,
+      result: redactCapabilities(updated.value),
+    });
+    assert.ok(
+      isJsonObject(updated.value) &&
+        updated.value.status === 'ok' &&
+        isJsonObject(updated.value.observation) &&
+        updated.value.observation.documentVersion === 2,
+      'Version update acknowledged',
+    );
+    const stale = await run(['semantic', 'query', '--json'], query);
+    results.push({
+      operation: 'stale-buffer-version-refusal',
+      fullScenarioQualified: false,
+      result: redactCapabilities(stale.value),
+    });
+    assert.ok(
+      isJsonObject(stale.value) && ['stale', 'conflict'].includes(String(stale.value.status)),
+      'Earlier buffer version must not be silently rebound',
+    );
+  } finally {
+    const closed = await run(['semantic', 'view', '--json'], {...common, action: 'close', handle});
+    results.push({
+      operation: 'owned-buffer-close',
+      fullScenarioQualified: false,
+      result: redactCapabilities(closed.value),
+    });
+    assert.ok(isJsonObject(closed.value) && closed.value.status === 'ok', 'Only our buffer handle closed');
+  }
+}

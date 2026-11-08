@@ -688,7 +688,7 @@ effectIt.effect.skipIf(!supported)(
         const f = yield* fixture;
         const firstHandle = yield* f.admit();
         const firstRecord = yield* f.writer.resolve(f.scope, firstHandle);
-        yield* f.writer.apply(f.scope, firstHandle, firstRecord, f.refresh);
+        expect(yield* f.writer.apply(f.scope, firstHandle, firstRecord, f.refresh)).toMatchObject({status: 'applied'});
         const child = yield* Effect.acquireRelease(
           Effect.sync(() =>
             Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)'], {

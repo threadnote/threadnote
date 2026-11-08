@@ -1,5 +1,6 @@
 import {Digest as EffectDigest} from 'effect/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -23,29 +24,54 @@ const Metadata = Schema.Struct({
   ),
 });
 const fail = () => LspFault.make({code: 'prerequisite'});
-const staticPath = (value: string) =>
-  value.length > 0 && value.length <= 8192 && !/[\p{Cc}:\\$]/u.test(value) && !EffectString.startsWith('~')(value);
+/** Paths are passed as native data, never shell text. A drive colon is allowed only at its root. */
+export const staticPythonPath = (value: string, windows = process.platform === 'win32') =>
+  value.length > 0 &&
+  value.length <= 8192 &&
+  !/[\p{Cc}$]/u.test(value) &&
+  !EffectString.startsWith('~')(value) &&
+  (windows
+    ? !EffectString.includes(':')(EffectString.replace(/^[a-z]:[\\/]/iu, '')(value)) &&
+      !EffectString.startsWith('\\\\')(value)
+    : !/[:\\]/u.test(value));
+const staticPath = staticPythonPath;
 const inside = (root: string, file: string, separator: string) =>
   file === root || EffectString.startsWith(root + separator)(file);
 const pathProbe = 'd8a7c87965c4ad49200fda06dd4fb09f6229e65c4a188553889562c01c615510';
 const versionProbe = '5811c668ec7eb72ffad07fa10823ada5a40e9392137033a876850ac30ebd1230';
-const quote = (value: string) => "'" + EffectString.replaceAll("'", "'\\''")(value) + "'";
-/** Only the two intrinsic FullAccessHost probes in basedpyright 1.40.2 are supported. No Python code runs. */
-export function pythonMetadataResponder(metadata: {
-  path: readonly string[];
-  prefix: string;
-  version: readonly number[];
-}) {
-  return `import {createHash} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
-const a=process.argv.slice(2), m=${JSON.stringify(metadata)};
-let kind;
-if(a.length===2&&a[0]==='-c'&&createHash('sha256').update(a[1]).digest('hex')==='${pathProbe}')kind='paths';
-if(a.length===3&&a[0]==='-I'&&a[1]==='-c'&&createHash('sha256').update(a[2]).digest('hex')==='${versionProbe}')kind='version';
-if(!kind)process.exit(64);
-const value=kind==='paths'?{path:m.path,prefix:m.prefix}:[...m.version,'final',0];
-writeFileSync(new URL('./'+kind+'.ok',import.meta.url),JSON.stringify(value),{mode:0o600});
-process.stdout.write(JSON.stringify(value));
+/** Fixed trusted preload. It never delegates to an interpreter, shell, or another execution surface. */
+export function pythonProviderBootstrap(
+  metadata: {
+    path: readonly string[];
+    prefix: string;
+    version: readonly number[];
+  },
+  marker: string,
+  directory: string,
+) {
+  return `const cp=require('node:child_process');
+const {createHash}=require('node:crypto');
+const {writeFileSync}=require('node:fs');
+const {join}=require('node:path');
+const {syncBuiltinESMExports}=require('node:module');
+const metadata=${JSON.stringify(metadata)}, marker=${JSON.stringify(marker)}, directory=${JSON.stringify(directory)};
+const deny=()=>{throw new Error('Static Python profile denies process execution');};
+const probe=(command,args,options)=>{
+  if(command!==marker||!Array.isArray(args)||!options||options.encoding!=='utf8'||options.shell!==false||
+    Reflect.ownKeys(options).some(k=>!['cwd','encoding','shell'].includes(k))||
+    !(options.cwd===undefined||typeof options.cwd==='string')||args.some(a=>typeof a!=='string'))return deny();
+  let kind;
+  if(args.length===2&&args[0]==='-c'&&createHash('sha256').update(args[1]).digest('hex')==='${pathProbe}')kind='paths';
+  if(args.length===3&&args[0]==='-I'&&args[1]==='-c'&&createHash('sha256').update(args[2]).digest('hex')==='${versionProbe}')kind='version';
+  if(!kind)return deny();
+  const value=JSON.stringify(kind==='paths'?{path:metadata.path,prefix:metadata.prefix}:[...metadata.version,'final',0]);
+  writeFileSync(join(directory,kind+'.ok'),value,{mode:0o600});
+  return value;
+};
+for(const name of ['exec','execSync','execFile','execFileSync','spawn','spawnSync','fork'])
+  Object.defineProperty(cp,name,{value:name==='execFileSync'?probe:deny,writable:false,configurable:false});
+Object.defineProperty(cp.ChildProcess.prototype,'spawn',{value:deny,writable:false,configurable:false});
+syncBuiltinESMExports();
 `;
 }
 /** Conservative static profile. Unsupported config/import-hook environments fail explicitly, without guessing. */
@@ -185,8 +211,8 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
                   typeof item !== 'string' ||
                   !staticPath(item) ||
                   path.isAbsolute(item) ||
-                  EffectString.split('/')(item).includes('..') ||
-                  (['include', 'strict'].includes(key) && EffectString.split('/')(item).includes('.git')),
+                  EffectString.split(/[\\/]/u)(item).includes('..') ||
+                  (['include', 'strict'].includes(key) && EffectString.split(/[\\/]/u)(item).includes('.git')),
               )
             )
               return yield* fail();
@@ -277,15 +303,21 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
   const directory = yield* fs.makeTempDirectoryScoped({directory: options.privateDirectory, prefix: 'python-'});
   yield* fs.chmod(directory, 0o700);
   if ((yield* fs.realPath(directory)) !== directory) return yield* fail();
-  const responder = path.join(directory, 'metadata.mjs');
+  const bootstrap = path.join(directory, 'static-python.cjs');
+  // An inert, nonexistent marker is consumed by the trusted preload before OS launch.
   const launcher = path.join(directory, 'python-static');
   const payload = {path: roots, prefix: metadata.prefix, version: metadata.version};
-  yield* fs.writeFileString(responder, pythonMetadataResponder(payload), {flag: 'wx', mode: 0o600});
-  yield* fs.writeFileString(
-    launcher,
-    '#!/bin/sh\nexec ' + quote(options.runtime) + ' ' + quote(responder) + ' "$@"\n',
-    {flag: 'wx', mode: 0o700},
-  );
+  const source = pythonProviderBootstrap(payload, launcher, directory);
+  const sourceDigest = sha256HexSync(source);
+  yield* fs.writeFileString(bootstrap, source, {flag: 'wx', mode: 0o600});
+  const verifyBootstrap = Effect.gen(function* () {
+    if (
+      (yield* fs.realPath(bootstrap)) !== bootstrap ||
+      (yield* fs.stat(bootstrap)).type !== 'File' ||
+      (yield* boundedFileDigest(bootstrap, 64 * 1024)) !== sourceDigest
+    )
+      return yield* fail();
+  });
   // The actual server must successfully consume this responder; unsupported probes never become an empty-path ready state.
   const ready = Effect.gen(function* () {
     const actual = yield* readBoundedText(path.join(directory, 'paths.ok'), 64 * 1024);
@@ -298,8 +330,14 @@ export const makePythonProject = Effect.fn('semantic.makePythonProject')(functio
       return yield* fail();
   });
   return {
-    verify,
-    ready,
+    verify: verify.pipe(Effect.andThen(verifyBootstrap)),
+    runtimeArguments: ['--require', bootstrap],
+    ready: verifyBootstrap.pipe(
+      Effect.andThen(ready),
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.provideService(EffectDigest.Digest, digest),
+    ),
     roots,
     settings: {
       python: {pythonPath: launcher},

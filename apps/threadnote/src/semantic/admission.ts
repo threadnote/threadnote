@@ -3,9 +3,13 @@ import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import {SecureRandom} from 'effect/crypto';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {SystemInfo} from '@threadnote/platform/system';
+import {
+  SystemInfo,
+  runtimeProbeProviderTree,
+  runtimeNativePlatformSupport,
+  runtimeAssertPrivateProviderPath,
+} from '@threadnote/platform/system';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import {isJsonObject} from '@threadnote/platform/json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Counter, Digest, Identifier} from '@threadnote/semantic/contracts';
 import {LspFault} from './lsp_transport.js';
@@ -46,15 +50,6 @@ type Ledger = {
   tickets: (typeof Ticket.Type)[];
 };
 const limits = semanticSessionLimits;
-/** Probe only. Unknown/EPERM remains occupied; no PID-only signalling or recovery. */
-function processGroupPresent(pid: number): boolean {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (cause) {
-    return !isJsonObject(cause) || cause.code !== 'ESRCH';
-  }
-}
 export interface SemanticPressure {
   readonly state: 'normal' | 'pressured' | 'unknown';
   readonly rssBytes: number | null;
@@ -76,7 +71,7 @@ export interface SemanticAdmissionOptions {
 }
 export interface SemanticReservation {
   readonly generation: number;
-  readonly bindProvider: (pid: number) => Effect.Effect<void, unknown>;
+  readonly bindProvider: (pid: number, identity?: string) => Effect.Effect<void, unknown>;
   readonly finishImport: Effect.Effect<void, unknown>;
   /** A positive group-drain receipt is required; failure conserves/quarantines the reservation. */
   readonly release: (drained: boolean) => Effect.Effect<void, unknown>;
@@ -88,19 +83,33 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
   const system = yield* SystemInfo;
   const crypto = yield* SecureRandom.SecureRandom;
   const identity = yield* system.canonicalProcessStartIdentity?.(system.processId) ?? succeedUndefined;
-  if (!identity || system.platform === 'win32') return yield* LspFault.make({code: 'prerequisite'});
+  if (!identity || !runtimeNativePlatformSupport().providerTree) return yield* LspFault.make({code: 'prerequisite'});
   const owner: Instance = {pid: system.processId, identity};
   if (!options.readOnly) yield* fs.makeDirectory(options.directory, {recursive: true, mode: 0o700});
   const directory = yield* fs.realPath(options.directory);
-  if (directory !== path.resolve(options.directory) || (yield* fs.stat(directory)).mode & 0o077)
-    return yield* LspFault.make({code: 'prerequisite'});
+  if (directory !== path.resolve(options.directory)) return yield* LspFault.make({code: 'prerequisite'});
+  yield* Effect.try({
+    try: () => runtimeAssertPrivateProviderPath(directory, {kind: 'directory'}),
+    catch: () => LspFault.make({code: 'prerequisite'}),
+  });
   const ledgerPath = path.join(directory, 'admission-v1.json');
-  const groupPresent = options.processGroupPresent ?? processGroupPresent;
+  const providerState = (instance: Instance) => {
+    // An injected legacy group probe is a test seam only; production observes persisted
+    // identity conservatively. In particular a lost Windows Job is never proved absent.
+    if (options.processGroupPresent) return options.processGroupPresent(instance.pid) ? 'present' : 'absent';
+    try {
+      return runtimeProbeProviderTree(instance);
+    } catch {
+      return 'unknown';
+    }
+  };
   const token = () => crypto.randomBytes(32).pipe(Effect.map(bytes => sha256HexSync(bytes)));
   const alive = (instance: Instance) =>
     Effect.gen(function* () {
       if (!system.isProcessRunning(instance.pid)) return false;
-      const observed = yield* system.canonicalProcessStartIdentity?.(instance.pid) ?? succeedUndefined;
+      const observed = yield* (system.canonicalProcessStartIdentity?.(instance.pid) ?? succeedUndefined).pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
       // Missing identity is uncertainty, not proof of death. Different canonical identities prove reuse.
       return observed === undefined || observed === instance.identity;
     });
@@ -121,11 +130,14 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
           const info = yield* fs.stat(ledgerPath);
           if (
             info.type !== 'File' ||
-            info.mode & 0o077 ||
             Number(info.size) > 128 * 1024 ||
             Option.isSome(yield* fs.readLink(ledgerPath).pipe(Effect.option))
           )
             return yield* LspFault.make({code: 'prerequisite'});
+          yield* Effect.try({
+            try: () => runtimeAssertPrivateProviderPath(ledgerPath, {kind: 'file'}),
+            catch: () => LspFault.make({code: 'prerequisite'}),
+          });
           const raw = yield* readBoundedText(ledgerPath, 128 * 1024);
           const json = yield* Effect.try({try: () => JSON.parse(raw), catch: () => LspFault.make({code: 'protocol'})});
           const decoded = yield* Schema.decodeUnknownEffect(Ledger, {onExcessProperty: 'error'})(json).pipe(
@@ -145,7 +157,7 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
             retained.push(slot);
             continue;
           }
-          if (slot.provider && !(yield* alive(slot.provider)) && !groupPresent(slot.provider.pid)) continue;
+          if (slot.provider && providerState(slot.provider) === 'absent') continue;
           // A crash between reservation and provider registration cannot safely be guessed away.
           retained.push({...slot, quarantined: true});
         }
@@ -341,10 +353,11 @@ export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(functio
         );
       return {
         generation,
-        bindProvider: (pid: number) =>
+        bindProvider: (pid: number, creationIdentity?: string) =>
           Effect.gen(function* () {
-            const identity = yield* system.canonicalProcessStartIdentity?.(pid) ?? succeedUndefined;
-            if (!identity || !Number.isSafeInteger(pid) || pid <= 0)
+            const identity =
+              creationIdentity ?? (yield* system.canonicalProcessStartIdentity?.(pid) ?? succeedUndefined);
+            if (!Schema.is(Identifier)(identity) || !Number.isSafeInteger(pid) || pid <= 0)
               return yield* LspFault.make({code: 'prerequisite'});
             yield* update(slot => ({...slot, provider: {pid, identity}}));
           }),

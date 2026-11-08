@@ -1894,3 +1894,20 @@ describe('backend-owned synchronized rename source closure', () => {
     );
   }
 });
+
+it('uses native Windows executable and cache paths without inherited tool hooks', () => {
+  const go = goEnvironment('C:\\SDK Space\\go', 'C:\\private Ω', 'C:\\source\\go.work', 'win32');
+  expect(go.PATH).toBe('C:\\SDK Space\\go\\bin');
+  expect(go.GOWORK).toBe('C:\\source\\go.work');
+  expect(go.GOCACHE).toBe('C:\\private Ω\\cache');
+  expect(go.TEMP).toBe('C:\\private Ω\\tmp');
+  expect(go.GOENV).toBe('off');
+  expect(go.GOTOOLCHAIN).toBe('local');
+  const rust = rustEnvironment('D:\\Rust SDK', 'C:\\private Ω', 'win32');
+  expect(rust.PATH).toBe('D:\\Rust SDK\\bin');
+  expect(rust.CARGO).toBe('D:\\Rust SDK\\bin\\cargo.exe');
+  expect(rust.RUSTC).toBe('D:\\Rust SDK\\bin\\rustc.exe');
+  expect(rust.RUSTDOC).toBe('D:\\Rust SDK\\bin\\rustdoc.exe');
+  expect(rust.CARGO_BUILD_RUSTC_WRAPPER).toBe('');
+  expect(rust.CARGO_NET_OFFLINE).toBe('true');
+});

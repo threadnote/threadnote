@@ -54,6 +54,15 @@ jobs:
       - name: Install frozen workspace dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify native release matrix coverage
+        run: >-
+          bun --eval 'import {BUN_STANDALONE_TARGETS} from "./scripts/release-targets.ts";
+          import {parse} from "yaml";
+          const workflow=parse(await Bun.file(".github/workflows/ci.yml").text());
+          const rows=workflow.jobs["self-contained-distribution"].strategy.matrix.include;
+          const targets=rows.map(row=>"bun-"+(row.target==="linux-x64"?"linux-x64-baseline":row.target==="linux-x64-musl"?"linux-x64-baseline-musl":row.target==="windows-x64"?"windows-x64-baseline":row.target));
+          if(targets.length!==BUN_STANDALONE_TARGETS.length||new Set(targets).size!==targets.length||BUN_STANDALONE_TARGETS.some(target=>!targets.includes(target)))throw new Error("Native execution matrix must cover the exact release target definitions");'
+
       - id: selection
         name: Select affected Bazel targets
         env:
@@ -350,6 +359,8 @@ jobs:
         include:
           - {os: ubuntu-latest, target: linux-x64}
           - {os: ubuntu-24.04-arm, target: linux-arm64}
+          - {os: ubuntu-latest, target: linux-x64-musl}
+          - {os: ubuntu-24.04-arm, target: linux-arm64-musl}
           - {os: macos-15, target: darwin-arm64}
           - {os: macos-15-intel, target: darwin-x64}
           - {os: windows-latest, target: windows-x64}
