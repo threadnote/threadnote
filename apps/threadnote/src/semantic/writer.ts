@@ -383,6 +383,45 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
       );
       if (result.status !== 'published') return yield* reject('unavailable');
     });
+  const discardUnissuedAdmissions = (operation: string, indexed: readonly {operation: string}[]) =>
+    Effect.gen(function* () {
+      yield* attempt(() => Native.runtimeAssertPrivateWriterDirectoryCurrent(authority.directory));
+      const names = yield* fs.readDirectory(authority.directory.path);
+      yield* attempt(() => Native.runtimeAssertPrivateWriterDirectoryCurrent(authority.directory));
+      if (names.length > semanticWriterLimits.maxOperations * 6 + 16) return yield* reject('unavailable');
+      for (const name of names) {
+        if (!/^[a-f0-9]{64}\.admission\.json$/u.test(name)) continue;
+        const candidate = EffectString.slice(0, 64)(name);
+        if (EffectArray.some(indexed, ref => ref.operation === candidate)) continue;
+        // Index membership is required before START or source mutation. Only these unreachable,
+        // never-started admission bytes may be removed; partial JSON is not a write grant.
+        yield* attempt(() => {
+          authority.assertOperationSync(operation);
+          if (
+            Native.runtimeReadPrivateWriterFile(
+              authority.directory,
+              startName(candidate),
+              semanticWriterLimits.maxJournalBytes,
+            ) ||
+            Native.runtimeReadPrivateWriterFile(
+              authority.directory,
+              journalName(candidate),
+              semanticWriterLimits.maxJournalBytes,
+            )
+          )
+            throw reject('invalid-journal');
+          const file = Native.runtimeReadPrivateWriterFile(
+            authority.directory,
+            name,
+            semanticWriterLimits.maxJournalBytes,
+          );
+          if (file)
+            Native.runtimeRemovePrivateWriterFile(authority.directory, name, file.identity, () =>
+              authority.assertOperationSync(operation),
+            );
+        });
+      }
+    });
   const restore = (raw: unknown) =>
     attempt(() => {
       const record = Schema.decodeUnknownSync(Admission, {onExcessProperty: 'error'})(raw);
@@ -840,6 +879,7 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
           operation,
           Effect.gen(function* () {
             const existing = yield* authority.listOperations;
+            yield* discardUnissuedAdmissions(operation, existing);
             if (existing.length >= semanticWriterLimits.maxOperations) return yield* reject('unavailable');
             let size = 0;
             for (const ref of existing) {
@@ -923,15 +963,17 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
             const record: Admission = {...temporary, claims, owners};
             const sealed = {...record, capabilityVerifier: verifier(capability, record, proposal)};
             if (size + bytes(sealed).length > semanticWriterLimits.maxPrivateBytes) return yield* reject('unavailable');
+            // An indexed operation must always have complete material for read-only maintenance,
+            // including when registration commits but its acknowledgement or issued handle is lost.
+            yield* publish(operation, admissionName(operation), sealed, 'exclusive', () => {
+              for (const claim of claims) authority.assertTargetSync(claim);
+            });
             yield* authority.registerOperation({
               operation,
               journalName: journalName(operation),
               resources: EffectArray.map(claims, claim => claim.canonicalUri),
               authority: claims[0].authority,
               fence: claims[0].fence,
-            });
-            yield* publish(operation, admissionName(operation), sealed, 'exclusive', () => {
-              for (const claim of claims) authority.assertTargetSync(claim);
             });
             return {
               version: 1,

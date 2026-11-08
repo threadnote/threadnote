@@ -129,6 +129,83 @@ const stable = (a: RuntimeWriterIdentity, b: RuntimeWriterIdentity) =>
   a.gid === b.gid &&
   a.nlink === b.nlink &&
   a.size === b.size;
+
+/** Bounded descriptor security record: missing/truncated records are unknown, never an empty ACL. */
+function assertPrivateAcl(fd: number, privateObject: boolean): void {
+  supported();
+  const lib = dlopen('/usr/lib/libSystem.B.dylib', {
+    __fstat64_extended: {args: ['i32', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
+    fpathconf: {args: ['i32', 'i32'], returns: 'i64'},
+    fstatfs: {args: ['i32', 'buffer'], returns: 'i32'},
+  });
+  try {
+    // Current Darwin arm64 headers: stat144, statfs2168/flags64, kauth_filesec44 + ACE24.
+    if (lib.symbols.fpathconf(fd, 13) !== 1n || lib.symbols.fpathconf(fd, 14) !== 0n) fail('private-storage');
+    const volume = new Uint8Array(2168 + 32);
+    volume.fill(0xa5);
+    if (
+      lib.symbols.fstatfs(fd, volume.subarray(0, 2168)) !== 0 ||
+      !volume.subarray(2168).every(value => value === 0xa5) ||
+      (new DataView(volume.buffer).getUint32(64, true) & 0x00200000) !== 0
+    )
+      fail('private-storage');
+    const before = stat(fd);
+    const metadata = new Uint8Array(144 + 32);
+    metadata.fill(0xa5);
+    const maximum = 44 + 24 * 128;
+    const security = new Uint8Array(maximum + 32);
+    security.fill(0xa5);
+    const length = new BigUint64Array([BigInt(maximum), 0xa5a5a5a5a5a5a5a5n]);
+    if (
+      lib.symbols.__fstat64_extended(
+        fd,
+        metadata.subarray(0, 144),
+        security.subarray(0, maximum),
+        new Uint8Array(length.buffer, 0, 8),
+      ) !== 0 ||
+      !metadata.subarray(144).every(value => value === 0xa5) ||
+      !security.subarray(maximum).every(value => value === 0xa5) ||
+      length[1] !== 0xa5a5a5a5a5a5a5a5n ||
+      length[0] < 44n ||
+      length[0] > BigInt(maximum)
+    )
+      fail('private-storage');
+    const observed = new DataView(metadata.buffer);
+    if (
+      BigInt(observed.getInt32(0, true)) !== before.dev ||
+      observed.getBigUint64(8, true) !== before.ino ||
+      BigInt(observed.getUint16(4, true)) !== before.mode ||
+      BigInt(observed.getUint32(16, true)) !== before.uid ||
+      BigInt(observed.getUint32(20, true)) !== before.gid
+    )
+      fail('private-storage');
+    const acl = new DataView(security.buffer);
+    const count = acl.getUint32(36, true);
+    // NOACL is an explicit kernel record; an omitted ACL/property or getter error is not equivalent.
+    if (
+      acl.getUint32(0, true) !== 0x012cc16d ||
+      (acl.getUint32(40, true) & ~0x00020000) !== 0 ||
+      (count !== 0xffffffff && count > 128) ||
+      Number(length[0]) !== 44 + (count === 0xffffffff ? 0 : count * 24)
+    )
+      fail('private-storage');
+    if (count !== 0xffffffff)
+      for (let index = 0; index < count; index++) {
+        const flags = acl.getUint32(44 + index * 24 + 16, true);
+        const rights = acl.getUint32(44 + index * 24 + 20, true);
+        const kind = flags & 0xf;
+        if ((kind !== 1 && kind !== 2) || (flags & ~0x1ff) !== 0 || (rights & ~0x00103ffe) !== 0)
+          fail('private-storage');
+        // Conservative: no principal/group resolution, and no repair of unexpected ACLs.
+        if (kind === 1 && (privateObject || (rights & 0x3574) !== 0 || (flags & 0x1e0) !== 0)) fail('private-storage');
+      }
+    if (!stable(before, stat(fd))) fail('private-storage');
+  } catch {
+    fail('private-storage');
+  } finally {
+    lib.close();
+  }
+}
 const physical = (info: RuntimeWriterIdentity) => JSON.stringify([String(info.dev), String(info.ino)]);
 const equalBytes = (a: Uint8Array, b: Uint8Array) =>
   a.length === b.length && a.every((value, index) => value === b[index]);
@@ -247,6 +324,8 @@ function directoryState(directory: RuntimePrivateWriterDirectory) {
   checkDirectory(state);
   const info = stat(last(state).fd);
   if (info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
+  for (let index = 0; index < state.chain.length; index++)
+    assertPrivateAcl(state.chain[index].fd, index === state.chain.length - 1);
   return state;
 }
 function requireFile(info: ReturnType<typeof stat>, bound: number, writable: boolean) {
@@ -480,6 +559,7 @@ export function runtimeOpenPrivateWriterChild(
     const info = stat(child);
     if (!info.isDirectory() || info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n)
       fail('private-storage');
+    assertPrivateAcl(child, true);
   } finally {
     native.closeSync(child);
   }
@@ -500,6 +580,7 @@ export function runtimeOpenPrivateWriterAuthority(
   if (identity.userId !== process.getuid?.()) fail('identity');
   const home = openDirectory(identity.accountHome);
   try {
+    for (const edge of home.chain) assertPrivateAcl(edge.fd, false);
     if (
       EffectArray.some(
         home.chain,
@@ -558,6 +639,9 @@ export function runtimeReadPrivateWriterFile(
     return fail('private-storage');
   }
   try {
+    const before = stat(fd);
+    if (before.uid !== BigInt(process.getuid?.() ?? -1) || (before.mode & 0o077n) !== 0n) fail('private-storage');
+    assertPrivateAcl(fd, true);
     const result = readFd(fd, maximumBytes);
     if (result.identity.uid !== BigInt(process.getuid?.() ?? -1) || (result.identity.mode & 0o077n) !== 0n)
       fail('private-storage');
@@ -598,15 +682,18 @@ export function runtimePublishPrivateWriterFile(
     createdIdentity = created;
     requireFile(created, maximumFileBytes, true);
     if (created.uid !== BigInt(process.getuid?.() ?? -1) || (created.mode & 0o777n) !== 0o600n) fail('private-storage');
+    assertPrivateAcl(fd, true);
     let offset = 0;
     while (offset < bytes.length) {
       input.assertCurrentSync();
+      assertPrivateAcl(fd, true);
       const count = native.writeSync(fd, bytes, offset, bytes.length - offset, offset);
       if (count <= 0) fail('io');
       offset += count;
     }
     syncFile(fd);
     directoryState(directory);
+    assertPrivateAcl(fd, true);
     input.assertCurrentSync();
     if (input.mode === 'replace') {
       const lib = library();
@@ -674,6 +761,7 @@ export function runtimeReadWriterLockToken(path: string): {
   if (before.isSymbolicLink()) fail('path');
   const fd = native.openSync(path, constants.O_RDONLY | fileFlags);
   try {
+    assertPrivateAcl(fd, true);
     const result = readFd(fd, 4096);
     if (!stable(before, result.identity) || !stable(before, native.lstatSync(path, {bigint: true}))) fail('identity');
     return {

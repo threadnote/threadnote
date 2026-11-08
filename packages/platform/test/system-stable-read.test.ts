@@ -22,6 +22,137 @@ import {
 } from '../src/system.js';
 
 effectIt.layer(BunServices.layer)(it => {
+  it.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    'refuses actual inheritable ACL grants on an already opened private directory before publishing bytes',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-private-acl-'}));
+        const native = process.getBuiltinModule('fs');
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenPrivateWriterDirectory(folder)),
+          directory =>
+            Effect.sync(() => {
+              const chmod = Bun.spawnSync(
+                ['/bin/chmod', '+a', 'everyone allow read,write,execute,file_inherit,directory_inherit', folder],
+                {stdout: 'pipe', stderr: 'pipe', timeout: 5000},
+              );
+              expect(chmod.exitCode).toBe(0);
+              expect(native.statSync(folder).mode & 0o777).toBe(0o700);
+              expect(() =>
+                runtimePublishPrivateWriterFile(
+                  directory,
+                  'private.json',
+                  new TextEncoder().encode('FIXTURE_PRIVATE_SOURCE_SENTINEL'),
+                  {
+                    mode: 'exclusive',
+                    nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    assertCurrentSync: () => undefined,
+                  },
+                ),
+              ).toThrow();
+              expect(native.existsSync(`${folder}/private.json`)).toBe(false);
+              // Existing unexpected ACLs were refused, never silently repaired.
+              expect(() => runtimeOpenPrivateWriterDirectory(folder)).toThrow();
+            }),
+          directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+        );
+      }),
+  );
+});
+
+for (const boundary of ['ancestor', 'existing-file', 'new-file'] as const) {
+  effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+      `refuses actual unsafe ACL state at the private ${boundary} boundary`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-acl-boundary-'}));
+          const native = process.getBuiltinModule('fs');
+          const child = `${folder}/vault`;
+          native.mkdirSync(child, {mode: 0o700});
+          const file = `${child}/private.json`;
+          const grant = (path: string, permissions: string) => {
+            const result = Bun.spawnSync(['/bin/chmod', '+a', `everyone allow ${permissions}`, path], {
+              stdout: 'pipe',
+              stderr: 'pipe',
+              timeout: 5000,
+            });
+            expect(result.exitCode).toBe(0);
+          };
+          if (boundary === 'ancestor') {
+            grant(folder, 'write,execute,delete_child');
+            expect(native.statSync(child).mode & 0o777).toBe(0o700);
+            expect(() => runtimeOpenPrivateWriterDirectory(child)).toThrow();
+            expect(native.existsSync(file)).toBe(false);
+            return;
+          }
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenPrivateWriterDirectory(child)),
+            directory =>
+              Effect.sync(() => {
+                const options = {
+                  mode: 'exclusive' as const,
+                  nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                  assertCurrentSync: () => undefined,
+                };
+                if (boundary === 'existing-file') {
+                  native.writeFileSync(file, 'existing fixture', {mode: 0o600});
+                  grant(file, 'read,write');
+                  const read = vi.spyOn(native, 'readSync');
+                  try {
+                    expect(() => runtimeReadPrivateWriterFile(directory, 'private.json', 128)).toThrow();
+                    expect(read).not.toHaveBeenCalled();
+                    expect(
+                      runtimePublishPrivateWriterFile(
+                        directory,
+                        'private.json',
+                        new TextEncoder().encode('replacement fixture'),
+                        {...options, mode: 'replace'},
+                      ).status,
+                    ).toBe('unknown');
+                  } finally {
+                    read.mockRestore();
+                  }
+                  expect(native.readFileSync(file, 'utf8')).toBe('existing fixture');
+                  expect(native.statSync(file).mode & 0o777).toBe(0o600);
+                } else {
+                  const original = native.fstatSync.bind(native);
+                  let injected = false;
+                  const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+                    if (!injected && native.existsSync(file)) {
+                      injected = true;
+                      grant(file, 'read,write');
+                    }
+                    return original(fd, options);
+                  });
+                  try {
+                    expect(
+                      runtimePublishPrivateWriterFile(
+                        directory,
+                        'private.json',
+                        new TextEncoder().encode('FIXTURE_PRIVATE_SOURCE_SENTINEL'),
+                        options,
+                      ).status,
+                    ).toBe('unknown');
+                  } finally {
+                    probe.mockRestore();
+                  }
+                  expect(injected).toBe(true);
+                  expect(native.statSync(file).size).toBe(0);
+                  expect(native.statSync(file).mode & 0o777).toBe(0o600);
+                  expect(() => runtimeReadPrivateWriterFile(directory, 'private.json', 128)).toThrow();
+                }
+              }),
+            directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+          );
+        }),
+    );
+  });
+}
+
+effectIt.layer(BunServices.layer)(it => {
   it.effect('conditionally writes through actual rooted descriptors and synchronizes the acknowledged source', () =>
     Effect.gen(function* () {
       if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
