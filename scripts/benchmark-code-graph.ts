@@ -1,3 +1,7 @@
+import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {TreeSitterRuntime, TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
+import type {Query} from 'web-tree-sitter';
+import {NATIVE_PERFORMANCE_CONTRACT} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray} from 'effect';
 import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -1932,6 +1936,9 @@ const benchmarkCodeGraph = Effect.scoped(
           : []),
       ],
       metadata: {
+        nativePerformanceContract: JSON.stringify(NATIVE_PERFORMANCE_CONTRACT),
+        nativePerformanceAttribution:
+          'Existing stage and request observations retain their declared boundaries. Aggregate stats do not exercise detail topology; no pure parse/query/fact/IPC or topology-compute isolation is claimed. --native-stage-probe provides an overlapping in-process diagnostic only.',
         activationMeasurement:
           'privacy-safe completed-stage duration and row counts; unobserved optional stages are retained as zero',
         coldEdges: cold.snapshot.edgeCount,
@@ -9870,8 +9877,156 @@ const embeddingRuntimeDiagnosticLayer = Layer.mergeAll(
   LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
 ).pipe(Layer.provideMerge(BunServices.layer));
 
+/** Diagnostic in-process decomposition; production worker measurements remain authoritative. */
+const nativeStageProbe = Effect.fn('benchmarkCodeGraph.nativeStageProbe')(function* () {
+  const args = process.argv.slice(3);
+  let output: string | undefined;
+  let samples = 30;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--output') output = required(args[++index], '--output');
+    else if (args[index] === '--samples') samples = integer(args[++index], '--samples', 1);
+    else return yield* ScriptError.make({message: `Unknown stage probe option: ${args[index]}`});
+  }
+  const registry = yield* CodeGraphLanguagePackRegistry;
+  const runtime = yield* TreeSitterRuntime;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const sourceRoot = system.currentDirectory();
+  const commit = yield* threadnoteSourceGit(sourceRoot, ['rev-parse', 'HEAD']);
+  const dirty = (yield* threadnoteSourceGit(sourceRoot, ['status', '--porcelain'])).length > 0;
+  const fixtures = [
+    {
+      path: 'Probe.java',
+      language: 'java',
+      content: 'package probe; class Probe { int value; int read() { return value; } }',
+    },
+    {
+      path: 'probe.py',
+      language: 'python',
+      content: 'class Probe:\n    def read(self, value):\n        return value + 1\n',
+    },
+    {path: 'probe.go', language: 'go', content: 'package probe\nfunc Read(value int) int { return value + 1 }\n'},
+  ];
+  const observations: {
+    language: string;
+    sample: number;
+    loadParse: number;
+    query: number;
+    callback: number;
+    factControlResidual: number;
+    cleanup: number;
+    total: number;
+    digest: string;
+  }[] = [];
+  for (const fixture of fixtures) {
+    for (let sample = 0; sample <= samples; sample += 1) {
+      let entered = 0;
+      let exited = 0;
+      let queryMilliseconds = 0;
+      const originals = new Map<Query, Query['matches']>();
+      const started = performance.now();
+      const facts = yield* registry
+        .extractRawFile({
+          ...fixture,
+          contentHash: sha256HexSync(fixture.content),
+          blobId: sha256HexSync(fixture.content),
+          mode: '100644',
+          size: new TextEncoder().encode(fixture.content).byteLength,
+          source: 'worktree',
+        })
+        .pipe(
+          Effect.provideService(
+            TreeSitterRuntime,
+            TreeSitterRuntime.of({
+              withParsedSource: (asset, source, use) =>
+                runtime.withParsedSource(asset, source, parsed => {
+                  entered = performance.now();
+                  try {
+                    return use({
+                      ...parsed,
+                      query: source => {
+                        const queryStarted = performance.now();
+                        const query = parsed.query(source);
+                        queryMilliseconds += performance.now() - queryStarted;
+                        if (!originals.has(query)) {
+                          const original = query.matches;
+                          originals.set(query, original);
+                          query.matches = (...args) => {
+                            const matchStarted = performance.now();
+                            try {
+                              return original.apply(query, args);
+                            } finally {
+                              queryMilliseconds += performance.now() - matchStarted;
+                            }
+                          };
+                        }
+                        return query;
+                      },
+                    });
+                  } finally {
+                    exited = performance.now();
+                  }
+                }),
+            }),
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              for (const [query, original] of originals) query.matches = original;
+            }),
+          ),
+        );
+      const finished = performance.now();
+      if (entered === 0 || exited === 0)
+        return yield* ScriptError.make({message: 'Stage probe did not enter Tree-sitter callback.'});
+      observations.push({
+        language: fixture.language,
+        sample,
+        loadParse: entered - started,
+        query: queryMilliseconds,
+        callback: exited - entered,
+        factControlResidual: Math.max(0, exited - entered - queryMilliseconds),
+        cleanup: finished - exited,
+        total: finished - started,
+        digest: sha256HexSync(JSON.stringify(facts)),
+      });
+    }
+  }
+  const result = {
+    version: 1,
+    kind: 'diagnostic',
+    contract: NATIVE_PERFORMANCE_CONTRACT,
+    source: {commit, dirty, runtime: Bun.version, platform: process.platform, architecture: process.arch},
+    identities: {
+      grammar: registry.activePackProvenance(EffectArray.map(fixtures, fixture => fixture.path)),
+      runtime: TREE_SITTER_RUNTIME_CACHE_IDENTITY,
+      workers: 0,
+    },
+    fixtures: EffectArray.map(fixtures, fixture => ({
+      language: fixture.language,
+      sha256: sha256HexSync(fixture.content),
+    })),
+    observations,
+    limitations: [
+      'In-process diagnostic with tiny fixed polyglot fixtures; no indexing or IPC measured.',
+      'loadParse includes runtime/grammar loading, registry work and parsing up to callback entry.',
+      'query directly times compilation/cache lookup and matches; callback includes query and fact construction, so these overlap.',
+      'factControlResidual = max(0, callback - query): derived fact construction + extraction control/projection residual, not pure fact construction; all terms use the same callback and performance.now timer.',
+      'cleanup includes parser/tree deletion, Effect completion and restoration of the diagnostic matches wrapper.',
+      'sample zero is first use per language in one process; remaining samples are warm, not independent cold processes.',
+    ],
+  };
+  if (output) {
+    yield* fs.makeDirectory(path.dirname(output), {recursive: true});
+    yield* atomicWrite(output, `${JSON.stringify(result, undefined, 2)}\n`);
+  }
+  yield* printJson(result);
+});
+
 if (import.meta.main) {
-  if (
+  if (process.argv[2] === '--native-stage-probe')
+    BunRuntime.runMain(provideScriptLayer(nativeStageProbe(), ApplicationLayer));
+  else if (
     process.argv[2] === '--embedding-runtime-diagnostics' ||
     process.argv[2] === '--embedding-runtime-diagnostic-child'
   )
