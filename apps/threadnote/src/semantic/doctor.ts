@@ -47,7 +47,11 @@ const actions = {
     'Use a client supporting the retained state version, or restore a separately verified compatible configuration; do not remove recovery records',
   invalid: 'Correct the private host profile schema without discarding unknown configuration or recovery records',
   untrusted:
-    'Check canonical paths, account ownership and private permissions; setup never repairs permissions automatically',
+    'Check canonical paths, account ownership, private permissions and ACL proof; setup never repairs permissions automatically',
+  'unsupported-platform':
+    'Private profile ACL and descriptor proof is unavailable on this platform; use a qualified host. Graph and memory remain independent',
+  indeterminate:
+    'Setup publication is indeterminate; inspect the retained profile with a qualified client before retrying. Do not assume no write or remove recovery evidence',
 } as const;
 
 /** Local operational projection. No source, host paths, provider stderr or private capabilities enter the response. */
