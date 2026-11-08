@@ -22,18 +22,38 @@ describe('Effect crypto compatibility', () => {
       ({bytes, text}) =>
         Effect.gen(function* () {
           const digest = yield* Digest.Digest;
+          const expectedText = createHash('sha256').update(text).digest('hex');
+          expect(sha256HexSync(text)).toBe(expectedText);
+
           const padded = new Uint8Array(bytes.length + 7).fill(255);
           padded.set(bytes, 3);
           const view = padded.subarray(3, 3 + bytes.length);
+          const before = padded.slice();
           for (const input of [view, encoder.encode(text), encoder.encode('ø漢字🙂\u0000')]) {
             const expected = createHash('sha256').update(input).digest('hex');
             expect(yield* digest.digestHex(Digest.sha256, input)).toBe(expected);
             expect(sha256HexSync(input)).toBe(expected);
           }
           expect(view).toEqual(bytes);
-          expect(padded[0]).toBe(255);
-          expect(padded[padded.length - 1]).toBe(255);
+          expect(padded).toEqual(before);
         }),
+      {fastCheck: {numRuns: 100}},
+    );
+
+    fcEffectProp(
+      layerIt,
+      'matches UTF-8 replacement behavior for malformed UTF-16 strings',
+      {
+        prefix: fc.string({maxLength: 24}),
+        suffix: fc.string({maxLength: 24}),
+        surrogate: fc.constantFrom('\ud800', '\udfff'),
+      },
+      ({prefix, suffix, surrogate}) => {
+        const text = `${prefix}${surrogate}${suffix}`;
+        return Effect.sync(() => {
+          expect(sha256HexSync(text)).toBe(createHash('sha256').update(text).digest('hex'));
+        });
+      },
       {fastCheck: {numRuns: 100}},
     );
 
