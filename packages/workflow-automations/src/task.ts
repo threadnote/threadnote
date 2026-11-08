@@ -5,6 +5,7 @@ import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
+import {nativeCycleReviewRecordingMode} from './cycle_review.js';
 
 export const NativeTaskStartRequestSchema = Schema.Struct({
   callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
@@ -54,6 +55,8 @@ export interface NativeTaskView {
       readonly files: readonly string[];
       readonly scopeFiles: readonly string[];
       readonly requiredReviewLanes: readonly string[];
+      readonly recordingMode: 'full' | 'incremental';
+      readonly snapshotRef: string;
       readonly previousAttempt?: {readonly status: 'invalid'; readonly message: string};
     };
   };
@@ -439,7 +442,7 @@ export function projectNativeTaskView(
   const reviewBudgetBlocked = reviewBudget?.exhausted ?? false;
   const next = reviewWork
     ? {
-        action: reviewBlocked ? 'resolve-review-failure' : reviewBudgetBlocked ? 'expand-review-budget' : 'review',
+        action: reviewBudgetBlocked ? 'expand-review-budget' : reviewBlocked ? 'resolve-review-failure' : 'review',
         phaseId: reviewWork.phase.id,
         snapshotId: reviewWork.snapshot.snapshot.snapshotId,
         ...(latestInvalidAttempt ? {reason: latestInvalidAttempt.message} : {}),
@@ -477,10 +480,13 @@ export function projectNativeTaskView(
     count => count > nextOffset,
   );
   const missingInputs = reviewWork
-    ? reviewBlocked
-      ? ['Explicit human authority to resolve repeated invalid review attempts']
-      : reviewBudgetBlocked
-        ? [`Explicit human authorization to expand this phase review budget (current limit: ${reviewBudget?.limit})`]
+    ? reviewBudgetBlocked
+      ? [`Explicit human authorization to expand this phase review budget (current limit: ${reviewBudget?.limit})`]
+      : reviewBlocked
+        ? [
+            'Submit one corrected review with this current taskRef, the same snapshotRef, and nonblank userAuthority.',
+            'Preserve all prior findings and dispositions; record a complete independent source review.',
+          ]
         : [
             `A complete independent review for snapshot ${reviewWork.snapshot.snapshot.snapshotId}`,
             'Correctness and simplicity review lanes with complete reports',
@@ -536,6 +542,25 @@ export function projectNativeTaskView(
                     files: page(snapshotFiles, offset),
                     scopeFiles: page(snapshotScopeFiles, offset),
                     requiredReviewLanes: ['correctness', 'simplicity'],
+                    recordingMode: nativeCycleReviewRecordingMode(snapshot),
+                    snapshotRef: (() => {
+                      const baseline = runtime.baselines[snapshot.phaseId];
+                      if (!baseline) throw new Error('An active review snapshot must have its admitted baseline.');
+                      return encodeNativeTaskActionRef({
+                        version: 1,
+                        kind: 'snapshot',
+                        runId: state.runId,
+                        generationHash: sha256HexSync(state.generation),
+                        phaseId: snapshot.phaseId,
+                        phaseHash: snapshot.phaseHash,
+                        baselineHead: baseline.head,
+                        baselineTree: baseline.tree,
+                        baselineRef: baseline.pinnedRef,
+                        snapshotId: snapshot.snapshotId,
+                        sourceHead: snapshot.head,
+                        sourceTree: snapshot.tree,
+                      });
+                    })(),
                     ...(latestInvalidAttempt
                       ? {previousAttempt: {status: 'invalid' as const, message: latestInvalidAttempt.message}}
                       : {}),

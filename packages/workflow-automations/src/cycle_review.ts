@@ -158,6 +158,11 @@ export const NativeCycleReviewSchema = Schema.Struct({
   findings: Schema.Array(findingSchema).check(Schema.isMaxLength(512)),
 });
 export type NativeCycleReview = typeof NativeCycleReviewSchema.Type;
+
+/** Review recording mode follows snapshot lineage; it never limits independent review scope. */
+export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): 'full' | 'incremental' =>
+  snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1 ? 'incremental' : 'full';
+
 const blocking = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
 const safePath = (value: string) =>
@@ -204,10 +209,7 @@ export function validateNativeCycleReviewHistory(
     review.snapshotId !== snapshot.snapshotId ||
     review.phaseHash !== snapshot.phaseHash ||
     review.snapshotTree !== snapshot.tree ||
-    review.mode !==
-      (snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1
-        ? 'incremental'
-        : 'full')
+    review.mode !== nativeCycleReviewRecordingMode(snapshot)
   )
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),

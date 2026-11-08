@@ -56,13 +56,19 @@ import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {
   cycleRequest,
+  currentNativeTaskRef,
   fail,
   hasApprovedBasePlanTransition,
   hasExactAcceptedFullReview,
   inCheckout,
   isCurrentTaskTargetForRequalification,
   nativeTaskBindingsCanReconcile,
+  reviewAttemptRef,
+  reviewRecoveryDecision,
+  reviewReplayAuthorityMatches,
   requalificationSnapshotId,
+  snapshotRefMatchesBaseline,
+  taskActionSnapshotRef,
   unwrapCycle,
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
@@ -237,6 +243,8 @@ const requestSchema = Schema.Union([
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     snapshotRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    userAuthority: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
     report: reviewInputSchema,
   }),
   Schema.Struct({
@@ -610,28 +618,6 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   return value;
 };
 
-const snapshotRef = (work: NonNullable<ReturnType<typeof decodeNativeTaskActionRef>>, entry: unknown) => {
-  if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
-    throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
-  const snapshot = entry.snapshot;
-  if (typeof snapshot.snapshotId !== 'string' || typeof snapshot.head !== 'string' || typeof snapshot.tree !== 'string')
-    throw fail('invalid-state', 'Canonical snapshot identity is incomplete.');
-  return encodeNativeTaskActionRef({
-    version: 1,
-    kind: 'snapshot',
-    runId: work.runId,
-    generationHash: work.generationHash,
-    phaseId: work.phaseId,
-    phaseHash: work.phaseHash,
-    baselineHead: work.baselineHead,
-    baselineTree: work.baselineTree,
-    baselineRef: work.baselineRef,
-    snapshotId: snapshot.snapshotId,
-    sourceHead: snapshot.head,
-    sourceTree: snapshot.tree,
-  });
-};
-
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -951,25 +937,15 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       return yield* fail('task-scope', 'Task actions support approved local, commit, or PR-delivery cycles.');
 
     const taskView = () => readNativeTaskView(config, {runId: request.runId, callerCwd: checkout});
-    const currentTaskRef = (view: Effect.Success<ReturnType<typeof taskView>>, action: string) => {
-      const currentPhaseId = 'phaseId' in view.next ? view.next.phaseId : undefined;
-      const currentSnapshotId = 'snapshotId' in view.next ? view.next.snapshotId : undefined;
-      if (!('taskRef' in request) || !request.taskRef || view.next.action !== action) return undefined;
-      const ref = decodeNativeTaskActionRef(request.taskRef);
-      if (
-        !ref ||
-        ref.kind !== 'task' ||
-        ref.runId !== request.runId ||
-        ref.generationHash !== sha256HexSync(stored.state.generation) ||
-        ref.stateRevision !== stored.revision ||
-        ref.taskAction !== action ||
-        (currentPhaseId !== undefined &&
-          (ref.phaseId !== currentPhaseId || ref.phaseHash !== state.phases[currentPhaseId]?.phaseHash)) ||
-        (currentSnapshotId !== undefined && ref.snapshotId !== currentSnapshotId)
-      )
-        return undefined;
-      return ref;
-    };
+    const currentTaskRef = (view: Effect.Success<ReturnType<typeof taskView>>, action: string) =>
+      currentNativeTaskRef(
+        'taskRef' in request ? request.taskRef : undefined,
+        stored.state,
+        stored.revision,
+        request.runId,
+        action,
+        view,
+      );
 
     if (request.command === 'begin') {
       const view = yield* taskView();
@@ -1290,6 +1266,12 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         entry.snapshot.tree !== ref.sourceTree
       )
         return yield* fail('stale-snapshot-ref', 'The referenced immutable snapshot is unavailable.');
+      const snapshotBaseline = runtime.baselines[ref.phaseId];
+      if (!snapshotRefMatchesBaseline(ref, snapshotBaseline))
+        return yield* fail(
+          'stale-snapshot-ref',
+          'The immutable snapshot reference does not match its admitted baseline.',
+        );
       const report = {
         snapshotId: entry.snapshot.snapshotId,
         phaseHash: entry.snapshot.phaseHash,
@@ -1302,12 +1284,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       const attemptId = `attempt-${EffectString.slice(0, 48)(sha256HexSync(stableJson([ref.snapshotId, reportDigest])))}`;
       if (ref.attemptId !== undefined && (ref.attemptId !== attemptId || ref.payloadDigest !== reportDigest))
         return yield* fail('review-conflict', 'The review reference is bound to different report content.');
-      const attemptRef = encodeNativeTaskActionRef({
-        ...ref,
-        kind: 'snapshot',
-        attemptId,
-        payloadDigest: reportDigest,
-      });
+      const attemptRef = reviewAttemptRef(ref, attemptId, reportDigest);
       const prior = EffectOption.getOrUndefined(EffectArray.findFirst(runtime.attempts, item => item.id === attemptId));
       if (prior) {
         if (prior.snapshotId !== ref.snapshotId || prior.digest !== reportDigest)
@@ -1315,6 +1292,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
             'review-conflict',
             'This review identity is already bound to different canonical evidence.',
           );
+        if (!reviewReplayAuthorityMatches(prior.authority, request.taskRef, request.userAuthority))
+          return yield* fail('review-authority', 'Replay the review with the same recovery authority inputs.');
         return {
           status: prior.status === 'accepted' ? 'recorded' : 'invalid',
           replayed: true,
@@ -1327,11 +1306,23 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         callerCwd: checkout,
         role: 'review',
       });
-      if (view.status !== 'ready' || view.next.action !== 'review' || view.next.snapshotId !== ref.snapshotId)
+      const recovery = reviewRecoveryDecision(view, request.taskRef, request.userAuthority, currentTaskRef);
+      if (recovery === 'missing-authority')
+        return yield* fail(
+          'review-authority',
+          'A corrected review requires the current taskRef and nonblank userAuthority.',
+        );
+      if (recovery === 'stale-task-ref')
+        return yield* fail('stale-task-ref', 'Read the current blocked review-recovery card before retrying.');
+      if (recovery === 'normal' && (view.status !== 'ready' || view.next.action !== 'review')) {
         return yield* fail(
           'review-not-ready',
           EffectArray.join(view.missingInputs, ' ') || 'Follow the current native review task.',
         );
+      }
+      const userAuthority = recovery === 'authorized' ? request.userAuthority : undefined;
+      if (view.next.snapshotId !== ref.snapshotId)
+        return yield* fail('stale-snapshot-ref', 'The current review task no longer references this snapshot.');
       const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current review source head.');
       yield* inCheckout(
@@ -1344,6 +1335,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
             attemptId,
             acceptedHead: head,
             report,
+            ...(userAuthority === undefined ? {} : {userAuthority}),
             expectedRevision: stored.revision,
           }),
         ),
@@ -1726,7 +1718,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           status: 'recorded',
           replayed: true,
           snapshot: admitted,
-          snapshotRef: snapshotRef(
+          snapshotRef: taskActionSnapshotRef(
             {
               version: 1,
               kind: 'work',
@@ -1811,7 +1803,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         status: 'recorded',
         replayed: false,
         snapshot: admitted,
-        snapshotRef: snapshotRef(
+        snapshotRef: taskActionSnapshotRef(
           {
             version: 1,
             kind: 'work',
@@ -1918,7 +1910,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         status: 'recorded',
         replayed: alreadyAdmitted._tag === 'Some',
         snapshot: result.snapshot,
-        snapshotRef: snapshotRef(ref, result.snapshot),
+        snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
       };
     }
 
@@ -1945,7 +1937,12 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           'snapshot-conflict',
           'This task reference is already bound to different canonical snapshot evidence.',
         );
-      return {status: 'recorded', replayed: true, snapshot: admitted, snapshotRef: snapshotRef(ref, admitted)};
+      return {
+        status: 'recorded',
+        replayed: true,
+        snapshot: admitted,
+        snapshotRef: taskActionSnapshotRef(ref, admitted),
+      };
     }
     const baseline = runtime.baselines[ref.phaseId];
     if (
@@ -1995,6 +1992,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       status: 'recorded',
       replayed: false,
       snapshot: result.snapshot,
-      snapshotRef: snapshotRef(ref, result.snapshot),
+      snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
     };
   });

@@ -375,6 +375,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
         snapshotRef: McpInput.requiredString('Opaque snapshot reference returned by snapshot recording'),
+        taskRef: McpInput.string('Current blocked review-recovery task reference; provide with userAuthority'),
+        userAuthority: McpInput.string('Actual human authority for one corrected attempt; provide with taskRef'),
         mode: NativeCycleReviewSchema.fields.mode,
         selected: NativeCycleReviewSchema.fields.selected,
         lanes: NativeCycleReviewSchema.fields.lanes,
@@ -385,6 +387,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       runId,
       callerCwd,
       snapshotRef,
+      taskRef,
+      userAuthority,
       mode,
       selected,
       lanes,
@@ -395,6 +399,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         runId,
         callerCwd,
         snapshotRef,
+        ...(taskRef === undefined ? {} : {taskRef}),
+        ...(userAuthority === undefined ? {} : {userAuthority}),
         report: {mode, selected, lanes, findings},
       });
       const text = JSON.stringify(result);

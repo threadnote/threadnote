@@ -353,7 +353,20 @@ describe('native task projection', () => {
       ),
       pinnedRef: 'refs/threadnote/snapshot/review-one',
     };
-    const runtime = {...state.cycle!, snapshots: [{snapshot, incoming: []}]};
+    const runtime = {
+      ...state.cycle!,
+      baselines: {
+        ...state.cycle!.baselines,
+        'phase-one': {
+          repo: '/repo',
+          head: Effect.pipe('b', EffectString.repeat(40)),
+          tree: Effect.pipe('c', EffectString.repeat(40)),
+          preservedFiles: [],
+          pinnedRef: 'refs/heads/main',
+        },
+      },
+      snapshots: [{snapshot, incoming: []}],
+    };
     const input = {...state, cycle: runtime};
     const view = projectNativeTaskView(input, Effect.pipe('f', EffectString.repeat(64)));
     expect(view).toMatchObject({
@@ -363,6 +376,8 @@ describe('native task projection', () => {
       phase: {
         snapshot: {
           snapshotId: 'review-one',
+          recordingMode: 'full',
+          snapshotRef: expect.any(String),
           requiredReviewLanes: ['correctness', 'simplicity'],
           files: Array.from({length: 16}, (_, index) => `src/file-${index}.ts`),
         },
@@ -377,6 +392,45 @@ describe('native task projection', () => {
     expect(
       projectNativeTaskView(input, Effect.pipe('f', EffectString.repeat(64)), {offset: 16}).phase?.snapshot?.files,
     ).toEqual(['src/file-16.ts', 'src/file-17.ts']);
+
+    const projectMode = (reviewSnapshot: NativeCycleSnapshot) =>
+      projectNativeTaskView(
+        {
+          ...state,
+          cycle: {
+            ...runtime,
+            snapshots: [{snapshot: reviewSnapshot, incoming: []}],
+          },
+        },
+        Effect.pipe('f', EffectString.repeat(64)),
+      ).phase?.snapshot?.recordingMode;
+    const followup: NativeCycleSnapshot = {
+      ...snapshot,
+      snapshotId: 'review-followup',
+      previous: 'review-prior',
+      previousTree: snapshot.tree,
+    };
+    const requalified: NativeCycleSnapshot = {
+      ...followup,
+      snapshotId: 'review-requalified',
+      baseRequalification: {
+        preRebaseHead: Effect.pipe('1', EffectString.repeat(40)),
+        ontoHead: Effect.pipe('2', EffectString.repeat(40)),
+        rebasedHead: Effect.pipe('3', EffectString.repeat(40)),
+        fromBaseBranch: 'main',
+        toBaseBranch: 'main',
+        priorDeclaredBaseHead: Effect.pipe('4', EffectString.repeat(40)),
+        reason: 'The approved base changed.',
+        authority: 'User authorized base requalification.',
+        receiptDigest: Effect.pipe('5', EffectString.repeat(64)),
+        beforeRef: `refs/threadnote/cycles/requalification-before/${Effect.pipe('6', EffectString.repeat(64))}`,
+        afterRef: `refs/threadnote/cycles/requalification-after/${Effect.pipe('7', EffectString.repeat(64))}`,
+        priorBaseRef: `refs/threadnote/cycles/requalification-base/${Effect.pipe('8', EffectString.repeat(64))}`,
+      },
+    };
+    expect(projectMode(snapshot)).toBe('full');
+    expect(projectMode(followup)).toBe('incremental');
+    expect(projectMode(requalified)).toBe('full');
   });
 
   it('keeps canonical invalidation blocking ahead of stale snapshot review hints', () => {
@@ -428,7 +482,7 @@ describe('native task projection', () => {
         scopeBase: Effect.pipe('c', EffectString.repeat(40)),
         declaredBaseHead: Effect.pipe('d', EffectString.repeat(40)),
         scopeFiles: ['src/task.ts'],
-        tree: Effect.pipe(String.fromCharCode(103 + index), EffectString.repeat(40)),
+        tree: Effect.pipe(String.fromCharCode(97 + index), EffectString.repeat(40)),
         files: ['src/task.ts'],
         pinnedRef: `refs/threadnote/snapshot/${snapshotId}`,
       };
@@ -450,7 +504,32 @@ describe('native task projection', () => {
     const view = projectNativeTaskView(
       {
         ...state,
-        cycle: {...state.cycle!, snapshots, reviews},
+        cycle: {
+          ...state.cycle!,
+          baselines: {
+            ...state.cycle!.baselines,
+            'phase-one': {
+              repo: '/repo',
+              head: Effect.pipe('b', EffectString.repeat(40)),
+              tree: Effect.pipe('c', EffectString.repeat(40)),
+              preservedFiles: [],
+              pinnedRef: 'refs/heads/main',
+            },
+          },
+          snapshots,
+          reviews,
+          attempts: [
+            ...state.cycle!.attempts,
+            ...EffectArray.map(['invalid-one', 'invalid-two'], (id, index) => ({
+              id,
+              snapshotId: 'review-5',
+              digest: Effect.pipe(String.fromCharCode(101 + index), EffectString.repeat(64)),
+              status: 'invalid' as const,
+              message: 'A prior independent review was invalid.',
+              report: '{}',
+            })),
+          ],
+        },
       },
       'revision',
     );

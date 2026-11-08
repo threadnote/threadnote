@@ -224,6 +224,8 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
               runId: options.runId,
               callerCwd: options.callerCwd,
               snapshotRef: options.snapshotRef,
+              ...(options.taskRef === undefined ? {} : {taskRef: options.taskRef}),
+              ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
               report: options.report,
             }).pipe(
               Effect.flatMap(value => Console.log(JSON.stringify(value))),
