@@ -17,13 +17,15 @@ import {
   Result,
   Schema,
 } from 'effect';
-import {expect} from 'vitest';
+import {expect, vi} from 'vitest';
+import {TestClock} from 'effect/testing';
 import {ChildEnvironmentPolicy} from '../src/child-environment-policy.js';
 import {cryptoLayer} from '../src/crypto.js';
 import {
   FileLockTimeout,
   fileLockBusyMessage,
   withExclusiveFileLock,
+  withExclusiveFileLockLease,
   withNativeFileLockWaitBudget,
 } from '../src/file/lock.js';
 import {RuntimeEntrypoint} from '../src/runtime-entrypoint.js';
@@ -38,6 +40,82 @@ const system = SystemInfo.layer.pipe(
   ),
 );
 const dependencies = Layer.mergeAll(BunServices.layer, cryptoLayer, system);
+
+effectIt.effect('makes current writer lease assertions sticky after replacement and inactive after scope exit', () =>
+  provide(
+    Effect.gen(function* () {
+      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'current-writer-lease-'});
+      const lock = `${root}/writer.lock`;
+      let outside: (() => void) | undefined;
+      yield* withExclusiveFileLockLease(
+        fs,
+        lock,
+        {...policy, allowUnverifiedStaleRecovery: false, useCanonicalProcessStartIdentity: true},
+        lease =>
+          Effect.gen(function* () {
+            yield* lease.assertCurrent;
+            outside = lease.assertCurrentSync;
+            const token = yield* fs.readFileString(lock);
+            yield* fs.writeFileString(lock, 'replaced');
+            expect(yield* lease.assertCurrent.pipe(Effect.flip)).toMatchObject({_tag: 'FileLockLost', reason: 'lost'});
+            yield* fs.writeFileString(lock, token);
+            expect(yield* lease.assertCurrent.pipe(Effect.flip)).toMatchObject({_tag: 'FileLockLost', reason: 'lost'});
+          }),
+      );
+      expect(outside).toBeDefined();
+      expect(() => outside?.()).toThrow();
+    }),
+  ),
+);
+
+effectIt.effect('retains heartbeat loss even when the original token is restored before the first assertion', () =>
+  provide(
+    Effect.gen(function* () {
+      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-heartbeat-loss-'});
+      const lock = `${root}/writer.lock`;
+      yield* withExclusiveFileLockLease(fs, lock, {...policy, heartbeatIntervalMilliseconds: 10}, lease =>
+        Effect.gen(function* () {
+          const token = yield* fs.readFileString(lock);
+          const closed = yield* Deferred.make<void>();
+          const native = process.getBuiltinModule('fs').promises;
+          const original = native.open.bind(native);
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() =>
+              vi.spyOn(native, 'open').mockImplementation(async (...args) => {
+                const handle = await original(...args);
+                if (args[0] === lock && typeof args[1] === 'number' && (args[1] & 3) === 2) {
+                  const close = handle.close.bind(handle);
+                  handle.close = async () => {
+                    await close();
+                    Deferred.doneUnsafe(closed, Effect.void);
+                  };
+                }
+                return handle;
+              }),
+            ),
+            () =>
+              Effect.gen(function* () {
+                yield* fs.writeFileString(lock, 'not the lease token');
+                yield* TestClock.adjust(20);
+                yield* Deferred.await(closed);
+                yield* Effect.yieldNow;
+                yield* fs.writeFileString(lock, token);
+                expect(yield* lease.assertCurrent.pipe(Effect.flip)).toMatchObject({
+                  _tag: 'FileLockLost',
+                  reason: 'lost',
+                });
+              }),
+            spy => Effect.sync(() => spy.mockRestore()),
+          );
+        }),
+      );
+    }),
+  ),
+);
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(dependencies).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 const policy = {

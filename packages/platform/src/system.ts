@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+export * from './writer_system.js';
 import {readProcessResourceCounters, type ProcessResourceCounters} from './process-resources.js';
 export {
   processCpuObservation,

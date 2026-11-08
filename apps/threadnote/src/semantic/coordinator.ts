@@ -1230,6 +1230,19 @@ export const serveSemanticEndpoint = Effect.fn('semantic.serveEndpoint')(functio
       if (body.operation === 'agent-view') return yield* agentView(body.request);
       if (body.operation === 'agent-change') {
         if (!agentChanges) return yield* LspFault.make({code: 'prerequisite'});
+        if (body.request.action === 'invalidate-for-writer') {
+          const result = yield* agentChanges.execute(body.request);
+          const decoded = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              version: Schema.Literal(1),
+              status: Schema.Literal('writer-invalidation'),
+              observations: Schema.Array(Observation),
+            }),
+            {onExcessProperty: 'error'},
+          )(result);
+          yield* Effect.forEach(decoded.observations, observation => coordinator.closeView(observation));
+          return {version: 1, status: 'invalidated'};
+        }
         if (body.request.action !== 'prepare' || !body.request.view) return yield* agentChanges.execute(body.request);
         const selector = body.request.view;
         const owned = yield* checkPublic(selector.handle, body.request.profile);

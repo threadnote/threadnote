@@ -56,6 +56,30 @@ export function registerSemanticQueryTool(
           })),
         ),
     );
+  for (const action of ['apply', 'recover'] as const)
+    server.registerTool(
+      'semantic_change_' + action,
+      {
+        annotations: {readOnlyHint: false, destructiveHint: action === 'apply', idempotentHint: true},
+        description:
+          action === 'apply'
+            ? 'Apply an exact operation already admitted by the local CLI. request: {version:1,callerCwd,writer:{operation,capability},milliseconds?,maxBytes?}. Secret capability is required; read profiles/previews never grant writes. Closed disk only; editor integration required for buffers.'
+            : 'Reconcile a locally admitted operation against actual source without replay or rollback. Same private writer handle and callerCwd as apply. Persists private recovery evidence; partial/unknown outcomes remain explicit. Never log the capability.',
+        inputSchema: {request: Schema.Json},
+      },
+      ({request}) =>
+        runSemanticAgentChange(
+          config,
+          typeof request === 'object' && request !== null && !EffectArray.isArray(request)
+            ? {...request, action}
+            : request,
+        ).pipe(
+          Effect.map(result => ({
+            content: [{type: 'text' as const, text: JSON.stringify(result)}],
+            structuredContent: result,
+          })),
+        ),
+    );
   server.registerTool(
     'semantic_view',
     {
