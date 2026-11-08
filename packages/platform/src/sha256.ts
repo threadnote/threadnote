@@ -18,6 +18,10 @@ const INITIAL_STATE = new Uint32Array([
 ]);
 
 export function sha256HexSync(value: string | Uint8Array): string {
+  if (typeof Bun !== 'undefined' && typeof Bun.SHA256?.hash === 'function') {
+    return Bun.SHA256.hash(value, 'hex');
+  }
+
   const input = typeof value === 'string' ? new TextEncoder().encode(value) : value;
   const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
   const padded = new Uint8Array(paddedLength);
