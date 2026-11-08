@@ -8,6 +8,7 @@ import {CommandExecutor, runCommandEffect, type CommandOptions} from '@threadnot
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {archiveRelease} from '../../../../scripts/archive-release.js';
+import {ScriptError} from '../../../../scripts/effect/errors.js';
 import {extractGzipTar} from '../../src/effect/archive.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -93,6 +94,58 @@ const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(functio
 });
 
 describe('production release archives', () => {
+  effectIt.effect('archives all eight canonical targets under distinct names with exact extracted bytes', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([{name: 'payload.bin', bytes: Uint8Array.from([0, 255, 10])}]);
+      const paths = [];
+      for (const target of [
+        'darwin-arm64',
+        'darwin-x64',
+        'linux-arm64',
+        'linux-x64',
+        'windows-arm64',
+        'windows-x64',
+        'linux-arm64-musl',
+        'linux-x64-musl',
+      ]) {
+        const extracted = f.path.join(f.root, 'extracted-' + target);
+        yield* f.fs.makeDirectory(extracted);
+        const archive = yield* verifyRoundtrip({...f, target, extracted});
+        expect(f.path.basename(archive.artifactPath)).toBe('threadnote-' + target + '.tar.gz');
+        paths.push(archive.artifactPath);
+      }
+      expect(new Set(paths).size).toBe(8);
+      for (const path of paths) expect(yield* f.fs.exists(path)).toBe(true);
+    }).pipe(testLayer),
+  );
+  effectIt.effect('rejects compile-target and foreign-libc aliases before any filesystem access', () =>
+    Effect.gen(function* () {
+      let accesses = 0;
+      const untouched = FileSystem.makeNoop({
+        exists: () =>
+          Effect.sync(() => {
+            accesses++;
+          }).pipe(Effect.andThen(Effect.die('Unexpected archive filesystem access'))),
+      });
+      for (const target of [
+        '',
+        'bun-linux-arm64-musl',
+        'linux-x64-baseline',
+        'linux-x64-baseline-musl',
+        'windows-x64-musl',
+        'darwin-arm64-musl',
+        'linux-arm64-musl-extra',
+        '../../escape',
+      ]) {
+        const error = yield* archiveRelease({root: '/nonexistent-private-archive-fixture', target}).pipe(
+          Effect.provideService(FileSystem.FileSystem, untouched),
+          Effect.flip,
+        );
+        expect(Schema.is(ScriptError)(error)).toBe(true);
+      }
+      expect(accesses).toBe(0);
+    }).pipe(provideTestLayer(archiveTestLayer)),
+  );
   effectIt.effect('preserves process environment, payload inventory, bytes, checksums and executable mode', () =>
     Effect.gen(function* () {
       const f = yield* fixture([

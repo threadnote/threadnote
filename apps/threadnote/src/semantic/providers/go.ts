@@ -3,12 +3,23 @@ import * as EffectString from 'effect/String';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {createScanner, ScanError, SyntaxKind} from 'jsonc-parser';
 import {CommandExecutor} from '@threadnote/platform/command';
+import {runtimePlatform, runtimeNativePlatformTarget, platformPathFor} from '@threadnote/platform/system';
 import {LspFault, type LspClient} from '../lsp_transport.js';
 import {boundedFileDigest} from '../fingerprint.js';
 import {makeLspSession, type LspSessionOptions} from '../provider.js';
 export const goProviderVersion = 'v0.24.0';
 export const goExecutableDigest = '701228f3770992e76ba343b3855b0c164064a4225c699f1e5b765b274c7836af';
 export const goToolDigest = 'aa355b078a81158d418079a3f8c776719eb99cc6f527e39ffa3250c66566aafb';
+// Shipped source pins are execution policy. The root qualification ledger is evidence only.
+const goRuntimePins = Object.freeze({
+  provider: 'gopls' as const,
+  providerExecutableDigest: goExecutableDigest,
+  goExecutableDigest: goToolDigest,
+  sdkTreeDigest: undefined as string | undefined,
+});
+export function goRuntimePinsForHost() {
+  return runtimeNativePlatformTarget() === 'darwin-arm64' ? goRuntimePins : undefined;
+}
 const fail = () => LspFault.make({code: 'prerequisite'});
 /** Go emits a sequence of JSON objects, including nested replacement metadata. */
 export function parseGoModuleStream(text: string): readonly unknown[] {
@@ -40,7 +51,14 @@ export function parseGoModuleStream(text: string): readonly unknown[] {
   return modules;
 }
 const staticPath = (value: string) =>
-  value.length > 0 && value.length <= 8192 && !/[\p{Cc}:\\$]/u.test(value) && !EffectString.startsWith('~')(value);
+  value.length > 0 &&
+  value.length <= 8192 &&
+  !/[\p{Cc}$]/u.test(value) &&
+  !EffectString.startsWith('~')(value) &&
+  (runtimePlatform === 'win32'
+    ? !EffectString.includes(':')(EffectString.replace(/^[a-z]:[\\/]/iu, '')(value)) &&
+      !EffectString.startsWith('\\\\')(value)
+    : !/[:\\]/u.test(value));
 const Module = Schema.Struct({
   Use: Schema.optional(Schema.NullOr(Schema.Array(Schema.Struct({DiskPath: Schema.String})))),
   Replace: Schema.optional(
@@ -50,28 +68,41 @@ const Module = Schema.Struct({
   ),
 });
 /** Complete child environment, including Go hooks that apply even when CGO is disabled. */
-export const goEnvironment = (sdk: string, directory: string, workspace: string): Record<string, string> => ({
-  PATH: sdk + '/bin:/usr/bin:/bin',
-  HOME: directory + '/home',
-  GOROOT: sdk,
-  GOENV: 'off',
-  GOTOOLCHAIN: 'local',
-  GOWORK: workspace,
-  GOFLAGS: '-mod=readonly',
-  GOPACKAGESDRIVER: 'off',
-  GOCACHEPROG: '',
-  GOPROXY: 'off',
-  GOSUMDB: 'off',
-  GOVCS: '*:off',
-  CGO_ENABLED: '0',
-  GOTELEMETRY: 'off',
-  GOPATH: directory + '/gopath',
-  GOMODCACHE: directory + '/modules',
-  GOCACHE: directory + '/cache',
-  XDG_CACHE_HOME: directory + '/cache',
-  XDG_CONFIG_HOME: directory + '/config',
-  TMPDIR: directory + '/tmp',
-});
+export const goToolPath = (sdk: string, platform: NodeJS.Platform = runtimePlatform) =>
+  platformPathFor(platform).join(sdk, 'bin', platform === 'win32' ? 'go.exe' : 'go');
+export const goEnvironment = (
+  sdk: string,
+  directory: string,
+  workspace: string,
+  platform: NodeJS.Platform = runtimePlatform,
+): Record<string, string> => {
+  const path = platformPathFor(platform);
+  return {
+    PATH: path.join(sdk, 'bin') + (platform === 'win32' ? '' : ':/usr/bin:/bin'),
+    HOME: path.join(directory, 'home'),
+    GOROOT: sdk,
+    GOENV: 'off',
+    GOTOOLCHAIN: 'local',
+    GOWORK: workspace,
+    GOFLAGS: '-mod=readonly',
+    GOPACKAGESDRIVER: 'off',
+    GOCACHEPROG: '',
+    GOPROXY: 'off',
+    GOSUMDB: 'off',
+    GOVCS: '*:off',
+    CGO_ENABLED: '0',
+    GOTELEMETRY: 'off',
+    GOPATH: path.join(directory, 'gopath'),
+    GOMODCACHE: path.join(directory, 'modules'),
+    GOCACHE: path.join(directory, 'cache'),
+    XDG_CACHE_HOME: path.join(directory, 'cache'),
+    XDG_CONFIG_HOME: path.join(directory, 'config'),
+    TMPDIR: path.join(directory, 'tmp'),
+    ...(platform === 'win32'
+      ? {TEMP: path.join(directory, 'tmp'), TMP: path.join(directory, 'tmp'), USERPROFILE: path.join(directory, 'home')}
+      : {}),
+  };
+};
 export const makeGoProject = Effect.fn('semantic.makeGoProject')(function* (options: {
   readonly project: string;
   readonly worktree: string;
@@ -107,7 +138,7 @@ export const makeGoProject = Effect.fn('semantic.makeGoProject')(function* (opti
       return yield* fail();
     const digest = yield* boundedFileDigest(file, 1024 * 1024);
     const result = yield* command.execute(
-      path.join(options.sdk, 'bin/go'),
+      goToolPath(options.sdk),
       [EffectString.endsWith('go.work')(file) ? 'work' : 'mod', 'edit', '-json', file],
       {
         cwd: options.project,
@@ -143,7 +174,7 @@ export const makeGoProject = Effect.fn('semantic.makeGoProject')(function* (opti
   });
   yield* verify;
   // The module graph must resolve offline before a provider slot is acquired; this never builds repository code.
-  const listed = yield* command.execute(path.join(options.sdk, 'bin/go'), ['list', '-m', '-json', 'all'], {
+  const listed = yield* command.execute(goToolPath(options.sdk), ['list', '-m', '-json', 'all'], {
     cwd: options.project,
     env: environment,
     maxOutputBytes: 4 * 1024 * 1024,

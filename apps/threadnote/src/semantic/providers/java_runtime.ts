@@ -4,6 +4,7 @@ import * as EffectString from 'effect/String';
 import {Cause, Effect, Exit, Fiber, FileSystem, Option, Path, Schema} from 'effect';
 import {Digest} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {runtimeNativePlatformTarget, runtimePlatform, platformPathFor} from '@threadnote/platform/system';
 import {boundedFileDigest, readBounded, semanticSdkDigest} from '../fingerprint.js';
 import {LspFault, makeLspClient, spawnLspWire, type LspWire, type WireStop} from '../lsp_transport.js';
 import {SemanticSetupFault, wellFormed} from '../provider.js';
@@ -23,7 +24,7 @@ export const JavaRuntimeCandidate = Schema.Struct({
 });
 export type JavaRuntimeCandidate = typeof JavaRuntimeCandidate.Type;
 
-/** These exact materialized SDKs qualify macOS arm64 only; other platform rows remain unqualified. */
+/** Retained experimental Darwin pins; no production or all-platform qualification is implied. */
 export const javaRuntimeQualification = Object.freeze({
   platform: 'darwin-arm64',
   serverVersion: '1.63.0-202610191322',
@@ -36,7 +37,99 @@ export const javaRuntimeQualification = Object.freeze({
   projectExecutableDigest: '0f642542ea1f0be6957557c0db96653ec128113bb5a4aaa7c2534d1d72ddb51f',
   configurationDigest: '0d5587fcd30641a4ce5b59e706d3565a8a7b7b40cd75c1d78ece842722c0b3ee',
 } as const);
-export const javaRuntimeSetupAction = `Configure the host-approved JDT LS ${javaRuntimeQualification.serverVersion}, server Java ${javaRuntimeQualification.runtimeVersion} and separate project Java ${javaRuntimeQualification.projectVersion} SDKs with their qualified full-tree digests; only macOS arm64 is currently qualified for this experimental profile`;
+const JavaPlatformPins = Schema.Struct({
+  serverTreeDigest: Digest,
+  configurationDigest: Digest,
+  configurationDirectory: Schema.Literals([
+    'config_mac_arm',
+    'config_mac',
+    'config_linux',
+    'config_linux_arm',
+    'config_win',
+  ]),
+  runtimeSdkDigest: Digest,
+  runtimeExecutableDigest: Digest,
+  projectSdkDigest: Digest,
+  projectExecutableDigest: Digest,
+});
+const JavaPlatformArtifact = Schema.Struct({
+  role: Schema.Literals(['provider', 'runtime-sdk', 'project-sdk']),
+  version: Schema.String,
+  url: Schema.String,
+  archiveSha256: Digest,
+  licenseEvidence: Schema.Array(Schema.Struct({url: Schema.String, sha256: Digest})).check(Schema.isMinLength(1)),
+});
+const JavaPlatformCandidate = Schema.Struct({
+  status: Schema.Literal('candidate-artifacts-verified'),
+  artifacts: Schema.Array(JavaPlatformArtifact).check(Schema.isBetweenLength(3, 3)),
+  runtimePins: JavaPlatformPins,
+  productionQualified: Schema.Literal(false),
+});
+const JavaRuntimePlatform = Schema.Literals([
+  'darwin-arm64',
+  'darwin-x64',
+  'linux-arm64',
+  'linux-arm64-musl',
+  'linux-x64-baseline',
+  'linux-x64-baseline-musl',
+  'windows-arm64',
+  'windows-x64-baseline',
+]);
+// These source-owned rows are independent of the root qualification evidence ledger.
+// There are no vetted additional platform images to ship yet; absent rows always refuse.
+const javaRuntimePlatformArtifacts: Readonly<Record<string, unknown>> = Object.freeze({});
+/** Decode one reviewed source pin image without granting any process or writer capability. */
+export function selectJavaRuntimePlatformPins(platform: string | undefined, candidate: unknown) {
+  if (!Schema.is(JavaRuntimePlatform)(platform)) return undefined;
+  try {
+    const row = Schema.decodeUnknownSync(JavaPlatformCandidate)(candidate);
+    const roles = new Set(EffectArray.map(row.artifacts, artifact => artifact.role));
+    const provider = EffectArray.findFirst(row.artifacts, artifact => artifact.role === 'provider');
+    const runtime = EffectArray.findFirst(row.artifacts, artifact => artifact.role === 'runtime-sdk');
+    const project = EffectArray.findFirst(row.artifacts, artifact => artifact.role === 'project-sdk');
+    if (
+      roles.size !== 3 ||
+      Option.isNone(provider) ||
+      Option.isNone(runtime) ||
+      Option.isNone(project) ||
+      provider.value.version !== javaRuntimeQualification.serverVersion ||
+      !EffectString.startsWith('25.')(runtime.value.version) ||
+      !EffectString.startsWith('21.')(project.value.version)
+    )
+      return undefined;
+    const config = EffectString.startsWith('darwin-')(platform)
+      ? EffectString.endsWith('arm64')(platform)
+        ? 'config_mac_arm'
+        : 'config_mac'
+      : EffectString.startsWith('windows-')(platform)
+        ? 'config_win'
+        : EffectString.startsWith('linux-arm64')(platform)
+          ? 'config_linux_arm'
+          : 'config_linux';
+    if (row.runtimePins.configurationDirectory !== config) return undefined;
+    return {
+      ...javaRuntimeQualification,
+      ...row.runtimePins,
+      platform,
+      runtimeVersion: runtime.value.version,
+      projectVersion: project.value.version,
+    };
+  } catch {
+    return undefined;
+  }
+}
+/** Select execution pins only from immutable product source, never a host profile or evidence ledger. */
+export function javaRuntimePinsForHost() {
+  const platform = runtimeNativePlatformTarget();
+  if (platform === javaRuntimeQualification.platform)
+    return {...javaRuntimeQualification, configurationDirectory: 'config_mac_arm' as const};
+  return selectJavaRuntimePlatformPins(platform, platform ? javaRuntimePlatformArtifacts[platform] : undefined);
+}
+export const isCurrentJavaRuntimePlatform = (platform: string) =>
+  Schema.is(JavaRuntimePlatform)(platform) && runtimeNativePlatformTarget() === platform;
+const javaExecutable = (home: string) =>
+  platformPathFor(runtimePlatform).join(home, 'bin', runtimePlatform === 'win32' ? 'java.exe' : 'java');
+export const javaRuntimeSetupAction = `Configure the host-approved JDT LS ${javaRuntimeQualification.serverVersion}, server Java ${javaRuntimeQualification.runtimeVersion} and separate project Java ${javaRuntimeQualification.projectVersion} SDKs with their qualified full-tree digests; platform-specific archive, license, complete-tree and executable pins are required for this experimental profile`;
 const fail = () => LspFault.make({code: 'prerequisite'});
 const setupFault = (component: 'provider' | 'runtime' | 'project', reason: SemanticSetupFault['reason']) =>
   SemanticSetupFault.make({
@@ -180,11 +273,11 @@ export const finishJavaPreparation = Effect.fn('semantic.finishJavaPreparation')
 export const materializeJavaRuntimeConfiguration = Effect.fn('semantic.materializeJavaRuntimeConfiguration')(function* (
   input: Uint8Array,
   directory: string,
+  expectedDigest: string = javaRuntimeQualification.configurationDigest,
 ) {
   if (input.length > 16 * 1024) return yield* setupFault('provider', 'incompatible');
   const bytes = input.slice();
-  if (sha256HexSync(bytes) !== javaRuntimeQualification.configurationDigest)
-    return yield* setupFault('provider', 'incompatible');
+  if (sha256HexSync(bytes) !== expectedDigest) return yield* setupFault('provider', 'incompatible');
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   if (
@@ -197,8 +290,7 @@ export const materializeJavaRuntimeConfiguration = Effect.fn('semantic.materiali
   if (info.type !== 'Directory' || info.mode & 0o077) return yield* fail();
   const file = path.join(directory, 'config.ini');
   yield* fs.writeFile(file, bytes, {flag: 'wx', mode: 0o600});
-  if ((yield* boundedFileDigest(file, 16 * 1024)) !== javaRuntimeQualification.configurationDigest)
-    return yield* fail();
+  if ((yield* boundedFileDigest(file, 16 * 1024)) !== expectedDigest) return yield* fail();
   return file;
 });
 
@@ -229,14 +321,15 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         if (!staticPath(value) || (yield* fs.realPath(value)) !== value || (yield* fs.stat(value)).type !== 'Directory')
           return yield* fail();
       });
+    const pins = javaRuntimePinsForHost();
+    if (!pins) return yield* setupFault('provider', 'incompatible');
     const sdks = [
-      [selected.serverDirectory, selected.serverTreeDigest, javaRuntimeQualification.serverTreeDigest, 'provider'],
-      [selected.runtimeJavaHome, selected.runtimeSdkDigest, javaRuntimeQualification.runtimeSdkDigest, 'runtime'],
-      [selected.projectJavaHome, selected.projectSdkDigest, javaRuntimeQualification.projectSdkDigest, 'project'],
+      [selected.serverDirectory, selected.serverTreeDigest, pins.serverTreeDigest, 'provider'],
+      [selected.runtimeJavaHome, selected.runtimeSdkDigest, pins.runtimeSdkDigest, 'runtime'],
+      [selected.projectJavaHome, selected.projectSdkDigest, pins.projectSdkDigest, 'project'],
     ] as const;
     const verify = Effect.gen(function* () {
-      if (`${process.platform}-${process.arch}` !== javaRuntimeQualification.platform)
-        return yield* setupFault('provider', 'incompatible');
+      if (!isCurrentJavaRuntimePlatform(pins.platform)) return yield* setupFault('provider', 'incompatible');
       for (const [root, expected, qualified, component] of sdks)
         if (expected !== qualified || !staticPath(root)) return yield* setupFault(component, 'incompatible');
       for (const [root, , qualified, component] of sdks) {
@@ -251,16 +344,16 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
         );
       }
       for (const [root, expected, component] of [
-        [selected.runtimeJavaHome, javaRuntimeQualification.runtimeExecutableDigest, 'runtime'],
-        [selected.projectJavaHome, javaRuntimeQualification.projectExecutableDigest, 'project'],
+        [selected.runtimeJavaHome, pins.runtimeExecutableDigest, 'runtime'],
+        [selected.projectJavaHome, pins.projectExecutableDigest, 'project'],
       ] as const) {
         yield* Effect.gen(function* () {
-          const file = path.join(root, 'bin/java');
+          const file = javaExecutable(root);
           const info = yield* fs.stat(file);
           if (
             (yield* fs.realPath(file)) !== file ||
             info.type !== 'File' ||
-            !(info.mode & 0o111) ||
+            (runtimePlatform !== 'win32' && !(info.mode & 0o111)) ||
             (yield* boundedFileDigest(file, 64 * 1024 * 1024)) !== expected
           )
             return yield* setupFault(component, 'incompatible');
@@ -342,17 +435,17 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
               ]
             : [];
         const configuration = yield* materializeJavaRuntimeConfiguration(
-          yield* readBounded(path.join(selected.serverDirectory, 'config_mac_arm/config.ini'), 16 * 1024),
+          yield* readBounded(path.join(selected.serverDirectory, pins.configurationDirectory, 'config.ini'), 16 * 1024),
           path.join(root, 'configuration'),
+          pins.configurationDigest,
         );
         yield* verify;
-        if ((yield* boundedFileDigest(configuration, 16 * 1024)) !== javaRuntimeQualification.configurationDigest)
-          return yield* fail();
+        if ((yield* boundedFileDigest(configuration, 16 * 1024)) !== pins.configurationDigest) return yield* fail();
         if (inputs) yield* verifyJavaPreparationInputs(inputs, {...options, build: build!});
         yield* options.workspace.hold;
         launched.started = true;
         const wire = yield* spawnLspWire({
-          command: path.join(selected.runtimeJavaHome, 'bin/java'),
+          command: javaExecutable(selected.runtimeJavaHome),
           cwd: options.project,
           args: [
             '-Djava.awt.headless=true',
@@ -378,10 +471,13 @@ export const makeJavaRuntime = Effect.fn('semantic.makeJavaRuntime')(
             path.join(root, 'data'),
           ],
           environment: {
-            PATH: path.join(selected.runtimeJavaHome, 'bin') + ':/usr/bin:/bin',
+            PATH: path.join(selected.runtimeJavaHome, 'bin') + (runtimePlatform === 'win32' ? '' : ':/usr/bin:/bin'),
             JAVA_HOME: selected.runtimeJavaHome,
             HOME: path.join(root, 'home'),
             TMPDIR: path.join(root, 'tmp'),
+            ...(runtimePlatform === 'win32'
+              ? {TEMP: path.join(root, 'tmp'), TMP: path.join(root, 'tmp'), USERPROFILE: path.join(root, 'home')}
+              : {}),
             GRADLE_USER_HOME: path.join(root, 'gradle'),
             JAVA_TOOL_OPTIONS: '',
             _JAVA_OPTIONS: '',

@@ -28,6 +28,7 @@ import * as fingerprints from '../../src/semantic/fingerprint.js';
 import {LspFault, makeLspClient, type LspWire} from '../../src/semantic/lsp_transport.js';
 import {SemanticSetupFault} from '../../src/semantic/provider.js';
 import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
+import * as nativePlatform from '@threadnote/platform/system';
 import * as javaPreparation from '../../src/semantic/providers/java_preparation.js';
 import {makeJavaPreparation, type JavaPreparationHost} from '../../src/semantic/providers/java.js';
 import {
@@ -2458,4 +2459,81 @@ describe('Java pinned runtime and preparation boundary', () => {
       expect(yield* Effect.flip(Fiber.join(fiber))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
+});
+
+it('refuses metadata-only Java platform rows without borrowing another platform image', () => {
+  const selected = vi.spyOn(nativePlatform, 'runtimeNativePlatformTarget');
+  try {
+    for (const target of [
+      'darwin-x64',
+      'linux-arm64',
+      'linux-arm64-musl',
+      'linux-x64-baseline',
+      'linux-x64-baseline-musl',
+      'windows-arm64',
+      'windows-x64-baseline',
+      undefined,
+    ]) {
+      selected.mockReturnValue(target);
+      expect(javaRuntime.javaRuntimePinsForHost()).toBeUndefined();
+    }
+  } finally {
+    selected.mockRestore();
+  }
+});
+
+it('selects complete source-pin fixtures and fences them in the canonical native target namespace', () => {
+  const selected = vi.spyOn(nativePlatform, 'runtimeNativePlatformTarget');
+  const digest = EffectString.repeat(64)('a');
+  try {
+    for (const [target, configurationDirectory] of [
+      ['darwin-arm64', 'config_mac_arm'],
+      ['darwin-x64', 'config_mac'],
+      ['linux-arm64', 'config_linux_arm'],
+      ['linux-arm64-musl', 'config_linux_arm'],
+      ['linux-x64-baseline', 'config_linux'],
+      ['linux-x64-baseline-musl', 'config_linux'],
+      ['windows-arm64', 'config_win'],
+      ['windows-x64-baseline', 'config_win'],
+    ]) {
+      const row = {
+        status: 'candidate-artifacts-verified',
+        productionQualified: false,
+        artifacts: EffectArray.map(
+          [
+            {role: 'provider', version: javaRuntimeQualification.serverVersion},
+            {role: 'runtime-sdk', version: '25.0.5.0.2'},
+            {role: 'project-sdk', version: '21.0.13.0.2'},
+          ],
+          artifact => ({
+            ...artifact,
+            url: 'https://example.invalid/pinned-archive',
+            archiveSha256: digest,
+            licenseEvidence: [{url: 'https://example.invalid/pinned-notice', sha256: digest}],
+          }),
+        ),
+        runtimePins: {...javaRuntimeQualification, configurationDirectory},
+      };
+      const pins = javaRuntime.selectJavaRuntimePlatformPins(target, row);
+      expect(pins?.platform).toBe(target);
+      selected.mockReturnValue(target);
+      expect(javaRuntime.isCurrentJavaRuntimePlatform(pins!.platform)).toBe(true);
+      selected.mockReturnValue(target === 'windows-arm64' ? 'windows-x64-baseline' : 'windows-arm64');
+      expect(javaRuntime.isCurrentJavaRuntimePlatform(pins!.platform)).toBe(false);
+      selected.mockReturnValue(undefined);
+      expect(javaRuntime.isCurrentJavaRuntimePlatform(pins!.platform)).toBe(false);
+      expect(
+        javaRuntime.selectJavaRuntimePlatformPins(target, {...row, status: 'metadata-only', runtimePins: null}),
+      ).toBeUndefined();
+      expect(
+        javaRuntime.selectJavaRuntimePlatformPins(target, {
+          ...row,
+          artifacts: EffectArray.map(row.artifacts, artifact => ({...artifact, licenseEvidence: []})),
+        }),
+      ).toBeUndefined();
+      expect(javaRuntime.selectJavaRuntimePlatformPins('win32-arm64', row)).toBeUndefined();
+    }
+  } finally {
+    selected.mockRestore();
+  }
 });

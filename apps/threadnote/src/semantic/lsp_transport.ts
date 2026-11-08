@@ -1,11 +1,15 @@
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-/* oxlint-disable effecttsgo/node-builtin-import, threadnote/no-node-runtime -- This scoped OS stdio boundary retains late write errors through close; the standard process sink loses them on Bun. */
-import {spawn, type ChildProcess} from 'node:child_process';
 import {Cause, Clock, Deferred, Effect, Option, Queue, Schema, Stream} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
-import {isJsonObject} from '@threadnote/platform/json';
+import {
+  runtimeSpawnOwnedProviderTree,
+  runtimeObserveOwnedProviderTree,
+  runtimeTerminateOwnedProviderTree,
+  runtimeCloseOwnedProviderTree,
+  type RuntimeOwnedProviderObservation,
+} from '@threadnote/platform/system';
 export class LspFault extends Schema.TaggedError<LspFault, {readonly brand: unique symbol}>()('LspFault', {
   code: Schema.Literals(['protocol', 'capacity', 'write', 'exit', 'timeout', 'closing', 'rejected', 'prerequisite']),
 }) {}
@@ -100,6 +104,7 @@ export interface WireStop {
 }
 export interface LspWire {
   readonly pid: number;
+  readonly identity?: string;
   readonly messages: Stream.Stream<Message>;
   readonly failure: () => LspFault | undefined;
   readonly beginClosing: Effect.Effect<void>;
@@ -114,28 +119,14 @@ export interface LspLaunch {
   readonly maxMessageBytes?: number;
 }
 export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (options: LspLaunch) {
-  // Windows process-tree containment remains a mandatory release qualification gate.
-  if (process.platform === 'win32') return yield* LspFault.make({code: 'prerequisite'});
   const frames = yield* Effect.try({
     try: () => new LspFrameDecoder(options.maxMessageBytes),
     catch: () => LspFault.make({code: 'protocol'}),
   });
   const policy = yield* ChildEnvironmentPolicy;
-  const incoming = yield* Queue.bounded<
-    {
-      message: Message;
-      bytes: number;
-    },
-    Cause.Done
-  >(64);
-  const spawned = Deferred.makeUnsafe<void, LspFault>();
-  const exited = Deferred.makeUnsafe<void>();
-  const closed = Deferred.makeUnsafe<void>();
-  let child: ChildProcess | undefined;
+  const incoming = yield* Queue.bounded<{message: Message; bytes: number}, Cause.Done>(64);
   let fault: LspFault | undefined;
   let ending = false;
-  let code: number | null = null;
-  let stdioClosed = false;
   let forced = false;
   let queuedBytes = 0;
   let writes = 0;
@@ -145,132 +136,142 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
     fault ??= LspFault.make({code});
     Queue.endUnsafe(incoming);
   };
-  const alive = () => {
-    if (!child?.pid) return false;
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch (error) {
-      return !isJsonObject(error) || error.code !== 'ESRCH';
-    }
-  };
-  const signal = (signal: NodeJS.Signals) =>
-    Effect.sync(() => {
-      if (!alive()) return;
-      forced = true;
-      try {
-        process.kill(-child!.pid!, signal);
-      } catch (error) {
-        if (!isJsonObject(error) || error.code !== 'ESRCH') fail('exit');
-      }
-    });
-  const waitGroup = (milliseconds: number) =>
+  // Native creation, cleanup registration and both output owners are one acquisition.
+  // A pending interrupt is restored only after the scope can drain the owned capability.
+  const {child, finish} = yield* Effect.uninterruptible(
     Effect.gen(function* () {
-      const until = (yield* Clock.currentTimeMillis) + milliseconds;
-      while (alive() && (yield* Clock.currentTimeMillis) < until) yield* Effect.sleep(20);
-    });
-  const finish = yield* Effect.cached(
-    Effect.uninterruptible(
-      Effect.gen(function* () {
-        ending = true;
-        const gracefulUntil = (yield* Clock.currentTimeMillis) + 2000;
-        yield* Effect.try({try: () => child?.stdin?.end(), catch: () => LspFault.make({code: 'write'})}).pipe(
-          Effect.catch(() =>
-            Effect.sync(() => {
-              fail('write');
-            }),
-          ),
-        );
-        if (Option.isNone(yield* Deferred.await(exited).pipe(Effect.timeoutOption(2000)))) fail('exit');
-        // A server can exit before its compiler children finish their own shutdown.
-        // Give the whole owned group the remaining grace budget before escalation.
-        yield* waitGroup(Math.max(0, gracefulUntil - (yield* Clock.currentTimeMillis)));
-        if (alive()) {
-          yield* signal('SIGTERM');
-          yield* waitGroup(1000);
-          if (alive()) {
-            yield* signal('SIGKILL');
-            yield* waitGroup(1000);
-          }
-        }
-        if (Option.isNone(yield* Deferred.await(closed).pipe(Effect.timeoutOption(2000)))) fail('exit');
-        if (writes !== 0) fail('write');
-        child?.stdin?.destroy();
-        child?.stdout?.destroy();
-        child?.stderr?.destroy();
-        child?.unref();
-        yield* Queue.shutdown(incoming);
-        return {code, drained: !alive(), forced, stdioClosed, fault};
-      }),
-    ),
-  );
-  yield* Effect.acquireRelease(
-    Effect.try({
-      try: () => {
-        child = spawn(options.command, [...options.args], {
-          cwd: options.cwd,
-          detached: true,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: policy.sanitizeExternal(options.environment),
-        });
-        child.once('spawn', () => Deferred.doneUnsafe(spawned, Effect.void));
-        child.once('error', () => {
+      // The platform capability, never a PID, owns signalling and the original group/Job.
+      const child = yield* Effect.try({
+        try: () =>
+          runtimeSpawnOwnedProviderTree({
+            command: options.command,
+            args: options.args,
+            cwd: options.cwd,
+            environment: policy.sanitizeExternal(options.environment),
+          }),
+        catch: () => LspFault.make({code: 'prerequisite'}),
+      });
+      const observe = (): RuntimeOwnedProviderObservation => {
+        try {
+          return runtimeObserveOwnedProviderTree(child.handle);
+        } catch {
           fail('exit');
-          Deferred.doneUnsafe(spawned, Effect.fail(fault!));
-          Deferred.doneUnsafe(exited, Effect.void);
+          return {state: 'unknown', leaderExitCode: null, stdioClosed: false};
+        }
+      };
+      const waitTree = (milliseconds: number) =>
+        Effect.gen(function* () {
+          const until = (yield* Clock.currentTimeMillis) + milliseconds;
+          let observation = observe();
+          while (observation.state !== 'drained' && (yield* Clock.currentTimeMillis) < until) {
+            yield* Effect.sleep(20);
+            observation = observe();
+          }
+          return observation;
         });
-        child.once('exit', value => {
-          code = value;
-          if (!ending) fail('exit');
-          Deferred.doneUnsafe(exited, Effect.void);
-        });
-        child.once('close', () => {
-          stdioClosed = true;
-          Queue.endUnsafe(incoming);
-          Deferred.doneUnsafe(closed, Effect.void);
-        });
-        child.stdin!.on('error', () => fail('write'));
-        child.stdout!.on('error', () => fail('protocol'));
-        child.stdout!.on('data', bytes => {
+      const terminate = (mode: 'terminate' | 'kill') =>
+        Effect.sync(() => {
+          forced = true;
           try {
-            for (const message of frames.push(bytes)) {
-              const size = encoder.encode(JSON.stringify(message)).length;
-              if (queuedBytes + size > 32 * 1024 * 1024) throw LspFault.make({code: 'capacity'});
-              queuedBytes += size;
-              if (!Queue.offerUnsafe(incoming, {message, bytes: size})) {
-                queuedBytes -= size;
-                throw LspFault.make({code: 'capacity'});
+            runtimeTerminateOwnedProviderTree(child.handle, mode);
+          } catch {
+            fail('exit');
+          }
+        });
+      const finish = yield* Effect.cached(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            ending = true;
+            yield* Effect.tryPromise({try: () => child.closeInput(), catch: () => LspFault.make({code: 'write'})}).pipe(
+              Effect.timeoutOption(2000),
+              Effect.tap(result =>
+                Effect.sync(() => {
+                  if (Option.isNone(result)) fail('write');
+                }),
+              ),
+              Effect.catch(() => Effect.sync(() => fail('write'))),
+            );
+            let observation = yield* waitTree(2000);
+            if (observation.state !== 'drained') {
+              yield* terminate('terminate');
+              observation = yield* waitTree(1000);
+              if (observation.state !== 'drained') {
+                yield* terminate('kill');
+                observation = yield* waitTree(2000);
               }
             }
-          } catch (error) {
-            fail(Schema.is(LspFault)(error) ? error.code : 'protocol');
+            if (writes !== 0) fail('write');
+            let drained = observation.state === 'drained' && observation.stdioClosed && writes === 0;
+            if (!drained) fail('exit');
+            if (drained) {
+              yield* Effect.try({
+                try: () => runtimeCloseOwnedProviderTree(child.handle),
+                catch: () => LspFault.make({code: 'exit'}),
+              }).pipe(
+                Effect.catch(() =>
+                  Effect.sync(() => {
+                    drained = false;
+                    fail('exit');
+                  }),
+                ),
+              );
+            }
+            // Unknown ownership deliberately retains the native handle and admission reservation.
+            yield* Queue.shutdown(incoming);
+            return {code: observation.leaderExitCode, drained, forced, stdioClosed: observation.stdioClosed, fault};
+          }),
+        ),
+      );
+      // These bounded stream pumps live through shutdown so descendant-held pipes and late errors
+      // cannot become a successful drain merely because the leader exited or a request was cancelled.
+      const pump = async (stream: ReadableStream<Uint8Array>, stdout: boolean) => {
+        const reader = stream.getReader();
+        try {
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) break;
+            if (stdout) {
+              if (fault) continue;
+              try {
+                for (const message of frames.push(next.value)) {
+                  const bytes = encoder.encode(JSON.stringify(message)).length;
+                  if (queuedBytes + bytes > 32 * 1024 * 1024 || !Queue.offerUnsafe(incoming, {message, bytes})) {
+                    fail('capacity');
+                    break;
+                  }
+                  queuedBytes += bytes;
+                }
+              } catch {
+                // Protocol failure ends delivery, but this owner must still consume the finite
+                // remaining output through EOF before the native group/Job can be drained.
+                fail('protocol');
+              }
+            } else {
+              const text = stderrTail + new TextDecoder().decode(next.value);
+              if (EffectString.includes('panicked at')(text)) fail('exit');
+              stderrTail = EffectString.slice(-4096)(text);
+            }
           }
-        });
-        child.stdout!.on('end', () => {
-          try {
+          if (stdout) {
             frames.finish();
-          } catch {
-            fail('protocol');
+            Queue.endUnsafe(incoming);
+            if (!ending) fail('exit');
           }
-          Queue.endUnsafe(incoming);
-        });
-        child.stderr!.on('error', () => fail('exit'));
-        child.stderr!.on('data', bytes => {
-          const text = stderrTail + new TextDecoder().decode(bytes);
-          if (EffectString.includes('panicked at')(text)) fail('exit');
-          stderrTail = EffectString.slice(-4096)(text);
-        });
-        return child;
-      },
-      catch: () => LspFault.make({code: 'exit'}),
+        } catch {
+          fail(stdout ? 'protocol' : 'exit');
+        } finally {
+          reader.releaseLock();
+        }
+      };
+      void pump(child.stdout, true);
+      void pump(child.stderr, false);
+      yield* Effect.addFinalizer(() => finish.pipe(Effect.asVoid));
+      return {child, finish};
     }),
-    () => finish.pipe(Effect.asVoid),
   );
-  yield* Deferred.await(spawned);
-  const pid = child?.pid;
-  if (!pid) return yield* LspFault.make({code: 'exit'});
-  return {
-    pid,
+  const wire: LspWire = {
+    pid: child.pid,
+    identity: child.identity,
     messages: Stream.fromQueue(incoming).pipe(
       Stream.map(packet => {
         queuedBytes -= packet.bytes;
@@ -282,51 +283,43 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
       ending = true;
     }),
     send: (message: Message) =>
-      Effect.callback<void, LspFault>(resume => {
-        if (fault) {
-          resume(Effect.fail(fault));
-          return;
-        }
+      Effect.suspend(() => {
+        if (fault) return Effect.fail(fault);
         let bytes: Uint8Array;
         try {
           bytes = encodeLspFrame(message);
         } catch {
-          resume(Effect.fail(LspFault.make({code: 'protocol'})));
-          return;
+          return Effect.fail(LspFault.make({code: 'protocol'}));
         }
-        if (writes >= 64 || writeBytes + bytes.length > 32 * 1024 * 1024) {
-          resume(Effect.fail(LspFault.make({code: 'capacity'})));
-          return;
-        }
-        writes++;
-        writeBytes += bytes.length;
-        let completed = false;
-        const complete = (error?: Error | null) => {
-          if (completed) return;
-          completed = true;
-          writes--;
-          writeBytes -= bytes.length;
-          if (error) fail('write');
-          resume(error ? Effect.fail(LspFault.make({code: 'write'})) : Effect.void);
-        };
-        try {
-          child!.stdin!.write(bytes, complete);
-        } catch {
-          complete(new Error('Provider write failed'));
-        }
-      }).pipe(
-        Effect.timeoutOption(2000),
-        Effect.flatMap(result =>
-          Effect.fromOption(result).pipe(
-            Effect.mapError(() => {
-              fail('write');
-              return fault!;
-            }),
+        if (writes >= 64 || writeBytes + bytes.length > 32 * 1024 * 1024)
+          return Effect.fail(LspFault.make({code: 'capacity'}));
+        return Effect.tryPromise({
+          try: signal => {
+            if (signal.aborted) return Promise.reject(new Error('Provider write cancelled'));
+            writes++;
+            writeBytes += bytes.length;
+            return child.write(bytes, signal).finally(() => {
+              writes--;
+              writeBytes -= bytes.length;
+            });
+          },
+          catch: () => {
+            fail('write');
+            return fault!;
+          },
+        }).pipe(
+          Effect.onInterrupt(() => Effect.sync(() => fail('write'))),
+          Effect.timeoutOption(2000),
+          Effect.flatMap(result =>
+            Option.isSome(result)
+              ? Effect.void
+              : Effect.sync(() => fail('write')).pipe(Effect.andThen(Effect.fail(LspFault.make({code: 'write'})))),
           ),
-        ),
-      ),
+        );
+      }),
     finish,
-  } satisfies LspWire;
+  };
+  return wire;
 });
 export interface LspClient {
   readonly pid: number;

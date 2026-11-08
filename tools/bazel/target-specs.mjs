@@ -220,7 +220,14 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'README.md',
     'THIRD_PARTY.md',
   ];
-  const applicationTestData = ['bun.lock', 'package.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts'];
+  const applicationTestData = [
+    'bun.lock',
+    'package.json',
+    'tsconfig.json',
+    'tsconfig.test.json',
+    'vitest.config.ts',
+    'config/semantic-providers/qualification-lock.json',
+  ];
   const applicationSourceExtensions = /\.(?:[cm]?[jt]sx?)$/u;
   const applicationTestSourceClosure = path => {
     const entries = [path, 'package.json', 'tools/bazel/project-vitest.config.ts'];
@@ -533,6 +540,15 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'vitest.config.ts',
         'vitest.e2e.config.ts',
         'apps/threadnote/test/unit/effect-system.test.ts',
+        'packages/platform/test/system-stable-read.test.ts',
+        'packages/platform/test/writer-system/provider-process.test.ts',
+        'apps/threadnote/test/unit/semantic-runtime.test.ts',
+        'apps/threadnote/test/unit/semantic-writer-process.test.ts',
+        'apps/threadnote/test/unit/semantic-operations.test.ts',
+        'apps/threadnote/test/unit/semantic-mcp-cli.test.ts',
+        'apps/threadnote/test/unit/semantic-python.test.ts',
+        'apps/threadnote/test/unit/semantic-go-rust.test.ts',
+        'apps/threadnote/test/unit/semantic-java-preparation.test.ts',
         'packages/workflow-automations/test/inventory.test.ts',
         'packages/workflow-automations/test/baseline.test.ts',
         ...EffectArrayPipe(filesBelow('apps/threadnote/test/e2e'), __effectArrayValues =>

@@ -9,13 +9,17 @@ import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {Observation} from '@threadnote/semantic/contracts';
+import {Observation, Position} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {makePythonSession, makePythonNotifications} from '../../src/semantic/providers/python.js';
-import {makePythonProject, pythonMetadataResponder} from '../../src/semantic/providers/python_project.js';
+import {
+  makePythonProject,
+  pythonProviderBootstrap,
+  staticPythonPath,
+} from '../../src/semantic/providers/python_project.js';
 import {makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
 import {semanticTreeDigest, semanticCatalogKey, makeSemanticCoordinator} from '../../src/semantic/coordinator.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -678,33 +682,104 @@ describe('Python static environment qualification', () => {
     );
     expect(semanticCatalogKey({python: {...python, environments: [envs[0]]}})).not.toBe(semanticCatalogKey({python}));
   });
-  effectIt.effect('rejects unrecognized metadata probe argv without running its payload', () =>
+  effectIt.effect('denies every child process execution surface before loading a server', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
-      const file = f.path.join(f.root, 'responder.mjs');
+      const bootstrap = f.path.join(f.root, 'bootstrap.cjs');
+      const server = f.path.join(f.root, 'probe.cjs');
       yield* f.fs.writeFileString(
-        file,
-        pythonMetadataResponder({path: ['/host/libs'], prefix: '/host/env', version: [3, 12, 13]}),
+        bootstrap,
+        pythonProviderBootstrap(
+          {path: ['/host/libs'], prefix: '/host/env', version: [3, 12, 13]},
+          'inert-marker',
+          f.root,
+        ),
+      );
+      yield* f.fs.writeFileString(
+        server,
+        `
+const cp=require('node:child_process');
+const calls=[...['exec','execSync','execFile','execFileSync','spawn','spawnSync','fork'].map(k=>()=>cp[k](process.execPath,['-e','process.exit(0)'])),
+()=>new cp.ChildProcess().spawn({file:process.execPath,args:[]}),
+()=>cp.execFileSync('inert-marker',['-c','process.stdout.write("EXECUTED")'],{encoding:'utf8',shell:false}),
+()=>cp.execFileSync('inert-marker',['--version'],{encoding:'utf8',shell:false})];
+for(const call of calls){let denied=false;try{call();}catch{denied=true;}if(!denied)process.exit(65);}
+import('node:child_process').then(esm=>{try{esm.spawn(process.execPath,[]);process.exit(66);}catch{process.stdout.write('denied');}});
+`,
       );
       const command = yield* CommandExecutor;
-      for (const args of [
-        [],
-        ['--version'],
-        ['-c', 'process.stdout.write("EXECUTED")'],
-        ['-I', '-c', 'raise RuntimeError()'],
-        ['-c', 'import json', 'extra'],
-      ]) {
-        const result = yield* command.execute(process.execPath, [file, ...args], {
-          env: {},
-          allowFailure: true,
-          timeoutMs: 2000,
-        });
-        expect(result.exitCode).toBe(64);
-        expect(result.stdout).toBe('');
-      }
+      const result = yield* command.execute(process.execPath, ['--require', bootstrap, server], {
+        env: {},
+        allowFailure: true,
+        timeoutMs: 2000,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('denied');
       expect(yield* f.fs.exists(f.path.join(f.root, 'paths.ok'))).toBe(false);
     }).pipe(Effect.provide(Layer.merge(io, commands)), TestClock.withLive),
   );
+  effectIt.effect('answers only the two exact intrinsic probes and pins the private preload bytes', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const bootstrap = f.path.join(f.root, 'bootstrap.cjs');
+      const server = f.path.join(f.root, 'probe.cjs');
+      const prefix = [
+        'import os, os.path, sys',
+        'normalize = lambda p: os.path.normcase(os.path.normpath(p))',
+        'cwd = normalize(os.getcwd())',
+        'orig_sys_path = [p for p in sys.path if p != ""]',
+        'sys.path[:] = [p for p in sys.path if p != "" and normalize(p) != cwd]',
+        'import sys, json',
+      ];
+      const pathCode = EffectArray.join(
+        [...prefix, 'json.dump(dict(path=orig_sys_path, prefix=sys.prefix), sys.stdout)'],
+        '; ',
+      );
+      const versionCode = EffectArray.join([...prefix, 'json.dump(tuple(sys.version_info), sys.stdout)'], '; ');
+      const metadata = {path: [f.root], prefix: f.root, version: [3, 12, 13]};
+      yield* f.fs.writeFileString(bootstrap, pythonProviderBootstrap(metadata, 'inert-marker', f.root));
+      yield* f.fs.writeFileString(
+        server,
+        `
+const cp=require('node:child_process');
+const paths=${JSON.stringify(pathCode)},version=${JSON.stringify(versionCode)};
+const options={cwd:process.cwd(),encoding:'utf8',shell:false};
+const a=cp.execFileSync('inert-marker',['-c',paths],options);
+const b=cp.execFileSync('inert-marker',['-I','-c',version],options);
+for(const args of [['-c',paths+' '],['-c','"'+paths+'"'],['-B','-c',paths],['-c',version],['-I','-c',paths]]){
+ let denied=false;try{cp.execFileSync('inert-marker',args,options);}catch{denied=true;}if(!denied)process.exit(65);
+}
+for(const options of [{encoding:'utf8',shell:true},{encoding:'utf8',shell:false,env:{}},{encoding:'buffer',shell:false}]){
+ let denied=false;try{cp.execFileSync('inert-marker',['-c',paths],options);}catch{denied=true;}if(!denied)process.exit(66);
+}
+process.stdout.write(JSON.stringify([JSON.parse(a),JSON.parse(b)]));
+`,
+      );
+      const command = yield* CommandExecutor;
+      const result = yield* command.execute(process.execPath, ['--require', bootstrap, server], {
+        env: {},
+        timeoutMs: 2000,
+      });
+      expect(JSON.parse(result.stdout)).toEqual([{path: [f.root], prefix: f.root}, [3, 12, 13, 'final', 0]]);
+      expect(JSON.parse(yield* f.fs.readFileString(f.path.join(f.root, 'paths.ok')))).toEqual({
+        path: [f.root],
+        prefix: f.root,
+      });
+      expect(JSON.parse(yield* f.fs.readFileString(f.path.join(f.root, 'version.ok')))).toEqual([
+        3,
+        12,
+        13,
+        'final',
+        0,
+      ]);
+    }).pipe(Effect.provide(Layer.merge(io, commands)), TestClock.withLive),
+  );
+  it('preserves native Windows path data while rejecting alternate streams and shell interpolation', () => {
+    expect(staticPythonPath('C:\\Program Files\\Python Ω', true)).toBe(true);
+    expect(staticPythonPath('C:/SDK/libs', true)).toBe(true);
+    for (const path of ['C:relative', 'C:\\SDK\\data:stream', '\\\\server\\share', 'C:\\SDK\\$hook', 'x\n'])
+      expect(staticPythonPath(path, true)).toBe(false);
+  });
 });
 const serverDirectory = process.env.THREADNOTE_PYTHON_PROVIDER_DIRECTORY;
 const node = process.env.THREADNOTE_PYTHON_NODE;
@@ -880,7 +955,7 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
         });
         const wire = yield* spawnLspWire({
           command: runtime,
-          args: [f.path.join(server, 'langserver.index.js'), '--stdio'],
+          args: [...project.runtimeArguments, f.path.join(server, 'langserver.index.js'), '--stdio'],
           cwd: f.project,
           environment: {},
         });
@@ -955,6 +1030,12 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
               files: Schema.Array(
                 Schema.Struct({
                   uri: Schema.String,
+                  content: Schema.String,
+                  documentVersion: Schema.NullOr(Schema.Int),
+                  source: Schema.Literals(['disk', 'overlay']),
+                  edits: Schema.Array(
+                    Schema.Struct({range: Schema.Struct({start: Position, end: Position}), newText: Schema.String}),
+                  ),
                 }),
               ),
             }),
@@ -987,6 +1068,12 @@ describe.skipIf(!serverDirectory || !node || process.platform === 'win32')('pinn
               files: Schema.Array(
                 Schema.Struct({
                   uri: Schema.String,
+                  content: Schema.String,
+                  documentVersion: Schema.NullOr(Schema.Int),
+                  source: Schema.Literals(['disk', 'overlay']),
+                  edits: Schema.Array(
+                    Schema.Struct({range: Schema.Struct({start: Position, end: Position}), newText: Schema.String}),
+                  ),
                 }),
               ),
             }),

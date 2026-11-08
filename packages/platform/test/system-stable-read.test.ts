@@ -19,10 +19,15 @@ import {
   runtimeReadPrivateWriterFile,
   runtimePublishPrivateWriterFile,
   runtimeReadWriterProcessIdentity,
+  runtimeAssertPrivateProviderPath,
 } from '../src/system.js';
 
+const posixWriterHost =
+  (process.platform === 'darwin' || process.platform === 'linux') &&
+  (process.arch === 'arm64' || process.arch === 'x64');
+
 effectIt.layer(BunServices.layer)(it => {
-  it.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+  it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
     'refuses actual inheritable ACL grants on an already opened private directory before publishing bytes',
     () =>
       Effect.gen(function* () {
@@ -52,6 +57,7 @@ effectIt.layer(BunServices.layer)(it => {
                 ),
               ).toThrow();
               expect(native.existsSync(`${folder}/private.json`)).toBe(false);
+              expect(() => runtimeAssertPrivateProviderPath(folder, {kind: 'directory'})).toThrow();
               // Existing unexpected ACLs were refused, never silently repaired.
               expect(() => runtimeOpenPrivateWriterDirectory(folder)).toThrow();
             }),
@@ -63,7 +69,7 @@ effectIt.layer(BunServices.layer)(it => {
 
 for (const boundary of ['ancestor', 'existing-file', 'new-file'] as const) {
   effectIt.layer(BunServices.layer)(it => {
-    it.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+    it.effect.skipIf(process.platform !== 'darwin' || (process.arch !== 'arm64' && process.arch !== 'x64'))(
       `refuses actual unsafe ACL state at the private ${boundary} boundary`,
       () =>
         Effect.gen(function* () {
@@ -153,55 +159,56 @@ for (const boundary of ['ancestor', 'existing-file', 'new-file'] as const) {
 }
 
 effectIt.layer(BunServices.layer)(it => {
-  it.effect('conditionally writes through actual rooted descriptors and synchronizes the acknowledged source', () =>
-    Effect.gen(function* () {
-      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
-      const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-descriptor-'});
-      const canonical = yield* fs.realPath(directory);
-      const filename = `${canonical}/a.ts`;
-      yield* fs.writeFileString(filename, 'old');
-      const native = process.getBuiltinModule('fs');
-      const parent = native.statSync(canonical, {bigint: true});
-      const original = native.statSync(filename, {bigint: true});
-      yield* Effect.acquireUseRelease(
-        Effect.sync(() => runtimeOpenWriterRoot(canonical, parent)),
-        root =>
-          Effect.acquireUseRelease(
-            Effect.sync(() =>
-              runtimeOpenGuardedDiskTarget(
-                root,
-                ['a.ts'],
-                JSON.stringify([String(original.dev), String(original.ino)]),
-                16,
+  it.effect.skipIf(!posixWriterHost)(
+    'conditionally writes through actual rooted descriptors and synchronizes the acknowledged source',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-descriptor-'});
+        const canonical = yield* fs.realPath(directory);
+        const filename = `${canonical}/a.ts`;
+        yield* fs.writeFileString(filename, 'old');
+        const native = process.getBuiltinModule('fs');
+        const parent = native.statSync(canonical, {bigint: true});
+        const original = native.statSync(filename, {bigint: true});
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenWriterRoot(canonical, parent)),
+          root =>
+            Effect.acquireUseRelease(
+              Effect.sync(() =>
+                runtimeOpenGuardedDiskTarget(
+                  root,
+                  ['a.ts'],
+                  JSON.stringify([String(original.dev), String(original.ino)]),
+                  16,
+                ),
               ),
+              target =>
+                Effect.sync(() => {
+                  let assertions = 0;
+                  const before = runtimeInspectGuardedDiskTarget(target);
+                  const result = runtimeCommitGuardedDiskTarget(target, {
+                    before,
+                    afterBytes: new TextEncoder().encode('new text'),
+                    assertCurrentSync: () => {
+                      assertions++;
+                    },
+                  });
+                  expect(result.status).toBe('applied');
+                  if (result.status === 'applied')
+                    expect(new TextDecoder().decode(result.current.bytes)).toBe('new text');
+                  expect(assertions).toBeGreaterThanOrEqual(3);
+                  expect(native.readFileSync(filename, 'utf8')).toBe('new text');
+                }),
+              target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
             ),
-            target =>
-              Effect.sync(() => {
-                let assertions = 0;
-                const before = runtimeInspectGuardedDiskTarget(target);
-                const result = runtimeCommitGuardedDiskTarget(target, {
-                  before,
-                  afterBytes: new TextEncoder().encode('new text'),
-                  assertCurrentSync: () => {
-                    assertions++;
-                  },
-                });
-                expect(result.status).toBe('applied');
-                if (result.status === 'applied')
-                  expect(new TextDecoder().decode(result.current.bytes)).toBe('new text');
-                expect(assertions).toBeGreaterThanOrEqual(3);
-                expect(native.readFileSync(filename, 'utf8')).toBe('new text');
-              }),
-            target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
-          ),
-        root => Effect.sync(() => runtimeCloseWriterRoot(root)),
-      );
-    }),
+          root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+        );
+      }),
   );
 });
 
-boundaryIt.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
+boundaryIt.skipIf(!posixWriterHost)(
   'reads one OS account home across actual processes with different configured homes',
   async () => {
     const identity = runtimeReadStableOsUserIdentity();
@@ -239,141 +246,143 @@ boundaryIt.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
     expect(rows[0].uid).toBe(identity.userId);
     expect(rows[1].uid).toBe(identity.userId);
     expect(rows[0].home).toBe(rows[1].home);
-    expect(rows[0].builtin).not.toBe(rows[1].builtin);
+    if (process.platform === 'darwin') expect(rows[0].builtin).not.toBe(rows[1].builtin);
   },
 );
 
 effectIt.layer(BunServices.layer)(it => {
-  it.effect('durably publishes private journal revisions through pinned native directories', () =>
-    Effect.gen(function* () {
-      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-private-journal-'});
-      const canonical = yield* fs.realPath(root);
-      yield* Effect.acquireUseRelease(
-        Effect.sync(() => runtimeOpenPrivateWriterDirectory(canonical)),
-        directory =>
-          Effect.sync(() => {
-            const options = {
-              mode: 'exclusive' as const,
-              nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-              assertCurrentSync: () => undefined,
-            };
-            expect(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)).toBeUndefined();
-            expect(
-              runtimePublishPrivateWriterFile(
+  it.effect.skipIf(!posixWriterHost)(
+    'durably publishes private journal revisions through pinned native directories',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-private-journal-'});
+        const canonical = yield* fs.realPath(root);
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => runtimeOpenPrivateWriterDirectory(canonical)),
+          directory =>
+            Effect.sync(() => {
+              const options = {
+                mode: 'exclusive' as const,
+                nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                assertCurrentSync: () => undefined,
+              };
+              expect(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)).toBeUndefined();
+              expect(
+                runtimePublishPrivateWriterFile(
+                  directory,
+                  'journal.json',
+                  new TextEncoder().encode('{"revision":1}'),
+                  options,
+                ).status,
+              ).toBe('published');
+              const replaced = runtimePublishPrivateWriterFile(
                 directory,
                 'journal.json',
-                new TextEncoder().encode('{"revision":1}'),
-                options,
-              ).status,
-            ).toBe('published');
-            const replaced = runtimePublishPrivateWriterFile(
-              directory,
-              'journal.json',
-              new TextEncoder().encode('{"revision":2}'),
-              {...options, mode: 'replace'},
-            );
-            expect(replaced.status).toBe('published');
-            const read = runtimeReadPrivateWriterFile(directory, 'journal.json', 128);
-            expect(new TextDecoder().decode(read?.bytes)).toBe('{"revision":2}');
-            expect(read?.identity.mode && read.identity.mode & 0o077n).toBe(0n);
-            expect(
-              runtimePublishPrivateWriterFile(directory, 'journal.json', new Uint8Array([0]), options).status,
-            ).toBe('unknown');
-            expect(new TextDecoder().decode(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)?.bytes)).toBe(
-              '{"revision":2}',
-            );
-          }),
-        directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
-      );
-    }),
+                new TextEncoder().encode('{"revision":2}'),
+                {...options, mode: 'replace'},
+              );
+              expect(replaced.status).toBe('published');
+              const read = runtimeReadPrivateWriterFile(directory, 'journal.json', 128);
+              expect(new TextDecoder().decode(read?.bytes)).toBe('{"revision":2}');
+              expect(read?.identity.mode && read.identity.mode & 0o077n).toBe(0n);
+              expect(
+                runtimePublishPrivateWriterFile(directory, 'journal.json', new Uint8Array([0]), options).status,
+              ).toBe('unknown');
+              expect(
+                new TextDecoder().decode(runtimeReadPrivateWriterFile(directory, 'journal.json', 128)?.bytes),
+              ).toBe('{"revision":2}');
+            }),
+          directory => Effect.sync(() => runtimeClosePrivateWriterDirectory(directory)),
+        );
+      }),
   );
 });
 
 for (const failure of ['source', 'readonly', 'hardlink', 'parent-symlink', 'lease', 'short-write'] as const) {
   effectIt.layer(BunServices.layer)(it => {
-    it.effect(`preserves native guarded targets across ${failure} before or during mutation`, () =>
-      Effect.gen(function* () {
-        if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
-        const fs = yield* FileSystem.FileSystem;
-        const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-native-conflict-'});
-        const canonical = yield* fs.realPath(directory);
-        const native = process.getBuiltinModule('fs');
-        native.mkdirSync(`${canonical}/project`);
-        native.mkdirSync(`${canonical}/project/sub`);
-        native.mkdirSync(`${canonical}/outside`);
-        const filename = `${canonical}/project/sub/a.ts`;
-        native.writeFileSync(filename, 'old');
-        native.writeFileSync(`${canonical}/outside/a.ts`, 'outside');
-        const parent = native.statSync(`${canonical}/project`, {bigint: true});
-        const source = native.statSync(filename, {bigint: true});
-        yield* Effect.acquireUseRelease(
-          Effect.sync(() => runtimeOpenWriterRoot(`${canonical}/project`, parent)),
-          root =>
-            Effect.acquireUseRelease(
-              Effect.sync(() =>
-                runtimeOpenGuardedDiskTarget(
-                  root,
-                  ['sub', 'a.ts'],
-                  JSON.stringify([String(source.dev), String(source.ino)]),
-                  32,
+    it.effect.skipIf(!posixWriterHost)(
+      `preserves native guarded targets across ${failure} before or during mutation`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'writer-native-conflict-'});
+          const canonical = yield* fs.realPath(directory);
+          const native = process.getBuiltinModule('fs');
+          native.mkdirSync(`${canonical}/project`);
+          native.mkdirSync(`${canonical}/project/sub`);
+          native.mkdirSync(`${canonical}/outside`);
+          const filename = `${canonical}/project/sub/a.ts`;
+          native.writeFileSync(filename, 'old');
+          native.writeFileSync(`${canonical}/outside/a.ts`, 'outside');
+          const parent = native.statSync(`${canonical}/project`, {bigint: true});
+          const source = native.statSync(filename, {bigint: true});
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => runtimeOpenWriterRoot(`${canonical}/project`, parent)),
+            root =>
+              Effect.acquireUseRelease(
+                Effect.sync(() =>
+                  runtimeOpenGuardedDiskTarget(
+                    root,
+                    ['sub', 'a.ts'],
+                    JSON.stringify([String(source.dev), String(source.ino)]),
+                    32,
+                  ),
                 ),
+                target =>
+                  Effect.sync(() => {
+                    const before = runtimeInspectGuardedDiskTarget(target);
+                    if (failure === 'source') native.writeFileSync(filename, 'user');
+                    if (failure === 'readonly') native.chmodSync(filename, 0o400);
+                    if (failure === 'hardlink') native.linkSync(filename, `${canonical}/alias`);
+                    if (failure === 'parent-symlink') {
+                      native.renameSync(`${canonical}/project/sub`, `${canonical}/project/detached`);
+                      native.symlinkSync(`${canonical}/outside`, `${canonical}/project/sub`);
+                    }
+                    const originalWrite = native.writeSync.bind(native);
+                    let calls = 0;
+                    const spy =
+                      failure === 'short-write'
+                        ? vi.spyOn(native, 'writeSync').mockImplementation((...args: unknown[]) => {
+                            const [fd, buffer, offset, length, position] = args;
+                            if (
+                              typeof fd !== 'number' ||
+                              !(buffer instanceof Uint8Array) ||
+                              typeof offset !== 'number' ||
+                              typeof length !== 'number' ||
+                              typeof position !== 'number'
+                            )
+                              throw new Error('Unexpected native descriptor-write arguments');
+                            if (++calls > 1) throw new Error('bounded injected disk failure');
+                            return originalWrite(fd, buffer, offset, 1, position);
+                          })
+                        : undefined;
+                    try {
+                      const apply = () =>
+                        runtimeCommitGuardedDiskTarget(target, {
+                          before,
+                          afterBytes: new TextEncoder().encode('new'),
+                          assertCurrentSync: () => {
+                            if (failure === 'lease') throw new Error('lease lost');
+                          },
+                        });
+                      if (failure === 'lease') expect(apply).toThrow('lease lost');
+                      else expect(apply().status).toBe(failure === 'short-write' ? 'unknown' : 'conflict');
+                      if (failure === 'short-write') expect(calls).toBe(2);
+                    } finally {
+                      spy?.mockRestore();
+                    }
+                    expect(native.readFileSync(`${canonical}/outside/a.ts`, 'utf8')).toBe('outside');
+                    const surviving = failure === 'parent-symlink' ? `${canonical}/project/detached/a.ts` : filename;
+                    expect(native.readFileSync(surviving, 'utf8')).toBe(
+                      failure === 'source' ? 'user' : failure === 'short-write' ? 'nld' : 'old',
+                    );
+                  }),
+                target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
               ),
-              target =>
-                Effect.sync(() => {
-                  const before = runtimeInspectGuardedDiskTarget(target);
-                  if (failure === 'source') native.writeFileSync(filename, 'user');
-                  if (failure === 'readonly') native.chmodSync(filename, 0o400);
-                  if (failure === 'hardlink') native.linkSync(filename, `${canonical}/alias`);
-                  if (failure === 'parent-symlink') {
-                    native.renameSync(`${canonical}/project/sub`, `${canonical}/project/detached`);
-                    native.symlinkSync(`${canonical}/outside`, `${canonical}/project/sub`);
-                  }
-                  const originalWrite = native.writeSync.bind(native);
-                  let calls = 0;
-                  const spy =
-                    failure === 'short-write'
-                      ? vi.spyOn(native, 'writeSync').mockImplementation((...args: unknown[]) => {
-                          const [fd, buffer, offset, length, position] = args;
-                          if (
-                            typeof fd !== 'number' ||
-                            !(buffer instanceof Uint8Array) ||
-                            typeof offset !== 'number' ||
-                            typeof length !== 'number' ||
-                            typeof position !== 'number'
-                          )
-                            throw new Error('Unexpected native descriptor-write arguments');
-                          if (++calls > 1) throw new Error('bounded injected disk failure');
-                          return originalWrite(fd, buffer, offset, 1, position);
-                        })
-                      : undefined;
-                  try {
-                    const apply = () =>
-                      runtimeCommitGuardedDiskTarget(target, {
-                        before,
-                        afterBytes: new TextEncoder().encode('new'),
-                        assertCurrentSync: () => {
-                          if (failure === 'lease') throw new Error('lease lost');
-                        },
-                      });
-                    if (failure === 'lease') expect(apply).toThrow('lease lost');
-                    else expect(apply().status).toBe(failure === 'short-write' ? 'unknown' : 'conflict');
-                    if (failure === 'short-write') expect(calls).toBe(2);
-                  } finally {
-                    spy?.mockRestore();
-                  }
-                  expect(native.readFileSync(`${canonical}/outside/a.ts`, 'utf8')).toBe('outside');
-                  const surviving = failure === 'parent-symlink' ? `${canonical}/project/detached/a.ts` : filename;
-                  expect(native.readFileSync(surviving, 'utf8')).toBe(
-                    failure === 'source' ? 'user' : failure === 'short-write' ? 'nld' : 'old',
-                  );
-                }),
-              target => Effect.sync(() => runtimeCloseGuardedDiskTarget(target)),
-            ),
-          root => Effect.sync(() => runtimeCloseWriterRoot(root)),
-        );
-      }),
+            root => Effect.sync(() => runtimeCloseWriterRoot(root)),
+          );
+        }),
     );
   });
 }
@@ -384,7 +393,6 @@ effectIt.layer(BunServices.layer)(it => {
     [Schema.Literals(['../', 'a/', 'a\\', '\0']), Schema.String.check(Schema.isMaxLength(16))],
     ([prefix, suffix]) =>
       Effect.gen(function* () {
-        if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
         const fs = yield* FileSystem.FileSystem;
         const folder = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'writer-component-property-'}));
         const native = process.getBuiltinModule('fs');
@@ -407,7 +415,7 @@ effectIt.layer(BunServices.layer)(it => {
           root => Effect.sync(() => runtimeCloseWriterRoot(root)),
         );
       }),
-    {arbitrary: {runs: 20}},
+    {skip: !posixWriterHost, arbitrary: {runs: 20}},
   );
 });
 

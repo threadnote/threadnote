@@ -1,0 +1,227 @@
+import {redactCapabilities, protocolCapabilities} from './provider-fixture.js';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {observeCandidateTransport} from './transport-lifecycle.js';
+import {fileURLToPath} from 'node:url';
+import {describe, expect, it} from 'vitest';
+import fc from 'fast-check';
+import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
+/* oxlint-disable effecttsgo/node-builtin-import -- Qualification exercises private evidence files and refuses a mismatched executable before spawning it. */
+import {readFileSync} from 'node:fs';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Ledger, qualificationInventory} from './inventory.js';
+import {candidateTargetMatchesHost, runCandidateChecks} from './candidate.js';
+import {checkMissingProfileTransportParity, checkProposalStatusTransportParity} from './transport-oracle.js';
+
+const ledger = Schema.decodeUnknownSync(Ledger)(
+  JSON.parse(
+    readFileSync(new URL('../../../../../config/semantic-providers/qualification-lock.json', import.meta.url), 'utf8'),
+  ),
+);
+const wrap = (value: unknown) => ({structuredContent: value, content: [{type: 'text', text: JSON.stringify(value)}]});
+describe('final combined qualification preparation', () => {
+  it('accepts only the exact canonical host release target, including Windows and libc/baseline boundaries', () => {
+    const targets = [
+      ['darwin-arm64', 'bun-darwin-arm64'],
+      ['darwin-x64', 'bun-darwin-x64'],
+      ['linux-arm64', 'bun-linux-arm64'],
+      ['linux-arm64-musl', 'bun-linux-arm64-musl'],
+      ['linux-x64-baseline', 'bun-linux-x64-baseline'],
+      ['linux-x64-baseline-musl', 'bun-linux-x64-baseline-musl'],
+      ['windows-arm64', 'bun-windows-arm64'],
+      ['windows-x64-baseline', 'bun-windows-x64-baseline'],
+    ] as const;
+    for (const [host, accepted] of targets) {
+      expect(candidateTargetMatchesHost(accepted, host)).toBe(true);
+      for (const [, selected] of targets)
+        if (selected !== accepted) expect(candidateTargetMatchesHost(selected, host)).toBe(false);
+    }
+    for (const host of [undefined, 'linux-x64', 'win32-arm64', 'windows-x64', 'linux-arm64-unknown'])
+      for (const [, selected] of targets) expect(candidateTargetMatchesHost(selected, host)).toBe(false);
+    expect(candidateTargetMatchesHost('bun-windows-x64', 'windows-x64-baseline')).toBe(false);
+    expect(candidateTargetMatchesHost('bun-linux-x64-baseline-extra', 'linux-x64-baseline')).toBe(false);
+  });
+
+  it('preserves missing selected cells independently of historical qualification labels', () => {
+    const inventory = qualificationInventory({
+      ...ledger,
+      providers: EffectArray.map(ledger.providers, provider => ({...provider, productionQualified: true})),
+    });
+    expect(inventory.counts).toEqual({familyPlatformCells: 40, activeClientCells: 80, qualifiedCells: 0});
+    expect(inventory.productionQualified).toBe(false);
+    expect(inventory.scenarios).toHaveLength(43);
+    expect(new Set(EffectArray.map(inventory.scenarios, scenario => scenario.id)).size).toBe(43);
+    expect(EffectArray.some(inventory.scenarios, scenario => scenario.id === 'S39')).toBe(false);
+    expect(EffectArray.every(inventory.cells, cell => cell.status === 'unqualified' && !cell.productionQualified)).toBe(
+      true,
+    );
+    expect(
+      EffectArray.every(inventory.cells, cell =>
+        EffectArray.every(cell.clients, client => client.outcome === 'missing'),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(inventory.scenarios, scenario => scenario.outcome === 'deferred'),
+        scenario => scenario.id,
+      ),
+    ).toEqual(['S29', 'S30', 'S31', 'S32']);
+    expect(EffectArray.findFirst(inventory.scenarios, scenario => scenario.id === 'S43')).toMatchObject({
+      value: {outcome: 'missing'},
+    });
+  });
+  it('rejects omitted or duplicate release matrix entries', () => {
+    expect(() => qualificationInventory({...ledger, requiredPlatforms: ledger.requiredPlatforms.slice(1)})).toThrow();
+    expect(() => qualificationInventory({...ledger, releaseLanguages: [...ledger.releaseLanguages, 'java']})).toThrow();
+    expect(() =>
+      qualificationInventory({
+        ...ledger,
+        selectedProviders: {...ledger.selectedProviders, python: ledger.selectedProviders.typescript},
+      }),
+    ).toThrow();
+  });
+  it('is deterministic under ledger order permutations and does not mutate source evidence', () => {
+    const expected = qualificationInventory(ledger);
+    fc.assert(
+      fc.property(
+        fc.shuffledSubarray([...ledger.requiredPlatforms], {minLength: 8, maxLength: 8}),
+        fc.shuffledSubarray([...ledger.providers], {
+          minLength: ledger.providers.length,
+          maxLength: ledger.providers.length,
+        }),
+        (platforms, providers) => {
+          const source = {...ledger, requiredPlatforms: platforms, providers};
+          const before = JSON.stringify(source);
+          expect(qualificationInventory(source)).toEqual(expected);
+          expect(JSON.stringify(source)).toBe(before);
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+  it('retains the owned child and awaits the original SDK auto-close after invalid initialize', async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [fileURLToPath(new URL('./invalid-initialize.cjs', import.meta.url))],
+      stderr: 'pipe',
+    });
+    const owned: number[] = [];
+    const lifecycle = observeCandidateTransport(transport, pid => owned.push(pid));
+    const client = new Client({name: 'qualification-cleanup-regression', version: '1'});
+    try {
+      await expect(client.connect(transport)).rejects.toThrow();
+      expect(transport.pid).toBeNull();
+      expect(owned).toHaveLength(1);
+      expect(lifecycle.pid).toBe(owned[0]);
+      expect(() => process.kill(owned[0], 0)).not.toThrow();
+      let closed = false;
+      const closing = lifecycle.close().then(() => {
+        closed = true;
+      });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(lifecycle.closeObserved).toBe(false);
+      await closing;
+      await lifecycle.waitForCloseIfStarted(AbortSignal.timeout(1000));
+      expect(lifecycle.closeObserved).toBe(true);
+      expect(() => process.kill(owned[0], 0)).toThrow();
+    } finally {
+      await lifecycle.close();
+      await lifecycle.waitForCloseIfStarted(AbortSignal.timeout(1000));
+    }
+  }, 10000);
+  it('retains a failed receipt and refuses executable hash mismatch before launching any candidate', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'tn11-receipt-test-'));
+    try {
+      const output = join(directory, 'receipt.json');
+      const manifest = join(directory, 'candidate.json');
+      await writeFile(join(directory, 'threadnote'), 'must never execute');
+      await writeFile(join(directory, 'release.json'), '{}');
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          binary: join(directory, 'threadnote'),
+          binarySha256: EffectString.repeat(64)('0'),
+          releaseSha256: EffectString.repeat(64)('0'),
+          sourceCommit: EffectString.repeat(40)('0'),
+          sourceTree: EffectString.repeat(40)('0'),
+        }),
+      );
+      const report = await runCandidateChecks(manifest, output);
+      expect(report).toMatchObject({
+        status: 'failed',
+        failure: 'Candidate hash mismatch',
+        fullScenarioQualified: false,
+        provider: {started: false},
+        cleanup: {ownedProcesses: [], ownedProcessesGone: true},
+      });
+      expect(JSON.parse(await readFile(output, 'utf8'))).toEqual(report);
+      const previous = await readFile(output, 'utf8');
+      await expect(runCandidateChecks(manifest, output)).rejects.toThrow();
+      expect(await readFile(output, 'utf8')).toBe(previous);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+  it('rejects transport error wrappers and canonical status/evidence changes', () => {
+    const value = {version: 1, status: 'unavailable', reason: 'missing-profile', evidence: null};
+    expect(checkMissingProfileTransportParity(value, wrap(value))).toBe(true);
+    expect(checkMissingProfileTransportParity(value, {...wrap(value), content: [{type: 'text', text: '{}'}]})).toBe(
+      false,
+    );
+    expect(checkMissingProfileTransportParity(value, {...wrap(value), isError: true})).toBe(false);
+    expect(checkMissingProfileTransportParity(value, wrap({...value, status: 'ok'}))).toBe(false);
+    expect(checkMissingProfileTransportParity(value, wrap({...value, evidence: {}}))).toBe(false);
+  });
+  it('redacts protocol credentials at every nested object boundary without mutating source evidence', () => {
+    const value = {
+      writer: {operation: 'receipt-id', capability: 'writer-secret'},
+      content: [{token: 'bootstrap-secret'}],
+    };
+    const before = JSON.stringify(value);
+    expect(protocolCapabilities(value)).toEqual(['writer-secret', 'bootstrap-secret']);
+    expect(redactCapabilities(value)).toEqual({
+      writer: {operation: 'receipt-id', capability: '<redacted>'},
+      content: [{token: '<redacted>'}],
+    });
+    expect(JSON.stringify(value)).toBe(before);
+  });
+  it('bounds sampled status timestamps while retaining every proposal field in parity', () => {
+    const value = {version: 1, status: 'ok', checkedAt: 11, page: {digest: 'fixed', chunks: []}};
+    expect(checkProposalStatusTransportParity(value, {...value, checkedAt: 12}, 10, 13)).toBe(true);
+    expect(checkProposalStatusTransportParity(value, {...value, checkedAt: 9}, 10, 13)).toBe(false);
+    expect(checkProposalStatusTransportParity(value, {...value, checkedAt: 14}, 10, 13)).toBe(false);
+    expect(
+      checkProposalStatusTransportParity(
+        value,
+        {...value, checkedAt: 12, page: {digest: 'changed', chunks: []}},
+        10,
+        13,
+      ),
+    ).toBe(false);
+  });
+  it('compares complete nested canonical fields without depending on object key order or mutating inputs', () => {
+    fc.assert(
+      fc.property(fc.jsonValue(), extra => {
+        const canonical = {
+          version: 1,
+          status: 'unavailable',
+          reason: 'missing-profile',
+          evidence: null,
+          // CLI and MCP compare decoded JSON; JSON canonicalizes JavaScript -0 to 0.
+          detail: [JSON.parse(JSON.stringify(extra))],
+        };
+        const reordered = EffectRecord.fromEntries(EffectRecord.toEntries(canonical).reverse());
+        const before = JSON.stringify(canonical);
+        expect(checkMissingProfileTransportParity(canonical, wrap(reordered))).toBe(true);
+        expect(checkMissingProfileTransportParity(canonical, wrap({...reordered, detail: {changed: extra}}))).toBe(
+          false,
+        );
+        expect(JSON.stringify(canonical)).toBe(before);
+      }),
+      {numRuns: 50},
+    );
+  });
+});

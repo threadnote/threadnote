@@ -45,7 +45,7 @@ import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {SystemInfo} from '@threadnote/platform/system';
+import {SystemInfo, runtimePlatform} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   Counter,
@@ -75,16 +75,14 @@ import {
 import {makePythonSession} from './providers/python.js';
 import {makePythonProject, PythonEnvironment} from './providers/python_project.js';
 import {makeJavaAnalysis, verifyJavaOutputDirectories} from './providers/java.js';
-import {javaRuntimeQualification, javaRuntimeSetupAction, makeJavaRuntime} from './providers/java_runtime.js';
-import {makeGoProject, makeGoSession, goProviderVersion, goExecutableDigest, goToolDigest} from './providers/go.js';
 import {
-  makeRustProject,
-  makeRustSession,
-  rustProviderVersion,
-  rustExecutableDigest,
-  rustToolDigest,
-  cargoToolDigest,
-} from './providers/rust.js';
+  javaRuntimeQualification,
+  javaRuntimePinsForHost,
+  javaRuntimeSetupAction,
+  makeJavaRuntime,
+} from './providers/java_runtime.js';
+import {makeGoProject, makeGoSession, goProviderVersion, goRuntimePinsForHost} from './providers/go.js';
+import {makeRustProject, makeRustSession, rustProviderVersion, rustRuntimePinsForHost} from './providers/rust.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {
   boundedFileDigest,
@@ -202,7 +200,9 @@ export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCan
   if (!candidate) return yield* nativeSetupFault(id, 'missing', 'provider');
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const expected = id === 'gopls' ? goExecutableDigest : rustExecutableDigest;
+  const pins = id === 'gopls' ? goRuntimePinsForHost() : rustRuntimePinsForHost();
+  if (!pins) return yield* nativeSetupFault(id, 'incompatible', 'provider');
+  const expected = pins.providerExecutableDigest;
   yield* Effect.gen(function* () {
     if (candidate.executableDigest !== expected || !path.isAbsolute(candidate.executable))
       return yield* nativeSetupFault(id, 'incompatible', 'provider');
@@ -219,7 +219,11 @@ export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCan
     ),
   );
   yield* Effect.gen(function* () {
-    if (!Schema.is(Digest)(candidate.sdkTreeDigest) || !path.isAbsolute(candidate.sdkDirectory))
+    if (
+      !Schema.is(Digest)(candidate.sdkTreeDigest) ||
+      !path.isAbsolute(candidate.sdkDirectory) ||
+      (pins.sdkTreeDigest !== undefined && candidate.sdkTreeDigest !== pins.sdkTreeDigest)
+    )
       return yield* nativeSetupFault(id, 'incompatible', 'sdk');
     if (!(yield* fs.exists(candidate.sdkDirectory))) return yield* nativeSetupFault(id, 'missing', 'sdk');
     if (
@@ -228,14 +232,14 @@ export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCan
     )
       return yield* nativeSetupFault(id, 'incompatible', 'sdk');
     const tools =
-      id === 'gopls'
-        ? [['bin/go', goToolDigest]]
+      pins.provider === 'gopls'
+        ? [['go', pins.goExecutableDigest]]
         : [
-            ['bin/rustc', rustToolDigest],
-            ['bin/cargo', cargoToolDigest],
+            ['rustc', pins.rustcExecutableDigest],
+            ['cargo', pins.cargoExecutableDigest],
           ];
     for (const [file, digest] of tools) {
-      const tool = path.join(candidate.sdkDirectory, file);
+      const tool = path.join(candidate.sdkDirectory, 'bin', file + (runtimePlatform === 'win32' ? '.exe' : ''));
       if (!(yield* fs.exists(tool))) return yield* nativeSetupFault(id, 'missing', 'sdk');
       if ((yield* boundedFileDigest(tool, 64 * 1024 * 1024)) !== digest)
         return yield* nativeSetupFault(id, 'incompatible', 'sdk');
@@ -602,6 +606,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 args:
                   'runtime' in candidate
                     ? [
+                        ...(pythonProject?.runtimeArguments ?? []),
                         path.join(
                           candidate.serverDirectory,
                           language === 'python' ? 'langserver.index.js' : 'lib/cli.mjs',
@@ -614,7 +619,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
                 environment: nativeProject?.environment ?? {},
               });
               wireState.finish = wire.finish;
-              yield* reservation.bindProvider(wire.pid);
+              yield* reservation.bindProvider(wire.pid, wire.identity);
               const notifications = makeSemanticNotifications();
               const client = yield* makeLspClient(wire, notifications.receive, projectOptions?.settings);
               if (pythonProject && 'runtime' in candidate) {
@@ -856,7 +861,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           ...(id === 'jdtls'
             ? {
                 requirements: {
-                  platform: javaRuntimeQualification.platform,
+                  platform: javaRuntimePinsForHost()?.platform ?? 'unavailable',
                   runtimeSdk: {language: 'java', version: javaRuntimeQualification.runtimeVersion},
                   projectSdk: {language: 'java', version: javaRuntimeQualification.projectVersion},
                   nextAction: javaRuntimeSetupAction,

@@ -5,12 +5,14 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {cryptoLayer} from '@threadnote/platform/crypto';
-import {Cause, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema, Stream} from 'effect';
+import {Cause, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as platformSystem from '@threadnote/platform/system';
+import {TestClock as SemanticTestClock} from 'effect/testing';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
@@ -1021,6 +1023,201 @@ describe('semantic LSP request lifecycle', () => {
       expect((yield* Queue.take(fake.sent)).method).toBe('exit');
       expect((yield* client.request('late', {}, 1000).pipe(Effect.flip)).code).toBe('closing');
     }),
+  );
+});
+describe('semantic owned-tree uncertainty', () => {
+  effectIt.effect('cleans up native acquisition interrupted before the wire can return', () =>
+    Effect.gen(function* () {
+      const minted = yield* Deferred.make<void>();
+      let owner: Fiber.Fiber<unknown, unknown> | undefined;
+      let inputClosed = false,
+        observed = 0,
+        closed = 0;
+      const eof = [false, false];
+      const reads = [0, 0];
+      const streams = EffectArray.map(
+        eof,
+        (_value, index) =>
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (reads[index]++ === 0) controller.enqueue(new Uint8Array());
+              else {
+                eof[index] = true;
+                controller.close();
+              }
+            },
+          }),
+      );
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- The synthetic capability is consumed only by mocked platform functions.
+      const handle = {} as platformSystem.RuntimeOwnedProviderTree;
+      const mocks = [
+        vi.spyOn(platformSystem, 'runtimeSpawnOwnedProviderTree').mockImplementation(() => {
+          owner!.interruptUnsafe();
+          Deferred.doneUnsafe(minted, Effect.void);
+          return {
+            handle,
+            pid: 42,
+            identity: 'acquisition-instance',
+            stdout: streams[0],
+            stderr: streams[1],
+            write: async () => {},
+            closeInput: async () => {
+              inputClosed = true;
+            },
+          };
+        }),
+        vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(() => {
+          observed++;
+          return {
+            state: inputClosed && EffectArray.every(eof, Boolean) ? 'drained' : 'running',
+            leaderExitCode: 0,
+            stdioClosed: EffectArray.every(eof, Boolean),
+          };
+        }),
+        vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation(() => {}),
+        vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(() => {
+          closed++;
+        }),
+      ];
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const mock of mocks) mock.mockRestore();
+        }),
+      );
+      const startup = yield* Effect.forkChild(
+        Effect.scoped(
+          Effect.withFiber(fiber => {
+            owner = fiber;
+            return spawnLspWire({command: '/trusted/server', args: [], cwd: '/project', environment: {}});
+          }),
+        ),
+      );
+      yield* Deferred.await(minted);
+      yield* SemanticTestClock.adjust(6000);
+      expect((yield* Fiber.await(startup))._tag).toBe('Failure');
+      expect(inputClosed).toBe(true);
+      expect(observed).toBeGreaterThan(0);
+      expect(reads).toEqual([2, 2]);
+      expect(closed).toBe(1);
+    }).pipe(
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+    ),
+  );
+  effectIt.effect('preserves malformed-frame failure while draining finite remaining bytes through EOF', () =>
+    Effect.gen(function* () {
+      const chunks = [encodeLspFrame({}), new Uint8Array([1]), new Uint8Array([2, 3]), new Uint8Array([4])];
+      let pulled = 0,
+        stdoutEof = false,
+        stderrEof = false,
+        dead = false,
+        closed = 0;
+      const modes: string[] = [];
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- The synthetic capability is consumed only by mocked platform functions.
+      const handle = {} as platformSystem.RuntimeOwnedProviderTree;
+      const mocks = [
+        vi.spyOn(platformSystem, 'runtimeSpawnOwnedProviderTree').mockReturnValue({
+          handle,
+          pid: 42,
+          identity: 'malformed-output-instance',
+          stdout: new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                if (pulled < chunks.length) controller.enqueue(chunks[pulled++]);
+                else {
+                  stdoutEof = true;
+                  controller.close();
+                }
+              },
+            },
+            {highWaterMark: 1},
+          ),
+          stderr: new ReadableStream<Uint8Array>({
+            start(controller) {
+              stderrEof = true;
+              controller.close();
+            },
+          }),
+          write: async () => {},
+          closeInput: async () => {},
+        }),
+        vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(() => ({
+          state: dead && stdoutEof && stderrEof ? 'drained' : 'running',
+          leaderExitCode: dead ? 0 : null,
+          stdioClosed: stdoutEof && stderrEof,
+        })),
+        vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation((_handle, mode) => {
+          modes.push(mode);
+          dead = true;
+        }),
+        vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(() => {
+          closed++;
+        }),
+      ];
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const mock of mocks) mock.mockRestore();
+        }),
+      );
+      const wire = yield* spawnLspWire({command: '/trusted/server', args: [], cwd: '/project', environment: {}});
+      const finishing = yield* Effect.forkChild(wire.finish);
+      yield* SemanticTestClock.adjust(6000);
+      expect(yield* Fiber.join(finishing)).toMatchObject({drained: true, stdioClosed: true, fault: {code: 'protocol'}});
+      expect(pulled).toBe(chunks.length);
+      expect(stdoutEof).toBe(true);
+      expect(modes).toEqual(['terminate']);
+      expect(closed).toBe(1);
+    }).pipe(
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+    ),
+  );
+  effectIt.effect('retains unknown whole-tree ownership despite leader exit and stream EOF', () =>
+    Effect.gen(function* () {
+      const signals: string[] = [];
+      const closed = vi.fn();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Synthetic capability is used exclusively by the mocked platform functions below.
+      const handle = {} as platformSystem.RuntimeOwnedProviderTree;
+      const mocks = [
+        vi.spyOn(platformSystem, 'runtimeSpawnOwnedProviderTree').mockReturnValue({
+          handle,
+          pid: 42,
+          identity: 'original-instance',
+          stdout: new ReadableStream({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          stderr: new ReadableStream({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          write: async () => {},
+          closeInput: async () => {},
+        }),
+        vi
+          .spyOn(platformSystem, 'runtimeObserveOwnedProviderTree')
+          .mockReturnValue({state: 'unknown', leaderExitCode: 0, stdioClosed: true}),
+        vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation((_handle, mode) => {
+          signals.push(mode);
+        }),
+        vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(closed),
+      ];
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const mock of mocks) mock.mockRestore();
+        }),
+      );
+      const wire = yield* spawnLspWire({command: '/trusted/server', args: [], cwd: '/project', environment: {}});
+      const finishing = yield* Effect.forkChild(wire.finish);
+      yield* Effect.yieldNow;
+      yield* SemanticTestClock.adjust(6000);
+      const stop = yield* Fiber.join(finishing);
+      expect(stop).toMatchObject({code: 0, drained: false, stdioClosed: true, forced: true, fault: {code: 'exit'}});
+      expect(signals).toEqual(['terminate', 'kill']);
+      expect(closed).not.toHaveBeenCalled();
+    }).pipe(
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+    ),
   );
 });
 describe.skipIf(process.platform === 'win32')('semantic real process transport', () => {
