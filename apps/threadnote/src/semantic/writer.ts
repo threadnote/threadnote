@@ -1,6 +1,6 @@
 import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
 import {SecureRandom} from 'effect/crypto';
-import {canonicalFileUri, Counter, Digest, FileUri, Identifier} from '@threadnote/semantic/contracts';
+import {canonicalFileUri, Counter, Digest, FileUri, Identifier, observationKey} from '@threadnote/semantic/contracts';
 import {createSemanticProposal, semanticProposalLimits, type SemanticProposal} from '@threadnote/semantic/proposals';
 import {applySemanticChange, recoverSemanticChange, type ApplyPorts} from '@threadnote/semantic/apply';
 import {
@@ -297,7 +297,9 @@ const retirementVerifier = (capability: string, record: Tombstone) =>
 const verifier = (capability: string, record: Admission, proposal: SemanticProposal) =>
   sha256HexSync(
     JSON.stringify([
-      'threadnote-writer-admission-v1',
+      // This value encoding replaces the unqualified preview's object-order binding.
+      // Existing stored verifiers are retained; no legacy write-authority fallback is accepted.
+      'threadnote-writer-admission-values-v1',
       capability,
       record.operation,
       record.principal,
@@ -306,14 +308,19 @@ const verifier = (capability: string, record: Admission, proposal: SemanticPropo
       record.profile,
       record.createdAt,
       record.expiresAt,
-      record.rootIdentity,
-      record.handle,
-      record.session,
+      [record.rootIdentity.dev, record.rootIdentity.ino],
+      [record.handle.id, record.handle.digest, record.handle.capability],
+      [
+        record.session.processId,
+        record.session.processStartIdentity,
+        record.session.boot,
+        record.session.runtimeIdentity,
+      ],
       record.taskAuthorization,
       record.diskOwnership,
       proposal.digest,
-      record.claims,
-      record.owners,
+      EffectArray.map(record.claims, claim => [claim.canonicalUri, claim.authority, claim.fence, claim.owner]),
+      EffectArray.map(record.owners, owner => [observationKey(owner.observation), owner.authority, owner.fence]),
     ]),
   );
 const binding = (record: Admission): ApplyBinding => ({
