@@ -1418,6 +1418,21 @@ effectIt.effect(
       expect(document.current.diagram).toBe('');
       const statePath = f.statePath(String(draft.runId));
       const bytes = yield* f.fs.readFileString(statePath);
+      yield* f.fs.remove(f.path.join(f.repo, 'source.ts'));
+      const missingExistingSource = yield* runNativeTaskAuthoring(f.config, {
+        command: 'decide',
+        callerCwd: f.repo,
+        authoringRef: draft.authoringRef,
+        userDecision: 'approve',
+        userResponse: 'I approve the originally displayed plan.',
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missingExistingSource).toMatchObject({failure: {code: 'source-path-unavailable'}});
+      if (missingExistingSource._tag !== 'Failure') throw new Error('Missing existing source unexpectedly approved.');
+      expect(missingExistingSource.failure.message).toContain('context.codeRefs[0]');
+      expect(missingExistingSource.failure.message).not.toContain(f.repo);
+      expect(yield* f.fs.readFileString(statePath)).toBe(bytes);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "changed after presentation";\n',
@@ -1496,6 +1511,22 @@ effectIt.effect(
         review: {outcome: 'accepted', blockingIssueCount: 0},
       });
       const beforeSourceChange = yield* f.fs.readFileString(f.statePath(String(draft.runId)));
+      yield* f.fs.remove(f.path.join(f.repo, 'source.ts'));
+      const missingTransferSource = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: 'Spec revision',
+        kind: 'plan',
+        contentFile: planFile,
+        specRef: ready.authoringRef,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missingTransferSource).toMatchObject({failure: {code: 'source-path-unavailable'}});
+      if (missingTransferSource._tag !== 'Failure')
+        throw new Error('Missing approved source unexpectedly transferred.');
+      expect(missingTransferSource.failure.message).toContain('context.codeRefs[0]');
+      expect(missingTransferSource.failure.message).not.toContain(f.repo);
+      expect(yield* f.fs.readFileString(f.statePath(String(draft.runId)))).toBe(beforeSourceChange);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "drift before spec transfer";\n',
@@ -1629,7 +1660,7 @@ effectIt.effect(
             ...specBusiness.context,
             evidenceRefs: [
               {uri: 'threadnote://fixture/valid', memoryId: 'tn_fixture', revision: EffectString.repeat(64)('a')},
-              {uri: marker, memoryId: marker, revision: marker},
+              {uri: marker, memoryId: marker, revision: marker, private: marker},
             ],
           },
         }),
@@ -1653,6 +1684,39 @@ effectIt.effect(
           48,
         )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[0])));
       expect(yield* readNativeWorkflowState(f.config, missingEvidenceRunId)).toBeUndefined();
+
+      const excessiveFeature = 'Too many evidence references';
+      const validEvidence = {
+        uri: 'threadnote://fixture/valid',
+        memoryId: 'tn_fixture',
+        revision: EffectString.repeat(64)('a'),
+      };
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          context: {...specBusiness.context, evidenceRefs: A.makeBy(17, () => validEvidence)},
+        }),
+      );
+      const excessive = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: excessiveFeature,
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(excessive).toMatchObject({failure: {code: 'invalid-content'}});
+      if (excessive._tag !== 'Failure')
+        throw new Error('Excessive evidence references unexpectedly initialized a run.');
+      expect(excessive.failure.message).toContain('context.evidenceRefs');
+      expect(excessive.failure.message).toContain('16');
+      const excessiveRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(excessiveFeature)));
+      expect(yield* readNativeWorkflowState(f.config, excessiveRunId)).toBeUndefined();
 
       const detail = yield* runNativeTaskAuthoring(f.config, {
         command: 'start',

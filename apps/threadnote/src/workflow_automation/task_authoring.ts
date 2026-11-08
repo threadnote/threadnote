@@ -23,7 +23,7 @@ import {
 } from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
-import {inspectNativeSourcePaths} from './authoring.js';
+import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_actions.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
@@ -40,6 +40,7 @@ const kind = Schema.Literals(['spec', 'plan']);
 const metadata = ['format', 'schemaVersion', 'id', 'project', 'source', 'sourceFreeReason'] as const;
 const specContent = Schema.Struct(Struct.omit(NativeAuthoringSpecDocumentSchema.fields, [...metadata, 'kind']));
 const evidenceRefsSchema = NativeAuthoringSpecDocumentSchema.fields.context.fields.evidenceRefs;
+const maximumEvidenceRefs = 16;
 const planFields = Struct.omit(NativeAuthoringPlanDocumentSchema.fields, [
   ...metadata,
   'kind',
@@ -170,9 +171,11 @@ const evidenceRefsIssue = (value: unknown) => {
   const refs = value.context.evidenceRefs;
   if (refs === undefined) return undefined;
   if (!A.isArray(refs)) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
+  if (refs.length > maximumEvidenceRefs)
+    return `context.evidenceRefs must contain at most ${maximumEvidenceRefs} references.`;
   for (const [index, reference] of refs.entries()) {
     try {
-      Schema.decodeUnknownSync(evidenceRefsSchema)([reference]);
+      Schema.decodeUnknownSync(evidenceRefsSchema, {onExcessProperty: 'error'})([reference]);
     } catch {
       return `context.evidenceRefs[${index}] must have the {uri,memoryId,revision} reference shape.`;
     }
@@ -585,6 +588,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           inspectNativeSourcePaths(
             checkout,
             A.map(approvedSpec.source.files, file => file.path),
+            nativeAuthoringSourceOrigins(approvedSpec),
           ),
         );
         if (stableJson(actualSpecSource) !== stableJson(approvedSpec.source))

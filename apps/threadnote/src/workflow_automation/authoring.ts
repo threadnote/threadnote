@@ -211,6 +211,27 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
   return {head, files};
 });
 
+/** Preserve the first business-field origin for each source path in document order. */
+export const nativeAuthoringSourceOrigins = (document: NativeAuthoringDocument): readonly string[] => {
+  const entries = [
+    ...EffectArray.map(
+      document.context.codeRefs,
+      (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const,
+    ),
+    ...(document.kind === 'plan'
+      ? EffectArray.flatMap(document.phases, (phase, phaseIndex) =>
+          EffectArray.map(
+            phase.affectedPaths,
+            (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
+          ),
+        )
+      : []),
+  ];
+  const origins = new Map<string, string>();
+  for (const [sourcePath, origin] of entries) if (!origins.has(sourcePath)) origins.set(sourcePath, origin);
+  return EffectArray.map(document.source?.files ?? [], file => origins.get(file.path) ?? 'source path');
+};
+
 /** Run the same bounded Git/filesystem source inspection before a run is initialized. */
 export const inspectNativeSourcePaths = (repo: string, paths: readonly string[], origins?: readonly string[]) =>
   inspectSource(repo, paths, true, origins);
@@ -225,6 +246,7 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
     repo,
     EffectArray.map(document.source.files, file => file.path),
     live,
+    nativeAuthoringSourceOrigins(document),
   );
   if (stableJson(source) !== stableJson(document.source))
     return yield* fail(
