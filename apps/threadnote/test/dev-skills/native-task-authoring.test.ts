@@ -49,6 +49,7 @@ import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
+import {inspectNativeSourcePaths} from '../../src/workflow_automation/authoring.js';
 import {CurrentNativeJobAutoLaunch, runNativeJob} from '../../src/workflow_automation/native_jobs.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestClock} from 'effect/testing';
@@ -1530,6 +1531,147 @@ effectIt.effect(
         }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result),
       ).toMatchObject({failure: {code: 'stale-spec-ref'}});
       expect(yield* f.fs.readFileString(statePath)).toBe(before);
+    }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('reports bounded field-specific source path failures before creating an authoring run', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const directory = 'source-directory';
+    const oversized = 'oversized-source.ts';
+    yield* f.fs.makeDirectory(f.path.join(f.repo, directory));
+    yield* f.fs.writeFileString(f.path.join(f.repo, oversized), EffectString.repeat(1_000_001)('x'));
+    const cases = [
+      {
+        featureName: 'Missing path diagnostics',
+        fileName: 'missing-path.json',
+        kind: 'plan' as const,
+        content: {
+          ...planBusiness,
+          context: {...planBusiness.context, codeRefs: ['missing-source.ts']},
+          phases: A.map(planBusiness.phases, (phase, index) =>
+            index === 0 ? {...phase, affectedPaths: ['missing-source.ts']} : phase,
+          ),
+        },
+        field: 'context.codeRefs[0]',
+        path: 'missing-source.ts',
+        code: 'source-path-unavailable',
+      },
+      {
+        featureName: 'Directory path diagnostics',
+        fileName: 'directory-path.json',
+        kind: 'plan' as const,
+        content: {
+          ...planBusiness,
+          context: {...planBusiness.context, codeRefs: ['source.ts']},
+          phases: A.map(planBusiness.phases, (phase, index) =>
+            index === 0 ? {...phase, affectedPaths: [directory]} : phase,
+          ),
+        },
+        field: 'phases[0].affectedPaths[0]',
+        path: directory,
+        code: 'source-path-not-file',
+      },
+      {
+        featureName: 'Oversized path diagnostics',
+        fileName: 'oversized-path.json',
+        kind: 'spec' as const,
+        content: {...specBusiness, context: {...specBusiness.context, codeRefs: [oversized]}},
+        field: 'context.codeRefs[0]',
+        path: oversized,
+        code: 'source-path-too-large',
+      },
+    ];
+    for (const item of cases) {
+      const contentFile = f.path.join(f.root, item.fileName);
+      yield* f.fs.writeFileString(contentFile, JSON.stringify(item.content));
+      const result = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: item.featureName,
+        kind: item.kind,
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(result).toMatchObject({failure: {code: item.code}});
+      if (result._tag !== 'Failure') throw new Error('A rejected source path unexpectedly created an authoring run.');
+      expect(result.failure.message).toContain(item.field);
+      expect(result.failure.message).toContain(item.path);
+      expect(result.failure.message).not.toContain(f.repo);
+      const runId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(item.featureName)));
+      expect(yield* readNativeWorkflowState(f.config, runId)).toBeUndefined();
+    }
+    const exactLimit = 'exact-limit-source.ts';
+    yield* f.fs.writeFileString(f.path.join(f.repo, exactLimit), EffectString.repeat(1_000_000)('x'));
+    const inspected = yield* inspectNativeSourcePaths(f.repo, [exactLimit], ['context.codeRefs[0]']);
+    expect(inspected.files).toHaveLength(1);
+    expect(inspected.files[0]?.path).toBe(exactLimit);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect(
+  'diagnoses malformed evidence references and read-only detail without echoing values or writing state',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const featureNames = ['Malformed evidence reference diagnostics', 'Read-only detail diagnostics'] as const;
+      const contentFile = f.path.join(f.root, 'malformed-evidence.json');
+      const marker = 'sensitive-evidence-value-must-not-be-echoed';
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          context: {
+            ...specBusiness.context,
+            evidenceRefs: [
+              {uri: 'threadnote://fixture/valid', memoryId: 'tn_fixture', revision: EffectString.repeat(64)('a')},
+              {uri: marker, memoryId: marker, revision: marker},
+            ],
+          },
+        }),
+      );
+      const malformed = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: featureNames[0],
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(malformed).toMatchObject({failure: {code: 'invalid-content'}});
+      if (malformed._tag !== 'Failure') throw new Error('Malformed evidence unexpectedly initialized a run.');
+      expect(malformed.failure.message).toContain('context.evidenceRefs[1]');
+      expect(malformed.failure.message).toContain('{uri,memoryId,revision}');
+      expect(malformed.failure.message).not.toContain(marker);
+      const missingEvidenceRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[0])));
+      expect(yield* readNativeWorkflowState(f.config, missingEvidenceRunId)).toBeUndefined();
+
+      const detail = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: featureNames[1],
+        kind: 'spec',
+        contentFile,
+        detail: 'document',
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(detail).toMatchObject({failure: {code: 'invalid-request'}});
+      if (detail._tag !== 'Failure') throw new Error('A non-read detail request unexpectedly initialized a run.');
+      expect(detail.failure.message).toContain('applies only to read');
+      const detailRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[1])));
+      expect(yield* readNativeWorkflowState(f.config, detailRunId)).toBeUndefined();
     }).pipe(TestClock.withLive, provideNative),
 );
 

@@ -39,6 +39,7 @@ const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)
 const kind = Schema.Literals(['spec', 'plan']);
 const metadata = ['format', 'schemaVersion', 'id', 'project', 'source', 'sourceFreeReason'] as const;
 const specContent = Schema.Struct(Struct.omit(NativeAuthoringSpecDocumentSchema.fields, [...metadata, 'kind']));
+const evidenceRefsSchema = NativeAuthoringSpecDocumentSchema.fields.context.fields.evidenceRefs;
 const planFields = Struct.omit(NativeAuthoringPlanDocumentSchema.fields, [
   ...metadata,
   'kind',
@@ -164,10 +165,26 @@ const contentOf = (document: NativeAuthoringDocument) =>
   document.kind === 'spec'
     ? Struct.omit(document, [...metadata, 'kind'])
     : Struct.omit(document, [...metadata, 'kind', 'spec', 'compactOrigin']);
+const evidenceRefsIssue = (value: unknown) => {
+  if (!Predicate.isObject(value) || !Predicate.isObject(value.context)) return undefined;
+  const refs = value.context.evidenceRefs;
+  if (refs === undefined) return undefined;
+  if (!A.isArray(refs)) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
+  for (const [index, reference] of refs.entries()) {
+    try {
+      Schema.decodeUnknownSync(evidenceRefsSchema)([reference]);
+    } catch {
+      return `context.evidenceRefs[${index}] must have the {uri,memoryId,revision} reference shape.`;
+    }
+  }
+  return undefined;
+};
 
 /** Business authoring over native receipts. Continuations are projections, not permissions or stored tickets. */
 export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
+    if (Predicate.isObject(input) && input.command !== 'read' && Record.has(input, 'detail'))
+      return yield* fail('invalid-request', 'The detail option applies only to read; retry with command read.');
     const request = yield* Schema.decodeUnknownEffect(inputSchema, {onExcessProperty: 'error'})(input).pipe(
       Effect.mapError(() =>
         fail(
@@ -532,6 +549,8 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           }),
         ),
       );
+      const evidenceIssue = evidenceRefsIssue(raw);
+      if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
       const content = yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
         onExcessProperty: 'error',
       })(raw).pipe(
@@ -588,16 +607,33 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
               requirements,
             }
           : content;
-      const paths =
+      const sourceEntries =
         'phases' in content
-          ? [...new Set([...content.context.codeRefs, ...A.flatMap(content.phases, phase => phase.affectedPaths)])]
-          : content.context.codeRefs;
+          ? [
+              ...A.map(
+                content.context.codeRefs,
+                (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const,
+              ),
+              ...A.flatMap(content.phases, (phase, phaseIndex) =>
+                A.map(
+                  phase.affectedPaths,
+                  (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
+                ),
+              ),
+            ]
+          : A.map(content.context.codeRefs, (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const);
+      const sourceOrigins = new Map<string, string>();
+      for (const [sourcePath, origin] of sourceEntries) {
+        if (!sourceOrigins.has(sourcePath)) sourceOrigins.set(sourcePath, origin);
+      }
+      const paths = [...sourceOrigins.keys()];
+      const origins = [...sourceOrigins.values()];
       // A reserved save must replay its exact admitted source and metadata. Inspecting
       // live source here could turn recovery into a different CAS intent.
       const source =
         stored?.state.authoringSave && existing
           ? existing.document.source
-          : yield* inCheckout(inspectNativeSourcePaths(checkout, paths));
+          : yield* inCheckout(inspectNativeSourcePaths(checkout, paths, origins));
       const sameBusinessContent =
         existing !== undefined &&
         stableJson(contentOf(existing.document)) === stableJson(normalized) &&
