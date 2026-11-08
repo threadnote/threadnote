@@ -120,18 +120,28 @@ function stat(fd: number) {
 }
 const same = (a: RuntimeWriterIdentity, b: RuntimeWriterIdentity) =>
   a.dev === b.dev && a.ino === b.ino && a.ino !== 0n && a.birthtimeNs === b.birthtimeNs;
+const sameMetadata = (a: RuntimeWriterIdentity, b: RuntimeWriterIdentity) =>
+  same(a, b) && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid && a.nlink === b.nlink && a.size === b.size;
 const stable = (a: RuntimeWriterIdentity, b: RuntimeWriterIdentity) =>
-  same(a, b) &&
-  a.ctimeNs === b.ctimeNs &&
-  a.mtimeNs === b.mtimeNs &&
-  a.mode === b.mode &&
-  a.uid === b.uid &&
-  a.gid === b.gid &&
-  a.nlink === b.nlink &&
-  a.size === b.size;
+  sameMetadata(a, b) && a.ctimeNs === b.ctimeNs && a.mtimeNs === b.mtimeNs;
+class LockTokenTimestampMovement extends Schema.TaggedError<
+  LockTokenTimestampMovement,
+  {readonly brand: unique symbol}
+>()('LockTokenTimestampMovement', {bytes: Schema.UndefinedOr(Schema.Uint8Array)}) {}
+function requireStable(
+  before: RuntimeWriterIdentity,
+  after: RuntimeWriterIdentity,
+  reason: RuntimeWriterFault['reason'],
+  stabilizeLockToken = false,
+  bytes?: Uint8Array,
+) {
+  if (stable(before, after)) return;
+  if (stabilizeLockToken && sameMetadata(before, after)) throw LockTokenTimestampMovement.make({bytes});
+  fail(reason);
+}
 
 /** Bounded descriptor security record: missing/truncated records are unknown, never an empty ACL. */
-function assertPrivateAcl(fd: number, privateObject: boolean): void {
+function assertPrivateAcl(fd: number, privateObject: boolean, stabilizeLockToken = false): void {
   supported();
   const lib = dlopen('/usr/lib/libSystem.B.dylib', {
     __fstat64_extended: {args: ['i32', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
@@ -199,8 +209,9 @@ function assertPrivateAcl(fd: number, privateObject: boolean): void {
         // Conservative: no principal/group resolution, and no repair of unexpected ACLs.
         if (kind === 1 && (privateObject || (rights & 0x3574) !== 0 || (flags & 0x1e0) !== 0)) fail('private-storage');
       }
-    if (!stable(before, stat(fd))) fail('private-storage');
-  } catch {
+    requireStable(before, stat(fd), 'private-storage', stabilizeLockToken);
+  } catch (error) {
+    if (stabilizeLockToken && Schema.is(LockTokenTimestampMovement)(error)) throw error;
     fail('private-storage');
   } finally {
     lib.close();
@@ -346,7 +357,11 @@ function openWritableAt(parent: number, name: string, maximumBytes: number) {
     return fail('readonly');
   }
 }
-function readFd(fd: number, maximumBytes: number): {identity: RuntimeWriterIdentity; bytes: Uint8Array} {
+function readFd(
+  fd: number,
+  maximumBytes: number,
+  stabilizeLockToken = false,
+): {identity: RuntimeWriterIdentity; bytes: Uint8Array} {
   checkBound(maximumBytes);
   const before = stat(fd);
   requireFile(before, maximumBytes, false);
@@ -357,7 +372,7 @@ function readFd(fd: number, maximumBytes: number): {identity: RuntimeWriterIdent
     if (count <= 0 || count > bytes.length - offset) fail('io');
     offset += count;
   }
-  if (!stable(before, stat(fd))) fail('source-changed');
+  requireStable(before, stat(fd), 'source-changed', stabilizeLockToken, bytes);
   return {identity: before, bytes};
 }
 export function runtimeOpenWriterRoot(
@@ -756,21 +771,34 @@ export function runtimeReadWriterLockToken(path: string): {
   readonly identity: RuntimeWriterIdentity;
 } {
   supported();
-  const before = native.lstatSync(path, {bigint: true});
-  requireFile(before, 4096, false);
-  if (before.isSymbolicLink()) fail('path');
-  const fd = native.openSync(path, constants.O_RDONLY | fileFlags);
-  try {
-    assertPrivateAcl(fd, true);
-    const result = readFd(fd, 4096);
-    if (!stable(before, result.identity) || !stable(before, native.lstatSync(path, {bigint: true}))) fail('identity');
-    return {
-      token: EffectString.trim(new TextDecoder('utf-8', {fatal: true}).decode(result.bytes)),
-      identity: result.identity,
-    };
-  } finally {
-    native.closeSync(fd);
+  const anchor = native.lstatSync(path, {bigint: true});
+  let sampledBytes: Uint8Array | undefined;
+  // A submitted async heartbeat can complete during this synchronous read. Retry only a
+  // timestamp-only incoherent observation, once, with a fresh complete ACL/byte/path proof.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = attempt === 0 ? anchor : native.lstatSync(path, {bigint: true});
+    requireFile(before, 4096, false);
+    if (before.isSymbolicLink() || !sameMetadata(anchor, before)) fail('identity');
+    const fd = native.openSync(path, constants.O_RDONLY | fileFlags);
+    try {
+      assertPrivateAcl(fd, true, true);
+      const result = readFd(fd, 4096, true);
+      if (sampledBytes && !equalBytes(sampledBytes, result.bytes)) fail('identity');
+      requireStable(before, result.identity, 'identity', true, result.bytes);
+      requireStable(before, native.lstatSync(path, {bigint: true}), 'identity', true, result.bytes);
+      return {
+        token: EffectString.trim(new TextDecoder('utf-8', {fatal: true}).decode(result.bytes)),
+        identity: result.identity,
+      };
+    } catch (error) {
+      if (!Schema.is(LockTokenTimestampMovement)(error)) throw error;
+      if (attempt !== 0) fail('identity');
+      sampledBytes = error.bytes;
+    } finally {
+      native.closeSync(fd);
+    }
   }
+  return fail('identity');
 }
 
 /** Darwin proc_bsdinfo binds a live process to microsecond start time, not PID alone. */

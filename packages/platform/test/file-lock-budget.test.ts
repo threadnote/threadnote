@@ -29,7 +29,7 @@ import {
   withNativeFileLockWaitBudget,
 } from '../src/file/lock.js';
 import {RuntimeEntrypoint} from '../src/runtime-entrypoint.js';
-import {SystemInfo} from '../src/system.js';
+import {runtimeReadWriterLockToken, SystemInfo} from '../src/system.js';
 
 const system = SystemInfo.layer.pipe(
   Layer.provide(
@@ -40,6 +40,111 @@ const system = SystemInfo.layer.pipe(
   ),
 );
 const dependencies = Layer.mergeAll(BunServices.layer, cryptoLayer, system);
+
+effectIt.effect('stabilizes a timestamp-only heartbeat interleaved with a synchronous current lease assertion', () =>
+  provide(
+    Effect.gen(function* () {
+      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-heartbeat-overlap-'});
+      const lock = `${root}/writer.lock`;
+      yield* withExclusiveFileLockLease(fs, lock, policy, lease =>
+        Effect.sync(() => {
+          const native = process.getBuiltinModule('fs');
+          // ACL before/after and byte-read before/after boundaries all retain full coherence checks.
+          for (const interleave of [1, 2, 3, 4]) {
+            const baseline = runtimeReadWriterLockToken(lock);
+            lease.assertCurrentSync();
+            const original = native.fstatSync.bind(native);
+            let samples = 0;
+            let injected = false;
+            const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+              const value = original(fd, options);
+              if (BigInt(value.ino) === baseline.identity.ino && ++samples === interleave) {
+                injected = true;
+                const timestamp = new Date(Number(baseline.identity.mtimeNs / 1_000_000n) + 1000);
+                native.futimesSync(fd, timestamp, timestamp);
+              }
+              return value;
+            });
+            try {
+              lease.assertCurrentSync();
+            } finally {
+              probe.mockRestore();
+            }
+            expect(injected).toBe(true);
+            const after = runtimeReadWriterLockToken(lock);
+            expect(after.token).toBe(baseline.token);
+            for (const field of ['dev', 'ino', 'birthtimeNs', 'mode', 'uid', 'gid', 'nlink', 'size'] as const)
+              expect(after.identity[field]).toBe(baseline.identity[field]);
+            expect(after.identity.mtimeNs).not.toBe(baseline.identity.mtimeNs);
+            lease.assertCurrentSync();
+          }
+        }),
+      );
+    }),
+  ),
+);
+
+effectIt.effect('keeps unsafe or persistently incoherent token observations sticky after stabilization', () =>
+  provide(
+    Effect.gen(function* () {
+      if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'writer-heartbeat-refusal-'});
+      for (const change of ['mode', 'bytes', 'acl-on-retry', 'continuous-timestamps'] as const) {
+        const lock = `${root}/${change}.lock`;
+        yield* withExclusiveFileLockLease(fs, lock, policy, lease =>
+          Effect.sync(() => {
+            const native = process.getBuiltinModule('fs');
+            const baseline = runtimeReadWriterLockToken(lock);
+            const originalBytes = native.readFileSync(lock);
+            const original = native.fstatSync.bind(native);
+            let samples = 0;
+            let aclAdded = false;
+            const probe = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+              const value = original(fd, options);
+              if (BigInt(value.ino) !== baseline.identity.ino) return value;
+              samples++;
+              if (change === 'continuous-timestamps' || (change === 'acl-on-retry' && samples === 1)) {
+                const timestamp = new Date(Number(baseline.identity.mtimeNs / 1_000_000n) + samples * 1000);
+                native.futimesSync(fd, timestamp, timestamp);
+              }
+              if (change === 'mode' && samples === 1) native.fchmodSync(fd, 0o644);
+              if (change === 'bytes' && samples === 1) {
+                const changed = Uint8Array.from(originalBytes);
+                changed[0] ^= 1;
+                native.writeFileSync(lock, changed);
+              }
+              if (change === 'acl-on-retry' && samples === 3) {
+                const result = Bun.spawnSync(['/bin/chmod', '+a', 'everyone allow read', lock], {
+                  stdout: 'pipe',
+                  stderr: 'pipe',
+                  timeout: 5000,
+                });
+                expect(result.exitCode).toBe(0);
+                aclAdded = true;
+              }
+              return value;
+            });
+            try {
+              expect(() => lease.assertCurrentSync()).toThrow();
+            } finally {
+              probe.mockRestore();
+              if (aclAdded) expect(Bun.spawnSync(['/bin/chmod', '-N', lock], {timeout: 5000}).exitCode).toBe(0);
+              native.chmodSync(lock, 0o600);
+              native.writeFileSync(lock, originalBytes);
+            }
+            if (change === 'continuous-timestamps') expect(samples).toBe(4);
+            if (change === 'acl-on-retry') expect(aclAdded).toBe(true);
+            expect(runtimeReadWriterLockToken(lock).token).toBe(baseline.token);
+            expect(() => lease.assertCurrentSync()).toThrow();
+          }),
+        );
+      }
+    }),
+  ),
+);
 
 effectIt.effect('makes current writer lease assertions sticky after replacement and inactive after scope exit', () =>
   provide(
