@@ -4,7 +4,11 @@ import {semanticSessionLimits} from '../semantic/coordinator.js';
 import {semanticAgentChangeLimits} from '../semantic/agent_change_protocol.js';
 import {semanticProposalStoreLimits} from '../semantic/proposal_store.js';
 import {typeScriptEditClosureLimits} from '../semantic/providers/typescript.js';
-import {runSemanticAgentChange} from '../semantic/agent_changes.js';
+import {
+  runSemanticAgentChange,
+  runSemanticLocalWriterAdmission,
+  runSemanticLocalWriterRetirement,
+} from '../semantic/agent_changes.js';
 import type {CliRuntimeRunner} from './cli_runtime_contract.js';
 import {runSemanticAgentQuery, runSemanticAgentView} from '../semantic/agent_queries.js';
 import {
@@ -16,6 +20,7 @@ import {LspFault} from '../semantic/lsp_transport.js';
 import {Array as EffectArray, Console, Effect, Schema, Stdio, Stream} from 'effect';
 import {Command} from 'effect/cli';
 import {Identifier} from '@threadnote/semantic/contracts';
+import {runtimePlatform, runtimeArchitecture} from '@threadnote/platform/system';
 import {boolean, optionalString} from './cli/flags.js';
 
 const CapabilityRequest = Schema.Struct({language: Schema.optionalKey(Identifier)});
@@ -76,9 +81,25 @@ export function semanticCapabilities(input: unknown = {}) {
       changeSurface: {
         version: 1,
         operations: ['rename', 'code-action'],
-        actions: ['prepare', 'status', 'preflight'],
-        readOnly: true,
+        actions: ['prepare', 'status', 'preflight', 'apply', 'recover'],
+        readOnly: false,
         writerAuthorityRequired: true,
+        writer: {
+          admission: 'local-cli-only-task-and-closed-disk-assertion',
+          authorization: 'distinct-secret-writer-capability',
+          source: 'closed-disk-only-qualified-host',
+          editor: 'qualified-integration-required',
+          recovery: 'observational-no-source-replay',
+          qualification: 'host-platform-and-runtime-proof-required',
+          host: {
+            platform: runtimePlatform,
+            architecture: runtimeArchitecture,
+            readiness:
+              runtimePlatform === 'darwin' && runtimeArchitecture === 'arm64'
+                ? 'native-candidate-requires-qualification'
+                : 'unsupported-host-writer',
+          },
+        },
         codeActions: {
           listing: 'retained-expiring-choice-capability',
           qualifiedInlineFamilies: [
@@ -110,7 +131,7 @@ export function semanticCapabilities(input: unknown = {}) {
           failedPublication: 'initial-page-or-view-fence-failure-rolls-back-retention',
         },
       },
-      pending: ['qualified-action-resolution', 'resource-application', 'apply'],
+      pending: ['qualified-action-resolution', 'resource-application', 'qualified-editor-writer'],
     },
     providers,
     reason: deferred
@@ -208,8 +229,8 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
     ),
   );
   const change = Command.make('change').pipe(
-    Command.withSubcommands(
-      EffectArray.map(['prepare', 'status', 'preflight'], action =>
+    Command.withSubcommands([
+      ...EffectArray.map(['prepare', 'status', 'preflight', 'apply', 'recover'], action =>
         Command.make(action, {json: boolean('json', 'Print versioned proposal JSON')}, () =>
           withRuntime(config =>
             Effect.gen(function* () {
@@ -221,7 +242,31 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
           ),
         ),
       ),
-    ),
+      Command.make('admit', {json: boolean('json', 'Print private writer admission JSON')}, () =>
+        withRuntime(config =>
+          Effect.gen(function* () {
+            const result = yield* runSemanticLocalWriterAdmission(config, yield* readSemanticAgentQueryInput);
+            return yield* Console.log(JSON.stringify(result));
+          }),
+        ),
+      ).pipe(
+        Command.withDescription(
+          'Locally assert existing task authority and exact closed-disk ownership; private proposal input and issued capability use stdin/stdout, never argv',
+        ),
+      ),
+      Command.make('retire', {json: boolean('json', 'Print private recovery retirement JSON')}, () =>
+        withRuntime(config =>
+          Effect.gen(function* () {
+            const result = yield* runSemanticLocalWriterRetirement(config, yield* readSemanticAgentQueryInput);
+            return yield* Console.log(JSON.stringify(result));
+          }),
+        ),
+      ).pipe(
+        Command.withDescription(
+          'Explicit local terminal cleanup or discard of private recovery evidence; never writes source',
+        ),
+      ),
+    ]),
   );
   return Command.make('semantic').pipe(
     Command.withSubcommands([

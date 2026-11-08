@@ -14,6 +14,8 @@ export const semanticAgentChangeLimits = {
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
 const Milliseconds = Counter.check(Schema.isBetween({minimum: 1, maximum: semanticAgentChangeLimits.maxMilliseconds}));
 export const SemanticProposalHandle = Schema.Struct({id: Digest, capability: Digest, digest: Digest});
+export const SemanticWriterHandle = Schema.Struct({operation: Digest, capability: Digest});
+export type SemanticWriterHandle = typeof SemanticWriterHandle.Type;
 const Common = {
   version: Schema.Literal(1),
   callerCwd: Text,
@@ -27,6 +29,42 @@ const Common = {
     ),
   ),
 };
+/** Local command only: intentionally absent from public change/RPC actions. */
+export const SemanticWriterAdmissionRequest = Schema.Struct({
+  ...Common,
+  handle: SemanticProposalHandle,
+  taskAuthorization: Identifier,
+  diskOwnership: Schema.Literal('closed-disk'),
+});
+export const SemanticWriterRequest = Schema.Struct({
+  ...Common,
+  action: Schema.Literals(['apply', 'recover', 'status']),
+  writer: SemanticWriterHandle,
+});
+export type SemanticWriterRequest = typeof SemanticWriterRequest.Type;
+export const SemanticWriterRetirementRequest = Schema.Struct({
+  ...Common,
+  writer: SemanticWriterHandle,
+  disposition: Schema.Literals(['terminal', 'discarded']),
+  taskAuthorization: Identifier,
+});
+export const SemanticWriterSession = Schema.Struct({
+  processId: Counter.check(Schema.isGreaterThanOrEqualTo(1)),
+  processStartIdentity: Identifier,
+  boot: Digest,
+  runtimeIdentity: Digest,
+});
+export type SemanticWriterSession = typeof SemanticWriterSession.Type;
+export const SemanticWriterProposal = Schema.Struct({
+  version: Schema.Literal(1),
+  status: Schema.Literal('writer-proposal'),
+  worktree: FileUri,
+  principal: Digest,
+  profile: Digest,
+  expiresAt: Counter,
+  proposal: Schema.Unknown,
+  session: SemanticWriterSession,
+});
 export const SemanticAgentChangeRequest = Schema.Union([
   Schema.Struct({
     ...Common,
@@ -50,6 +88,7 @@ export const SemanticAgentChangeRequest = Schema.Union([
     handle: SemanticProposalHandle,
     offset: Schema.optionalKey(Counter),
   }),
+  SemanticWriterRequest,
 ]);
 export type SemanticAgentChangeRequest = typeof SemanticAgentChangeRequest.Type;
 export const SemanticAgentEndpointChange = Schema.Struct({
@@ -57,7 +96,7 @@ export const SemanticAgentEndpointChange = Schema.Struct({
   worktree: FileUri,
   profile: Digest,
   principal: Digest,
-  action: Schema.Literals(['prepare', 'status', 'preflight']),
+  action: Schema.Literals(['prepare', 'status', 'preflight', 'resolve-for-writer', 'invalidate-for-writer']),
   project: Schema.optionalKey(FileUri),
   uri: Schema.optionalKey(FileUri),
   language: Schema.optionalKey(SemanticLanguage),

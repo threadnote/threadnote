@@ -15,7 +15,13 @@ import {LspFault} from './lsp_transport.js';
 import {readBounded} from './fingerprint.js';
 import {makeSemanticProposalStore} from './proposal_store.js';
 import {
+  runSemanticWriterRequestWith,
+  runSemanticWriterAdmissionWith,
+  runSemanticWriterRetirementWith,
+} from './writer.js';
+import {
   SemanticAgentChangeRequest,
+  SemanticWriterRequest,
   semanticAgentChangeLimits,
   type SemanticAgentEndpointChange,
   changeRefusal,
@@ -27,124 +33,133 @@ export const runSemanticAgentChangeWith = <R>(
   config: RuntimeConfig,
   input: unknown,
 ) =>
-  Effect.gen(function* () {
-    const bytes = yield* Effect.try({
-      try: () => new TextEncoder().encode(JSON.stringify(input)).length,
-      catch: () => LspFault.make({code: 'protocol'}),
-    });
-    if (bytes > semanticAgentChangeLimits.maxRequestBytes)
-      return changeRefusal('invalid-request', 'Request is too large');
-    const request = yield* Schema.decodeUnknownEffect(SemanticAgentChangeRequest, {onExcessProperty: 'error'})(
-      input,
-    ).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    if (!path.isAbsolute(request.callerCwd))
-      return changeRefusal('invalid-request', 'An absolute worktree is required');
-    const root = yield* fs.realPath(request.callerCwd);
-    const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
-    const selected = yield* readSemanticHostProfile(config, worktree);
-    const runtimeIdentity = yield* services.runtimeIdentity;
-    let scope;
-    if (request.action === 'prepare') {
-      if (
-        request.operation === 'rename' &&
-        (!request.position ||
-          !request.newName ||
-          request.choiceHandle ||
-          request.range ||
-          request.only ||
-          request.diagnosticIds)
-      )
-        return changeRefusal('invalid-request', 'Rename requires newName and no action query');
-      if (request.operation === 'code-action' && (request.newName || !request.range))
-        return changeRefusal('invalid-request', 'Code-action requires range and no newName');
-      if (
-        request.operation === 'code-action' &&
-        request.position &&
-        request.range &&
-        (request.position.line !== request.range.start.line ||
-          request.position.character !== request.range.start.character)
-      )
-        return changeRefusal('invalid-request', 'Action position must equal range start');
-      if (!Schema.is(SemanticLanguage)(request.language))
-        return changeRefusal('unsupported', 'Language is unqualified');
-      if (!selected.profile.catalog[semanticHostSelection[request.language].slot])
-        return changeRefusal('unavailable', 'Provider is not configured');
-      const project = path.resolve(root, request.project ?? '.');
-      const file = EffectString.startsWith('file:')(request.file)
-        ? yield* path.fromFileUrl(new URL(request.file))
-        : path.resolve(project, request.file);
-      if (
-        !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
-        !EffectString.startsWith(project + path.sep)(file) ||
-        EffectString.split(path.sep)(file).includes('.git') ||
-        (yield* fs.realPath(project)) !== project ||
-        (yield* fs.realPath(file)) !== file
-      )
-        return changeRefusal('invalid-request', 'Source must remain in the authorized canonical project');
-      scope = {
-        project: canonicalFileUri((yield* path.toFileUrl(project)).href),
-        uri: canonicalFileUri((yield* path.toFileUrl(file)).href),
-        language: request.language,
-        operation: request.operation,
-        position: request.position ?? request.range!.start,
-        ...(request.newName ? {newName: request.newName} : {}),
-        ...(request.range ? {range: request.range} : {}),
-        ...(request.diagnosticIds ? {diagnosticIds: request.diagnosticIds} : {}),
-        ...(request.only ? {only: request.only} : {}),
-        ...(request.choiceHandle ? {choiceHandle: request.choiceHandle} : {}),
-        ...(request.environment ? {environment: request.environment} : {}),
-        ...(typeof request.view === 'object' ? {view: request.view} : {}),
-      };
-    } else scope = {handle: request.handle, ...(request.offset !== undefined ? {offset: request.offset} : {})};
-    const endpoint = yield* services.connect({
-      enabled: true,
-      dataHome: selected.home,
-      worktree,
-      runtimeIdentity,
-      ...selected.profile.catalog,
-    });
-    const result = yield* endpoint.request({
-      operation: 'agent-change',
-      request: {
-        version: 1,
-        worktree,
-        profile: selected.digest,
-        principal: EffectString.slice(0, -5)(semanticHostProfileName(config, worktree)),
-        action: request.action,
-        ...scope,
-        maxBytes: request.maxBytes ?? semanticAgentChangeLimits.defaultPageBytes,
-        milliseconds: request.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds,
-      },
-    });
-    const current = yield* readSemanticHostProfile(config, worktree);
-    if (current.digest !== selected.digest) return changeRefusal('stale', 'Host read scope changed before publication');
-    return result;
-  }).pipe(
-    Effect.timeoutOption(
-      Schema.is(SemanticAgentChangeRequest)(input)
-        ? (input.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds)
-        : semanticAgentChangeLimits.defaultMilliseconds,
-    ),
-    Effect.map(result =>
-      result._tag === 'Some' ? result.value : changeRefusal('timeout', 'Proposal deadline expired'),
-    ),
-    Effect.catch(error =>
-      Effect.succeed(
-        changeRefusal(
-          Schema.is(LspFault)(error) && error.code === 'protocol'
-            ? 'invalid-request'
-            : Schema.is(LspFault)(error) && error.code === 'capacity'
-              ? 'budget-exceeded'
-              : 'unavailable',
-          'Proposal source, scope or prerequisites are unavailable',
+  Schema.is(SemanticWriterRequest)(input)
+    ? runSemanticWriterRequestWith(services, config, input)
+    : Effect.gen(function* () {
+        const bytes = yield* Effect.try({
+          try: () => new TextEncoder().encode(JSON.stringify(input)).length,
+          catch: () => LspFault.make({code: 'protocol'}),
+        });
+        if (bytes > semanticAgentChangeLimits.maxRequestBytes)
+          return changeRefusal('invalid-request', 'Request is too large');
+        const request = yield* Schema.decodeUnknownEffect(SemanticAgentChangeRequest, {onExcessProperty: 'error'})(
+          input,
+        ).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
+        if ('writer' in request) return yield* runSemanticWriterRequestWith(services, config, request);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        if (!path.isAbsolute(request.callerCwd))
+          return changeRefusal('invalid-request', 'An absolute worktree is required');
+        const root = yield* fs.realPath(request.callerCwd);
+        const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
+        const selected = yield* readSemanticHostProfile(config, worktree);
+        const runtimeIdentity = yield* services.runtimeIdentity;
+        let scope;
+        if (request.action === 'prepare') {
+          if (
+            request.operation === 'rename' &&
+            (!request.position ||
+              !request.newName ||
+              request.choiceHandle ||
+              request.range ||
+              request.only ||
+              request.diagnosticIds)
+          )
+            return changeRefusal('invalid-request', 'Rename requires newName and no action query');
+          if (request.operation === 'code-action' && (request.newName || !request.range))
+            return changeRefusal('invalid-request', 'Code-action requires range and no newName');
+          if (
+            request.operation === 'code-action' &&
+            request.position &&
+            request.range &&
+            (request.position.line !== request.range.start.line ||
+              request.position.character !== request.range.start.character)
+          )
+            return changeRefusal('invalid-request', 'Action position must equal range start');
+          if (!Schema.is(SemanticLanguage)(request.language))
+            return changeRefusal('unsupported', 'Language is unqualified');
+          if (!selected.profile.catalog[semanticHostSelection[request.language].slot])
+            return changeRefusal('unavailable', 'Provider is not configured');
+          const project = path.resolve(root, request.project ?? '.');
+          const file = EffectString.startsWith('file:')(request.file)
+            ? yield* path.fromFileUrl(new URL(request.file))
+            : path.resolve(project, request.file);
+          if (
+            !(project === root || EffectString.startsWith(root + path.sep)(project)) ||
+            !EffectString.startsWith(project + path.sep)(file) ||
+            EffectString.split(path.sep)(file).includes('.git') ||
+            (yield* fs.realPath(project)) !== project ||
+            (yield* fs.realPath(file)) !== file
+          )
+            return changeRefusal('invalid-request', 'Source must remain in the authorized canonical project');
+          scope = {
+            project: canonicalFileUri((yield* path.toFileUrl(project)).href),
+            uri: canonicalFileUri((yield* path.toFileUrl(file)).href),
+            language: request.language,
+            operation: request.operation,
+            position: request.position ?? request.range!.start,
+            ...(request.newName ? {newName: request.newName} : {}),
+            ...(request.range ? {range: request.range} : {}),
+            ...(request.diagnosticIds ? {diagnosticIds: request.diagnosticIds} : {}),
+            ...(request.only ? {only: request.only} : {}),
+            ...(request.choiceHandle ? {choiceHandle: request.choiceHandle} : {}),
+            ...(request.environment ? {environment: request.environment} : {}),
+            ...(typeof request.view === 'object' ? {view: request.view} : {}),
+          };
+        } else scope = {handle: request.handle, ...(request.offset !== undefined ? {offset: request.offset} : {})};
+        const endpoint = yield* services.connect({
+          enabled: true,
+          dataHome: selected.home,
+          worktree,
+          runtimeIdentity,
+          ...selected.profile.catalog,
+        });
+        const result = yield* endpoint.request({
+          operation: 'agent-change',
+          request: {
+            version: 1,
+            worktree,
+            profile: selected.digest,
+            principal: EffectString.slice(0, -5)(semanticHostProfileName(config, worktree)),
+            action: request.action,
+            ...scope,
+            maxBytes: request.maxBytes ?? semanticAgentChangeLimits.defaultPageBytes,
+            milliseconds: request.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds,
+          },
+        });
+        const current = yield* readSemanticHostProfile(config, worktree);
+        if (current.digest !== selected.digest)
+          return changeRefusal('stale', 'Host read scope changed before publication');
+        return result;
+      }).pipe(
+        Effect.timeoutOption(
+          Schema.is(SemanticAgentChangeRequest)(input)
+            ? (input.milliseconds ?? semanticAgentChangeLimits.defaultMilliseconds)
+            : semanticAgentChangeLimits.defaultMilliseconds,
         ),
-      ),
-    ),
-  );
+        Effect.map(result =>
+          result._tag === 'Some' ? result.value : changeRefusal('timeout', 'Proposal deadline expired'),
+        ),
+        Effect.catch(error =>
+          Effect.succeed(
+            changeRefusal(
+              Schema.is(LspFault)(error) && error.code === 'protocol'
+                ? 'invalid-request'
+                : Schema.is(LspFault)(error) && error.code === 'capacity'
+                  ? 'budget-exceeded'
+                  : 'unavailable',
+              'Proposal source, scope or prerequisites are unavailable',
+            ),
+          ),
+        ),
+      );
 export const runSemanticAgentChange = (config: RuntimeConfig, input: unknown) =>
   runSemanticAgentChangeWith(semanticAgentQueryHost, config, input);
+/** Dedicated local command entrypoint; never dispatched by an endpoint or registered MCP tool. */
+export const runSemanticLocalWriterAdmission = (config: RuntimeConfig, input: unknown) =>
+  runSemanticWriterAdmissionWith(semanticAgentQueryHost, config, input);
+export const runSemanticLocalWriterRetirement = (config: RuntimeConfig, input: unknown) =>
+  runSemanticWriterRetirementWith(config, input);
 
 type ChangeContext =
   EffectDigest.Digest | FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom | ChildEnvironmentPolicy;
@@ -554,6 +569,15 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
       }
       if (!request.handle) return changeRefusal('invalid-request', 'Proposal read capability required');
       const retained = yield* store.get(request.handle, binding(request.profile, request.principal));
+      if (request.action === 'invalidate-for-writer') {
+        // This read capability can invalidate only its retained observations; it never grants a source write.
+        yield* verifyScope(request);
+        return {
+          version: 1,
+          status: 'writer-invalidation',
+          observations: EffectArray.map(retained.proposal.targets, target => target.observation),
+        };
+      }
       const unsupportedSequence =
         retained.proposal.version === 2 && retained.proposal.qualification === 'unsupported-operation-sequence';
       const conflicts: {uri: string; reason: string}[] = unsupportedSequence
@@ -624,6 +648,35 @@ export const makeSemanticAgentChanges = Effect.fn('semantic.agentChanges')(funct
         conflicts,
         reason: conflicts.length ? 'Whole preflight rejected' : 'Read-only preview; writer authority is required',
       };
+      if (request.action === 'resolve-for-writer') {
+        if (unsupportedSequence)
+          return changeRefusal('unsupported', 'The complete operation sequence has no qualified writer');
+        if (base.status !== 'ok' || retained.stale || unsupportedSequence)
+          return changeRefusal('stale', 'A current complete qualified proposal is required');
+        const processStartIdentity = system.canonicalProcessStartIdentity
+          ? yield* system.canonicalProcessStartIdentity(system.processId)
+          : undefined;
+        if (!processStartIdentity) return changeRefusal('unavailable', 'Coordinator process identity is unavailable');
+        yield* verifyScope(request);
+        const result = {
+          version: 1,
+          status: 'writer-proposal',
+          proposal: retained.proposal,
+          worktree: options.worktree,
+          principal: request.principal,
+          profile: request.profile,
+          expiresAt: retained.expiresAt,
+          session: {
+            processId: system.processId,
+            processStartIdentity,
+            boot: namespace,
+            runtimeIdentity: options.runtimeIdentity,
+          },
+        };
+        if (new TextEncoder().encode(JSON.stringify(result)).length > request.maxBytes)
+          return changeRefusal('budget-exceeded', 'Complete proposal exceeds the private handoff budget');
+        return result;
+      }
       return request.action === 'status'
         ? yield* pageResult(base, retained.proposal, request.maxBytes, request.offset)
         : base;

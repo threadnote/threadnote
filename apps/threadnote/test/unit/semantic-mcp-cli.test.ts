@@ -681,6 +681,19 @@ describe('semantic capability discovery', () => {
 
   it('exposes effective bounded proposal limits and continuation semantics', () => {
     const surface = semanticCapabilities().readSurface.changeSurface;
+    expect(surface).toMatchObject({
+      actions: ['prepare', 'status', 'preflight', 'apply', 'recover'],
+      readOnly: false,
+      writerAuthorityRequired: true,
+      writer: {
+        admission: 'local-cli-only-task-and-closed-disk-assertion',
+        authorization: 'distinct-secret-writer-capability',
+        source: 'closed-disk-only-qualified-host',
+        editor: 'qualified-integration-required',
+        recovery: 'observational-no-source-replay',
+        qualification: 'host-platform-and-runtime-proof-required',
+      },
+    });
     expect(surface.limits).toMatchObject({
       request: {
         maxRequestBytes: 65536,
@@ -903,52 +916,116 @@ describe('semantic capability discovery', () => {
       expect(JSON.stringify(result)).not.toContain(request.handle.capability);
     }),
   );
-  effectIt.effect(
-    'CLI and MCP proposal actions share strict refusal semantics without disclosing read capabilities',
-    () =>
-      Effect.gen(function* () {
-        const handle = {
-          id: sha256HexSync('proposal-id'),
-          digest: sha256HexSync('proposal-digest'),
-          capability: sha256HexSync('private-read'),
-        };
-        for (const action of ['prepare', 'status', 'preflight']) {
-          const request =
-            action === 'prepare'
-              ? {
-                  version: 1,
-                  callerCwd: 'relative',
-                  operation: 'rename',
-                  file: 'a.ts',
-                  language: 'typescript',
-                  position: {line: 0, character: 0},
-                  newName: 'renamed',
-                }
+  effectIt.effect('CLI and MCP change actions share strict refusal semantics without disclosing capabilities', () =>
+    Effect.gen(function* () {
+      const handle = {
+        id: sha256HexSync('proposal-id'),
+        digest: sha256HexSync('proposal-digest'),
+        capability: sha256HexSync('private-read'),
+      };
+      const writer = {operation: sha256HexSync('writer-operation'), capability: sha256HexSync('private-writer')};
+      for (const action of ['prepare', 'status', 'preflight', 'apply', 'recover']) {
+        const request =
+          action === 'prepare'
+            ? {
+                version: 1,
+                callerCwd: 'relative',
+                operation: 'rename',
+                file: 'a.ts',
+                language: 'typescript',
+                position: {line: 0, character: 0},
+                newName: 'renamed',
+              }
+            : action === 'apply' || action === 'recover'
+              ? {version: 1, callerCwd: 'relative', writer}
               : {version: 1, callerCwd: 'relative', handle};
+        const cli = yield* captureConsole(
+          Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'change', action, '--json']),
+        ).pipe(
+          provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(request)))})),
+          provideTestLayer(ApplicationLayer),
+        );
+        const registry = new EffectMcpServerRegistry();
+        registerSemanticQueryTool(registry, {
+          account: 'local',
+          user: 'test',
+          agentId: 'test',
+          agentContextHome: '/unused',
+          manifestPath: '/unused/manifest.json',
+        });
+        const result = yield* registry
+          .invokeTool('semantic_change_' + action, {request})
+          .pipe(provideTestLayer(ApplicationLayer));
+        const canonical = JSON.parse(cli.output);
+        expect(canonical).toMatchObject({version: 1, status: 'invalid-request', applicable: false});
+        expect(result.structuredContent).toEqual(canonical);
+        expect(result.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
+        expect(JSON.stringify(result)).not.toContain(handle.capability);
+        expect(JSON.stringify(result)).not.toContain(writer.capability);
+        expect(cli.output).not.toContain(writer.capability);
+      }
+    }),
+  );
+  effectIt.effect('writer boundaries reject forged grants and keep admission local to CLI', () =>
+    Effect.gen(function* () {
+      const registry = new EffectMcpServerRegistry();
+      registerSemanticQueryTool(registry, {
+        account: 'local',
+        user: 'test',
+        agentId: 'test',
+        agentContextHome: '/unused',
+        manifestPath: '/unused/manifest.json',
+      });
+      const handle = {
+        id: sha256HexSync('read-id'),
+        digest: sha256HexSync('read-digest'),
+        capability: sha256HexSync('read-secret'),
+      };
+      const writer = {operation: sha256HexSync('operation'), capability: sha256HexSync('writer-secret')};
+      for (const action of ['apply', 'recover']) {
+        for (const grant of [{handle}, {writer, taskAuthorization: 'forged'}, {writer: {...writer, admitted: true}}]) {
+          const request = {version: 1, callerCwd: '/unused', ...grant};
           const cli = yield* captureConsole(
             Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'change', action, '--json']),
           ).pipe(
             provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(request)))})),
             provideTestLayer(ApplicationLayer),
           );
-          const registry = new EffectMcpServerRegistry();
-          registerSemanticQueryTool(registry, {
-            account: 'local',
-            user: 'test',
-            agentId: 'test',
-            agentContextHome: '/unused',
-            manifestPath: '/unused/manifest.json',
-          });
           const result = yield* registry
             .invokeTool('semantic_change_' + action, {request})
             .pipe(provideTestLayer(ApplicationLayer));
           const canonical = JSON.parse(cli.output);
           expect(canonical).toMatchObject({version: 1, status: 'invalid-request', applicable: false});
           expect(result.structuredContent).toEqual(canonical);
-          expect(result.content).toEqual([{type: 'text', text: JSON.stringify(canonical)}]);
-          expect(JSON.stringify(result)).not.toContain(handle.capability);
+          for (const secret of [handle.capability, writer.capability]) {
+            expect(JSON.stringify(result)).not.toContain(secret);
+            expect(cli.output).not.toContain(secret);
+          }
         }
-      }),
+      }
+      const admission = {
+        version: 1,
+        callerCwd: 'relative',
+        handle,
+        taskAuthorization: 'task',
+        diskOwnership: 'closed-disk',
+      };
+      const cli = yield* captureConsole(
+        Command.runWith(threadnoteCommand, {version: 'test'})(['semantic', 'change', 'admit', '--json']),
+      ).pipe(
+        provideTestLayer(Stdio.layerTest({stdin: Stream.make(new TextEncoder().encode(JSON.stringify(admission)))})),
+        provideTestLayer(ApplicationLayer),
+      );
+      expect(JSON.parse(cli.output)).toMatchObject({version: 1, status: 'invalid-request', applicable: false});
+      expect(cli.output).not.toContain(handle.capability);
+      const absent = yield* registry
+        .invokeTool('semantic_change_admit', {request: admission})
+        .pipe(Effect.flip, provideTestLayer(ApplicationLayer));
+      if (typeof absent !== 'object' || absent === null || !('message' in absent))
+        throw new Error('Missing unknown-tool refusal');
+      expect(typeof absent.message).toBe('string');
+      expect(absent.message).toContain('Unknown memory operation');
+    }),
   );
   effectIt.effect(
     'stdin rejects oversized, malformed UTF-8 and incomplete JSON while preserving split codepoints',
