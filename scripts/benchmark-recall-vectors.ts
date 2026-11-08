@@ -14,6 +14,7 @@ import {
   NATIVE_PERFORMANCE_CONTRACT,
   NATIVE_PERFORMANCE_STAGES,
   parseNativePerformanceCapture,
+  nativePerformanceSourceChanges,
 } from '@threadnote/evidence/native-performance';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 
@@ -121,15 +122,11 @@ const program = Effect.scoped(
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const command = yield* CommandExecutor;
     const system = yield* SystemInfo;
     const hardware = yield* system.hardwareInfo;
     const captureStartedAt = DateTime.formatIso(yield* DateTime.now);
-    const instrumentationHash = sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(import.meta.url)));
-    const sourceCommit = EffectString.trim((yield* command.execute('git', ['rev-parse', 'HEAD'])).stdout);
-    const dirty =
-      EffectString.trim((yield* command.execute('git', ['status', '--porcelain', '--untracked-files=no'])).stdout)
-        .length > 0;
+    const openingSource = yield* readBenchmarkSourceFence();
+    const {commit: sourceCommit, dirty, instrumentationHash} = openingSource;
     if (options.modelFile && sha256HexSync(yield* fs.readFile(options.modelFile)) !== manifest.sha256) {
       return yield* ScriptError.make({message: 'Installed model SHA256 does not match pinned manifest.'});
     }
@@ -323,10 +320,20 @@ const program = Effect.scoped(
         qualification: false,
       },
     });
-    if (sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(import.meta.url))) !== instrumentationHash)
-      return yield* ScriptError.make({message: 'Benchmark instrumentation changed during capture.'});
-    const finalCommit = EffectString.trim((yield* command.execute('git', ['rev-parse', 'HEAD'])).stdout);
-    if (finalCommit !== sourceCommit) return yield* ScriptError.make({message: 'Source HEAD changed during capture.'});
+    const closingSource = yield* readBenchmarkSourceFence();
+    const changedSource = nativePerformanceSourceChanges(openingSource, closingSource);
+    if (changedSource.length > 0) {
+      if (options.output) {
+        yield* fs.makeDirectory(path.dirname(options.output), {recursive: true});
+        yield* fs.writeFileString(
+          options.output,
+          `${JSON.stringify({version: 1, kind: 'mixed-source', changedSource, opening: openingSource, closing: closingSource, measurementsDiscarded: true}, undefined, 2)}\n`,
+        );
+      }
+      return yield* ScriptError.make({
+        message: `Mixed-source capture; measurements discarded: ${EffectArray.join(changedSource, ', ')}`,
+      });
+    }
     const limitations = [
       'Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.',
       'SQL/row transport and validation/scoring/top-k remain fused in the authorized read; no isolated stage claimed.',
@@ -340,6 +347,23 @@ const program = Effect.scoped(
         version: 1,
         kind: 'diagnostic',
         component: 'vector',
+        platform: `${process.platform}-${process.arch}`,
+        workload: {
+          kind: 'vector',
+          documents: options.documents,
+          dimensions: manifest.dimensions,
+          distribution: options.distribution,
+        },
+        sourceFence: {opening: openingSource, closing: closingSource},
+        inference: options.modelFile
+          ? {
+              kind: 'real-query',
+              purpose: 'recall',
+              weightsVerified: true,
+              templateIdentity: `manifest-query-prefix-v1:${sha256HexSync(JSON.stringify(manifest.promptPrefixes))}`,
+              model: {...artifact.environment.model, sha256: manifest.sha256, dimensions: manifest.dimensions},
+            }
+          : {kind: 'mock'},
         pair: options.pair,
         arm: options.arm,
         configurationHash: sha256HexSync(
@@ -358,6 +382,9 @@ const program = Effect.scoped(
         identities: {
           model: `${manifest.id}:${manifest.revision}:${manifest.sha256}`,
           purpose: 'recall',
+          platform: `${process.platform}-${process.arch}`,
+          method: 'selectedSemanticScores',
+          template: `manifest-query-prefix-v1:${sha256HexSync(JSON.stringify(manifest.promptPrefixes))}`,
           dimensions: String(manifest.dimensions),
           fixture: artifact.environment.fixtureHash,
           runtime: Bun.version,
@@ -397,7 +424,7 @@ const program = Effect.scoped(
         instrumentationHash,
         processTreeSampler: externalTelemetry,
         captureStartedAt,
-        captureFinishedAt: artifact.createdAt,
+        captureFinishedAt: DateTime.formatIso(yield* DateTime.now),
         rawWarmMilliseconds: queryDurations,
         rawWarmCpuMilliseconds: queryCpu,
         rawFirstUseMilliseconds: firstUseDurations,
@@ -497,6 +524,31 @@ const program = Effect.scoped(
     }
   }),
 );
+
+const readBenchmarkSourceFence = Effect.fn('benchmarkRecallVectors.sourceFence')(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const command = yield* CommandExecutor;
+  const cwd = yield* path.fromFileUrl(new URL('../', import.meta.url));
+  const git = (args: readonly string[]) => command.execute('git', args, {cwd, maxOutputBytes: 32 * 1024 * 1024});
+  const [commit, trackedDiff, index, status] = yield* Effect.all(
+    [
+      git(['rev-parse', 'HEAD']),
+      git(['diff', '--binary', '--no-ext-diff', 'HEAD', '--']),
+      git(['ls-files', '--stage', '-z']),
+      git(['status', '--porcelain=v1', '--untracked-files=normal', '-z']),
+    ],
+    {concurrency: 4},
+  );
+  return {
+    commit: EffectString.trim(commit.stdout),
+    dirty: status.stdout.length > 0,
+    trackedDiffHash: sha256HexSync(trackedDiff.stdout),
+    indexHash: sha256HexSync(index.stdout),
+    statusHash: sha256HexSync(status.stdout),
+    instrumentationHash: sha256HexSync(yield* fs.readFile(yield* path.fromFileUrl(import.meta.url))),
+  };
+});
 
 BunRuntime.runMain(provideScriptLayer(program, benchmarkLayer));
 

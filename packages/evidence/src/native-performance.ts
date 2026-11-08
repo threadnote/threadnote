@@ -42,6 +42,53 @@ const Stage = Schema.Union([
   Schema.Struct({state: Schema.Literal('not-applicable'), reason: NonEmpty}),
 ]);
 
+const SourceFence = Schema.Struct({
+  commit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u)),
+  dirty: Schema.Boolean,
+  trackedDiffHash: Hash,
+  indexHash: Hash,
+  statusHash: Hash,
+  instrumentationHash: Hash,
+});
+export type NativePerformanceSourceFence = typeof SourceFence.Type;
+
+export function nativePerformanceSourceChanges(
+  opening: NativePerformanceSourceFence,
+  closing: NativePerformanceSourceFence,
+): readonly string[] {
+  return EffectArray.filter(
+    ['commit', 'dirty', 'trackedDiffHash', 'indexHash', 'statusHash', 'instrumentationHash'] as const,
+    key => opening[key] !== closing[key],
+  );
+}
+
+const Workload = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal('vector'),
+    documents: Schema.Int,
+    dimensions: Schema.Int,
+    distribution: NonEmpty,
+  }),
+  Schema.Struct({kind: Schema.Literal('topology'), nodes: Schema.Int, operation: NonEmpty}),
+  Schema.Struct({kind: Schema.Literal('parser'), profile: NonEmpty}),
+]);
+const Inference = Schema.Union([
+  Schema.Struct({kind: Schema.Literals(['none', 'mock'])}),
+  Schema.Struct({
+    kind: Schema.Literal('real-query'),
+    purpose: Schema.Literals(['recall', 'graph']),
+    templateIdentity: NonEmpty,
+    weightsVerified: Schema.Literal(true),
+    model: Schema.Struct({
+      id: NonEmpty,
+      revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u)),
+      sha256: Hash,
+      dimensions: Schema.Int.check(Schema.isGreaterThan(0)),
+      backend: NonEmpty,
+    }),
+  }),
+]);
+
 export const NativePerformanceCaptureSchema = Schema.Struct({
   version: Schema.Literal(1),
   kind: Schema.Literals(['diagnostic', 'qualification']),
@@ -51,6 +98,11 @@ export const NativePerformanceCaptureSchema = Schema.Struct({
   // Includes fixture, purpose-specific actual model/revision/template, grammars,
   // worker counts, OS/CPU/runtime, query sequence, budgets and sampler settings.
   configurationHash: Hash,
+  // Optional only for legacy diagnostic receipts. Qualification requires these observed declarations.
+  platform: Schema.optionalKey(NonEmpty),
+  workload: Schema.optionalKey(Workload),
+  inference: Schema.optionalKey(Inference),
+  sourceFence: Schema.optionalKey(Schema.Struct({opening: SourceFence, closing: SourceFence})),
   identities: Schema.Record(NonEmpty, NonEmpty),
   correctnessDigest: Hash,
   firstUseMeasurement: NonEmpty,
@@ -95,6 +147,16 @@ export function parseNativePerformanceCapture(
   ] as const) {
     if (name !== undefined) requireMeasurement(name, unit);
   }
+  if (capture.sourceFence) {
+    const {opening, closing} = capture.sourceFence;
+    if (
+      nativePerformanceSourceChanges(opening, closing).length > 0 ||
+      opening.commit !== artifact.environment.commit ||
+      artifact.environment.dirty !== opening.dirty
+    ) {
+      throw new Error('Mixed-source capture: source fence does not match the measured source');
+    }
+  }
   if (capture.kind === 'qualification') {
     if (artifact.environment.dirty || !/^[a-f0-9]{40}$/u.test(artifact.environment.commit)) {
       throw new Error('Qualification requires clean exact source');
@@ -120,12 +182,107 @@ export function parseNativePerformanceCapture(
     for (const stage of requiredStages) {
       if (capture.stages[stage]?.state !== 'measured') throw new Error(`Qualification requires stage: ${stage}`);
     }
-    for (const key of ['fixture', 'runtime', 'workers', 'model', 'grammar', 'boundary', 'sampler']) {
+    for (const key of ['fixture', 'runtime', 'workers', 'grammar', 'boundary', 'method', 'sampler']) {
       if (!capture.identities[key]) throw new Error(`Missing identity: ${key}`);
     }
+    validateQualificationDeclarations(capture, artifact);
     Schema.decodeSync(Positive)(requireMeasurement(capture.processTreePeakRssMeasurement, 'bytes').maximum);
   }
   return {artifact, capture};
+}
+
+function validateQualificationDeclarations(capture: NativePerformanceCapture, artifact: BenchmarkArtifactV1): void {
+  if (artifact.metadata.qualification !== true || /diagnostic/iu.test(artifact.suite)) {
+    throw new Error('Diagnostic or unclassified artifact cannot qualify');
+  }
+  if (!capture.sourceFence) throw new Error('Qualification requires opening and closing source fences');
+  if (!EffectArray.some(NATIVE_PERFORMANCE_CONTRACT.platforms, platform => platform === capture.platform)) {
+    throw new Error('Unsupported qualification platform');
+  }
+  const environment = artifact.environment;
+  const platformMatches =
+    capture.platform === 'darwin-arm64'
+      ? environment.architecture === 'arm64' && /darwin|macos/iu.test(environment.operatingSystem)
+      : environment.architecture === 'x64' && /linux/iu.test(environment.operatingSystem);
+  if (!platformMatches || capture.identities.platform !== capture.platform)
+    throw new Error('Contradictory platform identity');
+  if (capture.identities.fixture !== environment.fixtureHash) throw new Error('Contradictory fixture identity');
+  const workload = capture.workload;
+  if (!workload || workload.kind !== capture.component) throw new Error('Missing representative workload');
+  if (workload.kind === 'vector') {
+    if (
+      !EffectArray.some(NATIVE_PERFORMANCE_CONTRACT.vectorDocuments, count => count === workload.documents) ||
+      !EffectArray.some(
+        NATIVE_PERFORMANCE_CONTRACT.vectorDistributions,
+        distribution => distribution === workload.distribution,
+      )
+    ) {
+      throw new Error('Unrepresentative vector workload');
+    }
+    const inference = capture.inference;
+    const model = environment.model;
+    if (
+      !inference ||
+      inference.kind !== 'real-query' ||
+      !model ||
+      artifact.metadata.inference !== 'real-query' ||
+      /mock|fake|diagnostic/iu.test(model.backend) ||
+      /mock|fake|diagnostic/iu.test(inference.model.backend) ||
+      model.id !== inference.model.id ||
+      model.revision !== inference.model.revision ||
+      model.backend !== inference.model.backend ||
+      artifact.metadata.modelSha256 !== inference.model.sha256 ||
+      artifact.metadata.modelPurpose !== inference.purpose ||
+      workload.dimensions !== inference.model.dimensions ||
+      artifact.metadata.documents !== workload.documents ||
+      artifact.metadata.distribution !== workload.distribution ||
+      capture.identities.model !== `${model.id}:${model.revision}:${inference.model.sha256}` ||
+      capture.identities.purpose !== inference.purpose ||
+      capture.identities.dimensions !== String(workload.dimensions) ||
+      capture.identities.template !== inference.templateIdentity
+    ) {
+      throw new Error('Vector qualification requires consistent pinned real-query inference evidence');
+    }
+  } else if (workload.kind === 'topology') {
+    if (
+      workload.nodes <= 100_000 ||
+      artifact.metadata.nodes !== workload.nodes ||
+      capture.identities.method !== workload.operation
+    ) {
+      throw new Error('Topology qualification requires an identified operation over more than 100000 nodes');
+    }
+  } else if (workload.profile !== 'reduced-polyglot' && workload.profile !== 'heavy-tail') {
+    throw new Error('Unrepresentative parser workload');
+  }
+}
+
+function sameRecord(left: Readonly<Record<string, unknown>>, right: Readonly<Record<string, unknown>>): boolean {
+  const keys = EffectRecord.keys(left);
+  return keys.length === EffectRecord.keys(right).length && EffectArray.every(keys, key => left[key] === right[key]);
+}
+
+function sameInference(
+  left: NativePerformanceCapture['inference'],
+  right: NativePerformanceCapture['inference'],
+): boolean {
+  if (left?.kind !== right?.kind) return false;
+  if (left?.kind === 'real-query' && right?.kind === 'real-query') {
+    return (
+      sameRecord(left.model, right.model) &&
+      left.purpose === right.purpose &&
+      left.templateIdentity === right.templateIdentity &&
+      left.weightsVerified === right.weightsVerified
+    );
+  }
+  return true;
+}
+
+function sameStages(left: NativePerformanceCapture['stages'], right: NativePerformanceCapture['stages']): boolean {
+  const keys = EffectRecord.keys(left);
+  return (
+    keys.length === EffectRecord.keys(right).length &&
+    EffectArray.every(keys, key => sameRecord(left[key], right[key] ?? {}))
+  );
 }
 
 /** Gate arithmetic is shared so the predeclared 5ms floor cannot be widened by a runner. */
@@ -158,7 +315,7 @@ export function validateNativePerformancePairs(
   const runs = EffectArray.map(inputs, input => parseNativePerformanceCapture(input.capture, input.artifact));
   if (runs.length < NATIVE_PERFORMANCE_CONTRACT.minimumPairedRuns * 2) throw new Error('At least three pairs required');
   const first = runs[0];
-  const platform = `${first.artifact.environment.operatingSystem}-${first.artifact.environment.architecture}`;
+  const platform = first.capture.platform;
   const pairs = new Map<number, {baseline?: typeof first; candidate?: typeof first}>();
   for (const run of runs) {
     const {capture, artifact} = run;
@@ -166,13 +323,32 @@ export function validateNativePerformancePairs(
     if (
       capture.component !== first.capture.component ||
       capture.configurationHash !== first.capture.configurationHash ||
+      !sameRecord(capture.identities, first.capture.identities) ||
+      !sameStages(capture.stages, first.capture.stages) ||
+      EffectArray.some(
+        [
+          'firstUseMeasurement',
+          'warmMeasurement',
+          'cpuMeasurement',
+          'diskMeasurement',
+          'processTreePeakRssMeasurement',
+        ] as const,
+        key => capture[key] !== first.capture[key],
+      ) ||
+      capture.sourceFence?.opening.instrumentationHash !== first.capture.sourceFence?.opening.instrumentationHash ||
+      capture.platform !== first.capture.platform ||
+      !sameRecord(capture.workload ?? {}, first.capture.workload ?? {}) ||
+      !sameInference(capture.inference, first.capture.inference) ||
       capture.correctnessDigest !== first.capture.correctnessDigest ||
       artifact.environment.fixtureHash !== first.artifact.environment.fixtureHash ||
       artifact.environment.cpu !== first.artifact.environment.cpu ||
       artifact.environment.runnerVersion !== first.artifact.environment.runnerVersion ||
+      artifact.environment.node !== first.artifact.environment.node ||
+      artifact.environment.runner !== first.artifact.environment.runner ||
       artifact.environment.packageManager !== first.artifact.environment.packageManager ||
-      JSON.stringify(artifact.environment.model) !== JSON.stringify(first.artifact.environment.model) ||
-      `${artifact.environment.operatingSystem}-${artifact.environment.architecture}` !== platform
+      !sameRecord(artifact.environment.model ?? {}, first.artifact.environment.model ?? {}) ||
+      artifact.environment.operatingSystem !== first.artifact.environment.operatingSystem ||
+      artifact.environment.architecture !== first.artifact.environment.architecture
     )
       throw new Error('Paired configuration, platform, fixture or correctness mismatch');
     const commit = capture.arm === 'baseline' ? expected.baselineCommit : expected.candidateCommit;

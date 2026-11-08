@@ -1,3 +1,4 @@
+import * as FC from 'fast-check';
 import {Array as EffectArray, Record as EffectRecord, String as EffectString} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
@@ -59,6 +60,84 @@ const capture: NativePerformanceCapture = {
   ),
   limitations: ['Mock inference'],
 };
+
+const pinnedModel = {
+  id: 'pinned-model',
+  revision: EffectString.repeat(40)('e'),
+  backend: 'cpu',
+  sha256: EffectString.repeat(64)('d'),
+  dimensions: 384,
+};
+const source = {
+  commit: artifact.environment.commit,
+  dirty: false,
+  trackedDiffHash: EffectString.repeat(64)('1'),
+  indexHash: EffectString.repeat(64)('2'),
+  statusHash: EffectString.repeat(64)('3'),
+  instrumentationHash: EffectString.repeat(64)('4'),
+};
+const qualificationArtifact: BenchmarkArtifactV1 = {
+  ...artifact,
+  environment: {
+    ...artifact.environment,
+    model: {id: pinnedModel.id, revision: pinnedModel.revision, backend: pinnedModel.backend},
+  },
+  metadata: {
+    qualification: true,
+    inference: 'real-query',
+    modelSha256: pinnedModel.sha256,
+    modelPurpose: 'recall',
+    documents: 10000,
+    distribution: 'dense',
+  },
+};
+const complete: NativePerformanceCapture = {
+  ...capture,
+  kind: 'qualification',
+  limitations: [],
+  platform: 'darwin-arm64',
+  workload: {kind: 'vector', documents: 10000, dimensions: 384, distribution: 'dense'},
+  inference: {
+    kind: 'real-query',
+    purpose: 'recall',
+    weightsVerified: true,
+    templateIdentity: 'prefix-v1',
+    model: pinnedModel,
+  },
+  sourceFence: {opening: source, closing: source},
+  stages: EffectRecord.fromEntries(
+    EffectArray.map(
+      NATIVE_PERFORMANCE_STAGES,
+      stage => [stage, {state: 'measured', measurement: 'warm', boundary: 'contract fixture'}] as const,
+    ),
+  ),
+  identities: {
+    fixture: 'fixture',
+    platform: 'darwin-arm64',
+    runtime: 'r',
+    workers: '1',
+    model: `${pinnedModel.id}:${pinnedModel.revision}:${pinnedModel.sha256}`,
+    purpose: 'recall',
+    dimensions: '384',
+    template: 'prefix-v1',
+    grammar: 'g',
+    boundary: 'b',
+    method: 'selectedSemanticScores',
+    sampler: 's',
+  },
+  processTreePeakRssMeasurement: 'rss',
+  cpuMeasurement: 'cpu',
+  diskMeasurement: 'disk',
+};
+const inputs = Array.from({length: 6}, (_, index) => ({
+  artifact: qualificationArtifact,
+  capture: {
+    ...complete,
+    pair: Math.floor(index / 2) + 1,
+    arm: index % 2 === 0 ? ('baseline' as const) : ('candidate' as const),
+  },
+}));
+const expected = {baselineCommit: artifact.environment.commit, candidateCommit: artifact.environment.commit};
 
 describe('native performance evidence admission', () => {
   it('retains diagnostic evidence while refusing to qualify missing stages or resources', () => {
@@ -134,26 +213,6 @@ describe('native performance evidence admission', () => {
         {baselineCommit: artifact.environment.commit, candidateCommit: artifact.environment.commit},
       ),
     ).toThrow('Diagnostic');
-    const complete = {
-      ...capture,
-      kind: 'qualification',
-      limitations: [],
-      stages: EffectRecord.fromEntries(
-        EffectArray.map(
-          NATIVE_PERFORMANCE_STAGES,
-          stage => [stage, {state: 'measured', measurement: 'warm', boundary: 'contract fixture'}] as const,
-        ),
-      ),
-      identities: {fixture: 'f', runtime: 'r', workers: '1', model: 'm', grammar: 'g', boundary: 'b', sampler: 's'},
-      processTreePeakRssMeasurement: 'rss',
-      cpuMeasurement: 'cpu',
-      diskMeasurement: 'disk',
-    };
-    const inputs = Array.from({length: 6}, (_, index) => ({
-      artifact,
-      capture: {...complete, pair: Math.floor(index / 2) + 1, arm: index % 2 === 0 ? 'baseline' : 'candidate'},
-    }));
-    const expected = {baselineCommit: artifact.environment.commit, candidateCommit: artifact.environment.commit};
     expect(validateNativePerformancePairs(inputs, expected).pairs).toBe(3);
     expect(() => validateNativePerformancePairs([...inputs.slice(0, 5), inputs[0]], expected)).toThrow('Duplicate');
     expect(() =>
@@ -165,6 +224,136 @@ describe('native performance evidence admission', () => {
         expected,
       ),
     ).toThrow('mismatch');
+  });
+
+  it('rejects contradictory declared identities and runtimes even with the same configuration hash', () => {
+    FC.assert(
+      FC.property(
+        FC.record({
+          identity: FC.constantFrom('workers', 'grammar', 'sampler', 'boundary', 'method', 'runtime'),
+          environmentKey: FC.constantFrom('node', 'runner', 'runnerVersion', 'packageManager', 'cpu'),
+          suffix: FC.string({maxLength: 12}),
+        }),
+        ({identity, environmentKey, suffix}) => {
+          const changedIdentity = {
+            ...inputs[5],
+            capture: {...inputs[5].capture, identities: {...complete.identities, [identity]: `changed:${suffix}`}},
+          };
+          expect(() => validateNativePerformancePairs([...inputs.slice(0, 5), changedIdentity], expected)).toThrow(
+            'mismatch',
+          );
+          const changedRuntime = {
+            ...inputs[5],
+            artifact: {
+              ...qualificationArtifact,
+              environment: {...qualificationArtifact.environment, [environmentKey]: `changed:${suffix}`},
+            },
+          };
+          expect(() => validateNativePerformancePairs([...inputs.slice(0, 5), changedRuntime], expected)).toThrow(
+            'mismatch',
+          );
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+
+  it('requires observed pinned real-query evidence and rejects diagnostic contradictions', () => {
+    expect(() =>
+      parseNativePerformanceCapture(complete, {...qualificationArtifact, environment: artifact.environment}),
+    ).toThrow('real-query');
+    for (const metadata of [
+      {...qualificationArtifact.metadata, qualification: false},
+      {...qualificationArtifact.metadata, inference: 'mock'},
+    ]) {
+      expect(() => parseNativePerformanceCapture(complete, {...qualificationArtifact, metadata})).toThrow();
+    }
+    expect(() =>
+      parseNativePerformanceCapture({...complete, inference: {kind: 'mock'}}, qualificationArtifact),
+    ).toThrow('real-query');
+    expect(() =>
+      parseNativePerformanceCapture(complete, {...qualificationArtifact, suite: 'diagnostic-probe'}),
+    ).toThrow('Diagnostic');
+    expect(() => parseNativePerformanceCapture({...complete, inference: undefined}, qualificationArtifact)).toThrow();
+    const inference = complete.inference;
+    if (inference?.kind !== 'real-query') throw new Error('Invalid test fixture');
+    expect(() =>
+      parseNativePerformanceCapture(
+        {...complete, inference: {...inference, model: {...pinnedModel, backend: 'mock'}}},
+        {
+          ...qualificationArtifact,
+          environment: {...qualificationArtifact.environment, model: {...pinnedModel, backend: 'mock'}},
+        },
+      ),
+    ).toThrow('real-query');
+  });
+
+  it('enforces the frozen platform and representative workload without requiring a model for topology', () => {
+    for (const platform of ['win32-x64', 'linux-arm64', 'darwin-x64'])
+      expect(() => parseNativePerformanceCapture({...complete, platform}, qualificationArtifact)).toThrow('platform');
+    for (const documents of [1, 9999, 10001, 99999])
+      expect(() =>
+        parseNativePerformanceCapture(
+          {...complete, workload: {kind: 'vector', documents, dimensions: 384, distribution: 'dense'}},
+          qualificationArtifact,
+        ),
+      ).toThrow('Unrepresentative');
+    expect(() =>
+      parseNativePerformanceCapture(
+        {...complete, workload: {kind: 'vector', documents: 10000, dimensions: 384, distribution: 'sparse'}},
+        qualificationArtifact,
+      ),
+    ).toThrow('Unrepresentative');
+    const topology: NativePerformanceCapture = {
+      ...complete,
+      component: 'topology',
+      workload: {kind: 'topology', nodes: 100001, operation: 'full'},
+      inference: {kind: 'none'},
+      identities: {
+        fixture: 'fixture',
+        platform: 'darwin-arm64',
+        runtime: 'r',
+        workers: '0',
+        grammar: 'not-applicable',
+        boundary: 'CLI full analysis',
+        method: 'full',
+        sampler: 's',
+      },
+    };
+    const topologyArtifact = {...artifact, metadata: {qualification: true, nodes: 100001}};
+    expect(parseNativePerformanceCapture(topology, topologyArtifact).capture.component).toBe('topology');
+    expect(() =>
+      parseNativePerformanceCapture(
+        {...topology, workload: {kind: 'topology', nodes: 100000, operation: 'full'}},
+        {...topologyArtifact, metadata: {qualification: true, nodes: 100000}},
+      ),
+    ).toThrow('more than 100000');
+  });
+
+  it('refuses a changed tracked tree, index or status when HEAD and instrumentation remain fixed', () => {
+    FC.assert(
+      FC.property(
+        FC.record({
+          key: FC.constantFrom('trackedDiffHash', 'indexHash', 'statusHash'),
+          hash: FC.array(FC.integer({min: 0, max: 15}), {minLength: 64, maxLength: 64}).map(values =>
+            EffectArray.join(
+              EffectArray.map(values, value => value.toString(16)),
+              '',
+            ),
+          ),
+        }),
+        ({key, hash}) => {
+          const changed = {...source, [key]: hash === source[key] ? EffectString.repeat(64)('f') : hash};
+          expect(() =>
+            parseNativePerformanceCapture(
+              {...complete, sourceFence: {opening: source, closing: changed}},
+              qualificationArtifact,
+            ),
+          ).toThrow('Mixed-source');
+        },
+      ),
+      {numRuns: 30},
+    );
   });
 
   it('applies the fixed improvement, regression/noise and memory gates at their boundaries', () => {
