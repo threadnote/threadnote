@@ -599,12 +599,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           ? existing.document.source
           : yield* inCheckout(inspectNativeSourcePaths(checkout, paths));
       const sameBusinessContent =
-        existing &&
+        existing !== undefined &&
         stableJson(contentOf(existing.document)) === stableJson(normalized) &&
         stableJson(existing.document.kind === 'plan' ? (existing.document.spec ?? null) : null) ===
           stableJson(spec ?? null);
-      const sameSource = existing && stableJson(existing.document.source ?? null) === stableJson(source ?? null);
-      if (sameBusinessContent && sameSource && !stored?.state.authoringSave) {
+      const sameSource =
+        existing !== undefined && stableJson(existing.document.source ?? null) === stableJson(source ?? null);
+      if (existing && sameBusinessContent && sameSource && !stored?.state.authoringSave) {
         if (
           request.command === 'start' ||
           existing.root.baseRevision === referenced?.artifact?.revision ||
@@ -669,6 +670,25 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       }
       if (request.command === 'start' && spec && document.kind === 'plan')
         yield* call('from-spec', {document, packet: yield* call('export-plan', {uri: referenced?.artifact?.uri})});
+      const sourceExisting = existing;
+      const refreshedSameIntent =
+        request.command === 'save' &&
+        sourceExisting !== undefined &&
+        sameBusinessContent &&
+        validateNativeAuthoring(sourceExisting.document).intentHash === structural.intentHash &&
+        sourceExisting.root.confirmation?.decision === 'approved' &&
+        sourceExisting.root.confirmation.intentHash === structural.intentHash;
+      const retainedConfirmation = sourceExisting && refreshedSameIntent ? sourceExisting.root.confirmation : undefined;
+      const retainedReview =
+        sameSource && sourceExisting?.root.review?.documentHash === structural.documentHash
+          ? sourceExisting.root.review
+          : undefined;
+      const saveReady =
+        refreshedSameIntent &&
+        (!document.review.required ||
+          (retainedReview?.documentHash === structural.documentHash &&
+            retainedReview.outcome === 'accepted' &&
+            retainedReview.blockingIssueCount === 0));
       if ('saveMode' in request && request.saveMode === 'background') {
         const accepted = object(
           yield* callJob('submit', {
@@ -680,7 +700,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
               runId,
               generation: stored!.state.generation,
               document,
-              ready: false,
+              ready: saveReady,
+              ...(retainedConfirmation ? {confirmation: retainedConfirmation} : {}),
+              ...(retainedReview ? {review: retainedReview} : {}),
               expectedRevision: request.command === 'save' ? referenced?.artifact?.revision : null,
               ...(request.command === 'save' ? {uri: referenced?.artifact?.uri} : {}),
             },
@@ -703,26 +725,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           job: accepted,
         };
       }
-      const refreshedSameIntent =
-        request.command === 'save' &&
-        sameBusinessContent &&
-        existing !== undefined &&
-        validateNativeAuthoring(existing.document).intentHash === structural.intentHash &&
-        existing.root.confirmation?.decision === 'approved' &&
-        existing.root.confirmation.intentHash === structural.intentHash;
-      const retainedConfirmation = refreshedSameIntent ? existing.root.confirmation : undefined;
-      const retainedReview =
-        sameSource && existing?.root.review?.documentHash === structural.documentHash
-          ? existing.root.review
-          : undefined;
       yield* call('save', {
         document,
-        ready:
-          refreshedSameIntent &&
-          (!document.review.required ||
-            (retainedReview?.documentHash === structural.documentHash &&
-              retainedReview.outcome === 'accepted' &&
-              retainedReview.blockingIssueCount === 0)),
+        ready: saveReady,
         expectedRevision: request.command === 'save' ? referenced?.artifact?.revision : null,
         ...(request.command === 'save' ? {uri: referenced?.artifact?.uri} : {}),
         ...(retainedConfirmation ? {confirmation: retainedConfirmation} : {}),

@@ -1626,6 +1626,84 @@ effectIt.effect.each(['head', 'bytes'] as const)(
     }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('background source refresh keeps the confirmed intent in its exact idempotent pending job', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const file = f.path.join(f.root, 'background-source-refresh-plan.json');
+    const direct = {
+      ...planBusiness,
+      requirements: specBusiness.requirements,
+      phases: A.map(planBusiness.phases, phase => ({
+        ...phase,
+        acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+      })),
+    };
+    yield* f.fs.writeFileString(file, JSON.stringify(direct));
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'Background source refresh',
+      kind: 'plan',
+      contentFile: file,
+      installationTarget: 'codex',
+    });
+    const approval = 'I approve this exact background source-linked plan intent.';
+    const ready = yield* f.author({
+      command: 'decide',
+      authoringRef: draft.authoringRef,
+      userDecision: 'approve',
+      userResponse: approval,
+      review: {outcome: 'accepted', blockingIssueCount: 0},
+    });
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
+    yield* runCommandEffect('git', ['-C', f.repo, 'add', 'unrelated.ts']);
+    yield* runCommandEffect('git', [
+      '-C',
+      f.repo,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-m',
+      'Background source refresh head',
+    ]);
+    expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+      'ready',
+    );
+    const request = {
+      command: 'save',
+      authoringRef: ready.authoringRef,
+      contentFile: file,
+      saveMode: 'background',
+    };
+    const accepted = yield* f.author(request).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    expect(accepted.status).toBe('accepted');
+    const jobId = String(object(accepted.job).jobId);
+    const inputPath = f.path.join(
+      f.home,
+      'workflow-automations',
+      'native-v1',
+      'jobs',
+      String(draft.runId),
+      `${jobId}.json.input.json`,
+    );
+    const originalInput = yield* f.fs.readFileString(inputPath);
+    const work = object(object(JSON.parse(originalInput)).work);
+    expect(work).toMatchObject({
+      action: 'authoring',
+      command: 'save',
+      ready: false,
+      confirmation: {decision: 'approved', response: approval, intentHash: ready.intentHash},
+    });
+    expect(work).not.toHaveProperty('review');
+    const stateAfterAdmission = yield* f.fs.readFileString(f.statePath(String(draft.runId)));
+    const replay = yield* f.author(request).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    expect(replay.jobRef).toBe(accepted.jobRef);
+    expect(yield* f.fs.readFileString(inputPath)).toBe(originalInput);
+    expect(yield* f.fs.readFileString(f.statePath(String(draft.runId)))).toBe(stateAfterAdmission);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect.each([
   'initial-source',
   'update-source',
