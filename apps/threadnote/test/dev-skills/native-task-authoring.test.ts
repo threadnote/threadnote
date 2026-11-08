@@ -1533,6 +1533,99 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect.each(['head', 'bytes'] as const)(
+  'refreshes source-only authoring evidence after %s drift while retaining intent confirmation and requiring fresh review',
+  drift =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const file = f.path.join(f.root, 'source-refresh-plan.json');
+      const direct = {
+        ...planBusiness,
+        requirements: specBusiness.requirements,
+        phases: A.map(planBusiness.phases, phase => ({
+          ...phase,
+          acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+        })),
+      };
+      yield* f.fs.writeFileString(file, JSON.stringify(direct));
+      const draft = yield* f.author({
+        command: 'start',
+        featureName: 'Source refresh',
+        kind: 'plan',
+        contentFile: file,
+        installationTarget: 'codex',
+      });
+      const approval = 'I approve this exact source-linked plan intent.';
+      const ready = yield* f.author({
+        command: 'decide',
+        authoringRef: draft.authoringRef,
+        userDecision: 'approve',
+        userResponse: approval,
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      });
+      const before = yield* f.author({command: 'read', authoringRef: ready.authoringRef, detail: 'document'});
+      const priorDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(before.document);
+      const priorSource = priorDocument.source;
+      if (drift === 'head') {
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
+        yield* runCommandEffect('git', ['-C', f.repo, 'add', 'unrelated.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          f.repo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Unrelated source change',
+        ]);
+      } else {
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "refreshed";\n');
+      }
+      expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+        'ready',
+      );
+      const refreshed = yield* f.author({command: 'save', authoringRef: ready.authoringRef, contentFile: file});
+      expect(refreshed).toMatchObject({status: 'draft', replayed: false, intentHash: ready.intentHash});
+      expect(refreshed.authoringRef).not.toBe(ready.authoringRef);
+      const readback = yield* f.author({command: 'read', authoringRef: refreshed.authoringRef, detail: 'document'});
+      const updated = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(readback.document);
+      if (drift === 'head') {
+        expect(updated.source?.head).not.toBe(priorSource?.head);
+        expect(updated.source?.files).toEqual(priorSource?.files);
+      } else {
+        expect(updated.source?.head).toBe(priorSource?.head);
+        expect(updated.source?.files).not.toEqual(priorSource?.files);
+      }
+      const state = yield* readNativeWorkflowState(f.config, String(draft.runId));
+      const rootOperation = A.findFirst(
+        [...(state?.state.operations ?? [])].reverse(),
+        operation => operation.status === 'verified' && operation.intent.role === 'authoring-root',
+      );
+      const root = decodeAuthoringArtifact(Option.getOrThrow(rootOperation).artifact!.body, AuthoringRootSchema);
+      expect(root.confirmation).toMatchObject({decision: 'approved', response: approval, intentHash: ready.intentHash});
+      expect(root.review?.documentHash).not.toBe(root.documentHash);
+      const reapproved = yield* f.author({
+        command: 'decide',
+        authoringRef: refreshed.authoringRef,
+        userDecision: 'approve',
+        userResponse: approval,
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      });
+      expect(reapproved.status).toBe('ready');
+      const replay = yield* f.author({command: 'save', authoringRef: reapproved.authoringRef, contentFile: file});
+      expect(replay).toMatchObject({status: 'ready', replayed: true, authoringRef: reapproved.authoringRef});
+      expect(
+        yield* f.author({
+          command: 'admit',
+          authoringRef: reapproved.authoringRef,
+          bindings: {readback: {branch: 'main', baseBranch: 'main'}},
+        }),
+      ).toMatchObject({status: 'admitted'});
+    }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect.each([
   'initial-source',
   'update-source',

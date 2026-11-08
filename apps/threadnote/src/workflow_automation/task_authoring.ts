@@ -588,13 +588,23 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
               requirements,
             }
           : content;
-      if (
+      const paths =
+        'phases' in content
+          ? [...new Set([...content.context.codeRefs, ...A.flatMap(content.phases, phase => phase.affectedPaths)])]
+          : content.context.codeRefs;
+      // A reserved save must replay its exact admitted source and metadata. Inspecting
+      // live source here could turn recovery into a different CAS intent.
+      const source =
+        stored?.state.authoringSave && existing
+          ? existing.document.source
+          : yield* inCheckout(inspectNativeSourcePaths(checkout, paths));
+      const sameBusinessContent =
         existing &&
         stableJson(contentOf(existing.document)) === stableJson(normalized) &&
         stableJson(existing.document.kind === 'plan' ? (existing.document.spec ?? null) : null) ===
-          stableJson(spec ?? null) &&
-        !stored?.state.authoringSave
-      ) {
+          stableJson(spec ?? null);
+      const sameSource = existing && stableJson(existing.document.source ?? null) === stableJson(source ?? null);
+      if (sameBusinessContent && sameSource && !stored?.state.authoringSave) {
         if (
           request.command === 'start' ||
           existing.root.baseRevision === referenced?.artifact?.revision ||
@@ -609,11 +619,6 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       if (request.command === 'save' && !exactCurrent() && !stored?.state.authoringSave)
         return yield* fail('stale-authoring-ref', 'Read the current draft before changing business content.');
-      const paths =
-        'phases' in content
-          ? [...new Set([...content.context.codeRefs, ...A.flatMap(content.phases, phase => phase.affectedPaths)])]
-          : content.context.codeRefs;
-      const source = yield* inCheckout(inspectNativeSourcePaths(checkout, paths));
       const document = decodeNativeAuthoringDocument({
         ...normalized,
         format: 'threadnote-native-authoring',
@@ -698,11 +703,30 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           job: accepted,
         };
       }
+      const refreshedSameIntent =
+        request.command === 'save' &&
+        sameBusinessContent &&
+        existing !== undefined &&
+        validateNativeAuthoring(existing.document).intentHash === structural.intentHash &&
+        existing.root.confirmation?.decision === 'approved' &&
+        existing.root.confirmation.intentHash === structural.intentHash;
+      const retainedConfirmation = refreshedSameIntent ? existing.root.confirmation : undefined;
+      const retainedReview =
+        sameSource && existing?.root.review?.documentHash === structural.documentHash
+          ? existing.root.review
+          : undefined;
       yield* call('save', {
         document,
-        ready: false,
+        ready:
+          refreshedSameIntent &&
+          (!document.review.required ||
+            (retainedReview?.documentHash === structural.documentHash &&
+              retainedReview.outcome === 'accepted' &&
+              retainedReview.blockingIssueCount === 0)),
         expectedRevision: request.command === 'save' ? referenced?.artifact?.revision : null,
         ...(request.command === 'save' ? {uri: referenced?.artifact?.uri} : {}),
+        ...(retainedConfirmation ? {confirmation: retainedConfirmation} : {}),
+        ...(retainedReview ? {review: retainedReview} : {}),
       });
     }
     existing = yield* current();
