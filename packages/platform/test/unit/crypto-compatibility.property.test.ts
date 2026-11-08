@@ -24,6 +24,7 @@ describe('Effect crypto compatibility', () => {
           const digest = yield* Digest.Digest;
           const expectedText = createHash('sha256').update(text).digest('hex');
           expect(sha256HexSync(text)).toBe(expectedText);
+          expect(withoutNativeBunSha256(() => sha256HexSync(text))).toBe(expectedText);
 
           const padded = new Uint8Array(bytes.length + 7).fill(255);
           padded.set(bytes, 3);
@@ -33,6 +34,7 @@ describe('Effect crypto compatibility', () => {
             const expected = createHash('sha256').update(input).digest('hex');
             expect(yield* digest.digestHex(Digest.sha256, input)).toBe(expected);
             expect(sha256HexSync(input)).toBe(expected);
+            expect(withoutNativeBunSha256(() => sha256HexSync(input))).toBe(expected);
           }
           expect(view).toEqual(bytes);
           expect(padded).toEqual(before);
@@ -51,7 +53,9 @@ describe('Effect crypto compatibility', () => {
       ({prefix, suffix, surrogate}) => {
         const text = `${prefix}${surrogate}${suffix}`;
         return Effect.sync(() => {
-          expect(sha256HexSync(text)).toBe(createHash('sha256').update(text).digest('hex'));
+          const expected = createHash('sha256').update(text).digest('hex');
+          expect(sha256HexSync(text)).toBe(expected);
+          expect(withoutNativeBunSha256(() => sha256HexSync(text))).toBe(expected);
         });
       },
       {fastCheck: {numRuns: 100}},
@@ -88,3 +92,14 @@ describe('Effect crypto compatibility', () => {
     );
   });
 });
+
+function withoutNativeBunSha256<T>(action: () => T): T {
+  const hashDescriptor = Object.getOwnPropertyDescriptor(Bun.SHA256, 'hash');
+  if (hashDescriptor === undefined) throw new Error('Bun.SHA256.hash descriptor is unavailable');
+  try {
+    Object.defineProperty(Bun.SHA256, 'hash', {...hashDescriptor, value: undefined});
+    return action();
+  } finally {
+    Object.defineProperty(Bun.SHA256, 'hash', hashDescriptor);
+  }
+}

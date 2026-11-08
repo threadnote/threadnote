@@ -17,4 +17,22 @@ describe('pure SHA-256', () => {
       expect(sha256HexSync(value)).toBe(createHash('sha256').update(value).digest('hex'));
     }
   });
+
+  it('uses the portable implementation when the Bun SHA-256 API is unavailable', () => {
+    const hashDescriptor = Object.getOwnPropertyDescriptor(Bun.SHA256, 'hash');
+    if (hashDescriptor === undefined) throw new Error('Bun.SHA256.hash descriptor is unavailable');
+    const backing = new Uint8Array([91, 0, 127, 255, 64]);
+    const view = backing.subarray(1, 4);
+    const before = backing.slice();
+
+    try {
+      Object.defineProperty(Bun.SHA256, 'hash', {...hashDescriptor, value: undefined});
+      for (const value of ['', 'Threadnote 🧵', '\ud800', view]) {
+        expect(sha256HexSync(value)).toBe(createHash('sha256').update(value).digest('hex'));
+      }
+      expect(backing).toEqual(before);
+    } finally {
+      Object.defineProperty(Bun.SHA256, 'hash', hashDescriptor);
+    }
+  });
 });
