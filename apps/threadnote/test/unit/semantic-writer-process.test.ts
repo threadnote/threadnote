@@ -118,19 +118,16 @@ const fixture = Effect.gen(function* () {
   );
   const authority = yield* makeSemanticWriterAuthorityFromDirectory(guardedDirectory);
   const writer = yield* makeSemanticHostWriterFromAuthority(authority);
+  const admissionRequest = {
+    version: 1 as const,
+    callerCwd: root,
+    handle,
+    taskAuthorization: 'Fixture task authorizes exact rename',
+    diskOwnership: 'closed-disk' as const,
+  };
   const admit = () =>
     writer
-      .admit(
-        scope,
-        {
-          version: 1,
-          callerCwd: root,
-          handle,
-          taskAuthorization: 'Fixture task authorizes exact rename',
-          diskOwnership: 'closed-disk',
-        },
-        resolved,
-      )
+      .admit(scope, admissionRequest, resolved)
       .pipe(
         Effect.flatMap(result =>
           'writer' in result && result.writer ? Effect.succeed(result.writer) : Effect.die('Fixture admission refused'),
@@ -165,10 +162,160 @@ const fixture = Effect.gen(function* () {
     resolved,
     authority,
     writer,
+    admissionRequest,
     admit,
     refresh,
   };
 });
+
+effectIt.effect.skipIf(!supported)(
+  'committed admission registration with lost acknowledgement remains recoverable',
+  () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const interrupted = yield* makeSemanticHostWriterFromAuthority({
+          ...f.authority,
+          registerOperation: ref =>
+            f.authority.registerOperation(ref).pipe(Effect.andThen(Effect.fail('Registration acknowledgement lost'))),
+        });
+        expect((yield* interrupted.admit(f.scope, f.admissionRequest, f.resolved).pipe(Effect.result))._tag).toBe(
+          'Failure',
+        );
+        const refs = yield* f.authority.withAdmission('inspect-admission-cut', f.authority.listOperations);
+        expect(refs).toHaveLength(1);
+        const operation = refs[0].operation;
+        const admission = runtimeReadPrivateWriterFile(
+          f.authority.directory,
+          operation + '.admission.json',
+          16 * 1024 * 1024,
+        );
+        expect(admission).toBeDefined();
+        expect(JSON.parse(new TextDecoder().decode(admission!.bytes))).toMatchObject({operation});
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, operation + '.started.json', 16384)).toBeUndefined();
+        expect(
+          runtimeReadPrivateWriterFile(f.authority.directory, operation + '.journal.json', 16 * 1024 * 1024),
+        ).toBeUndefined();
+        const next = yield* f.admit();
+        expect(next.operation).not.toBe(operation);
+        const journal = restoreApplyJournal(
+          JSON.parse(
+            new TextDecoder().decode(
+              runtimeReadPrivateWriterFile(f.authority.directory, operation + '.journal.json', 16 * 1024 * 1024)!.bytes,
+            ),
+          ),
+        );
+        expect(
+          EffectArray.every(journal.results, result => result.state === 'conflict' || result.state === 'unwritten'),
+        ).toBe(true);
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, operation + '.started.json', 16384)).toBeDefined();
+        for (const [index, original] of f.sources.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+for (const cut of ['complete-admission', 'partial-admission'] as const) {
+  effectIt.effect.skipIf(!supported)(`unindexed ${cut} is safely discarded before a fresh admission`, () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        let operation: string | undefined;
+        const interrupted = yield* makeSemanticHostWriterFromAuthority({
+          ...f.authority,
+          enrollResources: (session, resources, id) =>
+            f.authority.enrollResources(session, resources, id).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  operation = id;
+                }),
+              ),
+              Effect.filterOrElse(
+                () => cut === 'complete-admission',
+                () =>
+                  Effect.sync(() => {
+                    // Exact post-create crash state: malformed private bytes, no index, START or journal.
+                    const result = runtimePublishPrivateWriterFile(
+                      f.authority.directory,
+                      id + '.admission.json',
+                      new TextEncoder().encode('{"version":1,"proposal":'),
+                      {
+                        mode: 'exclusive',
+                        nonce: sha256HexSync('partial-publication-cut'),
+                        assertCurrentSync: () => f.authority.assertOperationSync(id),
+                      },
+                    );
+                    expect(result.status).toBe('published');
+                  }).pipe(Effect.andThen(Effect.fail('Interrupted partial admission publication'))),
+              ),
+            ),
+          registerOperation: () => Effect.fail('Interrupted before index registration'),
+        });
+        expect((yield* interrupted.admit(f.scope, f.admissionRequest, f.resolved).pipe(Effect.result))._tag).toBe(
+          'Failure',
+        );
+        expect(operation).toBeDefined();
+        expect(yield* f.authority.withAdmission('inspect-unindexed', f.authority.listOperations)).toHaveLength(0);
+        const name = operation + '.admission.json';
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, name, 16 * 1024 * 1024)).toBeDefined();
+        yield* f.admit();
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, name, 16 * 1024 * 1024)).toBeUndefined();
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, operation + '.started.json', 16384)).toBeUndefined();
+        expect(
+          runtimeReadPrivateWriterFile(f.authority.directory, operation + '.journal.json', 16 * 1024 * 1024),
+        ).toBeUndefined();
+        // Repeating normal admission neither resurrects the cleaned ID nor writes source.
+        yield* f.admit();
+        expect(runtimeReadPrivateWriterFile(f.authority.directory, name, 16 * 1024 * 1024)).toBeUndefined();
+        for (const [index, original] of f.sources.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
+      }),
+    ).pipe(Effect.provide(layer)),
+  );
+}
+
+for (const evidence of ['started', 'journal'] as const) {
+  effectIt.effect.skipIf(!supported)(
+    `unindexed admission with ${evidence} evidence is retained and refuses issuance`,
+    () =>
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const operation = sha256HexSync('unindexed-' + evidence);
+          const pending = '.pending-' + sha256HexSync('unattributable-temp');
+          const names = [operation + '.admission.json', operation + '.' + evidence + '.json', pending];
+          yield* f.authority.withAdmission(
+            operation,
+            Effect.sync(() => {
+              for (const [index, name] of names.entries()) {
+                const result = runtimePublishPrivateWriterFile(
+                  f.authority.directory,
+                  name,
+                  new TextEncoder().encode('unconfirmed'),
+                  {
+                    mode: 'exclusive',
+                    nonce: sha256HexSync('retention-fixture-' + index),
+                    assertCurrentSync: () => f.authority.assertOperationSync(operation),
+                  },
+                );
+                expect(result.status).toBe('published');
+              }
+            }),
+          );
+          expect((yield* f.writer.admit(f.scope, f.admissionRequest, f.resolved).pipe(Effect.result))._tag).toBe(
+            'Failure',
+          );
+          expect(yield* f.authority.withAdmission('inspect-retained', f.authority.listOperations)).toHaveLength(0);
+          for (const name of names)
+            expect(
+              new TextDecoder().decode(runtimeReadPrivateWriterFile(f.authority.directory, name, 16384)!.bytes),
+            ).toBe('unconfirmed');
+          for (const [index, original] of f.sources.entries())
+            expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
+        }),
+      ).pipe(Effect.provide(layer)),
+  );
+}
 
 effectIt.effect.skipIf(!supported)('actual native admission applies once and recovery preserves later disk edits', () =>
   TestClock.withLive(
