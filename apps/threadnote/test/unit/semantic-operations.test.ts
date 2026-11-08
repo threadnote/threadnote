@@ -1,17 +1,23 @@
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {canonicalFileUri} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as Native from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runSemanticDoctor} from '../../src/semantic/doctor.js';
-import {writeSemanticHostProfile} from '../../src/semantic/host_profile.js';
+import {
+  inspectSemanticHostProfile,
+  semanticHostProfileName,
+  SemanticHostProfileFault,
+  writeSemanticHostProfile,
+} from '../../src/semantic/host_profile.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {makeSemanticAdmission, semanticSessionLimits} from '../../src/semantic/coordinator.js';
@@ -45,8 +51,9 @@ const fixture = Effect.gen(function* () {
   const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
   return {fs, path, home, root, worktree, config, request: {version: 1, callerCwd: root}};
 });
+const privateProfileSupported = process.platform === 'darwin' && process.arch === 'arm64';
 
-describe('semantic operational inspection', () => {
+describe.skipIf(!privateProfileSupported)('semantic operational inspection', () => {
   effectIt.effect('keeps missing and disabled semantics independent without creating an admission service', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -163,6 +170,127 @@ describe('semantic operational inspection', () => {
           state: 'invalid-request',
           policy: {repositoryBuildPermission: false, automaticDownload: false},
         });
+      }).pipe(provideTestLayer(layer), TestClock.withLive),
+  );
+});
+
+describe('semantic private profile proof', () => {
+  effectIt.effect('refuses unsupported or unknown native proof before creating private profile bytes', () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => vi.spyOn(Native, 'runtimeOpenPrivateWriterDirectory')),
+      spy =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const profile = {version: 1, enabled: true, worktree: f.worktree, catalog: {}};
+          for (const reason of ['unsupported-platform', 'private-storage'] as const) {
+            spy.mockImplementation(() => {
+              throw Native.RuntimeWriterFault.make({reason});
+            });
+            const written = yield* writeSemanticHostProfile(f.config, f.worktree, profile).pipe(Effect.result);
+            expect(written._tag).toBe('Failure');
+            if (written._tag === 'Failure')
+              expect(Schema.is(SemanticHostProfileFault)(written.failure) && written.failure.reason).toBe(
+                reason === 'unsupported-platform' ? 'unsupported-platform' : 'untrusted',
+              );
+            expect(yield* runSemanticDoctor(f.config, f.request)).toMatchObject({
+              state: reason === 'unsupported-platform' ? 'unsupported-platform' : 'untrusted',
+            });
+            expect(yield* f.fs.exists(f.path.join(f.home, 'semantic'))).toBe(false);
+          }
+        }),
+      spy => Effect.sync(() => spy.mockRestore()),
+    ).pipe(provideTestLayer(layer), TestClock.withLive),
+  );
+
+  effectIt.effect.skipIf(!privateProfileSupported)(
+    'reports uncertain native publication as indeterminate without assuming that no write occurred',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* writeSemanticHostProfile(f.config, f.worktree, {
+          version: 1,
+          enabled: true,
+          worktree: f.worktree,
+          catalog: {},
+        });
+        const selected = yield* inspectSemanticHostProfile(f.config, f.worktree);
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => vi.spyOn(Native, 'runtimePublishPrivateWriterFile').mockReturnValue({status: 'unknown'})),
+          () =>
+            Effect.gen(function* () {
+              const report = yield* runSemanticDoctor(
+                f.config,
+                {...f.request, apply: true, expectedDigest: selected.digest},
+                'disable',
+              );
+              expect(report).toMatchObject({state: 'indeterminate'});
+              expect('changed' in report).toBe(false);
+              expect((yield* inspectSemanticHostProfile(f.config, f.worktree)).digest).toBe(selected.digest);
+            }),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+      }).pipe(provideTestLayer(layer), TestClock.withLive),
+  );
+
+  effectIt.effect.skipIf(!privateProfileSupported)(
+    'rejects actual inherited and file ACL grants before publishing or trusting profile bytes',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const grant = (target: string, inherited: boolean) =>
+          Effect.sync(() => {
+            const child = Bun.spawnSync(
+              [
+                '/bin/chmod',
+                '+a',
+                'everyone allow read,write,execute' + (inherited ? ',file_inherit,directory_inherit' : ''),
+                target,
+              ],
+              {stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 5000},
+            );
+            expect(child.exitCode).toBe(0);
+          });
+        const profile = {version: 1, enabled: true, worktree: f.worktree, catalog: {}};
+        yield* grant(f.home, true);
+        expect((yield* writeSemanticHostProfile(f.config, f.worktree, profile).pipe(Effect.result))._tag).toBe(
+          'Failure',
+        );
+        expect(yield* runSemanticDoctor(f.config, f.request)).toMatchObject({state: 'untrusted'});
+        expect(yield* f.fs.exists(f.path.join(f.home, 'semantic'))).toBe(false);
+
+        const existing = yield* fixture;
+        const saved = yield* writeSemanticHostProfile(existing.config, existing.worktree, {
+          ...profile,
+          worktree: existing.worktree,
+        });
+        const file = existing.path.join(
+          existing.home,
+          'semantic',
+          'profiles',
+          semanticHostProfileName(existing.config, existing.worktree),
+        );
+        const original = yield* existing.fs.readFileString(file);
+        yield* grant(file, false);
+        expect(yield* runSemanticDoctor(existing.config, existing.request)).toMatchObject({state: 'untrusted'});
+        expect(
+          yield* runSemanticDoctor(
+            existing.config,
+            {...existing.request, apply: true, expectedDigest: saved.digest},
+            'disable',
+          ),
+        ).toMatchObject({state: 'untrusted'});
+        expect(yield* existing.fs.readFileString(file)).toBe(original);
+        const future = JSON.stringify({...profile, worktree: existing.worktree, version: 99, future: 'retain'});
+        yield* existing.fs.writeFileString(file, future);
+        expect(
+          (yield* writeSemanticHostProfile(
+            existing.config,
+            existing.worktree,
+            {...profile, worktree: existing.worktree},
+            sha256HexSync(future),
+          ).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(yield* existing.fs.readFileString(file)).toBe(future);
       }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 });

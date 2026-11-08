@@ -63,7 +63,7 @@ describe.skipIf(process.platform === 'win32')('semantic mutable state compatibil
     {arbitrary: {runs: 20}},
   );
 
-  effectIt.effect(
+  effectIt.effect.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64')(
     'profile changes are explicit and resumable while future config, memories and recovery records remain unchanged',
     () =>
       Effect.gen(function* () {

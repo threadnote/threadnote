@@ -37,11 +37,20 @@ artifact paths and SHA-256 digests using the existing TypeScript, Python, Go, Ru
 qualification basis is [the provider lock](../config/semantic-providers/qualification-lock.json); an upstream `latest`
 version is never selected. No providers are bundled by this command.
 
+Private profile read/publication uses the existing native descriptor, ownership, identity and ACL boundary, available on
+the current Darwin arm64 candidate. This is not production qualification. Missing or unsupported ACL proof fails closed. Publication requires a canonical private
+data home and private descendants; `0700`/`0600` mode bits alone never prove ACL privacy. Unexpected grants are refused
+without changing permissions. This restriction does not qualify another platform or require semantic analysis for graph
+and memory use.
+
 Setup defaults to a preview. Add `apply:true` to save the verified profile. Replacing a different known profile also
 requires `expectedDigest`, obtained as `profileDigest` from inspection. A repeated request with the same exact supported
-profile is idempotent. Configuration is staged privately and published atomically; an interrupted staging directory is
-retained rather than guessed to be disposable recovery evidence, and does not prevent retrying setup. Setup never repairs
-permissions or overwrites unsupported/unknown state. If verification fails, the prior working profile remains intact.
+profile is idempotent. Native exclusive creation never replaces an existing profile, and known replacement uses guarded
+private staging and rename. The guard checks file ACLs before writing private bytes and rechecks the setup lease, parent
+identity and expected prior profile during publication. An unconfirmed publication returns `indeterminate`: inspect the
+retained state before an explicit retry, since an error is not proof of no write. Interrupted or unknown private staging
+is retained rather than guessed to be disposable recovery evidence. Setup never repairs permissions or overwrites
+unsupported/unknown state. If artifact verification fails, the prior working profile remains intact.
 
 To disable, pass the current digest to `threadnote semantic disable --json`:
 
