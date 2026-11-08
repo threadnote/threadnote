@@ -1,3 +1,17 @@
+import {
+  makeSemanticAdmission,
+  semanticSessionLimits,
+  SemanticCompatibilityFault,
+  type SemanticReservation,
+} from './admission.js';
+export {
+  makeSemanticAdmission,
+  semanticSessionLimits,
+  SemanticCompatibilityFault,
+  type SemanticReservation,
+  type SemanticAdmissionOptions,
+  type SemanticPressure,
+} from './admission.js';
 import {SemanticAgentEndpointChange, semanticAgentChangeLimits} from './agent_change_protocol.js';
 import {makeSemanticAgentChanges} from './agent_changes.js';
 import {Digest as EffectDigest, SecureRandom} from 'effect/crypto';
@@ -23,7 +37,6 @@ import {
   semanticAgentBufferLimits,
 } from './agent_query_protocol.js';
 import {makeSemanticAgentDiskQueries} from './agent_query_store.js';
-import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectArray from 'effect/Array';
 import * as EffectOption from 'effect/Option';
 import * as EffectString from 'effect/String';
@@ -33,7 +46,6 @@ import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
-import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   Counter,
@@ -83,26 +95,6 @@ import {
   typeScriptConfigurationHasExtendsCycle,
 } from './fingerprint.js';
 export {semanticTreeDigest} from './fingerprint.js';
-export const semanticSessionLimits = Object.freeze({
-  queriesPerSession: 4,
-  queuedPerSession: 32,
-  idleMilliseconds: 600000,
-  providersPerHome: 8,
-  providersPerWorkspace: 4,
-  importsPerHome: 2,
-  queued: 32,
-});
-const Instance = Schema.Struct({pid: Counter, identity: Identifier});
-type Instance = typeof Instance.Type;
-const Reservation = Schema.Struct({
-  token: Digest,
-  workspace: Digest,
-  owner: Instance,
-  provider: Schema.NullOr(Instance),
-  generation: Counter,
-  importing: Schema.Boolean,
-  quarantined: Schema.Boolean,
-});
 export const verifyJavaSemanticCandidate = Effect.fn('semantic.verifyJavaCandidate')(function* (
   candidate: JavaHostCandidate | undefined,
 ) {
@@ -256,6 +248,68 @@ export const verifyNativeSemanticCandidate = Effect.fn('semantic.verifyNativeCan
     ),
   );
 });
+export const verifySemanticNodeCandidate = Effect.fn('semantic.verifyNodeCandidate')(function* (
+  candidate: TypeScriptHostCandidate | PythonHostCandidate,
+  verifyRuntimeVersion = false,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (
+    candidate.runtimeVersion !== '24.19.0' ||
+    !Schema.is(Digest)(candidate.runtimeDigest) ||
+    !Schema.is(Digest)(candidate.serverTreeDigest)
+  )
+    return yield* LspFault.make({code: 'prerequisite'});
+  for (const file of [candidate.runtime, candidate.serverDirectory])
+    if (!path.isAbsolute(file) || (yield* fs.realPath(file)) !== file)
+      return yield* LspFault.make({code: 'prerequisite'});
+  if (
+    (yield* sha256FileHex(candidate.runtime)) !== candidate.runtimeDigest ||
+    (yield* semanticTreeDigest(candidate.serverDirectory)) !== candidate.serverTreeDigest
+  )
+    return yield* LspFault.make({code: 'prerequisite'});
+  if ('sdkDirectory' in candidate) {
+    if (
+      !path.isAbsolute(candidate.sdkDirectory) ||
+      (yield* fs.realPath(candidate.sdkDirectory)) !== candidate.sdkDirectory ||
+      (yield* semanticTreeDigest(candidate.sdkDirectory)) !== candidate.sdkTreeDigest
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+    for (const [directory, version] of [
+      [candidate.sdkDirectory, '6.0.3'],
+      [candidate.serverDirectory, '6.0.2'],
+    ]) {
+      const text = yield* readBoundedText(path.join(directory, 'package.json'), 1024 * 1024);
+      const value = yield* Effect.try({
+        try: () => JSON.parse(text),
+        catch: () => LspFault.make({code: 'prerequisite'}),
+      });
+      if (value?.version !== version) return yield* LspFault.make({code: 'prerequisite'});
+    }
+  } else {
+    // The wheel's package.json carries upstream Pyright's version; pin the distributed basedpyright server itself.
+    if (
+      (yield* boundedFileDigest(
+        path.join(candidate.serverDirectory, 'dist/pyright-langserver.js'),
+        16 * 1024 * 1024,
+      )) !== '3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33' ||
+      candidate.environments.length < 1 ||
+      candidate.environments.length > 16 ||
+      new Set(EffectArray.map(candidate.environments, e => e.id)).size !== candidate.environments.length
+    )
+      return yield* LspFault.make({code: 'prerequisite'});
+    for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
+  }
+  if (verifyRuntimeVersion) {
+    const command = yield* CommandExecutor;
+    const version = yield* command.execute(candidate.runtime, ['--version'], {
+      env: {},
+      timeoutMs: 2000,
+      maxOutputBytes: 128,
+    });
+    if (EffectString.trim(version.stdout) !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
+  }
+});
 /** Host-only construction. Repository requests can select a source view, never an executable, plugin or build policy. */
 export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(function* (
   options: SemanticCoordinatorOptions,
@@ -282,67 +336,21 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
     if (session) session.faulted = true;
     causes.set(id, reason);
   };
-  const verifyNodeCandidate = (candidate: TypeScriptHostCandidate | PythonHostCandidate) =>
-    Effect.gen(function* () {
-      if (
-        candidate.runtimeVersion !== '24.19.0' ||
-        !Schema.is(Digest)(candidate.runtimeDigest) ||
-        !Schema.is(Digest)(candidate.serverTreeDigest)
-      )
-        return yield* LspFault.make({code: 'prerequisite'});
-      for (const file of [candidate.runtime, candidate.serverDirectory])
-        if (!path.isAbsolute(file) || (yield* fs.realPath(file)) !== file)
-          return yield* LspFault.make({code: 'prerequisite'});
-      if (
-        (yield* sha256FileHex(candidate.runtime)) !== candidate.runtimeDigest ||
-        (yield* semanticTreeDigest(candidate.serverDirectory)) !== candidate.serverTreeDigest
-      )
-        return yield* LspFault.make({code: 'prerequisite'});
-      if ('sdkDirectory' in candidate) {
-        if (
-          !path.isAbsolute(candidate.sdkDirectory) ||
-          (yield* fs.realPath(candidate.sdkDirectory)) !== candidate.sdkDirectory ||
-          (yield* semanticTreeDigest(candidate.sdkDirectory)) !== candidate.sdkTreeDigest
-        )
-          return yield* LspFault.make({code: 'prerequisite'});
-        for (const [directory, version] of [
-          [candidate.sdkDirectory, '6.0.3'],
-          [candidate.serverDirectory, '6.0.2'],
-        ]) {
-          const text = yield* readBoundedText(path.join(directory, 'package.json'), 1024 * 1024);
-          const value = yield* Effect.try({
-            try: () => JSON.parse(text),
-            catch: () => LspFault.make({code: 'prerequisite'}),
-          });
-          if (value?.version !== version) return yield* LspFault.make({code: 'prerequisite'});
-        }
-      } else {
-        // The wheel's package.json carries upstream Pyright's version; pin the distributed basedpyright server itself.
-        if (
-          (yield* boundedFileDigest(
-            path.join(candidate.serverDirectory, 'dist/pyright-langserver.js'),
-            16 * 1024 * 1024,
-          )) !== '3ff64ca89ba46d04a7e8410955f20fb5e02d6b76d9a76f92e57bf43c95635c33' ||
-          candidate.environments.length < 1 ||
-          candidate.environments.length > 16 ||
-          new Set(EffectArray.map(candidate.environments, e => e.id)).size !== candidate.environments.length
-        )
-          return yield* LspFault.make({code: 'prerequisite'});
-        for (const environment of candidate.environments) yield* Schema.decodeEffect(PythonEnvironment)(environment);
-      }
-    });
   // Serialize coordinator candidate preflights; providers own their per-operation publication guards.
   const sdkVerification = yield* Semaphore.make(1);
   const verifyCandidate = (
     candidate: TypeScriptHostCandidate | PythonHostCandidate | SdkHostCandidate | JavaHostCandidate,
     id: string,
+    verifyRuntimeVersion = false,
   ) =>
     'runtimeCandidate' in candidate
       ? id === 'jdtls'
         ? sdkVerification.withPermit(verifyJavaSemanticCandidate(candidate))
         : Effect.fail(LspFault.make({code: 'prerequisite'}))
       : 'runtime' in candidate
-        ? verifyNodeCandidate(candidate)
+        ? verifySemanticNodeCandidate(candidate, verifyRuntimeVersion).pipe(
+            Effect.provideService(CommandExecutor, command),
+          )
         : id === 'gopls' || id === 'rust-analyzer'
           ? sdkVerification.withPermit(verifyNativeSemanticCandidate(candidate, id))
           : Effect.fail(LspFault.make({code: 'prerequisite'}));
@@ -355,14 +363,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
   ];
   if (!configured.length) return yield* LspFault.make({code: 'prerequisite'});
   for (const {candidate, id} of configured) {
-    if (id !== 'jdtls') yield* verifyCandidate(candidate, id);
-    if (!('runtime' in candidate)) continue;
-    const version = yield* command.execute(candidate.runtime, ['--version'], {
-      env: {},
-      timeoutMs: 2000,
-      maxOutputBytes: 128,
-    });
-    if (EffectString.trim(version.stdout) !== 'v24.19.0') return yield* LspFault.make({code: 'prerequisite'});
+    if (id !== 'jdtls') yield* verifyCandidate(candidate, id, true);
   }
   const retire = (id: string, session: AnalysisSession) =>
     Effect.uninterruptible(
@@ -890,6 +891,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
           idleMilliseconds: semanticSessionLimits.idleMilliseconds,
           queriesPerSession: semanticSessionLimits.queriesPerSession,
           queuedPerSession: semanticSessionLimits.queuedPerSession,
+          providerLeaderRssBytesPerHome: semanticSessionLimits.providerLeaderRssBytesPerHome,
+          resourceEnforcement: 'admission-only-registered-provider-leaders',
           providerFrameBytes: 32 * 1024 * 1024,
           projectFiles: 20000,
           projectBytes: 256 * 1024 * 1024,
@@ -905,7 +908,7 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
         limitations: [
           'Read-only experimental pilot',
           'Symlinked/external projects require further qualification',
-          'Aggregate RSS pressure enforcement remains a mandatory release qualification gate',
+          'RSS admission covers registered provider leaders; descendants, transient peaks and OS hard limits remain unqualified',
         ],
       })),
     ),
@@ -1540,6 +1543,32 @@ export interface SemanticEndpointLaunch extends SemanticCoordinatorOptions {
   /** Exact application/runtime identity supplied by the host, independent of provider selection. */
   readonly runtimeIdentity: string;
 }
+/** Probe the exact current runtime attachment only; operational inspection never starts or repairs a worker. */
+export const inspectSemanticEndpoint = Effect.fn('semantic.inspectEndpoint')(function* (
+  options: Pick<SemanticEndpointLaunch, 'dataHome' | 'worktree' | 'runtimeIdentity'>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (!Schema.is(Digest)(options.runtimeIdentity) || !Schema.is(FileUri)(options.worktree))
+    return yield* LspFault.make({code: 'prerequisite'});
+  const home = yield* fs.realPath(options.dataHome);
+  if (home !== path.resolve(options.dataHome)) return yield* LspFault.make({code: 'prerequisite'});
+  const key = sha256HexSync(JSON.stringify([home, options.worktree, options.runtimeIdentity]));
+  const directory = path.join(home, 'semantic', EffectString.slice(0, 20)(key));
+  const file = path.join(directory, 'host.json');
+  if (!(yield* fs.exists(file))) return undefined;
+  const bootstrap = yield* readSemanticBootstrap(file);
+  if (
+    bootstrap.runtimeIdentity !== options.runtimeIdentity ||
+    bootstrap.worktree !== options.worktree ||
+    bootstrap.dataHome !== home
+  )
+    return yield* SemanticCompatibilityFault.make({component: 'bootstrap'});
+  return yield* requestSemanticEndpoint(path.join(directory, 'rpc.sock'), bootstrap.token, {operation: 'status'}).pipe(
+    Effect.timeoutOption(2000),
+    Effect.map(Option.getOrUndefined),
+  );
+});
 /** Starts one runtime/worktree coordinator lazily. Capabilities/source text never enter process arguments. */
 export const ensureSemanticEndpoint = Effect.fn('semantic.ensureEndpoint')(function* (options: SemanticEndpointLaunch) {
   const launch = structuredClone(options);
@@ -1654,7 +1683,9 @@ const readSemanticBootstrap = Effect.fn('semantic.readBootstrap')(function* (fil
     return yield* LspFault.make({code: 'prerequisite'});
   const text = yield* readBoundedText(file, 16 * 1024);
   const raw = yield* Effect.try({try: () => JSON.parse(text), catch: () => LspFault.make({code: 'protocol'})});
-  return yield* Schema.decodeUnknownEffect(Bootstrap)(raw);
+  return yield* Schema.decodeUnknownEffect(Bootstrap, {onExcessProperty: 'error'})(raw).pipe(
+    Effect.mapError(() => SemanticCompatibilityFault.make({component: 'bootstrap'})),
+  );
 });
 export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(function* (arguments_: readonly string[]) {
   if (arguments_.length !== 2 || arguments_[0] !== '--config') return yield* LspFault.make({code: 'protocol'});
@@ -1697,246 +1728,4 @@ export const runSemanticCoordinatorWorker = Effect.fn('semantic.worker')(functio
       }),
     ),
   );
-});
-const Ticket = Schema.Struct({token: Digest, workspace: Digest, owner: Instance});
-const Ledger = Schema.Struct({
-  version: Schema.Literal(1),
-  nextGeneration: Counter,
-  slots: Schema.Array(Reservation).check(Schema.isMaxLength(8)),
-  tickets: Schema.Array(Ticket).check(Schema.isMaxLength(32)),
-});
-type Ledger = {
-  version: 1;
-  nextGeneration: number;
-  slots: (typeof Reservation.Type)[];
-  tickets: (typeof Ticket.Type)[];
-};
-const limits = semanticSessionLimits;
-/** Probe only. Unknown/EPERM remains occupied; no PID-only signalling or recovery. */
-function processGroupPresent(pid: number): boolean {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (cause) {
-    return !isJsonObject(cause) || cause.code !== 'ESRCH';
-  }
-}
-export interface SemanticAdmissionOptions {
-  /** One stable, private directory in the canonical data home, shared across runtime generations/worktrees. */
-  readonly directory: string;
-  readonly processGroupPresent?: (pid: number) => boolean;
-}
-export interface SemanticReservation {
-  readonly generation: number;
-  readonly bindProvider: (pid: number) => Effect.Effect<void, unknown>;
-  readonly finishImport: Effect.Effect<void, unknown>;
-  /** A positive group-drain receipt is required; failure conserves/quarantines the reservation. */
-  readonly release: (drained: boolean) => Effect.Effect<void, unknown>;
-}
-/** File-locked FIFO admission is shared by every worktree coordinator, rather than a per-process counter. */
-export const makeSemanticAdmission = Effect.fn('semantic.makeAdmission')(function* (options: SemanticAdmissionOptions) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const system = yield* SystemInfo;
-  const crypto = yield* SecureRandom.SecureRandom;
-  const identity = yield* system.canonicalProcessStartIdentity?.(system.processId) ?? succeedUndefined;
-  if (!identity || system.platform === 'win32') return yield* LspFault.make({code: 'prerequisite'});
-  const owner: Instance = {pid: system.processId, identity};
-  yield* fs.makeDirectory(options.directory, {recursive: true, mode: 0o700});
-  const directory = yield* fs.realPath(options.directory);
-  if (directory !== path.resolve(options.directory) || (yield* fs.stat(directory)).mode & 0o077)
-    return yield* LspFault.make({code: 'prerequisite'});
-  const ledgerPath = path.join(directory, 'admission-v1.json');
-  const groupPresent = options.processGroupPresent ?? processGroupPresent;
-  const token = () => crypto.randomBytes(32).pipe(Effect.map(bytes => sha256HexSync(bytes)));
-  const alive = (instance: Instance) =>
-    Effect.gen(function* () {
-      if (!system.isProcessRunning(instance.pid)) return false;
-      const observed = yield* system.canonicalProcessStartIdentity?.(instance.pid) ?? succeedUndefined;
-      // Missing identity is uncertainty, not proof of death. Different canonical identities prove reuse.
-      return observed === undefined || observed === instance.identity;
-    });
-  const transaction = <A, E, R>(f: (ledger: Ledger) => Effect.Effect<A, E, R>) =>
-    withExclusiveFileLock(
-      fs,
-      path.join(directory, 'admission-v1.lock'),
-      {
-        createParentDirectory: false,
-        retryIntervalMilliseconds: 20,
-        waitTimeoutMilliseconds: 2000,
-        staleAfterMilliseconds: 10000,
-        useCanonicalProcessStartIdentity: true,
-      },
-      Effect.gen(function* () {
-        let ledger: Ledger = {version: 1, nextGeneration: 0, slots: [], tickets: []};
-        if (yield* fs.exists(ledgerPath)) {
-          const info = yield* fs.stat(ledgerPath);
-          if (
-            info.type !== 'File' ||
-            info.mode & 0o077 ||
-            Number(info.size) > 128 * 1024 ||
-            Option.isSome(yield* fs.readLink(ledgerPath).pipe(Effect.option))
-          )
-            return yield* LspFault.make({code: 'prerequisite'});
-          const raw = yield* readBoundedText(ledgerPath, 128 * 1024);
-          const json = yield* Effect.try({try: () => JSON.parse(raw), catch: () => LspFault.make({code: 'protocol'})});
-          const decoded = yield* Schema.decodeUnknownEffect(Ledger)(json);
-          ledger = {
-            version: 1,
-            nextGeneration: decoded.nextGeneration,
-            slots: [...decoded.slots],
-            tickets: [...decoded.tickets],
-          };
-        }
-        ledger.tickets = yield* Effect.filter(ledger.tickets, ticket => alive(ticket.owner));
-        const retained: Ledger['slots'] = [];
-        for (const slot of ledger.slots) {
-          if (yield* alive(slot.owner)) {
-            retained.push(slot);
-            continue;
-          }
-          if (slot.provider && !(yield* alive(slot.provider)) && !groupPresent(slot.provider.pid)) continue;
-          // A crash between reservation and provider registration cannot safely be guessed away.
-          retained.push({...slot, quarantined: true});
-        }
-        ledger.slots = retained;
-        const result = yield* f(ledger);
-        const temporary = path.join(directory, `.admission-${yield* token()}`);
-        yield* fs
-          .writeFileString(temporary, JSON.stringify(ledger), {flag: 'wx', mode: 0o600})
-          .pipe(
-            Effect.andThen(fs.rename(temporary, ledgerPath)),
-            Effect.ensuring(fs.remove(temporary).pipe(Effect.ignore)),
-          );
-        return result;
-      }),
-    ).pipe(
-      Effect.provideService(SystemInfo, system),
-      Effect.provideService(SecureRandom.SecureRandom, crypto),
-      Effect.provideService(Path.Path, path),
-    );
-  const status = transaction(ledger =>
-    Effect.succeed({
-      limits,
-      providers: ledger.slots.length,
-      imports: EffectArray.filter(ledger.slots, slot => slot.importing).length,
-      queued: ledger.tickets.length,
-      quarantined: EffectArray.filter(ledger.slots, slot => slot.quarantined).length,
-      nextAction: EffectArray.some(ledger.slots, slot => slot.quarantined)
-        ? 'Inspect owned process trees; uncertain reservations remain occupied'
-        : 'Ready',
-    }),
-  );
-  const acquire = (workspace: string, milliseconds: number) =>
-    Effect.gen(function* () {
-      if (
-        !Schema.is(Digest)(workspace) ||
-        !Number.isSafeInteger(milliseconds) ||
-        milliseconds < 1 ||
-        milliseconds > 120000
-      )
-        return yield* LspFault.make({code: 'protocol'});
-      const id = yield* token();
-      let assigned = false;
-      let generation = 0;
-      yield* Effect.addFinalizer(() =>
-        transaction(ledger =>
-          Effect.sync(() => {
-            ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
-            ledger.slots = EffectArray.map(ledger.slots, slot =>
-              slot.token === id ? {...slot, quarantined: true} : slot,
-            );
-          }),
-        ).pipe(Effect.ignore),
-      );
-      yield* transaction(ledger =>
-        Effect.gen(function* () {
-          if (ledger.tickets.length >= limits.queued) return yield* LspFault.make({code: 'capacity'});
-          ledger.tickets.push({token: id, workspace, owner});
-        }),
-      );
-      yield* Effect.gen(function* () {
-        const started = yield* Clock.currentTimeMillis;
-        while (!assigned) {
-          assigned = yield* transaction(ledger =>
-            Effect.sync(() => {
-              if (
-                ledger.slots.length >= limits.providersPerHome ||
-                EffectArray.filter(ledger.slots, slot => slot.importing).length >= limits.importsPerHome
-              )
-                return false;
-              // Skip a ticket blocked by its own workspace cap so another workspace can progress.
-              const eligible = EffectOption.getOrUndefined(
-                EffectArray.findFirst(
-                  ledger.tickets,
-                  ticket =>
-                    EffectArray.filter(ledger.slots, slot => slot.workspace === ticket.workspace).length <
-                    limits.providersPerWorkspace,
-                ),
-              );
-              if (eligible?.token !== id || ledger.nextGeneration >= Number.MAX_SAFE_INTEGER) return false;
-              generation = ++ledger.nextGeneration;
-              ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
-              ledger.slots.push({
-                token: id,
-                workspace,
-                owner,
-                provider: null,
-                generation,
-                importing: true,
-                quarantined: false,
-              });
-              return true;
-            }),
-          );
-          if (assigned) break;
-          if ((yield* Clock.currentTimeMillis) - started >= milliseconds)
-            return yield* LspFault.make({code: 'timeout'});
-          yield* Effect.sleep(20);
-        }
-      }).pipe(
-        Effect.ensuring(
-          transaction(ledger =>
-            Effect.sync(() => {
-              ledger.tickets = EffectArray.filter(ledger.tickets, ticket => ticket.token !== id);
-            }),
-          ).pipe(Effect.ignore),
-        ),
-      );
-      let released = false;
-      const update = (f: (slot: typeof Reservation.Type) => typeof Reservation.Type | undefined) =>
-        transaction(ledger =>
-          Effect.gen(function* () {
-            if (released) return;
-            const index = EffectOption.getOrElse(
-              EffectArray.findFirstIndex(
-                ledger.slots,
-                slot => slot.token === id && slot.owner.pid === owner.pid && slot.owner.identity === owner.identity,
-              ),
-              () => -1,
-            );
-            if (index < 0) return yield* LspFault.make({code: 'closing'});
-            const next = f(ledger.slots[index]);
-            if (next) ledger.slots[index] = next;
-            else {
-              ledger.slots.splice(index, 1);
-              released = true;
-            }
-          }),
-        );
-      return {
-        generation,
-        bindProvider: (pid: number) =>
-          Effect.gen(function* () {
-            const identity = yield* system.canonicalProcessStartIdentity?.(pid) ?? succeedUndefined;
-            if (!identity || !Number.isSafeInteger(pid) || pid <= 0)
-              return yield* LspFault.make({code: 'prerequisite'});
-            yield* update(slot => ({...slot, provider: {pid, identity}}));
-          }),
-        finishImport: update(slot => ({...slot, importing: false})),
-        release: (drained: boolean) =>
-          update(slot => (drained ? undefined : {...slot, quarantined: true, importing: false})),
-      } satisfies SemanticReservation;
-    });
-  return {acquire, status};
 });

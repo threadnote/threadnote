@@ -22,6 +22,7 @@ import {Command} from 'effect/cli';
 import {Identifier} from '@threadnote/semantic/contracts';
 import {runtimePlatform, runtimeArchitecture} from '@threadnote/platform/system';
 import {boolean, optionalString} from './cli/flags.js';
+import {runSemanticDoctor} from '../semantic/doctor.js';
 
 const CapabilityRequest = Schema.Struct({language: Schema.optionalKey(Identifier)});
 
@@ -270,6 +271,20 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
   );
   return Command.make('semantic').pipe(
     Command.withSubcommands([
+      ...EffectArray.map(['doctor', 'status', 'setup', 'disable'] as const, action =>
+        Command.make(action, {json: boolean('json', 'Print bounded operational JSON')}, () =>
+          withRuntime(config =>
+            Effect.gen(function* () {
+              const result = yield* runSemanticDoctor(config, yield* readSemanticAgentQueryInput, action);
+              return yield* Console.log(JSON.stringify(result));
+            }),
+          ),
+        ).pipe(
+          Command.withDescription(
+            'Inspect or explicitly configure a private pinned host profile using version:1 JSON on stdin; never downloads or starts an analysis provider',
+          ),
+        ),
+      ),
       capabilities,
       query,
       change,
