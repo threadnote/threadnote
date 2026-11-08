@@ -258,6 +258,43 @@ describe('native performance evidence admission', () => {
     );
   });
 
+  it('compares host RAM, suite, warmups and primary sample counts instead of trusting the hash', () => {
+    const changedArtifacts = [
+      {
+        ...qualificationArtifact,
+        environment: {
+          ...qualificationArtifact.environment,
+          memoryBytes: qualificationArtifact.environment.memoryBytes + 1,
+        },
+      },
+      {...qualificationArtifact, suite: 'another-suite'},
+      {...qualificationArtifact, warmups: qualificationArtifact.warmups + 1},
+      {
+        ...qualificationArtifact,
+        measurements: EffectArray.map(qualificationArtifact.measurements, measurement =>
+          measurement.name === 'warm'
+            ? benchmarkMeasurement(
+                'warm',
+                'milliseconds',
+                Array.from({length: 31}, () => 5),
+              )
+            : measurement,
+        ),
+      },
+      {
+        ...qualificationArtifact,
+        measurements: EffectArray.map(qualificationArtifact.measurements, measurement =>
+          measurement.name === 'first' ? benchmarkMeasurement('first', 'milliseconds', [10, 10]) : measurement,
+        ),
+      },
+    ];
+    for (const changed of changedArtifacts) {
+      expect(() =>
+        validateNativePerformancePairs([...inputs.slice(0, 5), {...inputs[5], artifact: changed}], expected),
+      ).toThrow('mismatch');
+    }
+  });
+
   it('requires observed pinned real-query evidence and rejects diagnostic contradictions', () => {
     expect(() =>
       parseNativePerformanceCapture(complete, {...qualificationArtifact, environment: artifact.environment}),

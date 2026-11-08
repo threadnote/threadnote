@@ -307,6 +307,11 @@ export function nativePerformanceGates(input: {
   };
 }
 
+function measurementSamples(artifact: BenchmarkArtifactV1, name: string): number | undefined {
+  for (const measurement of artifact.measurements) if (measurement.name === name) return measurement.samples;
+  return undefined;
+}
+
 /** Admit one component/platform independently. Callers retain raw serial-run receipts. */
 export function validateNativePerformancePairs(
   inputs: readonly {readonly capture: unknown; readonly artifact: unknown}[],
@@ -322,6 +327,12 @@ export function validateNativePerformancePairs(
     if (capture.kind !== 'qualification') throw new Error('Diagnostic evidence cannot qualify a comparison');
     if (
       capture.component !== first.capture.component ||
+      artifact.suite !== first.artifact.suite ||
+      artifact.warmups !== first.artifact.warmups ||
+      measurementSamples(artifact, capture.warmMeasurement) !==
+        measurementSamples(first.artifact, first.capture.warmMeasurement) ||
+      measurementSamples(artifact, capture.firstUseMeasurement) !==
+        measurementSamples(first.artifact, first.capture.firstUseMeasurement) ||
       capture.configurationHash !== first.capture.configurationHash ||
       !sameRecord(capture.identities, first.capture.identities) ||
       !sameStages(capture.stages, first.capture.stages) ||
@@ -342,6 +353,7 @@ export function validateNativePerformancePairs(
       capture.correctnessDigest !== first.capture.correctnessDigest ||
       artifact.environment.fixtureHash !== first.artifact.environment.fixtureHash ||
       artifact.environment.cpu !== first.artifact.environment.cpu ||
+      artifact.environment.memoryBytes !== first.artifact.environment.memoryBytes ||
       artifact.environment.runnerVersion !== first.artifact.environment.runnerVersion ||
       artifact.environment.node !== first.artifact.environment.node ||
       artifact.environment.runner !== first.artifact.environment.runner ||
