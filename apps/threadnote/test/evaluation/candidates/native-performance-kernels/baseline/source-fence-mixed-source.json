@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "kind": "mixed-source",
+  "changedSource": ["dirty", "trackedDiffHash", "statusHash"],
+  "opening": {
+    "commit": "002f5c8f86d36c625133c9bc0db6cd1559c71985",
+    "dirty": false,
+    "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexHash": "be10e9e5fc0e3472e7c102c20bac793688cc4936825958efae420bea9f7ee477",
+    "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "instrumentationHash": "9a70a24775d36eb4cb854cb45574f0ec21a1d05cf09ff427aad21a7d1a0bf917"
+  },
+  "closing": {
+    "commit": "002f5c8f86d36c625133c9bc0db6cd1559c71985",
+    "dirty": true,
+    "trackedDiffHash": "91f38a52af90d1287eac81574bbe7736758a3038adb35315d8a938d60cc73ae2",
+    "indexHash": "be10e9e5fc0e3472e7c102c20bac793688cc4936825958efae420bea9f7ee477",
+    "statusHash": "f3e36db7ca1d4bb7c59ae650eb4f56cab41eef744d8ee77b8d5d38fcd645c1a9",
+    "instrumentationHash": "9a70a24775d36eb4cb854cb45574f0ec21a1d05cf09ff427aad21a7d1a0bf917"
+  },
+  "measurementsDiscarded": true
+}

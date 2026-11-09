@@ -24,6 +24,8 @@ const VECTOR_ID_LABELS = [
   'Ω-greek',
   '中-cjk',
   '😀-emoji',
+  '\uE000-private-use',
+  '\u{10000}-astral',
 ] as const;
 
 function compareCodeUnits(left: string, right: string): number {
@@ -148,6 +150,24 @@ describe('exact vector search properties', () => {
       }
     },
     {fastCheck: {numRuns: 150}},
+  );
+
+  fcProp(
+    it,
+    'selects UTF-16 tie ranks before truncating top-k across BMP and astral IDs',
+    {
+      asciiIds: FC.uniqueArray(FC.constantFrom('!bang', '0digit', 'A-upper', 'a-lower'), {maxLength: 4}),
+      reverse: FC.boolean(),
+    },
+    ({asciiIds, reverse}) => {
+      const ids = [...asciiIds, '\uE000-private-use', '\u{10000}-astral'];
+      const records = EffectArray.map(reverse ? [...ids].reverse() : ids, id => ({id, vector: [1, 0]}));
+      const actual = searchExactVectors([1, 0], records, {dimensions: 2, limit: asciiIds.length + 1});
+      const expected: string[] = [...asciiIds].sort();
+      expected.push('\u{10000}-astral');
+      expect(EffectArray.map(actual, result => result.id)).toEqual(expected);
+    },
+    {fastCheck: {numRuns: 50}},
   );
 
   fcProp(

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "kind": "operational-contention-diagnostic",
+  "executedSourceCommit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+  "installedRuntimeForProcessDiagnostics": "5.3.5-local.g04003aff03781860ce7d35a7dd2d1378db5bebd5",
+  "initialAttempt": {
+    "state": "failed",
+    "error": "CodeGraphAnalysisDeferred(writer-contention)",
+    "leaseCleanup": "deferred to bounded expiry",
+    "timingArtifactWritten": false,
+    "observedActivity": "background index-repository graph-builder; separate transient type-lint CPU activity also observed"
+  },
+  "boundedWorkaround": {
+    "ownerTerminated": false,
+    "liveStoreEditedOrRawCopied": false,
+    "builderFinishedNaturally": true,
+    "idleInventoryGraphBuilders": 0,
+    "idleInventoryProcessesAbove20PercentCpu": 0,
+    "quiescentRetries": 1,
+    "retry": "succeeded with all observed partitions and one pinned structural digest"
+  },
+  "productDiagnosis": "Expected zero-wait writer gate surfaced contention; no algorithm/data-integrity defect established. Supported isolated checkpoint export/import fallback identified but not used. No continuously exclusive host reservation is claimed.",
+  "issuePreviewPrepared": true,
+  "publicIssueCreated": false
+}

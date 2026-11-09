@@ -1,0 +1,4191 @@
+{
+  "version": 1,
+  "kind": "diagnostic",
+  "contract": {
+    "version": 1,
+    "primaryP95ImprovementRatio": 0.2,
+    "secondaryP95RegressionRatio": 0.05,
+    "secondaryNoiseMilliseconds": 5,
+    "processTreePeakRssGrowthRatio": 0.1,
+    "minimumPairedRuns": 3,
+    "minimumWarmVectorQueries": 30,
+    "platforms": ["darwin-arm64", "linux-x64"],
+    "vectorDocuments": [10000, 100000],
+    "vectorDistributions": ["dense", "tied"],
+    "primaryBoundaries": {
+      "vector": "complete semantic retrieval including pinned-model inference and authorized SQLite reads",
+      "parser": "cold polyglot indexing and whole worker request including serialization and persistence",
+      "topology": "each CLI analysis operation including snapshot loading and output projection; more than 100000 nodes"
+    },
+    "controls": ["first-use separately", "incremental indexing", "small-scale secondary flows"],
+    "refresh": "refresh after separately owned crypto lands; identical configuration apart from candidate change"
+  },
+  "source": {
+    "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+    "dirty": false,
+    "runtime": "1.4.4",
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "identities": {
+    "grammar": [
+      {
+        "cacheIdentity": "498d874dd270b70af35bc88b61aa041483b4ae0d8798933a8d104b963646c8b4",
+        "derivationIdentity": "ad8ed8c4c5237401843443e14b5066bf52367087923d6bb541dfdec0366be20e",
+        "id": "go",
+        "resolutionDomain": "go",
+        "resolutionVersion": "go-static-v1"
+      },
+      {
+        "cacheIdentity": "97a778ff86487ab932de8254932ab32e009d7113d754877f5920e46f7ba42b2d",
+        "derivationIdentity": "28a4c7d14159c15976157d2d6992593ff6e1bbba9a0f447f7ca6f631902c2aab",
+        "id": "java",
+        "resolutionDomain": "jvm",
+        "resolutionVersion": "jvm-static-v1"
+      },
+      {
+        "cacheIdentity": "cccc589319141fbbc04d4c99c1f8d50546f95cf9bb6a5ce7c9d030827d2d5aa3",
+        "derivationIdentity": "3e5edc91dae28532360b5523b85fdbf7261728bebee6667135feae383c8911c8",
+        "id": "python",
+        "resolutionDomain": "python",
+        "resolutionVersion": "python-static-v1"
+      }
+    ],
+    "runtime": "web-tree-sitter:0.27.1:beca80e44cccbf2299ed4d1e3fa6462a9a6fe818aeebf847547a392227ce4acc",
+    "workers": 0
+  },
+  "fixtures": [
+    {
+      "language": "java",
+      "sha256": "873c5be7309c4f3d377f0dd1235a75a9db3497e15e28bd77b384474f0110a85b"
+    },
+    {
+      "language": "python",
+      "sha256": "4d9e770dec758686f469121477aabe9d52e8ccde339f417a0471aa89baa845d8"
+    },
+    {
+      "language": "go",
+      "sha256": "3fe7b23bca3d52d36e3f3f4dd8ea93da82968d6a61c25310f5f0b73207a013ae"
+    }
+  ],
+  "observations": [
+    {
+      "language": "java",
+      "sample": 0,
+      "loadParse": 105.95958399999995,
+      "query": 24.430541999999946,
+      "callback": 26.860666000000037,
+      "factControlResidual": 2.430124,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 26.860666,
+        "intervals": [
+          {
+            "startMilliseconds": 0.236291,
+            "endMilliseconds": 7.553208
+          },
+          {
+            "startMilliseconds": 7.5655,
+            "endMilliseconds": 16.892375
+          },
+          {
+            "startMilliseconds": 16.901583,
+            "endMilliseconds": 22.617958
+          },
+          {
+            "startMilliseconds": 22.914083,
+            "endMilliseconds": 24.887583
+          },
+          {
+            "startMilliseconds": 25.238208,
+            "endMilliseconds": 25.3125
+          },
+          {
+            "startMilliseconds": 26.824458,
+            "endMilliseconds": 26.847041
+          }
+        ],
+        "coveredMilliseconds": 24.430542,
+        "exclusiveResidualMilliseconds": 2.430124
+      },
+      "cleanup": 0.20987500000001091,
+      "total": 133.030125,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 1,
+      "loadParse": 0.36645900000007714,
+      "query": 0.09362400000020443,
+      "callback": 0.6710409999999456,
+      "factControlResidual": 0.577417,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.671041,
+        "intervals": [
+          {
+            "startMilliseconds": 0.009083,
+            "endMilliseconds": 0.010708
+          },
+          {
+            "startMilliseconds": 0.013083,
+            "endMilliseconds": 0.014
+          },
+          {
+            "startMilliseconds": 0.014666,
+            "endMilliseconds": 0.015416
+          },
+          {
+            "startMilliseconds": 0.016375,
+            "endMilliseconds": 0.043916
+          },
+          {
+            "startMilliseconds": 0.073875,
+            "endMilliseconds": 0.114083
+          },
+          {
+            "startMilliseconds": 0.644125,
+            "endMilliseconds": 0.666708
+          }
+        ],
+        "coveredMilliseconds": 0.093624,
+        "exclusiveResidualMilliseconds": 0.577417
+      },
+      "cleanup": 0.044458999999960724,
+      "total": 1.0819589999999835,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 2,
+      "loadParse": 0.24233300000003055,
+      "query": 0.08141599999999016,
+      "callback": 0.6420829999999569,
+      "factControlResidual": 0.560667,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.642083,
+        "intervals": [
+          {
+            "startMilliseconds": 0.007917,
+            "endMilliseconds": 0.009125
+          },
+          {
+            "startMilliseconds": 0.010875,
+            "endMilliseconds": 0.011625
+          },
+          {
+            "startMilliseconds": 0.012292,
+            "endMilliseconds": 0.012708
+          },
+          {
+            "startMilliseconds": 0.013583,
+            "endMilliseconds": 0.037458
+          },
+          {
+            "startMilliseconds": 0.062542,
+            "endMilliseconds": 0.096792
+          },
+          {
+            "startMilliseconds": 0.618125,
+            "endMilliseconds": 0.639042
+          }
+        ],
+        "coveredMilliseconds": 0.081416,
+        "exclusiveResidualMilliseconds": 0.560667
+      },
+      "cleanup": 0.029541999999992186,
+      "total": 0.9139579999999796,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 3,
+      "loadParse": 0.24587500000006912,
+      "query": 0.08304000000009637,
+      "callback": 0.8678750000000264,
+      "factControlResidual": 0.784835,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.867875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.007459,
+            "endMilliseconds": 0.0085
+          },
+          {
+            "startMilliseconds": 0.009917,
+            "endMilliseconds": 0.010625
+          },
+          {
+            "startMilliseconds": 0.011125,
+            "endMilliseconds": 0.011625
+          },
+          {
+            "startMilliseconds": 0.012375,
+            "endMilliseconds": 0.041875
+          },
+          {
+            "startMilliseconds": 0.143459,
+            "endMilliseconds": 0.176709
+          },
+          {
+            "startMilliseconds": 0.846459,
+            "endMilliseconds": 0.8645
+          }
+        ],
+        "coveredMilliseconds": 0.08304,
+        "exclusiveResidualMilliseconds": 0.784835
+      },
+      "cleanup": 0.03116699999998218,
+      "total": 1.1449170000000777,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 4,
+      "loadParse": 0.19695899999999256,
+      "query": 0.15179100000011658,
+      "callback": 0.40058299999998326,
+      "factControlResidual": 0.248792,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.400583,
+        "intervals": [
+          {
+            "startMilliseconds": 0.007083,
+            "endMilliseconds": 0.00825
+          },
+          {
+            "startMilliseconds": 0.009708,
+            "endMilliseconds": 0.010416
+          },
+          {
+            "startMilliseconds": 0.011,
+            "endMilliseconds": 0.011541
+          },
+          {
+            "startMilliseconds": 0.012458,
+            "endMilliseconds": 0.121375
+          },
+          {
+            "startMilliseconds": 0.179583,
+            "endMilliseconds": 0.206916
+          },
+          {
+            "startMilliseconds": 0.38475,
+            "endMilliseconds": 0.397875
+          }
+        ],
+        "coveredMilliseconds": 0.151791,
+        "exclusiveResidualMilliseconds": 0.248792
+      },
+      "cleanup": 0.031082999999966887,
+      "total": 0.6286249999999427,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 5,
+      "loadParse": 0.22416600000008202,
+      "query": 0.05291599999986829,
+      "callback": 0.23949999999990723,
+      "factControlResidual": 0.186584,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.2395,
+        "intervals": [
+          {
+            "startMilliseconds": 0.011709,
+            "endMilliseconds": 0.013
+          },
+          {
+            "startMilliseconds": 0.014875,
+            "endMilliseconds": 0.015792
+          },
+          {
+            "startMilliseconds": 0.016417,
+            "endMilliseconds": 0.017042
+          },
+          {
+            "startMilliseconds": 0.017917,
+            "endMilliseconds": 0.037584
+          },
+          {
+            "startMilliseconds": 0.060917,
+            "endMilliseconds": 0.080042
+          },
+          {
+            "startMilliseconds": 0.226209,
+            "endMilliseconds": 0.2375
+          }
+        ],
+        "coveredMilliseconds": 0.052916,
+        "exclusiveResidualMilliseconds": 0.186584
+      },
+      "cleanup": 0.022334000000000742,
+      "total": 0.48599999999999,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 6,
+      "loadParse": 0.18875000000002728,
+      "query": 0.08150100000000293,
+      "callback": 0.33754099999998743,
+      "factControlResidual": 0.25604,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.337541,
+        "intervals": [
+          {
+            "startMilliseconds": 0.007333,
+            "endMilliseconds": 0.008583
+          },
+          {
+            "startMilliseconds": 0.010416,
+            "endMilliseconds": 0.011125
+          },
+          {
+            "startMilliseconds": 0.011875,
+            "endMilliseconds": 0.012333
+          },
+          {
+            "startMilliseconds": 0.013208,
+            "endMilliseconds": 0.035458
+          },
+          {
+            "startMilliseconds": 0.078416,
+            "endMilliseconds": 0.1215
+          },
+          {
+            "startMilliseconds": 0.320916,
+            "endMilliseconds": 0.334666
+          }
+        ],
+        "coveredMilliseconds": 0.081501,
+        "exclusiveResidualMilliseconds": 0.25604
+      },
+      "cleanup": 0.02095899999994799,
+      "total": 0.5472499999999627,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 7,
+      "loadParse": 0.183208000000036,
+      "query": 0.0564160000000129,
+      "callback": 0.22195899999996982,
+      "factControlResidual": 0.165543,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.221959,
+        "intervals": [
+          {
+            "startMilliseconds": 0.006209,
+            "endMilliseconds": 0.007209
+          },
+          {
+            "startMilliseconds": 0.009,
+            "endMilliseconds": 0.009917
+          },
+          {
+            "startMilliseconds": 0.010459,
+            "endMilliseconds": 0.010875
+          },
+          {
+            "startMilliseconds": 0.011917,
+            "endMilliseconds": 0.029042
+          },
+          {
+            "startMilliseconds": 0.046834,
+            "endMilliseconds": 0.073584
+          },
+          {
+            "startMilliseconds": 0.209834,
+            "endMilliseconds": 0.220042
+          }
+        ],
+        "coveredMilliseconds": 0.056416,
+        "exclusiveResidualMilliseconds": 0.165543
+      },
+      "cleanup": 0.011333000000036009,
+      "total": 0.41650000000004184,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 8,
+      "loadParse": 0.1251670000000331,
+      "query": 0.056376000000000204,
+      "callback": 0.4185420000000022,
+      "factControlResidual": 0.362166,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.418542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.002875
+          },
+          {
+            "startMilliseconds": 0.004083,
+            "endMilliseconds": 0.004792
+          },
+          {
+            "startMilliseconds": 0.00525,
+            "endMilliseconds": 0.005625
+          },
+          {
+            "startMilliseconds": 0.00625,
+            "endMilliseconds": 0.020583
+          },
+          {
+            "startMilliseconds": 0.037208,
+            "endMilliseconds": 0.06075
+          },
+          {
+            "startMilliseconds": 0.398375,
+            "endMilliseconds": 0.415167
+          }
+        ],
+        "coveredMilliseconds": 0.056376,
+        "exclusiveResidualMilliseconds": 0.362166
+      },
+      "cleanup": 0.026624999999967258,
+      "total": 0.5703340000000026,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 9,
+      "loadParse": 0.36570800000004056,
+      "query": 0.14008400000011534,
+      "callback": 0.42695899999989706,
+      "factControlResidual": 0.286875,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.426959,
+        "intervals": [
+          {
+            "startMilliseconds": 0.004375,
+            "endMilliseconds": 0.005834
+          },
+          {
+            "startMilliseconds": 0.007667,
+            "endMilliseconds": 0.008584
+          },
+          {
+            "startMilliseconds": 0.009209,
+            "endMilliseconds": 0.009834
+          },
+          {
+            "startMilliseconds": 0.010709,
+            "endMilliseconds": 0.062667
+          },
+          {
+            "startMilliseconds": 0.10775,
+            "endMilliseconds": 0.17625
+          },
+          {
+            "startMilliseconds": 0.404084,
+            "endMilliseconds": 0.420709
+          }
+        ],
+        "coveredMilliseconds": 0.140084,
+        "exclusiveResidualMilliseconds": 0.286875
+      },
+      "cleanup": 0.02870800000005147,
+      "total": 0.8213749999999891,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 10,
+      "loadParse": 0.17366600000002563,
+      "query": 0.06612500000005639,
+      "callback": 0.3050419999999576,
+      "factControlResidual": 0.238917,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.305042,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003625,
+            "endMilliseconds": 0.00475
+          },
+          {
+            "startMilliseconds": 0.0065,
+            "endMilliseconds": 0.00725
+          },
+          {
+            "startMilliseconds": 0.007917,
+            "endMilliseconds": 0.0085
+          },
+          {
+            "startMilliseconds": 0.009459,
+            "endMilliseconds": 0.029875
+          },
+          {
+            "startMilliseconds": 0.061542,
+            "endMilliseconds": 0.084959
+          },
+          {
+            "startMilliseconds": 0.283375,
+            "endMilliseconds": 0.303209
+          }
+        ],
+        "coveredMilliseconds": 0.066125,
+        "exclusiveResidualMilliseconds": 0.238917
+      },
+      "cleanup": 0.01887499999997999,
+      "total": 0.49758299999996325,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 11,
+      "loadParse": 0.1714999999999236,
+      "query": 0.06316800000001876,
+      "callback": 0.23166700000001583,
+      "factControlResidual": 0.168499,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.231667,
+        "intervals": [
+          {
+            "startMilliseconds": 0.004792,
+            "endMilliseconds": 0.005834
+          },
+          {
+            "startMilliseconds": 0.007417,
+            "endMilliseconds": 0.008459
+          },
+          {
+            "startMilliseconds": 0.0105,
+            "endMilliseconds": 0.011084
+          },
+          {
+            "startMilliseconds": 0.013959,
+            "endMilliseconds": 0.04425
+          },
+          {
+            "startMilliseconds": 0.06475,
+            "endMilliseconds": 0.086542
+          },
+          {
+            "startMilliseconds": 0.221,
+            "endMilliseconds": 0.229417
+          }
+        ],
+        "coveredMilliseconds": 0.063168,
+        "exclusiveResidualMilliseconds": 0.168499
+      },
+      "cleanup": 0.012125000000082764,
+      "total": 0.4152920000000222,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 12,
+      "loadParse": 0.13075000000003456,
+      "query": 0.033208000000058746,
+      "callback": 0.18637499999999818,
+      "factControlResidual": 0.153167,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.186375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002417,
+            "endMilliseconds": 0.003417
+          },
+          {
+            "startMilliseconds": 0.005917,
+            "endMilliseconds": 0.008
+          },
+          {
+            "startMilliseconds": 0.011209,
+            "endMilliseconds": 0.011625
+          },
+          {
+            "startMilliseconds": 0.012459,
+            "endMilliseconds": 0.023334
+          },
+          {
+            "startMilliseconds": 0.040459,
+            "endMilliseconds": 0.051959
+          },
+          {
+            "startMilliseconds": 0.1765,
+            "endMilliseconds": 0.183834
+          }
+        ],
+        "coveredMilliseconds": 0.033208,
+        "exclusiveResidualMilliseconds": 0.153167
+      },
+      "cleanup": 0.008916999999996733,
+      "total": 0.3260420000000295,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 13,
+      "loadParse": 0.10349999999993997,
+      "query": 0.02695800000003601,
+      "callback": 0.13087500000006003,
+      "factControlResidual": 0.103917,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.130875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001833,
+            "endMilliseconds": 0.002375
+          },
+          {
+            "startMilliseconds": 0.003166,
+            "endMilliseconds": 0.003666
+          },
+          {
+            "startMilliseconds": 0.004,
+            "endMilliseconds": 0.004333
+          },
+          {
+            "startMilliseconds": 0.00475,
+            "endMilliseconds": 0.013208
+          },
+          {
+            "startMilliseconds": 0.026,
+            "endMilliseconds": 0.035708
+          },
+          {
+            "startMilliseconds": 0.122416,
+            "endMilliseconds": 0.129833
+          }
+        ],
+        "coveredMilliseconds": 0.026958,
+        "exclusiveResidualMilliseconds": 0.103917
+      },
+      "cleanup": 0.0072499999999990905,
+      "total": 0.2416249999999991,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 14,
+      "loadParse": 0.080208999999968,
+      "query": 0.025206000000025597,
+      "callback": 0.12087499999995543,
+      "factControlResidual": 0.095669,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.120875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001375,
+            "endMilliseconds": 0.001791
+          },
+          {
+            "startMilliseconds": 0.002375,
+            "endMilliseconds": 0.002791
+          },
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.003708,
+            "endMilliseconds": 0.011416
+          },
+          {
+            "startMilliseconds": 0.02325,
+            "endMilliseconds": 0.032833
+          },
+          {
+            "startMilliseconds": 0.113208,
+            "endMilliseconds": 0.119916
+          }
+        ],
+        "coveredMilliseconds": 0.025206,
+        "exclusiveResidualMilliseconds": 0.095669
+      },
+      "cleanup": 0.006833000000028733,
+      "total": 0.20791699999995217,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 15,
+      "loadParse": 0.09204099999999471,
+      "query": 0.027541000000042004,
+      "callback": 0.12116700000001401,
+      "factControlResidual": 0.093626,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.121167,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001709,
+            "endMilliseconds": 0.002167
+          },
+          {
+            "startMilliseconds": 0.00275,
+            "endMilliseconds": 0.003167
+          },
+          {
+            "startMilliseconds": 0.003417,
+            "endMilliseconds": 0.003834
+          },
+          {
+            "startMilliseconds": 0.004209,
+            "endMilliseconds": 0.011875
+          },
+          {
+            "startMilliseconds": 0.025084,
+            "endMilliseconds": 0.03475
+          },
+          {
+            "startMilliseconds": 0.111167,
+            "endMilliseconds": 0.120084
+          }
+        ],
+        "coveredMilliseconds": 0.027541,
+        "exclusiveResidualMilliseconds": 0.093626
+      },
+      "cleanup": 0.010333000000059656,
+      "total": 0.22354100000006838,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 16,
+      "loadParse": 0.09987499999999727,
+      "query": 0.02491700000007313,
+      "callback": 0.12458400000002712,
+      "factControlResidual": 0.099667,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.124584,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001542,
+            "endMilliseconds": 0.001959
+          },
+          {
+            "startMilliseconds": 0.002417,
+            "endMilliseconds": 0.002959
+          },
+          {
+            "startMilliseconds": 0.003167,
+            "endMilliseconds": 0.003542
+          },
+          {
+            "startMilliseconds": 0.003959,
+            "endMilliseconds": 0.011334
+          },
+          {
+            "startMilliseconds": 0.027125,
+            "endMilliseconds": 0.036625
+          },
+          {
+            "startMilliseconds": 0.116167,
+            "endMilliseconds": 0.122875
+          }
+        ],
+        "coveredMilliseconds": 0.024917,
+        "exclusiveResidualMilliseconds": 0.099667
+      },
+      "cleanup": 0.00816599999996015,
+      "total": 0.23262499999998454,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 17,
+      "loadParse": 0.09654100000000199,
+      "query": 0.024833999999827938,
+      "callback": 0.12654200000008586,
+      "factControlResidual": 0.101708,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.126542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002459,
+            "endMilliseconds": 0.002875
+          },
+          {
+            "startMilliseconds": 0.003542,
+            "endMilliseconds": 0.003917
+          },
+          {
+            "startMilliseconds": 0.004125,
+            "endMilliseconds": 0.004459
+          },
+          {
+            "startMilliseconds": 0.004959,
+            "endMilliseconds": 0.012459
+          },
+          {
+            "startMilliseconds": 0.026292,
+            "endMilliseconds": 0.035792
+          },
+          {
+            "startMilliseconds": 0.11775,
+            "endMilliseconds": 0.124459
+          }
+        ],
+        "coveredMilliseconds": 0.024834,
+        "exclusiveResidualMilliseconds": 0.101708
+      },
+      "cleanup": 0.006750000000010914,
+      "total": 0.22983300000009876,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 18,
+      "loadParse": 0.08383299999991323,
+      "query": 0.026251999999999498,
+      "callback": 0.12475000000006276,
+      "factControlResidual": 0.098498,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.12475,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001417,
+            "endMilliseconds": 0.001834
+          },
+          {
+            "startMilliseconds": 0.002625,
+            "endMilliseconds": 0.003167
+          },
+          {
+            "startMilliseconds": 0.003375,
+            "endMilliseconds": 0.003709
+          },
+          {
+            "startMilliseconds": 0.004084,
+            "endMilliseconds": 0.011709
+          },
+          {
+            "startMilliseconds": 0.024,
+            "endMilliseconds": 0.034709
+          },
+          {
+            "startMilliseconds": 0.117209,
+            "endMilliseconds": 0.123834
+          }
+        ],
+        "coveredMilliseconds": 0.026252,
+        "exclusiveResidualMilliseconds": 0.098498
+      },
+      "cleanup": 0.016958999999928892,
+      "total": 0.22554199999990487,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 19,
+      "loadParse": 0.08570800000006784,
+      "query": 0.025792000000024018,
+      "callback": 0.12562500000001364,
+      "factControlResidual": 0.099833,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.125625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.0015,
+            "endMilliseconds": 0.001875
+          },
+          {
+            "startMilliseconds": 0.002417,
+            "endMilliseconds": 0.002792
+          },
+          {
+            "startMilliseconds": 0.003042,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.003792,
+            "endMilliseconds": 0.011917
+          },
+          {
+            "startMilliseconds": 0.02275,
+            "endMilliseconds": 0.032334
+          },
+          {
+            "startMilliseconds": 0.117625,
+            "endMilliseconds": 0.124625
+          }
+        ],
+        "coveredMilliseconds": 0.025792,
+        "exclusiveResidualMilliseconds": 0.099833
+      },
+      "cleanup": 0.007041999999955806,
+      "total": 0.2183750000000373,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 20,
+      "loadParse": 0.08541600000000926,
+      "query": 0.029708000000027823,
+      "callback": 0.12954200000001492,
+      "factControlResidual": 0.099834,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.129542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001667,
+            "endMilliseconds": 0.002125
+          },
+          {
+            "startMilliseconds": 0.002584,
+            "endMilliseconds": 0.003042
+          },
+          {
+            "startMilliseconds": 0.00325,
+            "endMilliseconds": 0.003667
+          },
+          {
+            "startMilliseconds": 0.004084,
+            "endMilliseconds": 0.016209
+          },
+          {
+            "startMilliseconds": 0.026917,
+            "endMilliseconds": 0.0365
+          },
+          {
+            "startMilliseconds": 0.121875,
+            "endMilliseconds": 0.128542
+          }
+        ],
+        "coveredMilliseconds": 0.029708,
+        "exclusiveResidualMilliseconds": 0.099834
+      },
+      "cleanup": 0.0072920000000067375,
+      "total": 0.22225000000003092,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 21,
+      "loadParse": 0.0887920000000122,
+      "query": 0.02774900000008529,
+      "callback": 0.1153749999999718,
+      "factControlResidual": 0.087626,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.115375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001416,
+            "endMilliseconds": 0.001875
+          },
+          {
+            "startMilliseconds": 0.002375,
+            "endMilliseconds": 0.002791
+          },
+          {
+            "startMilliseconds": 0.003083,
+            "endMilliseconds": 0.003833
+          },
+          {
+            "startMilliseconds": 0.004208,
+            "endMilliseconds": 0.014291
+          },
+          {
+            "startMilliseconds": 0.026125,
+            "endMilliseconds": 0.035083
+          },
+          {
+            "startMilliseconds": 0.107458,
+            "endMilliseconds": 0.114541
+          }
+        ],
+        "coveredMilliseconds": 0.027749,
+        "exclusiveResidualMilliseconds": 0.087626
+      },
+      "cleanup": 0.00837500000000091,
+      "total": 0.2125419999999849,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 22,
+      "loadParse": 0.07758300000000418,
+      "query": 0.028790999999841915,
+      "callback": 0.11445899999989706,
+      "factControlResidual": 0.085668,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.114459,
+        "intervals": [
+          {
+            "startMilliseconds": 0.00125,
+            "endMilliseconds": 0.001709
+          },
+          {
+            "startMilliseconds": 0.002209,
+            "endMilliseconds": 0.002625
+          },
+          {
+            "startMilliseconds": 0.002834,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.003709,
+            "endMilliseconds": 0.010709
+          },
+          {
+            "startMilliseconds": 0.020459,
+            "endMilliseconds": 0.029917
+          },
+          {
+            "startMilliseconds": 0.102375,
+            "endMilliseconds": 0.113292
+          }
+        ],
+        "coveredMilliseconds": 0.028791,
+        "exclusiveResidualMilliseconds": 0.085668
+      },
+      "cleanup": 0.00620800000001509,
+      "total": 0.19824999999991633,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 23,
+      "loadParse": 0.07320800000002237,
+      "query": 0.024083000000132415,
+      "callback": 0.11333300000001145,
+      "factControlResidual": 0.08925,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.113333,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001375,
+            "endMilliseconds": 0.00175
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.002667
+          },
+          {
+            "startMilliseconds": 0.002875,
+            "endMilliseconds": 0.003625
+          },
+          {
+            "startMilliseconds": 0.003917,
+            "endMilliseconds": 0.010917
+          },
+          {
+            "startMilliseconds": 0.020542,
+            "endMilliseconds": 0.029458
+          },
+          {
+            "startMilliseconds": 0.105833,
+            "endMilliseconds": 0.112375
+          }
+        ],
+        "coveredMilliseconds": 0.024083,
+        "exclusiveResidualMilliseconds": 0.08925
+      },
+      "cleanup": 0.005750000000034561,
+      "total": 0.19229100000006838,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 24,
+      "loadParse": 0.07262499999990268,
+      "query": 0.02395899999987705,
+      "callback": 0.10750000000007276,
+      "factControlResidual": 0.083541,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.1075,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001334,
+            "endMilliseconds": 0.001667
+          },
+          {
+            "startMilliseconds": 0.004917,
+            "endMilliseconds": 0.005334
+          },
+          {
+            "startMilliseconds": 0.005542,
+            "endMilliseconds": 0.006084
+          },
+          {
+            "startMilliseconds": 0.006375,
+            "endMilliseconds": 0.013667
+          },
+          {
+            "startMilliseconds": 0.023167,
+            "endMilliseconds": 0.032167
+          },
+          {
+            "startMilliseconds": 0.097459,
+            "endMilliseconds": 0.103834
+          }
+        ],
+        "coveredMilliseconds": 0.023959,
+        "exclusiveResidualMilliseconds": 0.083541
+      },
+      "cleanup": 0.005916999999953987,
+      "total": 0.18604199999992943,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 25,
+      "loadParse": 0.07066599999996015,
+      "query": 0.023583000000030552,
+      "callback": 0.10358400000006895,
+      "factControlResidual": 0.080001,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.103584,
+        "intervals": [
+          {
+            "startMilliseconds": 0.00125,
+            "endMilliseconds": 0.001667
+          },
+          {
+            "startMilliseconds": 0.002084,
+            "endMilliseconds": 0.002542
+          },
+          {
+            "startMilliseconds": 0.00275,
+            "endMilliseconds": 0.003125
+          },
+          {
+            "startMilliseconds": 0.003417,
+            "endMilliseconds": 0.0105
+          },
+          {
+            "startMilliseconds": 0.02,
+            "endMilliseconds": 0.028709
+          },
+          {
+            "startMilliseconds": 0.096084,
+            "endMilliseconds": 0.102625
+          }
+        ],
+        "coveredMilliseconds": 0.023583,
+        "exclusiveResidualMilliseconds": 0.080001
+      },
+      "cleanup": 0.00566599999990558,
+      "total": 0.17991599999993468,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 26,
+      "loadParse": 0.07625000000007276,
+      "query": 0.023584000000028027,
+      "callback": 0.10687499999994543,
+      "factControlResidual": 0.083291,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.106875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002042,
+            "endMilliseconds": 0.002417
+          },
+          {
+            "startMilliseconds": 0.002958,
+            "endMilliseconds": 0.003333
+          },
+          {
+            "startMilliseconds": 0.003583,
+            "endMilliseconds": 0.003917
+          },
+          {
+            "startMilliseconds": 0.005375,
+            "endMilliseconds": 0.012542
+          },
+          {
+            "startMilliseconds": 0.022875,
+            "endMilliseconds": 0.03175
+          },
+          {
+            "startMilliseconds": 0.099417,
+            "endMilliseconds": 0.105875
+          }
+        ],
+        "coveredMilliseconds": 0.023584,
+        "exclusiveResidualMilliseconds": 0.083291
+      },
+      "cleanup": 0.00620800000001509,
+      "total": 0.18933300000003328,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 27,
+      "loadParse": 25.26958300000001,
+      "query": 0.05041699999992488,
+      "callback": 0.30329200000005585,
+      "factControlResidual": 0.252875,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.303292,
+        "intervals": [
+          {
+            "startMilliseconds": 0.005792,
+            "endMilliseconds": 0.008917
+          },
+          {
+            "startMilliseconds": 0.011083,
+            "endMilliseconds": 0.012208
+          },
+          {
+            "startMilliseconds": 0.012708,
+            "endMilliseconds": 0.013583
+          },
+          {
+            "startMilliseconds": 0.015125,
+            "endMilliseconds": 0.039
+          },
+          {
+            "startMilliseconds": 0.089167,
+            "endMilliseconds": 0.102542
+          },
+          {
+            "startMilliseconds": 0.291958,
+            "endMilliseconds": 0.3
+          }
+        ],
+        "coveredMilliseconds": 0.050417,
+        "exclusiveResidualMilliseconds": 0.252875
+      },
+      "cleanup": 0.027749999999969077,
+      "total": 25.600625000000036,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 28,
+      "loadParse": 0.11287500000003092,
+      "query": 0.028916999999864856,
+      "callback": 0.13754199999993943,
+      "factControlResidual": 0.108625,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.137542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003417,
+            "endMilliseconds": 0.004125
+          },
+          {
+            "startMilliseconds": 0.005667,
+            "endMilliseconds": 0.006375
+          },
+          {
+            "startMilliseconds": 0.006875,
+            "endMilliseconds": 0.0075
+          },
+          {
+            "startMilliseconds": 0.009875,
+            "endMilliseconds": 0.019334
+          },
+          {
+            "startMilliseconds": 0.038542,
+            "endMilliseconds": 0.049167
+          },
+          {
+            "startMilliseconds": 0.127125,
+            "endMilliseconds": 0.133917
+          }
+        ],
+        "coveredMilliseconds": 0.028917,
+        "exclusiveResidualMilliseconds": 0.108625
+      },
+      "cleanup": 0.010125000000016371,
+      "total": 0.26054199999998673,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 29,
+      "loadParse": 0.1038340000000062,
+      "query": 0.02587400000004436,
+      "callback": 0.11716599999999744,
+      "factControlResidual": 0.091292,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.117166,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001875,
+            "endMilliseconds": 0.002375
+          },
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.003458
+          },
+          {
+            "startMilliseconds": 0.003708,
+            "endMilliseconds": 0.004125
+          },
+          {
+            "startMilliseconds": 0.0045,
+            "endMilliseconds": 0.012166
+          },
+          {
+            "startMilliseconds": 0.023875,
+            "endMilliseconds": 0.034166
+          },
+          {
+            "startMilliseconds": 0.109291,
+            "endMilliseconds": 0.115833
+          }
+        ],
+        "coveredMilliseconds": 0.025874,
+        "exclusiveResidualMilliseconds": 0.091292
+      },
+      "cleanup": 0.006792000000018561,
+      "total": 0.2277920000000222,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "java",
+      "sample": 30,
+      "loadParse": 0.09287499999993543,
+      "query": 0.026251999999999498,
+      "callback": 0.1449999999999818,
+      "factControlResidual": 0.118748,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.145,
+        "intervals": [
+          {
+            "startMilliseconds": 0.00125,
+            "endMilliseconds": 0.001667
+          },
+          {
+            "startMilliseconds": 0.002208,
+            "endMilliseconds": 0.002625
+          },
+          {
+            "startMilliseconds": 0.002833,
+            "endMilliseconds": 0.003292
+          },
+          {
+            "startMilliseconds": 0.003625,
+            "endMilliseconds": 0.013042
+          },
+          {
+            "startMilliseconds": 0.023167,
+            "endMilliseconds": 0.032167
+          },
+          {
+            "startMilliseconds": 0.137583,
+            "endMilliseconds": 0.144125
+          }
+        ],
+        "coveredMilliseconds": 0.026252,
+        "exclusiveResidualMilliseconds": 0.118748
+      },
+      "cleanup": 0.011125000000106411,
+      "total": 0.24900000000002365,
+      "digest": "9cb4af4a1a7114b25cb0631e76441b8d16064c71a4397e1df6f68fd36ac2fbd9"
+    },
+    {
+      "language": "python",
+      "sample": 0,
+      "loadParse": 17.121083,
+      "query": 4.737292999999795,
+      "callback": 5.271834000000013,
+      "factControlResidual": 0.534541,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 5.271834,
+        "intervals": [
+          {
+            "startMilliseconds": 0.018875,
+            "endMilliseconds": 1.385834
+          },
+          {
+            "startMilliseconds": 1.399334,
+            "endMilliseconds": 2.642584
+          },
+          {
+            "startMilliseconds": 2.645542,
+            "endMilliseconds": 4.721834
+          },
+          {
+            "startMilliseconds": 4.724584,
+            "endMilliseconds": 4.745542
+          },
+          {
+            "startMilliseconds": 4.791834,
+            "endMilliseconds": 4.813709
+          },
+          {
+            "startMilliseconds": 5.260125,
+            "endMilliseconds": 5.268084
+          }
+        ],
+        "coveredMilliseconds": 4.737293,
+        "exclusiveResidualMilliseconds": 0.534541
+      },
+      "cleanup": 0.03416600000002745,
+      "total": 22.42708300000004,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 1,
+      "loadParse": 0.20708299999989777,
+      "query": 0.028834999999844513,
+      "callback": 0.24375000000009095,
+      "factControlResidual": 0.214915,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.24375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.0065,
+            "endMilliseconds": 0.007542
+          },
+          {
+            "startMilliseconds": 0.00875,
+            "endMilliseconds": 0.009292
+          },
+          {
+            "startMilliseconds": 0.00975,
+            "endMilliseconds": 0.010167
+          },
+          {
+            "startMilliseconds": 0.010709,
+            "endMilliseconds": 0.016834
+          },
+          {
+            "startMilliseconds": 0.0255,
+            "endMilliseconds": 0.035292
+          },
+          {
+            "startMilliseconds": 0.230917,
+            "endMilliseconds": 0.241834
+          }
+        ],
+        "coveredMilliseconds": 0.028835,
+        "exclusiveResidualMilliseconds": 0.214915
+      },
+      "cleanup": 0.01520899999991343,
+      "total": 0.46604199999990215,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 2,
+      "loadParse": 0.3759589999999662,
+      "query": 0.028792000000066764,
+      "callback": 0.16362500000002456,
+      "factControlResidual": 0.134833,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.163625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.004166,
+            "endMilliseconds": 0.005291
+          },
+          {
+            "startMilliseconds": 0.007,
+            "endMilliseconds": 0.007375
+          },
+          {
+            "startMilliseconds": 0.007791,
+            "endMilliseconds": 0.008208
+          },
+          {
+            "startMilliseconds": 0.008875,
+            "endMilliseconds": 0.0185
+          },
+          {
+            "startMilliseconds": 0.031208,
+            "endMilliseconds": 0.042333
+          },
+          {
+            "startMilliseconds": 0.147458,
+            "endMilliseconds": 0.153583
+          }
+        ],
+        "coveredMilliseconds": 0.028792,
+        "exclusiveResidualMilliseconds": 0.134833
+      },
+      "cleanup": 0.015291000000047461,
+      "total": 0.5548750000000382,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 3,
+      "loadParse": 0.14329200000008768,
+      "query": 0.02191699999980301,
+      "callback": 0.1269169999999349,
+      "factControlResidual": 0.105,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.126917,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003667,
+            "endMilliseconds": 0.00475
+          },
+          {
+            "startMilliseconds": 0.0055,
+            "endMilliseconds": 0.005875
+          },
+          {
+            "startMilliseconds": 0.006167,
+            "endMilliseconds": 0.006542
+          },
+          {
+            "startMilliseconds": 0.006875,
+            "endMilliseconds": 0.012417
+          },
+          {
+            "startMilliseconds": 0.023917,
+            "endMilliseconds": 0.033042
+          },
+          {
+            "startMilliseconds": 0.12025,
+            "endMilliseconds": 0.125667
+          }
+        ],
+        "coveredMilliseconds": 0.021917,
+        "exclusiveResidualMilliseconds": 0.105
+      },
+      "cleanup": 0.009250000000065484,
+      "total": 0.27945900000008805,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 4,
+      "loadParse": 0.1283329999999978,
+      "query": 0.024457999999867752,
+      "callback": 0.38358400000004167,
+      "factControlResidual": 0.359126,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.383584,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002084,
+            "endMilliseconds": 0.002625
+          },
+          {
+            "startMilliseconds": 0.003167,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.003584,
+            "endMilliseconds": 0.003959
+          },
+          {
+            "startMilliseconds": 0.004292,
+            "endMilliseconds": 0.009209
+          },
+          {
+            "startMilliseconds": 0.021667,
+            "endMilliseconds": 0.028417
+          },
+          {
+            "startMilliseconds": 0.367292,
+            "endMilliseconds": 0.378959
+          }
+        ],
+        "coveredMilliseconds": 0.024458,
+        "exclusiveResidualMilliseconds": 0.359126
+      },
+      "cleanup": 0.019832999999948697,
+      "total": 0.5317499999999882,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 5,
+      "loadParse": 0.112041999999974,
+      "query": 0.04120900000009442,
+      "callback": 0.16433300000005602,
+      "factControlResidual": 0.123124,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.164333,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.003958
+          },
+          {
+            "startMilliseconds": 0.005291,
+            "endMilliseconds": 0.005625
+          },
+          {
+            "startMilliseconds": 0.006041,
+            "endMilliseconds": 0.006416
+          },
+          {
+            "startMilliseconds": 0.006958,
+            "endMilliseconds": 0.014791
+          },
+          {
+            "startMilliseconds": 0.02475,
+            "endMilliseconds": 0.05
+          },
+          {
+            "startMilliseconds": 0.156791,
+            "endMilliseconds": 0.16325
+          }
+        ],
+        "coveredMilliseconds": 0.041209,
+        "exclusiveResidualMilliseconds": 0.123124
+      },
+      "cleanup": 0.009457999999995081,
+      "total": 0.2858330000000251,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 6,
+      "loadParse": 0.12091699999996308,
+      "query": 0.03408500000011827,
+      "callback": 0.12187500000004547,
+      "factControlResidual": 0.08779,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.121875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003041,
+            "endMilliseconds": 0.00425
+          },
+          {
+            "startMilliseconds": 0.005708,
+            "endMilliseconds": 0.006041
+          },
+          {
+            "startMilliseconds": 0.006541,
+            "endMilliseconds": 0.007
+          },
+          {
+            "startMilliseconds": 0.00775,
+            "endMilliseconds": 0.02475
+          },
+          {
+            "startMilliseconds": 0.033916,
+            "endMilliseconds": 0.043375
+          },
+          {
+            "startMilliseconds": 0.115583,
+            "endMilliseconds": 0.121208
+          }
+        ],
+        "coveredMilliseconds": 0.034085,
+        "exclusiveResidualMilliseconds": 0.08779
+      },
+      "cleanup": 0.006750000000010914,
+      "total": 0.24954200000001947,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 7,
+      "loadParse": 0.0690829999999778,
+      "query": 0.023042000000032203,
+      "callback": 0.09504200000003493,
+      "factControlResidual": 0.072,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.095042,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002625,
+            "endMilliseconds": 0.00325
+          },
+          {
+            "startMilliseconds": 0.003917,
+            "endMilliseconds": 0.004292
+          },
+          {
+            "startMilliseconds": 0.004584,
+            "endMilliseconds": 0.004959
+          },
+          {
+            "startMilliseconds": 0.005375,
+            "endMilliseconds": 0.010459
+          },
+          {
+            "startMilliseconds": 0.016667,
+            "endMilliseconds": 0.027917
+          },
+          {
+            "startMilliseconds": 0.089042,
+            "endMilliseconds": 0.094375
+          }
+        ],
+        "coveredMilliseconds": 0.023042,
+        "exclusiveResidualMilliseconds": 0.072
+      },
+      "cleanup": 0.005999999999971806,
+      "total": 0.17012499999998454,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 8,
+      "loadParse": 0.07266600000002654,
+      "query": 0.018917999999985113,
+      "callback": 0.12791700000002493,
+      "factControlResidual": 0.108999,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.127917,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001667,
+            "endMilliseconds": 0.002209
+          },
+          {
+            "startMilliseconds": 0.002792,
+            "endMilliseconds": 0.003084
+          },
+          {
+            "startMilliseconds": 0.003334,
+            "endMilliseconds": 0.003709
+          },
+          {
+            "startMilliseconds": 0.004,
+            "endMilliseconds": 0.009084
+          },
+          {
+            "startMilliseconds": 0.018792,
+            "endMilliseconds": 0.026084
+          },
+          {
+            "startMilliseconds": 0.121917,
+            "endMilliseconds": 0.12725
+          }
+        ],
+        "coveredMilliseconds": 0.018918,
+        "exclusiveResidualMilliseconds": 0.108999
+      },
+      "cleanup": 0.005999999999971806,
+      "total": 0.20658300000002328,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 9,
+      "loadParse": 0.07441700000003948,
+      "query": 0.023832999999967797,
+      "callback": 0.21404100000006565,
+      "factControlResidual": 0.190208,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.214041,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001875,
+            "endMilliseconds": 0.002333
+          },
+          {
+            "startMilliseconds": 0.002916,
+            "endMilliseconds": 0.00325
+          },
+          {
+            "startMilliseconds": 0.003541,
+            "endMilliseconds": 0.004041
+          },
+          {
+            "startMilliseconds": 0.004291,
+            "endMilliseconds": 0.009
+          },
+          {
+            "startMilliseconds": 0.015125,
+            "endMilliseconds": 0.022041
+          },
+          {
+            "startMilliseconds": 0.201625,
+            "endMilliseconds": 0.212541
+          }
+        ],
+        "coveredMilliseconds": 0.023833,
+        "exclusiveResidualMilliseconds": 0.190208
+      },
+      "cleanup": 0.012874999999894499,
+      "total": 0.30133299999999963,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 10,
+      "loadParse": 0.10874999999998636,
+      "query": 0.024916999999959444,
+      "callback": 0.10974999999996271,
+      "factControlResidual": 0.084833,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.10975,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002709,
+            "endMilliseconds": 0.003625
+          },
+          {
+            "startMilliseconds": 0.004709,
+            "endMilliseconds": 0.005042
+          },
+          {
+            "startMilliseconds": 0.005375,
+            "endMilliseconds": 0.005709
+          },
+          {
+            "startMilliseconds": 0.006292,
+            "endMilliseconds": 0.013667
+          },
+          {
+            "startMilliseconds": 0.021875,
+            "endMilliseconds": 0.031792
+          },
+          {
+            "startMilliseconds": 0.102167,
+            "endMilliseconds": 0.108209
+          }
+        ],
+        "coveredMilliseconds": 0.024917,
+        "exclusiveResidualMilliseconds": 0.084833
+      },
+      "cleanup": 0.007875000000012733,
+      "total": 0.2263749999999618,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 11,
+      "loadParse": 0.06941600000004655,
+      "query": 0.019916999999850304,
+      "callback": 0.09766700000000128,
+      "factControlResidual": 0.07775,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.097667,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001834,
+            "endMilliseconds": 0.002292
+          },
+          {
+            "startMilliseconds": 0.002834,
+            "endMilliseconds": 0.003084
+          },
+          {
+            "startMilliseconds": 0.003334,
+            "endMilliseconds": 0.003709
+          },
+          {
+            "startMilliseconds": 0.004042,
+            "endMilliseconds": 0.009584
+          },
+          {
+            "startMilliseconds": 0.015625,
+            "endMilliseconds": 0.023459
+          },
+          {
+            "startMilliseconds": 0.091584,
+            "endMilliseconds": 0.097042
+          }
+        ],
+        "coveredMilliseconds": 0.019917,
+        "exclusiveResidualMilliseconds": 0.07775
+      },
+      "cleanup": 0.006666999999993095,
+      "total": 0.17375000000004093,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 12,
+      "loadParse": 0.06329199999993307,
+      "query": 0.017875000000117325,
+      "callback": 0.08791700000006131,
+      "factControlResidual": 0.070042,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.087917,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.002583
+          },
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.003167
+          },
+          {
+            "startMilliseconds": 0.003417,
+            "endMilliseconds": 0.003708
+          },
+          {
+            "startMilliseconds": 0.004,
+            "endMilliseconds": 0.008917
+          },
+          {
+            "startMilliseconds": 0.014083,
+            "endMilliseconds": 0.020625
+          },
+          {
+            "startMilliseconds": 0.08175,
+            "endMilliseconds": 0.087292
+          }
+        ],
+        "coveredMilliseconds": 0.017875,
+        "exclusiveResidualMilliseconds": 0.070042
+      },
+      "cleanup": 0.013500000000021828,
+      "total": 0.1647090000000162,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 13,
+      "loadParse": 0.07120899999995345,
+      "query": 0.016833000000133325,
+      "callback": 0.07979100000000017,
+      "factControlResidual": 0.062958,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.079791,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001416,
+            "endMilliseconds": 0.001875
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.002541
+          },
+          {
+            "startMilliseconds": 0.002708,
+            "endMilliseconds": 0.003041
+          },
+          {
+            "startMilliseconds": 0.003291,
+            "endMilliseconds": 0.007708
+          },
+          {
+            "startMilliseconds": 0.013208,
+            "endMilliseconds": 0.019458
+          },
+          {
+            "startMilliseconds": 0.074125,
+            "endMilliseconds": 0.079208
+          }
+        ],
+        "coveredMilliseconds": 0.016833,
+        "exclusiveResidualMilliseconds": 0.062958
+      },
+      "cleanup": 0.005709000000024389,
+      "total": 0.156708999999978,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 14,
+      "loadParse": 0.05487499999992451,
+      "query": 0.01583400000004076,
+      "callback": 0.07233400000006895,
+      "factControlResidual": 0.0565,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.072334,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001334,
+            "endMilliseconds": 0.001709
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.002334
+          },
+          {
+            "startMilliseconds": 0.002542,
+            "endMilliseconds": 0.002834
+          },
+          {
+            "startMilliseconds": 0.003167,
+            "endMilliseconds": 0.007542
+          },
+          {
+            "startMilliseconds": 0.013584,
+            "endMilliseconds": 0.019417
+          },
+          {
+            "startMilliseconds": 0.067042,
+            "endMilliseconds": 0.071834
+          }
+        ],
+        "coveredMilliseconds": 0.015834,
+        "exclusiveResidualMilliseconds": 0.0565
+      },
+      "cleanup": 0.004790999999954693,
+      "total": 0.13199999999994816,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 15,
+      "loadParse": 0.06595800000002328,
+      "query": 0.015916999999944892,
+      "callback": 0.07570799999996325,
+      "factControlResidual": 0.059791,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.075708,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001208,
+            "endMilliseconds": 0.001542
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.002125
+          },
+          {
+            "startMilliseconds": 0.002333,
+            "endMilliseconds": 0.002625
+          },
+          {
+            "startMilliseconds": 0.002875,
+            "endMilliseconds": 0.007458
+          },
+          {
+            "startMilliseconds": 0.0165,
+            "endMilliseconds": 0.022333
+          },
+          {
+            "startMilliseconds": 0.0705,
+            "endMilliseconds": 0.07525
+          }
+        ],
+        "coveredMilliseconds": 0.015917,
+        "exclusiveResidualMilliseconds": 0.059791
+      },
+      "cleanup": 0.004333999999971638,
+      "total": 0.14599999999995816,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 16,
+      "loadParse": 0.051499999999919055,
+      "query": 0.015497999999865897,
+      "callback": 0.07608400000003712,
+      "factControlResidual": 0.060586,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.076084,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001084,
+            "endMilliseconds": 0.0015
+          },
+          {
+            "startMilliseconds": 0.001834,
+            "endMilliseconds": 0.002
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.002459
+          },
+          {
+            "startMilliseconds": 0.002709,
+            "endMilliseconds": 0.006875
+          },
+          {
+            "startMilliseconds": 0.012167,
+            "endMilliseconds": 0.01775
+          },
+          {
+            "startMilliseconds": 0.070709,
+            "endMilliseconds": 0.075584
+          }
+        ],
+        "coveredMilliseconds": 0.015498,
+        "exclusiveResidualMilliseconds": 0.060586
+      },
+      "cleanup": 0.004208000000062384,
+      "total": 0.13179200000001856,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 17,
+      "loadParse": 0.059292000000027656,
+      "query": 0.015582999999992353,
+      "callback": 0.09337500000003729,
+      "factControlResidual": 0.077792,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.093375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.006417,
+            "endMilliseconds": 0.00675
+          },
+          {
+            "startMilliseconds": 0.007625,
+            "endMilliseconds": 0.007833
+          },
+          {
+            "startMilliseconds": 0.008,
+            "endMilliseconds": 0.00825
+          },
+          {
+            "startMilliseconds": 0.0085,
+            "endMilliseconds": 0.01275
+          },
+          {
+            "startMilliseconds": 0.017667,
+            "endMilliseconds": 0.023417
+          },
+          {
+            "startMilliseconds": 0.088125,
+            "endMilliseconds": 0.092917
+          }
+        ],
+        "coveredMilliseconds": 0.015583,
+        "exclusiveResidualMilliseconds": 0.077792
+      },
+      "cleanup": 0.004542000000014923,
+      "total": 0.15720900000007987,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 18,
+      "loadParse": 0.06633299999998599,
+      "query": 0.017917000000124972,
+      "callback": 0.07666699999992943,
+      "factControlResidual": 0.05875,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.076667,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001375,
+            "endMilliseconds": 0.003625
+          },
+          {
+            "startMilliseconds": 0.004083,
+            "endMilliseconds": 0.0045
+          },
+          {
+            "startMilliseconds": 0.004667,
+            "endMilliseconds": 0.005042
+          },
+          {
+            "startMilliseconds": 0.005292,
+            "endMilliseconds": 0.009417
+          },
+          {
+            "startMilliseconds": 0.01475,
+            "endMilliseconds": 0.020792
+          },
+          {
+            "startMilliseconds": 0.0715,
+            "endMilliseconds": 0.076208
+          }
+        ],
+        "coveredMilliseconds": 0.017917,
+        "exclusiveResidualMilliseconds": 0.05875
+      },
+      "cleanup": 0.004332999999974163,
+      "total": 0.14733299999988958,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 19,
+      "loadParse": 0.22395799999992505,
+      "query": 0.04125099999998838,
+      "callback": 0.20570900000006986,
+      "factControlResidual": 0.164458,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.205709,
+        "intervals": [
+          {
+            "startMilliseconds": 0.005334,
+            "endMilliseconds": 0.007542
+          },
+          {
+            "startMilliseconds": 0.009875,
+            "endMilliseconds": 0.010625
+          },
+          {
+            "startMilliseconds": 0.01125,
+            "endMilliseconds": 0.011792
+          },
+          {
+            "startMilliseconds": 0.01275,
+            "endMilliseconds": 0.028625
+          },
+          {
+            "startMilliseconds": 0.05375,
+            "endMilliseconds": 0.067459
+          },
+          {
+            "startMilliseconds": 0.1955,
+            "endMilliseconds": 0.203667
+          }
+        ],
+        "coveredMilliseconds": 0.041251,
+        "exclusiveResidualMilliseconds": 0.164458
+      },
+      "cleanup": 0.01720799999998235,
+      "total": 0.44687499999997726,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 20,
+      "loadParse": 0.10529199999996308,
+      "query": 0.021875000000136424,
+      "callback": 0.09900000000004638,
+      "factControlResidual": 0.077125,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.099,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002458,
+            "endMilliseconds": 0.003583
+          },
+          {
+            "startMilliseconds": 0.00425,
+            "endMilliseconds": 0.005333
+          },
+          {
+            "startMilliseconds": 0.005833,
+            "endMilliseconds": 0.006292
+          },
+          {
+            "startMilliseconds": 0.006792,
+            "endMilliseconds": 0.012667
+          },
+          {
+            "startMilliseconds": 0.02125,
+            "endMilliseconds": 0.02875
+          },
+          {
+            "startMilliseconds": 0.092292,
+            "endMilliseconds": 0.098125
+          }
+        ],
+        "coveredMilliseconds": 0.021875,
+        "exclusiveResidualMilliseconds": 0.077125
+      },
+      "cleanup": 0.007333000000016909,
+      "total": 0.21162500000002638,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 21,
+      "loadParse": 0.06474999999988995,
+      "query": 0.01995899999985795,
+      "callback": 0.08679100000006201,
+      "factControlResidual": 0.066832,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.086791,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001625,
+            "endMilliseconds": 0.002041
+          },
+          {
+            "startMilliseconds": 0.002583,
+            "endMilliseconds": 0.002875
+          },
+          {
+            "startMilliseconds": 0.003083,
+            "endMilliseconds": 0.003458
+          },
+          {
+            "startMilliseconds": 0.003791,
+            "endMilliseconds": 0.009208
+          },
+          {
+            "startMilliseconds": 0.015583,
+            "endMilliseconds": 0.023958
+          },
+          {
+            "startMilliseconds": 0.081041,
+            "endMilliseconds": 0.086125
+          }
+        ],
+        "coveredMilliseconds": 0.019959,
+        "exclusiveResidualMilliseconds": 0.066832
+      },
+      "cleanup": 0.0053339999999479915,
+      "total": 0.15687499999989996,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 22,
+      "loadParse": 0.05879200000003948,
+      "query": 0.016791000000125678,
+      "callback": 0.08741699999995944,
+      "factControlResidual": 0.070626,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.087417,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001292,
+            "endMilliseconds": 0.001583
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.002292
+          },
+          {
+            "startMilliseconds": 0.002458,
+            "endMilliseconds": 0.002958
+          },
+          {
+            "startMilliseconds": 0.003208,
+            "endMilliseconds": 0.007875
+          },
+          {
+            "startMilliseconds": 0.013208,
+            "endMilliseconds": 0.019208
+          },
+          {
+            "startMilliseconds": 0.081917,
+            "endMilliseconds": 0.086958
+          }
+        ],
+        "coveredMilliseconds": 0.016791,
+        "exclusiveResidualMilliseconds": 0.070626
+      },
+      "cleanup": 0.014999999999986358,
+      "total": 0.16120899999998528,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 23,
+      "loadParse": 0.06129199999998036,
+      "query": 0.0160009999998465,
+      "callback": 0.07112500000005184,
+      "factControlResidual": 0.055124,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.071125,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001458,
+            "endMilliseconds": 0.001708
+          },
+          {
+            "startMilliseconds": 0.002208,
+            "endMilliseconds": 0.002417
+          },
+          {
+            "startMilliseconds": 0.002583,
+            "endMilliseconds": 0.003
+          },
+          {
+            "startMilliseconds": 0.003292,
+            "endMilliseconds": 0.007583
+          },
+          {
+            "startMilliseconds": 0.012833,
+            "endMilliseconds": 0.018667
+          },
+          {
+            "startMilliseconds": 0.065167,
+            "endMilliseconds": 0.070167
+          }
+        ],
+        "coveredMilliseconds": 0.016001,
+        "exclusiveResidualMilliseconds": 0.055124
+      },
+      "cleanup": 0.005167000000028565,
+      "total": 0.13758400000006077,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 24,
+      "loadParse": 0.05229199999996581,
+      "query": 0.016085000000202854,
+      "callback": 0.07670800000005329,
+      "factControlResidual": 0.060623,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.076708,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001333,
+            "endMilliseconds": 0.001708
+          },
+          {
+            "startMilliseconds": 0.002166,
+            "endMilliseconds": 0.002416
+          },
+          {
+            "startMilliseconds": 0.002625,
+            "endMilliseconds": 0.002875
+          },
+          {
+            "startMilliseconds": 0.003166,
+            "endMilliseconds": 0.0075
+          },
+          {
+            "startMilliseconds": 0.013166,
+            "endMilliseconds": 0.019125
+          },
+          {
+            "startMilliseconds": 0.071291,
+            "endMilliseconds": 0.076208
+          }
+        ],
+        "coveredMilliseconds": 0.016085,
+        "exclusiveResidualMilliseconds": 0.060623
+      },
+      "cleanup": 0.004749999999944521,
+      "total": 0.13374999999996362,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 25,
+      "loadParse": 0.05629199999998491,
+      "query": 0.01583400000004076,
+      "callback": 0.09154200000000401,
+      "factControlResidual": 0.075708,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.091542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001167,
+            "endMilliseconds": 0.001458
+          },
+          {
+            "startMilliseconds": 0.010042,
+            "endMilliseconds": 0.01025
+          },
+          {
+            "startMilliseconds": 0.010542,
+            "endMilliseconds": 0.010792
+          },
+          {
+            "startMilliseconds": 0.013083,
+            "endMilliseconds": 0.017375
+          },
+          {
+            "startMilliseconds": 0.023833,
+            "endMilliseconds": 0.029792
+          },
+          {
+            "startMilliseconds": 0.086208,
+            "endMilliseconds": 0.091042
+          }
+        ],
+        "coveredMilliseconds": 0.015834,
+        "exclusiveResidualMilliseconds": 0.075708
+      },
+      "cleanup": 0.005333000000064203,
+      "total": 0.15316700000005312,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 26,
+      "loadParse": 0.05208300000003874,
+      "query": 0.015415999999845553,
+      "callback": 0.08454200000005585,
+      "factControlResidual": 0.069126,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.084542,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001208,
+            "endMilliseconds": 0.001542
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.00225
+          },
+          {
+            "startMilliseconds": 0.002417,
+            "endMilliseconds": 0.002708
+          },
+          {
+            "startMilliseconds": 0.002917,
+            "endMilliseconds": 0.007167
+          },
+          {
+            "startMilliseconds": 0.012167,
+            "endMilliseconds": 0.017708
+          },
+          {
+            "startMilliseconds": 0.07925,
+            "endMilliseconds": 0.084
+          }
+        ],
+        "coveredMilliseconds": 0.015416,
+        "exclusiveResidualMilliseconds": 0.069126
+      },
+      "cleanup": 0.007040999999958331,
+      "total": 0.14366600000005292,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 27,
+      "loadParse": 0.055957999999918684,
+      "query": 0.015709999999899082,
+      "callback": 0.06850000000008549,
+      "factControlResidual": 0.05279,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.0685,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001333,
+            "endMilliseconds": 0.001667
+          },
+          {
+            "startMilliseconds": 0.002042,
+            "endMilliseconds": 0.002292
+          },
+          {
+            "startMilliseconds": 0.0025,
+            "endMilliseconds": 0.002792
+          },
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.007292
+          },
+          {
+            "startMilliseconds": 0.012208,
+            "endMilliseconds": 0.018042
+          },
+          {
+            "startMilliseconds": 0.063167,
+            "endMilliseconds": 0.067875
+          }
+        ],
+        "coveredMilliseconds": 0.01571,
+        "exclusiveResidualMilliseconds": 0.05279
+      },
+      "cleanup": 0.005666999999903055,
+      "total": 0.13012499999990723,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 28,
+      "loadParse": 0.058667000000014013,
+      "query": 0.015040999999882843,
+      "callback": 0.08499999999992269,
+      "factControlResidual": 0.069959,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.085,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001375,
+            "endMilliseconds": 0.001666
+          },
+          {
+            "startMilliseconds": 0.002125,
+            "endMilliseconds": 0.002333
+          },
+          {
+            "startMilliseconds": 0.002541,
+            "endMilliseconds": 0.002833
+          },
+          {
+            "startMilliseconds": 0.003166,
+            "endMilliseconds": 0.007208
+          },
+          {
+            "startMilliseconds": 0.012125,
+            "endMilliseconds": 0.017625
+          },
+          {
+            "startMilliseconds": 0.07975,
+            "endMilliseconds": 0.084458
+          }
+        ],
+        "coveredMilliseconds": 0.015041,
+        "exclusiveResidualMilliseconds": 0.069959
+      },
+      "cleanup": 0.004290999999966516,
+      "total": 0.14795799999990322,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 29,
+      "loadParse": 0.06891699999994216,
+      "query": 0.015375000000176442,
+      "callback": 0.08112500000004275,
+      "factControlResidual": 0.06575,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.081125,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002291,
+            "endMilliseconds": 0.002708
+          },
+          {
+            "startMilliseconds": 0.004291,
+            "endMilliseconds": 0.004583
+          },
+          {
+            "startMilliseconds": 0.006041,
+            "endMilliseconds": 0.006291
+          },
+          {
+            "startMilliseconds": 0.006625,
+            "endMilliseconds": 0.010833
+          },
+          {
+            "startMilliseconds": 0.016166,
+            "endMilliseconds": 0.021708
+          },
+          {
+            "startMilliseconds": 0.076,
+            "endMilliseconds": 0.080666
+          }
+        ],
+        "coveredMilliseconds": 0.015375,
+        "exclusiveResidualMilliseconds": 0.06575
+      },
+      "cleanup": 0.004749999999944521,
+      "total": 0.15479199999992943,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "python",
+      "sample": 30,
+      "loadParse": 0.055292000000008557,
+      "query": 0.015541999999982181,
+      "callback": 0.06729100000006838,
+      "factControlResidual": 0.051749,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.067291,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001291,
+            "endMilliseconds": 0.001666
+          },
+          {
+            "startMilliseconds": 0.002083,
+            "endMilliseconds": 0.002208
+          },
+          {
+            "startMilliseconds": 0.002333,
+            "endMilliseconds": 0.002541
+          },
+          {
+            "startMilliseconds": 0.002791,
+            "endMilliseconds": 0.0075
+          },
+          {
+            "startMilliseconds": 0.012541,
+            "endMilliseconds": 0.018083
+          },
+          {
+            "startMilliseconds": 0.062208,
+            "endMilliseconds": 0.066791
+          }
+        ],
+        "coveredMilliseconds": 0.015542,
+        "exclusiveResidualMilliseconds": 0.051749
+      },
+      "cleanup": 0.005125000000020918,
+      "total": 0.12770800000009785,
+      "digest": "a81dff6e6392f3db04766eeaaca02339a5b8a2f451cabc7090a3abf4634675cd"
+    },
+    {
+      "language": "go",
+      "sample": 0,
+      "loadParse": 9.696958999999993,
+      "query": 2.6716260000000602,
+      "callback": 3.0633750000000646,
+      "factControlResidual": 0.391749,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 3.063375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.007708,
+            "endMilliseconds": 1.486708
+          },
+          {
+            "startMilliseconds": 1.4945,
+            "endMilliseconds": 1.9325
+          },
+          {
+            "startMilliseconds": 1.934541,
+            "endMilliseconds": 2.6465
+          },
+          {
+            "startMilliseconds": 2.64875,
+            "endMilliseconds": 2.673875
+          },
+          {
+            "startMilliseconds": 2.805166,
+            "endMilliseconds": 2.813458
+          },
+          {
+            "startMilliseconds": 3.05025,
+            "endMilliseconds": 3.0595
+          }
+        ],
+        "coveredMilliseconds": 2.671626,
+        "exclusiveResidualMilliseconds": 0.391749
+      },
+      "cleanup": 0.028790999999955602,
+      "total": 12.789125000000013,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 1,
+      "loadParse": 0.16641599999991286,
+      "query": 0.02900100000022121,
+      "callback": 0.1137500000000955,
+      "factControlResidual": 0.084749,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.11375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.004667,
+            "endMilliseconds": 0.005375
+          },
+          {
+            "startMilliseconds": 0.006209,
+            "endMilliseconds": 0.006584
+          },
+          {
+            "startMilliseconds": 0.006875,
+            "endMilliseconds": 0.007209
+          },
+          {
+            "startMilliseconds": 0.007584,
+            "endMilliseconds": 0.0245
+          },
+          {
+            "startMilliseconds": 0.03975,
+            "endMilliseconds": 0.045959
+          },
+          {
+            "startMilliseconds": 0.108375,
+            "endMilliseconds": 0.112834
+          }
+        ],
+        "coveredMilliseconds": 0.029001,
+        "exclusiveResidualMilliseconds": 0.084749
+      },
+      "cleanup": 0.008083999999939806,
+      "total": 0.28824999999994816,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 2,
+      "loadParse": 0.09558400000003076,
+      "query": 0.02524800000014693,
+      "callback": 0.10962500000005093,
+      "factControlResidual": 0.084377,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.109625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.00275,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.00375,
+            "endMilliseconds": 0.004166
+          },
+          {
+            "startMilliseconds": 0.004375,
+            "endMilliseconds": 0.004708
+          },
+          {
+            "startMilliseconds": 0.005,
+            "endMilliseconds": 0.016583
+          },
+          {
+            "startMilliseconds": 0.036375,
+            "endMilliseconds": 0.043791
+          },
+          {
+            "startMilliseconds": 0.10375,
+            "endMilliseconds": 0.108625
+          }
+        ],
+        "coveredMilliseconds": 0.025248,
+        "exclusiveResidualMilliseconds": 0.084377
+      },
+      "cleanup": 0.008874999999989086,
+      "total": 0.21408400000007077,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 3,
+      "loadParse": 0.06791699999996581,
+      "query": 0.015333999999938897,
+      "callback": 0.07541600000001836,
+      "factControlResidual": 0.060082,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.075416,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001583,
+            "endMilliseconds": 0.002083
+          },
+          {
+            "startMilliseconds": 0.002416,
+            "endMilliseconds": 0.002708
+          },
+          {
+            "startMilliseconds": 0.002833,
+            "endMilliseconds": 0.003083
+          },
+          {
+            "startMilliseconds": 0.003333,
+            "endMilliseconds": 0.008916
+          },
+          {
+            "startMilliseconds": 0.02325,
+            "endMilliseconds": 0.02825
+          },
+          {
+            "startMilliseconds": 0.071041,
+            "endMilliseconds": 0.07475
+          }
+        ],
+        "coveredMilliseconds": 0.015334,
+        "exclusiveResidualMilliseconds": 0.060082
+      },
+      "cleanup": 0.005834000000049855,
+      "total": 0.14916700000003402,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 4,
+      "loadParse": 0.07329200000003766,
+      "query": 0.013249000000087108,
+      "callback": 0.06004199999995308,
+      "factControlResidual": 0.046793,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.060042,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001208,
+            "endMilliseconds": 0.001583
+          },
+          {
+            "startMilliseconds": 0.001792,
+            "endMilliseconds": 0.002083
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.002375
+          },
+          {
+            "startMilliseconds": 0.002542,
+            "endMilliseconds": 0.007375
+          },
+          {
+            "startMilliseconds": 0.01575,
+            "endMilliseconds": 0.019875
+          },
+          {
+            "startMilliseconds": 0.056083,
+            "endMilliseconds": 0.0595
+          }
+        ],
+        "coveredMilliseconds": 0.013249,
+        "exclusiveResidualMilliseconds": 0.046793
+      },
+      "cleanup": 0.005625000000009095,
+      "total": 0.13895899999999983,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 5,
+      "loadParse": 0.051375000000007276,
+      "query": 0.012751999999863983,
+      "callback": 0.05816699999991215,
+      "factControlResidual": 0.045415,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.058167,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001125,
+            "endMilliseconds": 0.001459
+          },
+          {
+            "startMilliseconds": 0.001667,
+            "endMilliseconds": 0.001834
+          },
+          {
+            "startMilliseconds": 0.001917,
+            "endMilliseconds": 0.002084
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.006709
+          },
+          {
+            "startMilliseconds": 0.017625,
+            "endMilliseconds": 0.021875
+          },
+          {
+            "startMilliseconds": 0.05425,
+            "endMilliseconds": 0.057625
+          }
+        ],
+        "coveredMilliseconds": 0.012752,
+        "exclusiveResidualMilliseconds": 0.045415
+      },
+      "cleanup": 0.004000000000019099,
+      "total": 0.11354199999993853,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 6,
+      "loadParse": 0.04758399999991525,
+      "query": 0.012082000000077642,
+      "callback": 0.05179099999998016,
+      "factControlResidual": 0.039709,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.051791,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001125,
+            "endMilliseconds": 0.001458
+          },
+          {
+            "startMilliseconds": 0.001625,
+            "endMilliseconds": 0.001916
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.00225
+          },
+          {
+            "startMilliseconds": 0.002375,
+            "endMilliseconds": 0.006541
+          },
+          {
+            "startMilliseconds": 0.013416,
+            "endMilliseconds": 0.017208
+          },
+          {
+            "startMilliseconds": 0.048041,
+            "endMilliseconds": 0.051291
+          }
+        ],
+        "coveredMilliseconds": 0.012082,
+        "exclusiveResidualMilliseconds": 0.039709
+      },
+      "cleanup": 0.0037500000000818545,
+      "total": 0.10312499999997726,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 7,
+      "loadParse": 0.06691699999998946,
+      "query": 0.012375000000020009,
+      "callback": 0.06258300000001782,
+      "factControlResidual": 0.050208,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.062583,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001042,
+            "endMilliseconds": 0.001417
+          },
+          {
+            "startMilliseconds": 0.001625,
+            "endMilliseconds": 0.001917
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.002292
+          },
+          {
+            "startMilliseconds": 0.002417,
+            "endMilliseconds": 0.006708
+          },
+          {
+            "startMilliseconds": 0.013667,
+            "endMilliseconds": 0.017417
+          },
+          {
+            "startMilliseconds": 0.058708,
+            "endMilliseconds": 0.062083
+          }
+        ],
+        "coveredMilliseconds": 0.012375,
+        "exclusiveResidualMilliseconds": 0.050208
+      },
+      "cleanup": 0.0037499999999681677,
+      "total": 0.13324999999997544,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 8,
+      "loadParse": 0.04616600000008475,
+      "query": 0.011957999999935964,
+      "callback": 0.050333999999907064,
+      "factControlResidual": 0.038376,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.050334,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001959,
+            "endMilliseconds": 0.002292
+          },
+          {
+            "startMilliseconds": 0.0025,
+            "endMilliseconds": 0.002709
+          },
+          {
+            "startMilliseconds": 0.002834,
+            "endMilliseconds": 0.003209
+          },
+          {
+            "startMilliseconds": 0.003334,
+            "endMilliseconds": 0.007459
+          },
+          {
+            "startMilliseconds": 0.013959,
+            "endMilliseconds": 0.017667
+          },
+          {
+            "startMilliseconds": 0.046667,
+            "endMilliseconds": 0.049875
+          }
+        ],
+        "coveredMilliseconds": 0.011958,
+        "exclusiveResidualMilliseconds": 0.038376
+      },
+      "cleanup": 0.00333299999999781,
+      "total": 0.09983299999998962,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 9,
+      "loadParse": 0.05379100000004655,
+      "query": 0.01704199999994671,
+      "callback": 1.4713339999999562,
+      "factControlResidual": 1.454292,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 1.471334,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001125,
+            "endMilliseconds": 0.001459
+          },
+          {
+            "startMilliseconds": 0.001709,
+            "endMilliseconds": 0.002042
+          },
+          {
+            "startMilliseconds": 0.002125,
+            "endMilliseconds": 0.002417
+          },
+          {
+            "startMilliseconds": 0.002584,
+            "endMilliseconds": 0.006542
+          },
+          {
+            "startMilliseconds": 0.013459,
+            "endMilliseconds": 0.017209
+          },
+          {
+            "startMilliseconds": 1.460917,
+            "endMilliseconds": 1.469292
+          }
+        ],
+        "coveredMilliseconds": 0.017042,
+        "exclusiveResidualMilliseconds": 1.454292
+      },
+      "cleanup": 0.012958000000026004,
+      "total": 1.5380830000000287,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 10,
+      "loadParse": 0.1069159999999556,
+      "query": 0.016833000000133325,
+      "callback": 0.08683400000006714,
+      "factControlResidual": 0.070001,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.086834,
+        "intervals": [
+          {
+            "startMilliseconds": 0.003084,
+            "endMilliseconds": 0.00375
+          },
+          {
+            "startMilliseconds": 0.004584,
+            "endMilliseconds": 0.004875
+          },
+          {
+            "startMilliseconds": 0.005,
+            "endMilliseconds": 0.005292
+          },
+          {
+            "startMilliseconds": 0.0055,
+            "endMilliseconds": 0.012709
+          },
+          {
+            "startMilliseconds": 0.025334,
+            "endMilliseconds": 0.030125
+          },
+          {
+            "startMilliseconds": 0.08275,
+            "endMilliseconds": 0.086334
+          }
+        ],
+        "coveredMilliseconds": 0.016833,
+        "exclusiveResidualMilliseconds": 0.070001
+      },
+      "cleanup": 0.0049579999999878055,
+      "total": 0.19870800000001054,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 11,
+      "loadParse": 0.05062499999996817,
+      "query": 0.029041000000233907,
+      "callback": 0.07370800000001054,
+      "factControlResidual": 0.044667,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.073708,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001292,
+            "endMilliseconds": 0.001583
+          },
+          {
+            "startMilliseconds": 0.00175,
+            "endMilliseconds": 0.002125
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.002458
+          },
+          {
+            "startMilliseconds": 0.002625,
+            "endMilliseconds": 0.007417
+          },
+          {
+            "startMilliseconds": 0.016375,
+            "endMilliseconds": 0.020542
+          },
+          {
+            "startMilliseconds": 0.05375,
+            "endMilliseconds": 0.072958
+          }
+        ],
+        "coveredMilliseconds": 0.029041,
+        "exclusiveResidualMilliseconds": 0.044667
+      },
+      "cleanup": 0.004750000000058208,
+      "total": 0.12908300000003692,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 12,
+      "loadParse": 0.050749999999993634,
+      "query": 0.020377000000053158,
+      "callback": 0.0628750000000764,
+      "factControlResidual": 0.042498,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.062875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001083,
+            "endMilliseconds": 0.001375
+          },
+          {
+            "startMilliseconds": 0.0015,
+            "endMilliseconds": 0.00175
+          },
+          {
+            "startMilliseconds": 0.001833,
+            "endMilliseconds": 0.002042
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.006917
+          },
+          {
+            "startMilliseconds": 0.013958,
+            "endMilliseconds": 0.025292
+          },
+          {
+            "startMilliseconds": 0.05875,
+            "endMilliseconds": 0.062292
+          }
+        ],
+        "coveredMilliseconds": 0.020377,
+        "exclusiveResidualMilliseconds": 0.042498
+      },
+      "cleanup": 0.003666999999950349,
+      "total": 0.11729200000002038,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 13,
+      "loadParse": 0.055124999999975444,
+      "query": 0.01400100000000748,
+      "callback": 0.06083300000000236,
+      "factControlResidual": 0.046832,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.060833,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001083,
+            "endMilliseconds": 0.001375
+          },
+          {
+            "startMilliseconds": 0.001542,
+            "endMilliseconds": 0.001792
+          },
+          {
+            "startMilliseconds": 0.001875,
+            "endMilliseconds": 0.002125
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.00675
+          },
+          {
+            "startMilliseconds": 0.01475,
+            "endMilliseconds": 0.020042
+          },
+          {
+            "startMilliseconds": 0.056958,
+            "endMilliseconds": 0.060375
+          }
+        ],
+        "coveredMilliseconds": 0.014001,
+        "exclusiveResidualMilliseconds": 0.046832
+      },
+      "cleanup": 0.0036250000000563887,
+      "total": 0.11958300000003419,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 14,
+      "loadParse": 0.057999999999992724,
+      "query": 0.012875000000008185,
+      "callback": 0.06408299999998235,
+      "factControlResidual": 0.051208,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.064083,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001083,
+            "endMilliseconds": 0.001375
+          },
+          {
+            "startMilliseconds": 0.001542,
+            "endMilliseconds": 0.001792
+          },
+          {
+            "startMilliseconds": 0.001875,
+            "endMilliseconds": 0.002125
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.00675
+          },
+          {
+            "startMilliseconds": 0.016583,
+            "endMilliseconds": 0.02075
+          },
+          {
+            "startMilliseconds": 0.059417,
+            "endMilliseconds": 0.062833
+          }
+        ],
+        "coveredMilliseconds": 0.012875,
+        "exclusiveResidualMilliseconds": 0.051208
+      },
+      "cleanup": 0.003459000000020751,
+      "total": 0.12554199999999582,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 15,
+      "loadParse": 0.04537500000003547,
+      "query": 0.012042000000064945,
+      "callback": 0.07616700000005494,
+      "factControlResidual": 0.064125,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.076167,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001042,
+            "endMilliseconds": 0.001334
+          },
+          {
+            "startMilliseconds": 0.0015,
+            "endMilliseconds": 0.00175
+          },
+          {
+            "startMilliseconds": 0.001834,
+            "endMilliseconds": 0.002084
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.006334
+          },
+          {
+            "startMilliseconds": 0.012834,
+            "endMilliseconds": 0.016625
+          },
+          {
+            "startMilliseconds": 0.072334,
+            "endMilliseconds": 0.075709
+          }
+        ],
+        "coveredMilliseconds": 0.012042,
+        "exclusiveResidualMilliseconds": 0.064125
+      },
+      "cleanup": 0.003416999999899417,
+      "total": 0.12495899999998983,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 16,
+      "loadParse": 0.055375000000026375,
+      "query": 0.012166999999863037,
+      "callback": 0.053916999999955806,
+      "factControlResidual": 0.04175,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.053917,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001,
+            "endMilliseconds": 0.001292
+          },
+          {
+            "startMilliseconds": 0.001417,
+            "endMilliseconds": 0.001709
+          },
+          {
+            "startMilliseconds": 0.001792,
+            "endMilliseconds": 0.002042
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.006334
+          },
+          {
+            "startMilliseconds": 0.014334,
+            "endMilliseconds": 0.018292
+          },
+          {
+            "startMilliseconds": 0.050209,
+            "endMilliseconds": 0.053417
+          }
+        ],
+        "coveredMilliseconds": 0.012167,
+        "exclusiveResidualMilliseconds": 0.04175
+      },
+      "cleanup": 0.00333299999999781,
+      "total": 0.11262499999997999,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 17,
+      "loadParse": 0.06475000000000364,
+      "query": 0.012167000000090411,
+      "callback": 0.052874999999971806,
+      "factControlResidual": 0.040708,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.052875,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001,
+            "endMilliseconds": 0.001333
+          },
+          {
+            "startMilliseconds": 0.001583,
+            "endMilliseconds": 0.001875
+          },
+          {
+            "startMilliseconds": 0.001958,
+            "endMilliseconds": 0.002208
+          },
+          {
+            "startMilliseconds": 0.002333,
+            "endMilliseconds": 0.006458
+          },
+          {
+            "startMilliseconds": 0.013166,
+            "endMilliseconds": 0.016916
+          },
+          {
+            "startMilliseconds": 0.049041,
+            "endMilliseconds": 0.052458
+          }
+        ],
+        "coveredMilliseconds": 0.012167,
+        "exclusiveResidualMilliseconds": 0.040708
+      },
+      "cleanup": 0.004291000000080203,
+      "total": 0.12191600000005565,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 18,
+      "loadParse": 0.06566700000007586,
+      "query": 0.012750000000096406,
+      "callback": 0.06837499999994634,
+      "factControlResidual": 0.055625,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.068375,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002916,
+            "endMilliseconds": 0.00325
+          },
+          {
+            "startMilliseconds": 0.003458,
+            "endMilliseconds": 0.00375
+          },
+          {
+            "startMilliseconds": 0.003833,
+            "endMilliseconds": 0.004041
+          },
+          {
+            "startMilliseconds": 0.004208,
+            "endMilliseconds": 0.008833
+          },
+          {
+            "startMilliseconds": 0.015333,
+            "endMilliseconds": 0.019166
+          },
+          {
+            "startMilliseconds": 0.064458,
+            "endMilliseconds": 0.067916
+          }
+        ],
+        "coveredMilliseconds": 0.01275,
+        "exclusiveResidualMilliseconds": 0.055625
+      },
+      "cleanup": 0.0037079999999605207,
+      "total": 0.13774999999998272,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 19,
+      "loadParse": 0.07224999999993997,
+      "query": 0.018499999999903594,
+      "callback": 0.650209000000018,
+      "factControlResidual": 0.631709,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.650209,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001209,
+            "endMilliseconds": 0.0015
+          },
+          {
+            "startMilliseconds": 0.001625,
+            "endMilliseconds": 0.001917
+          },
+          {
+            "startMilliseconds": 0.002,
+            "endMilliseconds": 0.00225
+          },
+          {
+            "startMilliseconds": 0.002375,
+            "endMilliseconds": 0.0085
+          },
+          {
+            "startMilliseconds": 0.016209,
+            "endMilliseconds": 0.022542
+          },
+          {
+            "startMilliseconds": 0.643625,
+            "endMilliseconds": 0.648834
+          }
+        ],
+        "coveredMilliseconds": 0.0185,
+        "exclusiveResidualMilliseconds": 0.631709
+      },
+      "cleanup": 0.009999999999990905,
+      "total": 0.7324589999999489,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 20,
+      "loadParse": 0.09741699999995035,
+      "query": 0.01291599999990467,
+      "callback": 0.06562500000006821,
+      "factControlResidual": 0.052709,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.065625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001917,
+            "endMilliseconds": 0.00225
+          },
+          {
+            "startMilliseconds": 0.002583,
+            "endMilliseconds": 0.003
+          },
+          {
+            "startMilliseconds": 0.003125,
+            "endMilliseconds": 0.003375
+          },
+          {
+            "startMilliseconds": 0.003542,
+            "endMilliseconds": 0.008417
+          },
+          {
+            "startMilliseconds": 0.020667,
+            "endMilliseconds": 0.024375
+          },
+          {
+            "startMilliseconds": 0.061667,
+            "endMilliseconds": 0.065
+          }
+        ],
+        "coveredMilliseconds": 0.012916,
+        "exclusiveResidualMilliseconds": 0.052709
+      },
+      "cleanup": 0.004624999999919055,
+      "total": 0.16766699999993762,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 21,
+      "loadParse": 0.05150000000003274,
+      "query": 0.011165999999889209,
+      "callback": 0.054333000000042375,
+      "factControlResidual": 0.043167,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.054333,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001833,
+            "endMilliseconds": 0.002083
+          },
+          {
+            "startMilliseconds": 0.00225,
+            "endMilliseconds": 0.002541
+          },
+          {
+            "startMilliseconds": 0.002625,
+            "endMilliseconds": 0.002875
+          },
+          {
+            "startMilliseconds": 0.003,
+            "endMilliseconds": 0.006875
+          },
+          {
+            "startMilliseconds": 0.013416,
+            "endMilliseconds": 0.016875
+          },
+          {
+            "startMilliseconds": 0.050875,
+            "endMilliseconds": 0.053916
+          }
+        ],
+        "coveredMilliseconds": 0.011166,
+        "exclusiveResidualMilliseconds": 0.043167
+      },
+      "cleanup": 0.003416999999899417,
+      "total": 0.10924999999997453,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 22,
+      "loadParse": 0.4751250000000482,
+      "query": 0.02924900000004982,
+      "callback": 0.16270799999995234,
+      "factControlResidual": 0.133459,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.162708,
+        "intervals": [
+          {
+            "startMilliseconds": 0.006042,
+            "endMilliseconds": 0.00775
+          },
+          {
+            "startMilliseconds": 0.009125,
+            "endMilliseconds": 0.009542
+          },
+          {
+            "startMilliseconds": 0.009917,
+            "endMilliseconds": 0.010208
+          },
+          {
+            "startMilliseconds": 0.010875,
+            "endMilliseconds": 0.026083
+          },
+          {
+            "startMilliseconds": 0.063042,
+            "endMilliseconds": 0.069875
+          },
+          {
+            "startMilliseconds": 0.155583,
+            "endMilliseconds": 0.160375
+          }
+        ],
+        "coveredMilliseconds": 0.029249,
+        "exclusiveResidualMilliseconds": 0.133459
+      },
+      "cleanup": 0.01587500000005093,
+      "total": 0.6537080000000515,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 23,
+      "loadParse": 0.10383300000000872,
+      "query": 0.01579199999980574,
+      "callback": 0.08062500000005457,
+      "factControlResidual": 0.064833,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.080625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.002042,
+            "endMilliseconds": 0.002667
+          },
+          {
+            "startMilliseconds": 0.003084,
+            "endMilliseconds": 0.003459
+          },
+          {
+            "startMilliseconds": 0.003667,
+            "endMilliseconds": 0.003959
+          },
+          {
+            "startMilliseconds": 0.004167,
+            "endMilliseconds": 0.0105
+          },
+          {
+            "startMilliseconds": 0.022917,
+            "endMilliseconds": 0.0275
+          },
+          {
+            "startMilliseconds": 0.07625,
+            "endMilliseconds": 0.079834
+          }
+        ],
+        "coveredMilliseconds": 0.015792,
+        "exclusiveResidualMilliseconds": 0.064833
+      },
+      "cleanup": 0.011708999999996195,
+      "total": 0.1961670000000595,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 24,
+      "loadParse": 0.06158400000003894,
+      "query": 0.01374899999984791,
+      "callback": 0.06995799999992869,
+      "factControlResidual": 0.056209,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.069958,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001541,
+            "endMilliseconds": 0.002041
+          },
+          {
+            "startMilliseconds": 0.002375,
+            "endMilliseconds": 0.002708
+          },
+          {
+            "startMilliseconds": 0.002791,
+            "endMilliseconds": 0.003083
+          },
+          {
+            "startMilliseconds": 0.00325,
+            "endMilliseconds": 0.008583
+          },
+          {
+            "startMilliseconds": 0.017833,
+            "endMilliseconds": 0.021791
+          },
+          {
+            "startMilliseconds": 0.066125,
+            "endMilliseconds": 0.069458
+          }
+        ],
+        "coveredMilliseconds": 0.013749,
+        "exclusiveResidualMilliseconds": 0.056209
+      },
+      "cleanup": 0.005500000000097316,
+      "total": 0.13704200000006495,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 25,
+      "loadParse": 0.05366700000001856,
+      "query": 0.011583999999970729,
+      "callback": 0.06150000000002365,
+      "factControlResidual": 0.049916,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.0615,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001292,
+            "endMilliseconds": 0.001667
+          },
+          {
+            "startMilliseconds": 0.001958,
+            "endMilliseconds": 0.002083
+          },
+          {
+            "startMilliseconds": 0.002208,
+            "endMilliseconds": 0.002417
+          },
+          {
+            "startMilliseconds": 0.002583,
+            "endMilliseconds": 0.006625
+          },
+          {
+            "startMilliseconds": 0.014125,
+            "endMilliseconds": 0.017708
+          },
+          {
+            "startMilliseconds": 0.057792,
+            "endMilliseconds": 0.061042
+          }
+        ],
+        "coveredMilliseconds": 0.011584,
+        "exclusiveResidualMilliseconds": 0.049916
+      },
+      "cleanup": 0.004332999999974163,
+      "total": 0.11950000000001637,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 26,
+      "loadParse": 0.0625,
+      "query": 0.01212499999985539,
+      "callback": 0.08095800000000963,
+      "factControlResidual": 0.068833,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.080958,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001208,
+            "endMilliseconds": 0.001583
+          },
+          {
+            "startMilliseconds": 0.001875,
+            "endMilliseconds": 0.002083
+          },
+          {
+            "startMilliseconds": 0.002208,
+            "endMilliseconds": 0.00275
+          },
+          {
+            "startMilliseconds": 0.002875,
+            "endMilliseconds": 0.006958
+          },
+          {
+            "startMilliseconds": 0.015292,
+            "endMilliseconds": 0.019042
+          },
+          {
+            "startMilliseconds": 0.07725,
+            "endMilliseconds": 0.080417
+          }
+        ],
+        "coveredMilliseconds": 0.012125,
+        "exclusiveResidualMilliseconds": 0.068833
+      },
+      "cleanup": 0.004333999999971638,
+      "total": 0.14779199999998127,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 27,
+      "loadParse": 0.05645800000002055,
+      "query": 0.014832999999953245,
+      "callback": 0.05462499999998727,
+      "factControlResidual": 0.039792,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.054625,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001083,
+            "endMilliseconds": 0.0015
+          },
+          {
+            "startMilliseconds": 0.001667,
+            "endMilliseconds": 0.001875
+          },
+          {
+            "startMilliseconds": 0.001958,
+            "endMilliseconds": 0.002208
+          },
+          {
+            "startMilliseconds": 0.002333,
+            "endMilliseconds": 0.006208
+          },
+          {
+            "startMilliseconds": 0.013167,
+            "endMilliseconds": 0.02
+          },
+          {
+            "startMilliseconds": 0.050875,
+            "endMilliseconds": 0.054125
+          }
+        ],
+        "coveredMilliseconds": 0.014833,
+        "exclusiveResidualMilliseconds": 0.039792
+      },
+      "cleanup": 0.0037920000000895016,
+      "total": 0.11487500000009732,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 28,
+      "loadParse": 0.05270799999993869,
+      "query": 0.010793999999805237,
+      "callback": 0.047916999999984,
+      "factControlResidual": 0.037123,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.047917,
+        "intervals": [
+          {
+            "startMilliseconds": 0.000958,
+            "endMilliseconds": 0.001292
+          },
+          {
+            "startMilliseconds": 0.002083,
+            "endMilliseconds": 0.00225
+          },
+          {
+            "startMilliseconds": 0.002333,
+            "endMilliseconds": 0.002542
+          },
+          {
+            "startMilliseconds": 0.002667,
+            "endMilliseconds": 0.006333
+          },
+          {
+            "startMilliseconds": 0.012958,
+            "endMilliseconds": 0.016292
+          },
+          {
+            "startMilliseconds": 0.044333,
+            "endMilliseconds": 0.047417
+          }
+        ],
+        "coveredMilliseconds": 0.010794,
+        "exclusiveResidualMilliseconds": 0.037123
+      },
+      "cleanup": 0.0036660000000665605,
+      "total": 0.10429099999998925,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 29,
+      "loadParse": 0.04595799999992778,
+      "query": 0.010791000000267559,
+      "callback": 0.04716700000005858,
+      "factControlResidual": 0.036376,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.047167,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001042,
+            "endMilliseconds": 0.001375
+          },
+          {
+            "startMilliseconds": 0.001583,
+            "endMilliseconds": 0.00175
+          },
+          {
+            "startMilliseconds": 0.001833,
+            "endMilliseconds": 0.002042
+          },
+          {
+            "startMilliseconds": 0.002167,
+            "endMilliseconds": 0.005833
+          },
+          {
+            "startMilliseconds": 0.012875,
+            "endMilliseconds": 0.016333
+          },
+          {
+            "startMilliseconds": 0.04375,
+            "endMilliseconds": 0.046708
+          }
+        ],
+        "coveredMilliseconds": 0.010791,
+        "exclusiveResidualMilliseconds": 0.036376
+      },
+      "cleanup": 0.003582999999935055,
+      "total": 0.09670799999992141,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    },
+    {
+      "language": "go",
+      "sample": 30,
+      "loadParse": 0.05283299999996416,
+      "query": 0.010749999999916326,
+      "callback": 0.04704200000003311,
+      "factControlResidual": 0.036292,
+      "queryCoverage": {
+        "available": true,
+        "errors": [],
+        "envelopeMilliseconds": 0.047042,
+        "intervals": [
+          {
+            "startMilliseconds": 0.001,
+            "endMilliseconds": 0.001375
+          },
+          {
+            "startMilliseconds": 0.001542,
+            "endMilliseconds": 0.001708
+          },
+          {
+            "startMilliseconds": 0.001792,
+            "endMilliseconds": 0.002
+          },
+          {
+            "startMilliseconds": 0.002083,
+            "endMilliseconds": 0.00575
+          },
+          {
+            "startMilliseconds": 0.012333,
+            "endMilliseconds": 0.015667
+          },
+          {
+            "startMilliseconds": 0.043583,
+            "endMilliseconds": 0.046583
+          }
+        ],
+        "coveredMilliseconds": 0.01075,
+        "exclusiveResidualMilliseconds": 0.036292
+      },
+      "cleanup": 0.003375000000005457,
+      "total": 0.10325000000000273,
+      "digest": "c72f324cebc8950544fba5b2ed4ee0121cf5bb99e9dedc7bf3e7d61cbae01d97"
+    }
+  ],
+  "sourceFence": {
+    "opening": {
+      "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+      "dirty": false,
+      "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "indexHash": "8789cf8247e815b02195b5567160c7176c7de7d9309819582d177a8306c59655",
+      "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumentationHash": "1bb7c62fbfd235b724e382d97481434611ee0ecca03bf75f5bfe1519e0c8bbe1"
+    },
+    "closing": {
+      "commit": "7fddbacfa8d5486323acbf43e001371c1a113059",
+      "dirty": false,
+      "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "indexHash": "8789cf8247e815b02195b5567160c7176c7de7d9309819582d177a8306c59655",
+      "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumentationHash": "1bb7c62fbfd235b724e382d97481434611ee0ecca03bf75f5bfe1519e0c8bbe1"
+    }
+  },
+  "limitations": [
+    "In-process diagnostic with tiny fixed polyglot fixtures; no indexing or IPC measured.",
+    "loadParse includes runtime/grammar loading, registry work and parsing up to callback entry.",
+    "query directly times compilation/cache lookup and matches; callback includes query and fact construction, so these overlap.",
+    "factControlResidual = callback minus UNION of directly observed query intervals: fact construction + extraction control/projection residual, not pure fact construction. Invalid clocks/coverage are explicit and never clamped; performance.now is rounded to nanoseconds for union accounting.",
+    "cleanup includes parser/tree deletion, Effect completion and restoration of the diagnostic matches wrapper.",
+    "sample zero is first use per language in one process; remaining samples are warm, not independent cold processes."
+  ]
+}
