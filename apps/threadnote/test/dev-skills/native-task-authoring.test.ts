@@ -49,6 +49,7 @@ import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {sha256HexSync} from '../../src/workflow_memory/native_digest.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from '../../src/workflow_automation/authoring_artifacts.js';
+import {inspectNativeSourcePaths} from '../../src/workflow_automation/authoring.js';
 import {CurrentNativeJobAutoLaunch, runNativeJob} from '../../src/workflow_automation/native_jobs.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestClock} from 'effect/testing';
@@ -1417,6 +1418,21 @@ effectIt.effect(
       expect(document.current.diagram).toBe('');
       const statePath = f.statePath(String(draft.runId));
       const bytes = yield* f.fs.readFileString(statePath);
+      yield* f.fs.remove(f.path.join(f.repo, 'source.ts'));
+      const missingExistingSource = yield* runNativeTaskAuthoring(f.config, {
+        command: 'decide',
+        callerCwd: f.repo,
+        authoringRef: draft.authoringRef,
+        userDecision: 'approve',
+        userResponse: 'I approve the originally displayed plan.',
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missingExistingSource).toMatchObject({failure: {code: 'source-path-unavailable'}});
+      if (missingExistingSource._tag !== 'Failure') throw new Error('Missing existing source unexpectedly approved.');
+      expect(missingExistingSource.failure.message).toContain('context.codeRefs[0]');
+      expect(missingExistingSource.failure.message).not.toContain(f.repo);
+      expect(yield* f.fs.readFileString(statePath)).toBe(bytes);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "changed after presentation";\n',
@@ -1495,6 +1511,22 @@ effectIt.effect(
         review: {outcome: 'accepted', blockingIssueCount: 0},
       });
       const beforeSourceChange = yield* f.fs.readFileString(f.statePath(String(draft.runId)));
+      yield* f.fs.remove(f.path.join(f.repo, 'source.ts'));
+      const missingTransferSource = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: 'Spec revision',
+        kind: 'plan',
+        contentFile: planFile,
+        specRef: ready.authoringRef,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missingTransferSource).toMatchObject({failure: {code: 'source-path-unavailable'}});
+      if (missingTransferSource._tag !== 'Failure')
+        throw new Error('Missing approved source unexpectedly transferred.');
+      expect(missingTransferSource.failure.message).toContain('context.codeRefs[0]');
+      expect(missingTransferSource.failure.message).not.toContain(f.repo);
+      expect(yield* f.fs.readFileString(f.statePath(String(draft.runId)))).toBe(beforeSourceChange);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = true;\n');
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
         'export const fixture = "drift before spec transfer";\n',
@@ -1531,6 +1563,385 @@ effectIt.effect(
       ).toMatchObject({failure: {code: 'stale-spec-ref'}});
       expect(yield* f.fs.readFileString(statePath)).toBe(before);
     }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('reports bounded field-specific source path failures before creating an authoring run', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const directory = 'source-directory';
+    const oversized = 'oversized-source.ts';
+    yield* f.fs.makeDirectory(f.path.join(f.repo, directory));
+    yield* f.fs.writeFileString(f.path.join(f.repo, oversized), EffectString.repeat(1_000_001)('x'));
+    const cases = [
+      {
+        featureName: 'Missing path diagnostics',
+        fileName: 'missing-path.json',
+        kind: 'plan' as const,
+        content: {
+          ...planBusiness,
+          context: {...planBusiness.context, codeRefs: ['missing-source.ts']},
+          phases: A.map(planBusiness.phases, (phase, index) =>
+            index === 0 ? {...phase, affectedPaths: ['missing-source.ts']} : phase,
+          ),
+        },
+        field: 'context.codeRefs[0]',
+        path: 'missing-source.ts',
+        code: 'source-path-unavailable',
+      },
+      {
+        featureName: 'Directory path diagnostics',
+        fileName: 'directory-path.json',
+        kind: 'plan' as const,
+        content: {
+          ...planBusiness,
+          context: {...planBusiness.context, codeRefs: ['source.ts']},
+          phases: A.map(planBusiness.phases, (phase, index) =>
+            index === 0 ? {...phase, affectedPaths: [directory]} : phase,
+          ),
+        },
+        field: 'phases[0].affectedPaths[0]',
+        path: directory,
+        code: 'source-path-not-file',
+      },
+      {
+        featureName: 'Oversized path diagnostics',
+        fileName: 'oversized-path.json',
+        kind: 'spec' as const,
+        content: {...specBusiness, context: {...specBusiness.context, codeRefs: [oversized]}},
+        field: 'context.codeRefs[0]',
+        path: oversized,
+        code: 'source-path-too-large',
+      },
+    ];
+    for (const item of cases) {
+      const contentFile = f.path.join(f.root, item.fileName);
+      yield* f.fs.writeFileString(contentFile, JSON.stringify(item.content));
+      const result = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: item.featureName,
+        kind: item.kind,
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(result).toMatchObject({failure: {code: item.code}});
+      if (result._tag !== 'Failure') throw new Error('A rejected source path unexpectedly created an authoring run.');
+      expect(result.failure.message).toContain(item.field);
+      expect(result.failure.message).toContain(item.path);
+      expect(result.failure.message).not.toContain(f.repo);
+      const runId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(item.featureName)));
+      expect(yield* readNativeWorkflowState(f.config, runId)).toBeUndefined();
+    }
+    const exactLimit = 'exact-limit-source.ts';
+    yield* f.fs.writeFileString(f.path.join(f.repo, exactLimit), EffectString.repeat(1_000_000)('x'));
+    const inspected = yield* inspectNativeSourcePaths(f.repo, [exactLimit], ['context.codeRefs[0]']);
+    expect(inspected.files).toHaveLength(1);
+    expect(inspected.files[0]?.path).toBe(exactLimit);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect(
+  'diagnoses malformed evidence references and read-only detail without echoing values or writing state',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const featureNames = [
+        'Malformed evidence reference diagnostics',
+        'Read-only detail diagnostics',
+        'Missing evidence references diagnostics',
+      ] as const;
+      const contentFile = f.path.join(f.root, 'malformed-evidence.json');
+      const marker = 'sensitive-evidence-value-must-not-be-echoed';
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          context: {
+            ...specBusiness.context,
+            evidenceRefs: [
+              {uri: 'threadnote://fixture/valid', memoryId: 'tn_fixture', revision: EffectString.repeat(64)('a')},
+              {uri: marker, memoryId: marker, revision: marker, private: marker},
+            ],
+          },
+        }),
+      );
+      const malformed = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: featureNames[0],
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(malformed).toMatchObject({failure: {code: 'invalid-content'}});
+      if (malformed._tag !== 'Failure') throw new Error('Malformed evidence unexpectedly initialized a run.');
+      expect(malformed.failure.message).toContain('context.evidenceRefs[1]');
+      expect(malformed.failure.message).toContain('{uri,memoryId,revision}');
+      expect(malformed.failure.message).not.toContain(marker);
+      const missingEvidenceRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[0])));
+      expect(yield* readNativeWorkflowState(f.config, missingEvidenceRunId)).toBeUndefined();
+
+      const missingFeature = featureNames[2];
+      const {evidenceRefs: _omittedEvidenceRefs, ...contextWithoutEvidenceRefs} = specBusiness.context;
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          objective: marker,
+          context: contextWithoutEvidenceRefs,
+        }),
+      );
+      const missing = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: missingFeature,
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(missing).toMatchObject({failure: {code: 'invalid-content'}});
+      if (missing._tag !== 'Failure') throw new Error('Missing evidence references unexpectedly initialized a run.');
+      expect(missing.failure.message).toContain('context.evidenceRefs');
+      expect(missing.failure.message).toContain('{uri,memoryId,revision}');
+      expect(missing.failure.message).not.toContain(marker);
+      const omittedEvidenceRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(missingFeature)));
+      expect(yield* readNativeWorkflowState(f.config, omittedEvidenceRunId)).toBeUndefined();
+
+      const excessiveFeature = 'Too many evidence references';
+      const validEvidence = {
+        uri: 'threadnote://fixture/valid',
+        memoryId: 'tn_fixture',
+        revision: EffectString.repeat(64)('a'),
+      };
+      yield* f.fs.writeFileString(
+        contentFile,
+        JSON.stringify({
+          ...specBusiness,
+          context: {...specBusiness.context, evidenceRefs: A.makeBy(17, () => validEvidence)},
+        }),
+      );
+      const excessive = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: excessiveFeature,
+        kind: 'spec',
+        contentFile,
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(excessive).toMatchObject({failure: {code: 'invalid-content'}});
+      if (excessive._tag !== 'Failure')
+        throw new Error('Excessive evidence references unexpectedly initialized a run.');
+      expect(excessive.failure.message).toContain('context.evidenceRefs');
+      expect(excessive.failure.message).toContain('16');
+      const excessiveRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(excessiveFeature)));
+      expect(yield* readNativeWorkflowState(f.config, excessiveRunId)).toBeUndefined();
+
+      const detail = yield* runNativeTaskAuthoring(f.config, {
+        command: 'start',
+        callerCwd: f.repo,
+        featureName: featureNames[1],
+        kind: 'spec',
+        contentFile,
+        detail: 'document',
+      }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+      expect(detail).toMatchObject({failure: {code: 'invalid-request'}});
+      if (detail._tag !== 'Failure') throw new Error('A non-read detail request unexpectedly initialized a run.');
+      expect(detail.failure.message).toContain('applies only to read');
+      const detailRunId =
+        'task-' +
+        EffectString.slice(
+          0,
+          48,
+        )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug(featureNames[1])));
+      expect(yield* readNativeWorkflowState(f.config, detailRunId)).toBeUndefined();
+    }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect.each(['head', 'bytes'] as const)(
+  'refreshes source-only authoring evidence after %s drift while retaining intent confirmation and requiring fresh review',
+  drift =>
+    Effect.gen(function* () {
+      const f = yield* setup;
+      const file = f.path.join(f.root, 'source-refresh-plan.json');
+      const direct = {
+        ...planBusiness,
+        requirements: specBusiness.requirements,
+        phases: A.map(planBusiness.phases, phase => ({
+          ...phase,
+          acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+        })),
+      };
+      yield* f.fs.writeFileString(file, JSON.stringify(direct));
+      const draft = yield* f.author({
+        command: 'start',
+        featureName: 'Source refresh',
+        kind: 'plan',
+        contentFile: file,
+        installationTarget: 'codex',
+      });
+      const approval = 'I approve this exact source-linked plan intent.';
+      const ready = yield* f.author({
+        command: 'decide',
+        authoringRef: draft.authoringRef,
+        userDecision: 'approve',
+        userResponse: approval,
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      });
+      const before = yield* f.author({command: 'read', authoringRef: ready.authoringRef, detail: 'document'});
+      const priorDocument = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(before.document);
+      const priorSource = priorDocument.source;
+      if (drift === 'head') {
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
+        yield* runCommandEffect('git', ['-C', f.repo, 'add', 'unrelated.ts']);
+        yield* runCommandEffect('git', [
+          '-C',
+          f.repo,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.invalid',
+          'commit',
+          '-m',
+          'Unrelated source change',
+        ]);
+      } else {
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "refreshed";\n');
+      }
+      expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+        'ready',
+      );
+      const refreshed = yield* f.author({command: 'save', authoringRef: ready.authoringRef, contentFile: file});
+      expect(refreshed).toMatchObject({status: 'draft', replayed: false, intentHash: ready.intentHash});
+      expect(refreshed.authoringRef).not.toBe(ready.authoringRef);
+      const readback = yield* f.author({command: 'read', authoringRef: refreshed.authoringRef, detail: 'document'});
+      const updated = yield* Schema.decodeUnknownEffect(NativeAuthoringPlanDocumentSchema)(readback.document);
+      if (drift === 'head') {
+        expect(updated.source?.head).not.toBe(priorSource?.head);
+        expect(updated.source?.files).toEqual(priorSource?.files);
+      } else {
+        expect(updated.source?.head).toBe(priorSource?.head);
+        expect(updated.source?.files).not.toEqual(priorSource?.files);
+      }
+      const state = yield* readNativeWorkflowState(f.config, String(draft.runId));
+      const rootOperation = A.findFirst(
+        [...(state?.state.operations ?? [])].reverse(),
+        operation => operation.status === 'verified' && operation.intent.role === 'authoring-root',
+      );
+      const root = decodeAuthoringArtifact(Option.getOrThrow(rootOperation).artifact!.body, AuthoringRootSchema);
+      expect(root.confirmation).toMatchObject({decision: 'approved', response: approval, intentHash: ready.intentHash});
+      expect(root.review?.documentHash).not.toBe(root.documentHash);
+      const reapproved = yield* f.author({
+        command: 'decide',
+        authoringRef: refreshed.authoringRef,
+        userDecision: 'approve',
+        userResponse: approval,
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      });
+      expect(reapproved.status).toBe('ready');
+      const replay = yield* f.author({command: 'save', authoringRef: reapproved.authoringRef, contentFile: file});
+      expect(replay).toMatchObject({status: 'ready', replayed: true, authoringRef: reapproved.authoringRef});
+      expect(
+        yield* f.author({
+          command: 'admit',
+          authoringRef: reapproved.authoringRef,
+          bindings: {readback: {branch: 'main', baseBranch: 'main'}},
+        }),
+      ).toMatchObject({status: 'admitted'});
+    }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('background source refresh keeps the confirmed intent in its exact idempotent pending job', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const file = f.path.join(f.root, 'background-source-refresh-plan.json');
+    const direct = {
+      ...planBusiness,
+      requirements: specBusiness.requirements,
+      phases: A.map(planBusiness.phases, phase => ({
+        ...phase,
+        acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+      })),
+    };
+    yield* f.fs.writeFileString(file, JSON.stringify(direct));
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'Background source refresh',
+      kind: 'plan',
+      contentFile: file,
+      installationTarget: 'codex',
+    });
+    const approval = 'I approve this exact background source-linked plan intent.';
+    const ready = yield* f.author({
+      command: 'decide',
+      authoringRef: draft.authoringRef,
+      userDecision: 'approve',
+      userResponse: approval,
+      review: {outcome: 'accepted', blockingIssueCount: 0},
+    });
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.ts'), 'export const unrelated = true;\n');
+    yield* runCommandEffect('git', ['-C', f.repo, 'add', 'unrelated.ts']);
+    yield* runCommandEffect('git', [
+      '-C',
+      f.repo,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-m',
+      'Background source refresh head',
+    ]);
+    expect((yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home})).snapshot.state).toBe(
+      'ready',
+    );
+    const request = {
+      command: 'save',
+      authoringRef: ready.authoringRef,
+      contentFile: file,
+      saveMode: 'background',
+    };
+    const accepted = yield* f.author(request).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    expect(accepted.status).toBe('accepted');
+    const jobId = String(object(accepted.job).jobId);
+    const inputPath = f.path.join(
+      f.home,
+      'workflow-automations',
+      'native-v1',
+      'jobs',
+      String(draft.runId),
+      `${jobId}.json.input.json`,
+    );
+    const originalInput = yield* f.fs.readFileString(inputPath);
+    const work = object(object(JSON.parse(originalInput)).work);
+    expect(work).toMatchObject({
+      action: 'authoring',
+      command: 'save',
+      ready: false,
+      confirmation: {decision: 'approved', response: approval, intentHash: ready.intentHash},
+    });
+    expect(work).not.toHaveProperty('review');
+    const stateAfterAdmission = yield* f.fs.readFileString(f.statePath(String(draft.runId)));
+    const replay = yield* f.author(request).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    expect(replay.jobRef).toBe(accepted.jobRef);
+    expect(yield* f.fs.readFileString(inputPath)).toBe(originalInput);
+    expect(yield* f.fs.readFileString(f.statePath(String(draft.runId)))).toBe(stateAfterAdmission);
+  }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect.each([

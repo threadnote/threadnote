@@ -154,6 +154,7 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
   repo: string,
   paths: readonly string[],
   live = false,
+  origins?: readonly string[],
 ) {
   const admitted = live ? undefined : yield* CurrentNativeJobSourceView;
   if (admitted) {
@@ -173,7 +174,7 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
     return yield* fail('invalid-scope', 'Inspect between1and128unique existing relative source files.');
   const root = yield* fs.realPath(repo);
   const files: {path: string; sha256: string}[] = [];
-  for (const relative of paths) {
+  for (const [index, relative] of paths.entries()) {
     if (
       relative.length > 4096 ||
       Effect2.pipe(relative, EffectString.includes('\\')) ||
@@ -186,15 +187,19 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
       )
     )
       return yield* fail('invalid-scope', 'Source paths must be canonical repository-relative files.');
-    const actual = yield* fs.realPath(path.join(root, relative));
+    const safeRelative = EffectArray.join([...relative].slice(0, 128), '') + (relative.length > 128 ? '…' : '');
+    const label = `${origins?.[index] ?? 'source path'} (${safeRelative})`;
+    const unavailable = () => fail('source-path-unavailable', `${label}: file is missing or inaccessible.`);
+    const actual = yield* fs.realPath(path.join(root, relative)).pipe(Effect.mapError(() => unavailable()));
     if (!Effect2.pipe(actual, EffectString.startsWith(root + path.sep)))
       return yield* fail('invalid-scope', 'Source files cannot escape the bound checkout.');
-    const stat = yield* fs.stat(actual);
-    if (stat.type !== 'File' || Number(stat.size) > 1_000_000)
-      return yield* fail('invalid-scope', 'Inspect bounded regular source files only.');
-    const bytes = yield* fs.readFile(actual);
+    const stat = yield* fs.stat(actual).pipe(Effect.mapError(() => unavailable()));
+    if (stat.type !== 'File') return yield* fail('source-path-not-file', `${label}: expected a regular file.`);
+    if (Number(stat.size) > 1_000_000)
+      return yield* fail('source-path-too-large', `${label}: files must be at most 1000000 bytes.`);
+    const bytes = yield* fs.readFile(actual).pipe(Effect.mapError(() => unavailable()));
     if (bytes.byteLength > 1_000_000)
-      return yield* fail('invalid-scope', 'Source file changed beyond its admitted byte bound.');
+      return yield* fail('source-path-too-large', `${label}: files must be at most 1000000 bytes.`);
     files.push({path: relative, sha256: sha256HexSync(bytes)});
   }
   const head = Effect2.pipe(
@@ -206,8 +211,30 @@ const inspectSource = Effect.fn('workflowAutomation.authoring.inspectSource')(fu
   return {head, files};
 });
 
+/** Preserve the first business-field origin for each source path in document order. */
+export const nativeAuthoringSourceOrigins = (document: NativeAuthoringDocument): readonly string[] => {
+  const entries = [
+    ...EffectArray.map(
+      document.context.codeRefs,
+      (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const,
+    ),
+    ...(document.kind === 'plan'
+      ? EffectArray.flatMap(document.phases, (phase, phaseIndex) =>
+          EffectArray.map(
+            phase.affectedPaths,
+            (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
+          ),
+        )
+      : []),
+  ];
+  const origins = new Map<string, string>();
+  for (const [sourcePath, origin] of entries) if (!origins.has(sourcePath)) origins.set(sourcePath, origin);
+  return EffectArray.map(document.source?.files ?? [], file => origins.get(file.path) ?? 'source path');
+};
+
 /** Run the same bounded Git/filesystem source inspection before a run is initialized. */
-export const inspectNativeSourcePaths = (repo: string, paths: readonly string[]) => inspectSource(repo, paths, true);
+export const inspectNativeSourcePaths = (repo: string, paths: readonly string[], origins?: readonly string[]) =>
+  inspectSource(repo, paths, true, origins);
 
 const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(function* (
   repo: string,
@@ -219,6 +246,7 @@ const verifySource = Effect.fn('workflowAutomation.authoring.verifySource')(func
     repo,
     EffectArray.map(document.source.files, file => file.path),
     live,
+    nativeAuthoringSourceOrigins(document),
   );
   if (stableJson(source) !== stableJson(document.source))
     return yield* fail(
