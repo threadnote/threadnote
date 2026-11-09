@@ -23,7 +23,7 @@ import {
 } from '@threadnote/workflow-automations/authoring';
 import {readNativeWorkflowState} from './store.js';
 import {runWorkflowAutomation} from './index.js';
-import {inspectNativeSourcePaths} from './authoring.js';
+import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_actions.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
@@ -39,6 +39,8 @@ const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)
 const kind = Schema.Literals(['spec', 'plan']);
 const metadata = ['format', 'schemaVersion', 'id', 'project', 'source', 'sourceFreeReason'] as const;
 const specContent = Schema.Struct(Struct.omit(NativeAuthoringSpecDocumentSchema.fields, [...metadata, 'kind']));
+const evidenceRefsSchema = NativeAuthoringSpecDocumentSchema.fields.context.fields.evidenceRefs;
+const maximumEvidenceRefs = 16;
 const planFields = Struct.omit(NativeAuthoringPlanDocumentSchema.fields, [
   ...metadata,
   'kind',
@@ -164,10 +166,28 @@ const contentOf = (document: NativeAuthoringDocument) =>
   document.kind === 'spec'
     ? Struct.omit(document, [...metadata, 'kind'])
     : Struct.omit(document, [...metadata, 'kind', 'spec', 'compactOrigin']);
+const evidenceRefsIssue = (value: unknown) => {
+  if (!Predicate.isObject(value) || !Predicate.isObject(value.context)) return undefined;
+  const refs = value.context.evidenceRefs;
+  if (refs === undefined) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
+  if (!A.isArray(refs)) return 'context.evidenceRefs must be an array of {uri,memoryId,revision} references.';
+  if (refs.length > maximumEvidenceRefs)
+    return `context.evidenceRefs must contain at most ${maximumEvidenceRefs} references.`;
+  for (const [index, reference] of refs.entries()) {
+    try {
+      Schema.decodeUnknownSync(evidenceRefsSchema, {onExcessProperty: 'error'})([reference]);
+    } catch {
+      return `context.evidenceRefs[${index}] must have the {uri,memoryId,revision} reference shape.`;
+    }
+  }
+  return undefined;
+};
 
 /** Business authoring over native receipts. Continuations are projections, not permissions or stored tickets. */
 export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
+    if (Predicate.isObject(input) && input.command !== 'read' && Record.has(input, 'detail'))
+      return yield* fail('invalid-request', 'The detail option applies only to read; retry with command read.');
     const request = yield* Schema.decodeUnknownEffect(inputSchema, {onExcessProperty: 'error'})(input).pipe(
       Effect.mapError(() =>
         fail(
@@ -532,6 +552,8 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           }),
         ),
       );
+      const evidenceIssue = evidenceRefsIssue(raw);
+      if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
       const content = yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
         onExcessProperty: 'error',
       })(raw).pipe(
@@ -566,6 +588,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           inspectNativeSourcePaths(
             checkout,
             A.map(approvedSpec.source.files, file => file.path),
+            nativeAuthoringSourceOrigins(approvedSpec),
           ),
         );
         if (stableJson(actualSpecSource) !== stableJson(approvedSpec.source))
@@ -588,13 +611,41 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
               requirements,
             }
           : content;
-      if (
-        existing &&
+      const sourceEntries =
+        'phases' in content
+          ? [
+              ...A.map(
+                content.context.codeRefs,
+                (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const,
+              ),
+              ...A.flatMap(content.phases, (phase, phaseIndex) =>
+                A.map(
+                  phase.affectedPaths,
+                  (sourcePath, pathIndex) => [sourcePath, `phases[${phaseIndex}].affectedPaths[${pathIndex}]`] as const,
+                ),
+              ),
+            ]
+          : A.map(content.context.codeRefs, (sourcePath, index) => [sourcePath, `context.codeRefs[${index}]`] as const);
+      const sourceOrigins = new Map<string, string>();
+      for (const [sourcePath, origin] of sourceEntries) {
+        if (!sourceOrigins.has(sourcePath)) sourceOrigins.set(sourcePath, origin);
+      }
+      const paths = [...sourceOrigins.keys()];
+      const origins = [...sourceOrigins.values()];
+      // A reserved save must replay its exact admitted source and metadata. Inspecting
+      // live source here could turn recovery into a different CAS intent.
+      const source =
+        stored?.state.authoringSave && existing
+          ? existing.document.source
+          : yield* inCheckout(inspectNativeSourcePaths(checkout, paths, origins));
+      const sameBusinessContent =
+        existing !== undefined &&
         stableJson(contentOf(existing.document)) === stableJson(normalized) &&
         stableJson(existing.document.kind === 'plan' ? (existing.document.spec ?? null) : null) ===
-          stableJson(spec ?? null) &&
-        !stored?.state.authoringSave
-      ) {
+          stableJson(spec ?? null);
+      const sameSource =
+        existing !== undefined && stableJson(existing.document.source ?? null) === stableJson(source ?? null);
+      if (existing && sameBusinessContent && sameSource && !stored?.state.authoringSave) {
         if (
           request.command === 'start' ||
           existing.root.baseRevision === referenced?.artifact?.revision ||
@@ -609,11 +660,6 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       if (request.command === 'save' && !exactCurrent() && !stored?.state.authoringSave)
         return yield* fail('stale-authoring-ref', 'Read the current draft before changing business content.');
-      const paths =
-        'phases' in content
-          ? [...new Set([...content.context.codeRefs, ...A.flatMap(content.phases, phase => phase.affectedPaths)])]
-          : content.context.codeRefs;
-      const source = yield* inCheckout(inspectNativeSourcePaths(checkout, paths));
       const document = decodeNativeAuthoringDocument({
         ...normalized,
         format: 'threadnote-native-authoring',
@@ -664,6 +710,25 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       }
       if (request.command === 'start' && spec && document.kind === 'plan')
         yield* call('from-spec', {document, packet: yield* call('export-plan', {uri: referenced?.artifact?.uri})});
+      const sourceExisting = existing;
+      const refreshedSameIntent =
+        request.command === 'save' &&
+        sourceExisting !== undefined &&
+        sameBusinessContent &&
+        validateNativeAuthoring(sourceExisting.document).intentHash === structural.intentHash &&
+        sourceExisting.root.confirmation?.decision === 'approved' &&
+        sourceExisting.root.confirmation.intentHash === structural.intentHash;
+      const retainedConfirmation = sourceExisting && refreshedSameIntent ? sourceExisting.root.confirmation : undefined;
+      const retainedReview =
+        sameSource && sourceExisting?.root.review?.documentHash === structural.documentHash
+          ? sourceExisting.root.review
+          : undefined;
+      const saveReady =
+        refreshedSameIntent &&
+        (!document.review.required ||
+          (retainedReview?.documentHash === structural.documentHash &&
+            retainedReview.outcome === 'accepted' &&
+            retainedReview.blockingIssueCount === 0));
       if ('saveMode' in request && request.saveMode === 'background') {
         const accepted = object(
           yield* callJob('submit', {
@@ -675,7 +740,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
               runId,
               generation: stored!.state.generation,
               document,
-              ready: false,
+              ready: saveReady,
+              ...(retainedConfirmation ? {confirmation: retainedConfirmation} : {}),
+              ...(retainedReview ? {review: retainedReview} : {}),
               expectedRevision: request.command === 'save' ? referenced?.artifact?.revision : null,
               ...(request.command === 'save' ? {uri: referenced?.artifact?.uri} : {}),
             },
@@ -700,9 +767,11 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       }
       yield* call('save', {
         document,
-        ready: false,
+        ready: saveReady,
         expectedRevision: request.command === 'save' ? referenced?.artifact?.revision : null,
         ...(request.command === 'save' ? {uri: referenced?.artifact?.uri} : {}),
+        ...(retainedConfirmation ? {confirmation: retainedConfirmation} : {}),
+        ...(retainedReview ? {review: retainedReview} : {}),
       });
     }
     existing = yield* current();
