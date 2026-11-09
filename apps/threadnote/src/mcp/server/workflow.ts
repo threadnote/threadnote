@@ -309,7 +309,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record a source snapshot, supersede only the latest unreviewed snapshot, or requalify an exact reviewed predecessor after an approved base-branch transition. Requalification retains history and requires a new full review.',
+        'Record source, supersede only the latest unreviewed snapshot, or qualify a new base. Base qualifications preserve history and require full review.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -328,9 +328,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
             command: Schema.Literal('requalify-base'),
             snapshotRef: McpInput.requiredString('Exact reviewed predecessor reference from the current task view'),
             reason: McpInput.requiredString('Why the reviewed source is being requalified on the approved new base'),
-            userAuthority: McpInput.requiredString(
-              'Caller-provided human authority statement for this base change; actor identity is not independently authenticated',
-            ),
+            userAuthority: McpInput.requiredString('Caller-asserted human approval; identity unverified.'),
+          }),
+          Schema.Struct({
+            command: Schema.Literal('integrate-same-label-base'),
+            snapshotRef: McpInput.requiredString('Reviewed predecessor from task view.'),
+            reason: McpInput.requiredString('Reason to integrate this rewritten same-label base.'),
+            userAuthority: McpInput.requiredString('Caller-asserted human approval; identity unverified.'),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
@@ -354,7 +358,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                 reason: snapshot.reason,
               }
             : {
-                command: 'requalify-base-snapshot',
+                command:
+                  snapshot.command === 'integrate-same-label-base'
+                    ? 'integrate-same-label-base-snapshot'
+                    : 'requalify-base-snapshot',
                 runId,
                 callerCwd,
                 snapshotRef: snapshot.snapshotRef,

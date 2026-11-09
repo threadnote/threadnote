@@ -56,6 +56,9 @@ import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {
   cycleRequest,
+  snapshotRef,
+  runNativeTaskSameLabelIntegration,
+  NativeTaskSameLabelIntegrationSchema,
   fail,
   hasApprovedBasePlanTransition,
   hasExactAcceptedFullReview,
@@ -232,6 +235,7 @@ const requestSchema = Schema.Union([
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
+  NativeTaskSameLabelIntegrationSchema,
   Schema.Struct({
     command: Schema.Literal('record-review'),
     runId: id,
@@ -610,28 +614,6 @@ const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   return value;
 };
 
-const snapshotRef = (work: NonNullable<ReturnType<typeof decodeNativeTaskActionRef>>, entry: unknown) => {
-  if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
-    throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
-  const snapshot = entry.snapshot;
-  if (typeof snapshot.snapshotId !== 'string' || typeof snapshot.head !== 'string' || typeof snapshot.tree !== 'string')
-    throw fail('invalid-state', 'Canonical snapshot identity is incomplete.');
-  return encodeNativeTaskActionRef({
-    version: 1,
-    kind: 'snapshot',
-    runId: work.runId,
-    generationHash: work.generationHash,
-    phaseId: work.phaseId,
-    phaseHash: work.phaseHash,
-    baselineHead: work.baselineHead,
-    baselineTree: work.baselineTree,
-    baselineRef: work.baselineRef,
-    snapshotId: snapshot.snapshotId,
-    sourceHead: snapshot.head,
-    sourceTree: snapshot.tree,
-  });
-};
-
 /** Typed task operations over the existing cycle state; references never authorize a mutation by themselves. */
 export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -640,6 +622,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         fail('invalid-request', `Invalid task-action input: ${EffectString.slice(0, 768)(error.message)}`),
       ),
     );
+    if (request.command === 'integrate-same-label-base-snapshot')
+      return yield* runNativeTaskSameLabelIntegration(config, request);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     if (!path.isAbsolute(request.callerCwd))
