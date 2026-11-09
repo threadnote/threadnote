@@ -600,7 +600,18 @@ export function makeNativeTaskActionCommands<E, R>(
             code: 'invalid-request',
             message: 'The semantic review report must be valid JSON.',
           }),
-      }).pipe(Effect.flatMap(report => reviewHandler({...options, report}))),
+      }).pipe(
+        Effect.flatMap(report =>
+          reviewHandler({
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            snapshotRef: options.snapshotRef,
+            ...(options.taskRef === undefined ? {} : {taskRef: options.taskRef}),
+            ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
+            report,
+          }),
+        ),
+      ),
   ).pipe(Command.withDescription('Record a complete independent review against an immutable snapshot'));
   const recordValidation = Command.make(
     'record-validation',
