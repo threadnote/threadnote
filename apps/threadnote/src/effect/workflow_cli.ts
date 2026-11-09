@@ -308,6 +308,8 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly runId: string;
     readonly callerCwd: string;
     readonly snapshotRef: string;
+    readonly taskRef?: string;
+    readonly userAuthority?: string;
     readonly report: unknown;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   validationHandler: (options: {
@@ -580,6 +582,14 @@ export function makeNativeTaskActionCommands<E, R>(
       runId: requiredString('run-id', 'Existing native workflow run identifier'),
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
       snapshotRef: requiredString('snapshot-ref', 'Opaque snapshot reference returned by snapshot recording'),
+      taskRef: optionalString(
+        'task-ref',
+        'Current blocked review-recovery task reference; provide with user-authority',
+      ),
+      userAuthority: optionalString(
+        'user-authority',
+        'Actual human authority for one corrected attempt; provide with task-ref',
+      ),
       report: requiredString('report', 'Complete semantic review report as JSON, strictly schema-validated'),
     },
     options =>
@@ -590,7 +600,18 @@ export function makeNativeTaskActionCommands<E, R>(
             code: 'invalid-request',
             message: 'The semantic review report must be valid JSON.',
           }),
-      }).pipe(Effect.flatMap(report => reviewHandler({...options, report}))),
+      }).pipe(
+        Effect.flatMap(report =>
+          reviewHandler({
+            runId: options.runId,
+            callerCwd: options.callerCwd,
+            snapshotRef: options.snapshotRef,
+            ...(options.taskRef === undefined ? {} : {taskRef: options.taskRef}),
+            ...(options.userAuthority === undefined ? {} : {userAuthority: options.userAuthority}),
+            report,
+          }),
+        ),
+      ),
   ).pipe(Command.withDescription('Record a complete independent review against an immutable snapshot'));
   const recordValidation = Command.make(
     'record-validation',

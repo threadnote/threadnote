@@ -1,5 +1,11 @@
 import {SystemInfo} from '@threadnote/platform/system';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {
+  decodeNativeTaskActionRef,
+  encodeNativeTaskActionRef,
+  type NativeTaskActionRef,
+  type NativeTaskView,
+} from '@threadnote/workflow-automations/task';
 import {Array as EffectArray, Effect, Option, Predicate} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -13,6 +19,90 @@ import type {readNativeWorkflowState} from './store.js';
 export type NativeTaskStoredState = NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>;
 export type NativeTaskCycleRuntime = NonNullable<NativeTaskStoredState['state']['cycle']>;
 export const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+
+export const currentNativeTaskRef = (
+  encoded: string | undefined,
+  state: NativeTaskStoredState['state'],
+  revision: string,
+  runId: string,
+  action: string,
+  view: NativeTaskView,
+): NativeTaskActionRef | undefined => {
+  const phaseId = view.next.phaseId;
+  const snapshotId = view.next.snapshotId;
+  const ref = encoded ? decodeNativeTaskActionRef(encoded) : undefined;
+  return ref &&
+    ref.kind === 'task' &&
+    ref.runId === runId &&
+    ref.generationHash === sha256HexSync(state.generation) &&
+    ref.stateRevision === revision &&
+    ref.taskAction === action &&
+    view.next.action === action &&
+    (phaseId === undefined ||
+      (ref.phaseId === phaseId && ref.phaseHash === state.cycle?.state.phases[phaseId]?.phaseHash)) &&
+    (snapshotId === undefined || ref.snapshotId === snapshotId)
+    ? ref
+    : undefined;
+};
+
+export const reviewRecoveryDecision = (
+  view: NativeTaskView,
+  taskRef: string | undefined,
+  userAuthority: string | undefined,
+  currentRef: (view: NativeTaskView, action: string) => NativeTaskActionRef | undefined,
+): 'normal' | 'missing-authority' | 'stale-task-ref' | 'authorized' => {
+  if (taskRef === undefined && userAuthority === undefined) return 'normal';
+  if (!taskRef || !userAuthority || !EffectString.trim(userAuthority)) return 'missing-authority';
+  return currentRef(view, 'resolve-review-failure') ? 'authorized' : 'stale-task-ref';
+};
+
+export const reviewReplayAuthorityMatches = (
+  priorAuthority: string | undefined,
+  taskRef: string | undefined,
+  userAuthority: string | undefined,
+): boolean => {
+  const supplied = taskRef !== undefined || userAuthority !== undefined;
+  return (
+    !supplied ||
+    Boolean(taskRef && userAuthority && EffectString.trim(userAuthority) && priorAuthority === userAuthority)
+  );
+};
+
+export const snapshotRefMatchesBaseline = (
+  ref: NativeTaskActionRef,
+  baseline: {readonly head: string; readonly tree: string; readonly pinnedRef: string} | undefined,
+): boolean =>
+  Boolean(
+    baseline &&
+    ref.baselineHead === baseline.head &&
+    ref.baselineTree === baseline.tree &&
+    ref.baselineRef === baseline.pinnedRef,
+  );
+
+export const taskActionSnapshotRef = (work: NativeTaskActionRef, entry: unknown): string => {
+  if (!Predicate.isObject(entry) || !Predicate.isObject(entry.snapshot))
+    throw fail('invalid-state', 'Canonical snapshot evidence is unavailable.');
+  const snapshot = entry.snapshot;
+  if (typeof snapshot.snapshotId !== 'string' || typeof snapshot.head !== 'string' || typeof snapshot.tree !== 'string')
+    throw fail('invalid-state', 'Canonical snapshot identity is incomplete.');
+  return encodeNativeTaskActionRef({
+    version: 1,
+    kind: 'snapshot',
+    runId: work.runId,
+    generationHash: work.generationHash,
+    phaseId: work.phaseId,
+    phaseHash: work.phaseHash,
+    baselineHead: work.baselineHead,
+    baselineTree: work.baselineTree,
+    baselineRef: work.baselineRef,
+    snapshotId: snapshot.snapshotId,
+    sourceHead: snapshot.head,
+    sourceTree: snapshot.tree,
+  });
+};
+
+export const reviewAttemptRef = (ref: NativeTaskActionRef, attemptId: string, payloadDigest: string): string =>
+  encodeNativeTaskActionRef({...ref, kind: 'snapshot', attemptId, payloadDigest});
 
 const gitObjectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 

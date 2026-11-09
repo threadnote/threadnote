@@ -1,6 +1,10 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {validateNativeCycleReview, validateNativeCycleReviewHistory} from '../src/cycle_review.js';
+import {
+  nativeCycleReviewRecordingMode,
+  validateNativeCycleReview,
+  validateNativeCycleReviewHistory,
+} from '../src/cycle_review.js';
 import {NativeCycleSnapshotSchema} from '../src/cycle_review.js';
 import type {NativeCycleReview, NativeCycleSnapshot} from '../src/cycle_review.js';
 import {Array as EffectArray, Schema, String as EffectString} from 'effect';
@@ -98,6 +102,31 @@ const caught = (run: () => unknown): unknown => {
 };
 
 describe('native cycle review validation', () => {
+  it('derives recording mode from lineage without changing independent review scope', () => {
+    const full = snapshot({previous: undefined, previousTree: undefined, acceptedHead: undefined});
+    const incremental = snapshot();
+    const requalified = snapshot({
+      baseRequalification: {
+        preRebaseHead: objectId('f'),
+        ontoHead: objectId('1'),
+        rebasedHead: objectId('2'),
+        fromBaseBranch: 'main',
+        toBaseBranch: 'main',
+        priorDeclaredBaseHead: objectId('3'),
+        reason: 'The approved base changed.',
+        authority: 'User authorized base requalification.',
+        receiptDigest: hash('4'),
+        beforeRef: `refs/threadnote/cycles/requalification-before/${hash('5')}`,
+        afterRef: `refs/threadnote/cycles/requalification-after/${hash('6')}`,
+        priorBaseRef: `refs/threadnote/cycles/requalification-base/${hash('7')}`,
+      },
+    });
+
+    expect(nativeCycleReviewRecordingMode(full)).toBe('full');
+    expect(nativeCycleReviewRecordingMode(incremental)).toBe('incremental');
+    expect(nativeCycleReviewRecordingMode(requalified)).toBe('full');
+  });
+
   it('accepts a complete full review and resolves an existing blocker with a reason', () => {
     const fullSnapshot = snapshot({
       snapshotId: 'snapshot-1',

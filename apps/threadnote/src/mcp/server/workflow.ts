@@ -370,11 +370,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_record_review',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Record a complete independent review result against an immutable task snapshot.',
+      description: 'Record an independent review for a snapshot.',
       inputSchema: {
-        runId: McpInput.requiredString('Existing native workflow run identifier'),
-        callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
-        snapshotRef: McpInput.requiredString('Opaque snapshot reference returned by snapshot recording'),
+        runId: McpInput.requiredString('Run ID'),
+        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        snapshotRef: McpInput.requiredString('Snapshot ref'),
+        taskRef: McpInput.string('Blocked recovery taskRef'),
+        userAuthority: McpInput.string('Human authority for blocked retry'),
         mode: NativeCycleReviewSchema.fields.mode,
         selected: NativeCycleReviewSchema.fields.selected,
         lanes: NativeCycleReviewSchema.fields.lanes,
@@ -385,6 +387,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       runId,
       callerCwd,
       snapshotRef,
+      taskRef,
+      userAuthority,
       mode,
       selected,
       lanes,
@@ -395,6 +399,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         runId,
         callerCwd,
         snapshotRef,
+        ...(taskRef === undefined ? {} : {taskRef}),
+        ...(userAuthority === undefined ? {} : {userAuthority}),
         report: {mode, selected, lanes, findings},
       });
       const text = JSON.stringify(result);
