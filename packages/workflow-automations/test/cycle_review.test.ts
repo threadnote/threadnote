@@ -696,3 +696,58 @@ describe('native cycle review validation', () => {
     );
   });
 });
+
+it('forces full independent manifest3 review and retains blockers from the historical predecessor', () => {
+  const current = snapshot({version: 3});
+  const complete = review({mode: 'full'}, current);
+  const basis = nativeCycleReviewBasis(
+    current,
+    [priorSnapshot, current],
+    [{snapshotId: priorSnapshot.snapshotId, report: priorReview}],
+  );
+  expect(basis.previous).toEqual(previous);
+  expect(() => validateNativeCycleReview(current, complete, basis.previous, basis.findingBasis)).not.toThrow();
+  expect(() =>
+    validateNativeCycleReview(current, {...complete, mode: 'incremental'}, basis.previous, basis.findingBasis),
+  ).toThrow();
+  expect(() =>
+    validateNativeCycleReview(current, {...complete, findings: []}, basis.previous, basis.findingBasis),
+  ).toThrow();
+  expect(() =>
+    validateNativeCycleReview(
+      current,
+      {
+        ...complete,
+        selected: ['orchestrator', 'simplicity'],
+        lanes: [
+          {name: 'orchestrator', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+      },
+      basis.previous,
+      basis.findingBasis,
+    ),
+  ).toThrow();
+});
+
+it('rejects explicit self-review for a manifest3 current-source review', () => {
+  const current = snapshot({version: 3});
+  expect(() =>
+    validateNativeCycleReview(
+      current,
+      review(
+        {
+          mode: 'full',
+          selected: ['correctness', 'simplicity', 'self'],
+          lanes: [
+            {name: 'correctness', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+            {name: 'self', status: 'complete'},
+          ],
+        },
+        current,
+      ),
+      previous,
+    ),
+  ).toThrow();
+});

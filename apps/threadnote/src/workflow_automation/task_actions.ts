@@ -58,6 +58,8 @@ import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {
   cycleRequest,
   currentNativeTaskRef,
+  runNativeTaskSameLabelIntegration,
+  NativeTaskSameLabelIntegrationSchema,
   fail,
   hasApprovedBasePlanTransition,
   hasExactAcceptedFullReview,
@@ -255,6 +257,7 @@ const requestSchema = Schema.Union([
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     userAuthority: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
+  NativeTaskSameLabelIntegrationSchema,
   Schema.Struct({
     command: Schema.Literal('record-review'),
     runId: id,
@@ -609,6 +612,8 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         fail('invalid-request', `Invalid task-action input: ${EffectString.slice(0, 768)(error.message)}`),
       ),
     );
+    if (request.command === 'integrate-same-label-base-snapshot')
+      return yield* runNativeTaskSameLabelIntegration(config, request);
     const path = yield* Path.Path;
     const fs = yield* FileSystem.FileSystem;
     if (!path.isAbsolute(request.callerCwd))
