@@ -1,10 +1,12 @@
-import {Array as EffectArray, Effect, Schema} from 'effect';
+import {Array as EffectArray, Effect, Path, Schema} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {statusDevSkills} from '../dev_skills/index.js';
 import {DevSkillsError, type DevSkillsTarget} from '../dev_skills/contract.js';
-import {enrollmentContext} from '../dev_skills/registry.js';
+import {devSkillsCompatibility, devSkillsRuntimeVersion} from '../dev_skills/manifest.js';
+import {verifyGeneration, generationRoot} from '../dev_skills/inspection.js';
+import {enrollmentContext, readReceipt} from '../dev_skills/registry.js';
 import {fail, inCheckout} from './task_action_helpers.js';
 
 const MAX_TARGET_CHOICES = 5;
@@ -69,6 +71,8 @@ export const readNativeTaskInstalledTarget = (
   installationTarget: string | undefined,
   checkout: string,
   allowedProfiles: readonly ('desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal')[] = ['desktop'],
+  /** Only an accepted job may supply its independently stored run generation. */
+  retainedGeneration?: string,
 ) =>
   Effect.gen(function* () {
     if (!installationTarget) return yield* fail('needs-resources', yield* targetRecovery(config, checkout));
@@ -100,13 +104,21 @@ export const readNativeTaskInstalledTarget = (
     if (installed.success.targets.length !== 1)
       return yield* fail('needs-selection', 'Select exactly one installed Threadnote skill target for this task.');
     const target = installed.success.targets[0];
+    const current =
+      target.installationState === 'current' &&
+      target.installedDigest === installed.success.bundle.digest &&
+      target.installed?.digest === installed.success.bundle.digest;
+    const retainedCandidate =
+      retainedGeneration !== undefined &&
+      (target.installationState === 'current' || target.installationState === 'update-available') &&
+      target.issues.length === 0 &&
+      target.installedDigest !== undefined &&
+      target.installed?.digest === target.installedDigest;
     if (
       !target.enrolled ||
       !target.enabled ||
-      target.installationState !== 'current' ||
       !allowedProfiles.includes(target.target.profile) ||
-      target.installedDigest !== installed.success.bundle.digest ||
-      target.installed?.digest !== installed.success.bundle.digest
+      !(current || retainedCandidate)
     )
       return yield* fail(
         'needs-resources',
@@ -118,5 +130,22 @@ export const readNativeTaskInstalledTarget = (
           target.installationState === 'update-available',
         ),
       );
-    return {...target, installedDigest: installed.success.bundle.digest};
+    if (retainedGeneration !== undefined) {
+      const read = yield* readReceipt(target.target);
+      const receipt = read.receipt;
+      const retained = receipt?.generations[retainedGeneration];
+      if (
+        !receipt ||
+        receipt.manifest.digest !== target.installedDigest ||
+        !receipt.consumers[target.consumerId] ||
+        !retained ||
+        devSkillsCompatibility(retained, yield* devSkillsRuntimeVersion()).length > 0
+      )
+        return yield* fail('binding-drift', 'The selected target cannot verify this admitted authoring generation.');
+      const path = yield* Path.Path;
+      yield* verifyGeneration(generationRoot(path, target.target.skillRoot, retainedGeneration), retained).pipe(
+        Effect.mapError(() => fail('binding-drift', 'The admitted authoring generation is missing or changed.')),
+      );
+    }
+    return {...target, installedDigest: target.installedDigest ?? installed.success.bundle.digest};
   });

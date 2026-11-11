@@ -653,7 +653,9 @@ const requireExpectedProjectScope = Effect.fn('memoryCodeCitation.requireExpecte
 ) {
   if (!memoryCodeCitationProjectScopeMatches(status, expected)) {
     return yield* MemoryCodeCitationCaptureError.of(
-      'The selected project graph changed since deferred code citation capture; replace the memory with current code references.',
+      'kind' in expected && expected.kind === 'selected-project'
+        ? "The run's bound graph project was not observed during code citation capture. Restore its manifest entry, index that graphProject from callerCwd, then retry the same workflow operation. No memory was written."
+        : 'The selected project graph changed since deferred code citation capture; replace the memory with current code references.',
     );
   }
 });

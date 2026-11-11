@@ -775,7 +775,7 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
 );
 
 effectIt.effect(
-  'refuses public authoring resume for a valid installed target from a different admitted generation',
+  'resumes an accepted authoring job after its enabled target updates, while rejecting changed retained bytes',
   () =>
     Effect.gen(function* () {
       const f = yield* setup;
@@ -857,7 +857,6 @@ effectIt.effect(
       });
 
       const beforeResumeRun = yield* f.fs.readFileString(f.statePath(runId));
-      const beforeResumeJobs = yield* snapshotJobFiles();
       const executor = yield* CommandExecutor;
       let spawnCalls = 0;
       const observedExecutor = CommandExecutor.of({
@@ -868,17 +867,38 @@ effectIt.effect(
             return false;
           }),
       });
-      const mismatch = yield* f
+      const resumed = yield* f
         .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
         .pipe(
           Effect.provideService(DevSkillsSource, updatedSource),
           Effect.provideService(CommandExecutor, observedExecutor),
-          Effect.result,
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
         );
-      expect(mismatch).toMatchObject({failure: {code: 'binding-drift'}});
+      expect(resumed).toMatchObject({status: 'accepted', jobRef, job: {stopRequested: false}});
+      const resumedWithUpdateAvailable = yield* f
+        .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
+        .pipe(
+          Effect.provideService(CommandExecutor, observedExecutor),
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
+        );
+      expect(resumedWithUpdateAvailable).toMatchObject({status: 'accepted', jobRef});
       expect(spawnCalls).toBe(0);
       expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeResumeRun);
-      expect(yield* snapshotJobFiles()).toEqual(beforeResumeJobs);
+      const retainedFile = f.path.join(
+        installed.targets[0].target.skillRoot,
+        '.threadnote-dev-skills',
+        'generations',
+        admitted.state.generation,
+        changedSkillPath,
+      );
+      yield* f.fs.writeFileString(retainedFile, 'Changed retained generation.\n');
+      const beforeTamperedResume = yield* snapshotJobFiles();
+      const tampered = yield* f
+        .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
+        .pipe(Effect.provideService(DevSkillsSource, updatedSource), Effect.result);
+      expect(tampered).toMatchObject({failure: {code: 'needs-resources'}});
+      expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeResumeRun);
+      expect(yield* snapshotJobFiles()).toEqual(beforeTamperedResume);
     }).pipe(TestClock.withLive, provideNative),
 );
 

@@ -435,11 +435,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (!suppliedJob) return yield* fail('job-not-found', 'Read the current authoring job continuation.');
       if (request.operation === 'resume') {
         if (!stored) return yield* fail('run-not-found', 'The original authoring task is unavailable.');
-        const target = yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout, [
-          stored.state.profile ?? 'desktop',
-        ]);
-        if (target.installedDigest !== stored.state.generation)
-          return yield* fail('binding-drift', 'Resume only after the original authoring generation is current.');
+        yield* readNativeTaskInstalledTarget(
+          config,
+          request.installationTarget,
+          checkout,
+          [stored.state.profile ?? 'desktop'],
+          stored.state.generation,
+        );
       }
       const response = object(yield* callJob(request.operation));
       if (request.operation !== 'result' || response.status !== 'completed')
