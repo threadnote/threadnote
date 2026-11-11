@@ -11,6 +11,7 @@ import {
   PartitionedSemaphore,
   Path,
   Schedule,
+  Semaphore,
   Schema,
 } from 'effect';
 import * as PersistedQueue from 'effect/persistence/PersistedQueue';
@@ -636,6 +637,7 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
   )
     return yield* fail();
   const turns = yield* PartitionedSemaphore.make<string>({permits: concurrency});
+  const publication = yield* Semaphore.make(1);
   const id = (ticket: CoordinatorTicket) => `${ticket.key}:${ticket.generation}`;
   const bindingId = (sourceKey: string, descriptor: SourceWorkDescriptor) =>
     JSON.stringify([sourceKey, descriptor.fingerprint, descriptor.accountKey]);
@@ -691,34 +693,61 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
           readonly key: string;
         }>`UPDATE source_jobs SET state='queued' WHERE key=${row.key} AND generation=${row.generation} AND state='pending' RETURNING key`;
         if (changed.length === 0) return;
-        yield* store.queue.offer({key: row.key, generation: row.generation}, {id: id(row)});
         const turn = Math.max(now, ...accountTurns.values()) + 1;
+        // Publish before the queue's afterCommit wake. The short publication gate also
+        // keeps an already-polling consumer behind this committed publication.
+        yield* sql.afterCommit(
+          Effect.sync(() => {
+            accountTurns.set(account, turn);
+            reserved.set(row.key, {descriptor, generation: row.generation});
+            accounts.add(account);
+            sources.add(source);
+          }),
+        );
+        yield* store.queue.offer({key: row.key, generation: row.generation}, {id: id(row)});
         yield* sql`INSERT INTO source_account_turns (key,last_turn) VALUES (${account},${turn}) ON CONFLICT(key) DO UPDATE SET last_turn=excluded.last_turn`;
-        accountTurns.set(account, turn);
-        reserved.set(row.key, {descriptor, generation: row.generation});
-        accounts.add(account);
-        sources.add(source);
-      }).pipe(sql.withTransaction, Effect.mapError(fail));
+      }).pipe(sql.withTransaction, publication.withPermit);
     }
-  }).pipe(Effect.mapError(fail));
+  }).pipe(
+    // Re-enter the complete scheduling pass after a rolled-back transaction.
+    // Committed reservations remain authoritative; attempt-local state is fresh.
+    Effect.retry({
+      times: 20,
+      schedule: Schedule.spaced(25),
+      while: error => isSqlError(error) && error.reason._tag === 'LockTimeoutError',
+    }),
+    Effect.mapError(fail),
+  );
   const consume = store.queue
     .take(ticket =>
       Effect.gen(function* () {
-        const rows = yield* sql<JobRow>`SELECT * FROM source_jobs WHERE key=${ticket.key}`;
-        const row = rows[0];
-        if (!row || row.generation !== ticket.generation || row.state === 'idle') {
-          if (reserved.get(ticket.key)?.generation === ticket.generation) reserved.delete(ticket.key);
-          return;
-        }
-        const {config, descriptor} = parseRow(row);
-        const readyAt = yield* accountReadyAt(store, descriptor, yield* Clock.currentTimeMillis, policies);
-        if (readyAt > (yield* Clock.currentTimeMillis)) {
-          yield* sql`UPDATE source_jobs SET state='pending',generation=generation+1,not_before=MAX(not_before,${readyAt}) WHERE key=${ticket.key} AND generation=${ticket.generation}`;
-          reserved.delete(ticket.key);
-          return;
-        }
-        reserved.delete(ticket.key);
-        active.set(ticket.key, descriptor);
+        const job = yield* publication.withPermit(
+          Effect.gen(function* () {
+            const rows = yield* sql<JobRow>`SELECT * FROM source_jobs WHERE key=${ticket.key}`;
+            const row = rows[0];
+            if (!row || row.generation !== ticket.generation || row.state === 'idle') {
+              if (reserved.get(ticket.key)?.generation === ticket.generation) reserved.delete(ticket.key);
+              return;
+            }
+            const {config, descriptor} = parseRow(row);
+            const readyAt = yield* accountReadyAt(store, descriptor, yield* Clock.currentTimeMillis, policies);
+            if (readyAt > (yield* Clock.currentTimeMillis)) {
+              yield* sql`UPDATE source_jobs SET state='pending',generation=generation+1,not_before=MAX(not_before,${readyAt}) WHERE key=${ticket.key} AND generation=${ticket.generation}`;
+              reserved.delete(ticket.key);
+              return;
+            }
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                if (active.get(ticket.key) === descriptor) active.delete(ticket.key);
+              }),
+            );
+            reserved.delete(ticket.key);
+            active.set(ticket.key, descriptor);
+            return {config, descriptor, row};
+          }),
+        );
+        if (!job) return;
+        const {config, descriptor, row} = job;
         const run = Effect.gen(function* () {
           const startedAt = yield* Clock.currentTimeMillis;
           yield* sql`UPDATE source_jobs SET state='running',last_run=${startedAt} WHERE key=${ticket.key} AND generation=${ticket.generation}`;
@@ -862,15 +891,8 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
         });
         return yield* turns
           .withPermit(`${descriptor.provider}:${descriptor.accountKey}`)(run)
-          .pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                active.delete(ticket.key);
-              }),
-            ),
-            Effect.mapError(fail),
-          );
-      }).pipe(Effect.mapError(fail)),
+          .pipe(Effect.mapError(fail));
+      }).pipe(Effect.scoped, Effect.mapError(fail)),
     )
     .pipe(Effect.asVoid, Effect.mapError(fail));
   return {

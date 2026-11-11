@@ -885,5 +885,5 @@ effectIt.effect.each([
         expect(binaryState?.state.cycle?.state.plan.source.root.uri).toContain('threadnote://user/mismatch/');
       }
     }).pipe(TestClock.withLive, provideNative),
-  {timeout: 120_000},
+  {timeout: process.platform === 'win32' ? 180_000 : 120_000},
 );

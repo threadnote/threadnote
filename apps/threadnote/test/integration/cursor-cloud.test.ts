@@ -327,7 +327,7 @@ describe('Cursor Cloud integration', () => {
       expect(discoveryConfig.env.THREADNOTE_MCP_TOOLSET).toBe('cursor-cloud-personal');
       const first = await bootstrap(fixture);
       const before = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
-      const second = await bootstrap(fixture);
+      const second = await bootstrap(fixture, undefined, undefined, false);
       const after = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
       expect(first.stdout).toContain(
         'Cursor Cloud memory root: threadnote://user/cloud-user/memories/shared/engineering/',
@@ -1392,7 +1392,7 @@ function memoryDocument(topic: string, body: string, reference?: string): string
   );
 }
 
-function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture.remote) {
+function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture.remote, sync = true) {
   return runCli(
     [
       'cloud',
@@ -1408,6 +1408,7 @@ function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture
       'cloud-user',
       '--agent-id',
       'cloud-agent',
+      ...(sync ? [] : ['--no-sync']),
     ],
     {HOME: fixture.userHome},
   );

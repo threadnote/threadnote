@@ -3,9 +3,11 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {layer as effectLayer} from '@effect/vitest';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
-import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, PlatformError, Ref, Schema, Scope} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, PlatformError, Ref, Schema, Scope} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
 import * as Reactivity from 'effect/reactivity/Reactivity';
+import {isSqlError, SqlError, LockTimeoutError, SqlSyntaxError} from 'effect/sql/SqlError';
+import type {SqlClient} from 'effect/sql/SqlClient';
 import * as fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -26,6 +28,7 @@ import {
   makeSourceAdmission,
   openCoordinatorStore,
   sourceWorkKey,
+  type CoordinatorStore,
 } from '../src/coordinator.js';
 
 const base = Layer.merge(
@@ -74,6 +77,22 @@ const registration = (
   run: SourceWorkRegistration<SystemInfo>['run'] = (_config, sourceId) =>
     Effect.succeed({sourceId, syncedDocuments: [sourceId], warnings: [], value: {sourceId}}),
 ): SourceWorkRegistration<SystemInfo> => ({provider: 'synthetic', list: () => Effect.succeed(descriptors), run});
+
+const observingTransactions = (
+  store: CoordinatorStore,
+  observe: <A, E, R>(
+    program: Effect.Effect<A, E, R>,
+    transact: SqlClient['withTransaction'],
+  ) => Effect.Effect<A, E | SqlError, R>,
+): CoordinatorStore => ({
+  ...store,
+  sql: new Proxy(store.sql, {
+    get: (target, key, receiver) =>
+      key === 'withTransaction'
+        ? <A, E, R>(program: Effect.Effect<A, E, R>) => observe(program, target.withTransaction)
+        : Reflect.get(target, key, receiver),
+  }),
+});
 
 it('never prints arbitrary startup errors through the worker console projection', () => {
   fc.assert(
@@ -984,6 +1003,213 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       yield* store.enqueue(current, [source], 'automatic');
       yield* engine.dispatch;
       yield* engine.consume;
+    }),
+  );
+});
+
+effectLayer(base)('coordinator dispatch recovery', effectIt => {
+  effectIt.effect('retries actual dispatch writer contention and queues the source exactly once after release', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('dispatch-contention');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'explicit');
+      const paths = yield* coordinatorPaths(current);
+      const blocker = yield* Effect.acquireRelease(
+        Effect.sync(() => new Database(paths.database)),
+        database => Effect.sync(() => database.close()),
+      );
+      const busy = yield* Deferred.make<void>();
+      let attempts = 0;
+      let runs = 0;
+      const observed = observingTransactions(store, (program, transact) =>
+        Effect.suspend(() => {
+          attempts++;
+          return attempts === 1
+            ? Effect.sync(() => blocker.run('BEGIN IMMEDIATE')).pipe(
+                Effect.andThen(transact(program)),
+                Effect.tapError(error =>
+                  isSqlError(error) && error.reason._tag === 'LockTimeoutError'
+                    ? Deferred.succeed(busy, undefined)
+                    : Effect.void,
+                ),
+              )
+            : transact(program);
+        }),
+      );
+      const engine = yield* makeCoordinatorEngine({
+        store: observed,
+        registrations: [
+          registration([source], () =>
+            Effect.sync(() => {
+              runs++;
+              return {sourceId: source.sourceId, syncedDocuments: [], warnings: []};
+            }),
+          ),
+        ],
+      });
+      const dispatching = yield* Effect.forkScoped(engine.dispatch);
+      yield* Deferred.await(busy);
+      expect(engine.activeCount()).toBe(0);
+      yield* Effect.sync(() => blocker.run('ROLLBACK'));
+      yield* TestClock.adjust(25);
+      yield* Fiber.join(dispatching);
+      expect(attempts).toBe(2);
+      expect(engine.activeCount()).toBe(1);
+      expect(yield* store.sql`SELECT generation,state FROM source_jobs`).toEqual([{generation: 1, state: 'queued'}]);
+      expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_queue`).toEqual([{count: 1}]);
+      yield* engine.consume;
+      expect(runs).toBe(1);
+      expect(engine.activeCount()).toBe(0);
+      expect((yield* store.receipt(ticket))?.failed).toBe(false);
+    }),
+  );
+
+  effectIt.effect('discards rolled-back dispatch reservations and retries with fresh scheduling state', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const retained = descriptor('committed', 'first-account');
+      const pending = [descriptor('rollback-one', 'shared'), descriptor('rollback-two', 'shared')];
+      const sources = [retained, ...pending];
+      const store = yield* openCoordinatorStore(current);
+      yield* store.enqueue(current, [retained], 'explicit');
+      const rolledBack = yield* Deferred.make<void>();
+      const retryError = SqlError.make({reason: LockTimeoutError.make({cause: undefined})});
+      let attempts = 0;
+      const engine = yield* makeCoordinatorEngine({
+        store: observingTransactions(store, (program, transact) =>
+          Effect.suspend(() => {
+            attempts++;
+            return attempts === 2
+              ? transact(
+                  program.pipe(
+                    Effect.andThen(Deferred.succeed(rolledBack, undefined)),
+                    Effect.andThen(Effect.fail(retryError)),
+                  ),
+                )
+              : transact(program);
+          }),
+        ),
+        registrations: [registration(sources)],
+      });
+      yield* engine.dispatch;
+      yield* store.enqueue(current, pending, 'explicit');
+      const dispatching = yield* Effect.forkScoped(engine.dispatch);
+      yield* Deferred.await(rolledBack);
+      yield* TestClock.adjust(0);
+      expect(engine.activeCount()).toBe(1);
+      expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_queue`).toEqual([{count: 1}]);
+      expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_account_turns`).toEqual([{count: 1}]);
+      yield* TestClock.adjust(25);
+      yield* Fiber.join(dispatching);
+      expect(attempts).toBe(3);
+      expect(engine.activeCount()).toBe(2);
+      expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_queue`).toEqual([{count: 2}]);
+      yield* engine.consume;
+      yield* engine.consume;
+      yield* engine.dispatch;
+      expect(engine.activeCount()).toBe(1);
+      yield* engine.consume;
+      expect(engine.activeCount()).toBe(0);
+      expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_queue WHERE state='completed'`).toEqual([
+        {count: 3},
+      ]);
+    }),
+  );
+
+  effectIt.effect('publishes committed reservations before a polling consumer despite dispatch interruption', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('commit-interruption');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'explicit');
+      const committed = yield* Deferred.make<void>();
+      const publish = yield* Deferred.make<void>();
+      const leased = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      const finish = yield* Deferred.make<void>();
+      const engine = yield* makeCoordinatorEngine({
+        store: {
+          ...observingTransactions(store, (program, transact) =>
+            transact(
+              store.sql
+                .afterCommit(Deferred.succeed(committed, undefined).pipe(Effect.andThen(Deferred.await(publish))))
+                .pipe(Effect.andThen(program)),
+            ),
+          ),
+          queue: {
+            ...store.queue,
+            take: run =>
+              store.queue.take((value, metadata) =>
+                Deferred.succeed(leased, undefined).pipe(Effect.andThen(run(value, metadata))),
+              ),
+          },
+        },
+        registrations: [
+          registration([source], () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(finish)),
+              Effect.as({sourceId: source.sourceId, syncedDocuments: [], warnings: []}),
+            ),
+          ),
+        ],
+      });
+      yield* Effect.acquireUseRelease(
+        Effect.forkScoped(engine.dispatch),
+        dispatching =>
+          Effect.gen(function* () {
+            yield* Deferred.await(committed);
+            expect(yield* store.sql`SELECT state FROM source_jobs`).toEqual([{state: 'queued'}]);
+            const consuming = yield* Effect.forkScoped(engine.consume);
+            yield* Deferred.await(leased);
+            yield* TestClock.adjust(0);
+            expect(engine.activeCount()).toBe(0);
+            expect(yield* Deferred.isDone(started)).toBe(false);
+            const interrupting = yield* Effect.forkScoped(Fiber.interrupt(dispatching), {startImmediately: true});
+            yield* Deferred.succeed(publish, undefined);
+            const exit = yield* Fiber.await(dispatching);
+            expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true);
+            yield* Fiber.join(interrupting);
+            yield* Deferred.await(started);
+            expect(engine.activeCount()).toBe(1);
+            yield* Deferred.succeed(finish, undefined);
+            yield* Fiber.join(consuming);
+            expect(engine.activeCount()).toBe(0);
+            expect((yield* store.receipt(ticket))?.failed).toBe(false);
+          }),
+        () => Deferred.succeed(publish, undefined).pipe(Effect.andThen(Deferred.succeed(finish, undefined))),
+      );
+    }),
+  );
+
+  effectIt.effect('bounds dispatch contention retries and does not retry unrelated SQL errors', () =>
+    Effect.gen(function* () {
+      for (const [reason, expectedAttempts] of [
+        [LockTimeoutError.make({cause: undefined}), 21],
+        [SqlSyntaxError.make({cause: undefined}), 1],
+      ] as const) {
+        const current = yield* config;
+        const source = descriptor('dispatch-failure');
+        const store = yield* openCoordinatorStore(current);
+        yield* store.enqueue(current, [source], 'explicit');
+        let attempts = 0;
+        const engine = yield* makeCoordinatorEngine({
+          store: observingTransactions(store, () =>
+            Effect.suspend(() => {
+              attempts++;
+              return Effect.fail(SqlError.make({reason}));
+            }),
+          ),
+          registrations: [registration([source])],
+        });
+        const dispatching = yield* Effect.forkScoped(Effect.exit(engine.dispatch));
+        yield* TestClock.adjust(500);
+        expect(Exit.isFailure(yield* Fiber.join(dispatching))).toBe(true);
+        expect(attempts).toBe(expectedAttempts);
+        expect(engine.activeCount()).toBe(0);
+        expect(yield* store.sql`SELECT generation,state FROM source_jobs`).toEqual([{generation: 1, state: 'pending'}]);
+        expect(yield* store.sql`SELECT COUNT(*) AS count FROM source_queue`).toEqual([{count: 0}]);
+      }
     }),
   );
 });

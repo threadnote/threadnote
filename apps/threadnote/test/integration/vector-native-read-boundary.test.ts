@@ -192,13 +192,13 @@ const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
       script,
       `
 import {Database} from 'bun:sqlite';
-import {writeFileSync} from 'node:fs';
+import {renameSync, writeFileSync} from 'node:fs';
 const original = Database.prototype.query;
 const registered = new WeakSet();
 let promoted = false;
 Database.prototype.query = function(sql) {
   if (!registered.has(this)) {
-    this.function('fixture_native_entered', () => { writeFileSync(${JSON.stringify(entered)}, String(process.pid));
+    this.function('fixture_native_entered', () => { const entered = ${JSON.stringify(entered)}; writeFileSync(entered + '.tmp', String(process.pid)); renameSync(entered + '.tmp', entered);
       ${
         promote
           ? `if (!promoted) {
@@ -403,29 +403,29 @@ describe('model-free native vector reads', () => {
         const command = yield* CommandExecutor;
         const readMilliseconds: number[] = [];
         let readOrdinal = 0;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-          Effect.provideService(
-            CommandExecutor,
-            CommandExecutor.of({
-              ...command,
-              execute: (executable, arguments_, options) =>
-                command.execute(executable, arguments_, options).pipe(
-                  Effect.tapError(() =>
-                    Effect.logError('Vector revocation worker failed', {
-                      readOrdinal,
-                      timeoutMilliseconds: options?.timeoutMs,
-                      completedReadMilliseconds: [...readMilliseconds],
-                    }),
-                  ),
-                ),
-            }),
-          ),
-        );
         const read = (request: RecallReadyReadRequest) =>
-          Effect.suspend(() => {
+          Effect.gen(function* () {
             readOrdinal++;
-            return boundary.read(request).pipe(
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...command,
+                  execute: (executable, arguments_, options) =>
+                    command.execute(executable, arguments_, options).pipe(
+                      Effect.tapError(() =>
+                        Effect.logError('Vector revocation worker failed', {
+                          readOrdinal,
+                          timeoutMilliseconds: options?.timeoutMs,
+                          completedReadMilliseconds: [...readMilliseconds],
+                        }),
+                      ),
+                    ),
+                }),
+              ),
+            );
+            return yield* boundary.read(request).pipe(
               Effect.timed,
               Effect.map(([duration, response]) => {
                 readMilliseconds.push(Duration.toMillis(duration));
