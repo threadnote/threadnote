@@ -151,7 +151,10 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      - name: Install pinned native vector toolchain
+        if: matrix.architecture == 'x64'
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
       - run: ./dist/threadnote --version
@@ -234,7 +237,10 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - run: bun install --frozen-lockfile
-      - run: bun run build
+      - name: Install pinned native vector toolchain
+        if: matrix.architecture == 'arm64'
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
       - run: ./dist/threadnote --version
@@ -312,6 +318,9 @@ jobs:
             --sign "$APPLE_SIGNING_IDENTITY" \
             dist/threadnote
           codesign --verify --strict --verbose=2 dist/threadnote
+
+      - name: Bind final signed vector reader bytes
+        run: bun scripts/finalize-native-vector-reader.ts
 
       - name: Notarize the exact release payload
         shell: bash
@@ -419,7 +428,7 @@ jobs:
             throw "Bun baseline compiler backend was not preloaded."
           }
 
-      - run: bun run build
+      - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
       - name: Prepare fixture and verify with strict read-only doctor

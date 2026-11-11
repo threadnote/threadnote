@@ -27,6 +27,14 @@ import {
 } from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
 import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import {
+  VectorIndexOperationError,
+  validateEncodedVector,
+  encodedVectorValidationFailure,
+  searchEncodedVectorRows,
+  mergeSemanticMatches,
+  compareCodeUnits,
+} from './vector/scoring.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -35,6 +43,7 @@ import {
   recallVectorAuthorizationKey,
   recallVectorPreparationIdentity,
   recallVectorPreparationMatches,
+  recallVectorPreparationJobId,
 } from './vector/preparation-identity.js';
 export {loadRecallVectorAuthorizationKey};
 import {
@@ -47,6 +56,8 @@ import {
   type RecallVectorReadState,
 } from './read_boundary.js';
 import {readRecallIndexData, type RecallIndexConfig} from './index.js';
+import {availableNativeVectorReader, runNativeVectorRead} from './vector/native-reader.js';
+import {nativeVectorRequestSupported, type NativeVectorReadRequest} from './vector/native-reader-contract.js';
 type VectorReadModel = Pick<LocalModelManifest, 'id' | 'sha256' | 'dimensions' | 'promptPrefixes'>;
 type VectorReadConfig = {
   readonly agentContextHome: string;
@@ -83,14 +94,6 @@ const throughVectorReadBoundary = Effect.fn('vectorIndex.throughReadyReadBoundar
     catch: () => RecallReadyReadBoundaryError.make({reason: 'invalid-protocol'}),
   });
 });
-
-class VectorIndexOperationError extends Schema.TaggedError<
-  VectorIndexOperationError,
-  {readonly brand: unique symbol}
->()('VectorIndexOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
 
 const VECTOR_INDEX_DATABASE_VERSION = 5;
 
@@ -758,6 +761,7 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
   normalizedQuery: Option.Option<readonly number[]>,
   options: SemanticScoreOptions<R> = {},
   validateCanonicalScores = false,
+  useNativeReader = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -795,7 +799,7 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
     ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
     externalResources: effectiveExternal,
   };
-  const scores = yield* useVectorDatabaseReadOnly(
+  const typescriptRead = useVectorDatabaseReadOnly(
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -871,12 +875,81 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
     // the paged synchronous scorer, so make the public failure channel explicit.
     Effect.mapError(error => error),
   );
+  // Only the production worker opts into the one-shot adaptation. Arbitrary
+  // callbacks may depend on the transaction's SqlClient service and retain TS.
+  const nativeRequest: NativeVectorReadRequest | undefined =
+    options.corpusGeneration === undefined
+      ? undefined
+      : {
+          dbPath: databasePath,
+          generation: state.generation,
+          model: {
+            id: manifest.id,
+            sha256: manifest.sha256,
+            dimensions: manifest.dimensions ?? 0,
+            embeddingRecipe: embeddingRecipe(manifest),
+            chunkerVersion: RECALL_CHUNKER_VERSION,
+          },
+          expectedPreparationJobId: recallVectorPreparationJobId(
+            recallVectorPreparationIdentity(
+              options.corpusGeneration,
+              authorizationKey,
+              manifest.id,
+              embeddingRecipe(manifest),
+            ),
+          ),
+          corpusGeneration: options.corpusGeneration,
+          limit: options.limit ?? 500,
+          selection: vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes),
+          aliasScope: recallUriScopePredicate('alias', options.allowedUriScopes),
+          aliasEligibility: recallEligibilityPredicate('chunk', eligibility, false),
+        };
+  const query = Option.getOrUndefined(normalizedQuery);
+  const binding =
+    useNativeReader && nativeRequest !== undefined && nativeVectorRequestSupported(nativeRequest, query)
+      ? yield* availableNativeVectorReader
+      : undefined;
+  const selectedRead =
+    binding === undefined || nativeRequest === undefined
+      ? typescriptRead
+      : Effect.gen(function* () {
+          // Evaluate the independent lexical proof before native work, but defer its
+          // failure until metadata reaches the old callback position. Schema/count,
+          // generation/preparation and requested-corpus outcomes keep their precedence.
+          const openingCorpus = yield* verifyCurrentCorpusGeneration(manifest, options).pipe(Effect.result);
+          const result = yield* runNativeVectorRead(binding, nativeRequest, query);
+          if (result.corpusCheckRequired && Result.isFailure(openingCorpus))
+            return yield* Effect.fail(openingCorpus.failure);
+          switch (result.status) {
+            case 'success':
+              return new Map(EffectArray.map(result.scores, value => [value.uri, value.score] as const));
+            case 'absent':
+              return undefined;
+            case 'corrupt':
+              return yield* VectorIndexCorrupt.make({modelId: manifest.id, message: result.message});
+            case 'corpus-changed':
+              return yield* VectorCorpusGenerationChanged.make({
+                modelId: manifest.id,
+                requestedGeneration: nativeRequest.corpusGeneration,
+                message: result.message,
+              });
+            case 'operation-error':
+              return yield* VectorIndexOperationError.make({message: result.message});
+            case 'cancelled':
+              return yield* Effect.interrupt;
+          }
+        });
+  const scores = yield* selectedRead;
   // The SQLite transaction pins the vector snapshot. Re-check the independently
   // changing lexical corpus after releasing that read snapshot so a long paged
   // scan cannot return scores for a corpus that was superseded mid-query.
   yield* verifyCurrentCorpusGeneration(manifest, options);
   if (scores !== undefined) {
     for (const uri of scores.keys()) {
+      if (!recallUriMatchesScopes(uri, options.allowedUriScopes)) {
+        scores.delete(uri);
+        continue;
+      }
       if (
         isExternalResourceUri(uri) &&
         (externalLocation === undefined ||
@@ -1668,105 +1741,6 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
     throw VectorIndexOperationError.make({message: 'Vector is not L2-normalized.'});
   }
   return bytes;
-}
-
-function validateEncodedVector(value: unknown, dimensions: number): void {
-  const bytes = bytesFromSqlBlob(value);
-  if (bytes.byteLength !== dimensions * 4) {
-    throw VectorIndexOperationError.make({
-      message: `Stored vector has ${bytes.byteLength} bytes; expected ${dimensions * 4}.`,
-    });
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let squaredMagnitude = 0;
-  for (let index = 0; index < dimensions; index += 1) {
-    const component = view.getFloat32(index * 4, true);
-    if (!Number.isFinite(component)) {
-      throw VectorIndexOperationError.make({message: 'Stored vector contains a non-finite component.'});
-    }
-    squaredMagnitude += component * component;
-  }
-  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
-    throw VectorIndexOperationError.make({message: 'Stored vector is not L2-normalized.'});
-  }
-}
-
-function encodedVectorValidationFailure(value: unknown, dimensions: number): unknown | undefined {
-  try {
-    validateEncodedVector(value, dimensions);
-    return undefined;
-  } catch (cause) {
-    return cause;
-  }
-}
-
-function bytesFromSqlBlob(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  throw VectorIndexOperationError.make({message: 'Stored vector is not a binary SQLite value.'});
-}
-
-function mergeSemanticMatches(
-  left: readonly SemanticChunkMatch[],
-  right: readonly SemanticChunkMatch[],
-  limit: number,
-): readonly SemanticChunkMatch[] {
-  return [...left, ...right].sort(compareVectorMatches).slice(0, limit);
-}
-
-function searchEncodedVectorRows(
-  normalizedQuery: readonly number[],
-  rows: readonly VectorRow[],
-  dimensions: number,
-  limit: number,
-): readonly SemanticChunkMatch[] {
-  if (normalizedQuery.length !== dimensions) {
-    throw VectorIndexOperationError.make({
-      message: `Query vector has ${normalizedQuery.length} dimensions; expected ${dimensions}.`,
-    });
-  }
-  const matches: SemanticChunkMatch[] = [];
-  for (const row of rows) {
-    const bytes = bytesFromSqlBlob(row.vector);
-    if (bytes.byteLength !== dimensions * 4) {
-      throw VectorIndexOperationError.make({
-        message: `Stored vector ${row.chunk_id} has ${bytes.byteLength} bytes; expected ${dimensions * 4}.`,
-      });
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let score = 0;
-    let squaredMagnitude = 0;
-    for (let index = 0; index < dimensions; index += 1) {
-      const component = view.getFloat32(index * 4, true);
-      if (!Number.isFinite(component)) {
-        throw VectorIndexOperationError.make({
-          message: `Stored vector ${row.chunk_id} contains a non-finite component.`,
-        });
-      }
-      squaredMagnitude += component * component;
-      score += normalizedQuery[index] * component;
-    }
-    if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
-      throw VectorIndexOperationError.make({message: `Stored vector ${row.chunk_id} is not L2-normalized.`});
-    }
-    matches.push({
-      id: row.chunk_id,
-      score: Math.max(-1, Math.min(1, score)),
-      uri: row.uri,
-    });
-  }
-  return matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
-}
-
-function compareVectorMatches(left: VectorSearchResult, right: VectorSearchResult): number {
-  return right.score - left.score || compareCodeUnits(left.id, right.id);
-}
-
-function compareCodeUnits(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function generationMatchesCorpus(

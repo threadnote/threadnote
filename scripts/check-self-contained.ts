@@ -1,3 +1,8 @@
+import {
+  verifyNativeVectorReaderPayload,
+  sameNativeVectorReaderBuildInfo,
+} from '@threadnote/recall/vector/native-reader-payload';
+import {readNativeReaderBuildInfo} from './native-vector-reader-payload.js';
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -279,6 +284,25 @@ const checkSelfContained = Effect.gen(function* () {
       if (!(yield* fs.exists(required))) {
         failures.push(`standalone build output is missing: ${normalizePath(path.relative(root, required))}`);
       }
+    }
+    const vectorManifest = path.join(root, 'dist', 'runtime', 'vector-reader', 'manifest.json');
+    if (yield* fs.exists(vectorManifest)) {
+      const failure = yield* Effect.tryPromise({
+        try: async () => {
+          const manifest = await verifyNativeVectorReaderPayload(vectorManifest);
+          const info = await readNativeReaderBuildInfo(path.join(path.dirname(vectorManifest), manifest.binary));
+          if (!sameNativeVectorReaderBuildInfo(info, manifest.buildInfo))
+            throw new Error('Native binary build identity differs from manifest.');
+          return manifest;
+        },
+        catch: cause => ScriptError.make({message: cause instanceof Error ? cause.message : String(cause)}),
+      }).pipe(
+        Effect.match({
+          onSuccess: () => undefined,
+          onFailure: cause => (cause instanceof Error ? cause.message : String(cause)),
+        }),
+      );
+      if (failure) failures.push(`Native vector reader payload: ${failure}`);
     }
     const personalCursorGraphSkill = path.join(
       root,

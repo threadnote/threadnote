@@ -51,8 +51,20 @@ jobs:
           bun --bun vitest run
           packages/workflow-automations/test/inventory.test.ts
           packages/workflow-automations/test/baseline.test.ts
+      - name: Install pinned native vector toolchain
+        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
+        run: rustup toolchain install 1.89.0 --profile minimal
       - name: Build native payload
-        run: bun run build
+        run: bun run build:release
+      - name: Verify bundled vector reader
+        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
+        run: bun scripts/verify-native-vector-reader.ts --required
+      - name: Exercise Rust through the production ready-read worker
+        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
+        run: bun --bun vitest run apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+        env:
+          THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
+          THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
       - name: Self-contained native smoke
         run: bun scripts/smoke-self-contained.ts
       - name: Archive the native release

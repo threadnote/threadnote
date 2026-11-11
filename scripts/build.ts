@@ -233,6 +233,7 @@ const build = Effect.gen(function* () {
         nativeRuntimePackage: nativePackage,
         runtime: `bun-${Bun.version}`,
         target,
+        sourceIdentity: sourceIdentity ?? null,
         version,
       },
       null,

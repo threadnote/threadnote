@@ -1,3 +1,4 @@
+import {verifyNativeVectorReaderPayload} from '@threadnote/recall/vector/native-reader-payload';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -37,6 +38,14 @@ export const archiveRelease = Effect.fn('archiveRelease')(function* (options: Ar
   const checksumPath = `${artifactPath}.sha256`;
   if (!(yield* fs.exists(path.join(distributionRoot, 'release.json')))) {
     return yield* ScriptError.make({message: 'dist/release.json is missing; build the release before archiving it.'});
+  }
+
+  const vectorManifest = path.join(distributionRoot, 'runtime', 'vector-reader', 'manifest.json');
+  if (yield* fs.exists(vectorManifest)) {
+    yield* Effect.tryPromise({
+      try: () => verifyNativeVectorReaderPayload(vectorManifest),
+      catch: cause => ScriptError.make({message: 'Native vector reader payload is invalid before archive.', cause}),
+    });
   }
 
   yield* fs.makeDirectory(artifactsRoot, {recursive: true});

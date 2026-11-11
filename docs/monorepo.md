@@ -173,3 +173,28 @@ a debugging handoff. Use `bun run bazel -- test <label>` for focused execution;
 byte-stable regeneration, and target analysis without running every product test.
 It compares generated output with the current authored model, without requiring
 a generated Git diff.
+
+## Optional native vector reader
+
+The recall package owns `native-vector-reader/`, a pinned Rust 1.89.0 crate with
+bundled SQLite. Ordinary `bun run build`, Bazel actions, and all eight
+`compile:targets` contracts remain Bun-only. `bun run build:release` explicitly
+assembles the optional addon after the JavaScript distribution, using Cargo only
+on Darwin ARM64 and Linux x64 GNU hosts. Other release targets retain TypeScript.
+End users require neither Cargo nor an external SQLite installation.
+
+Release assembly requires a clean HEAD and matching `release.json.sourceIdentity`;
+its manifest binds source, lockfile, toolchain, target, N-API version and binary
+digest. macOS publishing finalizes the digest after nested signing and before
+notarization or archiving. Missing payloads use TypeScript before admission; an
+advertised invalid payload fails verification. A matching verified payload executes
+on its supported target profile. Performance qualification is an engineering
+delivery gate for each target before adoption or shipping; the payload does not
+self-attest qualification.
+
+For an explicitly selected development artifact, run
+`bun scripts/assemble-native-vector-reader.ts --development`, then set
+`THREADNOTE_NATIVE_VECTOR_READER_MANIFEST` to the absolute manifest path under
+`.context/native-vector-reader`. This is source-only, binds actual native inputs
+and the base Git identity, and never builds or downloads during a request. Dirty
+development diagnostics do not establish release qualification.

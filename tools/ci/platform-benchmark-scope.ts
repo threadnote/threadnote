@@ -34,6 +34,10 @@ const RELEASE_READINESS_PATHS = new Set([
 
 const RECALL_PATHS = new Set([
   'scripts/benchmark-recall-vectors.ts',
+  'scripts/assemble-native-vector-reader.ts',
+  'scripts/native-vector-reader-payload.ts',
+  'scripts/finalize-native-vector-reader.ts',
+  'scripts/verify-native-vector-reader.ts',
   'scripts/evaluate-recall.ts',
   'scripts/recall-vector-performance-budget.ts',
   'scripts/recall-vector-storage-budget.ts',

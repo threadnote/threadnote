@@ -15,6 +15,7 @@ import {
   loadRecallVectorAuthorizationKey,
   recallVectorStorage,
 } from '@threadnote/recall/vector-index';
+import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
   recallVectorQueryStateSchema,
@@ -44,6 +45,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 
+const hasNativeVectorReader = process.env.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST !== undefined;
 const manifest = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
@@ -174,34 +176,38 @@ const installSynchronousScoringStall = (database: string, stall = true) =>
     const db = new Database(database);
     try {
       db.exec('ALTER TABLE vector_values RENAME TO fixture_vector_values');
+      const native = hasNativeVectorReader;
+      const entered = native ? '0' : 'fixture_native_entered()';
+      const expression = stall
+        ? `(WITH RECURSIVE n(x) AS (VALUES(${entered}) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)>0`
+        : native
+          ? '1'
+          : 'fixture_native_entered()=1';
       db.exec(`CREATE VIEW vector_values AS SELECT id, vector_key, vector FROM fixture_vector_values
-      WHERE ${stall ? '(WITH RECURSIVE n(x) AS (VALUES(fixture_native_entered()) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)>0' : 'fixture_native_entered()=1'}`);
+        WHERE CASE WHEN (SELECT timeout FROM pragma_busy_timeout)=50 THEN (${expression}) ELSE json('wrong-vector-busy-timeout') END`);
     } finally {
       db.close();
     }
   });
 
-// The SQLite scalar runs inside the actual scoring query before native recursion.
-// The shim only installs this fixture function; production worker/layer and SQL stay real.
+// Observe the actual native addon export when available. The TS fallback keeps
+// its SQLite scalar seam; neither branch adds instrumentation to production code.
 const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
   Effect.gen(function* () {
     const script = f.path.join(f.home, 'observed-vector-worker.ts');
     const entered = f.path.join(f.home, 'native-query-entered.pid');
     const timeoutFile = f.path.join(f.home, 'native-query-timeout.json');
+    const native = hasNativeVectorReader;
     yield* f.fs.writeFileString(
       script,
       `
 import {Database} from 'bun:sqlite';
 import {renameSync, writeFileSync} from 'node:fs';
-const original = Database.prototype.query;
-const registered = new WeakSet();
 let promoted = false;
-Database.prototype.query = function(sql) {
-  if (!registered.has(this)) {
-    this.function('fixture_native_entered', () => { const entered = ${JSON.stringify(entered)}; writeFileSync(entered + '.tmp', String(process.pid)); renameSync(entered + '.tmp', entered);
-      ${
-        promote
-          ? `if (!promoted) {
+function promoteGeneration() {
+  ${
+    promote
+      ? `if (!promoted) {
         promoted = true;
         const writer = new Database(${JSON.stringify(f.database)});
         try {
@@ -210,15 +216,44 @@ Database.prototype.query = function(sql) {
           writer.exec('COMMIT');
         } finally {writer.close();}
       }`
-          : ''
-      }
-      return 1; });
-    registered.add(this);
+      : ''
   }
-  if (sql.includes('FROM vector_chunks AS chunk') && sql.includes('JOIN vector_values'))
-    writeFileSync(${JSON.stringify(timeoutFile)}, JSON.stringify(original.call(this, 'PRAGMA busy_timeout').get()));
-  return original.call(this, sql);
-};
+}
+if (${native}) {
+  const originalDlopen = process.dlopen;
+  process.dlopen = function(module, filename, flags) {
+    const result = originalDlopen.call(process, module, filename, flags);
+    if (typeof module.exports.readSelected === 'function') {
+      const originalRead = module.exports.readSelected;
+      module.exports.readSelected = function(...args) {
+        const pending = originalRead.apply(this, args);
+        const entered = ${JSON.stringify(entered)};
+        writeFileSync(entered + '.tmp', String(process.pid));
+        renameSync(entered + '.tmp', entered);
+        return pending.then(value => { promoteGeneration(); return value; });
+      };
+    }
+    return result;
+  };
+} else {
+  const original = Database.prototype.query;
+  const registered = new WeakSet();
+  Database.prototype.query = function(sql) {
+    if (!registered.has(this)) {
+      this.function('fixture_native_entered', () => {
+        const entered = ${JSON.stringify(entered)};
+        writeFileSync(entered + '.tmp', String(process.pid));
+        renameSync(entered + '.tmp', entered);
+        promoteGeneration();
+        return 1;
+      });
+      registered.add(this);
+    }
+    if (sql.includes('FROM vector_chunks AS chunk') && sql.includes('JOIN vector_values'))
+      writeFileSync(${JSON.stringify(timeoutFile)}, JSON.stringify(original.call(this, 'PRAGMA busy_timeout').get()));
+    return original.call(this, sql);
+  };
+}
 // Invoke the same narrow main as the ordinary source read worker. Importing
 // standalone here would also initialize unrelated CLI dispatch dependencies.
 const {Effect, Layer, Runtime} = await import(${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('effect')))});
@@ -239,7 +274,7 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 `,
     );
     const bundled = yield* bundledReadyWorker(f, script);
-    return {system: bundled.system, entered, timeoutFile};
+    return {system: bundled.system, entered, timeoutFile, native};
   });
 
 const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
@@ -258,9 +293,43 @@ const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
     return pid;
   });
 
+describe.skipIf(!hasNativeVectorReader)('bundled native vector capability', () => {
+  effectIt.effect(
+    'executes the actual production worker with canonical validation through Rust SQLite',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const system = yield* SystemInfo;
+        const binding = yield* Effect.tryPromise(() => loadNativeVectorReader(system));
+        expect(binding).toBeDefined();
+        const bundled = yield* observedWorker(f);
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+            );
+            return yield* boundary.read(request);
+          });
+        const opening = yield* read({operation: 'vector-state', config: f.config, options: {model}});
+        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opening.value);
+        if (proof.readiness !== 'current') return yield* Effect.die('Missing native capability opening proof');
+        const result = yield* read({
+          operation: 'vector-scores',
+          config: f.config,
+          options: {model, state: proof.state, queryVector: vector, eligibility: f.scope},
+        });
+        expect(result.outcome).toBe('success');
+        expect(result.value).toEqual([[f.uris[0], 1]]);
+        const nativePid = yield* awaitNativePid(f, bundled.entered);
+        expect(bundled.system.isProcessRunning(nativePid)).toBe(false);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {timeout: 15000},
+  );
+});
+
 describe('model-free native vector reads', () => {
   effectIt.effect(
-    'the closing vector fence rejects promotion performed during the actual SQLite score query',
+    'the closing vector fence rejects promotion at the actual scoring boundary',
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
@@ -285,7 +354,9 @@ describe('model-free native vector reads', () => {
         expect(result.value).toBeUndefined();
         const pid = yield* awaitNativePid(f, observed.entered);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
         const current = yield* scoring.read({operation: 'vector-state', config: f.config, options: {model}});
         const closing = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(current.value);
         expect(closing.readiness).toBe('current');
@@ -676,7 +747,9 @@ describe('model-free native vector reads', () => {
         expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(1800);
         const pid = yield* awaitNativePid(f, observed.entered);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
         const later = yield* boundary
           .read({operation: 'generation', config: f.config, options: {includeInactive: false}})
           .pipe(Effect.result);
@@ -721,7 +794,9 @@ describe('model-free native vector reads', () => {
         const pid = yield* awaitNativePid(f, observed.entered);
         yield* Fiber.interrupt(child);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
-        expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
+        // Native SQL views assert the actual connection timeout inside the query.
+        if (!observed.native)
+          expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 10000},
   );

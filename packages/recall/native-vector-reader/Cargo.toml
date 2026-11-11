@@ -1,0 +1,23 @@
+[package]
+name = "threadnote-native-vector-reader"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89.0"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "hooks"] }
+libsqlite3-sys = { version = "=0.39.1", default-features = false, features = ["bundled"] }
+napi = { version = "=3.16.2", default-features = false, features = ["napi6"] }
+napi-derive = "=3.6.13"
+
+[build-dependencies]
+napi-build = "=2.6.0"
+
+[profile.release]
+codegen-units = 1
+lto = true

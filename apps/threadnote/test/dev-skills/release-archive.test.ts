@@ -115,6 +115,17 @@ describe('production release archives', () => {
     }).pipe(testLayer),
   );
 
+  effectIt.effect('refuses an advertised invalid vector payload before creating an archive', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([{name: 'runtime/vector-reader/manifest.json', bytes: new TextEncoder().encode('{}')}]);
+      const result = yield* archiveRelease({root: f.root, target: f.target}).pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure')
+        expect(result.failure).toMatchObject({message: 'Native vector reader payload is invalid before archive.'});
+      expect(yield* f.fs.exists(f.path.join(f.root, 'artifacts', `threadnote-${f.target}.tar.gz`))).toBe(false);
+    }).pipe(testLayer),
+  );
+
   effectIt.effect.skipIf(process.platform !== 'darwin')(
     'does not turn real macOS file/directory xattrs into AppleDouble payload files',
     () =>
