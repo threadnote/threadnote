@@ -265,9 +265,12 @@ const authorResult = Schema.Struct({authoringRef: Schema.String, root: Schema.Un
 const shareResult = Schema.Struct({sharedPlanRef: Schema.String});
 const startResult = Schema.Struct({status: Schema.String, taskRef: Schema.String, view: Schema.Unknown});
 
-effectIt.effect(
-  'publishes a linked reviewed plan and starts recipient-owned work from one shared reference',
-  () =>
+effectIt.effect.each([
+  {name: 'LF donor to CRLF recipient', donorAutocrlf: false, recipientAutocrlf: true},
+  {name: 'CRLF donor to LF recipient', donorAutocrlf: true, recipientAutocrlf: false},
+] as const)(
+  'publishes a linked reviewed plan and starts recipient-owned work from one shared reference ($name)',
+  direction =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -303,12 +306,17 @@ effectIt.effect(
       yield* git(seed, ['commit', '-m', 'seed']);
       yield* git(seed, ['push', 'origin', 'main']);
       yield* setGitIdentity(donor.repo);
+      yield* git(donor.repo, ['config', '--local', 'core.autocrlf', String(direction.donorAutocrlf)]);
+      if (direction.donorAutocrlf)
+        yield* fs.writeFileString(path.join(donor.repo, 'source.ts'), 'export const fixture = true;\r\n');
       yield* git(donor.repo, ['add', 'source.ts']);
       yield* git(donor.repo, ['commit', '-m', 'source']);
-      yield* git(recipient.repo, ['config', '--local', 'core.autocrlf', 'true']);
+      yield* git(recipient.repo, ['config', '--local', 'core.autocrlf', String(direction.recipientAutocrlf)]);
       yield* git(recipient.repo, ['fetch', donor.repo, 'main']);
       yield* git(recipient.repo, ['reset', '--hard', 'FETCH_HEAD']);
-      expect(yield* fs.readFileString(path.join(recipient.repo, 'source.ts'))).toContain('\r\n');
+      expect(EffectString.includes('\r\n')(yield* fs.readFileString(path.join(recipient.repo, 'source.ts')))).toBe(
+        direction.recipientAutocrlf,
+      );
       yield* setGitIdentity(recipient.repo);
       const donorConfig = {
         ...donor.config,

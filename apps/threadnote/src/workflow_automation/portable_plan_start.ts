@@ -108,20 +108,14 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
         const current = observed.files[index];
         if (current?.path !== pinned.path) return yield* drift();
         if (current.sha256 === pinned.sha256) continue;
-        // A Git checkout may turn LF source bytes into CRLF. Admit that one
-        // representation change only when the exact commit and clean worktree
-        // independently prove the pinned source.
+        // Git may render the same committed text with LF or CRLF on either
+        // checkout. Admit only those two exact renderings of the pinned blob.
         const actual = yield* fs.realPath(path.join(checkout, pinned.path)).pipe(Effect.mapError(drift));
         if (!pipe(actual, EffectString.startsWith(checkout + path.sep))) return yield* drift();
         const stat = yield* fs.stat(actual).pipe(Effect.mapError(drift));
         if (stat.type !== 'File' || Number(stat.size) > 1_000_000) return yield* drift();
         const bytes = yield* fs.readFile(actual).pipe(Effect.mapError(drift));
-        if (
-          bytes.byteLength > 1_000_000 ||
-          sha256HexSync(bytes) !== current.sha256 ||
-          sha256HexSync(bytes.filter((byte, offset) => byte !== 13 || bytes[offset + 1] !== 10)) !== pinned.sha256
-        )
-          return yield* drift();
+        if (bytes.byteLength > 1_000_000 || sha256HexSync(bytes) !== current.sha256) return yield* drift();
         const blob = yield* runBinaryCommandEffect(
           'git',
           [
@@ -135,7 +129,25 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
           ],
           {allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 1_000_001, sensitiveOutput: true},
         ).pipe(Effect.mapError(drift));
-        if (blob.exitCode !== 0 || sha256HexSync(blob.stdout) !== pinned.sha256) return yield* drift();
+        if (blob.exitCode !== 0 || blob.stdout.byteLength > 1_000_000) return yield* drift();
+        let lineFeeds = 0;
+        for (const byte of blob.stdout) {
+          if (byte === 0 || byte === 13) return yield* drift();
+          if (byte === 10) lineFeeds++;
+        }
+        if (lineFeeds === 0 || blob.stdout.byteLength + lineFeeds > 1_000_000) return yield* drift();
+        yield* Effect.try({
+          try: () => new TextDecoder('utf-8', {fatal: true}).decode(blob.stdout),
+          catch: drift,
+        });
+        const crlf = new Uint8Array(blob.stdout.byteLength + lineFeeds);
+        let position = 0;
+        for (const byte of blob.stdout) {
+          if (byte === 10) crlf[position++] = 13;
+          crlf[position++] = byte;
+        }
+        const allowed = new Set([sha256HexSync(blob.stdout), sha256HexSync(crlf)]);
+        if (!allowed.has(pinned.sha256) || !allowed.has(current.sha256)) return yield* drift();
         const clean = yield* runCommandEffect(
           'git',
           [
