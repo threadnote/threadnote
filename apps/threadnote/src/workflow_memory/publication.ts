@@ -452,6 +452,9 @@ const captureCitations = Effect.fn('workflowPublication.captureCitations')(funct
   const citations = yield* captureMemoryCodeCitations(config, {
     callerCwd: binding.repo,
     project: yield* workflowGraphProjectHint(config, binding),
+    ...(binding.graphProject === undefined
+      ? {}
+      : {expectedProjectScope: {kind: 'selected-project' as const, project: binding.graphProject}}),
     refs,
     planOnly,
   });

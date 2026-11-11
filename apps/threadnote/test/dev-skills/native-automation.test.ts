@@ -169,6 +169,13 @@ describe('native workflow automation', () => {
       expect(selectedJournal.binding.graphProject).toBe('Alpha');
       const replay = yield* f.call({...selectedRequest, graphProject: 'ALPHA'});
       expect(replay).toMatchObject({bindingId: selected.bindingId, graphProject: 'Alpha'});
+      const inherited = yield* f.call({
+        ...f.base('init'),
+        project: 'fixture',
+        featureId: 'feature',
+        profile: 'desktop',
+      });
+      expect(inherited).toMatchObject({bindingId: selected.bindingId, graphProject: 'Alpha'});
       const before = yield* f.fs.readFileString(f.statePath());
       expect(yield* failure(f.call({...selectedRequest, graphProject: 'Beta'}))).toMatchObject({
         failure: {code: 'graph-scope-conflict'},

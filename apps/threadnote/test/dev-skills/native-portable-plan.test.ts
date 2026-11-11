@@ -7,7 +7,8 @@ import {TestClock} from 'effect/testing';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {formatMemoryDocument} from '@threadnote/memory/document';
+import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {prepareMemoryMaintenanceBasis} from '@threadnote/context/memory_maintenance';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {createNativeDocument} from '@threadnote/workflow-automations/templates';
 import {applyDevSkills} from '../../src/dev_skills/index.js';
@@ -657,6 +658,25 @@ effectIt.effect(
           pipe(ref.uri, EffectString.includes('/user/recipient/')),
         ),
       ).toBe(true);
+      for (const reference of localSpecDocument.context.evidenceRefs) {
+        const content = yield* store.read(
+          {account: recipientConfig.account, home: recipient.home, user: recipientConfig.user},
+          reference.uri,
+        );
+        const imported = parseMemoryDocument(reference.uri, content);
+        expect(imported?.metadata).toMatchObject({
+          kind: 'durable',
+          visibility: 'external',
+          authority: 'external',
+          trust: 'untrusted',
+        });
+        if (!imported) throw new Error('Recipient evidence is missing');
+        expect(prepareMemoryMaintenanceBasis(imported).assessment.capabilities).toMatchObject({
+          apply: false,
+          publish: false,
+          reviewRoute: 'read-only',
+        });
+      }
       const donorSpecReference = yield* Schema.decodeUnknownEffect(Schema.Struct({uri: Schema.String}))(readySpec.root);
       expect(localPlanDocument.spec?.root.uri).not.toBe(donorSpecReference.uri);
       expect(

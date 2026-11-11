@@ -738,7 +738,14 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     );
   const captured = yield* captureMemoryCodeCitationsForMcp(
     config,
-    {callerCwd: root, project, refs: codeRefs},
+    {
+      callerCwd: root,
+      project,
+      ...(state.graphProject === undefined
+        ? {}
+        : {expectedProjectScope: {kind: 'selected-project' as const, project: state.graphProject}}),
+      refs: codeRefs,
+    },
     'workflow-job',
   );
   if (!captured.ok)
@@ -1227,35 +1234,39 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
   const runId = run.state.runId;
-  const callerBinding = yield* resolveWorkflowBinding(
-    config,
-    {
-      protocolVersion: 1,
-      action: 'bind',
-      workflowRunId: 'native-v1-' + runId,
-      project: run.state.project,
-      ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
-      featureId: run.state.featureId,
-      generation: run.state.generation,
-      profile: run.state.profile ?? 'desktop',
-      ...(run.state.team === undefined ? {} : {team: run.state.team}),
-      ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
-    },
-    run.state.graphProject,
-    true,
-  );
+  const readOnly = request.command === 'status' || request.command === 'result';
+  // The canonical journal verifies stored identity against the current caller
+  // without routing the graph. Read-only accepted-job inspection survives a
+  // missing graph manifest; mutations still require the live bound scope.
+  const canonicalJournal = readOnly
+    ? yield* withWorkflowLock(config, run.state.bindingId, inspectWorkflowJournal(config, run.state.bindingId))
+    : undefined;
+  const callerBinding = canonicalJournal
+    ? canonicalJournal.state.binding
+    : yield* resolveWorkflowBinding(
+        config,
+        {
+          protocolVersion: 1,
+          action: 'bind',
+          workflowRunId: 'native-v1-' + runId,
+          project: run.state.project,
+          ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
+          featureId: run.state.featureId,
+          generation: run.state.generation,
+          profile: run.state.profile ?? 'desktop',
+          ...(run.state.team === undefined ? {} : {team: run.state.team}),
+          ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
+        },
+        run.state.graphProject,
+        true,
+      );
   if (callerBinding.bindingId !== run.state.bindingId)
     return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   // Read-only status/result still serialize against the journal. Stop/resume
   // must remain available while a writer owns that lock; their immutable job
   // input, run binding and current checkout are verified below, while resumed
   // authoring work re-enters the canonical journal transaction before writing.
-  if (request.command === 'status' || request.command === 'result') {
-    const canonicalJournal = yield* withWorkflowLock(
-      config,
-      run.state.bindingId,
-      inspectWorkflowJournal(config, run.state.bindingId),
-    );
+  if (canonicalJournal) {
     if (
       canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
       canonicalJournal.state.binding.graphProject !== run.state.graphProject ||

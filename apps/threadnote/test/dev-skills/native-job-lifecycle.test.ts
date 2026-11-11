@@ -271,6 +271,19 @@ describe('native private job lifecycle', () => {
       const accepted = object(yield* submit(f, work));
       expect(accepted.status).toBe('accepted');
       expect(accepted.jobId).toBeTruthy();
+      const jobId = requiredString(accepted.jobId);
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'fixture', path: f.repo, seed: [], uri: 'threadnote://resources/repos/fixture'}],
+        }),
+      );
+      expect(object(yield* f.call({...f.base('job'), command: 'status', jobId}))).toMatchObject({jobId});
+      expect(object(yield* f.call({...f.base('job'), command: 'result', jobId}))).toMatchObject({jobId});
+      expect(yield* f.call({...f.base('job'), command: 'cancel', jobId}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'graph-scope-unavailable'},
+      });
     }).pipe(run),
   );
 

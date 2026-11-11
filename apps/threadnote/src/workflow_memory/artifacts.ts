@@ -403,6 +403,9 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
             {
               callerCwd: state.binding.repo,
               project: yield* workflowGraphProjectHint(config, state.binding),
+              ...(state.binding.graphProject === undefined
+                ? {}
+                : {expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject}}),
               refs: request.codeRefs ?? [],
             },
             'workflow-memory',

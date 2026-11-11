@@ -6,6 +6,7 @@ import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphStoreBusyError, type CodeGraphIndexSummary, type CodeGraphStatus} from '@threadnote/graph/types';
 import {makeWorkflowGraphAdapter} from '../../src/workflow_automation/graph.js';
 import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
@@ -112,6 +113,50 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
 });
 
 describe('native workflow graph adapter', () => {
+  effectIt.effect('requires selected-project observation even for full coverage', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [
+            {name: 'Alpha', path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'},
+            {name: 'Beta', path: f.repo, seed: [], uri: 'threadnote://resources/repos/beta'},
+          ],
+        }),
+      );
+      const binding = {...bindingFor(f), graphProject: 'Alpha'};
+      const full = graphStatus(f.repo);
+      const wrong = yield* makeReady(f, [full], () => Effect.die('index must not run'), {prepare: false}, binding);
+      expect(yield* wrong.adapter.ready(f.repo).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'evidence-unavailable'},
+      });
+      const selected = attachCodeGraphStatusObservation(
+        {...full},
+        {
+          identity: full.identity,
+          projectScopeObserved: true,
+          projectScope: {project: {name: 'Alpha', uri: 'threadnote://resources/repos/alpha'}},
+        },
+      );
+      const right = yield* makeReady(f, [selected], () => Effect.die('index must not run'), {prepare: false}, binding);
+      expect(yield* right.adapter.ready(f.repo)).toMatchObject({state: 'ready'});
+    }).pipe(run),
+  );
+
   effectIt.effect('uses the bound project and names it in preparation guidance', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

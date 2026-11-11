@@ -206,7 +206,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     if (
       state.graphProject === undefined
         ? request.graphProject !== undefined
-        : request.graphProject === undefined ||
+        : request.graphProject !== undefined &&
           EffectString.toLowerCase(EffectString.trim(state.graphProject)) !==
             EffectString.toLowerCase(EffectString.trim(request.graphProject))
     )
