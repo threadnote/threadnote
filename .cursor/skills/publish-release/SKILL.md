@@ -13,7 +13,7 @@ publication gates remain unchanged.
 
 ## Execution agent
 
-Delegate patch-release preparation and post-merge publication to one `gpt-5.6-terra` agent with `low` reasoning effort. Keep `docs/releasing.md` authoritative: the agent must satisfy every applicable gate and stop on a failed or missing prerequisite rather than treating this delegation as permission to bypass it.
+Delegate patch-release preparation and post-merge publication to one `gpt-6.1-terra` agent with `low` reasoning effort. Keep `docs/releasing.md` authoritative: the agent must satisfy every applicable gate and stop on a failed or missing prerequisite rather than treating this delegation as permission to bypass it.
 
 ## Prepare (this PR)
 
