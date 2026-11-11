@@ -5,7 +5,16 @@
   "adoptionDecision": "defer-shipping-until-complete-R5-evidence",
   "privateMatchingCandidatePayloadExecutes": true,
   "qualifiedPlatforms": [],
-  "qualificationCandidates": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
+  "qualificationCandidates": [
+    "bun-darwin-arm64",
+    "bun-darwin-x64",
+    "bun-linux-arm64",
+    "bun-linux-arm64-musl",
+    "bun-linux-x64-baseline",
+    "bun-linux-x64-baseline-musl",
+    "bun-windows-arm64",
+    "bun-windows-x64-baseline"
+  ],
   "gates": {
     "pairedRunsMinimum": 3,
     "warmQueriesPerArmMinimum": 30,
@@ -21,7 +30,13 @@
   },
   "evidence": {
     "darwin": "local-results.json",
-    "linux": "linux-results.json"
+    "linux": "linux-results.json",
+    "allProfiles": "platform-results.json"
   },
-  "reason": "Local source and compiled production-path diagnostics are incomplete and contain deadline failures. No committed 3x30 paired qualification or complete secondary/RSS/Linux evidence has passed."
+  "reason": "Native-only all-eight qualification is pending. Earlier omitted-addon/source diagnostics remain historical and unqualified; no frozen native-only 3x30 paired capture has passed on any profile.",
+  "rollout": "native-only-all-eight",
+  "baseline": {
+    "commit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "method": "independently frozen TypeScript semantic executable; shared verified inference overlay explicitly identified"
+  }
 }

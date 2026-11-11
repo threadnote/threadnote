@@ -1,6 +1,7 @@
 use std::env;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=THREADNOTE_NATIVE_DEPLOYMENT_TARGET");
     let compiler = std::process::Command::new(env::var_os("RUSTC").expect("Cargo RUSTC"))
         .arg("--version")
         .output()
@@ -21,6 +22,7 @@ fn main() {
         "THREADNOTE_NATIVE_SOURCE_TREE",
         "THREADNOTE_NATIVE_LOCK_SHA256",
         "THREADNOTE_NATIVE_TOOLCHAIN_SHA256",
+        "THREADNOTE_NATIVE_BUILD_ENVIRONMENT_SHA256",
         "THREADNOTE_NATIVE_SOURCE_SHA256",
     ] {
         println!("cargo:rerun-if-env-changed={name}");

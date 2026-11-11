@@ -17,7 +17,7 @@ import {describe, expect, vi} from 'vitest';
 vi.mock('../../src/vector/native-reader-payload.js', () => ({loadNativeVectorReader: vi.fn()}));
 import {runNativeVectorRead} from '../../src/vector/native-reader.js';
 import {
-  nativeVectorRequestSupported,
+  nativeVectorWireRequest,
   type NativeVectorReaderBinding,
   type NativeVectorReadRequest,
   type NativeVectorReadResult,
@@ -28,6 +28,7 @@ const request: NativeVectorReadRequest = {
   generation: 'generation',
   model: {id: 'model', sha256: 'hash', dimensions: 1, embeddingRecipe: 'recipe', chunkerVersion: 1},
   expectedPreparationJobId: 'idle-recall-v2:hash',
+  preparationIdentitySuffix: '"authorization","model","recipe",1]',
   corpusGeneration: 'corpus',
   limit: 5,
   selection: {sql: '1 = 1', params: []},
@@ -128,28 +129,17 @@ describe('native vector reader admission and ownership', () => {
   );
 });
 
-describe('native vector pre-admission compatibility', () => {
-  effectIt.effect('retains large dimensions and predicate parameter sets without prototype caps', () =>
+describe('native vector input transport', () => {
+  effectIt.effect('keeps lossless expected metadata separate from SQL string binding', () =>
     Effect.sync(() => {
-      expect(
-        nativeVectorRequestSupported(
-          {
-            ...request,
-            model: {...request.model, dimensions: 5000},
-            selection: {sql: '1=1', params: Array.from({length: 100}, () => 'scope')},
-          },
-          Array.from({length: 5000}, () => 0),
-        ),
-      ).toBe(true);
-      expect(nativeVectorRequestSupported({...request, aliasScope: {sql: 'uri = ?', params: ['😀']}}, [1])).toBe(true);
-      for (const value of ['\ud800', '\udfff', 'a\0b'])
-        expect(nativeVectorRequestSupported({...request, aliasScope: {sql: 'uri = ?', params: [value]}}, [1])).toBe(
-          false,
-        );
-      for (const limit of [-1, 1.5, Infinity, NaN])
-        expect(nativeVectorRequestSupported({...request, limit}, [1])).toBe(false);
-      expect(nativeVectorRequestSupported(request, [NaN])).toBe(false);
-      expect(nativeVectorRequestSupported(request, [Number.MAX_VALUE])).toBe(false);
+      const value = nativeVectorWireRequest({
+        ...request,
+        model: {...request.model, id: 'a\ud800\0b'},
+        corpusGeneration: '\udfff',
+      });
+      expect(value.model.idUtf16).toEqual([97, 0xd800, 0, 98]);
+      expect(value.corpusGenerationUtf16).toEqual([0xdfff]);
+      expect(nativeVectorWireRequest({...request, corpusGeneration: undefined}).corpusGenerationUtf16).toBeUndefined();
     }),
   );
 });
@@ -219,7 +209,6 @@ describe('one-shot lexical corpus adaptation', () => {
             currentCorpusGeneration: () => Effect.succeedSome('superseded'),
           },
           false,
-          true,
         ).pipe(Effect.result);
         expect(calls).toBe(1);
         expect(
@@ -258,7 +247,6 @@ describe('one-shot lexical corpus adaptation', () => {
             currentCorpusGeneration: () => Effect.sync(() => Option.some(++checks === 1 ? 'corpus' : 'superseded')),
           },
           false,
-          true,
         ).pipe(Effect.result);
         expect(checks).toBe(2);
         expect(Result.isFailure(result) && Schema.is(VectorCorpusGenerationChanged)(result.failure)).toBe(true);
@@ -266,36 +254,44 @@ describe('one-shot lexical corpus adaptation', () => {
     }).pipe(provide),
   );
 
-  effectIt.effect('selects TypeScript before work for custom callbacks and incompatible request shapes', () =>
+  effectIt.effect('uses native for direct callers, optional corpus and SQL replacement inputs', () =>
     Effect.gen(function* () {
       const f = yield* scoreFixture;
-      let calls = 0;
+      const seen: NativeVectorReadRequest[] = [];
       vi.mocked(loadNativeVectorReader).mockResolvedValue({
         CancellationToken: class {
           cancel() {}
         },
-        readSelected: () => {
-          calls += 1;
+        readSelected: request => {
+          seen.push(request);
           return Promise.resolve(absent);
         },
       });
-      for (const native of [false, true]) {
-        const result = yield* readSelectedSemanticVectorScores(
-          f.config,
-          f.model,
-          f.state,
-          Option.some([1]),
-          {
-            corpusGeneration: 'corpus',
-            allowedUriScopes: native ? ['\ud800'] : undefined,
-            currentCorpusGeneration: () => Effect.succeedSome('corpus'),
-          },
-          false,
-          native,
-        ).pipe(Effect.result);
-        expect(Result.isFailure(result)).toBe(true);
+      for (const corpusGeneration of [undefined, 'corpus']) {
+        expect(
+          yield* readSelectedSemanticVectorScores(f.config, f.model, f.state, Option.some([Number.MAX_VALUE]), {
+            corpusGeneration,
+            allowedUriScopes: ['a\ud800\0b'],
+            ...(corpusGeneration === undefined ? {} : {currentCorpusGeneration: () => Effect.succeedSome('corpus')}),
+          }),
+        ).toBeUndefined();
       }
-      expect(calls).toBe(0);
+      expect(seen).toHaveLength(2);
+      expect(seen[0].corpusGeneration).toBeUndefined();
+      expect(seen[0].selection.params).toContain('a\ud800\0b');
+    }).pipe(provide),
+  );
+
+  effectIt.effect('reports a missing capability before any selected read', () =>
+    Effect.gen(function* () {
+      const f = yield* scoreFixture;
+      vi.mocked(loadNativeVectorReader).mockRejectedValueOnce(new Error('Required native vector reader is missing.'));
+      const result = yield* readSelectedSemanticVectorScores(f.config, f.model, f.state, Option.some([1])).pipe(
+        Effect.result,
+      );
+      expect(
+        Result.isFailure(result) && Schema.is(VectorIndexOperationError)(result.failure) && result.failure.message,
+      ).toContain('Required native vector reader');
     }).pipe(provide),
   );
 });

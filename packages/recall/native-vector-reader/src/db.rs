@@ -1,9 +1,11 @@
 use crate::{
+    legacy_numeric,
     protocol::*,
     scoring::{self, Hit},
     CancellationState,
 };
 use rusqlite::{types::ValueRef, Connection, OpenFlags, Row, Statement};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BinaryHeap, HashMap},
     sync::{atomic::Ordering, Arc},
@@ -81,13 +83,6 @@ fn read_inner(
     corpus_check_required: &mut bool,
 ) -> ReadResult<NativeReadOutcome> {
     checkpoint(cancellation)?;
-    if !request.limit.is_finite()
-        || request.limit < 0.0
-        || request.limit.fract() != 0.0
-        || request.limit > 9_007_199_254_740_991.0
-    {
-        return Err(Failure::operation("Unsupported native result limit."));
-    }
     let mut db = Connection::open_with_flags(
         &request.db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -107,12 +102,18 @@ fn read_inner(
         return Ok(NativeReadOutcome::absent());
     }
     if active.job_id.starts_with("idle-recall-v2:")
-        && active.job_id != request.expected_preparation_job_id
+        && active.job_id != preparation_job_id(request, &active)
     {
         return Ok(NativeReadOutcome::absent());
     }
-    if let Some(corpus) = &request.corpus_generation {
-        if active.corpus_generation.as_ref() != Some(corpus) {
+    if let Some(corpus) = &request.corpus_generation_utf16 {
+        if active
+            .corpus_generation
+            .as_ref()
+            .map(|value| value.encode_utf16().collect::<Vec<_>>())
+            .as_ref()
+            != Some(corpus)
+        {
             return Err(Failure {
                 status: "corpus-changed",
                 message:
@@ -130,7 +131,6 @@ fn read_inner(
     let query = query.ok_or_else(|| {
         Failure::operation("The active vector corpus changed shape during semantic scoring.")
     })?;
-    // The adapter selects TypeScript before admission for unsupported query shapes.
     if query.len() as f64 != active.dimensions || !query.iter().all(|v| v.is_finite()) {
         return Err(Failure::corrupt(format!(
             "Query vector has {} dimensions; expected {}.",
@@ -145,7 +145,13 @@ fn read_inner(
     ] {
         validate_predicate(predicate).map_err(Failure::operation)?;
     }
-    let limit = active.chunk_count.min(request.limit) as usize;
+    let end = if request.limit.is_nan() {
+        f64::NAN
+    } else {
+        active.chunk_count.min(request.limit)
+    };
+    let limit = legacy_numeric::slice_end(end, active.chunk_count as usize);
+    let mut replay = end < 0.0;
     let sql = format!("SELECT chunk.chunk_id,chunk.uri,value.vector FROM vector_chunks AS chunk JOIN vector_values AS value ON value.id=chunk.vector_id WHERE chunk.generation=? AND chunk.chunk_id > '' AND ({}) ORDER BY chunk.chunk_id", request.selection.sql);
     let mut stmt = tx.prepare(&sql)?;
     checked_statement(&stmt, 3, request.selection.params.len() + 1)?;
@@ -168,6 +174,12 @@ fn read_inner(
         let id = text(row, 0)?;
         let score = scoring::score_with_cancel(bytes, query, &id, || cancellation.is_cancelled())
             .map_err(Failure::corrupt)?;
+        if score.is_nan() && limit > 0 {
+            replay = true;
+        }
+        if replay {
+            break;
+        }
         if limit == 0 || (best.len() == limit && score < best.peek().unwrap().score) {
             continue;
         }
@@ -176,12 +188,17 @@ fn read_inner(
     }
     drop(rows);
     drop(stmt);
+    let hits = if replay {
+        legacy_replay(&tx, request, query, end, cancellation)?
+    } else {
+        best.into_sorted_vec()
+    };
     let mut scores = Vec::<NativeScore>::new();
     let mut indices = HashMap::<String, usize>::new();
-    for hit in best.into_sorted_vec() {
-        let score = hit.score.max(0.0);
+    for hit in hits {
+        let score = legacy_numeric::js_max(hit.score, 0.0);
         if let Some(index) = indices.get(&hit.uri) {
-            scores[*index].score = scores[*index].score.max(score);
+            scores[*index].score = legacy_numeric::js_max(scores[*index].score, score);
         } else {
             indices.insert(hit.uri.clone(), scores.len());
             scores.push(NativeScore {
@@ -202,6 +219,100 @@ fn read_inner(
     checkpoint(cancellation)?;
     tx.commit()?;
     Ok(NativeReadOutcome::success(scores))
+}
+
+fn legacy_replay(
+    db: &Connection,
+    request: &NativeReadRequest,
+    query: &[f64],
+    end: f64,
+    cancellation: &CancellationState,
+) -> ReadResult<Vec<Hit>> {
+    let sql = format!("SELECT chunk.chunk_id,chunk.uri,value.vector FROM vector_chunks AS chunk JOIN vector_values AS value ON value.id=chunk.vector_id WHERE chunk.generation=? AND chunk.chunk_id > ? AND ({}) ORDER BY chunk.chunk_id LIMIT 400", request.selection.sql);
+    let mut stmt = db.prepare(&sql)?;
+    checked_statement(&stmt, 3, request.selection.params.len() + 2)?;
+    let mut cursor = String::new();
+    let mut best = Vec::new();
+    loop {
+        checkpoint(cancellation)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(
+            std::iter::once(&request.generation)
+                .chain(std::iter::once(&cursor))
+                .chain(&request.selection.params),
+        ))?;
+        let mut page = Vec::with_capacity(400);
+        let mut next_cursor = cursor.clone();
+        while let Some(row) = rows.next()? {
+            checkpoint(cancellation)?;
+            let id = text(row, 0)?;
+            let bytes = match row.get_ref(2)? {
+                ValueRef::Blob(bytes) => bytes,
+                _ => {
+                    return Err(Failure::corrupt(
+                        "Stored vector is not a binary SQLite value.",
+                    ))
+                }
+            };
+            let score =
+                scoring::score_with_cancel(bytes, query, &id, || cancellation.is_cancelled())
+                    .map_err(Failure::corrupt)?;
+            next_cursor = id.clone();
+            page.push(Hit::new(id, text(row, 1)?, score));
+        }
+        let count = page.len();
+        if count == 0 {
+            break;
+        }
+        legacy_numeric::sort(&mut page, || {
+            checkpoint(cancellation).map_err(|error| error.message)
+        })
+        .map_err(Failure::operation)?;
+        page.truncate(legacy_numeric::slice_end(end, count));
+        best.extend(page);
+        legacy_numeric::sort(&mut best, || {
+            checkpoint(cancellation).map_err(|error| error.message)
+        })
+        .map_err(Failure::operation)?;
+        best.truncate(legacy_numeric::slice_end(end, best.len()));
+        cursor = next_cursor;
+        if count < 400 {
+            break;
+        }
+    }
+    Ok(best)
+}
+
+// The caller owns the identity policy and serializes its suffix with JSON.stringify.
+// Only the pinned snapshot's corpus string must be serialized here. This avoids
+// validating a prepared job against an earlier opening state when no corpus was requested.
+fn preparation_job_id(request: &NativeReadRequest, active: &Generation) -> String {
+    if request.corpus_generation.is_some() {
+        return request.expected_preparation_job_id.clone();
+    }
+    let corpus = active.corpus_generation.as_deref().unwrap_or("");
+    let mut encoded = String::from("[\"idle-recall-v2\",\"");
+    for character in corpus.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{0008}' => encoded.push_str("\\b"),
+            '\u{000c}' => encoded.push_str("\\f"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            c if c < '\u{0020}' => encoded.push_str(&format!("\\u{:04x}", c as u32)),
+            c => encoded.push(c),
+        }
+    }
+    encoded.push_str("\",");
+    encoded.push_str(&request.preparation_identity_suffix);
+    format!(
+        "idle-recall-v2:{}",
+        Sha256::digest(encoded.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 fn checked_statement(stmt: &Statement<'_>, columns: usize, params: usize) -> ReadResult<()> {
@@ -302,7 +413,9 @@ struct Generation {
 }
 impl Generation {
     fn compatible(&self, model: &NativeReadModel) -> bool {
-        self.model_id == model.id
+        self.model_id
+            .encode_utf16()
+            .eq(model.id_utf16.iter().copied())
             && self.model_sha256 == model.sha256
             && self.dimensions == model.dimensions
             && self.embedding_recipe == model.embedding_recipe
@@ -311,9 +424,7 @@ impl Generation {
 }
 fn text(row: &Row<'_>, column: usize) -> ReadResult<String> {
     match row.get_ref(column)? {
-        ValueRef::Text(value) => std::str::from_utf8(value)
-            .map(str::to_owned)
-            .map_err(|_| Failure::operation("Invalid UTF-8 vector metadata or identity.")),
+        ValueRef::Text(value) => Ok(String::from_utf8_lossy(value).into_owned()),
         _ => Err(Failure::operation(
             "Invalid vector metadata or identity type.",
         )),
@@ -488,7 +599,7 @@ fn load_aliases(
             if let Some(index) = indices.get(&representative) {
                 let score = scores[*index].score;
                 if let Some(index) = indices.get(&uri) {
-                    scores[*index].score = scores[*index].score.max(score);
+                    scores[*index].score = legacy_numeric::js_max(scores[*index].score, score);
                 } else {
                     indices.insert(uri.clone(), scores.len());
                     scores.push(NativeScore { uri, score });
@@ -543,13 +654,16 @@ mod tests {
                 generation: "1-ab".into(),
                 model: NativeReadModel {
                     id: "model".into(),
+                    id_utf16: "model".encode_utf16().collect(),
                     sha256: "a".repeat(64),
                     dimensions: 2.0,
                     embedding_recipe: "a".repeat(64),
                     chunker_version: 1.0,
                 },
                 expected_preparation_job_id: format!("idle-recall-v2:{}", "b".repeat(64)),
+                preparation_identity_suffix: "\"authorization\",\"model\",\"recipe\",1]".into(),
                 corpus_generation: Some("corpus".into()),
+                corpus_generation_utf16: Some("corpus".encode_utf16().collect()),
                 limit: 25.0,
                 selection: predicate(),
                 alias_scope: predicate(),
@@ -630,6 +744,7 @@ mod tests {
         assert!(!outcome.corpus_check_required);
         request.expected_preparation_job_id = format!("idle-recall-v2:{}", "c".repeat(64));
         request.corpus_generation = Some("different".into());
+        request.corpus_generation_utf16 = Some("different".encode_utf16().collect());
         let outcome = read(&request, Some(&[0.6, 0.8]), &CancellationState::default());
         assert_eq!(outcome.status, "corpus-changed");
         assert!(!outcome.corpus_check_required);

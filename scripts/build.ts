@@ -1,4 +1,5 @@
 import {Array as EffectArray} from 'effect';
+import {nativeVectorReaderHostProfile} from '@threadnote/recall/vector/native-reader-payload';
 import {
   parseNativeRequirements,
   parseDevSkillsManifest,
@@ -194,8 +195,10 @@ const build = Effect.gen(function* () {
     yield* fs.chmod(keychainLibrary, 0o755);
   }
   const nativePackage = nativePackageForTarget(target);
-  const nativePackageRoot = path.join(root, 'node_modules', ...Effect2.pipe(nativePackage, EffectString.split('/')));
-  if (!(yield* fs.exists(nativePackageRoot))) {
+  const nativePackageRoot = nativePackage
+    ? path.join(root, 'node_modules', ...Effect2.pipe(nativePackage, EffectString.split('/')))
+    : undefined;
+  if (nativePackageRoot && !(yield* fs.exists(nativePackageRoot))) {
     return yield* ScriptError.make({
       message: `${nativePackage} is not installed on this target build host. Run bun install before building.`,
     });
@@ -207,8 +210,17 @@ const build = Effect.gen(function* () {
     nativePackage,
     nativeRuntimeVersion,
   );
-  yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
-  yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
+  yield* fs.remove(path.join(nativeRuntimeRoot, 'native'), {recursive: true, force: true});
+  yield* fs.remove(path.join(outputRoot, 'llama', 'localBuilds'), {recursive: true, force: true});
+  if (nativePackageRoot) {
+    yield* fs.copy(path.join(nativePackageRoot, 'bins'), path.join(nativeRuntimeRoot, 'native'), {overwrite: true});
+    yield* fs.copyFile(path.join(nativePackageRoot, 'LICENSE'), path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'));
+  } else {
+    yield* fs.copyFile(
+      path.join(root, 'node_modules', NATIVE_RUNTIME_PACKAGE, 'LICENSE'),
+      path.join(nativeRuntimeRoot, 'NATIVE-LICENSE'),
+    );
+  }
   yield* fs.makeDirectory(path.join(outputRoot, 'llama'), {recursive: true});
   yield* fs.copyFile(
     path.join(root, 'node_modules', NATIVE_RUNTIME_PACKAGE, 'llama', 'binariesGithubRelease.json'),
@@ -230,7 +242,7 @@ const build = Effect.gen(function* () {
         executable: executableName,
         devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
-        nativeRuntimePackage: nativePackage,
+        nativeRuntimePackage: nativePackage ?? 'portable-local-build',
         runtime: `bun-${Bun.version}`,
         target,
         sourceIdentity: sourceIdentity ?? null,
@@ -325,7 +337,12 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
-function bundleNativeRuntime(entrypoint: string, outfile: string, nativePackage: string, nativeRuntimeVersion: string) {
+function bundleNativeRuntime(
+  entrypoint: string,
+  outfile: string,
+  nativePackage: string | undefined,
+  nativeRuntimeVersion: string,
+) {
   return runBunBuild({
     entrypoints: [entrypoint],
     minify: true,
@@ -383,8 +400,7 @@ function buildTarget(): Bun.Build.CompileTarget {
     }
     return configured;
   }
-  const platform = process.platform === 'win32' ? 'windows' : process.platform;
-  const inferred = `bun-${platform}-${process.arch}`;
+  const inferred = nativeVectorReaderHostProfile({platform: process.platform, architecture: process.arch});
   if (!isCompileTarget(inferred)) {
     throw ScriptError.make({message: `Unsupported Bun compile target for this host: ${inferred}.`});
   }
@@ -404,7 +420,8 @@ function assertNativeTargetMatchesHost(target: Bun.Build.CompileTarget): void {
   }
 }
 
-function nativePackageForTarget(target: Bun.Build.CompileTarget): string {
+function nativePackageForTarget(target: Bun.Build.CompileTarget): string | undefined {
+  if (EffectString.endsWith('-musl')(target)) return undefined;
   if (
     Effect2.pipe(target, EffectString.startsWith('bun-darwin-arm64')) ||
     Effect2.pipe(target, EffectString.startsWith('bun-darwin-aarch64'))

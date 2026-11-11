@@ -7,6 +7,13 @@ import {describe, expect} from 'vitest';
 import {CommandExecutor, runCommandEffect, type CommandOptions} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  nativeVectorReaderBuildEnvironmentSha256,
+  nativeVectorReaderHostProfile,
+  nativeVectorReaderTarget,
+} from '@threadnote/recall/vector/native-reader-payload';
+import {releaseTargetForBunTarget} from '../../../../scripts/release-targets.js';
+import {NATIVE_INFERENCE_LLAMA_COMMIT} from '../../../../scripts/native-inference-payload.js';
 import {archiveRelease} from '../../../../scripts/archive-release.js';
 import {extractGzipTar} from '../../src/effect/archive.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -45,8 +52,66 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: reado
   const extracted = path.join(root, 'extracted');
   yield* fs.makeDirectory(dist);
   yield* fs.makeDirectory(extracted);
+  const bunTarget = nativeVectorReaderHostProfile(system);
+  const target = releaseTargetForBunTarget(bunTarget);
+  const vectorBytes = new TextEncoder().encode('fixture-native-vector');
+  const nativeManifest = {
+    schemaVersion: 1,
+    binary: 'threadnote-vector-reader.node',
+    binarySha256: sha256HexSync(vectorBytes),
+    bunTarget,
+    development: false,
+    buildEnvironment: {compiler: 'fixture'},
+    buildInfo: {
+      protocolVersion: 2,
+      napiVersion: 6,
+      crateVersion: '0.1.0',
+      sqliteVersion: '3.54.1',
+      sqliteSourceId: 'fixture',
+      target: nativeVectorReaderTarget(bunTarget),
+      rustVersion: '1.89.0',
+      buildEnvironmentSha256: nativeVectorReaderBuildEnvironmentSha256({compiler: 'fixture'}),
+      crtStatic: system.platform === 'win32',
+      deploymentTarget: system.platform === 'darwin' ? '13.0' : '',
+      sourceCommit: EffectString.repeat(40)('a'),
+      sourceTree: EffectString.repeat(40)('b'),
+      lockSha256: EffectString.repeat(64)('c'),
+      toolchainSha256: EffectString.repeat(64)('d'),
+      sourceSha256: EffectString.repeat(64)('e'),
+    },
+  };
+  const inferenceFiles = [
+    {name: 'runtime/native/fixture.node', bytes: new TextEncoder().encode('fixture-inference-addon')},
+    {name: 'runtime/node-llama-cpp.js', bytes: new TextEncoder().encode('export {};')},
+  ];
+  const descriptor = {
+    schemaVersion: 1,
+    bunVersion: '1.4.4',
+    bunTarget,
+    packageVersion: '3.22.2',
+    llamaCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
+    sourceInputDigest: EffectString.repeat(64)('a'),
+    origin: 'locked-prebuilt',
+    toolchain: {bun: '1.4.4'},
+    files: EffectArray.map(inferenceFiles, file => ({
+      path: file.name,
+      sha256: sha256HexSync(file.bytes),
+      size: file.bytes.length,
+    })),
+  };
   const allFiles: readonly FixtureFile[] = [
-    {name: 'release.json', bytes: new TextEncoder().encode('{"version":"fixture"}\n')},
+    {name: 'release.json', bytes: new TextEncoder().encode(JSON.stringify({version: 'fixture', target: bunTarget}))},
+    ...inferenceFiles,
+    {name: 'native-inference.json', bytes: new TextEncoder().encode(JSON.stringify(descriptor))},
+    {name: 'runtime/vector-reader/threadnote-vector-reader.node', bytes: vectorBytes},
+    ...(EffectArray.some(files, file => file.name === 'runtime/vector-reader/manifest.json')
+      ? []
+      : [
+          {
+            name: 'runtime/vector-reader/manifest.json',
+            bytes: new TextEncoder().encode(JSON.stringify(nativeManifest)),
+          },
+        ]),
     ...files,
   ];
   for (const file of allFiles) {
@@ -55,7 +120,6 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: reado
     yield* fs.writeFile(destination, file.bytes);
     yield* fs.chmod(destination, file.executable ? 0o755 : 0o644);
   }
-  const target = `${system.platform === 'win32' ? 'windows' : system.platform}-${system.architecture}`;
   return {fs, path, system, root, dist, extracted, files: allFiles, target};
 });
 const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(function* (

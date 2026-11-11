@@ -1,7 +1,11 @@
 import {Effect, Semaphore} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {loadNativeVectorReader} from './native-reader-payload.js';
-import type {NativeVectorReadRequest, NativeVectorReaderBinding} from './native-reader-contract.js';
+import {
+  nativeVectorWireRequest,
+  type NativeVectorReadRequest,
+  type NativeVectorReaderBinding,
+} from './native-reader-contract.js';
 import {VectorIndexOperationError} from './scoring.js';
 
 // Each operation owns a connection and its queued task until the original Promise settles.
@@ -12,7 +16,7 @@ const operationError = (cause: unknown) =>
     message: cause instanceof Error ? cause.message : String(cause),
   });
 
-export const availableNativeVectorReader = Effect.gen(function* () {
+export const requiredNativeVectorReader = Effect.gen(function* () {
   const system = yield* SystemInfo;
   return yield* Effect.tryPromise({try: () => loadNativeVectorReader(system), catch: operationError});
 });
@@ -27,7 +31,7 @@ export const runNativeVectorRead = (
       Effect.gen(function* () {
         const token = yield* Effect.try({try: () => new binding.CancellationToken(), catch: operationError});
         // Copy before queueing: a caller cannot mutate any native-owned input in flight.
-        const ownedRequest = structuredClone(request);
+        const ownedRequest = nativeVectorWireRequest(request);
         const ownedQuery = query === undefined ? undefined : new Float64Array(query);
         const original = yield* Effect.try({
           try: () => ({promise: binding.readSelected(ownedRequest, ownedQuery, token)}),

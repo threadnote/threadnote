@@ -51,21 +51,57 @@ jobs:
           bun --bun vitest run
           packages/workflow-automations/test/inventory.test.ts
           packages/workflow-automations/test/baseline.test.ts
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
       - name: Install pinned native vector toolchain
-        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
         run: rustup toolchain install 1.89.0 --profile minimal
       - name: Build native payload
+        if: runner.os != 'Linux'
         run: bun run build:release
+        env:
+          THREADNOTE_BUILD_TARGET: ${{ inputs.target == 'windows-x64' && 'bun-windows-x64-baseline' || format('bun-{0}', inputs.target) }}
+      - name: Build GNU payload at the preserved libc floor
+        if: runner.os == 'Linux' && !endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bash", "-ec", "set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/vector-native-read-boundary.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]'
+      - name: Build musl payload at the preserved libc floor
+        if: endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash", "-ec", "set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/vector-native-read-boundary.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]'
       - name: Verify bundled vector reader
-        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
+        if: runner.os != 'Linux'
         run: bun scripts/verify-native-vector-reader.ts --required
       - name: Exercise Rust through the production ready-read worker
-        if: inputs.target == 'darwin-arm64' || inputs.target == 'linux-x64'
-        run: bun --bun vitest run apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+        if: runner.os != 'Linux'
+        run: >-
+          bun --bun vitest run
+          packages/recall/test/unit/native-vector-reader.test.ts
+          packages/recall/test/background-vector-step.test.ts
+          apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+          apps/threadnote/test/unit/vector-index.test.ts
+          apps/threadnote/test/unit/vector-index.eligibility.test.ts
+          packages/recall/test/unit/vector-scope-upgrade.test.ts
+          apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts
         env:
+          THREADNOTE_NATIVE_VECTOR_READER_REQUIRED: '1'
           THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
           THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
       - name: Self-contained native smoke
+        if: runner.os != 'Linux'
         run: bun scripts/smoke-self-contained.ts
       - name: Archive the native release
         run: bun run archive:release
@@ -78,6 +114,7 @@ jobs:
           if-no-files-found: error
 
   installed-e2e:
+    if: ${{ !endsWith(inputs.target, '-musl') }}
     name: Installed release E2E
     needs: build
     runs-on: ${{ inputs.runner }}

@@ -1,3 +1,4 @@
+import {finalizeNativeInferenceOverlay} from './native-inference-payload.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Path} from 'effect';
@@ -21,6 +22,7 @@ export const finalizeNativeVectorReader = Effect.fn('finalizeNativeVectorReader'
       publishNativeReaderManifest(directory, {
         bunTarget: manifest.bunTarget,
         development: manifest.development,
+        buildEnvironment: manifest.buildEnvironment,
         buildInfo: manifest.buildInfo,
       }),
     catch: scriptError,
@@ -30,7 +32,9 @@ export const finalizeNativeVectorReader = Effect.fn('finalizeNativeVectorReader'
 if (import.meta.main) {
   const main = Effect.gen(function* () {
     const path = yield* Path.Path;
-    return yield* finalizeNativeVectorReader(yield* path.fromFileUrl(new URL('..', import.meta.url)));
+    const root = yield* path.fromFileUrl(new URL('..', import.meta.url));
+    yield* finalizeNativeVectorReader(root);
+    yield* finalizeNativeInferenceOverlay(path.join(root, 'dist'));
   });
   BunRuntime.runMain(provideScriptLayer(main, BunServices.layer));
 }

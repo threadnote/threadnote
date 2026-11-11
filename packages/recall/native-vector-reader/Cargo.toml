@@ -10,6 +10,7 @@ license = "AGPL-3.0-or-later"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+sha2 = { version = "=0.11.1", default-features = false }
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "hooks"] }
 libsqlite3-sys = { version = "=0.39.1", default-features = false, features = ["bundled"] }
 napi = { version = "=3.16.2", default-features = false, features = ["napi6"] }

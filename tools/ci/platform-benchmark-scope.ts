@@ -63,6 +63,8 @@ const CODE_GRAPH_PATHS = new Set([
 ]);
 
 const SHARED_PATHS = new Set([
+  'scripts/windows-process-tree-sampler.ts',
+  'scripts/windows-process-tree-sampler.ps1',
   'packages/platform/src/command.ts',
   'packages/platform/src/digest.ts',
   'apps/threadnote/src/effect/runtime.ts',

@@ -45,7 +45,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 
-const hasNativeVectorReader = process.env.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST !== undefined;
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 const manifest = Option.getOrThrow(
   EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, value => value.id === 'bge-small-en-v1.5-q8'),
 );
@@ -176,13 +176,10 @@ const installSynchronousScoringStall = (database: string, stall = true) =>
     const db = new Database(database);
     try {
       db.exec('ALTER TABLE vector_values RENAME TO fixture_vector_values');
-      const native = hasNativeVectorReader;
-      const entered = native ? '0' : 'fixture_native_entered()';
+      const entered = '0';
       const expression = stall
         ? `(WITH RECURSIVE n(x) AS (VALUES(${entered}) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)>0`
-        : native
-          ? '1'
-          : 'fixture_native_entered()=1';
+        : '1';
       db.exec(`CREATE VIEW vector_values AS SELECT id, vector_key, vector FROM fixture_vector_values
         WHERE CASE WHEN (SELECT timeout FROM pragma_busy_timeout)=50 THEN (${expression}) ELSE json('wrong-vector-busy-timeout') END`);
     } finally {
@@ -190,14 +187,13 @@ const installSynchronousScoringStall = (database: string, stall = true) =>
     }
   });
 
-// Observe the actual native addon export when available. The TS fallback keeps
-// its SQLite scalar seam; neither branch adds instrumentation to production code.
+// Observe the actual addon export without instrumentation in production code.
 const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
   Effect.gen(function* () {
     const script = f.path.join(f.home, 'observed-vector-worker.ts');
     const entered = f.path.join(f.home, 'native-query-entered.pid');
     const timeoutFile = f.path.join(f.home, 'native-query-timeout.json');
-    const native = hasNativeVectorReader;
+    const native = true;
     yield* f.fs.writeFileString(
       script,
       `
@@ -234,24 +230,6 @@ if (${native}) {
       };
     }
     return result;
-  };
-} else {
-  const original = Database.prototype.query;
-  const registered = new WeakSet();
-  Database.prototype.query = function(sql) {
-    if (!registered.has(this)) {
-      this.function('fixture_native_entered', () => {
-        const entered = ${JSON.stringify(entered)};
-        writeFileSync(entered + '.tmp', String(process.pid));
-        renameSync(entered + '.tmp', entered);
-        promoteGeneration();
-        return 1;
-      });
-      registered.add(this);
-    }
-    if (sql.includes('FROM vector_chunks AS chunk') && sql.includes('JOIN vector_values'))
-      writeFileSync(${JSON.stringify(timeoutFile)}, JSON.stringify(original.call(this, 'PRAGMA busy_timeout').get()));
-    return original.call(this, sql);
   };
 }
 // Invoke the same narrow main as the ordinary source read worker. Importing
@@ -293,7 +271,7 @@ const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
     return pid;
   });
 
-describe.skipIf(!hasNativeVectorReader)('bundled native vector capability', () => {
+describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', () => {
   effectIt.effect(
     'executes the actual production worker with canonical validation through Rust SQLite',
     () =>
@@ -327,7 +305,7 @@ describe.skipIf(!hasNativeVectorReader)('bundled native vector capability', () =
   );
 });
 
-describe('model-free native vector reads', () => {
+describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () => {
   effectIt.effect(
     'the closing vector fence rejects promotion at the actual scoring boundary',
     () =>

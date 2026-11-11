@@ -1,14 +1,18 @@
 import {Array as EffectArray, Record as EffectRecord, String as EffectString} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
+  loadNativeVectorReader,
   nativeVectorReaderTarget,
   parseNativeVectorReaderManifest,
+  nativeVectorReaderBuildEnvironmentSha256,
   sameNativeVectorReaderBuildInfo,
 } from '../../src/vector/native-reader-payload.js';
 
 const buildInfo = {
-  protocolVersion: 1,
+  protocolVersion: 2,
   napiVersion: 6,
+  crtStatic: false,
+  deploymentTarget: '13.0',
   crateVersion: '0.1.0',
   sqliteVersion: '3.54.1',
   sqliteSourceId: 'sqlite-source-id',
@@ -18,6 +22,7 @@ const buildInfo = {
   sourceTree: EffectString.repeat(40)('b'),
   lockSha256: EffectString.repeat(64)('c'),
   toolchainSha256: EffectString.repeat(64)('c'),
+  buildEnvironmentSha256: nativeVectorReaderBuildEnvironmentSha256({compiler: 'fixture'}),
   sourceSha256: EffectString.repeat(64)('d'),
 } as const;
 const manifest = {
@@ -27,22 +32,46 @@ const manifest = {
   bunTarget: 'bun-darwin-arm64',
   development: true,
   sourceRoot: '/test-checkout',
+  buildEnvironment: {compiler: 'fixture'},
   buildInfo,
 };
 
 describe('native vector payload contract', () => {
-  it('maps only adopted native targets and keeps GNU distinct from musl', () => {
-    expect(nativeVectorReaderTarget('bun-darwin-arm64')).toBe('aarch64-apple-darwin');
-    expect(nativeVectorReaderTarget('bun-linux-x64-baseline')).toBe('x86_64-unknown-linux-gnu');
-    for (const target of [
-      'bun-darwin-x64',
-      'bun-linux-arm64',
-      'bun-linux-arm64-musl',
-      'bun-linux-x64-baseline-musl',
-      'bun-windows-arm64',
-      'bun-windows-x64-baseline',
-    ])
-      expect(nativeVectorReaderTarget(target)).toBeUndefined();
+  it('fails missing required source capability before attempting native execution', async () => {
+    const system = {
+      platform: 'darwin' as const,
+      architecture: 'arm64',
+      executablePath: '/test/bun',
+      environment: () => ({}),
+    };
+    await expect(loadNativeVectorReader(system)).rejects.toThrow('Required native vector reader');
+  });
+  it('maps all eight verified target profiles and keeps GNU distinct from musl', () => {
+    expect(
+      EffectArray.map(
+        [
+          'bun-darwin-arm64',
+          'bun-darwin-x64',
+          'bun-linux-arm64',
+          'bun-linux-arm64-musl',
+          'bun-linux-x64-baseline',
+          'bun-linux-x64-baseline-musl',
+          'bun-windows-arm64',
+          'bun-windows-x64-baseline',
+        ],
+        nativeVectorReaderTarget,
+      ),
+    ).toEqual([
+      'aarch64-apple-darwin',
+      'x86_64-apple-darwin',
+      'aarch64-unknown-linux-gnu',
+      'aarch64-unknown-linux-musl',
+      'x86_64-unknown-linux-gnu',
+      'x86_64-unknown-linux-musl',
+      'aarch64-pc-windows-msvc',
+      'x86_64-pc-windows-msvc',
+    ]);
+    expect(nativeVectorReaderTarget('unknown')).toBeUndefined();
   });
   it('requires target, ABI, source and binary identity', () => {
     expect(parseNativeVectorReaderManifest(manifest)).toEqual(manifest);
@@ -54,7 +83,7 @@ describe('native vector payload contract', () => {
       ...EffectArray.map(
         [
           {napiVersion: 5},
-          {protocolVersion: 2},
+          {protocolVersion: 1},
           {rustVersion: '1.90.0'},
           {sqliteVersion: '3.54.0'},
           {sourceCommit: 'development'},

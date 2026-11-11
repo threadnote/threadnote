@@ -1,5 +1,6 @@
 //! Recall's private selected-vector read. SQLite rows and resources remain native-owned.
 mod db;
+mod legacy_numeric;
 mod protocol;
 mod scoring;
 
@@ -128,6 +129,10 @@ pub fn build_info() -> NativeBuildInfo {
     NativeBuildInfo {
         protocol_version: PROTOCOL_VERSION,
         napi_version: 6,
+        crt_static: cfg!(target_feature = "crt-static"),
+        deployment_target: option_env!("THREADNOTE_NATIVE_DEPLOYMENT_TARGET")
+            .unwrap_or("")
+            .into(),
         crate_version: env!("CARGO_PKG_VERSION").into(),
         sqlite_version: rusqlite::version().into(),
         sqlite_source_id: rusqlite::Connection::open_in_memory()
@@ -139,6 +144,7 @@ pub fn build_info() -> NativeBuildInfo {
         source_tree: env!("THREADNOTE_NATIVE_SOURCE_TREE").into(),
         lock_sha256: env!("THREADNOTE_NATIVE_LOCK_SHA256").into(),
         toolchain_sha256: env!("THREADNOTE_NATIVE_TOOLCHAIN_SHA256").into(),
+        build_environment_sha256: env!("THREADNOTE_NATIVE_BUILD_ENVIRONMENT_SHA256").into(),
         source_sha256: env!("THREADNOTE_NATIVE_SOURCE_SHA256").into(),
     }
 }

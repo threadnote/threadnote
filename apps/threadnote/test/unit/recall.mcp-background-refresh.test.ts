@@ -1,3 +1,4 @@
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {EffectMcpServerRegistry} from '@threadnote/threadnote/effect/ai/mcp';
 import {registerStoreTool} from '@threadnote/threadnote/mcp/server/store';
 import {
@@ -904,166 +905,172 @@ describe('MCP recall background vector refresh', () => {
       }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  fcEffectProp(
-    effectIt,
-    'returns promptly and single-flights every bounded number of concurrent refreshes for one canonical home',
-    {callers: FC.integer({max: 24, min: 2})},
-    ({callers}) => concurrentRefreshFixture(callers),
-    {fastCheck: {numRuns: 8}},
-  );
-  effectIt.effect('fixed20 concurrent refresh diagnostic fixture preserves durable intent', () =>
-    concurrentRefreshFixture(20),
-  );
+  describe.skipIf(!nativeVectorTestsEnabled)('native semantic refresh qualification', () => {
+    fcEffectProp(
+      effectIt,
+      'returns promptly and single-flights every bounded number of concurrent refreshes for one canonical home',
+      {callers: FC.integer({max: 24, min: 2})},
+      ({callers}) => concurrentRefreshFixture(callers),
+      {fastCheck: {numRuns: 8}},
+    );
+    effectIt.effect('fixed20 concurrent refresh diagnostic fixture preserves durable intent', () =>
+      concurrentRefreshFixture(20),
+    );
 
-  effectIt.effect('builds missing lexical and vector indexes after a non-blocking first-use request', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-first-use-');
-        const config = {account: 'local', agentContextHome: home, user: 'tester'};
-        const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'first-use.md');
-        yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-        yield* fs.writeFileString(resource, '# First use\n\nFirst-use semantic content.\n');
-        const calls = yield* Ref.make(0);
-        const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.update(calls, count => count + 1).pipe(Effect.as(EffectArray.map(inputs, () => unitVector(dimensions)))),
-        );
-
-        yield* Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-          expect(yield* recallIndexStatus(config)).toMatchObject({
-            ready: false,
-            reason: 'not built; run `threadnote repair`',
-          });
-
-          const first = yield* loadMcpRecallSemanticScoresResult(config, 'first-use semantic content', 5);
-          expect(first.status).toBe('unavailable');
-          expect(Option.getOrUndefined(first.result.warning)).toContain('background refresh');
-          const generation = yield* awaitRefreshedRecallReadiness(config);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, generation)).toBe('current');
-
-          const second = yield* loadMcpRecallSemanticScoresResult(config, 'first-use semantic content', 5);
-          expect(second.status).toBe('available');
-          expect(yield* Ref.get(calls)).toBeGreaterThanOrEqual(2);
-        }).pipe(
-          Effect.provideService(LocalModelRuntime, runtime),
-          Effect.provideService(LocalModelStore, installedModelStore(home)),
-        );
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
-  );
-
-  effectIt.effect('retains durable demand after a failed unit so another worker turn can retry', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-retry-');
-        const config = {account: 'local', agentContextHome: home, user: 'tester'};
-        const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'retry.md');
-        yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-        yield* fs.writeFileString(resource, '# Retry\n\nRetry semantic content.\n');
-        const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-
-        const calls = yield* Ref.make(0);
-        const firstAttempted = yield* Deferred.make<void>();
-        const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.updateAndGet(calls, count => count + 1).pipe(
-            Effect.flatMap(call =>
-              call === 1
-                ? Deferred.succeed(firstAttempted, undefined).pipe(
-                    Effect.andThen(
-                      Effect.fail(
-                        EmbeddingFailed.make({
-                          cause: TestError.make({message: 'synthetic background refresh failure'}),
-                          message: 'Synthetic background refresh failure.',
-                          modelId: manifest.id,
-                        }),
-                      ),
-                    ),
-                  )
-                : Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+    effectIt.effect('builds missing lexical and vector indexes after a non-blocking first-use request', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-first-use-');
+          const config = {account: 'local', agentContextHome: home, user: 'tester'};
+          const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'first-use.md');
+          yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+          yield* fs.writeFileString(resource, '# First use\n\nFirst-use semantic content.\n');
+          const calls = yield* Ref.make(0);
+          const runtime = fakeRuntime((inputs, dimensions) =>
+            Ref.update(calls, count => count + 1).pipe(
+              Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
             ),
-          ),
-        );
+          );
 
-        yield* Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-          const first = yield* loadMcpRecallSemanticScoresResult(config, 'retry semantic content', 5);
-          expect(first.status).toBe('unavailable');
-          const worker = yield* finishQueuedRecall(config).pipe(Effect.forkScoped);
-          yield* Deferred.await(firstAttempted);
-          yield* Effect.forEach(Array.from({length: 20}), () => Effect.yieldNow, {discard: true});
+          yield* Effect.gen(function* () {
+            const catalog = yield* LocalModelCatalog;
+            yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+            expect(yield* recallIndexStatus(config)).toMatchObject({
+              ready: false,
+              reason: 'not built; run `threadnote repair`',
+            });
 
-          yield* Fiber.join(worker);
-          const second = yield* loadMcpRecallSemanticScoresResult(config, 'retry semantic content', 5);
-          expect(second.status).toBe('available');
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('current');
-          expect(yield* Ref.get(calls)).toBe(3);
-        }).pipe(
-          Effect.provideService(LocalModelRuntime, runtime),
-          Effect.provideService(LocalModelStore, installedModelStore(home)),
-        );
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
-  );
+            const first = yield* loadMcpRecallSemanticScoresResult(config, 'first-use semantic content', 5);
+            expect(first.status).toBe('unavailable');
+            expect(Option.getOrUndefined(first.result.warning)).toContain('background refresh');
+            const generation = yield* awaitRefreshedRecallReadiness(config);
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, generation)).toBe('current');
 
-  effectIt.effect('leaves corrupt vector rows untouched and never schedules repair', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-recall-corrupt-'});
-        const config = {account: 'local', agentContextHome: home, user: 'tester'};
-        const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'corrupt.md');
-        yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-        yield* fs.writeFileString(resource, '# Corrupt\n\nCorrupt semantic content.\n');
-        const calls = yield* Ref.make(0);
-        const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.update(calls, count => count + 1).pipe(Effect.as(EffectArray.map(inputs, () => unitVector(dimensions)))),
-        );
+            const second = yield* loadMcpRecallSemanticScoresResult(config, 'first-use semantic content', 5);
+            expect(second.status).toBe('available');
+            expect(yield* Ref.get(calls)).toBeGreaterThanOrEqual(2);
+          }).pipe(
+            Effect.provideService(LocalModelRuntime, runtime),
+            Effect.provideService(LocalModelStore, installedModelStore(home)),
+          );
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
 
-        yield* Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+    effectIt.effect('retains durable demand after a failed unit so another worker turn can retry', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* makeDetachedRefreshFixtureHome(fs, 'threadnote-mcp-recall-retry-');
+          const config = {account: 'local', agentContextHome: home, user: 'tester'};
+          const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'retry.md');
+          yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+          yield* fs.writeFileString(resource, '# Retry\n\nRetry semantic content.\n');
           const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-          yield* ensureVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
-          const databasePath = path.join(home, 'indexes', 'vectors', manifest.id, vectorIndexDatabaseFilename());
-          yield* Effect.sync(() => {
-            const database = new Database(databasePath);
-            try {
-              database.exec('UPDATE vector_values SET vector = zeroblob(4)');
-            } finally {
-              database.close();
-            }
-          });
 
-          const result = yield* loadMcpRecallSemanticScoresResult(config, 'corrupt semantic content', 5);
-          expect(result.status).toBe('failed');
-          expect(Option.getOrUndefined(result.result.warning)).toContain('deterministic lexical recall continued');
-          yield* Effect.forEach(Array.from({length: 50}), () => Effect.yieldNow, {discard: true});
-          expect(yield* Ref.get(calls)).toBe(2);
-          expect((yield* vectorIndexStatus(home, manifest)).ready).toBe(false);
-          expect(
+          const calls = yield* Ref.make(0);
+          const firstAttempted = yield* Deferred.make<void>();
+          const runtime = fakeRuntime((inputs, dimensions) =>
+            Ref.updateAndGet(calls, count => count + 1).pipe(
+              Effect.flatMap(call =>
+                call === 1
+                  ? Deferred.succeed(firstAttempted, undefined).pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          EmbeddingFailed.make({
+                            cause: TestError.make({message: 'synthetic background refresh failure'}),
+                            message: 'Synthetic background refresh failure.',
+                            modelId: manifest.id,
+                          }),
+                        ),
+                      ),
+                    )
+                  : Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+              ),
+            ),
+          );
+
+          yield* Effect.gen(function* () {
+            const catalog = yield* LocalModelCatalog;
+            yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+            const first = yield* loadMcpRecallSemanticScoresResult(config, 'retry semantic content', 5);
+            expect(first.status).toBe('unavailable');
+            const worker = yield* finishQueuedRecall(config).pipe(Effect.forkScoped);
+            yield* Deferred.await(firstAttempted);
+            yield* Effect.forEach(Array.from({length: 20}), () => Effect.yieldNow, {discard: true});
+
+            yield* Fiber.join(worker);
+            const second = yield* loadMcpRecallSemanticScoresResult(config, 'retry semantic content', 5);
+            expect(second.status).toBe('available');
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('current');
+            expect(yield* Ref.get(calls)).toBe(3);
+          }).pipe(
+            Effect.provideService(LocalModelRuntime, runtime),
+            Effect.provideService(LocalModelStore, installedModelStore(home)),
+          );
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+
+    effectIt.effect('leaves corrupt vector rows untouched and never schedules repair', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-recall-corrupt-'});
+          const config = {account: 'local', agentContextHome: home, user: 'tester'};
+          const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'corrupt.md');
+          yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+          yield* fs.writeFileString(resource, '# Corrupt\n\nCorrupt semantic content.\n');
+          const calls = yield* Ref.make(0);
+          const runtime = fakeRuntime((inputs, dimensions) =>
+            Ref.update(calls, count => count + 1).pipe(
+              Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
+            ),
+          );
+
+          yield* Effect.gen(function* () {
+            const catalog = yield* LocalModelCatalog;
+            yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+            const index = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+            yield* ensureVectorIndex(config, manifest, index.candidates, {corpusGeneration: index.generation});
+            const databasePath = path.join(home, 'indexes', 'vectors', manifest.id, vectorIndexDatabaseFilename());
             yield* Effect.sync(() => {
-              const database = new Database(databasePath, {readonly: true});
+              const database = new Database(databasePath);
               try {
-                return database.query('SELECT length(vector) AS bytes FROM vector_values').get();
+                database.exec('UPDATE vector_values SET vector = zeroblob(4)');
               } finally {
                 database.close();
               }
-            }),
-          ).toEqual({bytes: 4});
-        }).pipe(
-          Effect.provideService(LocalModelRuntime, runtime),
-          Effect.provideService(LocalModelStore, installedModelStore(home)),
-        );
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
-  );
+            });
+
+            const result = yield* loadMcpRecallSemanticScoresResult(config, 'corrupt semantic content', 5);
+            expect(result.status).toBe('failed');
+            expect(Option.getOrUndefined(result.result.warning)).toContain('deterministic lexical recall continued');
+            yield* Effect.forEach(Array.from({length: 50}), () => Effect.yieldNow, {discard: true});
+            expect(yield* Ref.get(calls)).toBe(2);
+            expect((yield* vectorIndexStatus(home, manifest)).ready).toBe(false);
+            expect(
+              yield* Effect.sync(() => {
+                const database = new Database(databasePath, {readonly: true});
+                try {
+                  return database.query('SELECT length(vector) AS bytes FROM vector_values').get();
+                } finally {
+                  database.close();
+                }
+              }),
+            ).toEqual({bytes: 4});
+          }).pipe(
+            Effect.provideService(LocalModelRuntime, runtime),
+            Effect.provideService(LocalModelStore, installedModelStore(home)),
+          );
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  });
 });
 
 /** Observe full result materialization separately from the required lexical scan and update. */

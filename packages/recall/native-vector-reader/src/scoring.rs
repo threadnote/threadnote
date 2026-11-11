@@ -1,12 +1,12 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Hit {
     pub uri: String,
     pub score: f64,
     // JavaScript orders strings by UTF-16 code units, not UTF-8 or Unicode scalar value.
-    key: Vec<u16>,
+    pub(crate) key: Vec<u16>,
 }
 
 impl Hit {
@@ -34,7 +34,10 @@ impl Ord for Hit {
         (if self.score == other.score {
             Ordering::Equal
         } else {
-            other.score.total_cmp(&self.score)
+            other
+                .score
+                .partial_cmp(&self.score)
+                .expect("NaN uses the legacy replay sorter")
         })
         .then(self.key.cmp(&other.key))
     }

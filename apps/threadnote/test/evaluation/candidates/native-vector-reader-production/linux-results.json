@@ -5,5 +5,5 @@
   "qualified": false,
   "capturedCandidate": null,
   "captures": [],
-  "reason": "Formal Linux qualification has not run. The default-off manual workflow can capture the four serial cases against a built strict payload and a cached SHA-verified BGE model; workflow existence is not performance evidence."
+  "reason": "Native-only Linux GNU and musl ARM64/x64 qualification has not run. Each profile requires its own frozen TS66 semantic baseline with the same genuine staged inference closure and SHA-verified cached model, serial paired cases and complete process-tree RSS. An unavailable musl real-inference build blocks qualification."
 }

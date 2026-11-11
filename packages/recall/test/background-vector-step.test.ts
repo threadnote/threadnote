@@ -1,3 +1,4 @@
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import * as ExternalResources from '@threadnote/store/external-resource';
 import {loadRecallVectorAuthorizationKey} from '../src/vector/preparation-identity.js';
 import {cryptoLayer} from '@threadnote/platform/crypto';
@@ -623,11 +624,15 @@ describe('resumable recall vector preparation', () => {
       const before = f.inputs();
       yield* f.finish;
       expect(f.inputs()).toBe(before);
-      const scores = yield* selectedSemanticScores(f.config, 'bounded').pipe(
-        Effect.provideService(LocalModelStore, f.store),
-        Effect.provideService(LocalModelRuntime, f.runtime),
-      );
-      expect(scores?.size).toBe(1);
+      // The same completed fixture proves actual Rust readability in the required
+      // addon lane; hermetic runs retain every preparation and reuse assertion.
+      if (nativeVectorTestsEnabled) {
+        const scores = yield* selectedSemanticScores(f.config, 'bounded').pipe(
+          Effect.provideService(LocalModelStore, f.store),
+          Effect.provideService(LocalModelRuntime, f.runtime),
+        );
+        expect(scores?.size).toBe(1);
+      }
     }).pipe(provideFixtureLayer(platform)),
   );
   fcEffectProp(
@@ -776,10 +781,10 @@ describe('resumable recall vector preparation', () => {
             }
           })();
           const uriPlan = db
-            .query<{detail: string}, [string, string]>('EXPLAIN QUERY PLAN ' + uriLookup)
+            .query<{detail: string}, [string, string]>('EXPLAIN QUERY PLAN ' + String(uriLookup))
             .all(row.generation, JSON.parse(row.candidate_json).uri);
           const chunkPlan = db
-            .query<{detail: string}, [string, string]>('EXPLAIN QUERY PLAN ' + chunkLookup)
+            .query<{detail: string}, [string, string]>('EXPLAIN QUERY PLAN ' + String(chunkLookup))
             .all(row.generation, '');
           expect(
             EffectArray.some(uriPlan, row =>

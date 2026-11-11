@@ -24,7 +24,8 @@
     "./process-environment": "./src/process-environment.ts",
     "./test-error": "./src/test-error.ts",
     "./windows-command-launcher": "./src/windows-command-launcher.ts",
-    "./node-stream": "./src/node-stream.ts"
+    "./node-stream": "./src/node-stream.ts",
+    "./native-vector-fixture": "./src/native-vector-fixture.ts"
   },
   "dependencies": {
     "@effect/vitest": "4.1.2",

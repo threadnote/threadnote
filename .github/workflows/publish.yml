@@ -104,7 +104,7 @@ jobs:
         run: bun run test:smoke:release
 
   linux:
-    name: Linux · ${{ matrix.architecture }}
+    name: Linux · ${{ matrix.architecture }} · ${{ matrix.libc }}
     if: github.event_name == 'push'
     needs: verify
     runs-on: ${{ matrix.runner }}
@@ -113,11 +113,25 @@ jobs:
       matrix:
         include:
           - architecture: x64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: bun-linux-x64-baseline
+            libc: gnu
+            suffix: ''
           - architecture: arm64
             runner: ubuntu-24.04-arm
             target: bun-linux-arm64
+            libc: gnu
+            suffix: ''
+          - architecture: x64
+            runner: ubuntu-24.04
+            target: bun-linux-x64-baseline-musl
+            libc: musl
+            suffix: -musl
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            target: bun-linux-arm64-musl
+            libc: musl
+            suffix: -musl
 
     steps:
       - uses: actions/checkout@v7
@@ -152,13 +166,21 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
-        if: matrix.architecture == 'x64'
         run: rustup toolchain install 1.89.0 --profile minimal
-      - run: bun run build:release
+      - name: Build GNU release at the preserved libc floor
+        if: matrix.libc == 'gnu'
+        run: bun scripts/assemble-native-inference.ts --gnu-container
+      - name: Build and load musl release at the preserved libc floor
+        if: matrix.libc == 'musl'
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container
+          --container-command-json '["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]'
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}
-      - run: ./dist/threadnote --version
+      - if: matrix.libc == 'gnu'
+        run: ./dist/threadnote --version
       - name: Prepare strict doctor fixture
+        if: matrix.libc == 'gnu'
         shell: bash
         env:
           CI: '1'
@@ -171,6 +193,7 @@ jobs:
           mkdir -p "$HOME"
           ./dist/threadnote --home "$THREADNOTE_HOME" install --no-start
       - name: Verify release with strict read-only doctor
+        if: matrix.libc == 'gnu'
         env:
           CI: '1'
           HOME: ${{ runner.temp }}/threadnote-release-user
@@ -179,14 +202,15 @@ jobs:
           THREADNOTE_INSTALL_ROOT: ${{ runner.temp }}/threadnote-release-install
         run: ./dist/threadnote --home "$THREADNOTE_HOME" doctor --dry-run --strict
       - name: Produce a real embedding with the release payload
+        if: matrix.libc == 'gnu'
         run: bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts
       - run: bun run archive:release
         env:
-          THREADNOTE_RELEASE_TARGET: linux-${{ matrix.architecture }}
+          THREADNOTE_RELEASE_TARGET: linux-${{ matrix.architecture }}${{ matrix.suffix }}
 
       - uses: actions/upload-artifact@v7
         with:
-          name: release-linux-${{ matrix.architecture }}
+          name: release-linux-${{ matrix.architecture }}${{ matrix.suffix }}
           path: artifacts/
           if-no-files-found: error
 
@@ -238,7 +262,6 @@ jobs:
 
       - run: bun install --frozen-lockfile
       - name: Install pinned native vector toolchain
-        if: matrix.architecture == 'arm64'
         run: rustup toolchain install 1.89.0 --profile minimal
       - run: bun run build:release
         env:
@@ -309,7 +332,7 @@ jobs:
               codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$native_file"
               codesign --verify --strict --verbose=2 "$native_file"
             fi
-          done < <(find dist/runtime -type f -print0)
+          done < <(find dist/runtime dist/llama -type f -print0)
           codesign \
             --force \
             --options runtime \
@@ -428,6 +451,22 @@ jobs:
             throw "Bun baseline compiler backend was not preloaded."
           }
 
+      - name: Initialize native Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (!$installation) { throw 'Visual Studio native build tools are required.' }
+          Import-Module "$installation\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments "-arch=$architecture -host_arch=$architecture"
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Install pinned native vector toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
       - run: bun run build:release
         env:
           THREADNOTE_BUILD_TARGET: ${{ matrix.target }}

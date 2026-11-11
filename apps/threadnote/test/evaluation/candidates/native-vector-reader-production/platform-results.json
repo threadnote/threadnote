@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "status": "pending",
+  "qualified": false,
+  "baselineCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+  "capturedCandidate": null,
+  "profiles": [
+    {
+      "target": "bun-darwin-arm64",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-darwin-x64",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-linux-arm64",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-linux-arm64-musl",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-linux-x64-baseline",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-linux-x64-baseline-musl",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-windows-arm64",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    },
+    {
+      "target": "bun-windows-x64-baseline",
+      "status": "not-run",
+      "qualified": false,
+      "completedCases": [],
+      "captures": []
+    }
+  ],
+  "requiredCases": ["100000-dense", "100000-tied", "10000-dense", "10000-tied"],
+  "reason": "All eight profiles require actual matching native-host evidence, exact baseline/candidate/query/oracle provenance, three paired runs of thirty warm requests per arm, separate first use and complete recursive process-tree RSS. Workflow declarations and cross-compiles do not qualify."
+}

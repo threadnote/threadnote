@@ -184,7 +184,6 @@ export const serveRecallReadyRead = Effect.fn('recall.serveReadyRead')(function*
             currentCorpusGeneration: () => currentRecallCorpusGeneration(request.config),
           },
           true,
-          true,
         );
         return value === undefined ? undefined : EffectArray.fromIterable(value);
       }

@@ -2,20 +2,24 @@ import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, String as EffectString} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {loadNativeVectorReader, verifyNativeVectorReaderPayload} from '@threadnote/recall/vector/native-reader-payload';
+import {
+  nativeVectorReaderBuildEnvironmentSha256,
+  loadNativeVectorReader,
+  verifyNativeVectorReaderPayload,
+} from '@threadnote/recall/vector/native-reader-payload';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {platformPathFor} from '@threadnote/platform/system';
 
 describe('native reader filesystem payload boundary', () => {
-  it('leaves ordinary source execution on TypeScript without explicit selection', async () => {
-    expect(
-      await loadNativeVectorReader({
+  it('requires explicit developer bootstrap before source reads', async () => {
+    await expect(
+      loadNativeVectorReader({
         platform: 'darwin',
         architecture: 'arm64',
         executablePath: '/usr/bin/bun',
         environment: () => ({}),
       }),
-    ).toBeUndefined();
+    ).rejects.toThrow('native:bootstrap');
   });
   it('rejects missing advertised source artifacts', async () => {
     await expect(
@@ -42,15 +46,19 @@ describe('native reader filesystem payload boundary', () => {
           binarySha256: sha256HexSync('test-native-bytes'),
           bunTarget: 'bun-darwin-arm64',
           development: true,
+          buildEnvironment: {compiler: 'fixture'},
           sourceRoot: '/test-checkout',
           buildInfo: {
-            protocolVersion: 1,
+            protocolVersion: 2,
             napiVersion: 6,
             crateVersion: '0.1.0',
             sqliteVersion: '3.54.1',
             sqliteSourceId: 'id',
             target: 'aarch64-apple-darwin',
             rustVersion: '1.89.0',
+            buildEnvironmentSha256: nativeVectorReaderBuildEnvironmentSha256({compiler: 'fixture'}),
+            crtStatic: false,
+            deploymentTarget: '13.0',
             sourceCommit: EffectString.repeat(40)('a'),
             sourceTree: EffectString.repeat(40)('b'),
             lockSha256: EffectString.repeat(64)('c'),

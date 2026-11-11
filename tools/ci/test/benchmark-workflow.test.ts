@@ -1,3 +1,4 @@
+import {NATIVE_VECTOR_PROFILES} from '@threadnote/evidence/native-performance';
 import {Array as EffectArray, Option, Predicate, Schema} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import fc from 'fast-check';
@@ -140,6 +141,80 @@ function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: 
 }
 
 describe('platform benchmark workflow', () => {
+  it('keeps native-only vector capture manual, serial and bound to all eight native hosts', () => {
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const input = Schema.decodeUnknownSync(
+      Schema.Struct({default: Schema.Literal(false), type: Schema.Literal('boolean')}),
+    )(workflow.on.workflow_dispatch?.inputs?.include_native_recall_vector_capture);
+    expect(input.default).toBe(false);
+    const job = workflow.jobs['recall-vector-native'];
+    expect(job.if).toBe("github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture");
+    expect(job['timeout-minutes']).toBe(45);
+    expect(job.strategy?.['max-parallel']).toBe(1);
+    const profiles = Schema.decodeUnknownSync(
+      Schema.Array(
+        Schema.Struct({target: Schema.String, os: Schema.String, musl: Schema.Boolean, gnu: Schema.Boolean}),
+      ),
+    )(job.strategy?.matrix?.include);
+    expect(EffectArray.map(profiles, profile => profile.target).sort()).toEqual(
+      EffectArray.map(NATIVE_VECTOR_PROFILES, profile => profile.target).sort(),
+    );
+    expect(EffectArray.filter(profiles, profile => profile.musl)).toEqual([
+      {target: 'bun-linux-arm64-musl', os: 'ubuntu-24.04-arm', musl: true, gnu: false},
+      {target: 'bun-linux-x64-baseline-musl', os: 'ubuntu-24.04', musl: true, gnu: false},
+    ]);
+    expect(profiles).toContainEqual({target: 'bun-windows-arm64', os: 'windows-11-arm', musl: false, gnu: false});
+    const commands = EffectArray.join(
+      EffectArray.map(job.steps ?? [], step => step.run ?? ''),
+      '\n',
+    );
+    for (const token of [
+      'git worktree add --detach',
+      '66f4c1d8baed033ec484f4db2895ea2252b4e2d0',
+      'THREADNOTE_DEVELOPMENT_BUILD_VERSION=',
+      'bun run build',
+      '--write-baseline-provenance',
+      '--baseline-source-root',
+      '--baseline-install-command',
+      'baseline_install=(bun install --frozen-lockfile --ignore-scripts)',
+      'baseline_install+=(--libc=glibc)',
+      '"${baseline_install[@]}"',
+      'node_modules/@threadnote',
+      '--stage-overlay',
+      '--baseline-distribution-root',
+      '--production-path --pairs 3 --samples 30',
+      '100000-dense 100000-tied 10000-dense 10000-tied',
+      '--musl-container',
+      '--gnu-container',
+      '--container-command-json',
+      'windows-process-tree-sampler.test.ts',
+      'code-graph.benchmark-failure.test.ts',
+      'test -f "$model_file"',
+    ])
+      expect(commands).toContain(token);
+    expect(commands).not.toContain('--fail-on-budget');
+    expect(commands).not.toMatch(/model(?:s)? (?:install|download)/u);
+    expect(Option.getOrElse(EffectString.indexOf('--write-baseline-provenance')(commands), () => -1)).toBeLessThan(
+      Option.getOrElse(EffectString.indexOf('--stage-overlay')(commands), () => -1),
+    );
+    const captureSteps = EffectArray.filter(
+      job.steps ?? [],
+      step =>
+        step.run !== undefined &&
+        (EffectString.includes('run.sh')(step.run) ||
+          EffectString.includes('--musl-container')(step.run) ||
+          EffectString.includes('--gnu-container')(step.run)),
+    );
+    expect(EffectArray.filter(captureSteps, step => step['timeout-minutes'] === 40)).toHaveLength(3);
+    expect(
+      EffectArray.findFirst(
+        job.steps ?? [],
+        step => step.uses !== undefined && EffectString.startsWith('actions/upload-artifact@')(step.uses),
+      ),
+    ).toMatchObject({value: {if: 'always()'}});
+  });
   it('preserves raw extension fields while normalizing empty YAML triggers and accepting scalar env values', () => {
     fc.assert(
       fc.property(fc.jsonValue(), extra => {

@@ -2,12 +2,13 @@ import {
   verifyNativeVectorReaderPayload,
   sameNativeVectorReaderBuildInfo,
 } from '@threadnote/recall/vector/native-reader-payload';
+import {verifyNativeInferenceOverlay} from './native-inference-payload.js';
 import {readNativeReaderBuildInfo} from './native-vector-reader-payload.js';
 import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Console, Effect, FileSystem, Path} from 'effect';
+import {Console, Effect, FileSystem, Path, Exit, Cause} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
 import * as EffectRecord from 'effect/Record';
@@ -222,7 +223,6 @@ const checkSelfContained = Effect.gen(function* () {
       releaseMetadata,
       path.join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
       path.join(root, 'dist', 'runtime', 'node-llama-cpp.js'),
-      path.join(root, 'dist', 'runtime', 'native'),
       path.join(root, 'dist', 'config', 'agent-instructions.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-context', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-code-graph', 'SKILL.md'),
@@ -284,6 +284,15 @@ const checkSelfContained = Effect.gen(function* () {
       if (!(yield* fs.exists(required))) {
         failures.push(`standalone build output is missing: ${normalizePath(path.relative(root, required))}`);
       }
+    }
+    if (
+      !(yield* fs.exists(path.join(root, 'dist', 'runtime', 'native'))) &&
+      !(yield* fs.exists(path.join(root, 'dist', 'llama', 'localBuilds')))
+    )
+      failures.push('standalone build output is missing its native inference closure');
+    if (yield* fs.exists(path.join(root, 'dist', 'native-inference.json'))) {
+      const inference = yield* verifyNativeInferenceOverlay(path.join(root, 'dist')).pipe(Effect.exit);
+      if (Exit.isFailure(inference)) failures.push(`Native inference payload: ${Cause.pretty(inference.cause)}`);
     }
     const vectorManifest = path.join(root, 'dist', 'runtime', 'vector-reader', 'manifest.json');
     if (yield* fs.exists(vectorManifest)) {

@@ -1,3 +1,5 @@
+import {verifyNativeInferenceOverlay} from './native-inference-payload.js';
+import {releaseTargetForBunTarget} from './release-targets.js';
 import {verifyNativeVectorReaderPayload} from '@threadnote/recall/vector/native-reader-payload';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
@@ -12,7 +14,7 @@ import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
-const ARCHIVE_TARGET_PATTERN = /^(darwin|linux|windows)-(arm64|x64)$/;
+const ARCHIVE_TARGET_PATTERN = /^(?:(darwin|windows)-(arm64|x64)|linux-(arm64|x64)(?:-musl)?)$/;
 
 export interface ArchiveReleaseOptions {
   readonly root: string;
@@ -40,13 +42,27 @@ export const archiveRelease = Effect.fn('archiveRelease')(function* (options: Ar
     return yield* ScriptError.make({message: 'dist/release.json is missing; build the release before archiving it.'});
   }
 
-  const vectorManifest = path.join(distributionRoot, 'runtime', 'vector-reader', 'manifest.json');
-  if (yield* fs.exists(vectorManifest)) {
-    yield* Effect.tryPromise({
-      try: () => verifyNativeVectorReaderPayload(vectorManifest),
-      catch: cause => ScriptError.make({message: 'Native vector reader payload is invalid before archive.', cause}),
+  const release: unknown = JSON.parse(yield* fs.readFileString(path.join(distributionRoot, 'release.json')));
+  if (
+    typeof release !== 'object' ||
+    release === null ||
+    !('target' in release) ||
+    typeof release.target !== 'string' ||
+    releaseTargetForBunTarget(release.target) !== target
+  )
+    return yield* ScriptError.make({
+      message: 'Release metadata target differs from the requested archive target/libc.',
     });
-  }
+  const vectorManifest = path.join(distributionRoot, 'runtime', 'vector-reader', 'manifest.json');
+  const vector = yield* Effect.tryPromise({
+    try: () => verifyNativeVectorReaderPayload(vectorManifest),
+    catch: cause => ScriptError.make({message: 'Native vector reader payload is invalid before archive.', cause}),
+  });
+  if (vector.development || vector.bunTarget !== release.target)
+    return yield* ScriptError.make({message: 'Native vector reader target/source mode differs from this release.'});
+  yield* verifyNativeInferenceOverlay(distributionRoot).pipe(
+    Effect.mapError(cause => ScriptError.make({message: 'Native inference payload is invalid before archive.', cause})),
+  );
 
   yield* fs.makeDirectory(artifactsRoot, {recursive: true});
   yield* fs.remove(artifactPath, {force: true});

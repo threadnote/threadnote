@@ -134,7 +134,7 @@ const smokeSelfContained = Effect.scoped(
       yield* run('install-dry-run', ['install', '--dry-run', '--no-start']);
 
       const runtime = yield* run('models-runtime', ['models', 'runtime']);
-      if (!/node-llama-cpp:\s+prebuilt/i.test(runtime)) {
+      if (!/node-llama-cpp:\s+(?:prebuilt|localBuild)/i.test(runtime)) {
         return yield* ScriptError.make({
           message: `Native runtime was not loaded from the release payload:\n${runtime}`,
         });

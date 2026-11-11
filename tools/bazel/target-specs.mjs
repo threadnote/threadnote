@@ -453,6 +453,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       'scripts/check-embedded-core-model.ts',
       'scripts/check-self-contained.ts',
       'scripts/assemble-native-vector-reader.ts',
+      'scripts/assemble-native-inference.ts',
+      'scripts/native-inference-payload.ts',
       'scripts/finalize-native-vector-reader.ts',
       'scripts/native-vector-reader-payload.ts',
       'scripts/verify-native-vector-reader.ts',
@@ -797,7 +799,12 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       name,
       kind: 'test',
       entries,
-      data: applicationTestData,
+      data: [
+        ...applicationTestData,
+        ...(EffectArray.contains(entries, 'apps/threadnote/test/unit/windows-process-tree-sampler.test.ts')
+          ? ['scripts/windows-process-tree-sampler.ps1']
+          : []),
+      ],
       referencedInputRoots: applicationReferencedInputRoots,
       npm: packageTestNpm['packages/graph'],
       timeout: 'long',

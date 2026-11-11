@@ -295,8 +295,8 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
         try: () => loadNativeVectorReader(system),
         catch: cause => LifecycleOperationError.make({cause, message: errorMessage(cause)}),
       }).pipe(
-        Effect.map(binding => ({
-          detail: binding ? 'verified native vector reader' : 'TypeScript fallback; no matching native payload',
+        Effect.map(() => ({
+          detail: 'verified required native vector reader',
           name: 'native vector reader',
           status: 'ok' as const,
         })),

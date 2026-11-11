@@ -1,3 +1,4 @@
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {stepRecallVectorPreparation} from '../../src/background/vector-step.js';
 import {readRecallEmbeddingDemand} from '../../src/background/demand.js';
 import {cryptoLayer} from '@threadnote/platform/crypto';
@@ -118,96 +119,103 @@ function withRuntime<A, E, R>(use: (embedded: string[]) => Effect.Effect<A, E, R
 
 describe('vector scope mapping upgrades', () => {
   effectIt.layer(base)(it => {
-    it.effect('refreshes a populated legacy generation through MCP with an unchanged lexical corpus', () =>
-      withRuntime(embedded =>
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const home = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-upgrade-'});
-          const manifestPath = path.join(home, 'seed-manifest.yaml');
-          yield* fs.writeFileString(manifestPath, JSON.stringify({version: 1, projects: []}));
-          const relative = 'memories/preferences/communication-style/concise.md';
-          const preferencePath = path.join(home, 'data/local/user/tester', relative);
-          yield* fs.makeDirectory(path.dirname(preferencePath), {recursive: true});
-          const content =
-            'MEMORY\nkind: preference\nstatus: active\nproject: communication-style\ntopic: concise\nsource_agent_client: test\ntimestamp: 2026-08-01T00:00:00.000Z\n\nUse brief sentences.';
-          yield* fs.writeFileString(preferencePath, content);
-          const config = {account: 'local', agentContextHome: home, manifestPath, user: 'tester'};
-          yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
-          const index = yield* loadRecallIndexData(config, {includeInactive: false});
-          expect(index.candidates).toHaveLength(1);
-          const old = yield* ensureVectorIndex(config, manifest, index.candidates, {
-            corpusGeneration: index.generation,
-          });
-          yield* legacyScopeMapping(home);
-          expect(yield* currentRecallCorpusGeneration(config)).toEqual(Option.some(index.generation));
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('stale');
-          expect(yield* vectorIndexStatus(home, manifest)).toMatchObject({ready: true, generation: old.generation});
-          expect((yield* selectedSemanticScores(config, 'brief sentences'))?.size).toBe(1);
-          const beforeRefresh = embedded.length;
-          const eligibility = {
-            kind: 'candidate-policy' as const,
-            authority: 'any' as const,
-            projects: {mode: 'allow-projects-and-projectless' as const, projects: ['workspace-project']},
-          };
-          const first = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
-          expect(first.status).toBe('unavailable');
-          expect(Option.getOrUndefined(first.result.warning)).toContain('refresh');
-          expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
-          for (let unit = 0; unit < 50; unit++) {
-            if ((yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true))).state === 'current') break;
-          }
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('current');
-          expect(embedded).toHaveLength(beforeRefresh);
-          const next = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
-          expect(next.status).toBe('available');
-          expect(Option.getOrUndefined(next.result.scores)?.size).toBe(1);
-          expect(yield* database(home, handle => handle.query('SELECT project FROM vector_chunks').all())).toEqual([
-            {project: null},
-          ]);
-          expect(yield* currentRecallCorpusGeneration(config)).toEqual(Option.some(index.generation));
-          expect(yield* fs.readFileString(preferencePath)).toBe(content);
-        }),
-      ).pipe(TestClock.withLive),
+    it.effect.skipIf(!nativeVectorTestsEnabled)(
+      'refreshes a populated legacy generation through MCP with an unchanged lexical corpus',
+      () =>
+        withRuntime(embedded =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const home = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-upgrade-'});
+            const manifestPath = path.join(home, 'seed-manifest.yaml');
+            yield* fs.writeFileString(manifestPath, JSON.stringify({version: 1, projects: []}));
+            const relative = 'memories/preferences/communication-style/concise.md';
+            const preferencePath = path.join(home, 'data/local/user/tester', relative);
+            yield* fs.makeDirectory(path.dirname(preferencePath), {recursive: true});
+            const content =
+              'MEMORY\nkind: preference\nstatus: active\nproject: communication-style\ntopic: concise\nsource_agent_client: test\ntimestamp: 2026-08-01T00:00:00.000Z\n\nUse brief sentences.';
+            yield* fs.writeFileString(preferencePath, content);
+            const config = {account: 'local', agentContextHome: home, manifestPath, user: 'tester'};
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+            const index = yield* loadRecallIndexData(config, {includeInactive: false});
+            expect(index.candidates).toHaveLength(1);
+            const old = yield* ensureVectorIndex(config, manifest, index.candidates, {
+              corpusGeneration: index.generation,
+            });
+            yield* legacyScopeMapping(home);
+            expect(yield* currentRecallCorpusGeneration(config)).toEqual(Option.some(index.generation));
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('stale');
+            expect(yield* vectorIndexStatus(home, manifest)).toMatchObject({ready: true, generation: old.generation});
+            expect((yield* selectedSemanticScores(config, 'brief sentences'))?.size).toBe(1);
+            const beforeRefresh = embedded.length;
+            const eligibility = {
+              kind: 'candidate-policy' as const,
+              authority: 'any' as const,
+              projects: {mode: 'allow-projects-and-projectless' as const, projects: ['workspace-project']},
+            };
+            const first = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect(first.status).toBe('unavailable');
+            expect(Option.getOrUndefined(first.result.warning)).toContain('refresh');
+            expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
+            for (let unit = 0; unit < 50; unit++) {
+              if ((yield* stepRecallVectorPreparation(config, manifest, Effect.succeed(true))).state === 'current')
+                break;
+            }
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, index.generation)).toBe('current');
+            expect(embedded).toHaveLength(beforeRefresh);
+            const next = yield* loadMcpRecallSemanticScoresResult(config, 'brief sentences', 5, eligibility);
+            expect(next.status).toBe('available');
+            expect(Option.getOrUndefined(next.result.scores)?.size).toBe(1);
+            expect(yield* database(home, handle => handle.query('SELECT project FROM vector_chunks').all())).toEqual([
+              {project: null},
+            ]);
+            expect(yield* currentRecallCorpusGeneration(config)).toEqual(Option.some(index.generation));
+            expect(yield* fs.readFileString(preferencePath)).toBe(content);
+          }),
+        ).pipe(TestClock.withLive),
     );
 
-    it.effect('keeps version-zero vectors readable when a mapping upgrade fails before activation', () =>
-      withRuntime(embedded =>
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const home = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-upgrade-failure-'});
-          const config = {agentContextHome: home};
-          const candidates: RecallCandidate[] = [
-            {
-              kind: 'preference',
-              fields: {project: 'communication-style'},
-              text: 'Use brief sentences.',
-              uri: 'threadnote://resources/repos/fixture/preference.md',
-            },
-          ];
-          yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
-          const old = yield* ensureVectorIndex(config, manifest, candidates, {corpusGeneration: 'unchanged'});
-          yield* legacyScopeMapping(home);
-          const embeddedBeforeUpgrade = embedded.length;
-          const failed = yield* ensureVectorIndex(config, manifest, candidates, {
-            corpusGeneration: 'unchanged',
-            onProgress: progress =>
-              progress.phase === 'activating' ? Effect.fail(TestError.make({message: 'paused upgrade'})) : Effect.void,
-          }).pipe(Effect.result);
-          expect(failed._tag).toBe('Failure');
-          expect(embedded).toHaveLength(embeddedBeforeUpgrade);
-          expect(
-            yield* database(home, handle =>
-              handle
-                .query('SELECT scope_mapping_version FROM vector_generations WHERE generation = ?')
-                .get(old.generation ?? null),
-            ),
-          ).toEqual({scope_mapping_version: 0});
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, 'unchanged')).toBe('stale');
-          expect(yield* vectorIndexStatus(home, manifest)).toMatchObject({ready: true, generation: old.generation});
-          expect((yield* selectedSemanticScores(config, 'brief sentences'))?.size).toBe(1);
-        }),
-      ).pipe(TestClock.withLive),
+    it.effect.skipIf(!nativeVectorTestsEnabled)(
+      'keeps version-zero vectors readable when a mapping upgrade fails before activation',
+      () =>
+        withRuntime(embedded =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const home = yield* fs.makeTempDirectoryScoped({prefix: 'vector-scope-upgrade-failure-'});
+            const config = {agentContextHome: home};
+            const candidates: RecallCandidate[] = [
+              {
+                kind: 'preference',
+                fields: {project: 'communication-style'},
+                text: 'Use brief sentences.',
+                uri: 'threadnote://resources/repos/fixture/preference.md',
+              },
+            ];
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+            const old = yield* ensureVectorIndex(config, manifest, candidates, {corpusGeneration: 'unchanged'});
+            yield* legacyScopeMapping(home);
+            const embeddedBeforeUpgrade = embedded.length;
+            const failed = yield* ensureVectorIndex(config, manifest, candidates, {
+              corpusGeneration: 'unchanged',
+              onProgress: progress =>
+                progress.phase === 'activating'
+                  ? Effect.fail(TestError.make({message: 'paused upgrade'}))
+                  : Effect.void,
+            }).pipe(Effect.result);
+            expect(failed._tag).toBe('Failure');
+            expect(embedded).toHaveLength(embeddedBeforeUpgrade);
+            expect(
+              yield* database(home, handle =>
+                handle
+                  .query('SELECT scope_mapping_version FROM vector_generations WHERE generation = ?')
+                  .get(old.generation ?? null),
+              ),
+            ).toEqual({scope_mapping_version: 0});
+            expect(yield* vectorIndexGenerationReadiness(home, manifest, 'unchanged')).toBe('stale');
+            expect(yield* vectorIndexStatus(home, manifest)).toMatchObject({ready: true, generation: old.generation});
+            expect((yield* selectedSemanticScores(config, 'brief sentences'))?.size).toBe(1);
+          }),
+        ).pipe(TestClock.withLive),
     );
 
     fcEffectProp(
@@ -357,16 +365,18 @@ describe('MCP recall generation races', () => {
           expect(yield* fs.readFileString(resource)).toBe(changed);
         }),
       ).pipe(TestClock.withLive);
-    it.effect('schedules current evidence when the corpus advances during query embedding', () =>
-      generationRace(['controlled update']),
-    );
-    fcEffectProp(
-      it,
-      'finite corpus mutations never return stale semantic scores and converge to the latest generation',
-      {updates: fc.array(fc.string({maxLength: 80}), {minLength: 1, maxLength: 4})},
-      ({updates}) => generationRace(updates),
-      {fastCheck: {numRuns: 10}},
-    );
+    describe.skipIf(!nativeVectorTestsEnabled)('native corpus race qualification', () => {
+      it.effect('schedules current evidence when the corpus advances during query embedding', () =>
+        generationRace(['controlled update']),
+      );
+      fcEffectProp(
+        it,
+        'finite corpus mutations never return stale semantic scores and converge to the latest generation',
+        {updates: fc.array(fc.string({maxLength: 80}), {minLength: 1, maxLength: 4})},
+        ({updates}) => generationRace(updates),
+        {fastCheck: {numRuns: 10}},
+      );
+    });
     fcEffectProp(
       it,
       'canonical refresh warnings identify their emitter without exposing arbitrary failure payloads',

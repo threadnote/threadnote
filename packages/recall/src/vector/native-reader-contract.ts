@@ -1,4 +1,4 @@
-import {Array as EffectArray, String as EffectString} from 'effect';
+import {Option, String as EffectString} from 'effect';
 /** Private recall-to-native protocol. Public ready-read requests never contain these predicates. */
 export interface NativeVectorPredicate {
   readonly sql: string;
@@ -16,7 +16,9 @@ export interface NativeVectorReadRequest {
     readonly chunkerVersion: number;
   };
   readonly expectedPreparationJobId: string;
-  readonly corpusGeneration: string;
+  /** JSON array tail owned by the TS identity policy, including its closing bracket. */
+  readonly preparationIdentitySuffix: string;
+  readonly corpusGeneration?: string;
   readonly limit: number;
   readonly selection: NativeVectorPredicate;
   readonly aliasScope: NativeVectorPredicate;
@@ -32,6 +34,22 @@ export type NativeVectorReadResult = {
   | {readonly status: 'corrupt' | 'operation-error' | 'corpus-changed' | 'cancelled'; readonly message: string}
 );
 
+/** Lossless expected metadata stays distinct from Bun/SQLite's UTF-8 bind transport. */
+export interface NativeVectorWireRequest extends NativeVectorReadRequest {
+  readonly model: NativeVectorReadRequest['model'] & {readonly idUtf16: readonly number[]};
+  readonly corpusGenerationUtf16?: readonly number[];
+}
+
+export function nativeVectorWireRequest(request: NativeVectorReadRequest): NativeVectorWireRequest {
+  const units = (value: string) =>
+    Array.from({length: value.length}, (_, index) => Option.getOrThrow(EffectString.charCodeAt(index)(value)));
+  return {
+    ...structuredClone(request),
+    model: {...request.model, idUtf16: units(request.model.id)},
+    ...(request.corpusGeneration === undefined ? {} : {corpusGenerationUtf16: units(request.corpusGeneration)}),
+  };
+}
+
 export interface NativeVectorCancellationToken {
   readonly cancel: () => void;
 }
@@ -39,43 +57,8 @@ export interface NativeVectorCancellationToken {
 export interface NativeVectorReaderBinding {
   readonly CancellationToken: new () => NativeVectorCancellationToken;
   readonly readSelected: (
-    request: NativeVectorReadRequest,
+    request: NativeVectorWireRequest,
     query: Float64Array | undefined,
     cancellation: NativeVectorCancellationToken,
   ) => Promise<NativeVectorReadResult>;
-}
-
-/** N-API's UTF-8 strings do not preserve an unpaired UTF-16 surrogate. */
-export function nativeVectorStringsSupported(strings: readonly string[]): boolean {
-  return EffectArray.every(strings, value => !/[\uD800-\uDFFF]/u.test(value) && !EffectString.includes('\0')(value));
-}
-
-export function nativeVectorRequestSupported(
-  request: NativeVectorReadRequest,
-  query: readonly number[] | undefined,
-): boolean {
-  return (
-    Number.isSafeInteger(request.model.dimensions) &&
-    request.model.dimensions > 0 &&
-    Number.isSafeInteger(request.limit) &&
-    request.limit >= 0 &&
-    (query === undefined ||
-      (query.length === request.model.dimensions &&
-        EffectArray.every(query, component => Number.isFinite(component) && Math.abs(component) <= 1))) &&
-    nativeVectorStringsSupported([
-      request.dbPath,
-      request.generation,
-      request.model.id,
-      request.model.sha256,
-      request.model.embeddingRecipe,
-      request.expectedPreparationJobId,
-      request.corpusGeneration,
-      request.selection.sql,
-      ...request.selection.params,
-      request.aliasScope.sql,
-      ...request.aliasScope.params,
-      request.aliasEligibility.sql,
-      ...request.aliasEligibility.params,
-    ])
-  );
 }

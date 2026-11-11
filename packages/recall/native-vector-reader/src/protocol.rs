@@ -2,7 +2,7 @@
 #[cfg(not(test))]
 use napi_derive::napi;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(test), napi(object))]
@@ -15,6 +15,7 @@ pub struct NativePredicate {
 #[cfg_attr(not(test), napi(object))]
 pub struct NativeReadModel {
     pub id: String,
+    pub id_utf16: Vec<u16>,
     pub sha256: String,
     pub dimensions: f64,
     pub embedding_recipe: String,
@@ -28,7 +29,9 @@ pub struct NativeReadRequest {
     pub generation: String,
     pub model: NativeReadModel,
     pub expected_preparation_job_id: String,
+    pub preparation_identity_suffix: String,
     pub corpus_generation: Option<String>,
+    pub corpus_generation_utf16: Option<Vec<u16>>,
     pub limit: f64,
     pub selection: NativePredicate,
     pub alias_scope: NativePredicate,
@@ -82,6 +85,8 @@ impl NativeReadOutcome {
 pub struct NativeBuildInfo {
     pub protocol_version: u32,
     pub napi_version: u32,
+    pub crt_static: bool,
+    pub deployment_target: String,
     pub crate_version: String,
     pub sqlite_version: String,
     pub sqlite_source_id: String,
@@ -91,6 +96,7 @@ pub struct NativeBuildInfo {
     pub source_tree: String,
     pub lock_sha256: String,
     pub toolchain_sha256: String,
+    pub build_environment_sha256: String,
     pub source_sha256: String,
 }
 

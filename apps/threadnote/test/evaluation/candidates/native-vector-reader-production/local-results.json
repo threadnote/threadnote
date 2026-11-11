@@ -1051,5 +1051,30 @@
       "diagnostic": true,
       "note": "One warm sample per arm; the native arm has only one RSS process sample. No formal p95/RSS gate or source-cohort qualification is claimed."
     }
+  },
+  "historicalScope": "Optional-native and omitted-addon/source diagnostics predating the native-only revision; preserved without relabeling as independent-baseline qualification.",
+  "nativeOnlyQualification": {
+    "status": "not-run",
+    "qualified": false,
+    "baselineCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "captures": []
+  },
+  "nativeOnlyBaselineCompatibility": {
+    "status": "passed-correctness-only",
+    "qualified": false,
+    "platform": "bun-darwin-arm64",
+    "sourceCommit": "66f4c1d8baed033ec484f4db2895ea2252b4e2d0",
+    "executableSha256": "43c92eb75c45836ad8159e7eb953a8a952d7a214e7c06b5d25a1dfd80103daf4",
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+    "overlayDescriptorSha256": "c341211513775d6f4e1ce1916729ffb2f44e2167901358586115d66f01696029",
+    "hybridInventorySha256": "d1d10507dc6a0a676a4d597c915fa9f3d6e7bc2b3279e81e79ca714aeafe8931",
+    "canonicalDocuments": 2,
+    "realPinnedBgeParent": true,
+    "unchangedWorkerDeadlineMilliseconds": 2000,
+    "exactOrderedScalarParity": true,
+    "originalReceiptUnchanged": true,
+    "hybridInventoryUnchanged": true,
+    "rawArtifact": "/private/tmp/threadnote-native-vector-baseline66-hybrid-compat.json",
+    "reason": "One actual frozen TS66 worker request accepted a genuinely staged shared inference overlay using separately authenticated original component provenance. No timing/performance qualification was attempted."
   }
 }

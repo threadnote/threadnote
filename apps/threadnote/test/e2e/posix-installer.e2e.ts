@@ -1,3 +1,4 @@
+import {runtimeLinuxLibc} from '@threadnote/platform/system';
 import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFile} from '@threadnote/testing/node-child-process';
@@ -26,7 +27,8 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
   )(await Bun.file(join(process.cwd(), 'package.json')).json());
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
-  const artifactName = `threadnote-${platform}-${architecture}.tar.gz`;
+  const libcSuffix = platform === 'linux' && runtimeLinuxLibc() === 'musl' ? '-musl' : '';
+  const artifactName = `threadnote-${platform}-${architecture}${libcSuffix}.tar.gz`;
   const artifact = join(root, artifactName);
   const checksum = `${artifact}.sha256`;
   const installRoot = join(root, 'install');
@@ -40,7 +42,7 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
       env: {
         ...process.env,
         THREADNOTE_ARTIFACTS_ROOT: root,
-        THREADNOTE_RELEASE_TARGET: `${platform}-${architecture}`,
+        THREADNOTE_RELEASE_TARGET: `${platform}-${architecture}${libcSuffix}`,
       },
     });
     const unsafeParentArtifact = join(root, 'unsafe-parent.tar.gz');
