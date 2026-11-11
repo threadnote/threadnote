@@ -48,6 +48,7 @@ import {
   makeNativeTaskViewCommand,
 } from '../../src/effect/workflow_cli.js';
 import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
+import {readNativeTaskInstalledTarget} from '../../src/workflow_automation/task_admission.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -516,6 +517,40 @@ const publishOpenHistoricalPhase = (
   });
 
 describe('native task actions', () => {
+  effectIt.effect('lists recorded installation targets and inspection codes on admission failure', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home};
+      const system = yield* SystemInfo;
+      const scoped = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, scoped));
+      const missing = yield* readNativeTaskInstalledTarget(config, undefined, repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.result,
+      );
+      expect(missing).toMatchObject({
+        failure: {code: 'needs-resources', message: expect.stringContaining('installationTarget')},
+      });
+      if (missing._tag !== 'Failure') throw new Error('Expected missing target to fail');
+      expect(missing.failure.message).toContain('--installation-target');
+      expect(missing.failure.message).toContain('codex');
+      expect(missing.failure.message).toContain('current');
+      expect(missing.failure.message).not.toContain(f.root);
+      const unknown = yield* readNativeTaskInstalledTarget(config, 'missing-target', repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.result,
+      );
+      expect(unknown).toMatchObject({
+        failure: {code: 'needs-resources', message: expect.stringContaining('Inspection code:')},
+      });
+      if (unknown._tag !== 'Failure') throw new Error('Expected unknown target to fail');
+      expect(unknown.failure.message).toContain('codex');
+      expect(unknown.failure.message).not.toContain(f.root);
+    }).pipe(run),
+  );
+
   effectIt.effect('starts in a selected graph project and rejects ambiguous unselected scope', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

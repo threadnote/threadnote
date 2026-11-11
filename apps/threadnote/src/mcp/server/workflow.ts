@@ -31,7 +31,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
         contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
-        installationTarget: McpInput.string('Installed target selector for start or authoring job resume'),
+        installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
         graphProject: McpInput.string('Configured graph project for a new authoring task'),
         authoringRef: McpInput.string('Current authoring continuation'),
         jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
