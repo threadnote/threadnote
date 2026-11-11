@@ -37,7 +37,8 @@ import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {canonicalFileUri, type Observation} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {compileContextBrief, compileSemanticContextKnowledge} from '../../src/context_brief/index.js';
 import {runSemanticAgentQueryWith, type SemanticAgentQueryHost} from '../../src/semantic/agent_queries.js';
@@ -139,6 +140,41 @@ const citationFailureEvidence = (candidate: unknown, gaps: unknown) => {
   return EffectString.slice(0, 2048)(JSON.stringify({candidate: selected, gaps}));
 };
 
+// Prepare the actual standalone dispatch before native reads allocate their shared deadline.
+// The setup command owns Bun.build's uncancellable Promise; the fixture scope owns every output.
+const bundledContextWorker = (root: string, home: string) =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
+    const directory = path.join(root, 'context-worker-bundle');
+    const bundled = path.join(directory, 'standalone.js');
+    yield* command.execute(
+      system.executablePath,
+      [
+        '--eval',
+        `const result = await Bun.build(${JSON.stringify({
+          entrypoints: [Bun.fileURLToPath(new URL('../../src/standalone.ts', import.meta.url))],
+          outdir: directory,
+          naming: 'standalone.js',
+          target: 'bun',
+          format: 'esm',
+          minify: true,
+        })});
+if (!result.success || !result.outputs.some(output => output.path === ${JSON.stringify(bundled)}))
+  throw new Error('Context worker bundle failed.');`,
+      ],
+      {
+        env: {...system.environment(), THREADNOTE_HOME: home},
+        timeoutMs: 5000,
+        maxOutputBytes: 16 * 1024,
+        forceKillAfterMilliseconds: 0,
+        verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+      },
+    );
+    return {...system, developmentEntrypoint: bundled};
+  });
+
 /** Actual graph, canonical memory reads and citation validation; only the provider RPC is a stable fixture. */
 const memoryContextFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -148,6 +184,9 @@ const memoryContextFixture = Effect.gen(function* () {
   const repository = path.join(root, 'repository');
   yield* fs.makeDirectory(repository);
   yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+  const contextSystem = Option.isSome(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))
+    ? yield* bundledContextWorker(root, home)
+    : yield* SystemInfo;
   const file = path.join(repository, 'main.ts');
   const source = (value: number) => `export class Alpha {\n  run() { return ${value}; }\n  other() { return 7; }\n}\n`;
   yield* fs.writeFileString(file, source(42));
@@ -261,6 +300,7 @@ const memoryContextFixture = Effect.gen(function* () {
     SemanticAgentQueryHost<Effect.Services<ReturnType<typeof compileSemanticContextKnowledge>>>['context']
   > = (currentConfig, input, evidence, target) =>
     compileSemanticContextKnowledge(currentConfig, input, evidence, target).pipe(
+      Effect.provideService(SystemInfo, contextSystem),
       Effect.tap(knowledge =>
         Effect.sync(() => {
           compilerCalls++;

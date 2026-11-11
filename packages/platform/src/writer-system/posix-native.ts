@@ -1,9 +1,10 @@
+import {runtimeCurrentPlatform, runtimeCurrentUserId, runtimeNativeDescriptorOperations} from '../system.js';
 import {Array as EffectArray, String as EffectString, Option} from 'effect';
 import {dlopen, ptr, read} from 'bun:ffi';
 import {writerFail as fail} from './fault.js';
 import type {RuntimeWriterIdentity} from '../writer_system.js';
 
-const fs = process.getBuiltinModule('fs');
+const fs = runtimeNativeDescriptorOperations();
 export interface RuntimeStableOsUserIdentity {
   readonly platform: 'darwin' | 'linux';
   readonly architecture: 'arm64' | 'x64';
@@ -13,7 +14,7 @@ export interface RuntimeStableOsUserIdentity {
 
 export function requirePosixWriterPlatform(): void {
   if (
-    (process.platform !== 'darwin' && process.platform !== 'linux') ||
+    (runtimeCurrentPlatform() !== 'darwin' && runtimeCurrentPlatform() !== 'linux') ||
     (process.arch !== 'arm64' && process.arch !== 'x64')
   )
     fail('unsupported-platform');
@@ -21,7 +22,7 @@ export function requirePosixWriterPlatform(): void {
 
 /** Read the running ELF interpreter, never a caller environment flag or an installed-libc guess. */
 export function linuxRuntimeLibc(): {readonly kind: 'glibc' | 'musl'; readonly library: string} {
-  if (process.platform !== 'linux') return fail('unsupported-platform');
+  if (runtimeCurrentPlatform() !== 'linux') return fail('unsupported-platform');
   const fd = fs.openSync('/proc/self/exe', fs.constants.O_RDONLY);
   const readAt = (length: number, offset: number) => {
     const bytes = new Uint8Array(length);
@@ -68,7 +69,7 @@ export function linuxRuntimeLibc(): {readonly kind: 'glibc' | 'musl'; readonly l
 
 function libcPath(): string {
   requirePosixWriterPlatform();
-  return process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib' : linuxRuntimeLibc().library;
+  return runtimeCurrentPlatform() === 'darwin' ? '/usr/lib/libSystem.B.dylib' : linuxRuntimeLibc().library;
 }
 
 /** LP64 pwd.h layouts are independently specified by Darwin, glibc and musl; no userInfo/HOME fallback. */
@@ -81,9 +82,9 @@ export function readPosixAccountIdentity(): RuntimeStableOsUserIdentity {
   });
   try {
     const userId = lib.symbols.geteuid();
-    if (userId !== lib.symbols.getuid() || userId !== process.getuid?.()) fail('identity');
-    const size = process.platform === 'darwin' ? 72 : 48;
-    const homeOffset = process.platform === 'darwin' ? 48 : 32;
+    if (userId !== lib.symbols.getuid() || userId !== runtimeCurrentUserId()) fail('identity');
+    const size = runtimeCurrentPlatform() === 'darwin' ? 72 : 48;
+    const homeOffset = runtimeCurrentPlatform() === 'darwin' ? 48 : 32;
     const storage = new BigUint64Array(32),
       structure = new Uint8Array(storage.buffer);
     structure.fill(0xa5);
@@ -115,7 +116,7 @@ export function readPosixAccountIdentity(): RuntimeStableOsUserIdentity {
     if (end <= start) fail('identity');
     const accountHome = new TextDecoder('utf-8', {fatal: true}).decode(buffer.subarray(start, end));
     if (!/^\//u.test(accountHome) || /[\p{Cc}]/u.test(accountHome)) fail('identity');
-    const platform = process.platform,
+    const platform = runtimeCurrentPlatform(),
       architecture = process.arch;
     if ((platform !== 'darwin' && platform !== 'linux') || (architecture !== 'arm64' && architecture !== 'x64'))
       return fail('unsupported-platform');
@@ -140,7 +141,7 @@ export function posixWriterLibrary() {
     unlinkat: {args: ['i32', 'buffer', 'i32'], returns: 'i32'},
   } as const;
   // Darwin's openat is variadic. Its fixed syscall wrapper is needed on arm64.
-  if (process.platform === 'darwin') {
+  if (runtimeCurrentPlatform() === 'darwin') {
     const lib = dlopen(path, {
       ...common,
       __openat: {args: ['i32', 'buffer', 'i32', 'u32'], returns: 'i32'},
@@ -170,14 +171,14 @@ export const posixDirectoryFlags =
   fs.constants.O_RDONLY |
   fs.constants.O_DIRECTORY |
   fs.constants.O_NOFOLLOW |
-  (process.platform === 'darwin' ? 0x01000000 : 0x00080000);
+  (runtimeCurrentPlatform() === 'darwin' ? 0x01000000 : 0x00080000);
 export const posixFileFlags =
-  fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (process.platform === 'darwin' ? 0x01000000 : 0x00080000);
+  fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (runtimeCurrentPlatform() === 'darwin' ? 0x01000000 : 0x00080000);
 
 /** Descriptor-bound complete ACL proof. Unknown records, remote filesystems and unsupported xattrs refuse. */
 export function assertPosixPrivateAcl(fd: number, privateObject: boolean, before: RuntimeWriterIdentity): void {
   requirePosixWriterPlatform();
-  if (process.platform === 'linux') {
+  if (runtimeCurrentPlatform() === 'linux') {
     assertLinuxPrivateAcl(fd);
     return;
   }
@@ -290,7 +291,7 @@ function assertLinuxPrivateAcl(fd: number): void {
 export function readPosixProcessIdentity(processId: number, includeZombie = false): string {
   requirePosixWriterPlatform();
   if (!Number.isSafeInteger(processId) || processId <= 0 || processId > 0x7fffffff) return fail('identity');
-  if (process.platform === 'linux') {
+  if (runtimeCurrentPlatform() === 'linux') {
     // procfs is a kernel channel. Bind stat and process-directory ownership on both sides of the read.
     const directory = fs.openSync(
       `/proc/${processId}`,
@@ -298,7 +299,7 @@ export function readPosixProcessIdentity(processId: number, includeZombie = fals
     );
     try {
       const before = fs.fstatSync(directory, {bigint: true});
-      if (before.uid !== BigInt(process.getuid?.() ?? -1)) fail('identity');
+      if (before.uid !== BigInt(runtimeCurrentUserId() ?? -1)) fail('identity');
       const lib = posixWriterLibrary();
       let fd = -1;
       try {
@@ -367,7 +368,7 @@ export function readPosixProcessIdentity(processId: number, includeZombie = fals
       micros = view.getBigUint64(128, true);
     if (
       view.getUint32(12, true) !== processId ||
-      view.getUint32(20, true) !== process.getuid?.() ||
+      view.getUint32(20, true) !== runtimeCurrentUserId() ||
       seconds === 0n ||
       micros >= 1_000_000n
     )
@@ -427,7 +428,7 @@ export function assertPosixPrivateProviderPath(path: string, kind: 'file' | 'dir
         privateObject = index === chain.length - 1;
       if (
         privateObject &&
-        (edge.identity.uid !== BigInt(process.getuid?.() ?? -1) || (edge.identity.mode & 0o077n) !== 0n)
+        (edge.identity.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (edge.identity.mode & 0o077n) !== 0n)
       )
         fail('private-storage');
       for (let attempt = 0; attempt < 2; attempt++) {

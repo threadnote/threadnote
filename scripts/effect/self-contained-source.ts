@@ -27,6 +27,7 @@ const PYTHON_IMPORTS = new Set([
   "import {Digest as EffectDigest} from 'effect/crypto';",
   "import {isJsonObject} from '@threadnote/platform/json';",
   "import {sha256HexSync} from '@threadnote/platform/sha256';",
+  "import {runtimeCurrentPlatform} from '@threadnote/platform/system';",
   "import * as EffectArray from 'effect/Array';",
   "import * as EffectRecord from 'effect/Record';",
   "import * as EffectString from 'effect/String';",

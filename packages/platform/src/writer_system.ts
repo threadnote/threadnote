@@ -1,3 +1,4 @@
+import {runtimeCurrentPlatform, runtimeCurrentUserId, runtimeNativeDescriptorOperations} from './system.js';
 import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 
 export {RuntimeWriterFault} from './writer-system/fault.js';
@@ -25,13 +26,13 @@ export interface RuntimeWindowsStableOsUserIdentity {
 export type RuntimeStableOsUserIdentity = RuntimePosixStableOsUserIdentity | RuntimeWindowsStableOsUserIdentity;
 import type {RuntimeStableOsUserIdentity as RuntimePosixStableOsUserIdentity} from './writer-system/posix-native.js';
 
-const native = process.getBuiltinModule('fs');
+const native = runtimeNativeDescriptorOperations();
 const constants = native.constants;
 const directoryFlags = posixDirectoryFlags;
 const fileFlags = posixFileFlags;
 const maximumFileBytes = 16 * 1024 * 1024;
 export function runtimeReadStableOsUserIdentity(): RuntimeStableOsUserIdentity {
-  if (process.platform !== 'win32') return readPosixAccountIdentity();
+  if (runtimeCurrentPlatform() !== 'win32') return readPosixAccountIdentity();
   requireWindowsNative();
   const identity = windowsTokenPrincipal();
   const architecture = process.arch;
@@ -237,7 +238,7 @@ function directoryState(directory: RuntimePrivateWriterDirectory) {
   if (!state) return fail('identity');
   checkDirectory(state);
   const info = stat(last(state).fd);
-  if (info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
+  if (info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n) fail('private-storage');
   for (let index = 0; index < state.chain.length; index++)
     assertPrivateDirectoryAcl(state.chain[index], state.chain[index - 1], index === state.chain.length - 1);
   return state;
@@ -381,7 +382,7 @@ export type RuntimeGuardedDiskWriteResult =
   | {readonly status: 'unknown'};
 function syncFile(fd: number) {
   native.fsyncSync(fd);
-  if (process.platform !== 'darwin') return;
+  if (runtimeCurrentPlatform() !== 'darwin') return;
   const lib = library();
   try {
     if (lib.symbols.fcntl(fd, 51) !== 0) fail('io');
@@ -476,7 +477,7 @@ export function runtimeOpenPrivateWriterChild(
   const child = openAt(last(state).fd, name, directoryFlags);
   try {
     const info = stat(child);
-    if (!info.isDirectory() || info.uid !== BigInt(process.getuid?.() ?? -1) || (info.mode & 0o077n) !== 0n)
+    if (!info.isDirectory() || info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n)
       fail('private-storage');
     assertPrivateDirectoryAcl({fd: child, identity: info, name}, last(state), true);
   } finally {
@@ -497,7 +498,7 @@ export function runtimeOpenPrivateWriterAuthority(
 ): RuntimePrivateWriterDirectory {
   supported();
   if (identity.platform === 'win32') return fail('unsupported-platform');
-  if (identity.userId !== process.getuid?.()) fail('identity');
+  if (identity.userId !== runtimeCurrentUserId()) fail('identity');
   const home = openDirectory(identity.accountHome);
   try {
     for (let index = 0; index < home.chain.length; index++)
@@ -561,10 +562,10 @@ export function runtimeReadPrivateWriterFile(
   }
   try {
     const before = stat(fd);
-    if (before.uid !== BigInt(process.getuid?.() ?? -1) || (before.mode & 0o077n) !== 0n) fail('private-storage');
+    if (before.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (before.mode & 0o077n) !== 0n) fail('private-storage');
     assertPrivateAcl(fd, true);
     const result = readFd(fd, maximumBytes);
-    if (result.identity.uid !== BigInt(process.getuid?.() ?? -1) || (result.identity.mode & 0o077n) !== 0n)
+    if (result.identity.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (result.identity.mode & 0o077n) !== 0n)
       fail('private-storage');
     const reopened = openAt(parent, name, constants.O_RDONLY | fileFlags);
     try {
@@ -602,7 +603,8 @@ export function runtimePublishPrivateWriterFile(
     const created = stat(fd);
     createdIdentity = created;
     requireFile(created, maximumFileBytes, true);
-    if (created.uid !== BigInt(process.getuid?.() ?? -1) || (created.mode & 0o777n) !== 0o600n) fail('private-storage');
+    if (created.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (created.mode & 0o777n) !== 0o600n)
+      fail('private-storage');
     assertPrivateAcl(fd, true);
     let offset = 0;
     while (offset < bytes.length) {
@@ -708,6 +710,6 @@ export function runtimeReadWriterLockToken(path: string): {
 }
 
 export function runtimeReadWriterProcessIdentity(processId: number): string {
-  if (process.platform !== 'win32') return readPosixProcessIdentity(processId);
+  if (runtimeCurrentPlatform() !== 'win32') return readPosixProcessIdentity(processId);
   return readWindowsWriterProcessIdentity(processId);
 }

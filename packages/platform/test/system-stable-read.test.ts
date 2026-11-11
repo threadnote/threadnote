@@ -216,7 +216,7 @@ boundaryIt.skipIf(!posixWriterHost)(
     const childSource = `import {runtimeReadStableOsUserIdentity} from ${JSON.stringify(new URL('../src/system.ts', import.meta.url).href)};
       const actual = runtimeReadStableOsUserIdentity();
       const hash = value => new Bun.CryptoHasher('sha256').update(value).digest('hex');
-      console.log(JSON.stringify({uid:actual.userId,home:hash(actual.accountHome),builtin:hash(process.getBuiltinModule('os').userInfo().homedir)}));`;
+      process.stdout.write(JSON.stringify({uid:actual.userId,home:hash(actual.accountHome),builtin:hash(process.getBuiltinModule('os').userInfo().homedir)})+String.fromCharCode(10));`;
     const rows: {uid: number; home: string; builtin: string}[] = [];
     for (const marker of ['/tmp/threadnote-identity-A', '/tmp/threadnote-identity-B']) {
       const child = Bun.spawn([process.execPath, '-e', childSource], {

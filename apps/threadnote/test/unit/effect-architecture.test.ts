@@ -237,7 +237,7 @@ describe('Effect architecture boundaries', () => {
           ),
         ),
         relativePath,
-      ).toEqual(relativePath === 'apps/threadnote/src/semantic/lsp_transport.ts' ? ['node:child_process'] : []);
+      ).toEqual([]);
     }
   });
 

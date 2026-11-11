@@ -1,6 +1,7 @@
 import {Digest as EffectDigest} from 'effect/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {runtimeCurrentPlatform} from '@threadnote/platform/system';
 import * as EffectArray from 'effect/Array';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -25,7 +26,7 @@ const Metadata = Schema.Struct({
 });
 const fail = () => LspFault.make({code: 'prerequisite'});
 /** Paths are passed as native data, never shell text. A drive colon is allowed only at its root. */
-export const staticPythonPath = (value: string, windows = process.platform === 'win32') =>
+export const staticPythonPath = (value: string, windows = runtimeCurrentPlatform() === 'win32') =>
   value.length > 0 &&
   value.length <= 8192 &&
   !/[\p{Cc}$]/u.test(value) &&

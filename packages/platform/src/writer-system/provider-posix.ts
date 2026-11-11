@@ -1,3 +1,9 @@
+import {
+  runtimeCurrentPlatform,
+  runtimeCurrentUserId,
+  runtimeAssertProcessGroupExistsSync,
+  runtimeNativeDescriptorOperations,
+} from '../system.js';
 import {providerOutputSource} from './provider-output-source.js';
 import {Array as EffectArray, String as EffectString, Record as EffectRecord, Option} from 'effect';
 import {dlopen, ptr, read} from 'bun:ffi';
@@ -6,7 +12,7 @@ import {writerFail as fail} from './fault.js';
 import {linuxRuntimeLibc, readPosixProcessIdentity, requirePosixWriterPlatform} from './posix-native.js';
 import type {OwnedProviderBackend, RuntimeOwnedProviderLaunch} from './provider-contract.js';
 
-const fs = process.getBuiltinModule('fs');
+const fs = runtimeNativeDescriptorOperations();
 const encoder = new TextEncoder();
 const pause = () => Bun.sleep(5);
 const again = (error: unknown) =>
@@ -40,7 +46,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     options.args.length > 4096
   )
     return fail('path');
-  const path = process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib' : linuxRuntimeLibc().library;
+  const path = runtimeCurrentPlatform() === 'darwin' ? '/usr/lib/libSystem.B.dylib' : linuxRuntimeLibc().library;
   const lib = dlopen(path, {
     posix_spawn: {args: ['buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer'], returns: 'i32'},
     posix_spawnattr_init: {args: ['buffer'], returns: 'i32'},
@@ -81,7 +87,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
     actionsReady = true;
     check(lib.symbols.posix_spawnattr_setpgroup(attr, 0));
     // A new session makes the original leader the group/session anchor, matching the prior detached launch.
-    check(lib.symbols.posix_spawnattr_setflags(attr, process.platform === 'darwin' ? 0x0400 | 0x4000 : 0x0080));
+    check(lib.symbols.posix_spawnattr_setflags(attr, runtimeCurrentPlatform() === 'darwin' ? 0x0400 | 0x4000 : 0x0080));
     check(lib.symbols.posix_spawn_file_actions_addchdir_np(actions, text(options.cwd)));
     for (let i = 0; i < 3; i++) {
       const pair = new Int32Array(2);
@@ -165,7 +171,7 @@ export function spawnPosixProvider(options: RuntimeOwnedProviderLaunch): OwnedPr
           reaped = true;
         }
         try {
-          process.kill(-pid, 0);
+          runtimeAssertProcessGroupExistsSync(pid);
           return false;
         } catch (error) {
           return isMissing(error);
@@ -214,7 +220,7 @@ function makeOwned(input: {
   const {pid, identity, lib, closeFd} = input;
   const retry = () => {
     const errno = input.errno();
-    return errno === 4 || errno === (process.platform === 'darwin' ? 35 : 11);
+    return errno === 4 || errno === (runtimeCurrentPlatform() === 'darwin' ? 35 : 11);
   };
   let inputOpen = true,
     inputClosing = false,
@@ -306,7 +312,7 @@ function makeOwned(input: {
         if (reaped) {
           // Reaping releases the PID reservation: no further signalling is permitted, even on a new matching PID.
           try {
-            process.kill(-pid, 0);
+            runtimeAssertProcessGroupExistsSync(pid);
             unknown = true;
           } catch (error) {
             if (isMissing(error)) groupEmpty = true;
@@ -314,7 +320,8 @@ function makeOwned(input: {
           }
         } else {
           const leader = readGroupMember(pid);
-          if (leader.identity !== identity || leader.group !== pid || leader.uid !== process.getuid?.()) unknown = true;
+          if (leader.identity !== identity || leader.group !== pid || leader.uid !== runtimeCurrentUserId())
+            unknown = true;
           else if (leader.zombie) {
             leaderExitCode = leader.exitCode;
             const members = listGroup(pid);
@@ -328,7 +335,7 @@ function makeOwned(input: {
                 const raw = status[0];
                 leaderExitCode = (raw & 0x7f) === 0 ? (raw >>> 8) & 0xff : 128 + (raw & 0x7f);
                 try {
-                  process.kill(-pid, 0);
+                  runtimeAssertProcessGroupExistsSync(pid);
                   unknown = true;
                 } catch (error) {
                   if (isMissing(error)) groupEmpty = true;
@@ -392,7 +399,7 @@ function makeOwned(input: {
       if (closed || groupEmpty) return;
       if (unknown || reaped) return fail('identity');
       const leader = readGroupMember(pid);
-      if (leader.identity !== identity || leader.group !== pid || leader.uid !== process.getuid?.()) {
+      if (leader.identity !== identity || leader.group !== pid || leader.uid !== runtimeCurrentUserId()) {
         unknown = true;
         return fail('identity');
       }
@@ -430,7 +437,7 @@ interface Member {
 }
 function readGroupMember(pid: number): Member {
   const identity = readPosixProcessIdentity(pid, true);
-  if (process.platform === 'linux') {
+  if (runtimeCurrentPlatform() === 'linux') {
     const text = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'),
       end = Option.getOrElse(EffectString.lastIndexOf(')')(text), () => -1),
       fields = EffectString.split(EffectString.trim(EffectString.slice(end + 2)(text)), /\s+/u);
@@ -465,7 +472,7 @@ function readGroupMember(pid: number): Member {
   }
 }
 function listGroup(group: number): readonly Member[] | undefined {
-  if (process.platform === 'linux') {
+  if (runtimeCurrentPlatform() === 'linux') {
     const names = fs.readdirSync('/proc');
     if (names.length > 65_536) return undefined;
     const members: Member[] = [];
@@ -513,7 +520,7 @@ function listGroup(group: number): readonly Member[] | undefined {
 }
 
 function providerIoLibrary(path: string) {
-  if (process.platform === 'darwin') {
+  if (runtimeCurrentPlatform() === 'darwin') {
     const lib = dlopen(path, {
       __fcntl: {args: ['i32', 'i32', 'i64'], returns: 'i32'},
       pipe: {args: ['buffer'], returns: 'i32'},
@@ -553,13 +560,15 @@ export function probePosixProviderTree(instance: {
   if (!Number.isSafeInteger(instance.pid) || instance.pid <= 0 || instance.pid > 0x7fffffff || !instance.identity)
     return 'unknown';
   try {
-    process.kill(-instance.pid, 0);
+    runtimeAssertProcessGroupExistsSync(instance.pid);
   } catch (error) {
     return isMissing(error) ? 'absent' : 'unknown';
   }
   try {
     const leader = readGroupMember(instance.pid);
-    return leader.group === instance.pid && leader.identity === instance.identity && leader.uid === process.getuid?.()
+    return leader.group === instance.pid &&
+      leader.identity === instance.identity &&
+      leader.uid === runtimeCurrentUserId()
       ? 'present'
       : 'unknown';
   } catch {

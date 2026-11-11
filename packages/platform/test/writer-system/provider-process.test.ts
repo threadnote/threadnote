@@ -74,7 +74,7 @@ it.skipIf(!supported)(
 it.skipIf(!supported)(
   'retains original group authority after leader exit and terminates its actual surviving descendant',
   async () => {
-    const childSource = `console.log('descendant-ready');setInterval(()=>{},1000);`;
+    const childSource = `process.stdout.write('descendant-ready'+String.fromCharCode(10));setInterval(()=>{},1000);`;
     const provider = spawn(
       `Bun.spawn([process.execPath,'-e',${JSON.stringify(childSource)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});setTimeout(()=>process.exit(7),100);`,
     );
@@ -205,7 +205,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     const run=flags=>{const start=new BigUint64Array(13);new DataView(start.buffer).setUint32(0,104,true);const info=new BigUint64Array(3);
       const ok=k.symbols.CreateProcessW(wide(app),wide('"'+app+'" -e "process.exit(0)"'),null,null,0,0x08000000|flags,null,null,start,info);
       const error=ok?0:k.symbols.GetLastError();if(ok){k.symbols.CloseHandle(info[1]);k.symbols.CloseHandle(info[0]);}return {ok,error};};
-    console.log(JSON.stringify({contained:run(0),breakaway:run(0x01000000)}));k.close();
+    process.stdout.write(JSON.stringify({contained:run(0),breakaway:run(0x01000000)})+String.fromCharCode(10));k.close();
   `;
     const provider = spawn(fixture);
     const output = new Response(provider.stdout).text(),
@@ -254,7 +254,12 @@ it.skipIf(process.platform !== 'win32' || !supported)(
     const expected = ['', 'space value', 'quote"value', 'tail\\', '\\"', '%PATH%&|^<>'];
     const provider = runtimeSpawnOwnedProviderTree({
       command: process.execPath,
-      args: ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '--', ...expected],
+      args: [
+        '-e',
+        'process.stdout.write(JSON.stringify(process.argv.slice(1))+String.fromCharCode(10))',
+        '--',
+        ...expected,
+      ],
       cwd: process.cwd(),
       environment: process.env,
     });
@@ -277,7 +282,7 @@ it.skipIf(process.platform !== 'win32' || !supported)(
 it.skipIf(!supported)(
   'drains actual stdout through EOF when its reader cancels immediately after one delivered chunk',
   async () => {
-    const provider = spawn("console.log('one');setInterval(()=>{},1000)");
+    const provider = spawn("process.stdout.write('one'+String.fromCharCode(10));setInterval(()=>{},1000)");
     const reader = provider.stdout.getReader();
     const errors = provider.stderr.cancel();
     try {
