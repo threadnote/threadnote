@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "capability": "rust-owned-vector-reader",
+  "status": "unqualified",
+  "adoptionDecision": "defer-shipping-until-complete-R5-evidence",
+  "privateMatchingCandidatePayloadExecutes": true,
+  "qualifiedPlatforms": [],
+  "qualificationCandidates": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
+  "gates": {
+    "pairedRunsMinimum": 3,
+    "warmQueriesPerArmMinimum": 30,
+    "primaryCase": "100000-dense",
+    "primaryP95ImprovementMinimum": 0.2,
+    "secondaryCaseDocuments": 10000,
+    "secondaryP95MaximumRegression": "max(5 milliseconds, 5 percent)",
+    "sampledProcessTreePeakRssMaximumGrowth": 0.1,
+    "distributions": ["dense", "tied"],
+    "firstUseSeparate": true,
+    "exactQueryAndScalarOracleParityRequired": true,
+    "productionCanonicalWorkerAndUnchangedDeadlinesRequired": true
+  },
+  "evidence": {
+    "darwin": "local-results.json",
+    "linux": "linux-results.json"
+  },
+  "reason": "Local source and compiled production-path diagnostics are incomplete and contain deadline failures. No committed 3x30 paired qualification or complete secondary/RSS/Linux evidence has passed."
+}

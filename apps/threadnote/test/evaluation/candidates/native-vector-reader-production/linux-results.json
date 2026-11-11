@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "platform": "x86_64-unknown-linux-gnu",
+  "status": "not-run",
+  "qualified": false,
+  "capturedCandidate": null,
+  "captures": [],
+  "reason": "Formal Linux qualification has not run. The default-off manual workflow can capture the four serial cases against a built strict payload and a cached SHA-verified BGE model; workflow existence is not performance evidence."
+}

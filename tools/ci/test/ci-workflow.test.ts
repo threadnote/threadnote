@@ -178,7 +178,7 @@ it('builds each native release once and fans its archive out to independent requ
   });
   const builds = EffectArray.filter(
     EffectArray.flatMap(EffectRecord.values(releaseJobs), job => job.steps ?? []),
-    candidate => candidate.run === 'bun run build',
+    candidate => candidate.run === 'bun run build:release',
   );
   expect(builds).toHaveLength(1);
   expect(step(releaseJobs.build, 'Self-contained native smoke')?.run).toBe('bun scripts/smoke-self-contained.ts');

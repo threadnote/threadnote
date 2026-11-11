@@ -46,7 +46,7 @@ on:
         type: boolean
         default: false
       include_native_recall_vector_capture:
-        description: Capture serial Linux recall-vector dense/tied evidence with the committed BGE model
+        description: Capture serial production native/TypeScript pairs on Linux with the committed BGE model
         required: false
         type: boolean
         default: false
@@ -989,7 +989,7 @@ jobs:
           retention-days: 30
 
   recall-vector-native-linux:
-    name: Recall vectors · Linux serial diagnostic capture
+    name: Recall vectors · Linux serial production capture
     if: github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_capture
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -1005,10 +1005,21 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Install pinned native vector toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal
+
+      - name: Build the source-bound production candidate once
+        run: bun run build:release
+        env:
+          THREADNOTE_BUILD_TARGET: bun-linux-x64-baseline
+
+      - name: Verify the production native vector payload
+        run: bun scripts/verify-native-vector-reader.ts --required
+
       - name: Prepare bounded output directory
         run: mkdir -p "$RUNNER_TEMP/recall-vector-native"
 
-      - name: Capture serial primary samples and separate observer controls
+      - name: Capture serial production pairs without a required timing gate
         timeout-minutes: 40
         shell: bash
         run: |
@@ -1016,21 +1027,18 @@ jobs:
           output_dir="$RUNNER_TEMP/recall-vector-native"
           model_file="$GITHUB_WORKSPACE/$MODEL_RELATIVE_PATH"
           test -f "$model_file"
-          for replica in 1 2 3; do
-            for documents in 10000 100000; do
-              for distribution in dense tied; do
-                output="$output_dir/recall-vector-${documents}-${distribution}-replica-${replica}.json"
-                bun scripts/benchmark-recall-vectors.ts \
-                  --pair "$replica" \
-                  --arm baseline \
-                  --documents "$documents" \
-                  --distribution "$distribution" \
-                  --samples 30 \
-                  --stage-attribution \
-                  --model bge-small-en-v1.5-q8 \
-                  --model-file "$model_file" \
-                  --output "$output"
-              done
+          for documents in 10000 100000; do
+            for distribution in dense tied; do
+              output="$output_dir/recall-vector-${documents}-${distribution}-production.json"
+              bun scripts/benchmark-recall-vectors.ts \
+                --production-path \
+                --pairs 3 \
+                --documents "$documents" \
+                --distribution "$distribution" \
+                --samples 30 \
+                --model-file "$model_file" \
+                --distribution-root "$GITHUB_WORKSPACE/dist" \
+                --output "$output"
             done
           done
 

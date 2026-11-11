@@ -32,6 +32,7 @@ import type {DevSkillsMutationLease} from './dev_skills/index.js';
 import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
+import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
 import {
   activeInstalledRelease,
   activeInstalledVersion,
@@ -287,6 +288,21 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
   ];
   checks.push(yield* safeDoctorCheck('threadnote shim', commandShimCheck(config.agentContextHome)));
   checks.push(yield* safeDoctorCheck('standalone process lifecycle', legacyProcessDoctorCheck(config)));
+  checks.push(
+    yield* safeDoctorCheck(
+      'native vector reader',
+      Effect.tryPromise({
+        try: () => loadNativeVectorReader(system),
+        catch: cause => LifecycleOperationError.make({cause, message: errorMessage(cause)}),
+      }).pipe(
+        Effect.map(binding => ({
+          detail: binding ? 'verified native vector reader' : 'TypeScript fallback; no matching native payload',
+          name: 'native vector reader',
+          status: 'ok' as const,
+        })),
+      ),
+    ),
+  );
   checks.push(
     yield* safeDoctorCheck(
       'Threadnote home',
