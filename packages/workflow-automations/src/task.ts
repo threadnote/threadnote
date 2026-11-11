@@ -1,5 +1,5 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
-import {nextNativeCycle as cycleNext} from './cycle.js';
+import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -54,6 +54,7 @@ export interface NativeTaskView {
       readonly files: readonly string[];
       readonly scopeFiles: readonly string[];
       readonly requiredReviewLanes: readonly string[];
+      readonly reviewMode: 'full' | 'incremental';
       readonly previousAttempt?: {readonly status: 'invalid'; readonly message: string};
     };
   };
@@ -77,6 +78,12 @@ export interface NativeTaskView {
     readonly title: string;
     readonly prUrl: string;
   }[];
+  readonly sameLabelBaseIntegration?: {
+    readonly action: 'integrate-same-label-base';
+    readonly phaseId: string;
+    readonly predecessorRef: string;
+    readonly baseBranch: string;
+  };
   readonly baseRequalification?: {
     readonly action: 'requalify-base';
     readonly phaseId: string;
@@ -408,11 +415,17 @@ export function projectNativeTaskView(
   const canonicalNext = cycleNext(cycle);
   const openReview = EffectOption.getOrUndefined(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
-      if (canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
+      if (canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
       const latest = phaseSnapshots.at(-1)?.snapshot;
       return Boolean(
         latest &&
+        (canonicalNext.action === 'implement' ||
+          (canonicalNext.action === 'blocked' &&
+            cycle.phases[candidate.id].status === 'stale' &&
+            latest.version === 3 &&
+            latest.sameLabelRebasedBaseIntegrationV1 &&
+            nativeCycleParentsReady(cycle, candidate.id))) &&
         latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
         !EffectArray.some(runtime.reviews, item => item.snapshotId === latest.snapshotId),
       );
@@ -536,6 +549,14 @@ export function projectNativeTaskView(
                     files: page(snapshotFiles, offset),
                     scopeFiles: page(snapshotScopeFiles, offset),
                     requiredReviewLanes: ['correctness', 'simplicity'],
+                    reviewMode:
+                      snapshot.previous &&
+                      snapshot.version !== 3 &&
+                      !snapshot.baseRequalification &&
+                      !snapshot.ordinaryMergeQualificationV1 &&
+                      !snapshot.sameLabelRebasedBaseIntegrationV1
+                        ? 'incremental'
+                        : 'full',
                     ...(latestInvalidAttempt
                       ? {previousAttempt: {status: 'invalid' as const, message: latestInvalidAttempt.message}}
                       : {}),
