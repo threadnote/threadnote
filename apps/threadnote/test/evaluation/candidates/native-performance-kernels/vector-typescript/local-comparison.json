@@ -1,0 +1,1144 @@
+{
+  "version": 1,
+  "kind": "permanent-local-descriptive-projection",
+  "name": "P2 legacy versus optimized TypeScript",
+  "platform": "darwin-arm64",
+  "interpretation": "Inconclusive full-request benefit: paired order1 optimized slower, reverse order optimized faster; shared-host outliers retained; no causal benefit claim.",
+  "qualification": false,
+  "hostOpening": {
+    "observedAt": "2026-11-11T10:49:00+01:00",
+    "cpu": "Apple M1 Max",
+    "logicalProcessors": 10,
+    "memoryBytes": 68719476736,
+    "loadAverages": [6.56, 6.17, 5.91],
+    "externalActivityAtOpening": [
+      {
+        "process": "unrelated Bun worker A",
+        "cpuPercent": 126.2
+      },
+      {
+        "process": "unrelated Bun worker B",
+        "cpuPercent": 97.6
+      },
+      {
+        "process": "Threadnote runtime",
+        "cpuPercent": 78.0
+      },
+      {
+        "process": "WindowServer",
+        "cpuPercent": 27.2
+      }
+    ]
+  },
+  "sampleCounts": {
+    "cells": 4,
+    "warmRequests": 20,
+    "observerDisabledControls": 20,
+    "firstUseRequests": 4
+  },
+  "rawRetention": "Original full local captures and provenance remain private with the frozen prototype; only whitelisted metrics/samples/counts/hashes are committed. No private paths or user content retained.",
+  "cells": [
+    {
+      "id": "pair-1-legacy",
+      "implementation": "legacy",
+      "backend": "typescript",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "createdAt": "2026-11-11T09:51:13.035Z",
+      "captureStartedAt": "2026-11-11T09:50:19.216Z",
+      "captureFinishedAt": "2026-11-11T09:51:13.091Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "configurationHash": "5b1188a8b83e5bf526984c984c50bb113e898c0f19408736e968a154d0eaf95c",
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "correctnessDigest": "43cf429c2c90e0c01fd44aae50efd53fbeb513f4c1d8a7bc1887fdbe75929c2d",
+      "sourceFence": {
+        "opening": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "5b6dbebb47c794d3c48f3e2e5d65bbf1e0335a9910f6b83b153c2ac09b56d98a",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        },
+        "closing": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "5b6dbebb47c794d3c48f3e2e5d65bbf1e0335a9910f6b83b153c2ac09b56d98a",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        }
+      },
+      "provenance": {
+        "sourceStable": true,
+        "exitCode": 0,
+        "selector": {
+          "THREADNOTE_NATIVE_VECTOR_EXPERIMENT": "0"
+        },
+        "opening": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "status": "",
+          "librarySha256": null
+        },
+        "closing": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "status": "",
+          "librarySha256": null
+        },
+        "cargoLockSha256": null,
+        "rawArtifactFile": "pair-1-legacy.json",
+        "rawArtifactSha256": "8c54e1e1a422a8219110e64bca97c5a02bb3cacf924f8f005ede8d4dd91d31f4",
+        "companionFile": "pair-1-legacy.json.provenance.json",
+        "companionSha256": "5a8b91ee508e8e10a01d295718b4b669e5ea57fb73d32f9ee4c2a65a440b0033",
+        "runtime": {
+          "bun": "1.4.4",
+          "platform": "darwin",
+          "architecture": "arm64"
+        }
+      },
+      "sampleCounts": {
+        "warmRequests": 5,
+        "observerDisabledControls": 5,
+        "firstUse": 1,
+        "stageObservations": 6
+      },
+      "statistics": [
+        {
+          "maximum": 971.397125,
+          "mean": 971.397125,
+          "minimum": 971.397125,
+          "name": "first-use-request",
+          "p50": 971.397125,
+          "p95": 971.397125,
+          "p99": 971.397125,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 475.486416,
+          "mean": 464.2425082,
+          "minimum": 452.775292,
+          "name": "warm-request",
+          "p50": 462.580792,
+          "p95": 475.486416,
+          "p99": 475.486416,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 578.931,
+          "mean": 519.5258,
+          "minimum": 488.899,
+          "name": "warm-parent-cpu",
+          "p50": 514.757,
+          "p95": 578.931,
+          "p99": 578.931,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 316376888,
+          "mean": 316376888,
+          "minimum": 316376888,
+          "name": "parent-peak-rss",
+          "p50": 316376888,
+          "p95": 316376888,
+          "p99": 316376888,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 873742336,
+          "mean": 873742336,
+          "minimum": 873742336,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 873742336,
+          "p95": 873742336,
+          "p99": 873742336,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 321708032,
+          "mean": 321708032,
+          "minimum": 321708032,
+          "name": "database",
+          "p50": 321708032,
+          "p95": 321708032,
+          "p99": 321708032,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 516.5515,
+          "mean": 472.6059582,
+          "minimum": 457.897458,
+          "name": "warm-observer-disabled-control",
+          "p50": 463.537083,
+          "p95": 516.5515,
+          "p99": 516.5515,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.21658400000160327,
+          "mean": 0.17548359999927926,
+          "minimum": 0.15074999999342253,
+          "name": "observer-postprocessing",
+          "p50": 0.1726669999989099,
+          "p95": 0.21658400000160327,
+          "p99": 0.21658400000160327,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 363.758297,
+          "mean": 354.9304098,
+          "minimum": 343.28537,
+          "name": "warm-sql-row-transport",
+          "p50": 356.435255,
+          "p95": 363.758297,
+          "p99": 363.758297,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 96.389547,
+          "mean": 91.71190659999999,
+          "minimum": 89.292461,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 89.738162,
+          "p95": 96.389547,
+          "p99": 96.389547,
+          "samples": 5,
+          "unit": "milliseconds"
+        }
+      ],
+      "samples": {
+        "warmRequestMilliseconds": [475.243166, 452.775292, 455.126875, 462.580792, 475.486416],
+        "observerDisabledControlMilliseconds": [516.5515, 463.839208, 463.537083, 457.897458, 461.204542],
+        "firstUseMilliseconds": [971.397125],
+        "warmParentCpuMilliseconds": [514.757, 488.899, 495.344, 519.698, 578.931],
+        "observerProjectionMilliseconds": [
+          0.21658400000160327, 0.1602500000008149, 0.15074999999342253, 0.1726669999989099, 0.17716700000164565
+        ],
+        "sqlSpanUnionMilliseconds": [363.758297, 343.28537, 352.016622, 356.435255, 359.156505],
+        "mixedReaderExclusiveSqlResidualMilliseconds": [93.732077, 96.389547, 89.292461, 89.407286, 89.738162]
+      },
+      "observerPairOrder": ["observed-first", "control-first", "observed-first", "control-first", "observed-first"],
+      "sampler": {
+        "processTelemetry": {
+          "availability": "available",
+          "parentIdentityValidation": "darwin-ps-lstart",
+          "sampleIntervalMilliseconds": 250,
+          "scope": "recursive-process-tree",
+          "source": "darwin-ps"
+        },
+        "queryPhase": {
+          "cpuMilliseconds": 6370,
+          "processPeakCount": 1,
+          "processSampleAttempts": 18,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 372,
+          "processSamples": 18,
+          "rssPeakBytes": 873742336,
+          "temporaryLinkedPeakBytes": 630224523,
+          "temporaryOpenAttempts": 5,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 321740800,
+          "temporaryOpenSamples": 5,
+          "databasePeakBytes": 321708032,
+          "journalPeakBytes": 0,
+          "samples": 171,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 630224523,
+          "walPeakBytes": 0
+        }
+      }
+    },
+    {
+      "id": "pair-1-optimized",
+      "implementation": "optimized",
+      "backend": "typescript",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "createdAt": "2026-11-11T09:53:06.142Z",
+      "captureStartedAt": "2026-11-11T09:52:07.647Z",
+      "captureFinishedAt": "2026-11-11T09:53:06.221Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "configurationHash": "5b1188a8b83e5bf526984c984c50bb113e898c0f19408736e968a154d0eaf95c",
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "correctnessDigest": "43cf429c2c90e0c01fd44aae50efd53fbeb513f4c1d8a7bc1887fdbe75929c2d",
+      "sourceFence": {
+        "opening": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "66ca65dc3608bc34c7b749c7823d3964f3b48032f77ec5468e2f0d2cb9057847",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        },
+        "closing": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "66ca65dc3608bc34c7b749c7823d3964f3b48032f77ec5468e2f0d2cb9057847",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        }
+      },
+      "provenance": {
+        "sourceStable": true,
+        "exitCode": 0,
+        "selector": {
+          "THREADNOTE_NATIVE_VECTOR_EXPERIMENT": "0"
+        },
+        "opening": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "status": "",
+          "librarySha256": null
+        },
+        "closing": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "status": "",
+          "librarySha256": null
+        },
+        "cargoLockSha256": null,
+        "rawArtifactFile": "pair-1-optimized.json",
+        "rawArtifactSha256": "fe1f7d91905e8f0072455ea91fe55e67a64477eee5eec5c8e50e34ec90d2f15a",
+        "companionFile": "pair-1-optimized.json.provenance.json",
+        "companionSha256": "6d0c15ffc628f4021642eb057dd45d18d8e84c0c8fd080d0b7143f150e335245",
+        "runtime": {
+          "bun": "1.4.4",
+          "platform": "darwin",
+          "architecture": "arm64"
+        }
+      },
+      "sampleCounts": {
+        "warmRequests": 5,
+        "observerDisabledControls": 5,
+        "firstUse": 1,
+        "stageObservations": 6
+      },
+      "statistics": [
+        {
+          "maximum": 2274.05725,
+          "mean": 2274.05725,
+          "minimum": 2274.05725,
+          "name": "first-use-request",
+          "p50": 2274.05725,
+          "p95": 2274.05725,
+          "p99": 2274.05725,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 1027.37725,
+          "mean": 629.1880916,
+          "minimum": 440.757916,
+          "name": "warm-request",
+          "p50": 492.379834,
+          "p95": 1027.37725,
+          "p99": 1027.37725,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 2383.156,
+          "mean": 912.2461999999999,
+          "minimum": 482.733,
+          "name": "warm-parent-cpu",
+          "p50": 581.196,
+          "p95": 2383.156,
+          "p99": 2383.156,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 307250904,
+          "mean": 307250904,
+          "minimum": 307250904,
+          "name": "parent-peak-rss",
+          "p50": 307250904,
+          "p95": 307250904,
+          "p99": 307250904,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 883687424,
+          "mean": 883687424,
+          "minimum": 883687424,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 883687424,
+          "p95": 883687424,
+          "p99": 883687424,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 321708032,
+          "mean": 321708032,
+          "minimum": 321708032,
+          "name": "database",
+          "p50": 321708032,
+          "p95": 321708032,
+          "p99": 321708032,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 629.0225,
+          "mean": 503.8105586,
+          "minimum": 448.161167,
+          "name": "warm-observer-disabled-control",
+          "p50": 475.713834,
+          "p95": 629.0225,
+          "p99": 629.0225,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.21229200000379933,
+          "mean": 0.1677588000005926,
+          "minimum": 0.14195900000049733,
+          "name": "observer-postprocessing",
+          "p50": 0.15862500000366708,
+          "p95": 0.21229200000379933,
+          "p99": 0.21229200000379933,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 601.693957,
+          "mean": 419.5206056,
+          "minimum": 347.982416,
+          "name": "warm-sql-row-transport",
+          "p50": 383.721435,
+          "p95": 601.693957,
+          "p99": 601.693957,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 99.224584,
+          "mean": 85.3192362,
+          "minimum": 77.528543,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 83.501913,
+          "p95": 99.224584,
+          "p99": 99.224584,
+          "samples": 5,
+          "unit": "milliseconds"
+        }
+      ],
+      "samples": {
+        "warmRequestMilliseconds": [1027.37725, 455.616416, 440.757916, 729.809042, 492.379834],
+        "observerDisabledControlMilliseconds": [495.796625, 475.713834, 448.161167, 629.0225, 470.358667],
+        "firstUseMilliseconds": [2274.05725],
+        "warmParentCpuMilliseconds": [2383.156, 498.885, 482.733, 615.261, 581.196],
+        "observerProjectionMilliseconds": [
+          0.21229200000379933, 0.14195900000049733, 0.15120899999601534, 0.17470899999898393, 0.15862500000366708
+        ],
+        "sqlSpanUnionMilliseconds": [402.876921, 361.328299, 347.982416, 601.693957, 383.721435],
+        "mixedReaderExclusiveSqlResidualMilliseconds": [83.501913, 79.081327, 77.528543, 99.224584, 87.259814]
+      },
+      "observerPairOrder": ["observed-first", "control-first", "observed-first", "control-first", "observed-first"],
+      "sampler": {
+        "processTelemetry": {
+          "availability": "available",
+          "parentIdentityValidation": "darwin-ps-lstart",
+          "sampleIntervalMilliseconds": 250,
+          "scope": "recursive-process-tree",
+          "source": "darwin-ps"
+        },
+        "queryPhase": {
+          "cpuMilliseconds": 8570,
+          "processPeakCount": 1,
+          "processSampleAttempts": 25,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 397,
+          "processSamples": 25,
+          "rssPeakBytes": 883687424,
+          "temporaryLinkedPeakBytes": 630224523,
+          "temporaryOpenAttempts": 7,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 321740800,
+          "temporaryOpenSamples": 7,
+          "databasePeakBytes": 321708032,
+          "journalPeakBytes": 0,
+          "samples": 220,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 630224523,
+          "walPeakBytes": 0
+        }
+      }
+    },
+    {
+      "id": "pair-2-legacy",
+      "implementation": "legacy",
+      "backend": "typescript",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "createdAt": "2026-11-11T09:57:04.784Z",
+      "captureStartedAt": "2026-11-11T09:56:05.814Z",
+      "captureFinishedAt": "2026-11-11T09:57:04.848Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "configurationHash": "5b1188a8b83e5bf526984c984c50bb113e898c0f19408736e968a154d0eaf95c",
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "correctnessDigest": "43cf429c2c90e0c01fd44aae50efd53fbeb513f4c1d8a7bc1887fdbe75929c2d",
+      "sourceFence": {
+        "opening": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "5b6dbebb47c794d3c48f3e2e5d65bbf1e0335a9910f6b83b153c2ac09b56d98a",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        },
+        "closing": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "5b6dbebb47c794d3c48f3e2e5d65bbf1e0335a9910f6b83b153c2ac09b56d98a",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        }
+      },
+      "provenance": {
+        "sourceStable": true,
+        "exitCode": 0,
+        "selector": {
+          "THREADNOTE_NATIVE_VECTOR_EXPERIMENT": "0"
+        },
+        "opening": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "status": "",
+          "librarySha256": null
+        },
+        "closing": {
+          "commit": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+          "status": "",
+          "librarySha256": null
+        },
+        "cargoLockSha256": null,
+        "rawArtifactFile": "pair-2-legacy.json",
+        "rawArtifactSha256": "f37826681ad4d2c98761d0c4188540c32efe4f8db04d18ee9191d1613fdd0af6",
+        "companionFile": "pair-2-legacy.json.provenance.json",
+        "companionSha256": "36f4461ad8d12fa6ed8dfec762581c09966b70858b8dccc84300c4d2c256d40d",
+        "runtime": {
+          "bun": "1.4.4",
+          "platform": "darwin",
+          "architecture": "arm64"
+        }
+      },
+      "sampleCounts": {
+        "warmRequests": 5,
+        "observerDisabledControls": 5,
+        "firstUse": 1,
+        "stageObservations": 6
+      },
+      "statistics": [
+        {
+          "maximum": 1069.77475,
+          "mean": 1069.77475,
+          "minimum": 1069.77475,
+          "name": "first-use-request",
+          "p50": 1069.77475,
+          "p95": 1069.77475,
+          "p99": 1069.77475,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 489.612625,
+          "mean": 470.9401583999999,
+          "minimum": 450.167666,
+          "name": "warm-request",
+          "p50": 471.859667,
+          "p95": 489.612625,
+          "p99": 489.612625,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 639.945,
+          "mean": 580.9646,
+          "minimum": 501.984,
+          "name": "warm-parent-cpu",
+          "p50": 589.78,
+          "p95": 639.945,
+          "p99": 639.945,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 302810888,
+          "mean": 302810888,
+          "minimum": 302810888,
+          "name": "parent-peak-rss",
+          "p50": 302810888,
+          "p95": 302810888,
+          "p99": 302810888,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 839122944,
+          "mean": 839122944,
+          "minimum": 839122944,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 839122944,
+          "p95": 839122944,
+          "p99": 839122944,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 321708032,
+          "mean": 321708032,
+          "minimum": 321708032,
+          "name": "database",
+          "p50": 321708032,
+          "p95": 321708032,
+          "p99": 321708032,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 519.172334,
+          "mean": 480.5509,
+          "minimum": 463.290375,
+          "name": "warm-observer-disabled-control",
+          "p50": 475.446291,
+          "p95": 519.172334,
+          "p99": 519.172334,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.2242499999993015,
+          "mean": 0.17468339999904856,
+          "minimum": 0.1486670000012964,
+          "name": "observer-postprocessing",
+          "p50": 0.16929099999833852,
+          "p95": 0.2242499999993015,
+          "p99": 0.2242499999993015,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 363.683216,
+          "mean": 351.5498286,
+          "minimum": 342.191545,
+          "name": "warm-sql-row-transport",
+          "p50": 346.360044,
+          "p95": 363.683216,
+          "p99": 363.683216,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 93.281621,
+          "mean": 91.6471724,
+          "minimum": 90.381079,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 91.644583,
+          "p95": 93.281621,
+          "p99": 93.281621,
+          "samples": 5,
+          "unit": "milliseconds"
+        }
+      ],
+      "samples": {
+        "warmRequestMilliseconds": [468.677542, 471.859667, 474.383292, 489.612625, 450.167666],
+        "observerDisabledControlMilliseconds": [464.593292, 519.172334, 463.290375, 475.446291, 480.252208],
+        "firstUseMilliseconds": [1069.77475],
+        "warmParentCpuMilliseconds": [589.78, 614.546, 558.568, 639.945, 501.984],
+        "observerProjectionMilliseconds": [
+          0.2242499999993015, 0.1486670000012964, 0.1577919999981532, 0.1734169999981532, 0.16929099999833852
+        ],
+        "sqlSpanUnionMilliseconds": [345.667421, 346.360044, 359.846917, 363.683216, 342.191545],
+        "mixedReaderExclusiveSqlResidualMilliseconds": [93.281621, 91.644583, 91.234335, 91.694244, 90.381079]
+      },
+      "observerPairOrder": ["observed-first", "control-first", "observed-first", "control-first", "observed-first"],
+      "sampler": {
+        "processTelemetry": {
+          "availability": "available",
+          "parentIdentityValidation": "darwin-ps-lstart",
+          "sampleIntervalMilliseconds": 250,
+          "scope": "recursive-process-tree",
+          "source": "darwin-ps"
+        },
+        "queryPhase": {
+          "cpuMilliseconds": 6890,
+          "processPeakCount": 1,
+          "processSampleAttempts": 19,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 360,
+          "processSamples": 19,
+          "rssPeakBytes": 839122944,
+          "temporaryLinkedPeakBytes": 630224523,
+          "temporaryOpenAttempts": 5,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 321740800,
+          "temporaryOpenSamples": 5,
+          "databasePeakBytes": 321708032,
+          "journalPeakBytes": 0,
+          "samples": 168,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 630224523,
+          "walPeakBytes": 0
+        }
+      }
+    },
+    {
+      "id": "pair-2-optimized",
+      "implementation": "optimized",
+      "backend": "typescript",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "createdAt": "2026-11-11T09:55:41.390Z",
+      "captureStartedAt": "2026-11-11T09:54:45.627Z",
+      "captureFinishedAt": "2026-11-11T09:55:41.453Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "configurationHash": "5b1188a8b83e5bf526984c984c50bb113e898c0f19408736e968a154d0eaf95c",
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "correctnessDigest": "43cf429c2c90e0c01fd44aae50efd53fbeb513f4c1d8a7bc1887fdbe75929c2d",
+      "sourceFence": {
+        "opening": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "66ca65dc3608bc34c7b749c7823d3964f3b48032f77ec5468e2f0d2cb9057847",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        },
+        "closing": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "66ca65dc3608bc34c7b749c7823d3964f3b48032f77ec5468e2f0d2cb9057847",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        }
+      },
+      "provenance": {
+        "sourceStable": true,
+        "exitCode": 0,
+        "selector": {
+          "THREADNOTE_NATIVE_VECTOR_EXPERIMENT": "0"
+        },
+        "opening": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "status": "",
+          "librarySha256": null
+        },
+        "closing": {
+          "commit": "217edfe1e2d3d358a4ff761bab93fb26f27ff98d",
+          "status": "",
+          "librarySha256": null
+        },
+        "cargoLockSha256": null,
+        "rawArtifactFile": "pair-2-optimized.json",
+        "rawArtifactSha256": "cc4089707b7337400aa08ad1684b57aa346b0af71850d7e409b785794a5c7142",
+        "companionFile": "pair-2-optimized.json.provenance.json",
+        "companionSha256": "f1b27e035eb754a0886dea6e9f2506fe5ba7060e4f588a19a115c0bc4d1ea93f",
+        "runtime": {
+          "bun": "1.4.4",
+          "platform": "darwin",
+          "architecture": "arm64"
+        }
+      },
+      "sampleCounts": {
+        "warmRequests": 5,
+        "observerDisabledControls": 5,
+        "firstUse": 1,
+        "stageObservations": 6
+      },
+      "statistics": [
+        {
+          "maximum": 868.573667,
+          "mean": 868.573667,
+          "minimum": 868.573667,
+          "name": "first-use-request",
+          "p50": 868.573667,
+          "p95": 868.573667,
+          "p99": 868.573667,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 779.017541,
+          "mean": 502.96253319999994,
+          "minimum": 425.747667,
+          "name": "warm-request",
+          "p50": 436.215583,
+          "p95": 779.017541,
+          "p99": 779.017541,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 1749.893,
+          "mean": 739.7738,
+          "minimum": 462.372,
+          "name": "warm-parent-cpu",
+          "p50": 486.66,
+          "p95": 1749.893,
+          "p99": 1749.893,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 299435808,
+          "mean": 299435808,
+          "minimum": 299435808,
+          "name": "parent-peak-rss",
+          "p50": 299435808,
+          "p95": 299435808,
+          "p99": 299435808,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 867860480,
+          "mean": 867860480,
+          "minimum": 867860480,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 867860480,
+          "p95": 867860480,
+          "p99": 867860480,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 321708032,
+          "mean": 321708032,
+          "minimum": 321708032,
+          "name": "database",
+          "p50": 321708032,
+          "p95": 321708032,
+          "p99": 321708032,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 431.88675,
+          "mean": 428.0453332,
+          "minimum": 424.442291,
+          "name": "warm-observer-disabled-control",
+          "p50": 427.415667,
+          "p95": 431.88675,
+          "p99": 431.88675,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.20754200000374112,
+          "mean": 0.16665820000052917,
+          "minimum": 0.1429160000043339,
+          "name": "observer-postprocessing",
+          "p50": 0.1590829999986454,
+          "p95": 0.20754200000374112,
+          "p99": 0.20754200000374112,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 347.434133,
+          "mean": 343.2477902,
+          "minimum": 335.031499,
+          "name": "warm-sql-row-transport",
+          "p50": 344.266705,
+          "p95": 347.434133,
+          "p99": 347.434133,
+          "samples": 5,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 77.906378,
+          "mean": 76.88014319999999,
+          "minimum": 76.083294,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 76.728744,
+          "p95": 77.906378,
+          "p99": 77.906378,
+          "samples": 5,
+          "unit": "milliseconds"
+        }
+      ],
+      "samples": {
+        "warmRequestMilliseconds": [436.215583, 440.026333, 779.017541, 433.805542, 425.747667],
+        "observerDisabledControlMilliseconds": [431.88675, 429.591, 427.415667, 426.890958, 424.442291],
+        "firstUseMilliseconds": [868.573667],
+        "warmParentCpuMilliseconds": [526.762, 486.66, 1749.893, 473.182, 462.372],
+        "observerProjectionMilliseconds": [
+          0.20754200000374112, 0.1590829999986454, 0.1429160000043339, 0.16524999999819556, 0.1584999999977299
+        ],
+        "sqlSpanUnionMilliseconds": [344.266705, 347.434133, 346.924419, 342.582195, 335.031499],
+        "mixedReaderExclusiveSqlResidualMilliseconds": [77.906378, 76.728744, 77.212538, 76.469762, 76.083294]
+      },
+      "observerPairOrder": ["observed-first", "control-first", "observed-first", "control-first", "observed-first"],
+      "sampler": {
+        "processTelemetry": {
+          "availability": "available",
+          "parentIdentityValidation": "darwin-ps-lstart",
+          "sampleIntervalMilliseconds": 250,
+          "scope": "recursive-process-tree",
+          "source": "darwin-ps"
+        },
+        "queryPhase": {
+          "cpuMilliseconds": 6830,
+          "processPeakCount": 1,
+          "processSampleAttempts": 18,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 360,
+          "processSamples": 18,
+          "rssPeakBytes": 867860480,
+          "temporaryLinkedPeakBytes": 630224523,
+          "temporaryOpenAttempts": 5,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 321740800,
+          "temporaryOpenSamples": 5,
+          "databasePeakBytes": 321708032,
+          "journalPeakBytes": 0,
+          "samples": 157,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 630224523,
+          "walPeakBytes": 0
+        }
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "pair": 1,
+      "captureOrder": ["legacy", "optimized"],
+      "reference": "legacy",
+      "candidate": "optimized",
+      "referenceWarmMedianMilliseconds": 462.580792,
+      "candidateWarmMedianMilliseconds": 492.379834,
+      "warmMedianChangeRatio": 0.06441910800308381,
+      "referenceControlMedianMilliseconds": 463.537083,
+      "candidateControlMedianMilliseconds": 475.713834,
+      "controlMedianChangeRatio": 0.02626920573687963,
+      "exactCrossArmDigestMatch": true,
+      "qualification": false
+    },
+    {
+      "pair": 2,
+      "captureOrder": ["optimized", "legacy"],
+      "reference": "legacy",
+      "candidate": "optimized",
+      "referenceWarmMedianMilliseconds": 471.859667,
+      "candidateWarmMedianMilliseconds": 436.215583,
+      "warmMedianChangeRatio": -0.07553958622193502,
+      "referenceControlMedianMilliseconds": 475.446291,
+      "candidateControlMedianMilliseconds": 427.415667,
+      "controlMedianChangeRatio": -0.10102218675210994,
+      "exactCrossArmDigestMatch": true,
+      "qualification": false
+    }
+  ],
+  "limitations": [
+    "Five warm samples per arm are descriptive, not p95 qualification.",
+    "Shared host/external activity; no idle guarantee.",
+    "All outliers retained with no normalization or trimming.",
+    "SQL and mixed reader residual percentiles are not additive.",
+    "Do not compare implementations causally across different capture windows.",
+    "This recall case does not establish graph blob-path performance."
+  ]
+}

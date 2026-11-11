@@ -1,0 +1,62 @@
+{
+  "phase": "P7",
+  "delivery": "evidence-only negative adoption decisions",
+  "runtimeBaseline": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+  "bunCrypto": "Already merged and retained; outside this experiment scope",
+  "components": [
+    {
+      "component": "TypeScript vector representation/selection experiment",
+      "phase": "P2",
+      "decision": "DEFER",
+      "runtimeShipped": false,
+      "evidence": "vector-typescript/README.md"
+    },
+    {
+      "component": "Native vector component",
+      "phase": "P3",
+      "decision": "DEFER",
+      "runtimeShipped": false,
+      "evidence": "../vector-native/decision.json"
+    },
+    {
+      "component": "SQL pipeline changes",
+      "phase": "P4",
+      "decision": "DEFER",
+      "runtimeShipped": false,
+      "evidence": "sql/decision.json"
+    },
+    {
+      "component": "Native parser component",
+      "phase": "P5",
+      "decision": "DEFER",
+      "runtimeShipped": false,
+      "evidence": "parser-native/decision.json"
+    },
+    {
+      "component": "Typed DSU/native topology component",
+      "phase": "P6",
+      "decision": "DEFER",
+      "runtimeShipped": false,
+      "evidence": "topology/README.md"
+    }
+  ],
+  "nativePayloadsAdded": false,
+  "nativeBuildDependenciesAdded": false,
+  "releaseTargetContractChanges": false,
+  "supportedReleaseTargetsRetained": 8,
+  "canonicalPhaseOrRunCompletionClaimed": false,
+  "qualification": false,
+  "unchangedAdoptionGates": {
+    "primaryEndToEndP95ImprovementPercent": 20,
+    "secondaryRegressionPercent": 5,
+    "noiseFloorMilliseconds": 5,
+    "processTreePeakRssGrowthPercent": 10,
+    "minimumPairedRuns": 3,
+    "minimumWarmVectorQueriesPerArm": 30
+  },
+  "limitations": [
+    "DEFER is a justified shipping boundary, not a fabricated performance failure or declaration that every native pilot completed.",
+    "Historical observations retain their actual source/model/host identities, failures and non-comparability.",
+    "Current global27 experimental runtime activation/doctor failures are historical validation limitations; coordinator owns restoring the exact final retained runtime."
+  ]
+}
