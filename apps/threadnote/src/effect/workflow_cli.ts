@@ -426,6 +426,13 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly validationRef: string;
     readonly commitEvidence: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
+  sameLabelIntegrationHandler?: (options: {
+    readonly runId: string;
+    readonly callerCwd: string;
+    readonly snapshotRef: string;
+    readonly reason: string;
+    readonly userAuthority: string;
+  }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   const lifecycle = (options: Parameters<NonNullable<typeof lifecycleHandler>>[0]) =>
     lifecycleHandler
@@ -614,6 +621,31 @@ export function makeNativeTaskActionCommands<E, R>(
             }),
           ),
   ).pipe(Command.withDescription('Requalify an exact reviewed predecessor against a newly approved base'));
+  const integrateSameLabelBaseSnapshot = Command.make(
+    'integrate-same-label-base-snapshot',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      snapshotRef: requiredString('snapshot-ref', 'Exact reviewed predecessor reference from workflow task view'),
+      reason: requiredString(
+        'reason',
+        'Why the rewritten same-label base is integrated into the existing reviewed phase lineage',
+      ),
+      userAuthority: requiredString(
+        'user-authority',
+        'Caller-provided human authority statement for this same-label upstream integration; actor identity is not independently authenticated',
+      ),
+    },
+    options =>
+      sameLabelIntegrationHandler
+        ? sameLabelIntegrationHandler(options)
+        : Effect.fail(
+            WorkflowAutomationError.make({
+              code: 'invalid-request',
+              message: 'This task-action command has no same-label integration handler.',
+            }),
+          ),
+  ).pipe(Command.withDescription('Qualify an ancestry-preserving integration of a rewritten same-label upstream base'));
   const supersedeUnreviewedSnapshot = Command.make(
     'supersede-unreviewed-snapshot',
     {
@@ -842,6 +874,7 @@ export function makeNativeTaskActionCommands<E, R>(
       extendReviewBudget,
       recordSnapshot,
       requalifyBaseSnapshot,
+      integrateSameLabelBaseSnapshot,
       supersedeUnreviewedSnapshot,
       recordReview,
       recordValidation,

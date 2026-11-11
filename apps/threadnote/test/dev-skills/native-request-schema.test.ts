@@ -127,6 +127,7 @@ describe('native request schema discovery', () => {
         ordinaryMergeQualificationV1: expect.stringContaining(
           'Produces manifest version2; legacy readers must reject it.',
         ),
+        sameLabelRebasedBaseIntegrationV1: expect.any(String),
       },
     ],
     [
@@ -163,13 +164,27 @@ describe('native request schema discovery', () => {
       text += page.text;
     }
     const schema = JSON.parse(text).schema;
-    expect(schema.properties.protocolVersion.enum).toEqual([1, 2]);
+    expect(schema.properties.protocolVersion.enum).toEqual([1, 2, 3]);
     for (const [name, required] of [
       ['rebase', ['preRebaseHead', 'ontoHead', 'rebasedHead']],
       ['baseRequalification', ['preRebaseHead', 'ontoHead', 'rebasedHead', 'fromBaseBranch']],
       [
         'ordinaryMergeQualificationV1',
         ['priorHead', 'currentBaseHead', 'currentHead', 'fromBaseBranch', 'planDocumentHash', 'phaseOwnedPaths'],
+      ],
+      [
+        'sameLabelRebasedBaseIntegrationV1',
+        [
+          'priorSnapshotId',
+          'expectedPriorEntryDigest',
+          'expectedPriorReviewDigest',
+          'currentBaseHead',
+          'currentHead',
+          'sameBaseBranch',
+          'authorityKind',
+          'planDocumentHash',
+          'phaseOwnedPaths',
+        ],
       ],
     ] as const) {
       expect(schema.required).not.toContain(name);
@@ -179,6 +194,12 @@ describe('native request schema discovery', () => {
         required: expect.arrayContaining([...required]),
       });
       expect(schema.properties[name].required).toHaveLength(required.length);
+      if (name === 'sameLabelRebasedBaseIntegrationV1') {
+        expect(Effect2.Record.keys(schema.properties[name].properties).sort()).toEqual([...required].sort());
+        expect(schema.properties[name].properties.authorityKind.enum).toEqual([
+          'same-label-upstream-rebase-integration',
+        ]);
+      }
     }
   });
 

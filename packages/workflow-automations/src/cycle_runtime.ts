@@ -12,10 +12,12 @@ import {
   NativeCycleSnapshotSchema,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
+  validateNativeCycleReview,
   nativeCycleReviewBasis,
   nativeCycleRebaseReceiptDigest,
   nativeCycleBaseRequalificationReceiptDigest,
   validateNativeCycleMergeReceipt,
+  validateNativeCycleSameLabelRebasedBaseReceipt,
 } from './cycle_review.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
@@ -291,13 +293,16 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       )
         fail('Base requalification lost its reviewed predecessor, approved plan transition or immutable witness.');
     }
-    if (snapshot.ordinaryMergeQualificationV1) {
+    if (snapshot.sameLabelRebasedBaseIntegrationV1)
+      validateNativeCycleSameLabelRebasedBaseReceipt(snapshot, runtime, capturedSnapshots.size);
+    if (snapshot.ordinaryMergeQualificationV1 || snapshot.sameLabelRebasedBaseIntegrationV1) {
       const predecessor = snapshot.previous ?? snapshot.supersedes;
       const prior = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
       if (!prior || !capturedSnapshots.has(prior.snapshotId) || !reviews.has(prior.snapshotId))
         fail('Ordinary merge qualification requires its retained reviewed predecessor.');
-      validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
-      const proof = snapshot.ordinaryMergeQualificationV1;
+      if (snapshot.ordinaryMergeQualificationV1)
+        validateNativeCycleMergeReceipt(snapshot, prior, runtime.plans, baseline.head);
+      const proof = (snapshot.ordinaryMergeQualificationV1 ?? snapshot.sameLabelRebasedBaseIntegrationV1)!;
       const plan = EffectOption.getOrUndefined(
         EffectArray.findFirst(runtime.plans, item => item.source.documentHash === proof.planDocumentHash),
       )!;
@@ -394,7 +399,12 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       EffectArray.map(runtime.snapshots, entry => entry.snapshot),
       runtime.reviews,
     );
-    validateNativeCycleReviewHistory(snapshot, report, basis.previous, basis.findingBasis);
+    (snapshot.sameLabelRebasedBaseIntegrationV1 ? validateNativeCycleReview : validateNativeCycleReviewHistory)(
+      snapshot,
+      report,
+      basis.previous,
+      basis.findingBasis,
+    );
   }
   if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
     fail('Review attempt snapshot is missing.');
