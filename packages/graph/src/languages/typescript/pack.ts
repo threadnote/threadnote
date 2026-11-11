@@ -4,7 +4,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {extractFileFacts} from '../../extractor.js';
 import {CodeGraphLanguagePackError, type CodeGraphLanguagePack} from '../types.js';
 
-const EXTRACTOR_POLICY_VERSION = 'typescript-compiler-v5-bounded-deduplicated-relationship-surface';
+const EXTRACTOR_POLICY_VERSION = 'typescript-compiler-v9-finite-navigation-proofs';
 
 export const codeGraphLanguagePack: CodeGraphLanguagePack = {
   assets: [],

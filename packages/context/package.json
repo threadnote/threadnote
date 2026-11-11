@@ -25,7 +25,9 @@
     "./health_maintenance": "./src/health_maintenance.ts",
     "./memory_maintenance": "./src/memory_maintenance.ts",
     "./navigation/model": "./src/navigation/model.ts",
-    "./navigation/assemble": "./src/navigation/assemble.ts"
+    "./navigation/assemble": "./src/navigation/assemble.ts",
+    "./navigation/structural": "./src/navigation/structural.ts",
+    "./navigation/project": "./src/navigation/project.ts"
   },
   "dependencies": {
     "@threadnote/semantic": "workspace:*",
