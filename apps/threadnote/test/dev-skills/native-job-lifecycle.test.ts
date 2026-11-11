@@ -1565,7 +1565,11 @@ describe('native private job CLI process', () => {
                 new Response(child.stdout).text(),
                 new Response(child.stderr).text(),
               ]);
-              if (code !== 0) throw new Error(`Native CLI failed: ${Effect2.pipe(error, EffectString.slice(0, 1500))}`);
+              if (code !== 0) {
+                throw new Error(
+                  `Native CLI failed with exit code ${code}. stdout: ${Effect2.pipe(output, EffectString.slice(0, 1024))}; stderr: ${Effect2.pipe(error, EffectString.slice(0, 1024))}`,
+                );
+              }
               expect(error).toBe('');
               expect(Effect2.pipe(output, EffectString.endsWith('\n'))).toBe(true);
               const lines = Effect2.pipe(output, EffectString.trim, EffectString.split(/\r?\n/u));
