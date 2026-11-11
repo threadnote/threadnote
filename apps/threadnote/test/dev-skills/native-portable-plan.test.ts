@@ -305,8 +305,10 @@ effectIt.effect(
       yield* setGitIdentity(donor.repo);
       yield* git(donor.repo, ['add', 'source.ts']);
       yield* git(donor.repo, ['commit', '-m', 'source']);
+      yield* git(recipient.repo, ['config', '--local', 'core.autocrlf', 'true']);
       yield* git(recipient.repo, ['fetch', donor.repo, 'main']);
       yield* git(recipient.repo, ['reset', '--hard', 'FETCH_HEAD']);
+      expect(yield* fs.readFileString(path.join(recipient.repo, 'source.ts'))).toContain('\r\n');
       yield* setGitIdentity(recipient.repo);
       const donorConfig = {
         ...donor.config,
@@ -721,6 +723,19 @@ effectIt.effect(
           Effect.provideService(SystemInfo, recipientSystem),
         ),
       ).toMatchObject({taskRef: started.taskRef});
+      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+        recipientState.revision,
+      );
+      const recipientSourcePath = path.join(recipient.repo, 'source.ts');
+      const recipientSource = yield* fs.readFileString(recipientSourcePath);
+      yield* fs.writeFileString(recipientSourcePath, recipientSource + 'export const changed = true;\r\n');
+      expect(
+        yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
+          Effect.provideService(SystemInfo, recipientSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'source-drift'}});
+      yield* fs.writeFileString(recipientSourcePath, recipientSource);
       expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
         recipientState.revision,
       );

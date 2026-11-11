@@ -1,6 +1,7 @@
 import {Array as EffectArray, Effect, FileSystem, Path, Schema, Struct, pipe} from 'effect';
 import * as EffectRecord from 'effect/Record';
 import {SystemInfo} from '@threadnote/platform/system';
+import {runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -95,11 +96,63 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
           ),
         ),
       );
-      if (stableJson(observed) !== stableJson(document.source))
-        return yield* fail(
+      if (stableJson(observed) === stableJson(document.source)) return;
+      const drift = () =>
+        fail(
           'source-drift',
           'The recipient source differs from the shared snapshot. Update and review the plan locally.',
         );
+      if (observed.head !== document.source.head || observed.files.length !== document.source.files.length)
+        return yield* drift();
+      for (const [index, pinned] of document.source.files.entries()) {
+        const current = observed.files[index];
+        if (current?.path !== pinned.path) return yield* drift();
+        if (current.sha256 === pinned.sha256) continue;
+        // A Git checkout may turn LF source bytes into CRLF. Admit that one
+        // representation change only when the exact commit and clean worktree
+        // independently prove the pinned source.
+        const actual = yield* fs.realPath(path.join(checkout, pinned.path)).pipe(Effect.mapError(drift));
+        if (!pipe(actual, EffectString.startsWith(checkout + path.sep))) return yield* drift();
+        const stat = yield* fs.stat(actual).pipe(Effect.mapError(drift));
+        if (stat.type !== 'File' || Number(stat.size) > 1_000_000) return yield* drift();
+        const bytes = yield* fs.readFile(actual).pipe(Effect.mapError(drift));
+        if (
+          bytes.byteLength > 1_000_000 ||
+          sha256HexSync(bytes) !== current.sha256 ||
+          sha256HexSync(bytes.filter((byte, offset) => byte !== 13 || bytes[offset + 1] !== 10)) !== pinned.sha256
+        )
+          return yield* drift();
+        const blob = yield* runBinaryCommandEffect(
+          'git',
+          [
+            '--no-optional-locks',
+            '--no-replace-objects',
+            '-C',
+            checkout,
+            'show',
+            `${observed.head}:${pinned.path}`,
+            '--',
+          ],
+          {allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 1_000_001, sensitiveOutput: true},
+        ).pipe(Effect.mapError(drift));
+        if (blob.exitCode !== 0 || sha256HexSync(blob.stdout) !== pinned.sha256) return yield* drift();
+        const clean = yield* runCommandEffect(
+          'git',
+          [
+            '--no-optional-locks',
+            '-C',
+            checkout,
+            'diff',
+            '--no-ext-diff',
+            '--quiet',
+            observed.head,
+            '--',
+            `:(literal)${pinned.path}`,
+          ],
+          {allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 4096, sensitiveOutput: true},
+        ).pipe(Effect.mapError(drift));
+        if (clean.exitCode !== 0) return yield* drift();
+      }
     });
   yield* checkSource(plan);
   if (spec) yield* checkSource(spec);
