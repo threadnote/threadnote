@@ -23,8 +23,49 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 import {Option as EffectOption} from 'effect';
+import {activateStandaloneRelease} from '@threadnote/threadnote/installations';
 
 describe('Windows Git Bash command launchers', () => {
+  effectIt.effect('keeps existing launchers unchanged when no installed release is validated active', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-shim-no-active-release-'});
+        const {testSystem} = yield* windowsShimFixture(root, false);
+        const systemWithoutActiveRelease = SystemInfo.of({
+          ...testSystem,
+          environment: () => ({...testSystem.environment(), THREADNOTE_INSTALL_ROOT: path.join(root, 'install')}),
+        });
+        const cli = yield* commandLauncherPath('cli', 'posix').pipe(
+          Effect.provideService(SystemInfo, systemWithoutActiveRelease),
+        );
+        const mcp = yield* commandLauncherPath('mcp', 'posix').pipe(
+          Effect.provideService(SystemInfo, systemWithoutActiveRelease),
+        );
+        const originalCli = yield* renderCommandShim(path.join(root, 'foreign-release'), 'cli', 'posix').pipe(
+          Effect.provideService(SystemInfo, systemWithoutActiveRelease),
+        );
+        const originalMcp = yield* renderCommandShim(path.join(root, 'foreign-release'), 'mcp', 'posix').pipe(
+          Effect.provideService(SystemInfo, systemWithoutActiveRelease),
+        );
+        yield* fs.writeFileString(cli, originalCli, {mode: 0o755});
+        yield* fs.writeFileString(mcp, originalMcp, {mode: 0o755});
+
+        const installed = yield* captureConsole(installCommandShim(false)).pipe(
+          Effect.provideService(SystemInfo, systemWithoutActiveRelease),
+        );
+        const check = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, systemWithoutActiveRelease));
+
+        expect(installed.output).toContain('no validated active standalone release');
+        expect(check.status).toBe('warn');
+        expect(check.detail).toContain('No validated active standalone release');
+        expect(yield* fs.readFileString(cli)).toBe(originalCli);
+        expect(yield* fs.readFileString(mcp)).toBe(originalMcp);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it('routes generic and legacy OAuth helpers through the standalone boundary', async () => {
     const threadnoteHome = await mkdtemp('threadnote-oauth-helper-');
     try {
@@ -163,15 +204,11 @@ describe('Windows Git Bash command launchers', () => {
         const fs = yield* FileSystem.FileSystem;
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-win-shim-doctor-'});
         const {testSystem} = yield* windowsShimFixture(root);
-        const cmdPath = yield* commandLauncherPath('cli', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem));
         const posixPath = yield* commandLauncherPath('cli', 'posix').pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        yield* fs.writeFileString(
-          cmdPath,
-          yield* renderCommandShim(undefined, 'cli', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem)),
-          {mode: 0o755},
-        );
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        yield* fs.remove(posixPath);
 
         const check = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem));
         expect(check.status).toBe('warn');
@@ -185,14 +222,14 @@ describe('Windows Git Bash command launchers', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-win-shim-doctor-cmd-'});
-        const {testSystem} = yield* windowsShimFixture(root);
+        const {releaseRoot, testSystem} = yield* windowsShimFixture(root);
         const cmdPath = yield* commandLauncherPath('cli', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem));
         const posixPath = yield* commandLauncherPath('cli', 'posix').pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
         yield* fs.writeFileString(
           posixPath,
-          yield* renderCommandShim(undefined, 'cli', 'posix').pipe(Effect.provideService(SystemInfo, testSystem)),
+          yield* renderCommandShim(releaseRoot, 'cli', 'posix').pipe(Effect.provideService(SystemInfo, testSystem)),
           {mode: 0o755},
         );
 
@@ -210,15 +247,10 @@ describe('Windows Git Bash command launchers', () => {
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-win-shim-stale-'});
         const {testSystem} = yield* windowsShimFixture(root);
-        const cmdPath = yield* commandLauncherPath('cli', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem));
         const posixPath = yield* commandLauncherPath('cli', 'posix').pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        yield* fs.writeFileString(
-          cmdPath,
-          yield* renderCommandShim(undefined, 'cli', 'cmd').pipe(Effect.provideService(SystemInfo, testSystem)),
-          {mode: 0o755},
-        );
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
         yield* fs.writeFileString(
           posixPath,
           yield* renderCommandShim(path.join(root, 'stale-release'), 'cli', 'posix').pipe(
@@ -621,24 +653,30 @@ describe('Windows Git Bash command launchers', () => {
   );
 });
 
-const windowsShimFixture = Effect.fn('test.windowsShimFixture')(function* (root: string) {
+const windowsShimFixture = Effect.fn('test.windowsShimFixture')(function* (root: string, activate = true) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const baseSystem = yield* SystemInfo;
   const binDirectory = path.join(root, 'bin');
-  const releaseRoot = path.join(root, 'versions', '4.6.3');
+  const installRoot = path.join(root, 'install');
+  const releaseRoot = path.join(installRoot, 'versions', '4.6.3');
   yield* fs.makeDirectory(binDirectory, {recursive: true});
+  yield* fs.makeDirectory(releaseRoot, {recursive: true});
+  yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), `${JSON.stringify({version: '4.6.3'})}\n`);
   const testSystem = SystemInfo.of({
     ...baseSystem,
     environment: () => ({
       ...baseSystem.environment(),
       DOCKER_CONFIG: path.join(root, 'docker'),
+      THREADNOTE_INSTALL_ROOT: installRoot,
       THREADNOTE_BIN_DIR: binDirectory,
       THREADNOTE_HOME: path.join(root, 'home'),
     }),
     homeDirectory: root,
     platform: 'win32',
   });
+  if (activate)
+    yield* activateStandaloneRelease(releaseRoot, false).pipe(Effect.provideService(SystemInfo, testSystem));
   return {binDirectory, releaseRoot, testSystem};
 });
 

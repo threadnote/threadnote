@@ -33,6 +33,7 @@ import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
+  activeInstalledRelease,
   activeInstalledVersion,
   activateStandaloneRelease,
   pruneStandaloneReleases,
@@ -519,9 +520,17 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     printNextSteps: false,
     modelSetup: false,
     skipRecallIndexes: true,
-    skipReleaseLifecycle: options.skipReleaseLifecycle,
+    // Repair restores routing to the installed owner. Only install/update may
+    // activate or prune standalone releases.
+    skipReleaseLifecycle: true,
     start: false,
   });
+  const activeRelease = yield* activeInstalledRelease();
+  if (activeRelease) {
+    yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
+  } else {
+    yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
+  }
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
     const selection = yield* readModelSelection(config.agentContextHome);
@@ -700,7 +709,6 @@ export const runDevelopmentInstallRepair = Effect.fn('lifecycle.developmentInsta
     mcp: 'none',
     skipAgentIntegrations: true,
     postUpdate: false,
-    skipReleaseLifecycle: true,
   });
   yield* requireExpectedActive;
 });

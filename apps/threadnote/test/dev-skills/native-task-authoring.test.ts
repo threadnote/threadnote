@@ -42,7 +42,7 @@ import {
   encodeNativeAuthoringTaskRef,
   decodeNativeAuthoringTaskRef,
 } from '../../src/workflow_automation/task_authoring.js';
-import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {readNativeWorkflowState, withNativeWorkflowLock} from '../../src/workflow_automation/store.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
@@ -771,6 +771,33 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
     expect(ownerResumeWithoutTarget).toMatchObject({failure: {code: 'needs-resources'}});
     expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
     expect(yield* snapshotJobFiles()).toEqual(beforeJobs);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('reads an accepted authoring job status while the native run lock is held', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const file = f.path.join(f.root, 'held-run-lock-spec.json');
+    yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+    const accepted = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Held run lock status',
+        kind: 'spec',
+        contentFile: file,
+        installationTarget: 'codex',
+        saveMode: 'background',
+      })
+      .pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    const runId = String(accepted.runId);
+    const jobRef = String(accepted.jobRef);
+    const status = yield* withNativeWorkflowLock(
+      f.config,
+      runId,
+      false,
+      f.author({command: 'job', jobRef, operation: 'status'}),
+    );
+    expect(status).toMatchObject({status: 'accepted', jobRef});
   }).pipe(TestClock.withLive, provideNative),
 );
 

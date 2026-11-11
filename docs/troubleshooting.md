@@ -73,8 +73,9 @@ automatically; add that directory to `PATH` yourself or use its absolute launche
 On Windows, launchers live in `%LOCALAPPDATA%\Threadnote\bin` (or `THREADNOTE_BIN_DIR`). The installer writes
 `threadnote.cmd` for cmd.exe and PowerShell plus an extensionless `threadnote` for Git Bash and other MSYS shells, and
 the same pair for `threadnote-mcp-server`. Git Bash does not apply PATHEXT, so `threadnote` needs that extensionless
-file. `threadnote repair` recreates a missing managed launcher. After install, open a new terminal if `threadnote` is
-still not found; the installer also prepends the default bin directory to the Windows user `PATH`.
+file. `threadnote repair` recreates a missing managed launcher when a validated active standalone release is
+available; it does not switch launchers to the checkout running repair. After install, open a new terminal if
+`threadnote` is still not found; the installer also prepends the default bin directory to the Windows user `PATH`.
 
 ## Start and stop do not launch a service
 

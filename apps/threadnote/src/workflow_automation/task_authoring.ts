@@ -401,13 +401,11 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           );
         return {document, root: referencedRoot, operation: referenced, stored, response: loaded};
       });
-    let existing =
-      stored?.state.authoringSave && supplied && (request.command === 'save' || request.command === 'decide')
-        ? yield* pendingOriginal()
-        : stored
-          ? yield* current()
-          : undefined;
-    const result = (value: NonNullable<typeof existing>, replayed = false, full = false) => ({
+    const result = (
+      value: NonNullable<Effect.Success<ReturnType<typeof current>>>,
+      replayed = false,
+      full = false,
+    ) => ({
       status:
         value.root.readiness === 'ready' && value.root.confirmation?.intentHash === value.root.intentHash
           ? 'ready'
@@ -454,6 +452,12 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       return {status: 'completed', jobRef: request.jobRef, job: response, authoring: result(completed, false, true)};
     }
+    let existing =
+      stored?.state.authoringSave && supplied && (request.command === 'save' || request.command === 'decide')
+        ? yield* pendingOriginal()
+        : stored
+          ? yield* current()
+          : undefined;
     if (request.command === 'read') {
       if (!existing) return yield* fail('authoring-root-missing', 'Save a standard authoring draft first.');
       return result(existing, false, request.detail === 'document');
