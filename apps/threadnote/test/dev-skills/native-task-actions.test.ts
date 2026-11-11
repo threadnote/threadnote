@@ -6741,6 +6741,71 @@ describe('native task actions', () => {
     }).pipe(run, provideTestLayer(cliTestLayer)),
   );
 
+  effectIt.effect('uses the declared packet budget and keeps bounded recovery for oversized packets', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const largePacket = {
+        ...packet,
+        budgetBytes: 48_000,
+        checks: Array.from({length: 32}, (_, index) => `${index} ${EffectString.repeat(900)('x')}`),
+      };
+      const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+      registerWorkflowTaskTool(mcp, f.config);
+      const largeResponse = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...largePacket,
+        }),
+      );
+      const largeWork = object(largeResponse.structuredContent);
+      expect(largeWork.status).toBe('ready');
+      const largePacketBytes = new TextEncoder().encode(JSON.stringify(largeWork.packet)).byteLength;
+      expect(largePacketBytes).toBeGreaterThan(16_384);
+      expect(largePacketBytes).toBeLessThanOrEqual(48_000);
+
+      const smallResponse = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...packet,
+          budgetBytes: 1_024,
+          detailRefs: Array.from(
+            {length: 16},
+            (_, index) => `threadnote://fixture/spec/${index}-${EffectString.repeat(4_000)('r')}`,
+          ),
+        }),
+      );
+      expect(smallResponse.structuredContent).toMatchObject({
+        status: 'unavailable',
+        reason: 'response-budget-exceeded',
+        continuation: {command: 'detail', phaseId: 'one', omittedDetailRefs: 16},
+      });
+      const smallWork = object(smallResponse.structuredContent);
+      expect(smallWork.requiredBytes).toEqual(expect.any(Number));
+      expect(new TextEncoder().encode(JSON.stringify(smallWork)).byteLength).toBeLessThanOrEqual(1_024);
+
+      const longRef = `threadnote://fixture/spec/${EffectString.repeat(4_000)('r')}`;
+      const longRefResponse = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...packet,
+          budgetBytes: 8_192,
+          checks: largePacket.checks,
+          detailRefs: [longRef],
+        }),
+      );
+      expect(longRefResponse.structuredContent).toMatchObject({
+        status: 'unavailable',
+        reason: 'packet-budget-exceeded',
+        detailRefs: [longRef],
+        continuation: 'Read the exact phase acceptance and ownership, then create a bounded implementation slice.',
+      });
+    }).pipe(run, provideTestLayer(cliTestLayer)),
+  );
+
   effectIt.effect.prop(
     'keeps task projection deterministic and refuses generated unknown historical phases without mutation',
     {

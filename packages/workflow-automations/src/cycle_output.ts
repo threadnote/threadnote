@@ -1,5 +1,6 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectArray from 'effect/Array';
 
 const invalidPage = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'invalid-cycle-page', message});
@@ -7,6 +8,45 @@ const invalidPage = (message: string): never => {
 
 const outputCapacity = (message: string): never => {
   throw WorkflowAutomationError.make({code: 'outputcapacity', message});
+};
+
+export const nativeCyclePacketRequestOptions = (budgetBytes: number | undefined) =>
+  budgetBytes === undefined ? {} : {maxBytes: Math.min(budgetBytes + 512, 65_536)};
+
+export const nativeCyclePacketRecovery = (packet: Readonly<Record<string, unknown>>, phaseId: string) => {
+  if (
+    packet.available === true ||
+    (packet.reason !== 'packet-budget-exceeded' && packet.reason !== 'response-budget-exceeded')
+  )
+    return undefined;
+  const continuation = packet.continuation;
+  return {
+    status: 'unavailable',
+    phaseId,
+    reason: packet.reason,
+    ...(typeof packet.requiredBytes === 'number' ? {requiredBytes: packet.requiredBytes} : {}),
+    ...(typeof packet.maxBytes === 'number' ? {maxBytes: packet.maxBytes} : {}),
+    ...(EffectArray.isArray(packet.detailRefs) && EffectArray.every(packet.detailRefs, item => typeof item === 'string')
+      ? {detailRefs: packet.detailRefs}
+      : {}),
+    continuation:
+      typeof continuation === 'string'
+        ? continuation
+        : typeof continuation === 'object' && continuation !== null
+          ? continuation
+          : {command: 'detail', phaseId},
+  };
+};
+
+export const nativeCyclePacketFailure = (packet: Readonly<Record<string, unknown>>) => {
+  if (
+    packet.available === true ||
+    packet.reason === 'packet-budget-exceeded' ||
+    packet.reason === 'response-budget-exceeded'
+  )
+    return undefined;
+  const code = typeof packet.reason === 'string' ? packet.reason : 'packet-unavailable';
+  return {code, message: code === 'packet-unavailable' ? 'The packet is unavailable.' : code};
 };
 
 const isContinuationByte = (byte: number): boolean => (byte & 0xc0) === 0x80;
@@ -77,20 +117,31 @@ export function boundNativeCycleOutput(
   const snapshot = payload.snapshot;
   const snapshotId =
     typeof snapshot === 'object' && snapshot !== null && 'snapshotId' in snapshot ? snapshot.snapshotId : undefined;
-  const fallback = {
+  const detailRefs = EffectArray.isArray(payload.detailRefs)
+    ? EffectArray.filter(payload.detailRefs, (item): item is string => typeof item === 'string').slice(0, 16)
+    : [];
+  const fallbackBase = {
     available: false,
     reason: 'response-budget-exceeded',
     requiredBytes,
     maxBytes: maximumBytes,
+    ...(typeof payload.phaseId === 'string' ? {phaseId: payload.phaseId} : {}),
     ...(payload.status === 'error'
       ? {status: 'error', code: typeof payload.code === 'string' ? payload.code : 'cycle-operation-failed'}
       : {}),
     ...(typeof payload.revision === 'string' ? {revision: payload.revision} : {}),
     ...(payload.next ? {next: payload.next} : {}),
+  };
+  const continuation = {
+    command: 'detail',
+    ...detail,
+    ...(typeof snapshotId === 'string' ? {snapshotId} : {}),
+  };
+  let fallback: Readonly<Record<string, unknown>> = {
+    ...fallbackBase,
     continuation: {
-      command: 'detail',
-      ...detail,
-      ...(typeof snapshotId === 'string' ? {snapshotId} : {}),
+      ...continuation,
+      ...(detailRefs.length > 0 ? {omittedDetailRefs: detailRefs.length} : {}),
     },
   };
   let fallbackJson: string | undefined;
@@ -99,7 +150,33 @@ export function boundNativeCycleOutput(
   } catch {
     return outputCapacity('Cycle output continuation exceeds the response budget.');
   }
-  if (fallbackJson === undefined || new TextEncoder().encode(fallbackJson).byteLength > maximumBytes)
+  if (fallbackJson === undefined) return outputCapacity('Cycle output continuation exceeds the response budget.');
+
+  const includedRefs: string[] = [];
+  for (const ref of detailRefs) {
+    const candidateRefs = [...includedRefs, ref];
+    const omittedDetailRefs = detailRefs.length - candidateRefs.length;
+    const candidate: Readonly<Record<string, unknown>> = {
+      ...fallbackBase,
+      detailRefs: candidateRefs,
+      continuation: {
+        ...continuation,
+        ...(omittedDetailRefs > 0 ? {omittedDetailRefs} : {}),
+      },
+    };
+    let candidateJson: string | undefined;
+    try {
+      candidateJson = JSON.stringify(candidate);
+    } catch {
+      continue;
+    }
+    if (candidateJson !== undefined && new TextEncoder().encode(candidateJson).byteLength <= maximumBytes) {
+      includedRefs.push(ref);
+      fallback = candidate;
+      fallbackJson = candidateJson;
+    }
+  }
+  if (new TextEncoder().encode(fallbackJson).byteLength > maximumBytes)
     return outputCapacity('Cycle output continuation exceeds the response budget.');
   return fallback;
 }

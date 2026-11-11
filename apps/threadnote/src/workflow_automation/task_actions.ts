@@ -13,6 +13,7 @@ import {
   NativeCycleValidationSchema,
 } from '@threadnote/workflow-automations/cycle';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
+import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
@@ -1606,17 +1607,17 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
             cycleRequest(current, {
               command: 'packet',
               phaseId,
+              ...CycleOutput.nativeCyclePacketRequestOptions(request.packet.budgetBytes),
               packet: {...request.packet, anchors: packetAnchors, graphProof: {...graph, tree}},
             }),
           ),
           checkout,
         ),
       );
-      if (packet.available !== true)
-        return yield* fail(
-          'packet-unavailable',
-          typeof packet.reason === 'string' ? packet.reason : 'The packet is unavailable.',
-        );
+      const packetRecovery = CycleOutput.nativeCyclePacketRecovery(packet, phaseId);
+      if (packetRecovery) return packetRecovery;
+      const packetFailure = CycleOutput.nativeCyclePacketFailure(packet);
+      if (packetFailure) return yield* fail(packetFailure.code, packetFailure.message);
       const latest = yield* readNativeWorkflowState(config, request.runId);
       const baseline = requireEffectValue(
         latest?.state.cycle?.baselines[phaseId],
