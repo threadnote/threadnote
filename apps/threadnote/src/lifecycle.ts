@@ -218,6 +218,7 @@ interface RunInstallOptions extends InstallOptions {
 
 interface RunRepairOptions extends RepairOptions {
   readonly skipAgentIntegrations?: boolean;
+  /** Caller already owns the standalone installation lock. */
   readonly skipReleaseLifecycle?: boolean;
 }
 
@@ -423,7 +424,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
       Effect.gen(function* () {
         yield* activateStandaloneRelease(releaseRoot, dryRun);
         yield* applyLegacyInstallationCleanup(legacyCleanup, dryRun);
-        yield* installCommandShim(dryRun, undefined, config.agentContextHome);
+        yield* installCommandShim(dryRun, releaseRoot, config.agentContextHome);
       }),
       dryRun,
     );
@@ -525,12 +526,15 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     skipReleaseLifecycle: true,
     start: false,
   });
-  const activeRelease = yield* activeInstalledRelease();
-  if (activeRelease) {
-    yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
-  } else {
-    yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
-  }
+  const repairLaunchers = Effect.gen(function* () {
+    const activeRelease = yield* activeInstalledRelease();
+    if (activeRelease) {
+      yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
+    } else {
+      yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
+    }
+  });
+  yield* withStandaloneInstallationLock(repairLaunchers, dryRun || options.skipReleaseLifecycle === true);
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
     const selection = yield* readModelSelection(config.agentContextHome);
@@ -709,6 +713,7 @@ export const runDevelopmentInstallRepair = Effect.fn('lifecycle.developmentInsta
     mcp: 'none',
     skipAgentIntegrations: true,
     postUpdate: false,
+    skipReleaseLifecycle: true,
   });
   yield* requireExpectedActive;
 });
