@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+  "base": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+  "baseIncludes": "Merged P1 and Bun crypto; crypto/model inference changes excluded",
+  "status": "provisional source candidate, not P2 performance acceptance",
+  "checks": [
+    {
+      "command": "bun --bun vitest run packages/inference/test/vector-search.property.test.ts packages/inference/test/vector-blob-search.property.test.ts",
+      "result": "passed7tests"
+    },
+    {
+      "command": "bun run bazel -- test //packages/inference:test //packages/recall:test //packages/graph:test --test_output=errors",
+      "result": "passed3targets; production source unchanged afterward; scalar test import/style subsequently corrected and focused tests/typecheck rerun"
+    },
+    {
+      "command": "bun run check:repo",
+      "result": "passed on final source/test/probe content"
+    },
+    {
+      "command": "bun check -p tsconfig.test.json",
+      "result": "passed3169files"
+    },
+    {
+      "command": "normal commit hooks: lint, format:write, source/test/site typechecks",
+      "result": "passed"
+    }
+  ],
+  "reviews": {
+    "correctnessSecurity": "independent full review clean on27dd",
+    "simplicityDevEx": "independent full review clean on27dd",
+    "performanceMethodology": "captures non-qualifying: Linux hosts/digests differ; Mac loaded; graph candidate unavailable",
+    "architecture": "skipped: existing owners and no new boundary"
+  },
+  "unchangedGates": {
+    "primaryEndToEndP95ImprovementPercent": 20,
+    "secondaryRegressionPercent": 5,
+    "noiseFloorMilliseconds": 5,
+    "processTreePeakRssGrowthPercent": 10,
+    "pairedRunsMinimum": 3,
+    "warmQueriesPerVectorArmMinimum": 30
+  },
+  "pending": [
+    "Controlled same-host reference/candidate comparison and exact cross-arm parity",
+    "Actual Gemma768 graph candidate comparison with successful source/payload/lease checks",
+    "Successful exact-HEAD global doctor/repair and semantic global smoke",
+    "P2 acceptance and canonical workflow reconciliation; neither is claimed"
+  ]
+}

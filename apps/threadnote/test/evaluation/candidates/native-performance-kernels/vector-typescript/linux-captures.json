@@ -1,0 +1,1813 @@
+{
+  "kind": "independent-linux-capture-summaries",
+  "version": 1,
+  "qualification": false,
+  "comparisonAdmission": "rejected: different CPU identities and exact cross-arm correctness digests",
+  "reference": {
+    "run": "https://github.com/threadnote/threadnote/actions/runs/42982186387",
+    "artifactId": 13838427706,
+    "artifact": "https://github.com/threadnote/threadnote/actions/runs/42982186387/artifacts/13838427706"
+  },
+  "candidate": {
+    "run": "https://github.com/threadnote/threadnote/actions/runs/42984247188",
+    "artifactId": 13839875424,
+    "artifact": "https://github.com/threadnote/threadnote/actions/runs/42984247188/artifacts/13839875424",
+    "archiveSha256": "fdecbdb752bd92e0dd99c8c3c2039c28b8ff3d446284256a0d22969d7761939e",
+    "expires": "2026-12-11"
+  },
+  "completedCellsPerArm": 12,
+  "primaryWarmQueriesPerArm": 360,
+  "separatelyLabeledControlsPerArm": 360,
+  "firstUseRequestsPerArm": 12,
+  "independentReview": {
+    "withinCellReplicasInternallyConsistent": true,
+    "scalarAndObserverControlParity": "exact within every artifact",
+    "all12CrossArmCorrectnessDigestsEqual": false,
+    "sourceModelMethodDeclarations": "valid",
+    "samplingFailures": 0
+  },
+  "limitations": [
+    "Reference EPYC7763 and candidate EPYC9V45 are different hosts; all12 corresponding cross-arm correctness digests differ. Cause is not isolated; no cross-arm exact-parity or causal performance claim is admitted.",
+    "Every request and outlier remains in the source artifacts; summaries retain min/mean/p50/p95/p99/max rather than trimming. Reference10k-dense replica1 has observed p95399.19ms/control p95626.2ms, unlike replicas2/3.",
+    "Process-tree sampled RSS spans first-use plus observed/control warm requests, can miss peaks and is not per-arm warm-only RSS. Different hosts confound the reported raw RSS ratios; one100k-tied pair exceeds10% growth.",
+    "Pinned real BGE384 query inference over synthetic document vectors is a declared recall performance workload, not retrieval-quality realism or evidence for graph-purpose Gemma768.",
+    "Public CI artifacts expire; JSON-file hashes bind this bounded projection to the original files. No performance gate is relaxed."
+  ],
+  "matched": [
+    {
+      "filename": "recall-vector-10000-dense-replica-1.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 2.2685440285121317
+    },
+    {
+      "filename": "recall-vector-10000-dense-replica-2.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": -1.2699953715724188
+    },
+    {
+      "filename": "recall-vector-10000-dense-replica-3.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 1.231957761448177
+    },
+    {
+      "filename": "recall-vector-10000-tied-replica-1.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": -2.7053064333643295
+    },
+    {
+      "filename": "recall-vector-10000-tied-replica-2.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 2.865020103388849
+    },
+    {
+      "filename": "recall-vector-10000-tied-replica-3.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 4.158654129750006
+    },
+    {
+      "filename": "recall-vector-100000-dense-replica-1.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": -10.006518904823992
+    },
+    {
+      "filename": "recall-vector-100000-dense-replica-2.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 7.285877219979353
+    },
+    {
+      "filename": "recall-vector-100000-dense-replica-3.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 7.193631451057203
+    },
+    {
+      "filename": "recall-vector-100000-tied-replica-1.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 9.664381732395611
+    },
+    {
+      "filename": "recall-vector-100000-tied-replica-2.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 4.3642974851329175
+    },
+    {
+      "filename": "recall-vector-100000-tied-replica-3.json",
+      "exactDigestEqual": false,
+      "cpuEqual": false,
+      "sampledRssDifferencePercent": 10.154130813587937
+    }
+  ],
+  "cells": [
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-dense-replica-1.json",
+      "sha256": "f16f93199143da01ab519bf205d15a4180753248174a643b847919d3595f916e",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d1a62354700930745bef5cd76ae17bc9cee7dedca5662281962d7c73e4ec4696",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "f5808cf37424c13ba222ed4e344bfc693c2b476ae2ada481e194eacec5a73359",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 522.155895,
+        "mean": 522.155895,
+        "minimum": 522.155895,
+        "name": "first-use-request",
+        "p50": 522.155895,
+        "p95": 522.155895,
+        "p99": 522.155895,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 80.746985,
+        "mean": 49.872902866666664,
+        "minimum": 40.009284,
+        "name": "warm-request",
+        "p50": 48.744311,
+        "p95": 70.490619,
+        "p99": 80.746985,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 66.741184,
+        "mean": 48.608675500000004,
+        "minimum": 38.221151,
+        "name": "warm-observer-disabled-control",
+        "p50": 48.271523,
+        "p95": 64.373048,
+        "p99": 66.741184,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 357302272,
+        "mean": 357302272,
+        "minimum": 357302272,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 357302272,
+        "p95": 357302272,
+        "p99": 357302272,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 121,
+        "failures": 0,
+        "maximumGapMilliseconds": 42
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-dense-replica-1.json",
+      "sha256": "6cb1e4e28c9627a48d7c6886cf6fb43195c0c150b4250914a68810735eb95066",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d895b5e987aaf56eb921d1d424d229eea6b6cd8fa489dc1fad789d6dd01cdb59",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "034e45f474330ab8f1c760dce29af9aebe7809ace888c5e2c84ff677f7ae38c2",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1659.603328,
+        "mean": 1659.603328,
+        "minimum": 1659.603328,
+        "name": "first-use-request",
+        "p50": 1659.603328,
+        "p95": 1659.603328,
+        "p99": 1659.603328,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 1261.966724,
+        "mean": 129.19518676666667,
+        "minimum": 65.969071,
+        "name": "warm-request",
+        "p50": 73.528257,
+        "p95": 399.187893,
+        "p99": 1261.966724,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 797.398287,
+        "mean": 117.60741716666666,
+        "minimum": 65.064337,
+        "name": "warm-observer-disabled-control",
+        "p50": 72.725039,
+        "p95": 626.203399,
+        "p99": 797.398287,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 349376512,
+        "mean": 349376512,
+        "minimum": 349376512,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 349376512,
+        "p95": 349376512,
+        "p99": 349376512,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 308,
+        "failures": 0,
+        "maximumGapMilliseconds": 53
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-dense-replica-2.json",
+      "sha256": "1f45254a328f551a24e2e96e7d651ab160cf5e87693c07a2e48d5d037889c45a",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d1a62354700930745bef5cd76ae17bc9cee7dedca5662281962d7c73e4ec4696",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "f5808cf37424c13ba222ed4e344bfc693c2b476ae2ada481e194eacec5a73359",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 511.919158,
+        "mean": 511.919158,
+        "minimum": 511.919158,
+        "name": "first-use-request",
+        "p50": 511.919158,
+        "p95": 511.919158,
+        "p99": 511.919158,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 70.11291,
+        "mean": 50.873517800000016,
+        "minimum": 40.552394,
+        "name": "warm-request",
+        "p50": 49.994536,
+        "p95": 62.001241,
+        "p99": 70.11291,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 59.354205,
+        "mean": 49.33738396666666,
+        "minimum": 40.942518,
+        "name": "warm-observer-disabled-control",
+        "p50": 50.866411,
+        "p95": 56.602387,
+        "p99": 59.354205,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 358227968,
+        "mean": 358227968,
+        "minimum": 358227968,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 358227968,
+        "p95": 358227968,
+        "p99": 358227968,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 125,
+        "failures": 0,
+        "maximumGapMilliseconds": 34
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-dense-replica-2.json",
+      "sha256": "3ed2c09acc1968534efd4e22856c72979a691c214a83abc23bd6028a6ab35c8d",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d895b5e987aaf56eb921d1d424d229eea6b6cd8fa489dc1fad789d6dd01cdb59",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "034e45f474330ab8f1c760dce29af9aebe7809ace888c5e2c84ff677f7ae38c2",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 708.668969,
+        "mean": 708.668969,
+        "minimum": 708.668969,
+        "name": "first-use-request",
+        "p50": 708.668969,
+        "p95": 708.668969,
+        "p99": 708.668969,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 88.492248,
+        "mean": 75.9095736,
+        "minimum": 64.746206,
+        "name": "warm-request",
+        "p50": 75.800726,
+        "p95": 87.840375,
+        "p99": 88.492248,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 129.777599,
+        "mean": 77.51143986666665,
+        "minimum": 64.975264,
+        "name": "warm-observer-disabled-control",
+        "p50": 75.4613,
+        "p95": 91.001582,
+        "p99": 129.777599,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 362835968,
+        "mean": 362835968,
+        "minimum": 362835968,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 362835968,
+        "p95": 362835968,
+        "p99": 362835968,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 183,
+        "failures": 0,
+        "maximumGapMilliseconds": 40
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-dense-replica-3.json",
+      "sha256": "29d061620fdca5da17e0c77d4e89c971c0629cff3681b321235c40a382354ec4",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d1a62354700930745bef5cd76ae17bc9cee7dedca5662281962d7c73e4ec4696",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "f5808cf37424c13ba222ed4e344bfc693c2b476ae2ada481e194eacec5a73359",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 469.778229,
+        "mean": 469.778229,
+        "minimum": 469.778229,
+        "name": "first-use-request",
+        "p50": 469.778229,
+        "p95": 469.778229,
+        "p99": 469.778229,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 68.791269,
+        "mean": 51.6294521,
+        "minimum": 40.923526,
+        "name": "warm-request",
+        "p50": 51.818504,
+        "p95": 66.557821,
+        "p99": 68.791269,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 78.484588,
+        "mean": 51.72940253333334,
+        "minimum": 42.209665,
+        "name": "warm-observer-disabled-control",
+        "p50": 51.190865,
+        "p95": 62.24454,
+        "p99": 78.484588,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 362827776,
+        "mean": 362827776,
+        "minimum": 362827776,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 362827776,
+        "p95": 362827776,
+        "p99": 362827776,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 125,
+        "failures": 0,
+        "maximumGapMilliseconds": 36
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-dense-replica-3.json",
+      "sha256": "4d2884446250a49a099afb7d3e2e022608616d7c9ad30a38d74f45e0d7674baa",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d895b5e987aaf56eb921d1d424d229eea6b6cd8fa489dc1fad789d6dd01cdb59",
+      "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+      "configurationHash": "034e45f474330ab8f1c760dce29af9aebe7809ace888c5e2c84ff677f7ae38c2",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 717.530133,
+        "mean": 717.530133,
+        "minimum": 717.530133,
+        "name": "first-use-request",
+        "p50": 717.530133,
+        "p95": 717.530133,
+        "p99": 717.530133,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 95.85059,
+        "mean": 77.24391433333335,
+        "minimum": 66.396212,
+        "name": "warm-request",
+        "p50": 75.933225,
+        "p95": 91.998347,
+        "p99": 95.85059,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 85.341766,
+        "mean": 75.55660026666666,
+        "minimum": 63.075362,
+        "name": "warm-observer-disabled-control",
+        "p50": 75.684197,
+        "p95": 84.601658,
+        "p99": 85.341766,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 358412288,
+        "mean": 358412288,
+        "minimum": 358412288,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 358412288,
+        "p95": 358412288,
+        "p99": 358412288,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 183,
+        "failures": 0,
+        "maximumGapMilliseconds": 39
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-tied-replica-1.json",
+      "sha256": "fecff7b9f9db46387171846b0c64afe28ae819d35505342a7292bffe526d50d3",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d47b9256e73a47dca918a76bc6585d03c8917f542b4b7c7f751b0d36081e9e18",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "3d5a19e1f9007f1fb86a1d7ac751b06514000293d18e3ce5cd22a612312d1660",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 473.087256,
+        "mean": 473.087256,
+        "minimum": 473.087256,
+        "name": "first-use-request",
+        "p50": 473.087256,
+        "p95": 473.087256,
+        "p99": 473.087256,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 98.039119,
+        "mean": 54.2934164,
+        "minimum": 41.184786,
+        "name": "warm-request",
+        "p50": 51.909775,
+        "p95": 74.096066,
+        "p99": 98.039119,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 118.370259,
+        "mean": 53.89383513333333,
+        "minimum": 39.668534,
+        "name": "warm-observer-disabled-control",
+        "p50": 51.687812,
+        "p95": 69.933559,
+        "p99": 118.370259,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 355753984,
+        "mean": 355753984,
+        "minimum": 355753984,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 355753984,
+        "p95": 355753984,
+        "p99": 355753984,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 130,
+        "failures": 0,
+        "maximumGapMilliseconds": 37
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-tied-replica-1.json",
+      "sha256": "bb9dbba737987104902a85efa8a53eb55f0b8e3bf1f767ba4b13b3bcd84b4d33",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d378583c8a533ed39feabd657f143d7e4b18baef919858031db2a5bc3aaee0af",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "92728485ab87fe26cbab637e73accc6187a99b6c3c71c406180bd9732eb57e37",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 708.739156,
+        "mean": 708.739156,
+        "minimum": 708.739156,
+        "name": "first-use-request",
+        "p50": 708.739156,
+        "p95": 708.739156,
+        "p99": 708.739156,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 96.04943,
+        "mean": 74.34048860000001,
+        "minimum": 65.025961,
+        "name": "warm-request",
+        "p50": 72.592574,
+        "p95": 93.696322,
+        "p99": 96.04943,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 77.151202,
+        "mean": 71.4908015,
+        "minimum": 62.870031,
+        "name": "warm-observer-disabled-control",
+        "p50": 71.649725,
+        "p95": 77.12736,
+        "p99": 77.151202,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 365645824,
+        "mean": 365645824,
+        "minimum": 365645824,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 365645824,
+        "p95": 365645824,
+        "p99": 365645824,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 174,
+        "failures": 0,
+        "maximumGapMilliseconds": 39
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-tied-replica-2.json",
+      "sha256": "9c07ab147942817beae8264fd218d1457dbed30aab513dcf7346bf088c10fd99",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d47b9256e73a47dca918a76bc6585d03c8917f542b4b7c7f751b0d36081e9e18",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "3d5a19e1f9007f1fb86a1d7ac751b06514000293d18e3ce5cd22a612312d1660",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 497.742698,
+        "mean": 497.742698,
+        "minimum": 497.742698,
+        "name": "first-use-request",
+        "p50": 497.742698,
+        "p95": 497.742698,
+        "p99": 497.742698,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 75.669198,
+        "mean": 50.23913613333333,
+        "minimum": 40.645715,
+        "name": "warm-request",
+        "p50": 49.792154,
+        "p95": 72.023996,
+        "p99": 75.669198,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 72.910374,
+        "mean": 48.45726253333332,
+        "minimum": 40.231352,
+        "name": "warm-observer-disabled-control",
+        "p50": 49.501765,
+        "p95": 53.928892,
+        "p99": 72.910374,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 366772224,
+        "mean": 366772224,
+        "minimum": 366772224,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 366772224,
+        "p95": 366772224,
+        "p99": 366772224,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 121,
+        "failures": 0,
+        "maximumGapMilliseconds": 43
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-tied-replica-2.json",
+      "sha256": "00bd1ca151b00c1d6177e7e3e4b8fde863747a9716c02f4a0b307638252d034a",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d378583c8a533ed39feabd657f143d7e4b18baef919858031db2a5bc3aaee0af",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "92728485ab87fe26cbab637e73accc6187a99b6c3c71c406180bd9732eb57e37",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 735.457787,
+        "mean": 735.457787,
+        "minimum": 735.457787,
+        "name": "first-use-request",
+        "p50": 735.457787,
+        "p95": 735.457787,
+        "p99": 735.457787,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 105.964771,
+        "mean": 77.74215186666667,
+        "minimum": 64.903185,
+        "name": "warm-request",
+        "p50": 75.10676,
+        "p95": 104.184153,
+        "p99": 105.964771,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 88.288899,
+        "mean": 73.61353480000002,
+        "minimum": 64.074354,
+        "name": "warm-observer-disabled-control",
+        "p50": 73.725112,
+        "p95": 82.488212,
+        "p99": 88.288899,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 356556800,
+        "mean": 356556800,
+        "minimum": 356556800,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 356556800,
+        "p95": 356556800,
+        "p99": 356556800,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 180,
+        "failures": 0,
+        "maximumGapMilliseconds": 43
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-10000-tied-replica-3.json",
+      "sha256": "6b9c40657d0b1b8b6be821eba9e6b80a7260efac526e21d2a6d67ea7b795c6ae",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "d47b9256e73a47dca918a76bc6585d03c8917f542b4b7c7f751b0d36081e9e18",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "3d5a19e1f9007f1fb86a1d7ac751b06514000293d18e3ce5cd22a612312d1660",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 454.215775,
+        "mean": 454.215775,
+        "minimum": 454.215775,
+        "name": "first-use-request",
+        "p50": 454.215775,
+        "p95": 454.215775,
+        "p99": 454.215775,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 72.174027,
+        "mean": 49.65322886666667,
+        "minimum": 41.573859,
+        "name": "warm-request",
+        "p50": 49.087255,
+        "p95": 68.24983,
+        "p99": 72.174027,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 68.60786,
+        "mean": 49.206161133333346,
+        "minimum": 40.849494,
+        "name": "warm-observer-disabled-control",
+        "p50": 48.048584,
+        "p95": 64.234445,
+        "p99": 68.60786,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 361627648,
+        "mean": 361627648,
+        "minimum": 361627648,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 361627648,
+        "p95": 361627648,
+        "p99": 361627648,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 121,
+        "failures": 0,
+        "maximumGapMilliseconds": 35
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-10000-tied-replica-3.json",
+      "sha256": "7fc05f6a4536b508fb17b84d1c014a8b3fb93e8d90f00e9b4c01dd3885cde33f",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "d378583c8a533ed39feabd657f143d7e4b18baef919858031db2a5bc3aaee0af",
+      "fixtureHash": "d9a31735792aea637383709bc7f3e877a6772caf03d6c1b052b7494c2e25934b",
+      "configurationHash": "92728485ab87fe26cbab637e73accc6187a99b6c3c71c406180bd9732eb57e37",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 728.5523,
+        "mean": 728.5523,
+        "minimum": 728.5523,
+        "name": "first-use-request",
+        "p50": 728.5523,
+        "p95": 728.5523,
+        "p99": 728.5523,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 101.608338,
+        "mean": 74.69424826666666,
+        "minimum": 64.972386,
+        "name": "warm-request",
+        "p50": 73.273748,
+        "p95": 84.537341,
+        "p99": 101.608338,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 114.96129,
+        "mean": 74.42535480000001,
+        "minimum": 64.379856,
+        "name": "warm-observer-disabled-control",
+        "p50": 71.883696,
+        "p95": 92.629986,
+        "p99": 114.96129,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 347189248,
+        "mean": 347189248,
+        "minimum": 347189248,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 347189248,
+        "p95": 347189248,
+        "p99": 347189248,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 179,
+        "failures": 0,
+        "maximumGapMilliseconds": 39
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-dense-replica-1.json",
+      "sha256": "27cad2641b3fc7a69e68b3d1604a583a41dc914326623484f9e0a563f721bcf2",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "44cf7b183d5ead6adddecc4ac48b2688f7e613703542b8f2fcada791bf2b8add",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "ffd21e342590edf5ff200d7104370d881725152806e44845e06e887a7fce7bb1",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 836.60687,
+        "mean": 836.60687,
+        "minimum": 836.60687,
+        "name": "first-use-request",
+        "p50": 836.60687,
+        "p95": 836.60687,
+        "p99": 836.60687,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 491.668897,
+        "mean": 404.72184303333324,
+        "minimum": 383.033313,
+        "name": "warm-request",
+        "p50": 403.122613,
+        "p95": 417.818404,
+        "p99": 491.668897,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 472.136376,
+        "mean": 409.6362458333333,
+        "minimum": 388.498136,
+        "name": "warm-observer-disabled-control",
+        "p50": 403.211678,
+        "p95": 464.384871,
+        "p99": 472.136376,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 486289408,
+        "mean": 486289408,
+        "minimum": 486289408,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 486289408,
+        "p95": 486289408,
+        "p99": 486289408,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 928,
+        "failures": 0,
+        "maximumGapMilliseconds": 41
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-dense-replica-1.json",
+      "sha256": "c620221406c7cc32ce2db64b6af4c52c9bf3c638023171a5003e46e1241a3d8c",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "62aade0f66343c6a7f56feb26aa3e8f2c6ce7b44220a14dc886722a6174a262c",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "076724c2b12fd0c9a0f59bb51c04d2a20d8e79f15fd88956945987858cfb19ad",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1292.062359,
+        "mean": 1292.062359,
+        "minimum": 1292.062359,
+        "name": "first-use-request",
+        "p50": 1292.062359,
+        "p95": 1292.062359,
+        "p99": 1292.062359,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 673.230375,
+        "mean": 628.4278375333332,
+        "minimum": 612.141201,
+        "name": "warm-request",
+        "p50": 626.563653,
+        "p95": 645.128999,
+        "p99": 673.230375,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 654.450574,
+        "mean": 627.6717848333333,
+        "minimum": 612.264473,
+        "name": "warm-observer-disabled-control",
+        "p50": 625.852407,
+        "p95": 650.557109,
+        "p99": 654.450574,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 540360704,
+        "mean": 540360704,
+        "minimum": 540360704,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 540360704,
+        "p95": 540360704,
+        "p99": 540360704,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1398,
+        "failures": 0,
+        "maximumGapMilliseconds": 40
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-dense-replica-2.json",
+      "sha256": "e158c32c445c9753bdfa12b8beb8c48f37dd195b0b2d773af792367ea8b93056",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "44cf7b183d5ead6adddecc4ac48b2688f7e613703542b8f2fcada791bf2b8add",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "ffd21e342590edf5ff200d7104370d881725152806e44845e06e887a7fce7bb1",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 852.224718,
+        "mean": 852.224718,
+        "minimum": 852.224718,
+        "name": "first-use-request",
+        "p50": 852.224718,
+        "p95": 852.224718,
+        "p99": 852.224718,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 473.935955,
+        "mean": 423.3518302,
+        "minimum": 379.135608,
+        "name": "warm-request",
+        "p50": 419.456374,
+        "p95": 468.055591,
+        "p99": 473.935955,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 493.073292,
+        "mean": 426.5515277999999,
+        "minimum": 392.15373,
+        "name": "warm-observer-disabled-control",
+        "p50": 423.280675,
+        "p95": 467.812995,
+        "p99": 493.073292,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 485470208,
+        "mean": 485470208,
+        "minimum": 485470208,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 485470208,
+        "p95": 485470208,
+        "p99": 485470208,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 969,
+        "failures": 0,
+        "maximumGapMilliseconds": 50
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-dense-replica-2.json",
+      "sha256": "aa82981dafc7631f22d13d50381957dfd8eabd19b05003b194e8bedbf4da4baf",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "62aade0f66343c6a7f56feb26aa3e8f2c6ce7b44220a14dc886722a6174a262c",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "076724c2b12fd0c9a0f59bb51c04d2a20d8e79f15fd88956945987858cfb19ad",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1312.279193,
+        "mean": 1312.279193,
+        "minimum": 1312.279193,
+        "name": "first-use-request",
+        "p50": 1312.279193,
+        "p95": 1312.279193,
+        "p99": 1312.279193,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 667.524927,
+        "mean": 651.7788929999999,
+        "minimum": 629.83726,
+        "name": "warm-request",
+        "p50": 650.808177,
+        "p95": 667.008501,
+        "p99": 667.524927,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 674.091512,
+        "mean": 648.4560915666667,
+        "minimum": 628.570828,
+        "name": "warm-observer-disabled-control",
+        "p50": 649.654791,
+        "p95": 665.671389,
+        "p99": 674.091512,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 452501504,
+        "mean": 452501504,
+        "minimum": 452501504,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 452501504,
+        "p95": 452501504,
+        "p99": 452501504,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1445,
+        "failures": 0,
+        "maximumGapMilliseconds": 38
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-dense-replica-3.json",
+      "sha256": "a562fc93616515a544aee30f336c4d55b53997b31d0046c044523561104fd9b1",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "44cf7b183d5ead6adddecc4ac48b2688f7e613703542b8f2fcada791bf2b8add",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "ffd21e342590edf5ff200d7104370d881725152806e44845e06e887a7fce7bb1",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 819.06378,
+        "mean": 819.06378,
+        "minimum": 819.06378,
+        "name": "first-use-request",
+        "p50": 819.06378,
+        "p95": 819.06378,
+        "p99": 819.06378,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 446.839315,
+        "mean": 405.86510699999997,
+        "minimum": 367.977822,
+        "name": "warm-request",
+        "p50": 404.486061,
+        "p95": 443.438248,
+        "p99": 446.839315,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 462.69339,
+        "mean": 406.83559166666674,
+        "minimum": 362.380711,
+        "name": "warm-observer-disabled-control",
+        "p50": 406.636164,
+        "p95": 458.454254,
+        "p99": 462.69339,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 484253696,
+        "mean": 484253696,
+        "minimum": 484253696,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 484253696,
+        "p95": 484253696,
+        "p99": 484253696,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 928,
+        "failures": 0,
+        "maximumGapMilliseconds": 36
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-dense-replica-3.json",
+      "sha256": "7d6eea05425afd33d512a8d9d333d2f72acf85eee03bb3860c73429620a1c3ed",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "62aade0f66343c6a7f56feb26aa3e8f2c6ce7b44220a14dc886722a6174a262c",
+      "fixtureHash": "122a7d8792e81d1883ce2f6a7522f3058b2f981c4815119335feaad44c8a1df9",
+      "configurationHash": "076724c2b12fd0c9a0f59bb51c04d2a20d8e79f15fd88956945987858cfb19ad",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1308.632603,
+        "mean": 1308.632603,
+        "minimum": 1308.632603,
+        "name": "first-use-request",
+        "p50": 1308.632603,
+        "p95": 1308.632603,
+        "p99": 1308.632603,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 664.018336,
+        "mean": 641.7154234999999,
+        "minimum": 622.690867,
+        "name": "warm-request",
+        "p50": 641.409288,
+        "p95": 661.611212,
+        "p99": 664.018336,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 664.965814,
+        "mean": 641.8290169999999,
+        "minimum": 621.861442,
+        "name": "warm-observer-disabled-control",
+        "p50": 642.32643,
+        "p95": 661.613943,
+        "p99": 664.965814,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 451756032,
+        "mean": 451756032,
+        "minimum": 451756032,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 451756032,
+        "p95": 451756032,
+        "p99": 451756032,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1426,
+        "failures": 0,
+        "maximumGapMilliseconds": 48
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-tied-replica-1.json",
+      "sha256": "e9823eac47100c421d5ebc79f5b9dd7955fb2be2381f092d7f6ed47ae59c2431",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "ce756dd8d2569b1b8263118e55503d836355a53300445a99151ebf8e242079f3",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "146e083cbd81be7f6f5380f7bb62854063fb65171b329aa01222151c76f466c3",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 809.84844,
+        "mean": 809.84844,
+        "minimum": 809.84844,
+        "name": "first-use-request",
+        "p50": 809.84844,
+        "p95": 809.84844,
+        "p99": 809.84844,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 478.511654,
+        "mean": 403.48981726666676,
+        "minimum": 364.071725,
+        "name": "warm-request",
+        "p50": 400.795138,
+        "p95": 434.70318,
+        "p99": 478.511654,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 454.580931,
+        "mean": 403.48618050000005,
+        "minimum": 355.973616,
+        "name": "warm-observer-disabled-control",
+        "p50": 407.557392,
+        "p95": 442.938031,
+        "p99": 454.580931,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 504569856,
+        "mean": 504569856,
+        "minimum": 504569856,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 504569856,
+        "p95": 504569856,
+        "p99": 504569856,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 922,
+        "failures": 0,
+        "maximumGapMilliseconds": 45
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-tied-replica-1.json",
+      "sha256": "d9cacf9f4c1e8070a72c1a2e69896ba4c0934c397421c79f5ed2e341afc65c38",
+      "pair": 1,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "139e51366dfef4dc96cfa7579f44f22c18bd3d4ffacf41bf80159e5a8a9d1958",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "413e4926436ae375d74179799b54a7971f518b7e6f89685f050f59edd5d48465",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1283.083416,
+        "mean": 1283.083416,
+        "minimum": 1283.083416,
+        "name": "first-use-request",
+        "p50": 1283.083416,
+        "p95": 1283.083416,
+        "p99": 1283.083416,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 659.626667,
+        "mean": 632.8657629333334,
+        "minimum": 618.716101,
+        "name": "warm-request",
+        "p50": 631.557513,
+        "p95": 646.614368,
+        "p99": 659.626667,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 680.793684,
+        "mean": 633.2044761000001,
+        "minimum": 607.350851,
+        "name": "warm-observer-disabled-control",
+        "p50": 631.615415,
+        "p95": 652.724758,
+        "p99": 680.793684,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 460103680,
+        "mean": 460103680,
+        "minimum": 460103680,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 460103680,
+        "p95": 460103680,
+        "p99": 460103680,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1409,
+        "failures": 0,
+        "maximumGapMilliseconds": 45
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-tied-replica-2.json",
+      "sha256": "058ce0b5a390e36d8cfd310b653982d79f213298718c5255bdc3501577cd0f55",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "ce756dd8d2569b1b8263118e55503d836355a53300445a99151ebf8e242079f3",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "146e083cbd81be7f6f5380f7bb62854063fb65171b329aa01222151c76f466c3",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 833.907525,
+        "mean": 833.907525,
+        "minimum": 833.907525,
+        "name": "first-use-request",
+        "p50": 833.907525,
+        "p95": 833.907525,
+        "p99": 833.907525,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 455.746069,
+        "mean": 412.52552246666676,
+        "minimum": 380.623177,
+        "name": "warm-request",
+        "p50": 410.365378,
+        "p95": 454.120542,
+        "p99": 455.746069,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 448.876248,
+        "mean": 407.782818,
+        "minimum": 384.783713,
+        "name": "warm-observer-disabled-control",
+        "p50": 404.701865,
+        "p95": 439.302585,
+        "p99": 448.876248,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 477302784,
+        "mean": 477302784,
+        "minimum": 477302784,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 477302784,
+        "p95": 477302784,
+        "p99": 477302784,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 939,
+        "failures": 0,
+        "maximumGapMilliseconds": 40
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-tied-replica-2.json",
+      "sha256": "a60f9ed207141eadf9eb7aaa8af9a0701f04f84cf3a45724fdec234cd11d5c3e",
+      "pair": 2,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "139e51366dfef4dc96cfa7579f44f22c18bd3d4ffacf41bf80159e5a8a9d1958",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "413e4926436ae375d74179799b54a7971f518b7e6f89685f050f59edd5d48465",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1302.219029,
+        "mean": 1302.219029,
+        "minimum": 1302.219029,
+        "name": "first-use-request",
+        "p50": 1302.219029,
+        "p95": 1302.219029,
+        "p99": 1302.219029,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 645.189185,
+        "mean": 628.8295271999999,
+        "minimum": 616.193063,
+        "name": "warm-request",
+        "p50": 628.956175,
+        "p95": 642.895165,
+        "p99": 645.189185,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 653.644207,
+        "mean": 628.9722343333335,
+        "minimum": 610.820464,
+        "name": "warm-observer-disabled-control",
+        "p50": 628.154405,
+        "p95": 644.176122,
+        "p99": 653.644207,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 457342976,
+        "mean": 457342976,
+        "minimum": 457342976,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 457342976,
+        "p95": 457342976,
+        "p99": 457342976,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1398,
+        "failures": 0,
+        "maximumGapMilliseconds": 48
+      }
+    },
+    {
+      "arm": "candidate",
+      "filename": "recall-vector-100000-tied-replica-3.json",
+      "sha256": "1c24d1ed30aee9b009f166562db1bb051ae7d9f9dc9679f30be6523911222b6c",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "27dd69c8b3f220c6195dbefafeeeb25fc4541556",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "correctnessDigest": "ce756dd8d2569b1b8263118e55503d836355a53300445a99151ebf8e242079f3",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "146e083cbd81be7f6f5380f7bb62854063fb65171b329aa01222151c76f466c3",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 806.400601,
+        "mean": 806.400601,
+        "minimum": 806.400601,
+        "name": "first-use-request",
+        "p50": 806.400601,
+        "p95": 806.400601,
+        "p99": 806.400601,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 474.589381,
+        "mean": 414.5296188666667,
+        "minimum": 371.946875,
+        "name": "warm-request",
+        "p50": 416.893424,
+        "p95": 440.212074,
+        "p99": 474.589381,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 442.12303,
+        "mean": 413.6882394666667,
+        "minimum": 381.701402,
+        "name": "warm-observer-disabled-control",
+        "p50": 413.138636,
+        "p95": 440.978197,
+        "p99": 442.12303,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 502329344,
+        "mean": 502329344,
+        "minimum": 502329344,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 502329344,
+        "p95": 502329344,
+        "p99": 502329344,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 944,
+        "failures": 0,
+        "maximumGapMilliseconds": 47
+      }
+    },
+    {
+      "arm": "reference",
+      "filename": "recall-vector-100000-tied-replica-3.json",
+      "sha256": "1efd2b036cdef141c0baa951b7fe4de57e331414fc35739d6f4691a5bf5da461",
+      "pair": 3,
+      "workload": {
+        "kind": "vector",
+        "documents": 100000,
+        "dimensions": 384,
+        "distribution": "tied"
+      },
+      "source": "2d7a73c71a866a6bd86f227bef1f73831ab39b46",
+      "cpu": "AMD EPYC 7763 64-Core Processor",
+      "correctnessDigest": "139e51366dfef4dc96cfa7579f44f22c18bd3d4ffacf41bf80159e5a8a9d1958",
+      "fixtureHash": "aac3dd637aadd0418f92b8fb89e3fc332470431afe68c0736b2609904c790457",
+      "configurationHash": "413e4926436ae375d74179799b54a7971f518b7e6f89685f050f59edd5d48465",
+      "runnerHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+      "sourceFencesCleanAndEqual": true,
+      "firstUseMilliseconds": {
+        "maximum": 1314.473252,
+        "mean": 1314.473252,
+        "minimum": 1314.473252,
+        "name": "first-use-request",
+        "p50": 1314.473252,
+        "p95": 1314.473252,
+        "p99": 1314.473252,
+        "samples": 1,
+        "unit": "milliseconds"
+      },
+      "warmMilliseconds": {
+        "maximum": 693.252933,
+        "mean": 652.8227431666667,
+        "minimum": 624.03871,
+        "name": "warm-request",
+        "p50": 657.599596,
+        "p95": 672.404022,
+        "p99": 693.252933,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "controlMilliseconds": {
+        "maximum": 732.582548,
+        "mean": 652.9387728666666,
+        "minimum": 626.588338,
+        "name": "warm-observer-disabled-control",
+        "p50": 649.587288,
+        "p95": 680.91494,
+        "p99": 732.582548,
+        "samples": 30,
+        "unit": "milliseconds"
+      },
+      "processTreeSampledPeakRss": {
+        "maximum": 456024064,
+        "mean": 456024064,
+        "minimum": 456024064,
+        "name": "process-tree-sampled-peak-rss",
+        "p50": 456024064,
+        "p95": 456024064,
+        "p99": 456024064,
+        "samples": 1,
+        "unit": "bytes"
+      },
+      "sampler": {
+        "availability": "available",
+        "intervalMilliseconds": 25,
+        "processSamples": 1453,
+        "failures": 0,
+        "maximumGapMilliseconds": 40
+      }
+    }
+  ],
+  "inference": {
+    "kind": "real-query",
+    "purpose": "recall",
+    "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+    "weightsVerified": true,
+    "model": {
+      "id": "bge-small-en-v1.5-q8",
+      "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+      "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+      "dimensions": 384,
+      "backend": "node-llama-cpp-query/synthetic-documents"
+    }
+  },
+  "environment": {
+    "runtime": "bun@1.4.4",
+    "node": "v26.3.0",
+    "operatingSystem": "Linux 7.0.0-1017-azure",
+    "architecture": "x64",
+    "runner": "benchmark-recall-vectors.ts",
+    "runnerVersion": "native-performance-v1"
+  }
+}
