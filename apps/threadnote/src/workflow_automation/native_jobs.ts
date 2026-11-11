@@ -32,6 +32,7 @@ import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {isMemoryCodeCitationRecovery} from '../memory/deferred/code_anchor_scope.js';
+import {shellQuote} from '../utils.js';
 import {workflowGraphProjectHint} from '../workflow_memory/graph_scope.js';
 import {readNativeCycleTreeEntry, nativeCycleRelativePath} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
@@ -760,7 +761,7 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
   )
     return yield* fail(
       'job-capability',
-      'Exact current citation evidence is unavailable. Run `threadnote graph index --no-vectors` from the original checkout, then retry the same save unchanged. No job was accepted.',
+      `Exact current citation evidence is unavailable. Run \`threadnote graph index --no-vectors${state.graphProject === undefined ? '' : ` --project ${shellQuote(state.graphProject)}`}\` from the original checkout, then retry the same save unchanged. No job was accepted.`,
     );
   if (!captured.ok)
     return yield* fail('job-capability', 'Exact current citation evidence could not be retained before acceptance.');

@@ -708,7 +708,8 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskControl = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_control'),
         );
-        expect(workflowTaskControl?.description).toContain('resume a blocked phase after dependencies are accepted');
+        expect(workflowTaskControl?.description).toContain('resume blocked after dependencies are accepted');
+        expect(workflowTaskControl?.description).toContain('Actor identity is not authenticated');
         const controlProperties = decodeJsonObject(decodeJsonObject(workflowTaskControl?.inputSchema).properties);
         const controlVariants = decodeJsonObject(controlProperties.control).anyOf;
         expect(controlVariants instanceof Array).toBe(true);

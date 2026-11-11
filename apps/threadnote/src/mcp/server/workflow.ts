@@ -287,25 +287,25 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use the current task card to begin eligible phases, reopen an explicitly selected validated or published phase after an observed failure, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with caller-provided human authority. Actor identity is not independently authenticated.',
+        'Control task phases: begin eligible; reopen validated/published after failure; resume blocked after dependencies are accepted; reconcile to the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is not authenticated.',
       inputSchema: {
-        runId: McpInput.requiredString('Existing workflow run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
-        taskRef: McpInput.requiredString('Current task card reference from workflow_task_view'),
+        runId: Schema.String,
+        callerCwd: Schema.String,
+        taskRef: Schema.String,
         control: Schema.Union([
           Schema.Struct({command: Schema.Literal('begin')}),
           Schema.Struct({
             command: Schema.Literal('resume'),
-            reason: McpInput.requiredString('Recovery reason'),
+            reason: Schema.String,
           }),
           Schema.Struct({
             command: Schema.Literal('reopen'),
-            phaseId: McpInput.requiredString('Exact validated or published phase ID to reopen'),
-            reason: McpInput.requiredString('Observed failure or source-drift reason'),
+            phaseId: Schema.String,
+            reason: Schema.String,
           }),
           Schema.Struct({
             command: Schema.Literal('reconcile'),
-            reason: McpInput.requiredString('Reason for approved-plan reconciliation'),
+            reason: Schema.String,
             bindings: Schema.optionalKey(
               Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
             ),
@@ -313,9 +313,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
-            reason: McpInput.requiredString('Reason for review-budget increase'),
+            reason: Schema.String,
             userAuthority: McpInput.requiredString(
-              'Caller-provided human authority; actor identity is not independently authenticated',
+              'Caller-provided human authority; actor identity is not authenticated',
             ),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),

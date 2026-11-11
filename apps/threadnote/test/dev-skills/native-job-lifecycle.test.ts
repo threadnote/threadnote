@@ -235,13 +235,14 @@ describe('native private job lifecycle', () => {
   effectIt.effect('admits selected-scope job citations when the memory project names another scope', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
+      const selectedProject = 'Alpha Project';
       yield* commit(f.repo, 'source');
       yield* f.fs.writeFileString(
         f.config.manifestPath,
         JSON.stringify({
           version: 1,
           projects: [
-            {name: 'Alpha', path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'},
+            {name: selectedProject, path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'},
             {
               name: 'fixture',
               path: f.repo,
@@ -253,9 +254,9 @@ describe('native private job lifecycle', () => {
         }),
       );
       const initialized = object(
-        yield* f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject: 'Alpha'}),
+        yield* f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject: selectedProject}),
       );
-      expect(initialized.graphProject).toBe('Alpha');
+      expect(initialized.graphProject).toBe(selectedProject);
       yield* (yield* CodeGraphIndexer).index({
         cwd: f.repo,
         threadnoteHome: f.home,
@@ -268,6 +269,22 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
+      yield* commit(f.repo, 'changed source');
+      const denied = yield* submit(f, work).pipe(Effect.result);
+      expect(denied).toMatchObject({failure: {code: 'job-capability'}});
+      if (Result.isFailure(denied)) expect(denied.failure.message).toContain("--project 'Alpha Project'");
+      const expectedJobId = nativeJobId(requiredString(initialized.bindingId), work);
+      expect(
+        yield* f.fs.exists(
+          f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run', expectedJobId + '.json'),
+        ),
+      ).toBe(false);
+      yield* (yield* CodeGraphIndexer).index({
+        cwd: f.repo,
+        threadnoteHome: f.home,
+        project: {uri: 'threadnote://resources/repos/alpha'},
+      });
       const accepted = object(yield* submit(f, work));
       expect(accepted.status).toBe('accepted');
       expect(accepted.jobId).toBeTruthy();
