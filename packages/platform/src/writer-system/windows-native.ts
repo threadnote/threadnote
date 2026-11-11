@@ -93,16 +93,20 @@ export function windowsTokenPrincipal(processHandle?: bigint): {readonly sid: st
       required[0] > 65536
     )
       fail('identity');
-    const bytes = new Uint8Array(required[0] + 32);
+    const length = required[0],
+      // TOKEN_USER contains an absolute SID pointer. Materialize backing/views before native code writes it.
+      buffer = new ArrayBuffer(length + 32),
+      bytes = new Uint8Array(buffer),
+      view = new DataView(buffer),
+      canary = bytes.subarray(length);
     bytes.fill(0xa5);
-    const length = required[0];
     if (
       security.symbols.GetTokenInformation(token, 1, ptr(bytes), length, required) === 0 ||
       required[0] !== length ||
-      !bytes.subarray(length).every(v => v === 0xa5)
+      !canary.every(v => v === 0xa5)
     )
       fail('identity');
-    const sid = new DataView(bytes.buffer).getBigUint64(0, true),
+    const sid = view.getBigUint64(0, true),
       start = windowsAddress(bytes);
     if (sid < start || sid + 8n > start + BigInt(length) || security.symbols.IsValidSid(sid) === 0) fail('identity');
     const sidLength = security.symbols.GetLengthSid(sid);

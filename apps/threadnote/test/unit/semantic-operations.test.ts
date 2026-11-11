@@ -51,7 +51,8 @@ const fixture = Effect.gen(function* () {
   const worktree = canonicalFileUri((yield* path.toFileUrl(root)).href);
   return {fs, path, home, root, worktree, config, request: {version: 1, callerCwd: root}};
 });
-const privateProfileSupported = process.platform === 'darwin' && process.arch === 'arm64';
+const privateProfileSupported = Native.runtimeNativePlatformSupport().writer;
+const darwinAclSupported = process.platform === 'darwin' && (process.arch === 'arm64' || process.arch === 'x64');
 
 describe.skipIf(!privateProfileSupported)('semantic operational inspection', () => {
   effectIt.effect('keeps missing and disabled semantics independent without creating an admission service', () =>
@@ -261,7 +262,7 @@ describe('semantic private profile proof', () => {
       }).pipe(provideTestLayer(layer), TestClock.withLive),
   );
 
-  effectIt.effect.skipIf(!privateProfileSupported)(
+  effectIt.effect.skipIf(!darwinAclSupported)(
     'rejects actual inherited and file ACL grants before publishing or trusting profile bytes',
     () =>
       Effect.gen(function* () {

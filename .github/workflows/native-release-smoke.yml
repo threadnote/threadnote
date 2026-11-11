@@ -276,7 +276,7 @@ jobs:
           mkdir -p .context/semantic-platform
           docker pull "$MUSL_IMAGE"
           docker image inspect "$MUSL_IMAGE" > .context/semantic-platform/image.json
-          docker run --rm --init --user root             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
+          docker run --rm --interactive --init --user root             -v "$PWD:/workspace" -w /workspace             -e THREADNOTE_BUILD_TARGET -e RELEASE_TARGET "$MUSL_IMAGE" sh -se <<'MUSL'
               apk add --no-cache bash git ripgrep bubblewrap libstdc++ libgcc
               bun --version > .context/semantic-platform/bun-version.txt
               uname -m > .context/semantic-platform/architecture.txt

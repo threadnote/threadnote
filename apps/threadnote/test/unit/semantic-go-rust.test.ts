@@ -105,6 +105,8 @@ const goClient = (request: LspClient['request']): LspClient => ({
   close: Effect.succeed({code: 0, drained: true, forced: false, stdioClosed: true, fault: undefined, graceful: true}),
 });
 describe('native semantic setup causes', () => {
+  // Artifact admission is narrower than native process/private-storage implementation support.
+  const hostHasNativeArtifacts = process.platform === 'darwin' && process.arch === 'arm64';
   for (const id of ['gopls', 'rust-analyzer'] as const) {
     effectIt.effect(`rejects missing and incompatible ${id} before worker launch or bootstrap publication`, () =>
       Effect.gen(function* () {
@@ -142,7 +144,7 @@ describe('native semantic setup causes', () => {
           expect(Schema.is(SemanticSetupFault)(error)).toBe(true);
           expect(error).toMatchObject({
             providerId: id,
-            reason,
+            reason: reason === 'missing' && !hostHasNativeArtifacts ? 'incompatible' : reason,
             component: 'provider',
             requiredVersion: id === 'gopls' ? 'v0.24.0' : rustProviderVersion,
             requiredSdkVersion: id === 'gopls' ? '1.27.3' : '1.99.1',
