@@ -433,6 +433,9 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (!suppliedJob) return yield* fail('job-not-found', 'Read the current authoring job continuation.');
       if (request.operation === 'resume') {
         if (!stored) return yield* fail('run-not-found', 'The original authoring task is unavailable.');
+        // Validate the immutable job and checkout before asking for an installed
+        // target, so a foreign continuation cannot be masked as missing resources.
+        yield* callJob('status');
         yield* readNativeTaskInstalledTarget(
           config,
           request.installationTarget,

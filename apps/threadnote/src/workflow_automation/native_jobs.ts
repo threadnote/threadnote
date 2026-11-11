@@ -30,6 +30,8 @@ import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journ
 import {stableJson} from '../workflow_memory/protocol.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {isMemoryCodeCitationRecovery} from '../memory/deferred/code_anchor_scope.js';
 import {workflowGraphProjectHint} from '../workflow_memory/graph_scope.js';
 import {readNativeCycleTreeEntry, nativeCycleRelativePath} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
@@ -748,6 +750,18 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     },
     'workflow-job',
   );
+  if (
+    !captured.ok &&
+    Schema.is(MemoryCodeCitationCaptureError)(captured.failure) &&
+    isMemoryCodeCitationRecovery(captured.failure.recovery) &&
+    captured.failure.recovery.code === 'exact-current-evidence-unavailable' &&
+    captured.failure.recovery.recovery === 'prepare-current-graph' &&
+    captured.failure.recovery.preparation.action === 'index-current-graph'
+  )
+    return yield* fail(
+      'job-capability',
+      'Exact current citation evidence is unavailable. Run `threadnote graph index --no-vectors` from the original checkout, then retry the same save unchanged. No job was accepted.',
+    );
   if (!captured.ok)
     return yield* fail('job-capability', 'Exact current citation evidence could not be retained before acceptance.');
   const citations = captured.citations;

@@ -597,6 +597,33 @@ describe('native private job lifecycle', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('reports stale graph recovery before accepting an exact citation job', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      const initialized = object(yield* f.init());
+      const sourceContent = 'export const fixture = false;\n';
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), sourceContent);
+      const head = yield* commit(f.repo, 'changed source');
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document({head, files: [{path: 'source.ts', sha256: sha256HexSync(sourceContent)}]}, ['source.ts']),
+        ready: false,
+        expectedRevision: null,
+      };
+      const jobId = nativeJobId(requiredString(initialized.bindingId), work);
+      const receipt = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run', jobId + '.json');
+      const denied = yield* submit(f, work).pipe(Effect.result);
+      expect(denied).toMatchObject({failure: {code: 'job-capability'}});
+      if (Result.isFailure(denied)) expect(denied.failure.message).toContain('threadnote graph index --no-vectors');
+      expect(yield* f.fs.exists(receipt)).toBe(false);
+      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      expect(object(yield* submit(f, work)).status).toBe('accepted');
+    }).pipe(run),
+  );
+
   it('keeps job progress monotone and invariant under duplicate and reordered proof replay', () => {
     fc.assert(
       fc.property(

@@ -724,9 +724,16 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], {properties, required: variant.required}];
           }),
         );
-        expect([...variantsByCommand.keys()]).toEqual(['begin', 'resume', 'reconcile', 'extend-review-budget']);
+        expect([...variantsByCommand.keys()]).toEqual([
+          'begin',
+          'resume',
+          'reopen',
+          'reconcile',
+          'extend-review-budget',
+        ]);
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('reopen')?.required).toEqual(['command', 'phaseId', 'reason']);
         expect(variantsByCommand.get('reconcile')?.required).toEqual(['command', 'reason']);
         expect(variantsByCommand.get('reconcile')?.properties.bindings).toBeDefined();
         expect(variantsByCommand.get('extend-review-budget')?.required).toEqual([

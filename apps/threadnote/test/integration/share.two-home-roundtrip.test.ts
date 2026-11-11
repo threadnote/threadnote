@@ -208,7 +208,12 @@ describe('share two-home round trip', () => {
     expect(recipient.plan).toEqual(plan);
     const pin = decodePortablePlanRef(first.sharedPlanRef);
     const rootUri = `threadnote://user/teammate/memories/shared/default/durable/projects/threadnote/portable-plans/${pin.payloadHash}/root.md`;
+    const rootRelative = Effect.pipe(
+      rootUri,
+      EffectString.replace('threadnote://user/teammate/memories/shared/default/', ''),
+    );
     const rootFile = canonicalResourceFile(subscriber.home, rootUri);
+    const committedRootFile = join(subscriber.worktree, rootRelative);
     const originalRoot = await readFile(rootFile, 'utf8');
     await writeFile(
       rootFile,
@@ -217,8 +222,20 @@ describe('share two-home round trip', () => {
     );
     await expect(
       runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote')),
-    ).rejects.toMatchObject({code: 'portable-plan-private'});
+    ).rejects.toMatchObject({code: 'portable-plan-conflict'});
     await writeFile(rootFile, originalRoot, 'utf8');
+
+    const privateRoot = Effect.pipe(originalRoot, EffectString.replace('visibility: shared', 'visibility: personal'));
+    await writeFile(rootFile, privateRoot, 'utf8');
+    await writeFile(committedRootFile, privateRoot, 'utf8');
+    await git(['add', '--', rootRelative], subscriber.worktree);
+    await git(['commit', '-m', 'fixture private shared plan root'], subscriber.worktree);
+    await expect(
+      runEffect(readPortablePlanPayload(subscriber.config, first.sharedPlanRef, 'threadnote')),
+    ).rejects.toMatchObject({code: 'portable-plan-private'});
+    await git(['revert', '--no-edit', 'HEAD'], subscriber.worktree);
+    await writeFile(rootFile, originalRoot, 'utf8');
+
     const childUri = `threadnote://user/teammate/memories/shared/default/durable/projects/threadnote/portable-plans/${pin.payloadHash}/page-0.md`;
     await rm(canonicalResourceFile(subscriber.home, childUri));
     await expect(
