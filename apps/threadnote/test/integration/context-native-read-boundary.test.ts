@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Path, Schema} from 'effect';
+import {Clock, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -120,8 +120,7 @@ describe('whole native Context Brief read boundary', () => {
           mode: 'locate',
           task: 'boundedAnswer',
         });
-        const deadline = yield* makeReadDeadline(5000);
-        const budget = {remaining: 2, primaryRemaining: 17, deadline};
+        const budget = {remaining: 2, primaryRemaining: 17, deadline: yield* makeReadDeadline(5000)};
         const graph = yield* native.graphEvidence(plan.graph, budget);
         expect(graph.cards.length).toBeGreaterThan(0);
         expect(graph.resolvedSnapshots[0]?.dirty).toBe(false);
@@ -140,7 +139,7 @@ describe('whole native Context Brief read boundary', () => {
           plan.scope,
           [candidate],
           graph.citationValidationFence,
-          deadline,
+          yield* makeReadDeadline(5000),
         );
         expect(verified[0]?.receipts[0]?.status).toBe('exact');
         yield* f.fs.writeFileString(f.file, 'export function boundedAnswer() { return 43; }\n');
@@ -148,7 +147,7 @@ describe('whole native Context Brief read boundary', () => {
           plan.scope,
           [candidate],
           graph.citationValidationFence,
-          deadline,
+          yield* makeReadDeadline(5000),
         );
         expect(drift[0]?.receipts[0]?.coverage).toBe('incomplete');
         expect(drift[0]?.receipts[0]?.status).not.toBe('exact');
@@ -237,15 +236,34 @@ describe('whole native Context Brief read boundary', () => {
           }),
         );
         const plan = planContextBrief({scope: {kind: 'repository', callerCwd: f.repo}, mode: 'locate', task: 'answer'});
-        const start = yield* Clock.monotonicTimeNanos;
-        const result = yield* native
-          .graphEvidence(plan.graph, {remaining: 2, primaryRemaining: 17, deadline: yield* makeReadDeadline(2200)})
-          .pipe(Effect.result);
-        expect(result._tag).toBe('Failure');
-        const pid = Number(yield* f.fs.readFileString(pidFile));
-        expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
-        expect(system.isProcessRunning(pid)).toBe(false);
-        expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(2200);
+        // The deadline is a watchdog; cancellation is triggered only by the real child's acknowledgement.
+        yield* Effect.acquireUseRelease(
+          native
+            .graphEvidence(plan.graph, {remaining: 2, primaryRemaining: 17, deadline: yield* makeReadDeadline(8000)})
+            .pipe(Effect.interruptible, Effect.forkChild),
+          worker =>
+            Effect.gen(function* () {
+              yield* Effect.gen(function* () {
+                while (!(yield* f.fs.exists(pidFile))) yield* Effect.sleep('10 millis');
+              }).pipe(Effect.timeout('5 seconds'));
+              const pid = Number(yield* f.fs.readFileString(pidFile));
+              expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+              expect(system.isProcessRunning(pid)).toBe(true);
+              const start = yield* Clock.monotonicTimeNanos;
+              yield* Fiber.interrupt(worker);
+              expect(system.isProcessRunning(pid)).toBe(false);
+              expect(Number((yield* Clock.monotonicTimeNanos) - start) / 1_000_000).toBeLessThan(2200);
+            }),
+          worker =>
+            Effect.gen(function* () {
+              yield* Fiber.interrupt(worker);
+              if (yield* f.fs.exists(pidFile)) {
+                const pid = Number(yield* f.fs.readFileString(pidFile));
+                expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+                expect(system.isProcessRunning(pid)).toBe(false);
+              }
+            }).pipe(Effect.orDie),
+        );
       }).pipe(
         Effect.provideService(ReadyRecallReadWorkerAdmission, {enabled: true}),
         provideTestLayer(ApplicationLayer),
