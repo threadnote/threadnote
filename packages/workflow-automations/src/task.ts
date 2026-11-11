@@ -5,7 +5,7 @@ import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
-import {nativeCycleReviewRecordingMode} from './cycle_review.js';
+import {nativeCycleReviewRecordingMode, validateNativeCycleReviewHistory} from './cycle_review.js';
 
 export const NativeTaskStartRequestSchema = Schema.Union([
   Schema.Struct({
@@ -452,14 +452,37 @@ export function projectNativeTaskView(
   const latestSnapshot = pendingSnapshot
     ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
-  const acceptedReview =
-    latestSnapshot && EffectArray.some(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId);
+  const acceptedReview = latestSnapshot
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
+      )
+    : undefined;
+  const predecessorId = latestSnapshot?.snapshot.previous ?? latestSnapshot?.snapshot.supersedes;
+  const predecessor = predecessorId
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
+      )?.snapshot
+    : undefined;
+  const predecessorReview = predecessor
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
+      )?.report
+    : undefined;
+  const blockingReview = Boolean(
+    latestSnapshot &&
+    acceptedReview &&
+    validateNativeCycleReviewHistory(
+      latestSnapshot.snapshot,
+      acceptedReview.report,
+      predecessor && predecessorReview ? {snapshot: predecessor, review: predecessorReview} : undefined,
+    ).summary.blockingIssueCount,
+  );
   const reviewWork =
     pendingSnapshot && latestSnapshot && !acceptedReview
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const validationWork =
-    pendingSnapshot && latestSnapshot && acceptedReview && options.acceptedSnapshotCurrent !== false
+    pendingSnapshot && latestSnapshot && acceptedReview && !blockingReview && options.acceptedSnapshotCurrent !== false
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const latestInvalidAttempt = reviewWork

@@ -508,6 +508,39 @@ describe('native task projection', () => {
       next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
       phase: {snapshot: {snapshotRef: expect.any(String)}},
     });
+    const blockedReview = projectNativeTaskView(
+      {
+        ...state,
+        cycle: {
+          ...runtime,
+          reviews: [
+            {
+              ...runtime.reviews[0],
+              report: {
+                ...runtime.reviews[0].report,
+                findings: [
+                  {
+                    id: 'blocking-finding',
+                    file: 'src/task.ts',
+                    line: 1,
+                    body: 'The acceptance behavior is incomplete.',
+                    trigger: 'Run the phase check.',
+                    impact: 'The phase cannot be accepted yet.',
+                    evidence: 'The reviewed source still omits the behavior.',
+                    severity: 'important' as const,
+                    category: 'correctness' as const,
+                    confidence: 95,
+                    state: 'new' as const,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      'blocking-revision',
+    );
+    expect(blockedReview).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
     expect(
       projectNativeTaskView({...state, cycle: runtime}, 'review-revision', {acceptedSnapshotCurrent: false}),
     ).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});

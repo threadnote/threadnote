@@ -1532,7 +1532,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         callerCwd: checkout,
         role: 'implementation',
       });
-      if (view.status !== 'ready' || view.next.action !== 'implement' || !view.next.phaseId)
+      if (view.status !== 'ready' || !['implement', 'validate'].includes(view.next.action) || !view.next.phaseId)
         return yield* fail(
           'task-not-ready',
           EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action.',
@@ -1957,7 +1957,11 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       callerCwd: checkout,
       role: 'implementation',
     });
-    if (view.status !== 'ready' || view.next.action !== 'implement' || view.next.phaseId !== ref.phaseId)
+    if (
+      view.status !== 'ready' ||
+      !['implement', 'validate'].includes(view.next.action) ||
+      view.next.phaseId !== ref.phaseId
+    )
       return yield* fail(
         'task-not-ready',
         EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action.',
