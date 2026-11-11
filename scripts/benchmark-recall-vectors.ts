@@ -1,11 +1,19 @@
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {loadRecallIndexData} from '@threadnote/recall/index';
+import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
+import {RecallReadyReadBoundary, RecallReadyReadBoundaryError} from '@threadnote/recall/read_boundary';
+import {makeReadDeadline} from '@threadnote/platform/read_deadline';
+import {verifyNativeVectorReaderPayload} from '@threadnote/recall/vector/native-reader-payload';
+import {makeReadyRecallReadBoundary} from '@threadnote/threadnote/recall/ready_read_boundary';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {startExternalSampler} from './benchmark-code-graph.js';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
-import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import {provideScriptLayer, ScriptError, scriptError} from './effect/errors.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {BunRuntime} from '@effect/platform-bun';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
-import {Clock, Console, DateTime, Effect, FileSystem, Layer, Path} from 'effect';
+import {Clock, Console, DateTime, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -663,7 +671,663 @@ const readBenchmarkSourceFence = Effect.fn('benchmarkRecallVectors.sourceFence')
   };
 });
 
-BunRuntime.runMain(provideScriptLayer(program, benchmarkLayer));
+type ProductionBackend = 'baseline' | 'candidate';
+interface ProductionQuerySample {
+  readonly sample: number;
+  readonly milliseconds: number;
+  readonly success: boolean;
+  readonly reason?: string;
+  readonly querySha256?: string;
+  readonly scoresSha256?: string;
+  readonly children: readonly {operation: string; milliseconds: number; timeoutMs: number | undefined}[];
+}
+interface ProductionArmCapture {
+  readonly pair: number;
+  readonly backend: ProductionBackend;
+  readonly samples: ProductionQuerySample[];
+  readonly parentMemoryAtArmStart: ReturnType<typeof process.memoryUsage>;
+  sampler?: Effect.Success<ReturnType<Effect.Success<ReturnType<typeof startExternalSampler>>['stop']>>;
+  p95Milliseconds?: number;
+  sampledTreePeakRssBytes?: number;
+  resourceEvidenceComplete?: boolean;
+}
+
+const productionSourcePaths = [
+  'package.json',
+  'bun.lock',
+  'bunfig.toml',
+  'tsconfig.json',
+  ':(glob)packages/*/src/**',
+  ':(glob)packages/*/package.json',
+  'apps/threadnote/src',
+  'packages/recall/native-vector-reader/Cargo.toml',
+  'packages/recall/native-vector-reader/Cargo.lock',
+  'packages/recall/native-vector-reader/build.rs',
+  'packages/recall/native-vector-reader/rust-toolchain.toml',
+  'packages/recall/native-vector-reader/src',
+  'scripts/benchmark-recall-vectors.ts',
+  'scripts/benchmark-code-graph.ts',
+  'scripts/code-graph-benchmark-sampler.ts',
+  'scripts/effect',
+] as const;
+
+const productionSourceFence = (candidateCommit: string) =>
+  Effect.gen(function* () {
+    const source = yield* readBenchmarkSourceFence();
+    const path = yield* Path.Path;
+    const command = yield* CommandExecutor;
+    const cwd = yield* path.fromFileUrl(new URL('../', import.meta.url));
+    const [difference, untracked, candidateHarness] = yield* Effect.all(
+      [
+        command.execute('git', ['diff', '--binary', '--no-ext-diff', candidateCommit, '--', ...productionSourcePaths], {
+          cwd,
+          maxOutputBytes: 32 * MEBIBYTE,
+        }),
+        command.execute('git', ['ls-files', '--others', '--exclude-standard', '--', ...productionSourcePaths], {cwd}),
+        command.execute('git', ['show', `${candidateCommit}:scripts/benchmark-recall-vectors.ts`], {
+          cwd,
+          maxOutputBytes: MEBIBYTE,
+        }),
+      ],
+      {concurrency: 2},
+    );
+    return {
+      ...source,
+      runtimeAndHarnessMatchCandidate:
+        difference.stdout === '' &&
+        untracked.stdout === '' &&
+        source.instrumentationHash === sha256HexSync(candidateHarness.stdout),
+      candidateHarnessSha256: sha256HexSync(candidateHarness.stdout),
+      runtimeAndHarnessDiffSha256: sha256HexSync(difference.stdout),
+      untrackedRuntimePathsSha256: sha256HexSync(untracked.stdout),
+    };
+  });
+
+const productionDistributionInventory = (root: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const files: {path: string; sha256: string}[] = [];
+    const visit = (directory: string): Effect.Effect<void, unknown, FileSystem.FileSystem> =>
+      Effect.gen(function* () {
+        for (const name of (yield* fs.readDirectory(directory)).sort()) {
+          const filename = path.join(directory, name);
+          const stat = yield* fs.stat(filename);
+          if (stat.type === 'Directory') yield* visit(filename);
+          else if (stat.type === 'File') {
+            files.push({
+              path: Effect2.pipe(path.relative(root, filename), EffectString.replaceAll('\\', '/')),
+              sha256: sha256HexSync(yield* fs.readFile(filename)),
+            });
+          } else return yield* ScriptError.make({message: 'Unexpected distribution entry in production benchmark.'});
+        }
+      });
+    yield* visit(root);
+    return files;
+  });
+
+const makeProductionFixture = (home: string, documents: number) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const config = {
+      account: 'local',
+      user: 'benchmark',
+      agentContextHome: home,
+      manifestPath: path.join(home, 'manifest.yaml'),
+    };
+    yield* fs.makeDirectory(home, {recursive: true});
+    yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+    const directory = path.join(home, 'data/local/user/benchmark/memories/durable/projects/benchmark');
+    yield* fs.makeDirectory(directory, {recursive: true});
+    // Every vector has its own legitimate canonical source and lexical metadata.
+    for (let index = 0; index < documents; index++) {
+      yield* fs.writeFileString(
+        path.join(directory, `${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}.md`),
+        formatMemoryDocument(
+          'MEMORY',
+          {
+            kind: 'durable',
+            status: 'active',
+            project: 'benchmark',
+            memoryId: `tn_vector_benchmark_${index}`,
+            sourceAgentClient: 'benchmark',
+            timestamp: '2026-11-04T00:00:00.000Z',
+          },
+          `Unique vector production benchmark document ${index}.`,
+        ),
+      );
+    }
+    yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+    const lexical = yield* loadRecallIndexData(config, {includeInactive: false});
+    if (lexical.candidates.length !== documents)
+      return yield* ScriptError.make({
+        message: 'Production benchmark canonical candidate count differs from requested count.',
+      });
+    const status = yield* rebuildVectorIndex(config, manifest, lexical.candidates, {
+      corpusGeneration: lexical.generation,
+    });
+    if (status.chunkCount !== documents)
+      return yield* ScriptError.make({message: 'Production benchmark vector count differs from canonical count.'});
+    return {
+      config,
+      corpusGeneration: lexical.generation,
+      documents,
+      databasePath: path.join(home, 'indexes', 'vectors', manifest.id, vectorIndexDatabaseFilename()),
+    };
+  });
+
+const runProductionVectorBenchmark = Effect.scoped(
+  Effect.gen(function* () {
+    if (
+      !options.output ||
+      !options.modelFile ||
+      !options.distributionRoot ||
+      options.distribution === 'sparse' ||
+      manifest.id !== 'bge-small-en-v1.5-q8'
+    )
+      return yield* ScriptError.make({
+        message:
+          '--production-path requires --output, --model-file for pinned BGE, --distribution-root and --distribution dense|tied.',
+      });
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const system = yield* SystemInfo;
+    const command = yield* CommandExecutor;
+    const runtime = yield* LocalModelRuntime;
+    const captureStartedAt = DateTime.formatIso(yield* DateTime.now);
+    const modelPath = options.modelFile;
+    if (sha256HexSync(yield* fs.readFile(modelPath)) !== manifest.sha256)
+      return yield* ScriptError.make({message: 'Production benchmark model differs from the pinned builtin SHA256.'});
+    const distributionRoot = path.resolve(options.distributionRoot);
+    const nativeManifest = yield* Effect.tryPromise({
+      try: () =>
+        verifyNativeVectorReaderPayload(path.join(distributionRoot, 'runtime', 'vector-reader', 'manifest.json')),
+      catch: scriptError,
+    });
+    if (nativeManifest.development)
+      return yield* ScriptError.make({message: 'Production capture requires a strict standalone payload.'});
+    const release = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({
+        executable: Schema.String,
+        sourceIdentity: Schema.Struct({
+          commit: Schema.String,
+          tree: Schema.String,
+          target: Schema.String,
+          bun: Schema.String,
+        }),
+      }),
+    )(JSON.parse(yield* fs.readFileString(path.join(distributionRoot, 'release.json'))));
+    if (
+      release.sourceIdentity.commit !== nativeManifest.buildInfo.sourceCommit ||
+      release.sourceIdentity.tree !== nativeManifest.buildInfo.sourceTree ||
+      release.sourceIdentity.target !== nativeManifest.bunTarget ||
+      release.sourceIdentity.bun !== Bun.version
+    )
+      return yield* ScriptError.make({message: 'Compiled candidate, payload and parent Bun identities must agree.'});
+    const openingSource = yield* productionSourceFence(nativeManifest.buildInfo.sourceCommit);
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-production-'});
+    const candidateRoot = path.join(home, 'candidate');
+    const baselineRoot = path.join(home, 'baseline');
+    const inputInventory = yield* productionDistributionInventory(distributionRoot);
+    for (const entry of inputInventory) {
+      const destination = path.join(candidateRoot, entry.path);
+      yield* fs.makeDirectory(path.dirname(destination), {recursive: true});
+      yield* fs.link(path.join(distributionRoot, entry.path), destination);
+    }
+    const candidateInventory = yield* productionDistributionInventory(candidateRoot);
+    for (const entry of candidateInventory) {
+      if (EffectString.startsWith('runtime/vector-reader/')(entry.path)) continue;
+      const destination = path.join(baselineRoot, entry.path);
+      yield* fs.makeDirectory(path.dirname(destination), {recursive: true});
+      yield* fs.link(path.join(candidateRoot, entry.path), destination);
+    }
+    const baselineInventory = yield* productionDistributionInventory(baselineRoot);
+    if (JSON.stringify(inputInventory) !== JSON.stringify(candidateInventory))
+      return yield* ScriptError.make({message: 'Frozen input distribution changed while creating capture arms.'});
+    const commonInventory = EffectArray.filter(
+      candidateInventory,
+      entry => !EffectString.startsWith('runtime/vector-reader/')(entry.path),
+    );
+    if (JSON.stringify(commonInventory) !== JSON.stringify(baselineInventory))
+      return yield* ScriptError.make({message: 'Production arms differ beyond the optional native payload.'});
+    const setupStarted = yield* Clock.currentTimeNanos;
+    yield* Console.log(
+      `Building ${options.documents} canonical ${options.distribution} documents for compiled production retrieval.`,
+    );
+    const fixture = yield* makeProductionFixture(path.join(home, 'fixture'), options.documents);
+    const setupMilliseconds = Number((yield* Clock.currentTimeNanos) - setupStarted) / NANOSECONDS_PER_MILLISECOND;
+    const databaseSha256 = sha256HexSync(yield* fs.readFile(fixture.databasePath));
+    const eligibility = deriveRecallEligibilityPolicy({
+      explicitProject: 'benchmark',
+      originalQuery: 'vector production benchmark',
+    });
+    const arms: ProductionArmCapture[] = [];
+    const executableVerification: {
+      backend: ProductionBackend;
+      milliseconds: number;
+      success: boolean;
+      version?: string;
+    }[] = [];
+    const firstUse: {
+      modelMilliseconds?: number;
+      requests: {backend: ProductionBackend; result: ProductionQuerySample}[];
+    } = {requests: []};
+    const oracleControls: {querySha256: string; scoresSha256: string}[] = [];
+    const proof: {backend: ProductionBackend; result: ProductionQuerySample}[] = [];
+    const pairGates: {
+      pair: number;
+      baselineP95?: number;
+      candidateP95?: number;
+      latencyPassed: boolean;
+      rssPassed: boolean;
+      complete: boolean;
+    }[] = [];
+    let sourceStable = false;
+    let fixtureStable = false;
+    let distributionStable = false;
+    let modelStable = false;
+    let caseGatesPassed = false;
+    let closingSource: typeof openingSource | undefined;
+    let fatal: string | undefined;
+    const capture = () => ({
+      format: 'threadnote-native-vector-production-v1',
+      captureStartedAt,
+      capturedCandidate: release.sourceIdentity,
+      platform: {platform: system.platform, architecture: system.architecture, bun: Bun.version},
+      model: {id: manifest.id, sha256: manifest.sha256, dimensions: manifest.dimensions},
+      configuration: {
+        documents: options.documents,
+        distribution: options.distribution,
+        samples: options.samples,
+        pairs: options.pairs,
+        resultLimit: VECTOR_QUERY_RESULT_LIMIT,
+        fullQueryDeadlineMilliseconds: 2000,
+        cleanupReserveMilliseconds: 1100,
+      },
+      boundary:
+        'selectedSemanticScores + real pinned query inference + actual compiled owned ready-read children + authorization/lexical/canonical opening and closing fences',
+      syntheticDocumentEmbeddings: true,
+      qualified: false,
+      qualificationScope:
+        'One case only; default adoption additionally requires all dense/tied 100k/10k cases and both Darwin ARM64/Linux x64 platforms.',
+      diagnostic:
+        options.pairs < 3 ||
+        options.samples < 30 ||
+        ![10_000, 100_000].includes(options.documents) ||
+        !openingSource.runtimeAndHarnessMatchCandidate,
+      nativeManifest,
+      candidateInventory,
+      baselineInventory,
+      openingSource,
+      closingSource,
+      sourceStable,
+      fixtureStable,
+      distributionStable,
+      modelStable,
+      fixture: {
+        documents: fixture.documents,
+        corpusGeneration: fixture.corpusGeneration,
+        databaseSha256,
+        setupMilliseconds,
+      },
+      executableVerification,
+      firstUse,
+      nativeExecutionProof: proof,
+      oracleControls,
+      arms,
+      pairGates,
+      caseGatesPassed,
+      fatal,
+    });
+    const writeCapture = () =>
+      Effect.suspend(() =>
+        options.output ? fs.writeFileString(options.output, `${JSON.stringify(capture(), null, 2)}\n`) : Effect.void,
+      );
+    if (options.output) yield* fs.makeDirectory(path.dirname(options.output), {recursive: true});
+    const executeQuery = (
+      backend: ProductionBackend,
+      selectedFixture: typeof fixture,
+      sample: number,
+      expected?: {querySha256: string; scoresSha256: string},
+    ) =>
+      Effect.gen(function* () {
+        const environment = {...system.environment()};
+        delete environment.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST;
+        delete environment.THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT;
+        const selected = {
+          ...system,
+          executablePath: path.join(backend === 'candidate' ? candidateRoot : baselineRoot, release.executable),
+          environment: () => environment,
+        };
+        const children: {operation: string; milliseconds: number; timeoutMs: number | undefined}[] = [];
+        const observedCommands = CommandExecutor.of({
+          ...command,
+          execute: (executable, args, requestOptions) =>
+            Effect.gen(function* () {
+              const started = yield* Clock.currentTimeNanos;
+              const reply = yield* command.execute(executable, args, requestOptions).pipe(Effect.result);
+              const operation = requestOptions?.input
+                ? (yield* Schema.decodeUnknownEffect(Schema.Struct({operation: Schema.String}))(
+                    JSON.parse(new TextDecoder().decode(requestOptions.input)),
+                  ).pipe(Effect.orDie)).operation
+                : 'unknown';
+              children.push({
+                operation,
+                milliseconds: Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND,
+                timeoutMs: requestOptions?.timeoutMs,
+              });
+              return yield* reply._tag === 'Failure' ? Effect.fail(reply.failure) : Effect.succeed(reply.success);
+            }),
+        });
+        lastQueryVector = [];
+        const started = yield* Clock.currentTimeNanos;
+        const result = yield* Effect.gen(function* () {
+          const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+            Effect.provideService(SystemInfo, selected),
+            Effect.provideService(CommandExecutor, observedCommands),
+          );
+          return yield* selectedSemanticScores(
+            selectedFixture.config,
+            `Unique vector production benchmark document ${sample}.`,
+            {
+              limit: VECTOR_QUERY_RESULT_LIMIT,
+              eligibility,
+            },
+          ).pipe(Effect.provideService(RecallReadyReadBoundary, boundary));
+        }).pipe(Effect.result);
+        const milliseconds = Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND;
+        if (result._tag === 'Failure') {
+          const reason = Schema.is(RecallReadyReadBoundaryError)(result.failure)
+            ? result.failure.reason
+            : 'semantic-failure';
+          return {sample, milliseconds, success: false, reason, children} satisfies ProductionQuerySample;
+        }
+        if (!result.success)
+          return {
+            sample,
+            milliseconds,
+            success: false,
+            reason: 'absent-result',
+            children,
+          } satisfies ProductionQuerySample;
+        const querySha256 = sha256HexSync(JSON.stringify(scalarNormalizedQuery(lastQueryVector)));
+        const scoresSha256 = sha256HexSync(JSON.stringify([...result.success]));
+        const parity = expected ?? {
+          querySha256,
+          scoresSha256: sha256HexSync(
+            JSON.stringify([...scalarOracleScores(selectedFixture.databasePath, lastQueryVector)]),
+          ),
+        };
+        const success = parity.querySha256 === querySha256 && parity.scoresSha256 === scoresSha256;
+        return {
+          sample,
+          milliseconds,
+          success,
+          ...(success ? {} : {reason: 'query-or-scalar-oracle-mismatch'}),
+          querySha256,
+          scoresSha256,
+          children,
+        } satisfies ProductionQuerySample;
+      });
+    yield* Effect.gen(function* () {
+      // Release/install setup verifies executable startup separately from semantic requests.
+      for (const backend of ['baseline', 'candidate'] as const) {
+        const started = yield* Clock.currentTimeNanos;
+        const verification = yield* command
+          .execute(
+            path.join(backend === 'candidate' ? candidateRoot : baselineRoot, release.executable),
+            ['--version'],
+            {
+              env: {...system.environment(), THREADNOTE_HOME: fixture.config.agentContextHome},
+              timeoutMs: 5000,
+              maxOutputBytes: 16 * 1024,
+              forceKillAfterMilliseconds: 0,
+              sensitiveOutput: true,
+              verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+            },
+          )
+          .pipe(Effect.result);
+        executableVerification.push({
+          backend,
+          milliseconds: Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND,
+          success: verification._tag === 'Success',
+          ...(verification._tag === 'Success' ? {version: EffectString.trim(verification.success.stdout)} : {}),
+        });
+        if (verification._tag === 'Failure') return yield* verification.failure;
+      }
+      Bun.gc(true);
+      queryPhase = true;
+      const modelStarted = yield* Clock.currentTimeNanos;
+      yield* runtime.embedMany({
+        inputs: [`${manifest.promptPrefixes?.query ?? ''}Unique vector production benchmark document 0.`],
+        manifest,
+        modelPath,
+      });
+      firstUse.modelMilliseconds = Number((yield* Clock.currentTimeNanos) - modelStarted) / NANOSECONDS_PER_MILLISECOND;
+      for (const backend of ['baseline', 'candidate'] as const) {
+        firstUse.requests.push({backend, result: yield* executeQuery(backend, fixture, 0)});
+      }
+      // A separate tiny VIEW discriminates the actual SQLite engine without changing measured data or production code.
+      queryPhase = false;
+      const proofFixture = yield* makeProductionFixture(path.join(home, 'proof'), 2);
+      Bun.gc(true);
+      queryPhase = true;
+      const proofDb = new Database(proofFixture.databasePath);
+      try {
+        proofDb.exec('ALTER TABLE vector_values RENAME TO fixture_vector_values');
+        const sourceId = Effect2.pipe(nativeManifest.buildInfo.sqliteSourceId, EffectString.replaceAll("'", "''"));
+        const hostSourceId = requiredRow(proofDb.query<{id: string}, []>('SELECT sqlite_source_id() AS id').get()).id;
+        if (hostSourceId === nativeManifest.buildInfo.sqliteSourceId)
+          throw ScriptError.make({message: 'SQLite engines cannot be discriminated on this host.'});
+        proofDb.exec(
+          `CREATE VIEW vector_values AS SELECT id,vector_key,CASE WHEN sqlite_source_id()='${sourceId}' THEN vector ELSE X'00' END AS vector FROM fixture_vector_values`,
+        );
+      } finally {
+        proofDb.close();
+      }
+      // The oracle reads original stored bytes; native must return them, TS must fail strict validation.
+      const proofVector = yield* runtime.embedMany({
+        inputs: [`${manifest.promptPrefixes?.query ?? ''}Unique vector production benchmark document 0.`],
+        manifest,
+        modelPath,
+      });
+      const proofExpected = {
+        querySha256: sha256HexSync(JSON.stringify(scalarNormalizedQuery(proofVector[0]))),
+        scoresSha256: sha256HexSync(
+          JSON.stringify([...scalarOracleScores(proofFixture.databasePath, proofVector[0], 'fixture_vector_values')]),
+        ),
+      };
+      for (const backend of ['baseline', 'candidate'] as const)
+        proof.push({backend, result: yield* executeQuery(backend, proofFixture, 0, proofExpected)});
+      yield* writeCapture();
+      if (proof[0]?.result.success || proof[0]?.result.reason !== 'worker-failed' || !proof[1]?.result.success)
+        return yield* ScriptError.make({
+          message: 'Actual compiled native/TypeScript engine proof failed; capture is unqualified.',
+        });
+      const expected = oracleControls;
+      for (let sample = 0; sample < options.samples; sample++) {
+        const vector = (yield* runtime.embedMany({
+          inputs: [`${manifest.promptPrefixes?.query ?? ''}Unique vector production benchmark document ${sample}.`],
+          manifest,
+          modelPath,
+        }))[0];
+        expected.push({
+          querySha256: sha256HexSync(JSON.stringify(scalarNormalizedQuery(vector))),
+          scoresSha256: sha256HexSync(JSON.stringify([...scalarOracleScores(fixture.databasePath, vector)])),
+        });
+      }
+      for (let pair = 1; pair <= options.pairs; pair++) {
+        const order: readonly ProductionBackend[] =
+          pair % 2 === 1 ? ['baseline', 'candidate'] : ['candidate', 'baseline'];
+        for (const backend of order) {
+          Bun.gc(true);
+          const arm: ProductionArmCapture = {pair, backend, samples: [], parentMemoryAtArmStart: process.memoryUsage()};
+          arms.push(arm);
+          const samplerRoot = path.join(home, `sampler-${pair}-${backend}`);
+          const sampledTemporaryRoot = path.join(samplerRoot, 'temp');
+          yield* fs.makeDirectory(sampledTemporaryRoot, {recursive: true});
+          const sampler = yield* Effect.acquireRelease(
+            startExternalSampler(
+              fs,
+              path,
+              samplerRoot,
+              sampledTemporaryRoot,
+              fixture.databasePath,
+              options.output
+                ? `${options.output}.pair-${pair}-${backend}.sampler.json`
+                : path.join(samplerRoot, 'checkpoint.json'),
+              'cold',
+            ),
+            handle => handle.stop('aborted').pipe(Effect.ignore),
+          );
+          yield* sampler.markPhase('production-query');
+          for (let sample = 0; sample < options.samples; sample++) {
+            const result = yield* executeQuery(backend, fixture, sample, expected[sample]);
+            arm.samples.push(result);
+            if (result.reason === 'cleanup-unconfirmed')
+              return yield* ScriptError.make({message: 'Owned worker cleanup was not confirmed; capture stopped.'});
+          }
+          arm.sampler = yield* sampler.stop();
+          const phase = arm.sampler.phases['production-query'];
+          arm.resourceEvidenceComplete =
+            arm.sampler.processTelemetry.availability === 'available' &&
+            arm.sampler.processTelemetry.scope === 'recursive-process-tree' &&
+            (phase?.processSamples ?? 0) > 1 &&
+            (phase?.processSampleFailures ?? 0) === 0 &&
+            (phase?.processPeakCount ?? 0) > 1;
+          arm.sampledTreePeakRssBytes = arm.resourceEvidenceComplete ? phase?.rssPeakBytes : undefined;
+          const successful = EffectArray.filter(arm.samples, value => value.success);
+          if (successful.length === options.samples)
+            arm.p95Milliseconds = percentile(
+              EffectArray.map(successful, value => value.milliseconds).sort((a, b) => a - b),
+              0.95,
+            );
+          yield* writeCapture();
+          yield* Console.log(
+            `Production pair ${pair} ${backend}: ${successful.length}/${options.samples} exact requests, p95 ${arm.p95Milliseconds ?? 'unavailable'} ms.`,
+          );
+        }
+        const baseline = EffectOption.getOrUndefined(
+          EffectArray.findFirst(arms, arm => arm.pair === pair && arm.backend === 'baseline'),
+        );
+        const candidate = EffectOption.getOrUndefined(
+          EffectArray.findFirst(arms, arm => arm.pair === pair && arm.backend === 'candidate'),
+        );
+        const complete = baseline?.p95Milliseconds !== undefined && candidate?.p95Milliseconds !== undefined;
+        const latencyPassed =
+          complete &&
+          (options.documents === 100_000 && options.distribution === 'dense'
+            ? candidate.p95Milliseconds! <= baseline.p95Milliseconds! * 0.8
+            : options.documents === 10_000
+              ? candidate.p95Milliseconds! - baseline.p95Milliseconds! <= Math.max(5, baseline.p95Milliseconds! * 0.05)
+              : true);
+        const rssPassed =
+          baseline?.sampledTreePeakRssBytes !== undefined &&
+          candidate?.sampledTreePeakRssBytes !== undefined &&
+          candidate.sampledTreePeakRssBytes <= baseline.sampledTreePeakRssBytes * 1.1;
+        pairGates.push({
+          pair,
+          baselineP95: baseline?.p95Milliseconds,
+          candidateP95: candidate?.p95Milliseconds,
+          latencyPassed,
+          rssPassed,
+          complete,
+        });
+      }
+      closingSource = yield* productionSourceFence(nativeManifest.buildInfo.sourceCommit);
+      sourceStable =
+        openingSource.runtimeAndHarnessDiffSha256 === closingSource.runtimeAndHarnessDiffSha256 &&
+        openingSource.untrackedRuntimePathsSha256 === closingSource.untrackedRuntimePathsSha256 &&
+        openingSource.instrumentationHash === closingSource.instrumentationHash;
+      fixtureStable = databaseSha256 === sha256HexSync(yield* fs.readFile(fixture.databasePath));
+      distributionStable =
+        JSON.stringify(candidateInventory) === JSON.stringify(yield* productionDistributionInventory(candidateRoot)) &&
+        JSON.stringify(baselineInventory) === JSON.stringify(yield* productionDistributionInventory(baselineRoot));
+      modelStable = manifest.sha256 === sha256HexSync(yield* fs.readFile(modelPath));
+      const firstUsePassed = EffectArray.every(firstUse.requests, value => value.result.success);
+      caseGatesPassed =
+        openingSource.runtimeAndHarnessMatchCandidate &&
+        sourceStable &&
+        fixtureStable &&
+        distributionStable &&
+        modelStable &&
+        firstUsePassed &&
+        options.pairs >= 3 &&
+        options.samples >= 30 &&
+        [10_000, 100_000].includes(options.documents) &&
+        EffectArray.every(pairGates, value => value.complete && value.latencyPassed && value.rssPassed);
+      const semanticFailure =
+        EffectArray.some(
+          firstUse.requests,
+          value => !value.result.success && value.result.reason !== 'budget-exhausted',
+        ) ||
+        EffectArray.some(arms, arm =>
+          EffectArray.some(arm.samples, value => !value.success && value.reason !== 'budget-exhausted'),
+        );
+      if (semanticFailure || !sourceStable || !fixtureStable || !distributionStable || !modelStable)
+        return yield* ScriptError.make({
+          message:
+            'Production capture has semantic/parity/ownership or source/fixture failures; see retained artifact.',
+        });
+      if (options.failOnBudget && !caseGatesPassed)
+        return yield* ScriptError.make({message: 'Production case did not pass the unchanged R5 capture gates.'});
+    }).pipe(
+      Effect.onError(cause =>
+        Effect.sync(() => {
+          fatal = String(cause);
+        }),
+      ),
+      Effect.ensuring(writeCapture().pipe(Effect.orDie)),
+    );
+    if (!options.output) yield* Console.log(JSON.stringify(capture(), null, 2));
+  }),
+);
+
+function scalarNormalizedQuery(query: readonly number[]): readonly number[] {
+  let magnitude = 0;
+  for (const component of query) magnitude += component * component;
+  const inverse = 1 / Math.sqrt(magnitude);
+  return EffectArray.map(query, component => component * inverse);
+}
+
+function scalarOracleScores(
+  databasePath: string,
+  query: readonly number[],
+  valuesTable: 'vector_values' | 'fixture_vector_values' = 'vector_values',
+): ReadonlyMap<string, number> {
+  const database = new Database(databasePath, {readonly: true});
+  try {
+    const normalized = scalarNormalizedQuery(query);
+    const rows = database
+      .query<{chunk_id: string; uri: string; vector: Uint8Array}, []>(
+        `SELECT chunk.chunk_id,chunk.uri,value.vector FROM vector_chunks chunk JOIN ${valuesTable} value ON value.id=chunk.vector_id`,
+      )
+      .all();
+    const ranked = EffectArray.map(rows, row => {
+      const view = new DataView(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength);
+      let score = 0;
+      for (let index = 0; index < normalized.length; index++)
+        score += normalized[index] * view.getFloat32(index * 4, true);
+      return {id: row.chunk_id, uri: row.uri, score: Math.max(-1, Math.min(1, score))};
+    }).sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    const scores = new Map<string, number>();
+    for (const row of ranked.slice(0, VECTOR_QUERY_RESULT_LIMIT))
+      scores.set(row.uri, Math.max(scores.get(row.uri) ?? 0, Math.max(0, row.score)));
+    return scores;
+  } finally {
+    database.close();
+  }
+}
+
+BunRuntime.runMain(
+  options.productionPath
+    ? provideScriptLayer(
+        runProductionVectorBenchmark,
+        Layer.mergeAll(ApplicationLayer, LocalModelCatalog.layer([manifest]), modelStoreLayer, runtimeLayer),
+      )
+    : provideScriptLayer(program, benchmarkLayer),
+);
 
 function deterministicVector(dimensions: number, input: string): readonly number[] {
   if (options.distribution === 'tied') return Array.from({length: dimensions}, () => 1 / Math.sqrt(dimensions));
@@ -716,6 +1380,9 @@ function percentile(sorted: readonly number[], ratio: number): number {
 }
 
 function parseOptions(arguments_: readonly string[]): {
+  readonly productionPath: boolean;
+  readonly distributionRoot?: string;
+  readonly pairs: number;
   readonly arm: 'baseline' | 'candidate';
   readonly pair: number;
   readonly distribution: 'dense' | 'tied' | 'sparse';
@@ -727,6 +1394,9 @@ function parseOptions(arguments_: readonly string[]): {
   readonly samples: number;
   readonly stageAttribution: boolean;
 } {
+  let productionPath = false;
+  let distributionRoot: string | undefined;
+  let pairs = 3;
   let arm: 'baseline' | 'candidate' = 'baseline';
   let pair = 1;
   let distribution: 'dense' | 'tied' | 'sparse' = 'sparse';
@@ -739,7 +1409,10 @@ function parseOptions(arguments_: readonly string[]): {
   let stageAttribution = false;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
-    if (argument === '--pair') pair = positiveInteger(arguments_[++index], '--pair');
+    if (argument === '--production-path') productionPath = true;
+    else if (argument === '--distribution-root') distributionRoot = arguments_[++index];
+    else if (argument === '--pairs') pairs = positiveInteger(arguments_[++index], '--pairs');
+    else if (argument === '--pair') pair = positiveInteger(arguments_[++index], '--pair');
     else if (argument === '--arm') {
       const value = arguments_[++index];
       if (value !== 'baseline' && value !== 'candidate') throw ScriptError.make({message: 'Invalid arm'});
@@ -759,6 +1432,9 @@ function parseOptions(arguments_: readonly string[]): {
     else throw ScriptError.make({message: `Unknown vector benchmark option: ${argument}`});
   }
   return {
+    productionPath,
+    pairs,
+    ...(distributionRoot ? {distributionRoot} : {}),
     ...(output ? {output} : {}),
     ...(modelFile ? {modelFile} : {}),
     arm,
