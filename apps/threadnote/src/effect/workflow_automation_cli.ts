@@ -1,5 +1,5 @@
 import {makeNativeTaskAuthoringCommand} from './task_authoring_cli.js';
-import {Console, Effect, Schema, Stdio, Stream} from 'effect';
+import {Console, Effect, FileSystem, Path, Schema, Stdio, Stream} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
 import {runWorkflowAutomation} from '../workflow_automation/index.js';
@@ -125,34 +125,81 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         ),
       ),
       makeNativeTaskStartCommand(options =>
-        withRuntime(config => {
-          const {eligibility, missingDecision, evidenceRefs, reviewRequired, reviewReason, ...fields} = options;
-          const intent = {
-            title: fields.title,
-            currentBehavior: fields.currentBehavior,
-            desiredChange: fields.desiredChange,
-            affectedPaths: fields.affectedPaths,
-            acceptanceCriterion: fields.acceptanceCriterion,
-            verification: fields.verification,
-            eligibilityRationale: fields.eligibilityRationale,
-            eligibility:
-              eligibility === 'eligible'
-                ? {status: 'eligible' as const}
-                : {status: 'needs-planning' as const, missingDecision: missingDecision ?? '', evidenceRefs},
-            review: {required: reviewRequired, reason: reviewReason},
-          };
-          return runNativeTaskStart(config, {
-            callerCwd: fields.callerCwd,
-            featureName: fields.featureName,
-            ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
-            ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
-            ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
-            intent,
-          }).pipe(
-            Effect.flatMap(value => Console.log(JSON.stringify(value))),
-            Effect.mapError(nativeWorkflowError),
-          );
-        }),
+        withRuntime(config =>
+          Effect.gen(function* () {
+            const {
+              eligibility,
+              missingDecision,
+              evidenceRefs,
+              reviewRequired,
+              reviewReason,
+              sharedPlanRef,
+              bindingsFile,
+              delivery,
+              userResponse,
+              reviewOutcome,
+              ...fields
+            } = options;
+            if (sharedPlanRef !== undefined) {
+              const fs = yield* FileSystem.FileSystem;
+              const path = yield* Path.Path;
+              const raw =
+                bindingsFile === undefined
+                  ? undefined
+                  : yield* fs.readFileString(
+                      path.isAbsolute(bindingsFile) ? bindingsFile : path.join(fields.callerCwd, bindingsFile),
+                    );
+              const bindings =
+                raw === undefined
+                  ? undefined
+                  : yield* Effect.try({
+                      try: () => JSON.parse(raw) as unknown,
+                      catch: () =>
+                        WorkflowAutomationError.make({
+                          code: 'invalid-bindings',
+                          message: 'Provide local branch/base choices as JSON.',
+                        }),
+                    });
+              const result = yield* runNativeTaskStart(config, {
+                callerCwd: fields.callerCwd,
+                installationTarget: fields.installationTarget,
+                sharedPlanRef,
+                ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
+                ...(delivery === undefined ? {} : {delivery}),
+                ...(bindings === undefined ? {} : {bindings}),
+                ...(userResponse === undefined ? {} : {userResponse}),
+                ...(reviewOutcome === undefined ? {} : {review: {outcome: reviewOutcome, blockingIssueCount: 0}}),
+              });
+              yield* Console.log(JSON.stringify(result));
+              return;
+            }
+            const intent = {
+              title: fields.title,
+              currentBehavior: fields.currentBehavior,
+              desiredChange: fields.desiredChange,
+              affectedPaths: fields.affectedPaths,
+              acceptanceCriterion: fields.acceptanceCriterion,
+              verification: fields.verification,
+              eligibilityRationale: fields.eligibilityRationale,
+              eligibility:
+                eligibility === 'eligible'
+                  ? {status: 'eligible' as const}
+                  : {status: 'needs-planning' as const, missingDecision: missingDecision ?? '', evidenceRefs},
+              review: {required: reviewRequired, reason: reviewReason},
+            };
+            return yield* runNativeTaskStart(config, {
+              callerCwd: fields.callerCwd,
+              featureName: fields.featureName,
+              ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
+              ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
+              ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
+              intent,
+            }).pipe(
+              Effect.flatMap(value => Console.log(JSON.stringify(value))),
+              Effect.mapError(nativeWorkflowError),
+            );
+          }),
+        ),
       ),
       makeNativeTaskPrDeliveryCommand(options =>
         withRuntime(config =>

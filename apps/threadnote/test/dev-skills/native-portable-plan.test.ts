@@ -1,5 +1,33 @@
 import {describe, expect, it} from 'vitest';
-import {Array as EffectArray, pipe} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {Command} from 'effect/cli';
+import {Effect, FileSystem, Path, Schema} from 'effect';
+import {SystemInfo} from '@threadnote/platform/system';
+import {TestClock} from 'effect/testing';
+import {runCommandEffect} from '@threadnote/platform/command';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {createNativeDocument} from '@threadnote/workflow-automations/templates';
+import {applyDevSkills} from '../../src/dev_skills/index.js';
+import {runShareInit} from '../../src/share/admin.js';
+import {runShareSync} from '../../src/share/sync.js';
+import {runNativeTaskAuthoring} from '../../src/workflow_automation/task_authoring.js';
+import {runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
+import {makeWorkflowAutomationCommand} from '../../src/effect/workflow_automation_cli.js';
+import {makeNativeTaskAuthoringCommand} from '../../src/effect/task_authoring_cli.js';
+import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {
+  AuthoringRootSchema,
+  decodeAuthoringArtifact,
+  encodeAuthoringDocument,
+} from '../../src/workflow_automation/authoring_artifacts.js';
+import {encodeNativeAuthoringTaskRef} from '../../src/workflow_automation/task_authoring.js';
+import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {Array as EffectArray, Option as EffectOption, pipe} from 'effect';
 import * as EffectString from 'effect/String';
 import {
   canonicalAuthoringJson,
@@ -15,6 +43,9 @@ import {
   decodePortablePlanRef,
   encodePortablePlanPages,
   encodePortablePlanRef,
+  publishPortablePlanPayload,
+  readPortablePlanPayload,
+  portableEvidenceBody,
 } from '../../src/workflow_automation/portable_plan.js';
 
 const h = (value: string) => sha256HexSync(value);
@@ -88,10 +119,12 @@ describe('portable plan admission', () => {
     expect(decodePortablePlanPages(root, pages, {team: 'team', project: 'project'}).plan).toEqual(plan);
     for (const change of [
       () => decodePortablePlanPages(root, pages, {team: 'other', project: 'project'}),
+      () => decodePortablePlanPages(root, pages, {team: 'team', project: 'other'}),
       () => decodePortablePlanPages(root, [], {team: 'team', project: 'project'}),
       () => decodePortablePlanPages(root, [{...pages[0], content: body + ' '}], {team: 'team', project: 'project'}),
       () => decodePortablePlanPages(root, [{...pages[0], content: '{'}], {team: 'team', project: 'project'}),
       () => decodePortablePlanPayload({...payload, spec: {document: planText, documentHash: h(planText)}}),
+      () => decodePortablePlanPayload({...payload, provenance: {...payload.provenance, documentHash: h('changed')}}),
     ])
       expect(change).toThrow();
   });
@@ -142,4 +175,552 @@ describe('portable plan admission', () => {
     expect(EffectArray.join(chunks, '')).toBe(stableJson(expanded));
     expect(EffectArray.every(chunks, chunk => new TextEncoder().encode(chunk).byteLength <= 24_000)).toBe(true);
   });
+
+  it('excludes an approved native handoff stored under a durable memory path', () => {
+    const uri = 'threadnote://user/donor/memories/durable/projects/project/neutral-evidence.md';
+    const body = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'project',
+        topic: 'neutral-evidence',
+        memoryId: 'tn_native_handoff',
+        sourceAgentClient: 'fixture',
+        timestamp: '2026-11-11T00:00:00.000Z',
+        visibility: 'personal',
+        trust: 'approved',
+        authority: 'user_approved',
+      },
+      encodeAuthoringDocument(
+        createNativeDocument({
+          kind: 'handoff',
+          title: 'Synthetic private closeout',
+          sections: {task: 'Synthetic task.', 'next-step': 'Keep this private.'},
+        }),
+      ),
+    );
+    expect(() =>
+      portableEvidenceBody({uri, memoryId: 'tn_native_handoff', revision: h(body)}, body, 'project'),
+    ).toThrowError(/handoff/u);
+  });
+
+  it('allows an approved durable decision whose topic mentions handoffs', () => {
+    const uri = 'threadnote://user/donor/memories/durable/projects/project/handoff-policy.md';
+    const body = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'project',
+        topic: 'handoff-policy',
+        memoryId: 'tn_handoff_policy',
+        sourceAgentClient: 'fixture',
+        timestamp: '2026-11-11T00:00:00.000Z',
+        visibility: 'personal',
+        trust: 'approved',
+        authority: 'user_approved',
+      },
+      'Share only reviewed decisions.',
+    );
+    expect(portableEvidenceBody({uri, memoryId: 'tn_handoff_policy', revision: h(body)}, body, 'project')).toBe(
+      'Share only reviewed decisions.',
+    );
+  });
 });
+
+const authorResult = Schema.Struct({authoringRef: Schema.String, root: Schema.Unknown, status: Schema.String});
+const shareResult = Schema.Struct({sharedPlanRef: Schema.String});
+const startResult = Schema.Struct({status: Schema.String, taskRef: Schema.String, view: Schema.Unknown});
+
+effectIt.effect(
+  'publishes a linked reviewed plan and starts recipient-owned work from one shared reference',
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const donorFixture = yield* nativeFixture();
+      const recipientFixture = yield* nativeFixture();
+      const donor = {
+        ...donorFixture,
+        root: yield* fs.realPath(donorFixture.root),
+        home: yield* fs.realPath(donorFixture.home),
+        repo: yield* fs.realPath(donorFixture.repo),
+      };
+      const recipient = {
+        ...recipientFixture,
+        root: yield* fs.realPath(recipientFixture.root),
+        home: yield* fs.realPath(recipientFixture.home),
+        repo: yield* fs.realPath(recipientFixture.repo),
+      };
+      const system = yield* SystemInfo;
+      const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
+      const remote = path.join(donor.root, 'portable.git');
+      yield* git(donor.root, ['init', '--bare', '--initial-branch=main', remote]);
+      const seed = path.join(donor.root, 'seed');
+      yield* git(donor.root, ['clone', remote, seed]);
+      yield* git(seed, ['config', 'user.name', 'Fixture']);
+      yield* git(seed, ['config', 'user.email', 'fixture@example.invalid']);
+      yield* fs.writeFileString(path.join(seed, 'README.md'), 'Shared fixture\n');
+      yield* git(seed, ['add', 'README.md']);
+      yield* git(seed, ['commit', '-m', 'seed']);
+      yield* git(seed, ['push', 'origin', 'main']);
+      yield* git(donor.repo, [
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'add',
+        'source.ts',
+      ]);
+      yield* git(donor.repo, [
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'source',
+      ]);
+      yield* git(recipient.repo, ['fetch', donor.repo, 'main']);
+      yield* git(recipient.repo, ['reset', '--hard', 'FETCH_HEAD']);
+      const donorConfig = {
+        ...donor.config,
+        user: 'donor',
+        account: 'donor-account',
+        agentContextHome: donor.home,
+        manifestPath: path.join(donor.home, 'manifest.json'),
+      };
+      const recipientConfig = {
+        ...recipient.config,
+        user: 'recipient',
+        account: 'recipient-account',
+        agentContextHome: recipient.home,
+        manifestPath: path.join(recipient.home, 'manifest.json'),
+      };
+      const donorSystem = {...system, currentDirectory: () => donor.repo, homeDirectory: donor.home};
+      const recipientSystem = {...system, currentDirectory: () => recipient.repo, homeDirectory: recipient.home};
+      yield* applyDevSkills(donorConfig, 'install', {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, donorSystem),
+      );
+      yield* applyDevSkills(recipientConfig, 'install', {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, recipientSystem),
+      );
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: donor.repo, threadnoteHome: donor.home})).snapshot.state,
+      ).toBe('ready');
+      expect(
+        (yield* (yield* CodeGraphIndexer).index({cwd: recipient.repo, threadnoteHome: recipient.home})).snapshot.state,
+      ).toBe('ready');
+      yield* runShareInit(donorConfig, remote, {team: 'default'});
+      yield* runShareInit(recipientConfig, remote, {team: 'default'});
+      const location = {account: donorConfig.account, home: donor.home, user: donorConfig.user};
+      const store = yield* ResourceStore;
+      const evidenceDirectory = 'threadnote://user/donor/memories/durable/projects/repo';
+      for (const directory of [
+        'threadnote://user/donor/memories/durable',
+        'threadnote://user/donor/memories/durable/projects',
+        evidenceDirectory,
+      ])
+        yield* store.makeDirectory(location, directory);
+      const evidenceUri = `${evidenceDirectory}/approved-fixture.md`;
+      const evidenceBody = formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          status: 'active',
+          project: 'repo',
+          topic: 'approved-fixture',
+          memoryId: 'tn_approved_fixture',
+          sourceAgentClient: 'fixture',
+          timestamp: '2026-11-11T00:00:00.000Z',
+          visibility: 'personal',
+          trust: 'approved',
+          authority: 'user_approved',
+        },
+        'Approved synthetic evidence.',
+      );
+      yield* store.write(location, evidenceUri, evidenceBody, {mode: 'create'});
+      const evidence = {uri: evidenceUri, memoryId: 'tn_approved_fixture', revision: h(evidenceBody)};
+      const specEvidenceUri = `${evidenceDirectory}/spec-only-fixture.md`;
+      const specEvidenceBody = formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          status: 'active',
+          project: 'repo',
+          topic: 'spec-only-fixture',
+          memoryId: 'tn_spec_only_fixture',
+          sourceAgentClient: 'fixture',
+          timestamp: '2026-11-11T00:00:00.000Z',
+          visibility: 'personal',
+          trust: 'approved',
+          authority: 'user_approved',
+        },
+        'Approved specification-only evidence.',
+      );
+      yield* store.write(location, specEvidenceUri, specEvidenceBody, {mode: 'create'});
+      const specEvidence = {uri: specEvidenceUri, memoryId: 'tn_spec_only_fixture', revision: h(specEvidenceBody)};
+      const context = {codeRefs: ['source.ts'], evidenceRefs: [evidence], note: 'Synthetic readback evidence.'};
+      const specContext = {...context, evidenceRefs: [evidence, specEvidence]};
+      const specBusiness = {
+        title: 'Fixture specification',
+        objective: 'Preserve the fixture.',
+        requirements: [{id: 'r', behavior: 'Fixture works.'}],
+        context: specContext,
+        actors: ['Recipient'],
+        inScope: ['Fixture behavior'],
+        outOfScope: [],
+        constraints: [],
+        observations: [],
+        scenarios: [
+          {id: 's', requirementIds: ['r'], given: 'Source exists.', when: 'Work begins.', then: 'Fixture works.'},
+        ],
+        assumptions: [],
+        questions: [],
+        artifacts: [],
+        review: {required: true, reason: 'Review required.'},
+      };
+      const planBusiness = {
+        title: 'Fixture plan',
+        objective: 'Preserve the fixture.',
+        context,
+        current: {summary: 'Fixture not transferred.', components: ['Fixture reader'], contracts: ['Read source']},
+        target: {summary: 'Fixture transferred.', components: ['Fixture reader'], contracts: ['Read source']},
+        phases: [
+          {
+            id: 'phase',
+            title: 'Transfer fixture',
+            outcome: 'Recipient owns work.',
+            dependsOn: [],
+            affectedPaths: ['source.ts'],
+            newPaths: [],
+            contracts: [],
+            acceptance: [
+              {
+                id: 'a',
+                criterion: 'Fixture works.',
+                verification: 'Read source.',
+                requirementIds: ['r'],
+                scenarioIds: ['s'],
+              },
+            ],
+            safeBoundary: 'Synthetic source remains intact.',
+          },
+        ],
+        decisions: [
+          {
+            id: 'reuse',
+            question: 'Which fixture reader owns the behavior?',
+            selection: 'no-better-alternative',
+            selected: 'Use the existing fixture reader.',
+            alternatives: [],
+            rationale: 'The reader already owns the source.',
+            affectedPhases: ['phase'],
+            authority: 'orchestrator',
+          },
+        ],
+        openQuestions: [],
+        review: {required: true, reason: 'Review required.'},
+      };
+      const specFile = path.join(donor.root, 'spec.json');
+      const planFile = path.join(donor.root, 'plan.json');
+      yield* fs.writeFileString(specFile, stableJson(specBusiness));
+      yield* fs.writeFileString(planFile, stableJson(planBusiness));
+      const donorAuthor = (input: object) =>
+        runNativeTaskAuthoring(donorConfig, {callerCwd: donor.repo, ...input}).pipe(
+          Effect.provideService(SystemInfo, donorSystem),
+        );
+      const decodeAuthor = (label: string, value: unknown) =>
+        Schema.decodeUnknownEffect(authorResult)(value).pipe(
+          Effect.mapError(() =>
+            WorkflowAutomationError.make({
+              code: 'invalid-readback',
+              message: `Fixture author result is missing at ${label}.`,
+            }),
+          ),
+        );
+      const draftSpec = yield* decodeAuthor(
+        'draft spec',
+        yield* donorAuthor({
+          command: 'start',
+          featureName: 'Fixture',
+          kind: 'spec',
+          contentFile: specFile,
+          installationTarget: 'codex',
+        }),
+      );
+      const readySpec = yield* decodeAuthor(
+        'ready spec',
+        yield* donorAuthor({
+          command: 'decide',
+          authoringRef: draftSpec.authoringRef,
+          userDecision: 'approve',
+          userResponse: 'I approve the fixture specification.',
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+        }),
+      );
+      expect(readySpec.status).toBe('ready');
+      const draftPlan = yield* decodeAuthor(
+        'draft plan',
+        yield* donorAuthor({
+          command: 'start',
+          featureName: 'Fixture',
+          kind: 'plan',
+          contentFile: planFile,
+          specRef: readySpec.authoringRef,
+        }),
+      );
+      const readyPlan = yield* decodeAuthor(
+        'ready plan',
+        yield* donorAuthor({
+          command: 'decide',
+          authoringRef: draftPlan.authoringRef,
+          userDecision: 'approve',
+          userResponse: 'I approve the fixture plan.',
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+        }),
+      );
+      expect(readyPlan.status).toBe('ready');
+      const published = yield* Schema.decodeUnknownEffect(shareResult)(
+        yield* donorAuthor({
+          command: 'share',
+          authoringRef: readyPlan.authoringRef,
+          team: 'default',
+        }),
+      );
+      expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
+        published,
+      );
+      const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
+      registerWorkflowTaskTool(donorMcp, donorConfig);
+      const mcpShared = yield* donorMcp
+        .invokeTool('workflow_task_author', {
+          command: 'share',
+          callerCwd: donor.repo,
+          authoringRef: readyPlan.authoringRef,
+          team: 'default',
+        })
+        .pipe(Effect.provideService(SystemInfo, donorSystem));
+      expect(
+        (yield* Schema.decodeUnknownEffect(shareResult)(
+          (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpShared))
+            .structuredContent,
+        )).sharedPlanRef,
+      ).toBe(published.sharedPlanRef);
+      const authorCli = Command.make('threadnote').pipe(
+        Command.withSubcommands([makeNativeTaskAuthoringCommand(program => program(donorConfig))]),
+      );
+      yield* Command.runWith(authorCli, {version: 'fixture'})([
+        'task-author',
+        '--operation',
+        'share',
+        '--caller-cwd',
+        donor.repo,
+        '--authoring-ref',
+        readyPlan.authoringRef,
+        '--team',
+        'default',
+      ]).pipe(Effect.provideService(SystemInfo, donorSystem));
+      const donorPlanRead = yield* donorAuthor({
+        command: 'read',
+        authoringRef: readyPlan.authoringRef,
+        detail: 'document',
+      });
+      const donorSpecRead = yield* donorAuthor({
+        command: 'read',
+        authoringRef: readySpec.authoringRef,
+        detail: 'document',
+      });
+      expect(donorPlanRead).toMatchObject({root: readyPlan.root, status: 'ready'});
+      expect(donorSpecRead).toMatchObject({root: readySpec.root, status: 'ready'});
+      expect(
+        yield* donorAuthor({
+          command: 'admit',
+          authoringRef: readyPlan.authoringRef,
+          delivery: 'local',
+          bindings: {phase: {branch: 'main', baseBranch: 'main'}},
+        }),
+      ).toMatchObject({status: 'admitted'});
+      const donorRunBefore = yield* readNativeWorkflowState(
+        donorConfig,
+        'task-' + pipe(h('repo\nfixture'), EffectString.slice(0, 48)),
+      );
+      yield* runShareSync(recipientConfig, {team: 'default', push: false});
+      const recipientStart = {
+        callerCwd: recipient.repo,
+        sharedPlanRef: published.sharedPlanRef,
+        installationTarget: 'codex',
+        delivery: 'local',
+        bindings: {phase: {branch: 'main', baseBranch: 'main'}},
+        userResponse: 'I authorize execution of this exact shared fixture plan.',
+        review: {outcome: 'accepted', blockingIssueCount: 0},
+      } as const;
+      const started = yield* Schema.decodeUnknownEffect(startResult)(
+        yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
+          Effect.provideService(SystemInfo, recipientSystem),
+        ),
+      );
+      expect(started.status).toBe('admitted');
+      expect(started.view).toMatchObject({next: {action: 'implement', phaseId: 'phase'}});
+      const recipientState = yield* readNativeWorkflowState(recipientConfig, started.taskRef);
+      const donorState = yield* readNativeWorkflowState(donorConfig, started.taskRef);
+      expect(recipientState?.state.bindingId).not.toBe(donorState?.state.bindingId);
+      expect(donorState?.revision).toBe(donorRunBefore?.revision);
+      expect(recipientState?.state.cycle?.state.plan.source.root.uri).toContain('threadnote://user/recipient/');
+      const localOperations = recipientState?.state.operations ?? [];
+      const localRoot = (kind: 'spec' | 'plan') =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...localOperations].reverse(),
+            operation => operation.status === 'verified' && operation.intent.artifactKey === `author-root-${kind}`,
+          ),
+        );
+      const localSpec = localRoot('spec');
+      const localPlan = localRoot('plan');
+      expect(localSpec?.artifact?.uri).toContain('threadnote://user/recipient/');
+      expect(localPlan?.artifact?.uri).toContain('threadnote://user/recipient/');
+      if (!recipientState || !localSpec?.artifact || !localPlan?.artifact) throw new Error('Missing recipient roots');
+      const planRoot = decodeAuthoringArtifact(localPlan.artifact.body, AuthoringRootSchema);
+      const readPlan = yield* runNativeTaskAuthoring(recipientConfig, {
+        callerCwd: recipient.repo,
+        command: 'read',
+        detail: 'document',
+        authoringRef: encodeNativeAuthoringTaskRef({
+          version: 1,
+          kind: 'plan',
+          runId: started.taskRef,
+          generationHash: h(recipientState.state.generation),
+          operationId: localPlan.intent.operationId,
+          documentHash: planRoot.documentHash,
+          stateRevision: recipientState.revision,
+        }),
+      }).pipe(Effect.provideService(SystemInfo, recipientSystem));
+      const localDocument = yield* Schema.decodeUnknownEffect(Schema.Struct({document: Schema.Unknown}))(readPlan);
+      const localPlanDocument = decodeNativeAuthoringDocument(localDocument.document);
+      if (localPlanDocument.kind !== 'plan') throw new Error('Recipient did not author a plan');
+      expect(localPlanDocument.spec?.root.uri).toBe(localSpec.artifact.uri);
+      expect(localPlanDocument.context.evidenceRefs).toHaveLength(1);
+      const specRoot = decodeAuthoringArtifact(localSpec.artifact.body, AuthoringRootSchema);
+      const readSpec = yield* runNativeTaskAuthoring(recipientConfig, {
+        callerCwd: recipient.repo,
+        command: 'read',
+        detail: 'document',
+        authoringRef: encodeNativeAuthoringTaskRef({
+          version: 1,
+          kind: 'spec',
+          runId: started.taskRef,
+          generationHash: h(recipientState.state.generation),
+          operationId: localSpec.intent.operationId,
+          documentHash: specRoot.documentHash,
+          stateRevision: recipientState.revision,
+        }),
+      }).pipe(Effect.provideService(SystemInfo, recipientSystem));
+      const localSpecDocument = decodeNativeAuthoringDocument(
+        (yield* Schema.decodeUnknownEffect(Schema.Struct({document: Schema.Unknown}))(readSpec)).document,
+      );
+      expect(localSpecDocument.context.evidenceRefs).toHaveLength(2);
+      expect(
+        EffectArray.every(localSpecDocument.context.evidenceRefs, ref =>
+          pipe(ref.uri, EffectString.includes('/user/recipient/')),
+        ),
+      ).toBe(true);
+      const donorSpecReference = yield* Schema.decodeUnknownEffect(Schema.Struct({uri: Schema.String}))(readySpec.root);
+      expect(localPlanDocument.spec?.root.uri).not.toBe(donorSpecReference.uri);
+      expect(
+        yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
+          Effect.provideService(SystemInfo, recipientSystem),
+        ),
+      ).toMatchObject({taskRef: started.taskRef});
+      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+        recipientState.revision,
+      );
+      const recipientMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
+      registerWorkflowTaskTool(recipientMcp, recipientConfig);
+      const mcpStarted = yield* recipientMcp
+        .invokeTool('workflow_task_start', recipientStart)
+        .pipe(Effect.provideService(SystemInfo, recipientSystem));
+      expect(
+        (yield* Schema.decodeUnknownEffect(startResult)(
+          (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpStarted))
+            .structuredContent,
+        )).taskRef,
+      ).toBe(started.taskRef);
+      const bindingsFile = path.join(recipient.root, 'bindings.json');
+      yield* fs.writeFileString(bindingsFile, stableJson(recipientStart.bindings));
+      const startCli = Command.make('threadnote').pipe(
+        Command.withSubcommands([makeWorkflowAutomationCommand(program => program(recipientConfig))]),
+      );
+      yield* Command.runWith(startCli, {version: 'fixture'})([
+        'workflow-automation',
+        'task-start',
+        '--caller-cwd',
+        recipient.repo,
+        '--shared-plan-ref',
+        published.sharedPlanRef,
+        '--installation-target',
+        'codex',
+        '--bindings-file',
+        bindingsFile,
+        '--delivery',
+        'local',
+        '--response',
+        recipientStart.userResponse,
+        '--review-outcome',
+        'accepted',
+      ]).pipe(Effect.provideService(SystemInfo, recipientSystem));
+      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+        recipientState.revision,
+      );
+      const originalPayload = yield* readPortablePlanPayload(donorConfig, published.sharedPlanRef, 'repo');
+      const changedPlanRef = yield* publishPortablePlanPayload(
+        donorConfig,
+        {
+          ...originalPayload.payload,
+          provenance: {
+            ...originalPayload.payload.provenance,
+            root: {...originalPayload.payload.provenance.root, revision: h('different-plan-root')},
+          },
+        },
+        'default',
+      );
+      yield* runShareSync(recipientConfig, {team: 'default', push: false});
+      expect(
+        yield* runNativeTaskStart(recipientConfig, {
+          ...recipientStart,
+          sharedPlanRef: changedPlanRef.sharedPlanRef,
+        }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
+      ).toMatchObject({failure: {code: 'portable-plan-conflict'}});
+      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+        recipientState.revision,
+      );
+      expect(
+        yield* runNativeTaskStart(recipientConfig, {
+          ...recipientStart,
+          bindings: {phase: {branch: 'different', baseBranch: 'main'}},
+        }).pipe(Effect.provideService(SystemInfo, recipientSystem), Effect.result),
+      ).toMatchObject({failure: {code: 'cycle-conflict'}});
+      expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
+        recipientState.revision,
+      );
+      const mismatchFixture = yield* nativeFixture();
+      const mismatchHome = yield* fs.realPath(mismatchFixture.home);
+      const mismatchRepo = yield* fs.realPath(mismatchFixture.repo);
+      const mismatchConfig = {
+        ...mismatchFixture.config,
+        user: 'mismatch',
+        account: 'mismatch-account',
+        agentContextHome: mismatchHome,
+        manifestPath: path.join(mismatchHome, 'manifest.json'),
+      };
+      yield* runShareInit(mismatchConfig, remote, {team: 'default'});
+      yield* runShareSync(mismatchConfig, {team: 'default', push: false});
+      const mismatchResult = yield* runNativeTaskStart(mismatchConfig, {
+        ...recipientStart,
+        callerCwd: mismatchRepo,
+      }).pipe(Effect.result);
+      expect(mismatchResult, JSON.stringify(mismatchResult)).toMatchObject({failure: {code: 'source-drift'}});
+      expect(yield* readNativeWorkflowState(mismatchConfig, started.taskRef)).toBeUndefined();
+    }).pipe(TestClock.withLive, provideNative),
+  {timeout: 120_000},
+);

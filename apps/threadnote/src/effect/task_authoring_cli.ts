@@ -11,7 +11,7 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
     {
       command: requiredChoice(
         'operation',
-        ['start', 'read', 'save', 'decide', 'admit', 'job'],
+        ['start', 'read', 'save', 'decide', 'admit', 'share', 'job'],
         'Business authoring action',
       ),
       callerCwd: requiredString('caller-cwd', 'Absolute original checkout'),
@@ -22,6 +22,7 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
       installationTarget: optionalString('installation-target', 'Required for start; installed target for job resume'),
       graphProject: optionalString('graph-project', 'Configured graph project for a new authoring task'),
       authoringRef: optionalString('authoring-ref', 'Opaque current authoring continuation'),
+      team: optionalString('team', 'Writable shared team for plan publication'),
       jobRef: optionalString('job-ref', 'Opaque accepted semantic authoring job continuation'),
       jobOperation: optionalChoice('job-operation', ['status', 'result', 'cancel', 'resume'], 'Operate on one job'),
       specRef: optionalString('spec-ref', 'Opaque approved specification reference for plan start'),

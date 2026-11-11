@@ -6,7 +6,9 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {Effect} from 'effect';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {decodeNativeDocument} from '@threadnote/workflow-automations/documents';
+import {decodeAuthoringArtifact} from './authoring_artifacts.js';
+import type {ShareRuntime} from '../types.js';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {
   NATIVE_RESOURCE_BACKEND,
@@ -81,6 +83,47 @@ const PortablePlanRefSchema = Schema.Struct({
   payloadHash: hash,
 });
 export type PortablePlanRef = typeof PortablePlanRefSchema.Type;
+
+/** Semantic handoff/preferences remain private even when a producer used a durable path. */
+export function portableEvidenceBody(
+  reference: PortablePlanPayload['evidence'][number]['reference'],
+  content: string,
+  project: string,
+): string {
+  const record = parseMemoryDocument(reference.uri, content);
+  if (
+    sha256HexSync(content) !== reference.revision ||
+    record?.metadata.memoryId !== reference.memoryId ||
+    record.metadata.project !== project ||
+    record.metadata.kind !== 'durable' ||
+    record.metadata.status !== 'active'
+  )
+    throw fail('portable-plan-conflict', 'Required plan evidence changed identity or revision.');
+  let nativeKind: string | undefined;
+  if (pipe(record.body, EffectString.includes('<!-- threadnote-authoring:v1 '))) {
+    try {
+      nativeKind = decodeNativeDocument(decodeAuthoringArtifact(record.body + '\n', Schema.Unknown)).kind;
+    } catch {
+      throw fail('portable-plan-private', 'Malformed native authoring evidence cannot enter a shared plan.');
+    }
+  }
+  if (
+    nativeKind === 'handoff' ||
+    (record.metadata.visibility !== 'shared' &&
+      !(
+        record.metadata.trust === 'approved' &&
+        (record.metadata.authority === 'user_approved' || record.metadata.reviewedSupport)
+      ))
+  )
+    throw fail(
+      'portable-plan-private',
+      'A handoff, preference or unreviewed private memory cannot enter a shared plan.',
+    );
+  const scrub = applyScrubber(record.body, {redact: false});
+  if (scrub.blocker || scrub.redactions.length)
+    throw fail('portable-plan-private', 'Required evidence contains material that cannot be shared.');
+  return record.body;
+}
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const MAX_PAYLOAD_BYTES = 1_250_000;
@@ -163,6 +206,9 @@ export function decodePortablePlanPayload(input: unknown): {
   }
   if (encoder.encode(stableJson(payload)).byteLength > MAX_PAYLOAD_BYTES)
     throw fail('portable-plan-oversized', 'The shared plan payload exceeds its bounded size.');
+  const privacy = applyScrubber(stableJson(payload), {redact: false});
+  if (privacy.blocker || privacy.redactions.length)
+    throw fail('portable-plan-private', 'The shared plan contains material that cannot be used.');
   const plan = decodeDocument(payload.plan.document, 'plan');
   if (plan.kind !== 'plan') throw fail('portable-plan-malformed', 'The shared plan has the wrong kind.');
   if (plan.project !== payload.project || nativeAuthoringDigest(plan) !== payload.plan.documentHash)
@@ -190,7 +236,7 @@ export function decodePortablePlanPayload(input: unknown): {
     throw fail('portable-plan-conflict', 'The linked specification differs from the pinned plan.');
   const evidenceUris = new Set<string>();
   for (const item of payload.evidence) {
-    if (item.reference.revision !== item.bodyHash || sha256HexSync(item.body) !== item.bodyHash)
+    if (sha256HexSync(item.body) !== item.bodyHash)
       throw fail('portable-plan-conflict', 'A shared evidence revision changed.');
     if (evidenceUris.has(item.reference.uri))
       throw fail('portable-plan-malformed', 'The shared evidence inventory contains duplicates.');
@@ -198,10 +244,11 @@ export function decodePortablePlanPayload(input: unknown): {
     if (applyScrubber(item.body, {redact: false}).blocker)
       throw fail('portable-plan-private', 'Shared evidence contains material that cannot be published.');
   }
-  if (
-    plan.context.evidenceRefs.length !== payload.evidence.length ||
-    EffectArray.some(plan.context.evidenceRefs, ref => !evidenceUris.has(ref.uri))
-  )
+  const required = new Set([
+    ...EffectArray.map(plan.context.evidenceRefs, ref => ref.uri),
+    ...(spec ? EffectArray.map(spec.context.evidenceRefs, ref => ref.uri) : []),
+  ]);
+  if (required.size !== payload.evidence.length || EffectArray.some([...required], uri => !evidenceUris.has(uri)))
     throw fail('portable-plan-missing', 'The required plan evidence closure is incomplete.');
   return {payload, plan, ...(spec ? {spec} : {})};
 }
@@ -247,7 +294,7 @@ export function decodePortablePlanPages(
 
 const sharedRelative = (project: string, payloadHash: string, leaf: string) =>
   `durable/projects/${project}/portable-plans/${payloadHash}/${leaf}.md`;
-const sharedUri = (config: RuntimeConfig, team: string, relative: string) =>
+const sharedUri = (config: ShareRuntime, team: string, relative: string) =>
   `threadnote://user/${uriSegment(config.user)}/memories/shared/${team}/${relative}`;
 const memoryBody = (project: string, topic: string, body: string, memoryId: string) =>
   formatMemoryDocument(
@@ -279,7 +326,7 @@ const bodyToPage = (content: string) => {
 
 /** Publish dependency pages first, verify their exact bytes, then expose the root. */
 export const publishPortablePlanPayload = Effect.fn('workflowAutomation.publishPortablePlanPayload')(function* (
-  config: RuntimeConfig,
+  config: ShareRuntime,
   input: PortablePlanPayload,
   teamName: string,
 ) {
@@ -363,7 +410,7 @@ export const publishPortablePlanPayload = Effect.fn('workflowAutomation.publishP
 
 /** Resolve a user-independent ref through this user's synchronized team namespace. */
 export const readPortablePlanPayload = Effect.fn('workflowAutomation.readPortablePlanPayload')(function* (
-  config: RuntimeConfig,
+  config: ShareRuntime,
   reference: string,
   project: string,
 ) {
@@ -378,7 +425,13 @@ export const readPortablePlanPayload = Effect.fn('workflowAutomation.readPortabl
     Effect.mapError(() => fail('portable-plan-missing', 'Sync the selected team before starting this plan.')),
   );
   const record = parseMemoryDocument(rootUri, rootBytes);
-  if (!record || record.metadata.visibility !== 'shared' || record.metadata.project !== project)
+  if (
+    !record ||
+    record.metadata.visibility !== 'shared' ||
+    record.metadata.project !== project ||
+    record.metadata.kind !== 'durable' ||
+    record.metadata.status !== 'active'
+  )
     return yield* fail('portable-plan-private', 'The shared plan root is not an eligible shared memory.');
   const root = yield* Effect.try({
     try: () => JSON.parse(record.body) as unknown,
@@ -411,6 +464,8 @@ export const readPortablePlanPayload = Effect.fn('workflowAutomation.readPortabl
       !page ||
       page.metadata.visibility !== 'shared' ||
       page.metadata.project !== project ||
+      page.metadata.kind !== 'durable' ||
+      page.metadata.status !== 'active' ||
       page.metadata.memoryId !== pinned.reference.memoryId
     )
       return yield* fail('portable-plan-private', 'A shared plan page has invalid identity or visibility.');

@@ -74,6 +74,7 @@ import {
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
+import {runNativeSharedPlanStart} from './portable_plan_start.js';
 import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const packetInputSchema = Schema.Struct({
@@ -348,6 +349,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         ),
       ),
     );
+    if ('sharedPlanRef' in request) return yield* runNativeSharedPlanStart(config, request);
     const taskStartReference = request.taskRef ? decodeNativeTaskStartReference(request.taskRef) : undefined;
     if (request.taskRef && !taskStartReference)
       return yield* fail('invalid-task-ref', 'Provide a canonical run ID or current task-view reference.');

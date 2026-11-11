@@ -12,11 +12,13 @@ import {
 } from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
   NativeAuthoringSpecDocumentSchema,
   NativeAuthoringPlanDocumentSchema,
   decodeNativeAuthoringDocument,
+  canonicalAuthoringJson,
   nativeAuthoringPathDiagnostic,
   nativeAuthoringDigest,
   validateNativeAuthoring,
@@ -34,6 +36,7 @@ import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
+import {portableEvidenceBody, publishPortablePlanPayload, type PortablePlanPayload} from './portable_plan.js';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
@@ -122,6 +125,12 @@ const inputSchema = Schema.Union([
     command: Schema.Literal('read'),
     authoringRef: text,
     detail: Schema.optionalKey(Schema.Literals(['summary', 'document'])),
+  }),
+  Schema.Struct({
+    ...scope,
+    command: Schema.Literal('share'),
+    authoringRef: text,
+    team: text,
   }),
   Schema.Struct({
     ...scope,
@@ -446,6 +455,115 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     if (request.command === 'read') {
       if (!existing) return yield* fail('authoring-root-missing', 'Save a standard authoring draft first.');
       return result(existing, false, request.detail === 'document');
+    }
+    if (request.command === 'share') {
+      if (
+        !existing ||
+        !supplied ||
+        !referenced?.artifact ||
+        !stored ||
+        existing.operation.intent.operationId !== supplied.operationId ||
+        stored.revision !== supplied.stateRevision
+      )
+        return yield* fail('stale-authoring-ref', 'Read the exact current approved plan before sharing.');
+      const document = existing.document;
+      const root = existing.root;
+      if (
+        document.kind !== 'plan' ||
+        root.kind !== 'plan' ||
+        root.readiness !== 'ready' ||
+        root.confirmation?.decision !== 'approved' ||
+        root.confirmation.intentHash !== root.intentHash ||
+        root.review?.outcome !== 'accepted' ||
+        root.review.blockingIssueCount !== 0 ||
+        root.review.documentHash !== root.documentHash ||
+        nativeAuthoringDigest(document) !== root.documentHash
+      )
+        return yield* fail(
+          'approval-required',
+          'Share only the exact current ready approved independently reviewed plan.',
+        );
+      if (!document.source)
+        return yield* fail('portable-plan-source', 'Record current source evidence before sharing this plan.');
+      const source = yield* inCheckout(
+        inspectNativeSourcePaths(
+          checkout,
+          A.map(document.source.files, file => file.path),
+          nativeAuthoringSourceOrigins(document),
+        ),
+      ).pipe(Effect.mapError(() => fail('source-drift', 'The plan source cannot be verified for sharing.')));
+      if (stableJson(source) !== stableJson(document.source))
+        return yield* fail('source-drift', 'Refresh and review the plan against the current source before sharing.');
+      let spec: PortablePlanPayload['spec'];
+      let linkedSpecDocument: NativeAuthoringDocument | undefined;
+      if (document.spec) {
+        const loaded = yield* call('load', {uri: document.spec.root.uri, detail: 'document'});
+        const specDocument = decodeNativeAuthoringDocument(loaded.document);
+        if (
+          specDocument.kind !== 'spec' ||
+          !specDocument.source ||
+          stableJson(loaded.root) !== stableJson(document.spec.root) ||
+          nativeAuthoringDigest(specDocument) !== document.spec.documentHash
+        )
+          return yield* fail('portable-plan-conflict', 'The linked ready specification changed.');
+        const specSource = yield* inCheckout(
+          inspectNativeSourcePaths(
+            checkout,
+            A.map(specDocument.source.files, file => file.path),
+            nativeAuthoringSourceOrigins(specDocument),
+          ),
+        ).pipe(
+          Effect.mapError(() =>
+            fail('source-drift', 'The linked specification source cannot be verified for sharing.'),
+          ),
+        );
+        if (stableJson(specSource) !== stableJson(specDocument.source))
+          return yield* fail('source-drift', 'Refresh and review the linked specification source before sharing.');
+        linkedSpecDocument = specDocument;
+        spec = {document: canonicalAuthoringJson(specDocument), documentHash: nativeAuthoringDigest(specDocument)};
+      }
+      const store = yield* ResourceStore;
+      const evidence: PortablePlanPayload['evidence'][number][] = [];
+      const references = new Map<string, (typeof document.context.evidenceRefs)[number]>();
+      for (const reference of [...document.context.evidenceRefs, ...(linkedSpecDocument?.context.evidenceRefs ?? [])]) {
+        const earlier = references.get(reference.uri);
+        if (earlier && stableJson(earlier) !== stableJson(reference))
+          return yield* fail(
+            'portable-plan-conflict',
+            'Linked documents pin different revisions of the same evidence.',
+          );
+        references.set(reference.uri, reference);
+      }
+      for (const reference of references.values()) {
+        const content = yield* store
+          .read({account: config.account, home: config.agentContextHome, user: config.user}, reference.uri)
+          .pipe(Effect.mapError(() => fail('portable-plan-missing', 'Required plan evidence is missing.')));
+        const body = yield* Effect.try({
+          try: () => portableEvidenceBody(reference, content, document.project),
+          catch: nativeWorkflowError,
+        });
+        evidence.push({reference, body, bodyHash: sha256HexSync(body), review: 'approved-durable'});
+      }
+      const payload: PortablePlanPayload = {
+        format: 'threadnote-portable-plan',
+        version: 1,
+        project: document.project,
+        plan: {document: canonicalAuthoringJson(document), documentHash: root.documentHash},
+        ...(spec ? {spec} : {}),
+        evidence,
+        provenance: {
+          root: {
+            uri: referenced.artifact.uri,
+            memoryId: referenced.artifact.memoryId,
+            revision: referenced.artifact.revision,
+          },
+          documentHash: root.documentHash,
+          intentHash: root.intentHash,
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+          approval: 'approved',
+        },
+      };
+      return yield* publishPortablePlanPayload(config, payload, request.team);
     }
     const exactCurrent = () =>
       existing &&

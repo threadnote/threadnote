@@ -23,9 +23,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan. References come from this tool. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
+        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan, or share it by current authoringRef and writable team for one portable reference. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
       inputSchema: {
-        command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'job']),
+        command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'share', 'job']),
         callerCwd: McpInput.requiredString('Absolute original checkout'),
         featureName: McpInput.string('Feature name for start'),
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
@@ -34,6 +34,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
         graphProject: McpInput.string('Configured graph project for a new authoring task'),
         authoringRef: McpInput.string('Current authoring continuation'),
+        team: McpInput.string('Writable team selected for portable plan sharing'),
         jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
         operation: Schema.optionalKey(Schema.Literals(['status', 'result', 'cancel', 'resume'])),
         specRef: McpInput.string('Approved spec reference for plan start'),
@@ -65,24 +66,50 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         'Start or resume a bounded task from business intent; the runtime verifies installed workflow resources and owns native run metadata.',
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
-        featureName: McpInput.requiredString('Stable feature name used to resume this task'),
+        featureName: McpInput.string('Stable feature name used to resume a compact task'),
         installationTarget: McpInput.requiredString(
           'Installed Threadnote host target, required to verify the current bundle on start or resume',
         ),
         taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
+        sharedPlanRef: McpInput.string('One verified portable plan reference for recipient start'),
         graphProject: McpInput.string('Configured graph project for a new native run'),
-        intent: NativeCompactIntentSchema,
+        intent: Schema.optionalKey(NativeCompactIntentSchema),
+        delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
+        bindings: Schema.optionalKey(
+          Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+        ),
+        userResponse: McpInput.string('Actual recipient instruction to execute this shared plan'),
+        review: Schema.optionalKey(
+          Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
+        ),
       },
     },
     Effect.fn('mcp_server.workflowTaskStart')(function* (input) {
-      const {callerCwd, featureName, installationTarget, taskRef, graphProject, intent} = input;
-      const result = yield* runNativeTaskStart(config, {
+      const {
         callerCwd,
         featureName,
+        installationTarget,
+        taskRef,
+        graphProject,
+        intent,
+        sharedPlanRef,
+        delivery,
+        bindings,
+        userResponse,
+        review,
+      } = input;
+      const result = yield* runNativeTaskStart(config, {
+        callerCwd,
         ...(installationTarget === undefined ? {} : {installationTarget}),
+        ...(featureName === undefined ? {} : {featureName}),
         ...(taskRef === undefined ? {} : {taskRef}),
         ...(graphProject === undefined ? {} : {graphProject}),
-        intent,
+        ...(intent === undefined ? {} : {intent}),
+        ...(sharedPlanRef === undefined ? {} : {sharedPlanRef}),
+        ...(delivery === undefined ? {} : {delivery}),
+        ...(bindings === undefined ? {} : {bindings}),
+        ...(userResponse === undefined ? {} : {userResponse}),
+        ...(review === undefined ? {} : {review}),
       });
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};

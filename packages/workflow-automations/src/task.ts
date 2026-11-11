@@ -7,14 +7,26 @@ import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
 import {nativeCycleReviewRecordingMode} from './cycle_review.js';
 
-export const NativeTaskStartRequestSchema = Schema.Struct({
-  callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-  graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
-  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
-  taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  intent: NativeCompactIntentSchema,
-});
+export const NativeTaskStartRequestSchema = Schema.Union([
+  Schema.Struct({
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+    taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    intent: NativeCompactIntentSchema,
+  }),
+  Schema.Struct({
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    sharedPlanRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+    installationTarget: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    delivery: Schema.Literals(['local', 'commit', 'pr']),
+    bindings: Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+    userResponse: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    review: Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
+  }),
+]);
 
 export type NativeTaskRole = 'implementation' | 'review' | 'delivery';
 

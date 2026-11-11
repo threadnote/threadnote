@@ -248,47 +248,57 @@ export function makeNativeTaskPrWatchCommand<E, R>(
 export function makeNativeTaskStartCommand<E, R>(
   handler: (options: {
     readonly callerCwd: string;
-    readonly featureName: string;
+    readonly featureName?: string;
     readonly installationTarget: string;
+    readonly sharedPlanRef?: string;
+    readonly bindingsFile?: string;
+    readonly delivery?: 'local' | 'commit' | 'pr';
+    readonly userResponse?: string;
+    readonly reviewOutcome?: 'accepted';
     readonly graphProject?: string;
     readonly taskRef?: string;
-    readonly title: string;
-    readonly currentBehavior: string;
-    readonly desiredChange: string;
+    readonly title?: string;
+    readonly currentBehavior?: string;
+    readonly desiredChange?: string;
     readonly affectedPaths: readonly string[];
-    readonly acceptanceCriterion: string;
-    readonly verification: string;
-    readonly eligibilityRationale: string;
-    readonly eligibility: 'eligible' | 'needs-planning';
+    readonly acceptanceCriterion?: string;
+    readonly verification?: string;
+    readonly eligibilityRationale?: string;
+    readonly eligibility?: 'eligible' | 'needs-planning';
     readonly missingDecision?: string;
     readonly evidenceRefs: readonly string[];
     readonly reviewRequired: boolean;
-    readonly reviewReason: string;
+    readonly reviewReason?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
     'task-start',
     {
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task'),
-      featureName: requiredString('feature-name', 'Stable feature name used to resume this task'),
+      featureName: optionalString('feature-name', 'Stable feature name used to resume a compact task'),
       installationTarget: requiredString(
         'installation-target',
         'Installed Threadnote host target verified on start or resume',
       ),
       taskRef: optionalString('task-ref', 'Opaque task reference returned by a previous start'),
+      sharedPlanRef: optionalString('shared-plan-ref', 'One verified portable plan reference'),
+      bindingsFile: optionalString('bindings-file', 'Local phase branch/base choices as JSON'),
+      delivery: optionalChoice('delivery', ['local', 'commit', 'pr'], 'Recipient delivery mode'),
+      userResponse: optionalString('response', 'Actual recipient instruction to execute the shared plan'),
+      reviewOutcome: optionalChoice('review-outcome', ['accepted'], 'Actual accepted recipient review'),
       graphProject: optionalString('graph-project', 'Configured graph project for a new native run'),
-      title: requiredString('title', 'Task title'),
-      currentBehavior: requiredString('current-behavior', 'Current behavior'),
-      desiredChange: requiredString('desired-change', 'Desired behavior'),
+      title: optionalString('title', 'Task title'),
+      currentBehavior: optionalString('current-behavior', 'Current behavior'),
+      desiredChange: optionalString('desired-change', 'Desired behavior'),
       affectedPaths: repeatedString('affected-path', 'Repository-relative source path; repeat for each path'),
-      acceptanceCriterion: requiredString('acceptance', 'Acceptance criterion'),
-      verification: requiredString('verification', 'How the acceptance criterion will be verified'),
-      eligibilityRationale: requiredString('eligibility-rationale', 'Human-authored bounded-fix eligibility rationale'),
-      eligibility: requiredChoice('eligibility', ['eligible', 'needs-planning'], 'Semantic bounded-fix eligibility'),
+      acceptanceCriterion: optionalString('acceptance', 'Acceptance criterion'),
+      verification: optionalString('verification', 'How the acceptance criterion will be verified'),
+      eligibilityRationale: optionalString('eligibility-rationale', 'Human-authored bounded-fix eligibility rationale'),
+      eligibility: optionalChoice('eligibility', ['eligible', 'needs-planning'], 'Semantic bounded-fix eligibility'),
       missingDecision: optionalString('missing-decision', 'Unresolved decision that requires expanded planning'),
       evidenceRefs: repeatedString('evidence-ref', 'Evidence URI for needs-planning; repeat as needed'),
       reviewRequired: boolean('review-required', 'Whether an independent authoring review is required'),
-      reviewReason: requiredString('review-reason', 'Why review is or is not required'),
+      reviewReason: optionalString('review-reason', 'Why review is or is not required'),
     },
     handler,
   ).pipe(Command.withDescription('Start or resume a bounded task from semantic intent'));
