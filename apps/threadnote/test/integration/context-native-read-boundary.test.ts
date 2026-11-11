@@ -226,7 +226,7 @@ describe('whole native Context Brief read boundary', () => {
         const gitFile = f.path.join(shim, 'git');
         yield* f.fs.writeFileString(
           gitFile,
-          `#!${system.executablePath}\nimport {writeFileSync} from 'node:fs'; import {Database} from 'bun:sqlite'; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); const db=new Database(':memory:'); db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n').get();\n`,
+          `#!${system.executablePath}\nimport {renameSync,writeFileSync} from 'node:fs'; import {Database} from 'bun:sqlite'; const pidFile=${JSON.stringify(pidFile)}; writeFileSync(pidFile+'.tmp',String(process.pid)); renameSync(pidFile+'.tmp',pidFile); const db=new Database(':memory:'); db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n').get();\n`,
         );
         yield* f.fs.chmod(gitFile, 0o700);
         const native = yield* withNativeContextBriefReadSources(f.config, sources).pipe(
