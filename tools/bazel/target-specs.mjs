@@ -220,14 +220,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     'README.md',
     'THIRD_PARTY.md',
   ];
-  const applicationTestData = [
-    'bun.lock',
-    'package.json',
-    'tsconfig.json',
-    'tsconfig.test.json',
-    'vitest.config.ts',
-    'config/semantic-providers/qualification-lock.json',
-  ];
+  const applicationTestData = ['bun.lock', 'package.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts'];
   const applicationSourceExtensions = /\.(?:[cm]?[jt]sx?)$/u;
   const applicationTestSourceClosure = path => {
     const entries = [path, 'package.json', 'tools/bazel/project-vitest.config.ts'];

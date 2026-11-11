@@ -1,10 +1,11 @@
+import {runtimeCurrentPlatform} from '../system.js';
 import {dlopen, ptr, read, type FFIFunction} from 'bun:ffi';
 import {String as EffectString, Option} from 'effect';
 import {writerFail as fail} from './fault.js';
 
 export const windowsInvalidHandle = 0xffffffffffffffffn;
 export function requireWindowsNative(): void {
-  if (process.platform !== 'win32' || (process.arch !== 'arm64' && process.arch !== 'x64'))
+  if (runtimeCurrentPlatform() !== 'win32' || (process.arch !== 'arm64' && process.arch !== 'x64'))
     fail('unsupported-platform');
 }
 export function windowsWide(value: string): Uint16Array {
@@ -210,7 +211,12 @@ export function windowsSystemLibrary<const Fns extends Record<string, FFIFunctio
 
 /** Native HANDLE-bound identity for the existing public process-start channel. */
 export function readNativeWindowsProcessStartIdentity(processId: number): string | undefined {
-  if (process.platform !== 'win32' || !Number.isSafeInteger(processId) || processId <= 0 || processId > 0xffffffff)
+  if (
+    runtimeCurrentPlatform() !== 'win32' ||
+    !Number.isSafeInteger(processId) ||
+    processId <= 0 ||
+    processId > 0xffffffff
+  )
     return undefined;
   const open = dlopen('kernel32.dll', {
     OpenProcess: {args: ['u32', 'i32', 'u32'], returns: 'u64'},

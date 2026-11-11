@@ -180,12 +180,73 @@ export async function* runtimeTextDirectoryNames(path: string): AsyncGenerator<s
   }
 }
 
-/** Host facts and Bun's Node-compatible structural adapters stay inside SystemInfo's runtime boundary. */
+/** Host facts and structural adapters stay in SystemInfo; synchronous native backends query facts lazily. */
+export function runtimeCurrentPlatform(): NodeJS.Platform {
+  return process.platform;
+}
+export function runtimeCurrentUserId(): number | undefined {
+  return process.getuid?.();
+}
+/** Read-only presence probe; ownership and every real signal remain with the retained backend capability. */
+export function runtimeAssertProcessGroupExistsSync(processGroupId: number): void {
+  process.kill(-processGroupId, 0);
+}
 export const runtimeArchitecture = process.arch;
 export const runtimePlatform = process.platform;
 const nativeOperatingSystemModule = process.getBuiltinModule('os') as NativeOperatingSystemModuleShape;
 export const runtimeOperatingSystemRelease = nativeOperatingSystemModule.release();
-const nativeFileSystemModule = process.getBuiltinModule('fs');
+function nativeFileSystem() {
+  return process.getBuiltinModule('fs');
+}
+const nativeFileSystemModule = nativeFileSystem();
+
+/**
+ * Fixed synchronous operations for descriptor/HANDLE backends. Acquire lazily so
+ * native backend imports can initialize through this facade's reexports. Getters
+ * retain the current native method (including a scoped test interception), without
+ * exposing an arbitrary built-in module lookup or the rest of the filesystem API.
+ */
+export function runtimeNativeDescriptorOperations() {
+  const native = nativeFileSystem();
+  return {
+    get constants() {
+      return native.constants;
+    },
+    get openSync() {
+      return native.openSync;
+    },
+    get closeSync() {
+      return native.closeSync;
+    },
+    get fstatSync() {
+      return native.fstatSync;
+    },
+    get lstatSync() {
+      return native.lstatSync;
+    },
+    get realpathSync() {
+      return native.realpathSync;
+    },
+    get readSync() {
+      return native.readSync;
+    },
+    get writeSync() {
+      return native.writeSync;
+    },
+    get fsyncSync() {
+      return native.fsyncSync;
+    },
+    get ftruncateSync() {
+      return native.ftruncateSync;
+    },
+    get readFileSync() {
+      return native.readFileSync;
+    },
+    get readdirSync() {
+      return native.readdirSync;
+    },
+  };
+}
 const nativeFileSystemPromises = nativeFileSystemModule.promises;
 const nativePathModule = process.getBuiltinModule('path') as NativePathModuleShape;
 const nativeUtilModule = process.getBuiltinModule('util') as NativeUtilModuleShape;

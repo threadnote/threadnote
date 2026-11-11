@@ -3,6 +3,7 @@ import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import {Cause, Clock, Deferred, Effect, Option, Queue, Schema, Stream} from 'effect';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {
   runtimeSpawnOwnedProviderTree,
   runtimeObserveOwnedProviderTree,
@@ -182,7 +183,10 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
         Effect.uninterruptible(
           Effect.gen(function* () {
             ending = true;
-            yield* Effect.tryPromise({try: () => child.closeInput(), catch: () => LspFault.make({code: 'write'})}).pipe(
+            yield* fromPromiseInterruptible(
+              () => child.closeInput(),
+              () => LspFault.make({code: 'write'}),
+            ).pipe(
               Effect.timeoutOption(2000),
               Effect.tap(result =>
                 Effect.sync(() => {
@@ -293,8 +297,8 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
         }
         if (writes >= 64 || writeBytes + bytes.length > 32 * 1024 * 1024)
           return Effect.fail(LspFault.make({code: 'capacity'}));
-        return Effect.tryPromise({
-          try: signal => {
+        return fromPromiseInterruptible(
+          signal => {
             if (signal.aborted) return Promise.reject(new Error('Provider write cancelled'));
             writes++;
             writeBytes += bytes.length;
@@ -303,11 +307,11 @@ export const spawnLspWire = Effect.fn('semantic.spawnLspWire')(function* (option
               writeBytes -= bytes.length;
             });
           },
-          catch: () => {
+          () => {
             fail('write');
             return fault!;
           },
-        }).pipe(
+        ).pipe(
           Effect.onInterrupt(() => Effect.sync(() => fail('write'))),
           Effect.timeoutOption(2000),
           Effect.flatMap(result =>

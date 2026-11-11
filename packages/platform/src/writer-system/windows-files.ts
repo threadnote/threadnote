@@ -1,3 +1,4 @@
+import {runtimeNativeDescriptorOperations} from '../system.js';
 import {dlopen, toArrayBuffer} from 'bun:ffi';
 import {Array as EffectArray, String as EffectString} from 'effect';
 import {withNativeArguments} from './native-arguments.js';
@@ -11,7 +12,7 @@ import {
   windowsWide,
 } from './windows-native.js';
 
-const fs = process.getBuiltinModule('fs');
+const fs = runtimeNativeDescriptorOperations();
 const administrativePrincipals = new Set(['S-1-5-18', 'S-1-5-32-544']);
 interface NativeFileIdentity {
   readonly fileId: string;
