@@ -399,7 +399,7 @@ effectIt.effect.each([
       );
       yield* store.write(location, specEvidenceUri, specEvidenceBody, {mode: 'create'});
       const specEvidence = {uri: specEvidenceUri, memoryId: 'tn_spec_only_fixture', revision: h(specEvidenceBody)};
-      const evidenceRefs = direction.fullEvidence ? [evidence, specEvidence] : [];
+      const evidenceRefs = direction.fullEvidence ? [evidence] : [];
       if (direction.fullEvidence) {
         for (let index = 0; index < 14; index++) {
           const topic = `capacity-fixture-${index}`;
@@ -431,7 +431,11 @@ effectIt.effect.each([
         note: pipe('P', EffectString.repeat(4096)),
         sharedPlanRef: encodePortablePlanRef({version: 1, team: 'older', project: 'repo', payloadHash: h('older')}),
       };
-      const specContext = {...context, note: pipe('S', EffectString.repeat(4096))};
+      const specContext = {
+        ...context,
+        evidenceRefs: direction.fullEvidence ? [...evidenceRefs, specEvidence] : [],
+        note: pipe('S', EffectString.repeat(4096)),
+      };
       const specBusiness = {
         title: 'Fixture specification',
         objective: 'Preserve the fixture.',
@@ -713,7 +717,7 @@ effectIt.effect.each([
       expect(localPlanDocument.spec?.root.uri).toBe(localSpec.artifact.uri);
       expect(localPlanDocument.context.note).toBe(context.note);
       expect(localPlanDocument.context.sharedPlanRef).toBe(published.sharedPlanRef);
-      expect(localPlanDocument.context.evidenceRefs).toHaveLength(direction.fullEvidence ? 16 : 0);
+      expect(localPlanDocument.context.evidenceRefs).toHaveLength(direction.fullEvidence ? 15 : 0);
       const specRoot = decodeAuthoringArtifact(localSpec.artifact.body, AuthoringRootSchema);
       const readSpec = yield* runNativeTaskAuthoring(recipientConfig, {
         callerCwd: recipient.repo,
