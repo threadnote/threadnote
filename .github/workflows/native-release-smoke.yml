@@ -283,7 +283,11 @@ jobs:
               apk info -v > .context/semantic-platform/system-packages.txt
               ldd /usr/local/bin/bun > .context/semantic-platform/bun-libraries.txt 2>&1
               git config --global --add safe.directory /workspace
-              bun install --frozen-lockfile
+              # Reproduce root prepare explicitly: the pinned Effect Oxlint replacement does not support musl.
+              bun install --frozen-lockfile --ignore-scripts
+              bun --bun husky
+              bun --bun effect-tsgo patch --no-typescript --oxlint --skip-missing
+              printf '%s\n' 'Effect Oxlint integration: unsupported on musl; no lint run or pass is claimed.' > .context/semantic-platform/effect-lint-status.txt
               bun --eval 'import {runtimeNativePlatformTarget,runtimeNativePlatformSupport} from "@threadnote/platform/system"; const support=runtimeNativePlatformSupport(); if(!support.writer||!support.providerTree)throw new Error("Native semantic platform capability unavailable"); const actual=runtimeNativePlatformTarget(); const expected=Bun.env.THREADNOTE_BUILD_TARGET.slice(4); if(actual!==expected)throw new Error(`Native libc/CPU target mismatch: ${actual} != ${expected}`); console.log(actual);' > .context/semantic-platform/native-target.txt
               bun --bun vitest run packages/platform/test/system-stable-read.test.ts packages/platform/test/writer-system/provider-process.test.ts apps/threadnote/test/unit/semantic-runtime.test.ts apps/threadnote/test/unit/semantic-writer-process.test.ts apps/threadnote/test/unit/semantic-operations.test.ts apps/threadnote/test/unit/semantic-mcp-cli.test.ts apps/threadnote/test/unit/semantic-python.test.ts apps/threadnote/test/unit/semantic-go-rust.test.ts apps/threadnote/test/unit/semantic-java-preparation.test.ts --reporter=default --reporter=json --outputFile=.context/semantic-platform/components.json
               bun run build
