@@ -16,7 +16,7 @@
       "phase": "P3",
       "decision": "DEFER",
       "runtimeShipped": false,
-      "evidence": "Separate author docs-only results commit integrates after this consolidation; no prototype code or build/CI dependency is included."
+      "evidence": "../vector-native/decision.json"
     },
     {
       "component": "SQL pipeline changes",
