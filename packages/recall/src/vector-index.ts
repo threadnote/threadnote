@@ -26,7 +26,7 @@ import {
   loadExternalResourceAccess,
 } from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
-import {normalizeVector, offerBoundedBest, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -814,10 +814,9 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
             });
           }
           const limit = Math.min(active.chunk_count, options.limit ?? 500);
-          const boundedSelection = Number.isInteger(limit) && limit >= 0;
           const selection = vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes);
           let cursor = '';
-          let best: SemanticChunkMatch[] = [];
+          let best: readonly SemanticChunkMatch[] = [];
           for (;;) {
             const rows = yield* sql.unsafe<VectorRow>(
               `SELECT chunk.chunk_id, chunk.uri, chunk.fingerprint, value.vector
@@ -832,27 +831,19 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
             );
             if (rows.length === 0) break;
             const pageMatches = yield* Effect.try({
-              try: () =>
-                searchEncodedVectorRows(
-                  normalizedQuery.value,
-                  rows,
-                  active.dimensions,
-                  limit,
-                  boundedSelection ? best : [],
-                ),
+              try: () => searchEncodedVectorRows(normalizedQuery.value, rows, active.dimensions, limit),
               catch: cause =>
                 VectorIndexCorrupt.make({
                   message: cause instanceof Error ? cause.message : String(cause),
                   modelId: manifest.id,
                 }),
             });
-            // Preserve the existing Array.slice behavior for non-integer or negative limits.
-            if (!boundedSelection) best = [...best, ...pageMatches].sort(compareVectorMatches).slice(0, limit);
+            best = mergeSemanticMatches(best, pageMatches, limit);
             cursor = rows.at(-1)!.chunk_id;
             if (rows.length < VECTOR_INDEX_PAGE_SIZE) break;
           }
           const scores = new Map<string, number>();
-          for (const result of best.sort(compareVectorMatches)) {
+          for (const result of best) {
             scores.set(result.uri, Math.max(scores.get(result.uri) ?? 0, Math.max(0, result.score)));
           }
           const aliases = yield* loadVectorAliasesForRepresentatives(
@@ -1718,18 +1709,26 @@ function bytesFromSqlBlob(value: unknown): Uint8Array {
   throw VectorIndexOperationError.make({message: 'Stored vector is not a binary SQLite value.'});
 }
 
+function mergeSemanticMatches(
+  left: readonly SemanticChunkMatch[],
+  right: readonly SemanticChunkMatch[],
+  limit: number,
+): readonly SemanticChunkMatch[] {
+  return [...left, ...right].sort(compareVectorMatches).slice(0, limit);
+}
+
 function searchEncodedVectorRows(
   normalizedQuery: readonly number[],
   rows: readonly VectorRow[],
   dimensions: number,
   limit: number,
-  matches: SemanticChunkMatch[],
-): SemanticChunkMatch[] {
+): readonly SemanticChunkMatch[] {
   if (normalizedQuery.length !== dimensions) {
     throw VectorIndexOperationError.make({
       message: `Query vector has ${normalizedQuery.length} dimensions; expected ${dimensions}.`,
     });
   }
+  const matches: SemanticChunkMatch[] = [];
   for (const row of rows) {
     const bytes = bytesFromSqlBlob(row.vector);
     if (bytes.byteLength !== dimensions * 4) {
@@ -1753,17 +1752,13 @@ function searchEncodedVectorRows(
     if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
       throw VectorIndexOperationError.make({message: `Stored vector ${row.chunk_id} is not L2-normalized.`});
     }
-    const match = {
+    matches.push({
       id: row.chunk_id,
       score: Math.max(-1, Math.min(1, score)),
       uri: row.uri,
-    };
-    if (!Number.isInteger(limit) || limit < 0) matches.push(match);
-    else offerBoundedBest(matches, match, limit, compareVectorMatches);
+    });
   }
-  return Number.isInteger(limit) && limit >= 0
-    ? matches
-    : matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
+  return matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
 }
 
 function compareVectorMatches(left: VectorSearchResult, right: VectorSearchResult): number {

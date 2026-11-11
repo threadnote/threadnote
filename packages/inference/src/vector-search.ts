@@ -11,12 +11,6 @@ export interface VectorSearchResult {
   readonly score: number;
 }
 
-export interface VectorBlobRecord {
-  readonly id: string;
-  /** Float32LE components; the view's byte offset and length are significant. */
-  readonly vector: Uint8Array;
-}
-
 export class VectorInvalid extends Schema.TaggedError<VectorInvalid, {readonly brand: unique symbol}>()(
   'VectorInvalid',
   {
@@ -67,7 +61,16 @@ export function searchExactVectors(
   records: readonly VectorRecord[],
   options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
 ): readonly VectorSearchResult[] {
-  const normalizedQuery = prepareSearchQuery(query, options);
+  if (!Number.isInteger(options.dimensions) || options.dimensions <= 0) {
+    throw new Error('Vector dimensions must be a positive integer.');
+  }
+  if (!Number.isInteger(options.limit) || options.limit < 0) {
+    throw new Error('Vector search limit must be a non-negative integer.');
+  }
+  if (query.length !== options.dimensions) {
+    throw new Error(`Query vector has ${query.length} dimensions; expected ${options.dimensions}.`);
+  }
+  const normalizedQuery = normalizeVector(query);
   const seen = new Set<string>();
   const results: VectorSearchResult[] = [];
   const compareBestFirst = (left: VectorSearchResult, right: VectorSearchResult): number =>
@@ -95,59 +98,6 @@ export function searchExactVectors(
   return results.sort(compareBestFirst);
 }
 
-/** Exact scoring without expanding stored Float32LE components into number arrays.
- * As with searchExactVectors, only the query is normalized. Stored-vector
- * normalization/eligibility belongs to the caller's canonical store boundary.
- */
-export function searchExactVectorBlobs(
-  query: readonly number[],
-  records: readonly VectorBlobRecord[],
-  options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
-): readonly VectorSearchResult[] {
-  const normalizedQuery = prepareSearchQuery(query, options);
-  const seen = new Set<string>();
-  const results: VectorSearchResult[] = [];
-  const compareBestFirst = (left: VectorSearchResult, right: VectorSearchResult): number =>
-    right.score - left.score || compareCodeUnits(left.id, right.id);
-  for (const record of records) {
-    if (seen.has(record.id)) throw new Error(`Duplicate vector record ID: ${record.id}.`);
-    seen.add(record.id);
-    if (record.vector.byteLength !== options.dimensions * 4) {
-      throw new Error(
-        `Vector record ${record.id} has ${record.vector.byteLength} bytes; expected ${options.dimensions * 4}.`,
-      );
-    }
-    const view = new DataView(record.vector.buffer, record.vector.byteOffset, record.vector.byteLength);
-    let score = 0;
-    for (let index = 0; index < options.dimensions; index += 1) {
-      const component = view.getFloat32(index * 4, true);
-      if (!Number.isFinite(component)) throw new Error('Vector must contain at least one finite component.');
-      score += normalizedQuery[index] * component;
-    }
-    score = Math.max(-1, Math.min(1, score));
-    if (score >= (options.minimumScore ?? -1)) {
-      offerBoundedBest(results, {id: record.id, score}, options.limit, compareBestFirst);
-    }
-  }
-  return results.sort(compareBestFirst);
-}
-
-function prepareSearchQuery(
-  query: readonly number[],
-  options: {readonly dimensions: number; readonly limit: number},
-): readonly number[] {
-  if (!Number.isInteger(options.dimensions) || options.dimensions <= 0) {
-    throw new Error('Vector dimensions must be a positive integer.');
-  }
-  if (!Number.isInteger(options.limit) || options.limit < 0) {
-    throw new Error('Vector search limit must be a non-negative integer.');
-  }
-  if (query.length !== options.dimensions) {
-    throw new Error(`Query vector has ${query.length} dimensions; expected ${options.dimensions}.`);
-  }
-  return normalizeVector(query);
-}
-
 function assertFiniteVector(vector: readonly number[]): void {
   if (vector.length === 0 || EffectArray.some(vector, component => !Number.isFinite(component))) {
     throw new Error('Vector must contain at least one finite component.');
@@ -162,13 +112,7 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-/** Retain the best limit items in a worst-first heap. Sort only after all pages. */
-export function offerBoundedBest<T>(
-  heap: T[],
-  item: T,
-  limit: number,
-  compareBestFirst: (left: T, right: T) => number,
-): void {
+function offerBoundedBest<T>(heap: T[], item: T, limit: number, compareBestFirst: (left: T, right: T) => number): void {
   if (limit <= 0) return;
   if (heap.length < limit) {
     heap.push(item);

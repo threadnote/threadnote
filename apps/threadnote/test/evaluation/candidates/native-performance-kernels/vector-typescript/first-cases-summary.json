@@ -299,7 +299,8 @@
       "External sampler overhead is not separately isolated; reference-only actual graph timings cannot establish candidate benefit."
     ]
   },
-  "status": "experimental; TypeScript outcome pending controlled same-host comparison",
+  "status": "Historical diagnostics; DEFER experimental TypeScript change and retain existing runtime",
   "phaseComplete": false,
-  "canonicalRunComplete": false
+  "canonicalRunComplete": false,
+  "runtimeExperimentShipped": false
 }

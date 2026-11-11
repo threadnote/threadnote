@@ -1,0 +1,280 @@
+diff --git a/packages/graph/src/embedding.ts b/packages/graph/src/embedding.ts
+index 752ae9a65..e9ab6363c 100644
+--- a/packages/graph/src/embedding.ts
++++ b/packages/graph/src/embedding.ts
+@@ -30,7 +30,7 @@ import {
+ } from '@threadnote/inference/models/catalog';
+ import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
+ import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
+-import {normalizeVector, searchExactVectors, type VectorSearchResult} from '@threadnote/inference/vector-search';
++import {normalizeVector, searchExactVectorBlobs, type VectorSearchResult} from '@threadnote/inference/vector-search';
+ import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from './layout.js';
+ import {compareCodeUnits} from './ordering.js';
+ import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from './index_scope.js';
+@@ -930,9 +930,9 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
+         if (rows.length === 0) break;
+         const records = EffectArray.map(rows, row => ({
+           id: row.symbol_id,
+-          vector: decodeVector(row.vector, active.dimensions),
++          vector: validatedVectorBytes(row.vector, active.dimensions),
+         }));
+-        const pageMatches = searchExactVectors(queryVector, records, {
++        const pageMatches = searchExactVectorBlobs(queryVector, records, {
+           dimensions: active.dimensions,
+           limit: Math.min(boundedLimit, records.length),
+           minimumScore: graphEmbeddingMinimumScore(selected.manifest),
+@@ -1100,7 +1100,7 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
+   return bytes;
+ }
+ 
+-function decodeVector(value: unknown, dimensions: number): readonly number[] {
++function validatedVectorBytes(value: unknown, dimensions: number): Uint8Array {
+   const bytes = bytesFromSqlBlob(value);
+   if (bytes.byteLength !== dimensions * 4) {
+     throw CodeGraphEmbeddingError.make({
+@@ -1108,19 +1108,22 @@ function decodeVector(value: unknown, dimensions: number): readonly number[] {
+     });
+   }
+   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+-  const vector = Array.from({length: dimensions}, (_, index) => view.getFloat32(index * 4, true));
+-  if (EffectArray.some(vector, component => !Number.isFinite(component))) {
+-    throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
++  let squaredMagnitude = 0;
++  for (let index = 0; index < dimensions; index += 1) {
++    const component = view.getFloat32(index * 4, true);
++    if (!Number.isFinite(component)) {
++      throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
++    }
++    squaredMagnitude += component * component;
+   }
+-  const magnitude = Math.sqrt(EffectArray.reduce(vector, 0, (sum, component) => sum + component * component));
+-  if (Math.abs(magnitude - 1) > 0.002)
++  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002)
+     throw CodeGraphEmbeddingError.make({message: 'Stored vector is not L2-normalized.'});
+-  return vector;
++  return bytes;
+ }
+ 
+ function isDecodableVector(value: unknown, dimensions: number): boolean {
+   try {
+-    decodeVector(value, dimensions);
++    validatedVectorBytes(value, dimensions);
+     return true;
+   } catch {
+     return false;
+diff --git a/packages/inference/src/vector-search.ts b/packages/inference/src/vector-search.ts
+index eb8bc843b..bdaaf6798 100644
+--- a/packages/inference/src/vector-search.ts
++++ b/packages/inference/src/vector-search.ts
+@@ -11,6 +11,12 @@ export interface VectorSearchResult {
+   readonly score: number;
+ }
+ 
++export interface VectorBlobRecord {
++  readonly id: string;
++  /** Float32LE components; the view's byte offset and length are significant. */
++  readonly vector: Uint8Array;
++}
++
+ export class VectorInvalid extends Schema.TaggedError<VectorInvalid, {readonly brand: unique symbol}>()(
+   'VectorInvalid',
+   {
+@@ -61,16 +67,7 @@ export function searchExactVectors(
+   records: readonly VectorRecord[],
+   options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
+ ): readonly VectorSearchResult[] {
+-  if (!Number.isInteger(options.dimensions) || options.dimensions <= 0) {
+-    throw new Error('Vector dimensions must be a positive integer.');
+-  }
+-  if (!Number.isInteger(options.limit) || options.limit < 0) {
+-    throw new Error('Vector search limit must be a non-negative integer.');
+-  }
+-  if (query.length !== options.dimensions) {
+-    throw new Error(`Query vector has ${query.length} dimensions; expected ${options.dimensions}.`);
+-  }
+-  const normalizedQuery = normalizeVector(query);
++  const normalizedQuery = prepareSearchQuery(query, options);
+   const seen = new Set<string>();
+   const results: VectorSearchResult[] = [];
+   const compareBestFirst = (left: VectorSearchResult, right: VectorSearchResult): number =>
+@@ -98,6 +95,59 @@ export function searchExactVectors(
+   return results.sort(compareBestFirst);
+ }
+ 
++/** Exact scoring without expanding stored Float32LE components into number arrays.
++ * As with searchExactVectors, only the query is normalized. Stored-vector
++ * normalization/eligibility belongs to the caller's canonical store boundary.
++ */
++export function searchExactVectorBlobs(
++  query: readonly number[],
++  records: readonly VectorBlobRecord[],
++  options: {readonly dimensions: number; readonly limit: number; readonly minimumScore?: number},
++): readonly VectorSearchResult[] {
++  const normalizedQuery = prepareSearchQuery(query, options);
++  const seen = new Set<string>();
++  const results: VectorSearchResult[] = [];
++  const compareBestFirst = (left: VectorSearchResult, right: VectorSearchResult): number =>
++    right.score - left.score || compareCodeUnits(left.id, right.id);
++  for (const record of records) {
++    if (seen.has(record.id)) throw new Error(`Duplicate vector record ID: ${record.id}.`);
++    seen.add(record.id);
++    if (record.vector.byteLength !== options.dimensions * 4) {
++      throw new Error(
++        `Vector record ${record.id} has ${record.vector.byteLength} bytes; expected ${options.dimensions * 4}.`,
++      );
++    }
++    const view = new DataView(record.vector.buffer, record.vector.byteOffset, record.vector.byteLength);
++    let score = 0;
++    for (let index = 0; index < options.dimensions; index += 1) {
++      const component = view.getFloat32(index * 4, true);
++      if (!Number.isFinite(component)) throw new Error('Vector must contain at least one finite component.');
++      score += normalizedQuery[index] * component;
++    }
++    score = Math.max(-1, Math.min(1, score));
++    if (score >= (options.minimumScore ?? -1)) {
++      offerBoundedBest(results, {id: record.id, score}, options.limit, compareBestFirst);
++    }
++  }
++  return results.sort(compareBestFirst);
++}
++
++function prepareSearchQuery(
++  query: readonly number[],
++  options: {readonly dimensions: number; readonly limit: number},
++): readonly number[] {
++  if (!Number.isInteger(options.dimensions) || options.dimensions <= 0) {
++    throw new Error('Vector dimensions must be a positive integer.');
++  }
++  if (!Number.isInteger(options.limit) || options.limit < 0) {
++    throw new Error('Vector search limit must be a non-negative integer.');
++  }
++  if (query.length !== options.dimensions) {
++    throw new Error(`Query vector has ${query.length} dimensions; expected ${options.dimensions}.`);
++  }
++  return normalizeVector(query);
++}
++
+ function assertFiniteVector(vector: readonly number[]): void {
+   if (vector.length === 0 || EffectArray.some(vector, component => !Number.isFinite(component))) {
+     throw new Error('Vector must contain at least one finite component.');
+@@ -112,7 +162,13 @@ function compareCodeUnits(left: string, right: string): number {
+   return left < right ? -1 : left > right ? 1 : 0;
+ }
+ 
+-function offerBoundedBest<T>(heap: T[], item: T, limit: number, compareBestFirst: (left: T, right: T) => number): void {
++/** Retain the best limit items in a worst-first heap. Sort only after all pages. */
++export function offerBoundedBest<T>(
++  heap: T[],
++  item: T,
++  limit: number,
++  compareBestFirst: (left: T, right: T) => number,
++): void {
+   if (limit <= 0) return;
+   if (heap.length < limit) {
+     heap.push(item);
+diff --git a/packages/recall/src/vector-index.ts b/packages/recall/src/vector-index.ts
+index f094e0e40..78fea1347 100644
+--- a/packages/recall/src/vector-index.ts
++++ b/packages/recall/src/vector-index.ts
+@@ -26,7 +26,7 @@ import {
+   loadExternalResourceAccess,
+ } from '@threadnote/store/external-resource';
+ import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
+-import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
++import {normalizeVector, offerBoundedBest, type VectorSearchResult} from '@threadnote/inference/vector-search';
+ import * as EffectRecord from 'effect/Record';
+ import * as EffectString from 'effect/String';
+ import * as Effect2 from 'effect';
+@@ -814,9 +814,10 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
+             });
+           }
+           const limit = Math.min(active.chunk_count, options.limit ?? 500);
++          const boundedSelection = Number.isInteger(limit) && limit >= 0;
+           const selection = vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes);
+           let cursor = '';
+-          let best: readonly SemanticChunkMatch[] = [];
++          let best: SemanticChunkMatch[] = [];
+           for (;;) {
+             const rows = yield* sql.unsafe<VectorRow>(
+               `SELECT chunk.chunk_id, chunk.uri, chunk.fingerprint, value.vector
+@@ -831,19 +832,27 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
+             );
+             if (rows.length === 0) break;
+             const pageMatches = yield* Effect.try({
+-              try: () => searchEncodedVectorRows(normalizedQuery.value, rows, active.dimensions, limit),
++              try: () =>
++                searchEncodedVectorRows(
++                  normalizedQuery.value,
++                  rows,
++                  active.dimensions,
++                  limit,
++                  boundedSelection ? best : [],
++                ),
+               catch: cause =>
+                 VectorIndexCorrupt.make({
+                   message: cause instanceof Error ? cause.message : String(cause),
+                   modelId: manifest.id,
+                 }),
+             });
+-            best = mergeSemanticMatches(best, pageMatches, limit);
++            // Preserve the existing Array.slice behavior for non-integer or negative limits.
++            if (!boundedSelection) best = [...best, ...pageMatches].sort(compareVectorMatches).slice(0, limit);
+             cursor = rows.at(-1)!.chunk_id;
+             if (rows.length < VECTOR_INDEX_PAGE_SIZE) break;
+           }
+           const scores = new Map<string, number>();
+-          for (const result of best) {
++          for (const result of best.sort(compareVectorMatches)) {
+             scores.set(result.uri, Math.max(scores.get(result.uri) ?? 0, Math.max(0, result.score)));
+           }
+           const aliases = yield* loadVectorAliasesForRepresentatives(
+@@ -1709,26 +1718,18 @@ function bytesFromSqlBlob(value: unknown): Uint8Array {
+   throw VectorIndexOperationError.make({message: 'Stored vector is not a binary SQLite value.'});
+ }
+ 
+-function mergeSemanticMatches(
+-  left: readonly SemanticChunkMatch[],
+-  right: readonly SemanticChunkMatch[],
+-  limit: number,
+-): readonly SemanticChunkMatch[] {
+-  return [...left, ...right].sort(compareVectorMatches).slice(0, limit);
+-}
+-
+ function searchEncodedVectorRows(
+   normalizedQuery: readonly number[],
+   rows: readonly VectorRow[],
+   dimensions: number,
+   limit: number,
+-): readonly SemanticChunkMatch[] {
++  matches: SemanticChunkMatch[],
++): SemanticChunkMatch[] {
+   if (normalizedQuery.length !== dimensions) {
+     throw VectorIndexOperationError.make({
+       message: `Query vector has ${normalizedQuery.length} dimensions; expected ${dimensions}.`,
+     });
+   }
+-  const matches: SemanticChunkMatch[] = [];
+   for (const row of rows) {
+     const bytes = bytesFromSqlBlob(row.vector);
+     if (bytes.byteLength !== dimensions * 4) {
+@@ -1752,13 +1753,17 @@ function searchEncodedVectorRows(
+     if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002) {
+       throw VectorIndexOperationError.make({message: `Stored vector ${row.chunk_id} is not L2-normalized.`});
+     }
+-    matches.push({
++    const match = {
+       id: row.chunk_id,
+       score: Math.max(-1, Math.min(1, score)),
+       uri: row.uri,
+-    });
++    };
++    if (!Number.isInteger(limit) || limit < 0) matches.push(match);
++    else offerBoundedBest(matches, match, limit, compareVectorMatches);
+   }
+-  return matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
++  return Number.isInteger(limit) && limit >= 0
++    ? matches
++    : matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
+ }
+ 
+ function compareVectorMatches(left: VectorSearchResult, right: VectorSearchResult): number {
