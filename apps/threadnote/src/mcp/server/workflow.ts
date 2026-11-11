@@ -289,23 +289,23 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       description:
         'Control task phases: begin eligible; reopen validated/published after failure; resume blocked after dependencies are accepted; reconcile to the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is not authenticated.',
       inputSchema: {
-        runId: Schema.String,
-        callerCwd: Schema.String,
-        taskRef: Schema.String,
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
+        taskRef: McpInput.requiredString(),
         control: Schema.Union([
           Schema.Struct({command: Schema.Literal('begin')}),
           Schema.Struct({
             command: Schema.Literal('resume'),
-            reason: Schema.String,
+            reason: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('reopen'),
-            phaseId: Schema.String,
-            reason: Schema.String,
+            phaseId: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('reconcile'),
-            reason: Schema.String,
+            reason: McpInput.requiredString(),
             bindings: Schema.optionalKey(
               Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
             ),
@@ -313,7 +313,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
-            reason: Schema.String,
+            reason: McpInput.requiredString(),
             userAuthority: McpInput.requiredString(
               'Caller-provided human authority; actor identity is not authenticated',
             ),

@@ -732,10 +732,19 @@ describe('Threadnote MCP toolsets', () => {
           'reconcile',
           'extend-review-budget',
         ]);
+        for (const field of ['runId', 'callerCwd', 'taskRef'])
+          expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('resume')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('reopen')?.required).toEqual(['command', 'phaseId', 'reason']);
+        expect(variantsByCommand.get('reopen')?.properties.phaseId).toMatchObject({type: 'string', minLength: 1});
+        expect(variantsByCommand.get('reopen')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('reconcile')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('reconcile')?.properties.reason).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
         expect(variantsByCommand.get('reconcile')?.properties.bindings).toBeDefined();
         expect(variantsByCommand.get('extend-review-budget')?.required).toEqual([
           'command',
@@ -743,6 +752,14 @@ describe('Threadnote MCP toolsets', () => {
           'reason',
           'userAuthority',
         ]);
+        expect(variantsByCommand.get('extend-review-budget')?.properties.reason).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
+        expect(variantsByCommand.get('extend-review-budget')?.properties.userAuthority).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
 
         const workflowTaskAuthor = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_author'),
