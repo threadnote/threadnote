@@ -1,7 +1,13 @@
-import {Array as EffectArray, Schema} from 'effect';
-import {describe, expect, it} from 'vitest';
+import {Array as EffectArray, Context, Effect, Layer, Schema} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {describe, expect, it, vi} from 'vitest';
+import {Parser} from 'web-tree-sitter';
+import {TestClock} from 'effect/testing';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
+import {JAVA_GRAMMAR} from '@threadnote/graph/languages/tree_sitter_assets';
 import {TREE_SITTER_RUNTIME_CACHE_IDENTITY} from '@threadnote/graph/tree_sitter/runtime';
+import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
+import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import * as EffectRecord from 'effect/Record';
 
 const grammarManifestEntrySchema = Schema.StructWithRest(
@@ -23,6 +29,47 @@ const grammarManifestSchema = Schema.StructWithRest(
 );
 
 describe('code graph grammar assets', () => {
+  effectIt.effect('initializes independent concurrent parser layers against one verified runtime', () =>
+    Effect.gen(function* () {
+      const initialize = Parser.init.bind(Parser);
+      let initializations = 0;
+      let failFirst = true;
+      const parse = () =>
+        Effect.scoped(
+          Layer.build(TreeSitterRuntime.layer.pipe(Layer.provide(citationPlatformLayer))).pipe(
+            Effect.flatMap(context =>
+              Context.get(context, TreeSitterRuntime).withParsedSource(
+                JAVA_GRAMMAR,
+                'class Greeter {}',
+                parsed => parsed.root.type,
+              ),
+            ),
+          ),
+        );
+      const roots = yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(Parser, 'init').mockImplementation(async options => {
+            initializations += 1;
+            if (failFirst) {
+              failFirst = false;
+              throw new Error('Simulated first parser initialization failure.');
+            }
+            await new Promise(resolve => setTimeout(resolve, 5));
+            return initialize(options);
+          }),
+        ),
+        () =>
+          Effect.gen(function* () {
+            expect((yield* parse().pipe(Effect.result))._tag).toBe('Failure');
+            return yield* Effect.all(EffectArray.makeBy(8, parse), {concurrency: 'unbounded'});
+          }),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      expect(roots).toEqual(EffectArray.makeBy(8, () => 'program'));
+      expect(initializations).toBeLessThanOrEqual(2);
+    }).pipe(TestClock.withLive),
+  );
+
   it('keeps the parser package, lockfile, vendored runtime, and cache identity on one exact release', async () => {
     const [assetManifest, lockfile, packageManifest, installedManifest, thirdPartyNotices] = await Promise.all([
       Bun.file('assets/code-graph/manifest.json').json(),

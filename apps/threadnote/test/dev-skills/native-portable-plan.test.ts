@@ -14,6 +14,7 @@ import {createNativeDocument} from '@threadnote/workflow-automations/templates';
 import {applyDevSkills} from '../../src/dev_skills/index.js';
 import {runShareInit} from '../../src/share/admin.js';
 import {runShareSync} from '../../src/share/sync.js';
+import {teamWorktreePath} from '../../src/share/core.js';
 import {runNativeTaskAuthoring} from '../../src/workflow_automation/task_authoring.js';
 import {runNativeTaskStart} from '../../src/workflow_automation/task_actions.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
@@ -256,35 +257,27 @@ effectIt.effect(
       };
       const system = yield* SystemInfo;
       const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
+      const setGitIdentity = (cwd: string) =>
+        Effect.gen(function* () {
+          yield* git(cwd, ['config', '--local', 'user.name', 'Fixture']);
+          yield* git(cwd, ['config', '--local', 'user.email', 'fixture@example.invalid']);
+        });
       const remote = path.join(donor.root, 'portable.git');
       yield* git(donor.root, ['init', '--bare', '--initial-branch=main', remote]);
       const seed = path.join(donor.root, 'seed');
       yield* git(donor.root, ['clone', remote, seed]);
-      yield* git(seed, ['config', 'user.name', 'Fixture']);
-      yield* git(seed, ['config', 'user.email', 'fixture@example.invalid']);
+      yield* setGitIdentity(seed);
       yield* fs.writeFileString(path.join(seed, 'README.md'), 'Shared fixture\n');
-      yield* git(seed, ['add', 'README.md']);
+      yield* fs.writeFileString(path.join(seed, '.gitignore'), '**/.abstract.md\n**/.overview.md\n');
+      yield* git(seed, ['add', 'README.md', '.gitignore']);
       yield* git(seed, ['commit', '-m', 'seed']);
       yield* git(seed, ['push', 'origin', 'main']);
-      yield* git(donor.repo, [
-        '-c',
-        'user.name=Fixture',
-        '-c',
-        'user.email=fixture@example.invalid',
-        'add',
-        'source.ts',
-      ]);
-      yield* git(donor.repo, [
-        '-c',
-        'user.name=Fixture',
-        '-c',
-        'user.email=fixture@example.invalid',
-        'commit',
-        '-m',
-        'source',
-      ]);
+      yield* setGitIdentity(donor.repo);
+      yield* git(donor.repo, ['add', 'source.ts']);
+      yield* git(donor.repo, ['commit', '-m', 'source']);
       yield* git(recipient.repo, ['fetch', donor.repo, 'main']);
       yield* git(recipient.repo, ['reset', '--hard', 'FETCH_HEAD']);
+      yield* setGitIdentity(recipient.repo);
       const donorConfig = {
         ...donor.config,
         user: 'donor',
@@ -315,6 +308,8 @@ effectIt.effect(
       ).toBe('ready');
       yield* runShareInit(donorConfig, remote, {team: 'default'});
       yield* runShareInit(recipientConfig, remote, {team: 'default'});
+      yield* setGitIdentity(yield* teamWorktreePath(donorConfig, 'default'));
+      yield* setGitIdentity(yield* teamWorktreePath(recipientConfig, 'default'));
       const location = {account: donorConfig.account, home: donor.home, user: donorConfig.user};
       const store = yield* ResourceStore;
       const evidenceDirectory = 'threadnote://user/donor/memories/durable/projects/repo';
@@ -758,6 +753,7 @@ effectIt.effect(
       const mismatchFixture = yield* nativeFixture();
       const mismatchHome = yield* fs.realPath(mismatchFixture.home);
       const mismatchRepo = yield* fs.realPath(mismatchFixture.repo);
+      yield* setGitIdentity(mismatchRepo);
       const mismatchConfig = {
         ...mismatchFixture.config,
         user: 'mismatch',
@@ -766,6 +762,7 @@ effectIt.effect(
         manifestPath: path.join(mismatchHome, 'manifest.json'),
       };
       yield* runShareInit(mismatchConfig, remote, {team: 'default'});
+      yield* setGitIdentity(yield* teamWorktreePath(mismatchConfig, 'default'));
       yield* runShareSync(mismatchConfig, {team: 'default', push: false});
       const mismatchResult = yield* runNativeTaskStart(mismatchConfig, {
         ...recipientStart,
