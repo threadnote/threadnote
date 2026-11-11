@@ -41,6 +41,7 @@ import * as Effect2 from 'effect';
 
 const WorkflowBindingSchema = Schema.Struct({
   bindingId: Schema.String,
+  graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
   naming: Schema.optionalKey(WorkflowNameFamilySchema),
   workflowRunId: Schema.String,
   profile: Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']),

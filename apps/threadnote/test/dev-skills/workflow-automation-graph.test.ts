@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStoreBusyError, type CodeGraphIndexSummary, type CodeGraphStatus} from '@threadnote/graph/types';
 import {makeWorkflowGraphAdapter} from '../../src/workflow_automation/graph.js';
@@ -78,6 +80,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
     options: Parameters<Parameters<typeof CodeGraphIndexer.of>[0]['index']>[0],
   ) => Effect.Effect<CodeGraphIndexSummary, unknown>,
   options: {readonly prepare?: boolean} = {},
+  binding: WorkflowBinding = bindingFor(f),
 ) {
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
@@ -98,7 +101,7 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
       return index(options);
     },
   });
-  const adapter = yield* makeWorkflowGraphAdapter(f.config, bindingFor(f), options).pipe(
+  const adapter = yield* makeWorkflowGraphAdapter(f.config, binding, options).pipe(
     Effect.provideService(CodeGraphQueryService, observedQuery),
     Effect.provideService(CodeGraphIndexer, observedIndexer),
   );
@@ -109,6 +112,55 @@ const makeReady = Effect.fn('test.workflowAutomationGraph.makeReady')(function* 
 });
 
 describe('native workflow graph adapter', () => {
+  effectIt.effect('uses the bound project and names it in preparation guidance', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: EffectArray.map(['Alpha', 'Beta'], name => ({
+            name,
+            path: f.repo,
+            seed: [],
+            uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+            graph: {closure: 'dependencies', roots: [EffectString.toLowerCase(name)]},
+          })),
+        }),
+      );
+      const binding = {...bindingFor(f), graphProject: 'Alpha'};
+      const stale = graphStatus(f.repo, {stale: true});
+      const fixture = yield* makeReady(f, [stale], () => Effect.die('index must not start'), {prepare: false}, binding);
+      const result = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
+      expect(result).toMatchObject({
+        failure: {code: 'evidence-unavailable', message: expect.stringContaining('--project Alpha')},
+      });
+      expect(fixture.counts()).toEqual({indexCalls: 0, statusCalls: 1});
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'Beta', path: f.repo, seed: [], uri: 'threadnote://resources/repos/beta'}],
+        }),
+      );
+      expect(yield* makeWorkflowGraphAdapter(f.config, binding).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'graph-scope-unavailable'},
+      });
+    }).pipe(run),
+  );
+
   effectIt.effect('uses exact current ready source identity without indexing', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

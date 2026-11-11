@@ -4,6 +4,7 @@ import {Array as EffectArray} from 'effect';
 import {Context, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import {workflowGraphProjectHint} from './graph_scope.js';
 import {
   canonicalMemoryDocumentContent,
   formatMemoryDocument,
@@ -450,7 +451,7 @@ const captureCitations = Effect.fn('workflowPublication.captureCitations')(funct
 ) {
   const citations = yield* captureMemoryCodeCitations(config, {
     callerCwd: binding.repo,
-    project: binding.project,
+    project: yield* workflowGraphProjectHint(config, binding),
     refs,
     planOnly,
   });

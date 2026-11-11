@@ -30,6 +30,7 @@ import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journ
 import {stableJson} from '../workflow_memory/protocol.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {workflowGraphProjectHint} from '../workflow_memory/graph_scope.js';
 import {readNativeCycleTreeEntry, nativeCycleRelativePath} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
@@ -1159,6 +1160,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     );
     if (
       journal.state.binding.bindingId !== stored.state.bindingId ||
+      journal.state.binding.graphProject !== stored.state.graphProject ||
       journal.state.binding.repo !== (yield* (yield* FileSystem.FileSystem).realPath(journal.state.binding.repo))
     )
       return yield* fail('binding-drift', 'The original logical repository binding changed.');
@@ -1166,7 +1168,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       config,
       stored.state,
       journal.state.binding.repo,
-      journal.state.binding.project,
+      yield* workflowGraphProjectHint(config, journal.state.binding),
       work,
       admissionEpoch,
     );
@@ -1230,6 +1232,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     action: 'bind',
     workflowRunId: 'native-v1-' + runId,
     project: run.state.project,
+    ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
     featureId: run.state.featureId,
     generation: run.state.generation,
     profile: run.state.profile ?? 'desktop',
@@ -1250,6 +1253,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     );
     if (
       canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
+      canonicalJournal.state.binding.graphProject !== run.state.graphProject ||
       canonicalJournal.state.binding.repo !== callerBinding.repo
     )
       return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');

@@ -1,8 +1,15 @@
+import * as EffectString from 'effect/String';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Predicate, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {runCommandEffect} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {SystemInfo} from '@threadnote/platform/system';
+import {stableJson} from '../../src/workflow_memory/protocol.js';
+import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import * as EffectRecord from 'effect/Record';
 
@@ -19,6 +26,125 @@ function textField(value: Record<string, unknown>, key: string, label: string): 
 }
 
 describe('native workflow automation', () => {
+  effectIt.effect('binds a configured graph project canonically and preserves unselected identity', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: EffectArray.map(['Alpha', 'Beta'], name => ({
+            name,
+            path: f.repo,
+            seed: [],
+            uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+            graph: {closure: 'dependencies', roots: [EffectString.toLowerCase(name)]},
+          })),
+        }),
+      );
+      const invalid = yield* failure(
+        f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject: 'unknown'}),
+      );
+      expect(invalid).toMatchObject({failure: {code: 'graph-scope-invalid'}});
+      expect(yield* f.fs.exists(f.statePath())).toBe(false);
+      const unselected = yield* f.init('unselected');
+      const unselectedState = JSON.parse(yield* f.fs.readFileString(f.statePath('unselected')));
+      const unselectedJournal = JSON.parse(yield* f.fs.readFileString(f.journalPath(unselected.bindingId)));
+      expect(unselectedState).not.toHaveProperty('graphProject');
+      expect(unselectedJournal.binding).not.toHaveProperty('graphProject');
+      const {bindingId, ...identity} = unselectedJournal.binding;
+      expect(bindingId).toBe(sha256HexSync(stableJson(identity)));
+      expect(yield* failure(f.call(f.base('graph-ready', 'unselected')))).toMatchObject({
+        failure: {code: 'graph-scope-required'},
+      });
+      const selectedRequest = {
+        ...f.base('init'),
+        project: 'fixture',
+        featureId: 'feature',
+        profile: 'desktop',
+        graphProject: ' alpha ',
+      };
+      const selected = yield* f.call(selectedRequest);
+      if (!('bindingId' in selected)) throw new Error('Expected selected native binding');
+      expect(selected).toMatchObject({graphProject: 'Alpha'});
+      const selectedState = JSON.parse(yield* f.fs.readFileString(f.statePath()));
+      const selectedJournal = JSON.parse(yield* f.fs.readFileString(f.journalPath(selected.bindingId)));
+      expect(selectedState.graphProject).toBe('Alpha');
+      expect(selectedJournal.binding.graphProject).toBe('Alpha');
+      const replay = yield* f.call({...selectedRequest, graphProject: 'ALPHA'});
+      expect(replay).toMatchObject({bindingId: selected.bindingId, graphProject: 'Alpha'});
+      const before = yield* f.fs.readFileString(f.statePath());
+      expect(yield* failure(f.call({...selectedRequest, graphProject: 'Beta'}))).toMatchObject({
+        failure: {code: 'graph-scope-conflict'},
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(run),
+  );
+
+  effectIt.effect('does not defer selected-run citation capture', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* runCommandEffect('git', [
+        '-C',
+        f.repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'Alpha', path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'}],
+        }),
+      );
+      const selected = yield* f.call({
+        ...f.base('init'),
+        project: 'fixture',
+        featureId: 'feature',
+        graphProject: 'Alpha',
+      });
+      if (!('bindingId' in selected)) throw new Error('Expected selected native binding');
+      const journalPath = f.journalPath(selected.bindingId);
+      const before = yield* f.fs.readFileString(journalPath);
+      const system = yield* SystemInfo;
+      const result = yield* runWorkflowMemory(f.config, {
+        protocolVersion: 1,
+        action: 'create',
+        bindingId: selected.bindingId,
+        operationId: 'selected-defer',
+        artifactKey: 'root',
+        sourceRunId: 'native-run',
+        role: 'root',
+        body: 'Selected citation.\n',
+        bodySha256: sha256HexSync('Selected citation.\n'),
+        expectedRevision: null,
+        storageKind: 'durable',
+        codeRefs: ['source.ts'],
+        citationPolicy: 'defer',
+      }).pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => f.repo}), Effect.result);
+      expect(result).toMatchObject({failure: {_tag: 'MemoryCodeCitationCaptureError'}});
+      expect(yield* f.fs.readFileString(journalPath)).toBe(before);
+    }).pipe(run),
+  );
+
   effectIt.effect('creates and resumes a stable native run without rewriting verified bytes', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();

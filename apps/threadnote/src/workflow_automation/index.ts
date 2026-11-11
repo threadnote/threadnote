@@ -61,6 +61,7 @@ const summary = (state: NativeWorkflowState) => ({
   generation: state.generation,
   bindingId: state.bindingId,
   project: state.project,
+  ...(state.graphProject === undefined ? {} : {graphProject: state.graphProject}),
   featureId: state.featureId,
   ...(state.naming ? {naming: state.naming, title: state.title} : {}),
   profile: state.profile,
@@ -80,7 +81,7 @@ const summary = (state: NativeWorkflowState) => ({
 });
 
 const bindingRequest = (
-  state: Pick<NativeWorkflowState, 'runId' | 'project' | 'featureId' | 'generation'> & {
+  state: Pick<NativeWorkflowState, 'runId' | 'project' | 'featureId' | 'generation' | 'graphProject'> & {
     readonly naming?: NativeWorkflowState['naming'];
   },
 ) => ({
@@ -98,11 +99,15 @@ const currentBinding = Effect.fn('workflowAutomation.currentBinding')(function* 
   config: RuntimeConfig,
   state: NativeWorkflowState,
 ) {
-  const binding = yield* resolveWorkflowBinding(config, {
-    ...bindingRequest(state),
-    profile: state.profile,
-    ...(state.team ? {team: state.team} : {}),
-  });
+  const binding = yield* resolveWorkflowBinding(
+    config,
+    {
+      ...bindingRequest(state),
+      profile: state.profile,
+      ...(state.team ? {team: state.team} : {}),
+    },
+    state.graphProject,
+  );
   if (binding.bindingId !== state.bindingId)
     return yield* issue(
       'binding-drift',
@@ -119,6 +124,8 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
 ) {
   const native =
     admitted ?? (yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId)));
+  if (native.state.binding.graphProject !== state.graphProject)
+    return yield* issue('binding-drift', 'Native run state and journal disagree about the bound graph project.');
   const ids = new Set(EffectArray.map(state.operations, operation => operation.intent.operationId));
   const cache = yield* CurrentWorkflowReadCache;
   if (
@@ -196,6 +203,17 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
   if (existing) {
     const state = existing.state;
     if (
+      state.graphProject === undefined
+        ? request.graphProject !== undefined
+        : request.graphProject === undefined ||
+          EffectString.toLowerCase(EffectString.trim(state.graphProject)) !==
+            EffectString.toLowerCase(EffectString.trim(request.graphProject))
+    )
+      return yield* issue(
+        'graph-scope-conflict',
+        'This run already has an immutable graph scope. Start a new run with graphProject or --graph-project, or restore an unambiguous manifest.',
+      );
+    if (
       state.project !== request.project ||
       state.featureId !== request.featureId ||
       state.generation !== request.generation ||
@@ -207,25 +225,34 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     const binding = yield* currentBinding(config, state);
     return yield* inspectNative(config, state, binding);
   }
-  const baseBinding = yield* resolveWorkflowBinding(config, {
-    ...bindingRequest(request),
-    ...(request.profile ? {profile: request.profile} : {}),
-    ...(request.team ? {team: request.team} : {}),
-  });
+  const baseBinding = yield* resolveWorkflowBinding(
+    config,
+    {
+      ...bindingRequest(request),
+      ...(request.profile ? {profile: request.profile} : {}),
+      ...(request.team ? {team: request.team} : {}),
+    },
+    request.graphProject,
+  );
   const title = request.title ?? request.featureId;
   const naming = yield* reserveWorkflowNameFamily(config, baseBinding, title);
-  const binding = yield* resolveWorkflowBinding(config, {
-    ...bindingRequest(request),
-    naming,
-    ...(request.profile ? {profile: request.profile} : {}),
-    ...(request.team ? {team: request.team} : {}),
-  });
+  const binding = yield* resolveWorkflowBinding(
+    config,
+    {
+      ...bindingRequest(request),
+      naming,
+      ...(request.profile ? {profile: request.profile} : {}),
+      ...(request.team ? {team: request.team} : {}),
+    },
+    request.graphProject,
+  );
   const state: NativeWorkflowState = {
     format: 'threadnote-native-workflow',
     stateVersion: 1,
     executorVersion: 1,
     runId: request.runId,
     project: binding.project,
+    ...(binding.graphProject === undefined ? {} : {graphProject: binding.graphProject}),
     featureId: binding.featureId,
     title,
     naming,
@@ -436,6 +463,7 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
         binding.bindingId !== stored.state.bindingId ||
         binding.workflowRunId !== expected.workflowRunId ||
         binding.project !== expected.project ||
+        binding.graphProject !== stored.state.graphProject ||
         binding.featureId !== expected.featureId ||
         binding.generation !== expected.generation ||
         binding.profile !== expected.profile ||

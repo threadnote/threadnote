@@ -1,11 +1,11 @@
 import {Effect, Schema} from 'effect';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
-import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError, type CodeGraphStatus} from '@threadnote/graph/types';
 import {WorkflowAutomationError, WorkflowGraph} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {WorkflowBinding} from '../workflow_memory/protocol.js';
+import {resolveWorkflowGraphScope} from '../workflow_memory/graph_scope.js';
 import {nativeWorkflowError} from './memory.js';
 
 const isReady = (status: CodeGraphStatus, repo: string) =>
@@ -25,7 +25,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
   const query = yield* CodeGraphQueryService;
   const indexer = yield* CodeGraphIndexer;
   // A memory project tag is not a graph scope selector.
-  const route = yield* resolveCodeGraphScopeRoute(config.manifestPath, binding.repo);
+  const route = yield* resolveWorkflowGraphScope(config, binding);
   const project = route.state === 'selected' ? route.project : undefined;
   const statusOptions = {
     manifestPath: config.manifestPath,
@@ -44,8 +44,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           if (options.prepare === false)
             return yield* WorkflowAutomationError.make({
               code: 'evidence-unavailable',
-              message:
-                'Code citations require an already-published ready graph; run `threadnote graph index --no-vectors` from callerCwd, then retry. No indexing was started.',
+              message: `Code citations require an already-published ready graph; run \`threadnote graph index --no-vectors${project ? ` --project ${project.name}` : ''}\` from callerCwd, then retry. No indexing was started.`,
               retryable: false,
             });
           yield* indexer.index({
