@@ -4725,6 +4725,82 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('validates a reviewed tree after a new commit and rejects committed tree drift', () =>
+    Effect.gen(function* () {
+      for (const changedTree of [false, true]) {
+        const f = yield* fixture(['one'], 'local');
+        yield* f.mutate('begin-phase', {phaseId: 'one'});
+        const work = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            packet,
+          }),
+        );
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "reviewed";\n');
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', 'Reviewed implementation']);
+        const snapshot = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: String(work.workRef),
+          }),
+        );
+        const review = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-review',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: String(snapshot.snapshotRef),
+            report: {
+              mode: 'full',
+              selected: ['correctness', 'simplicity'],
+              lanes: [
+                {name: 'correctness', status: 'complete'},
+                {name: 'simplicity', status: 'complete'},
+              ],
+              findings: [],
+            },
+          }),
+        );
+        const reviewedHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        const reviewedTree = EffectString.trim((yield* f.git(['rev-parse', 'HEAD^{tree}'])).stdout);
+        if (changedTree) {
+          yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "changed";\n');
+          yield* f.git(['add', 'source.ts']);
+          yield* f.git(['commit', '-m', 'Changed implementation']);
+        } else yield* f.git(['commit', '--allow-empty', '-m', 'Build marker']);
+        expect(EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout)).not.toBe(reviewedHead);
+        expect(EffectString.trim((yield* f.git(['rev-parse', 'HEAD^{tree}'])).stdout) === reviewedTree).toBe(
+          !changedTree,
+        );
+        const stored = yield* readNativeWorkflowState(f.config, 'native-run');
+        if (!stored) throw new Error('Expected the canonical workflow journal.');
+        const journalPath = f.journalPath(stored.state.bindingId);
+        const beforeJournal = yield* f.fs.readFileString(journalPath);
+        const beforeState = yield* f.fs.readFileString(f.statePath());
+        const validation = runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(review.snapshotRef),
+          validation: {
+            checks: [{command: 'focused fixture check', result: 'passed', evidence: 'Reviewed tree checked.'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'Reviewed tree works.'}],
+          },
+        });
+        if (changedTree) {
+          expect(yield* validation.pipe(Effect.result)).toMatchObject({failure: {code: 'source-drift'}});
+          expect(yield* f.fs.readFileString(journalPath)).toBe(beforeJournal);
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeState);
+        } else expect(object(yield* validation)).toMatchObject({status: 'recorded', replayed: false});
+      }
+    }).pipe(run),
+  );
+
   // prettier-ignore
   effectIt.effect('records a canonical snapshot and review with exact replay after source drift', () =>
     Effect.gen(function* () {

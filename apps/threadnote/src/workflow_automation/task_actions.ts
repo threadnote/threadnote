@@ -1354,7 +1354,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         attempt,
       };
     }
-
     if (request.command === 'record-validation') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
       if (
@@ -1388,16 +1387,18 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === ref.snapshotId),
       );
       if (!report) return yield* fail('review-pending', 'Record the complete accepted review before validation.');
+      const proof = state.phases[ref.phaseId];
+      const head = proof?.validation ? proof.head : yield* gitValue(['rev-parse', 'HEAD'], checkout);
+      if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
       const validation = {
         snapshotTree: entry.snapshot.tree,
         reviewTree: entry.snapshot.tree,
-        head: entry.snapshot.head,
+        head,
         status: 'passed' as const,
         productState: 'working' as const,
         checks: request.validation.checks,
         acceptance: request.validation.acceptance,
       };
-      const proof = state.phases[ref.phaseId];
       const validationDigest = sha256HexSync(stableJson(validation));
       const validationRef = encodeNativeTaskActionRef({
         ...ref,
@@ -1407,7 +1408,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (proof?.validation) {
         if (
           proof.phaseHash !== ref.phaseHash ||
-          proof.head !== entry.snapshot.head ||
+          proof.head !== validation.head ||
           proof.tree !== entry.snapshot.tree ||
           stableJson(proof.validation) !== stableJson(validation) ||
           (ref.kind === 'validation' && ref.payloadDigest !== validationDigest)
@@ -1425,6 +1426,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
               command: 'ready',
               phaseId: ref.phaseId,
               snapshotId: ref.snapshotId,
+              acceptedHead: head,
               validation,
               expectedRevision: stored.revision,
             }),
@@ -1437,7 +1439,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!accepted) return yield* fail('validation-not-recorded', 'The canonical phase validation was not persisted.');
       return {status: 'recorded', replayed: false, validationRef, validation: accepted};
     }
-
     if (request.command === 'deliver-local') {
       const ref = decodeNativeTaskActionRef(request.validationRef);
       if (
