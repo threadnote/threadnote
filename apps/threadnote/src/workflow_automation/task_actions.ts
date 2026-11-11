@@ -40,15 +40,15 @@ import {
 } from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {statusDevSkills} from '../dev_skills/index.js';
 import {gitValue} from '../utils.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
+import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {inspectNativeSourcePaths} from './authoring.js';
 import {makeWorkflowGitAdapter} from './cycle_git.js';
-import {makeWorkflowGraphAdapter} from './graph.js';
+import {requireWorkflowGraphReady} from './graph.js';
+import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
@@ -334,44 +334,7 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
   );
 };
 
-/** The installed selector is checked for start and resume, never treated as actor/publication authority. */
-export const readNativeTaskInstalledTarget = (
-  config: RuntimeConfig,
-  installationTarget: string | undefined,
-  checkout: string,
-  allowedProfiles: readonly ('desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal')[] = ['desktop'],
-) =>
-  Effect.gen(function* () {
-    if (!installationTarget)
-      return yield* fail(
-        'needs-resources',
-        'Select an installed Threadnote skill target. It must have the current verified workflow bundle before a task can start or resume.',
-      );
-    const installed = yield* inCheckout(
-      statusDevSkills(config, {agent: installationTarget}).pipe(
-        Effect.mapError(() =>
-          fail('needs-resources', 'The selected skill target could not verify an installed workflow bundle.'),
-        ),
-      ),
-      checkout,
-    );
-    if (installed.targets.length !== 1)
-      return yield* fail('needs-selection', 'Select exactly one installed Threadnote skill target for this task.');
-    const target = installed.targets[0];
-    if (
-      !target.enrolled ||
-      !target.enabled ||
-      target.installationState !== 'current' ||
-      !allowedProfiles.includes(target.target.profile) ||
-      target.installedDigest !== installed.bundle.digest ||
-      target.installed?.digest !== installed.bundle.digest
-    )
-      return yield* fail(
-        'needs-resources',
-        'The selected target does not have the current verified Threadnote workflow generation enabled. Update or repair that installation, then retry.',
-      );
-    return {...target, installedDigest: installed.bundle.digest};
-  });
+export {readNativeTaskInstalledTarget} from './task_admission.js';
 
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -414,27 +377,35 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     const currentSystem = yield* SystemInfo;
     const inCallerCheckout = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(Effect.provideService(SystemInfo, {...currentSystem, currentDirectory: () => checkout}));
+    const graphProject =
+      request.graphProject === undefined
+        ? undefined
+        : yield* validateWorkflowGraphProject(config, checkout, request.graphProject);
     const requireGraphReady = (
       generation: string,
       profile: 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal',
       team?: string,
     ) =>
-      Effect.gen(function* () {
-        const binding = yield* resolveWorkflowBinding(config, {
-          protocolVersion: 1,
-          action: 'bind',
-          workflowRunId: 'native-v1-' + runId,
-          project,
-          featureId,
-          generation,
-          profile,
-          ...(team === undefined ? {} : {team}),
-        });
-        const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false});
-        return yield* graph.ready(checkout);
+      requireWorkflowGraphReady(config, {
+        checkout,
+        runId,
+        project,
+        featureId,
+        generation,
+        profile,
+        recovery: stored ? 'new-task' : 'same-task',
+        ...(team === undefined ? {} : {team}),
+        ...((stored?.state.graphProject ?? graphProject) === undefined
+          ? {}
+          : {graphProject: stored?.state.graphProject ?? graphProject}),
       }).pipe(inCallerCheckout);
 
     if (stored) {
+      if (graphProject !== undefined && graphProject !== stored.state.graphProject)
+        return yield* fail(
+          'graph-scope-conflict',
+          'This run already has an immutable graph scope. Start a new task with a new feature name and graphProject or --graph-project, or make the manifest unambiguous.',
+        );
       if (
         stored.state.project !== project ||
         stored.state.featureId !== featureId ||
@@ -569,6 +540,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         generation: target.installedDigest,
         profile: target.target.profile,
         title: request.intent.title,
+        ...(graphProject === undefined ? {} : {graphProject}),
       }),
     );
     const initResult: unknown = initialized;

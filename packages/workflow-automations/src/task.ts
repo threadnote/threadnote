@@ -10,6 +10,7 @@ import {nativeCycleReviewRecordingMode} from './cycle_review.js';
 export const NativeTaskStartRequestSchema = Schema.Struct({
   callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
   installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
   taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   intent: NativeCompactIntentSchema,

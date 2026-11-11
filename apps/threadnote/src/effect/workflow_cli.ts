@@ -250,6 +250,7 @@ export function makeNativeTaskStartCommand<E, R>(
     readonly callerCwd: string;
     readonly featureName: string;
     readonly installationTarget: string;
+    readonly graphProject?: string;
     readonly taskRef?: string;
     readonly title: string;
     readonly currentBehavior: string;
@@ -275,6 +276,7 @@ export function makeNativeTaskStartCommand<E, R>(
         'Installed Threadnote host target verified on start or resume',
       ),
       taskRef: optionalString('task-ref', 'Opaque task reference returned by a previous start'),
+      graphProject: optionalString('graph-project', 'Configured graph project for a new native run'),
       title: requiredString('title', 'Task title'),
       currentBehavior: requiredString('current-behavior', 'Current behavior'),
       desiredChange: requiredString('desired-change', 'Desired behavior'),

@@ -516,6 +516,81 @@ const publishOpenHistoricalPhase = (
   });
 
 describe('native task actions', () => {
+  effectIt.effect('starts in a selected graph project and rejects ambiguous unselected scope', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const repo = yield* f.fs.realPath(f.repo);
+      const home = yield* f.fs.realPath(f.home);
+      const config = {...f.config, agentContextHome: home, manifestPath: f.path.join(home, 'manifest.json')};
+      const system = yield* SystemInfo;
+      const testSystem = {...system, currentDirectory: () => repo, homeDirectory: home};
+      yield* f.fs.makeDirectory(f.path.join(repo, 'apps', 'alpha'), {recursive: true});
+      yield* f.fs.makeDirectory(f.path.join(repo, 'apps', 'beta'), {recursive: true});
+      yield* f.fs.writeFileString(
+        f.path.join(repo, 'package.json'),
+        JSON.stringify({private: true, workspaces: ['apps/*']}),
+      );
+      yield* f.fs.writeFileString(
+        f.path.join(repo, 'apps', 'alpha', 'package.json'),
+        JSON.stringify({name: '@fixture/alpha'}),
+      );
+      yield* f.fs.writeFileString(
+        f.path.join(repo, 'apps', 'beta', 'package.json'),
+        JSON.stringify({name: '@fixture/beta'}),
+      );
+      yield* f.fs.writeFileString(f.path.join(repo, 'apps', 'alpha', 'source.ts'), 'export const selected = true;\n');
+      yield* f.fs.writeFileString(f.path.join(repo, 'apps', 'beta', 'source.ts'), 'export const other = true;\n');
+      yield* runCommandEffect('git', ['-C', repo, 'add', '.']);
+      yield* runCommandEffect('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        'commit',
+        '-m',
+        'Graph projects',
+      ]);
+      const projects = EffectArray.map(['Alpha', 'Beta'], name => ({
+        name,
+        path: repo,
+        seed: [],
+        uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+        graph: {closure: 'dependencies' as const, roots: [`apps/${EffectString.toLowerCase(name)}`]},
+      }));
+      yield* f.fs.writeFileString(config.manifestPath, JSON.stringify({version: 1, projects}));
+      yield* applyDevSkills(config, 'install', {agent: 'codex'}).pipe(Effect.provideService(SystemInfo, testSystem));
+      const intent = {
+        title: 'Selected graph task',
+        currentBehavior: 'Selected source is not checked.',
+        desiredChange: 'Selected source is checked.',
+        affectedPaths: ['apps/alpha/source.ts'],
+        acceptanceCriterion: 'Selected source is checked.',
+        verification: 'Inspect selected source.',
+        eligibilityRationale: 'One local source and behavior are explicit.',
+        eligibility: {status: 'eligible' as const},
+        review: {required: false, reason: 'Focused fixture.'},
+      };
+      const request = {callerCwd: repo, featureName: 'Selected graph task', installationTarget: 'codex', intent};
+      const unselected = yield* runNativeTaskStart(config, request).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+        Effect.result,
+      );
+      expect(unselected).toMatchObject({failure: {code: 'graph-scope-required'}});
+      const index = yield* (yield* CodeGraphIndexer).index({cwd: repo, threadnoteHome: home, project: projects[0]});
+      expect(index.snapshot.state).toBe('ready');
+      const started = object(
+        yield* runNativeTaskStart(config, {...request, graphProject: ' alpha '}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        ),
+      );
+      if (typeof started.taskRef !== 'string') throw new Error('Expected task reference after start');
+      const state = yield* readNativeWorkflowState(config, started.taskRef);
+      expect(state?.state.graphProject).toBe('Alpha');
+    }).pipe(run),
+  );
+
   effectIt.effect(
     'reports a read-back drained outcome for a canonical prior binding without rewriting its history',
     () =>

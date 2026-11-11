@@ -52,6 +52,7 @@ export const validateWorkflowGraphProject = Effect.fn('workflowGraph.validatePro
 export const resolveWorkflowGraphScope = Effect.fn('workflowGraph.resolveScope')(function* (
   config: RuntimeConfig,
   binding: Pick<WorkflowBinding, 'repo' | 'graphProject'>,
+  recovery: 'fresh-run' | 'same-task' | 'new-task' = 'fresh-run',
 ) {
   if (binding.graphProject !== undefined) {
     const name = yield* validateWorkflowGraphProject(config, binding.repo, binding.graphProject).pipe(
@@ -87,7 +88,7 @@ export const resolveWorkflowGraphScope = Effect.fn('workflowGraph.resolveScope')
       Schema.is(CodeGraphScopeRoutingError)(error) && error.projects
         ? workflowError(
             'graph-scope-required',
-            `Graph scope is ambiguous. Start a fresh run with graphProject or --graph-project set to one of: ${choices(error.projects)}. Alternatively, make the graph manifest unambiguous, then retry this run.`,
+            `Graph scope is ambiguous. ${recovery === 'same-task' ? 'Retry this task start with the same feature name' : recovery === 'new-task' ? 'Start a new task with a new feature name' : 'Start a fresh run'} and graphProject or --graph-project set to one of: ${choices(error.projects)}. Alternatively, make the graph manifest unambiguous${recovery === 'same-task' ? ', then retry this task start' : ', then retry this run'}.`,
           )
         : workflowError(
             'graph-scope-unavailable',

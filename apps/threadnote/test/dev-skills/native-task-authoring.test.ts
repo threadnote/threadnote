@@ -302,6 +302,78 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('selects a configured graph project on task-author start in an ambiguous checkout', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    yield* f.fs.makeDirectory(f.path.join(f.repo, 'apps', 'alpha'), {recursive: true});
+    yield* f.fs.makeDirectory(f.path.join(f.repo, 'apps', 'beta'), {recursive: true});
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'package.json'),
+      JSON.stringify({private: true, workspaces: ['apps/*']}),
+    );
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'apps', 'alpha', 'package.json'),
+      JSON.stringify({name: '@fixture/alpha'}),
+    );
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'apps', 'beta', 'package.json'),
+      JSON.stringify({name: '@fixture/beta'}),
+    );
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'apps', 'alpha', 'source.ts'), 'export const selected = true;\n');
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'apps', 'beta', 'source.ts'), 'export const other = true;\n');
+    yield* runCommandEffect('git', ['-C', f.repo, 'add', '.']);
+    yield* runCommandEffect('git', [
+      '-C',
+      f.repo,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-m',
+      'Graph projects',
+    ]);
+    const projects = A.map(['Alpha', 'Beta'], name => ({
+      name,
+      path: f.repo,
+      seed: [],
+      uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+      graph: {closure: 'dependencies' as const, roots: [`apps/${EffectString.toLowerCase(name)}`]},
+    }));
+    yield* f.fs.writeFileString(f.config.manifestPath, JSON.stringify({version: 1, projects}));
+    const contentFile = f.path.join(f.root, 'graph-spec-business.json');
+    yield* f.fs.writeFileString(
+      contentFile,
+      JSON.stringify({...specBusiness, context: {...specBusiness.context, codeRefs: ['apps/alpha/source.ts']}}),
+    );
+    const request = {
+      command: 'start',
+      callerCwd: f.repo,
+      featureName: 'Graph scope fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    };
+    const unselected = yield* runNativeTaskAuthoring(f.config, request).pipe(
+      Effect.provideService(SystemInfo, f.scoped),
+      Effect.result,
+    );
+    expect(unselected).toMatchObject({failure: {code: 'graph-scope-required'}});
+    if (unselected._tag !== 'Failure') throw new Error('Expected ambiguous graph scope to block start');
+    expect(unselected.failure.message).toContain('graphProject');
+    expect(unselected.failure.message).toContain('--graph-project');
+    expect(unselected.failure.message).toContain('Alpha');
+    expect(unselected.failure.message).toContain('Beta');
+    expect(unselected.failure.message).not.toContain(f.root);
+    const index = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home, project: projects[0]});
+    expect(index.snapshot.state).toBe('ready');
+    const selected = yield* f.author({...request, graphProject: ' alpha '});
+    expect(selected.status).toBe('draft');
+    const state = yield* readNativeWorkflowState(f.config, String(selected.runId));
+    expect(state?.state.graphProject).toBe('Alpha');
+  }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect('reports canonical path failures on task-author start and save without changing state', () =>
   Effect.gen(function* () {
     const f = yield* setup;

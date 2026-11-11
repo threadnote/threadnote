@@ -27,8 +27,8 @@ import {runWorkflowAutomation} from './index.js';
 import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_actions.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
-import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
-import {makeWorkflowGraphAdapter} from './graph.js';
+import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
+import {requireWorkflowGraphReady} from './graph.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -114,6 +114,7 @@ const inputSchema = Schema.Union([
     contentFile: text,
     saveMode: Schema.optionalKey(Schema.Literal('background')),
     installationTarget: Schema.optionalKey(text),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
     specRef: Schema.optionalKey(text),
   }),
   Schema.Struct({
@@ -205,6 +206,10 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     const reported = yield* gitValue(['rev-parse', '--show-toplevel'], cwd);
     if (!reported) return yield* fail('wrong-checkout', 'Use the original Git checkout.');
     const checkout = yield* fs.realPath(reported);
+    const graphProject =
+      request.command === 'start' && request.graphProject !== undefined
+        ? yield* validateWorkflowGraphProject(config, checkout, request.graphProject)
+        : undefined;
     const system = yield* SystemInfo;
     const inCheckout = <B, E, R>(program: Effect.Effect<B, E, R>) =>
       program.pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => checkout}));
@@ -226,6 +231,16 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     const runId =
       suppliedJob?.runId ?? supplied?.runId ?? 'task-' + S.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
     let stored = yield* readNativeWorkflowState(config, runId);
+    if (
+      request.command === 'start' &&
+      stored &&
+      graphProject !== undefined &&
+      graphProject !== stored.state.graphProject
+    )
+      return yield* fail(
+        'graph-scope-conflict',
+        'This run already has an immutable graph scope. Start a new task with a new feature name and graphProject or --graph-project, or make the manifest unambiguous.',
+      );
     if (stored && (stored.state.project !== project || (featureId && stored.state.featureId !== featureId)))
       return yield* fail('binding-drift', 'The authoring task belongs to another feature or checkout namespace.');
     if (!stored && request.command !== 'start')
@@ -683,19 +698,18 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           'codex-cloud-personal',
           'cursor-cloud-personal',
         ]);
-        const binding = yield* inCheckout(
-          resolveWorkflowBinding(config, {
-            protocolVersion: 1,
-            action: 'bind',
-            workflowRunId: 'native-v1-' + runId,
+        yield* inCheckout(
+          requireWorkflowGraphReady(config, {
+            checkout,
+            runId,
             project,
             featureId,
             generation: target.installedDigest,
             profile: target.target.profile,
+            ...(graphProject === undefined ? {} : {graphProject}),
+            recovery: 'same-task',
           }),
         );
-        const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false});
-        yield* graph.ready(checkout);
         yield* inCheckout(
           runWorkflowAutomation(config, {
             protocolVersion: 1,
@@ -707,6 +721,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
             generation: target.installedDigest,
             profile: target.target.profile,
             title: document.title,
+            ...(graphProject === undefined ? {} : {graphProject}),
           }),
         );
         stored = yield* readNativeWorkflowState(config, runId);

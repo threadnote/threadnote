@@ -32,6 +32,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
         installationTarget: McpInput.string('Installed target selector for start or authoring job resume'),
+        graphProject: McpInput.string('Configured graph project for a new authoring task'),
         authoringRef: McpInput.string('Current authoring continuation'),
         jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
         operation: Schema.optionalKey(Schema.Literals(['status', 'result', 'cancel', 'resume'])),
@@ -69,16 +70,18 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           'Installed Threadnote host target, required to verify the current bundle on start or resume',
         ),
         taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
+        graphProject: McpInput.string('Configured graph project for a new native run'),
         intent: NativeCompactIntentSchema,
       },
     },
     Effect.fn('mcp_server.workflowTaskStart')(function* (input) {
-      const {callerCwd, featureName, installationTarget, taskRef, intent} = input;
+      const {callerCwd, featureName, installationTarget, taskRef, graphProject, intent} = input;
       const result = yield* runNativeTaskStart(config, {
         callerCwd,
         featureName,
         ...(installationTarget === undefined ? {} : {installationTarget}),
         ...(taskRef === undefined ? {} : {taskRef}),
+        ...(graphProject === undefined ? {} : {graphProject}),
         intent,
       });
       const text = JSON.stringify(result);

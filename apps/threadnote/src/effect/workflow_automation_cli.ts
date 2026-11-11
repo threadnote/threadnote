@@ -146,6 +146,7 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             featureName: fields.featureName,
             ...(fields.installationTarget === undefined ? {} : {installationTarget: fields.installationTarget}),
             ...(fields.taskRef === undefined ? {} : {taskRef: fields.taskRef}),
+            ...(fields.graphProject === undefined ? {} : {graphProject: fields.graphProject}),
             intent,
           }).pipe(
             Effect.flatMap(value => Console.log(JSON.stringify(value))),

@@ -20,6 +20,7 @@ export const makeNativeTaskAuthoringCommand = (withRuntime: CliRuntimeRunner) =>
       contentFile: optionalString('content-file', 'Business JSON artifact; omit native metadata'),
       saveMode: optionalChoice('save-mode', ['background'], 'Submit an exact save to the durable native job worker'),
       installationTarget: optionalString('installation-target', 'Installed target selector for start or job resume'),
+      graphProject: optionalString('graph-project', 'Configured graph project for a new authoring task'),
       authoringRef: optionalString('authoring-ref', 'Opaque current authoring continuation'),
       jobRef: optionalString('job-ref', 'Opaque accepted semantic authoring job continuation'),
       jobOperation: optionalChoice('job-operation', ['status', 'result', 'cancel', 'resume'], 'Operate on one job'),
