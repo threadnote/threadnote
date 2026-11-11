@@ -3,6 +3,7 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
   Array as EffectArray,
+  Arbitrary,
   Clock,
   Effect,
   FileSystem,
@@ -14,8 +15,9 @@ import {
   String as EffectString,
 } from 'effect';
 import {TestClock} from 'effect/testing';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
+import * as Native from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   SystemInfo,
@@ -217,50 +219,143 @@ effectIt.effect.skipIf(!supported)(
 );
 
 describe.skipIf(!supported)('native admission serialization', () => {
-  effectIt.effect.prop(
-    'authenticates equivalent serialized admission values independently of object key order',
-    [
-      Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65535}))).check(
-        Schema.isMinLength(1),
-        Schema.isMaxLength(12),
-      ),
-    ],
-    ([shifts]) =>
-      TestClock.withLive(
-        Effect.gen(function* () {
-          const f = yield* fixture;
-          const handle = yield* f.admit();
-          const original = yield* f.writer.resolve(f.scope, handle);
-          const serialized: unknown = JSON.parse(JSON.stringify(original));
-          const reordered = reorderObjectKeys(serialized, shifts);
-          expect(reordered).toEqual(serialized); // Deep values and ordered arrays are the independent invariant.
-          yield* f.authority.withAdmission(
-            handle.operation,
-            Effect.sync(() => {
-              const result = runtimePublishPrivateWriterFile(
-                f.authority.directory,
-                handle.operation + '.admission.json',
-                new TextEncoder().encode(JSON.stringify(reordered)),
-                {
-                  mode: 'replace',
-                  nonce: sha256HexSync('key-order-roundtrip'),
-                  assertCurrentSync: () => f.authority.assertOperationSync(handle.operation),
-                },
-              );
-              expect(result.status).toBe('published');
-            }),
-          );
-          const restored = yield* f.writer.resolve(f.scope, handle);
-          expect(restored).toEqual(original);
-          expect((yield* f.writer.status(f.scope, handle)).status).toBe('not-started');
+  effectIt.effect('authenticates reordered values through the real decoder and capability verifier', () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const handle = yield* f.admit();
+        const original = yield* f.writer.resolve(f.scope, handle);
+        const name = handle.operation + '.admission.json';
+        const seeded = runtimeReadPrivateWriterFile(f.authority.directory, name, 16 * 1024 * 1024);
+        if (!seeded) return yield* Effect.die('Seeded admission bytes unavailable');
+        const serialized: unknown = JSON.parse(JSON.stringify(original));
+        let currentBytes = new Uint8Array();
+        let reads = 0;
+        let served: Uint8Array | undefined;
+        const unexpectedIo = (): never => {
+          throw new Error('Unexpected I/O in value-authentication property');
+        };
+        const authority = new Proxy(f.authority, {
+          get(target, key) {
+            if (key === 'directory') return target.directory;
+            if (key === 'withOperation')
+              return <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
+                operation === handle.operation
+                  ? effect
+                  : Effect.die('Unexpected operation in value-authentication property');
+            return unexpectedIo();
+          },
+        });
+        const retire = Effect.gen(function* () {
           expect(
             (yield* f.writer.retire(f.scope, handle, 'discarded', 'Explicit property fixture cleanup')).status,
           ).toBe('retired');
-          for (const [index, original] of f.sources.entries())
-            expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(original);
-        }),
-      ).pipe(Effect.provide(layer)),
-    {arbitrary: {runs: 8}},
+        });
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => [
+            vi.spyOn(Native, 'runtimeReadPrivateWriterFile').mockImplementation((directory, filename, maximum) => {
+              if (directory !== f.authority.directory || filename !== name || maximum !== 16 * 1024 * 1024)
+                return unexpectedIo();
+              reads++;
+              served = currentBytes.slice();
+              return {...seeded, bytes: served};
+            }),
+            vi.spyOn(Native, 'runtimePublishPrivateWriterFile').mockImplementation(unexpectedIo),
+            vi.spyOn(Native, 'runtimeRemovePrivateWriterFile').mockImplementation(unexpectedIo),
+            vi.spyOn(Native, 'runtimeOpenWriterRoot').mockImplementation(unexpectedIo),
+            vi.spyOn(Native, 'runtimeOpenGuardedDiskTarget').mockImplementation(unexpectedIo),
+            vi.spyOn(Native, 'runtimeCommitGuardedDiskTarget').mockImplementation(unexpectedIo),
+          ]),
+          () =>
+            Effect.gen(function* () {
+              const isolated = yield* makeSemanticHostWriterFromAuthority(authority).pipe(
+                Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({})),
+              );
+              const checkRead = (before: number) => {
+                expect(reads).toBe(before + 1);
+                expect(served).not.toBe(currentBytes);
+                expect(served).toEqual(currentBytes);
+              };
+              const authenticatePermutation = (shifts: readonly number[]) =>
+                Effect.gen(function* () {
+                  const reordered = reorderObjectKeys(serialized, shifts);
+                  expect(reordered).toEqual(serialized); // Values and material array order are the independent model.
+                  currentBytes = new TextEncoder().encode(JSON.stringify(reordered));
+                  const before = reads;
+                  expect(yield* isolated.resolve(f.scope, handle)).toEqual(original);
+                  checkRead(before);
+                  return true;
+                });
+              // Require a changed encoding even if the generated rotations happen to be identities.
+              expect(JSON.stringify(reorderObjectKeys(serialized, [1]))).not.toBe(JSON.stringify(serialized));
+              yield* authenticatePermutation([1]);
+              const result = yield* Arbitrary.checkEffect(
+                Arbitrary.schema(
+                  Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 65535}))).check(
+                    Schema.isMinLength(1),
+                    Schema.isMaxLength(12),
+                  ),
+                ),
+                authenticatePermutation,
+                {runs: 8},
+              );
+              const failure = Arbitrary.formatCheckFailure(result);
+              if (failure !== undefined) return yield* Effect.die(new Error(failure));
+              const before = reads;
+              const wrong = sha256HexSync('wrong-value-property-capability');
+              const capability = wrong === handle.capability ? sha256HexSync('other-wrong-capability') : wrong;
+              expect(yield* isolated.resolve(f.scope, {...handle, capability}).pipe(Effect.flip)).toMatchObject({
+                _tag: 'ApplyFault',
+                reason: 'unauthorized',
+              });
+              checkRead(before);
+            }),
+          spies =>
+            Effect.sync(() => {
+              for (const spy of spies) spy.mockRestore();
+            }),
+        ).pipe(Effect.ensuring(retire.pipe(Effect.orDie)));
+        expect(serialized).toEqual(original);
+        for (const [index, source] of f.sources.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(source);
+      }),
+    ).pipe(Effect.provide(layer)),
+  );
+  effectIt.effect('publishes one nonidentity native key ordering and authenticates it through retirement', () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const handle = yield* f.admit();
+        const original = yield* f.writer.resolve(f.scope, handle);
+        const serialized: unknown = JSON.parse(JSON.stringify(original));
+        const reordered = reorderObjectKeys(serialized, [1]);
+        expect(reordered).toEqual(serialized);
+        expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(serialized));
+        yield* f.authority.withAdmission(
+          handle.operation,
+          Effect.sync(() => {
+            const result = runtimePublishPrivateWriterFile(
+              f.authority.directory,
+              handle.operation + '.admission.json',
+              new TextEncoder().encode(JSON.stringify(reordered)),
+              {
+                mode: 'replace',
+                nonce: sha256HexSync('key-order-roundtrip'),
+                assertCurrentSync: () => f.authority.assertOperationSync(handle.operation),
+              },
+            );
+            expect(result.status).toBe('published');
+          }),
+        );
+        expect(yield* f.writer.resolve(f.scope, handle)).toEqual(original);
+        expect((yield* f.writer.status(f.scope, handle)).status).toBe('not-started');
+        expect(
+          (yield* f.writer.retire(f.scope, handle, 'discarded', 'Explicit native ordering fixture cleanup')).status,
+        ).toBe('retired');
+        for (const [index, source] of f.sources.entries())
+          expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, `${index}.ts`))).toBe(source);
+      }),
+    ).pipe(Effect.provide(layer)),
   );
 });
 
