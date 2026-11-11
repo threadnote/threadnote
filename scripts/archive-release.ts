@@ -60,9 +60,12 @@ export const archiveRelease = Effect.fn('archiveRelease')(function* (options: Ar
   });
   if (vector.development || vector.bunTarget !== release.target)
     return yield* ScriptError.make({message: 'Native vector reader target/source mode differs from this release.'});
-  yield* verifyNativeInferenceOverlay(distributionRoot).pipe(
+  const inference = yield* verifyNativeInferenceOverlay(distributionRoot).pipe(
     Effect.mapError(cause => ScriptError.make({message: 'Native inference payload is invalid before archive.', cause})),
   );
+
+  if (inference.bunTarget !== release.target)
+    return yield* ScriptError.make({message: 'Native inference target/libc differs from this release.'});
 
   yield* fs.makeDirectory(artifactsRoot, {recursive: true});
   yield* fs.remove(artifactPath, {force: true});

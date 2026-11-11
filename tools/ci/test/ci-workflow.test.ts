@@ -217,8 +217,36 @@ it('builds each native release once and fans its archive out to independent requ
     THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
   });
   expect(step(releaseJobs['extracted-workflows'], 'Workflow journal persistence smoke')?.if).toBe(
-    "matrix.profile == 'all' || matrix.profile == 'desktop'",
+    "${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}",
   );
+});
+
+it('executes musl extracted archives and their compiled harness inside the native musl container', () => {
+  const consumer = releaseJobs['extracted-workflows'];
+  expect(consumer?.if).toBeUndefined();
+  expect(step(consumer, 'Extracted release and installed workflow lifecycle')?.if).toBe(
+    "${{ !endsWith(inputs.target, '-musl') }}",
+  );
+  const musl = step(consumer, 'Extracted musl release and installed workflow lifecycle');
+  expect(musl?.if).toBe("endsWith(inputs.target, '-musl')");
+  expect(musl?.env).toEqual({
+    THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
+    THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
+  });
+  expect(musl?.run).toContain('assemble-native-inference.ts --musl-container --workflow-runtime');
+  const builder = step(releaseJobs.build, 'Build musl payload at the preserved libc floor');
+  expect(builder?.run).toContain('--musl-container');
+  expect(builder?.run).not.toContain('--workflow-runtime');
+  const encoded = /--container-command-json '([^']+)'/u.exec(musl?.run ?? '')?.[1];
+  expect(encoded).toBeDefined();
+  const command = Schema.decodeUnknownSync(Schema.Array(Schema.String))(JSON.parse(encoded ?? 'null'));
+  expect(command.slice(0, 2)).toEqual(['bash', '-ec']);
+  expect(command[2]).toContain('command -v git; command -v rg; command -v bwrap;');
+  expect(command[2]).toContain('bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts');
+  expect(command[2]).toContain(
+    'bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
+  );
+  expect(command[2]).not.toContain('build:release');
 });
 
 it('partitions only catalog-supported macOS profiles while other platforms retain complete qualification', () => {

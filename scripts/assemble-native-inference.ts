@@ -428,12 +428,37 @@ const MUSL_PINS = {
   },
 } as const;
 
+/** Only the extracted-workflow harness needs nested mount/network namespaces and these two inputs. */
+export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.ProcessEnv>): readonly string[] {
+  const archive = environment.THREADNOTE_RELEASE_ARCHIVE;
+  const profile = environment.THREADNOTE_RELEASE_PROFILE;
+  if (
+    !archive ||
+    !/^artifacts\/threadnote-linux-(?:x64|arm64)-musl\.tar\.gz$/u.test(archive) ||
+    !profile ||
+    !/^[a-z][a-z0-9-]*$/u.test(profile)
+  )
+    throw new Error('Musl workflow execution requires its extracted release archive and profile.');
+  return [
+    '--cap-add',
+    'SYS_ADMIN',
+    '--security-opt',
+    'apparmor=unconfined',
+    '--env',
+    `THREADNOTE_RELEASE_ARCHIVE=${archive}`,
+    '--env',
+    `THREADNOTE_RELEASE_PROFILE=${profile}`,
+  ];
+}
+
 /** Native-architecture CI container only; this deliberately has no emulation switch. */
 export const runMuslBuildContainer = Effect.fn('nativeInference.muslContainer')(function* (
   root: string,
   command: readonly string[],
+  options: {readonly workflowRuntime?: boolean} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
+  const workflowArguments = options.workflowRuntime ? muslWorkflowRuntimeArguments(Bun.env) : [];
   if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
     throw new Error('Musl CI builds require a native Linux x64 or ARM64 Docker host.');
   const pins = MUSL_PINS[process.arch];
@@ -460,7 +485,7 @@ grep -q '^${pins.main} ' /tmp/index-sha256
 grep -q '^${pins.community} ' /tmp/index-sha256
 apk --cache-dir /tmp/threadnote-index fetch --recursive --output /tmp/threadnote-apks \
  build-base=0.5-r3 cmake=3.24.4-r0 samurai=1.2-r2 nodejs=18.20.1-r0 npm=9.1.2-r0 \
- python3=3.10.15-r0 git=2.39.5-r0 curl=8.9.0-r0 bash=5.2.15-r0 linux-headers=5.19.5-r0
+ python3=3.10.15-r0 git=2.39.5-r0 curl=8.9.0-r0 bash=5.2.15-r0 linux-headers=5.19.5-r0${options.workflowRuntime ? ' ripgrep=13.0.0-r1 bubblewrap=0.7.0-r0' : ''}
 find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /tmp/index-after-sha256
 cmp /tmp/index-sha256 /tmp/index-after-sha256
 apk --no-network add /tmp/threadnote-apks/*.apk
@@ -487,6 +512,7 @@ bun ${shellDriver}
       'run',
       '--rm',
       '--init',
+      ...workflowArguments,
       '--volume',
       `${root}:${root}`,
       '--workdir',
@@ -525,7 +551,7 @@ if (import.meta.main) {
   const main = Bun.argv.includes('--gnu-container')
     ? runGnuBuildContainer(ROOT, parsedCommand)
     : Bun.argv.includes('--musl-container')
-      ? runMuslBuildContainer(ROOT, parsedCommand)
+      ? runMuslBuildContainer(ROOT, parsedCommand, {workflowRuntime: Bun.argv.includes('--workflow-runtime')})
       : overlay
         ? stageNativeInferenceOverlay(overlay, destination)
         : assembleNativeInference({

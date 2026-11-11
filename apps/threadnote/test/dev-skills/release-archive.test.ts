@@ -43,7 +43,10 @@ interface FixtureFile {
   readonly bytes: Uint8Array;
   readonly executable?: boolean;
 }
-const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: readonly FixtureFile[]) {
+const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
+  files: readonly FixtureFile[],
+  options: {readonly bunTarget?: string; readonly inferenceTarget?: string} = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -52,7 +55,7 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: reado
   const extracted = path.join(root, 'extracted');
   yield* fs.makeDirectory(dist);
   yield* fs.makeDirectory(extracted);
-  const bunTarget = nativeVectorReaderHostProfile(system);
+  const bunTarget = options.bunTarget ?? nativeVectorReaderHostProfile(system);
   const target = releaseTargetForBunTarget(bunTarget);
   const vectorBytes = new TextEncoder().encode('fixture-native-vector');
   const nativeManifest = {
@@ -71,8 +74,8 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: reado
       target: nativeVectorReaderTarget(bunTarget),
       rustVersion: '1.89.0',
       buildEnvironmentSha256: nativeVectorReaderBuildEnvironmentSha256({compiler: 'fixture'}),
-      crtStatic: system.platform === 'win32',
-      deploymentTarget: system.platform === 'darwin' ? '13.0' : '',
+      crtStatic: EffectString.startsWith('bun-windows-')(bunTarget),
+      deploymentTarget: EffectString.startsWith('bun-darwin-')(bunTarget) ? '13.0' : '',
       sourceCommit: EffectString.repeat(40)('a'),
       sourceTree: EffectString.repeat(40)('b'),
       lockSha256: EffectString.repeat(64)('c'),
@@ -87,7 +90,7 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (files: reado
   const descriptor = {
     schemaVersion: 1,
     bunVersion: '1.4.4',
-    bunTarget,
+    bunTarget: options.inferenceTarget ?? bunTarget,
     packageVersion: '3.22.2',
     llamaCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
     sourceInputDigest: EffectString.repeat(64)('a'),
@@ -157,6 +160,31 @@ const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(functio
 });
 
 describe('production release archives', () => {
+  effectIt.effect('rejects verified inference overlays from another OS, architecture or libc before output', () =>
+    Effect.gen(function* () {
+      for (const [bunTarget, inferenceTarget] of [
+        ['bun-darwin-arm64', 'bun-windows-x64-baseline'],
+        ['bun-darwin-arm64', 'bun-darwin-x64'],
+        ['bun-linux-x64-baseline', 'bun-linux-x64-baseline-musl'],
+        ['bun-linux-x64-baseline-musl', 'bun-linux-x64-baseline'],
+        ['bun-linux-arm64-musl', 'bun-linux-arm64'],
+      ]) {
+        const f = yield* fixture([], {bunTarget, inferenceTarget});
+        const result = yield* archiveRelease({root: f.root, target: f.target}).pipe(Effect.result);
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure')
+          expect(result.failure).toMatchObject({message: 'Native inference target/libc differs from this release.'});
+        expect(yield* f.fs.exists(f.path.join(f.root, 'artifacts'))).toBe(false);
+      }
+    }).pipe(testLayer),
+  );
+  effectIt.effect('accepts matching GNU and musl inference profiles', () =>
+    Effect.gen(function* () {
+      for (const bunTarget of ['bun-linux-x64-baseline', 'bun-linux-x64-baseline-musl'])
+        yield* verifyRoundtrip(yield* fixture([], {bunTarget}));
+    }).pipe(testLayer),
+  );
+
   effectIt.effect('preserves process environment, payload inventory, bytes, checksums and executable mode', () =>
     Effect.gen(function* () {
       const f = yield* fixture([

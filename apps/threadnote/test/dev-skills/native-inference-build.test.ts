@@ -1,6 +1,6 @@
 import {CommandExecutor} from '@threadnote/platform/command';
-import {assembleNativeInference} from '../../../../scripts/assemble-native-inference.js';
-import {describe, expect} from 'vitest';
+import {assembleNativeInference, muslWorkflowRuntimeArguments} from '../../../../scripts/assemble-native-inference.js';
+import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, String as EffectString} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -12,6 +12,31 @@ import {
 } from '../../../../scripts/native-inference-payload.js';
 
 describe('native inference overlay filesystem boundary', () => {
+  it('runs the extracted musl harness with only its explicit archive/profile environment', () => {
+    const arguments_ = muslWorkflowRuntimeArguments({
+      THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-arm64-musl.tar.gz',
+      THREADNOTE_RELEASE_PROFILE: 'all',
+      GH_TOKEN: 'must-not-forward',
+    });
+    expect(arguments_).toEqual([
+      '--cap-add',
+      'SYS_ADMIN',
+      '--security-opt',
+      'apparmor=unconfined',
+      '--env',
+      'THREADNOTE_RELEASE_ARCHIVE=artifacts/threadnote-linux-arm64-musl.tar.gz',
+      '--env',
+      'THREADNOTE_RELEASE_PROFILE=all',
+    ]);
+    expect(arguments_).not.toContain('--privileged');
+    for (const environment of [
+      {},
+      {THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-x64.tar.gz', THREADNOTE_RELEASE_PROFILE: 'all'},
+      {THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-x64-musl.tar.gz'},
+    ])
+      expect(() => muslWorkflowRuntimeArguments(environment)).toThrow('extracted release archive and profile');
+  });
+
   effectIt.layer(BunServices.layer)(it => {
     it.effect('rejects cross-platform inference assembly before invoking build tools', () =>
       Effect.gen(function* () {

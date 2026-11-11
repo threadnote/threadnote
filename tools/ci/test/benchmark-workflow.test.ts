@@ -166,6 +166,37 @@ describe('platform benchmark workflow', () => {
       {target: 'bun-linux-x64-baseline-musl', os: 'ubuntu-24.04', musl: true, gnu: false},
     ]);
     expect(profiles).toContainEqual({target: 'bun-windows-arm64', os: 'windows-11-arm', musl: false, gnu: false});
+    const steps = job.steps ?? [];
+    const toolchain = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Initialize native Windows C toolchain'),
+    );
+    expect(toolchain).toMatchObject({if: "runner.os == 'Windows'", shell: 'pwsh'});
+    for (const token of [
+      'vswhere.exe',
+      'Microsoft.VisualStudio.DevShell.dll',
+      "$env:PROCESSOR_ARCHITECTURE -eq 'ARM64'",
+      "{ 'arm64' } else { 'x64' }",
+      '-arch=$architecture -host_arch=$architecture',
+      "@('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','WindowsSdkDir','WindowsSDKVersion')",
+      '[Environment]::GetEnvironmentVariable($name)',
+      '$env:GITHUB_ENV',
+    ])
+      expect(toolchain.run).toContain(token);
+    const verifyTools = Option.getOrThrow(
+      EffectArray.findFirst(steps, step => step.name === 'Verify Windows native tools in Bash'),
+    );
+    expect(verifyTools).toMatchObject({if: "runner.os == 'Windows'", shell: 'bash'});
+    expect(verifyTools.run).toContain('command -v cl');
+    expect(verifyTools.run).toContain('command -v dumpbin');
+    expect(steps.indexOf(toolchain)).toBeLessThan(steps.indexOf(verifyTools));
+    for (const name of [
+      'Install pinned native vector toolchain',
+      'Prepare one serial native-host capture driver',
+      'Capture serial production pairs without a required timing gate',
+    ]) {
+      const step = Option.getOrThrow(EffectArray.findFirst(steps, step => step.name === name));
+      expect(steps.indexOf(verifyTools)).toBeLessThan(steps.indexOf(step));
+    }
     const commands = EffectArray.join(
       EffectArray.map(job.steps ?? [], step => step.run ?? ''),
       '\n',

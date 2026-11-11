@@ -228,6 +228,7 @@ jobs:
           mkdir -p dist
           tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
       - name: Extracted release and installed workflow lifecycle
+        if: ${{ !endsWith(inputs.target, '-musl') }}
         run: >-
           bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
           --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json
@@ -235,8 +236,16 @@ jobs:
           THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
           THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
       - name: Workflow journal persistence smoke
-        if: matrix.profile == 'all' || matrix.profile == 'desktop'
+        if: ${{ !endsWith(inputs.target, '-musl') && (matrix.profile == 'all' || matrix.profile == 'desktop') }}
         run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
+      - name: Extracted musl release and installed workflow lifecycle
+        if: endsWith(inputs.target, '-musl')
+        run: >-
+          bun scripts/assemble-native-inference.ts --musl-container --workflow-runtime
+          --container-command-json '["bash","-ec","set -euo pipefail; command -v git; command -v rg; command -v bwrap; bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json; bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts"]'
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
+          THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
       - name: Preserve bounded release evidence
         if: always()
         uses: actions/upload-artifact@v7
