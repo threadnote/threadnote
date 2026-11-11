@@ -70,6 +70,26 @@ describe.runIf(process.env.THREADNOTE_NATIVE_VECTOR_EXPERIMENT === '1')(
       }
     });
 
+    it('keeps separate multiply/add bits and inclusive thresholds for a valid strict unit row', async () => {
+      const rows = encode([0.6, 0.8]);
+      const query = normalizeVector([-0.8, 0.6]);
+      const ordered = searchExactVectorBlobs(query, [{id: 'unit', vector: rows}], {dimensions: 2, limit: 1})[0].score;
+      // A fused second multiply/add gives -1.1920928972841694e-8 for these exact inputs.
+      expect(ordered).toBe(-1.1920928966180355e-8);
+      const bits = new DataView(new ArrayBuffer(8));
+      bits.setFloat64(0, ordered, false);
+      // Negative finite binary64: decrementing its bit pattern moves one ULP toward +Infinity.
+      bits.setBigUint64(0, bits.getBigUint64(0, false) - 1n, false);
+      const nextUp = bits.getFloat64(0, false);
+      expect(nextUp).toBeGreaterThan(ordered);
+      expect(
+        await native.searchBatch(1, rows, new Float64Array(query), new Uint32Array([0]), 1, ordered, true),
+      ).toEqual({indices: [0], scores: [ordered]});
+      expect(await native.searchBatch(1, rows, new Float64Array(query), new Uint32Array([0]), 1, nextUp, true)).toEqual(
+        {indices: [], scores: []},
+      );
+    });
+
     it('owns input copies before queueing and preserves candidate values without normalization', async () => {
       const rows = encode([1.001, 0, 1, 0]);
       const before = rows.slice();
