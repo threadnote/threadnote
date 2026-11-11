@@ -497,6 +497,32 @@ describe('native authoring documents', () => {
     );
   });
 
+  it('binds optional shared provenance without consuming business context capacity or approval intent', () => {
+    const sharedPlanRef = 'portableplan-v1.' + Effect.pipe('a', EffectString.repeat(512 - 'portableplan-v1.'.length));
+    for (const build of [validSpec, validPlan]) {
+      const original = build();
+      const absent = decodeNativeAuthoringDocument(JSON.parse(canonicalAuthoringJson(original)));
+      expect(absent.context).not.toHaveProperty('sharedPlanRef');
+      expect(nativeAuthoringDigest(absent)).toBe(nativeAuthoringDigest(original));
+      const fullContext = {
+        codeRefs: Array.from({length: 8}, (_, index) => `src/file-${index}.ts`),
+        evidenceRefs: Array.from({length: 16}, (_, index) => ({
+          uri: `threadnote://memory/tn_evidence_${index}`,
+          memoryId: `tn_evidence_${index}`,
+          revision: hash,
+        })),
+        note: Effect.pipe('n', EffectString.repeat(4096)),
+      };
+      const full = build({context: fullContext});
+      const adopted = build({context: {...fullContext, sharedPlanRef}});
+      expect(adopted.context).toEqual({...fullContext, sharedPlanRef});
+      expect(nativeAuthoringDigest(adopted)).not.toBe(nativeAuthoringDigest(full));
+      expect(nativeSpecIntentDigest(adopted)).toBe(nativeSpecIntentDigest(full));
+      for (const invalid of [sharedPlanRef + 'a', 'other-reference', 'portableplan-v1.a\nb'])
+        expect(() => build({context: {...fullContext, sharedPlanRef: invalid}})).toThrow();
+    }
+  });
+
   it('keeps spec approval intent stable across source-only changes but binds all behavioral content', () => {
     const original = validSpec();
     const sourceOnly = validSpec({

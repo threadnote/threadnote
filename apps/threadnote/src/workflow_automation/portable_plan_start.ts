@@ -169,7 +169,6 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
   yield* checkSource(plan);
   if (spec) yield* checkSource(spec);
   yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout);
-  const mark = `Shared plan reference: ${request.sharedPlanRef}`;
   const runId = 'task-' + pipe(sha256HexSync(`${project}\n${plan.id}`), EffectString.slice(0, 48));
   const existingRun = yield* readNativeWorkflowState(config, runId);
   if (existingRun) {
@@ -212,7 +211,7 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
       try: () => decodeNativeAuthoringDocument(readDocument.document),
       catch: () => fail('portable-plan-conflict', 'The current recipient plan has no readable origin.'),
     });
-    if (!pipe(currentDocument.context.note, EffectString.endsWith(mark)))
+    if (currentDocument.context.sharedPlanRef !== request.sharedPlanRef)
       return yield* fail('portable-plan-conflict', 'The existing recipient run pins a different shared plan.');
   }
   const bindings = request.bindings;
@@ -268,7 +267,7 @@ export const runNativeSharedPlanStart = Effect.fn('workflowAutomation.runNativeS
       if (!local) throw fail('portable-plan-missing', 'The recipient evidence mapping is incomplete.');
       return local;
     });
-    return {...document.context, evidenceRefs, note: `${document.context.note}\n${mark}`};
+    return {...document.context, evidenceRefs, sharedPlanRef: request.sharedPlanRef};
   };
   const recipientSpec = spec ? {...spec, context: recipientContext(spec)} : undefined;
   const recipientPlan = {...plan, context: recipientContext(plan)};

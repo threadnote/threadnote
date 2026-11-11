@@ -84,6 +84,11 @@ const context = Schema.Struct({
   codeRefs: Schema.Array(relativePath).check(Schema.isMaxLength(8)),
   evidenceRefs: Schema.Array(evidenceReference).check(Schema.isMaxLength(16)),
   note: boundedText(4096),
+  // Caller-asserted provenance, never an approval or execution capability.
+  // Adoption verifies the canonical portable reference before binding this field.
+  sharedPlanRef: Schema.optionalKey(
+    boundedText(512, true, true).check(Schema.isPattern(/^portableplan-v1\.[A-Za-z0-9_-]+$/u)),
+  ),
 });
 const requirement = Schema.Struct({id: portableId, behavior: prose});
 const scenario = Schema.Struct({

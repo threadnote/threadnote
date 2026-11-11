@@ -266,8 +266,8 @@ const shareResult = Schema.Struct({sharedPlanRef: Schema.String});
 const startResult = Schema.Struct({status: Schema.String, taskRef: Schema.String, view: Schema.Unknown});
 
 effectIt.effect.each([
-  {name: 'LF donor to CRLF recipient', donorAutocrlf: false, recipientAutocrlf: true},
-  {name: 'CRLF donor to LF recipient', donorAutocrlf: true, recipientAutocrlf: false},
+  {name: 'LF donor to CRLF recipient', donorAutocrlf: false, recipientAutocrlf: true, fullEvidence: false},
+  {name: 'CRLF donor to LF recipient', donorAutocrlf: true, recipientAutocrlf: false, fullEvidence: true},
 ] as const)(
   'publishes a linked reviewed plan and starts recipient-owned work from one shared reference ($name)',
   direction =>
@@ -399,8 +399,39 @@ effectIt.effect.each([
       );
       yield* store.write(location, specEvidenceUri, specEvidenceBody, {mode: 'create'});
       const specEvidence = {uri: specEvidenceUri, memoryId: 'tn_spec_only_fixture', revision: h(specEvidenceBody)};
-      const context = {codeRefs: ['source.ts'], evidenceRefs: [evidence], note: 'Synthetic readback evidence.'};
-      const specContext = {...context, evidenceRefs: [evidence, specEvidence]};
+      const evidenceRefs = direction.fullEvidence ? [evidence, specEvidence] : [];
+      if (direction.fullEvidence) {
+        for (let index = 0; index < 14; index++) {
+          const topic = `capacity-fixture-${index}`;
+          const uri = `${evidenceDirectory}/${topic}.md`;
+          const memoryId = `tn_capacity_fixture_${index}`;
+          const content = formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              project: 'repo',
+              topic,
+              memoryId,
+              sourceAgentClient: 'fixture',
+              timestamp: '2026-11-11T00:00:00.000Z',
+              visibility: 'personal',
+              trust: 'approved',
+              authority: 'user_approved',
+            },
+            'Approved capacity evidence.',
+          );
+          yield* store.write(location, uri, content, {mode: 'create'});
+          evidenceRefs.push({uri, memoryId, revision: h(content)});
+        }
+      }
+      const context = {
+        codeRefs: ['source.ts'],
+        evidenceRefs,
+        note: pipe('P', EffectString.repeat(4096)),
+        sharedPlanRef: encodePortablePlanRef({version: 1, team: 'older', project: 'repo', payloadHash: h('older')}),
+      };
+      const specContext = {...context, note: pipe('S', EffectString.repeat(4096))};
       const specBusiness = {
         title: 'Fixture specification',
         objective: 'Preserve the fixture.',
@@ -602,8 +633,8 @@ effectIt.effect.each([
         authoringRef: readySpec.authoringRef,
         detail: 'document',
       });
-      expect(donorPlanRead).toMatchObject({root: readyPlan.root, status: 'ready'});
-      expect(donorSpecRead).toMatchObject({root: readySpec.root, status: 'ready'});
+      expect(donorPlanRead).toMatchObject({root: readyPlan.root, status: 'ready', document: {context}});
+      expect(donorSpecRead).toMatchObject({root: readySpec.root, status: 'ready', document: {context: specContext}});
       expect(
         yield* donorAuthor({
           command: 'admit',
@@ -680,7 +711,9 @@ effectIt.effect.each([
       const localPlanDocument = decodeNativeAuthoringDocument(localDocument.document);
       if (localPlanDocument.kind !== 'plan') throw new Error('Recipient did not author a plan');
       expect(localPlanDocument.spec?.root.uri).toBe(localSpec.artifact.uri);
-      expect(localPlanDocument.context.evidenceRefs).toHaveLength(1);
+      expect(localPlanDocument.context.note).toBe(context.note);
+      expect(localPlanDocument.context.sharedPlanRef).toBe(published.sharedPlanRef);
+      expect(localPlanDocument.context.evidenceRefs).toHaveLength(direction.fullEvidence ? 16 : 0);
       const specRoot = decodeAuthoringArtifact(localSpec.artifact.body, AuthoringRootSchema);
       const readSpec = yield* runNativeTaskAuthoring(recipientConfig, {
         callerCwd: recipient.repo,
@@ -699,7 +732,9 @@ effectIt.effect.each([
       const localSpecDocument = decodeNativeAuthoringDocument(
         (yield* Schema.decodeUnknownEffect(Schema.Struct({document: Schema.Unknown}))(readSpec)).document,
       );
-      expect(localSpecDocument.context.evidenceRefs).toHaveLength(2);
+      expect(localSpecDocument.context.note).toBe(specContext.note);
+      expect(localSpecDocument.context.sharedPlanRef).toBe(published.sharedPlanRef);
+      expect(localSpecDocument.context.evidenceRefs).toHaveLength(direction.fullEvidence ? 16 : 0);
       expect(
         EffectArray.every(localSpecDocument.context.evidenceRefs, ref =>
           pipe(ref.uri, EffectString.includes('/user/recipient/')),
