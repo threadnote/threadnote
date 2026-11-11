@@ -385,6 +385,91 @@ describe('native authoring documents', () => {
     }
   });
 
+  it('projects only recognized relative-path failures into bounded private diagnostics', () => {
+    const base = asPlan(validPlan());
+    if (base.source === null) throw new Error('Expected source fixture.');
+    const cases = [
+      ['', 'the non-empty path requirement'],
+      ['src/', 'a trailing separator'],
+      ['/src/file.ts', 'a leading separator'],
+      ['src\\file.ts', 'a backslash'],
+      ['src:file.ts', 'a colon'],
+      ['src//file.ts', 'an empty path segment'],
+      ['src/./file.ts', 'a dot path segment'],
+      ['src/../file.ts', 'a parent path segment'],
+      ['src/\nfile.ts', 'a control character'],
+      [Effect.pipe('x', EffectString.repeat(4097)), 'the 4096-byte path limit'],
+    ] as const;
+    for (const [value, rule] of cases) {
+      const input = {
+        ...base,
+        phases: EffectArray.map(base.phases, (phase, index) =>
+          index === 0 ? {...phase, affectedPaths: [value]} : phase,
+        ),
+      };
+      const before = structuredClone(input);
+      const error = caught(() => decodeNativeAuthoringDocument(input));
+      if (!(error instanceof Error)) throw new Error('Invalid path unexpectedly decoded.');
+      expect(error).toMatchObject({code: 'invalid-document'});
+      expect(error.message).toContain('phases[0].affectedPaths[0]');
+      expect(error.message).toContain(rule);
+      if (value.length > 0) expect(error.message).not.toContain(value);
+      expect(new TextEncoder().encode(error.message).byteLength).toBeLessThanOrEqual(256);
+      expect(input).toEqual(before);
+    }
+    const recognizedLocations: ReadonlyArray<{readonly change: Record<string, unknown>; readonly location: string}> = [
+      {change: {context: {...base.context, codeRefs: ['src/']}}, location: 'context.codeRefs[0]'},
+      {
+        change: {source: {...base.source, files: [{...base.source.files[0], path: 'src/'}]}},
+        location: 'source.files[0].path',
+      },
+      {
+        change: {phases: [{...base.phases[0], newPaths: ['src/']}, ...base.phases.slice(1)]},
+        location: 'phases[0].newPaths[0]',
+      },
+    ];
+    for (const {change, location} of recognizedLocations) {
+      const error = caught(() => decodeNativeAuthoringDocument({...base, ...change}));
+      expect(error).toMatchObject({code: 'invalid-document'});
+      if (!(error instanceof Error)) throw new Error('Invalid path unexpectedly decoded.');
+      expect(error.message).toContain(location);
+      expect(error.message).toContain('a trailing separator');
+      expect(error.message).not.toContain('src/');
+    }
+    const genericCases = [
+      {...base, unexpectedField: 'private-marker'},
+      {...base, phases: [{...base.phases[0], affectedPaths: [42]}, ...base.phases.slice(1)]},
+    ];
+    for (const input of genericCases) {
+      expect(caught(() => decodeNativeAuthoringDocument(input))).toMatchObject({
+        code: 'invalid-document',
+        message: 'The native authoring document is malformed or contains unsupported fields.',
+      });
+    }
+    const marker = 'private-marker-';
+    fc.assert(
+      fc.property(
+        fc
+          .string({minLength: 1, maxLength: 48})
+          .filter(value => EffectArray.every(Array.from(value), character => character >= ' ')),
+        suffix => {
+          const value = `${marker}${suffix}/`;
+          const result = caught(() =>
+            decodeNativeAuthoringDocument({
+              ...base,
+              phases: [{...base.phases[0], affectedPaths: [value]}, ...base.phases.slice(1)],
+            }),
+          );
+          if (!(result instanceof Error)) throw new Error('Invalid path unexpectedly decoded.');
+          const message = result.message;
+          expect(message).not.toContain(value);
+          expect(new TextEncoder().encode(message).byteLength).toBeLessThanOrEqual(256);
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
   it('canonicalizes recursively, omits undefined object fields, and roundtrips bounded Unicode', () => {
     expect(canonicalAuthoringJson({z: {b: 2, a: 1}, a: undefined})).toBe('{"z":{"a":1,"b":2}}');
     const reverse = (value: unknown): unknown => {

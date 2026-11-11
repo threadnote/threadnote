@@ -302,6 +302,63 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('reports canonical path failures on task-author start and save without changing state', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const validPlan = {
+      ...planBusiness,
+      requirements: specBusiness.requirements,
+      phases: A.map(planBusiness.phases, phase => ({
+        ...phase,
+        acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+      })),
+    };
+    const invalidPlan = {...validPlan, phases: [{...validPlan.phases[0], affectedPaths: ['src/']}]};
+    const invalidFile = f.path.join(f.root, 'invalid-plan.json');
+    const validFile = f.path.join(f.root, 'valid-plan.json');
+    yield* f.fs.writeFileString(invalidFile, JSON.stringify(invalidPlan));
+    yield* f.fs.writeFileString(validFile, JSON.stringify(validPlan));
+    const invalidStart = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Invalid path plan',
+        kind: 'plan',
+        contentFile: invalidFile,
+        installationTarget: 'codex',
+      })
+      .pipe(Effect.result);
+    expect(invalidStart).toMatchObject({failure: {code: 'invalid-content'}});
+    if (invalidStart._tag !== 'Failure') throw new Error('Invalid plan unexpectedly started.');
+    expect(JSON.stringify(invalidStart)).toContain('phases[0].affectedPaths[0]');
+    expect(JSON.stringify(invalidStart)).toContain('a trailing separator');
+    const invalidRunId =
+      'task-' +
+      EffectString.slice(
+        0,
+        48,
+      )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug('Invalid path plan')));
+    expect(yield* readNativeWorkflowState(f.config, invalidRunId)).toBeUndefined();
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'Save path plan',
+      kind: 'plan',
+      contentFile: validFile,
+      installationTarget: 'codex',
+    });
+    expect(draft.runId).toBeTruthy();
+    const statePath = f.statePath(String(draft.runId));
+    const before = yield* f.fs.readFileString(statePath);
+    const invalidSave = yield* f
+      .author({command: 'save', authoringRef: draft.authoringRef, contentFile: invalidFile})
+      .pipe(Effect.result);
+    expect(invalidSave).toMatchObject({failure: {code: 'invalid-content'}});
+    if (invalidSave._tag !== 'Failure') throw new Error('Invalid plan unexpectedly saved.');
+    expect(JSON.stringify(invalidSave)).toContain('phases[0].affectedPaths[0]');
+    expect(JSON.stringify(invalidSave)).toContain('a trailing separator');
+    expect(yield* f.fs.readFileString(statePath)).toBe(before);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect('admits commit delivery, recovers an unreviewed snapshot, and delivers reviewed source', () =>
   Effect.gen(function* () {
     const f = yield* setup;

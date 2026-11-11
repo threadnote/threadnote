@@ -17,6 +17,7 @@ import {
   NativeAuthoringSpecDocumentSchema,
   NativeAuthoringPlanDocumentSchema,
   decodeNativeAuthoringDocument,
+  nativeAuthoringPathDiagnostic,
   nativeAuthoringDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -556,11 +557,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
       const content = yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
         onExcessProperty: 'error',
+        reportInput: true,
       })(raw).pipe(
-        Effect.mapError(() =>
+        Effect.mapError(error =>
           fail(
             'invalid-content',
-            'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
+            nativeAuthoringPathDiagnostic(error) ??
+              'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
           ),
         ),
       );
