@@ -39,7 +39,22 @@ export const verifyGeneration = Effect.fn('devSkills.verifyGeneration')(function
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const actual = yield* enumerateFiles(root);
+  const discovered = yield* enumerateFiles(root);
+  const actual: string[] = [];
+  for (const file of discovered) {
+    if (path.basename(file) !== '.DS_Store') {
+      actual.push(file);
+      continue;
+    }
+    const absolute = path.join(root, file);
+    const link = yield* fs.readLink(absolute).pipe(Effect.result);
+    if (link._tag === 'Success') {
+      actual.push(file);
+      continue;
+    }
+    if (!['NotFound', 'InvalidArgument', 'Unknown'].includes(link.failure.reason._tag)) return yield* link.failure;
+    if ((yield* fs.stat(absolute)).type !== 'File') actual.push(file);
+  }
   const expected = EffectRecord.keys(manifest.hashes).sort();
   if (
     EffectArray.some(actual, file => !(file in manifest.hashes)) ||
