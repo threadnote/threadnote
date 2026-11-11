@@ -12,7 +12,7 @@ import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskInspection} from './index.js';
+import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -490,9 +490,38 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
           ),
         )
       : undefined;
+    const uncheckedView = projectNativeTaskView(stored.state, stored.revision, {
+      ...(request.role === undefined ? {} : {role: request.role}),
+      ...(planDrift === undefined ? {} : {planDrift}),
+    });
+    let acceptedSnapshotCurrent = true;
+    if (!authoringBlocked && uncheckedView.next.action === 'validate' && uncheckedView.next.snapshotId) {
+      const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
+      if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
+      const checked = yield* runWorkflowAutomation(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'cycle',
+        command: 'check-phase',
+        runId: stored.state.runId,
+        generation: stored.state.generation,
+        phaseId: uncheckedView.next.phaseId,
+        snapshotId: uncheckedView.next.snapshotId,
+        acceptedHead: head,
+      }).pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => checkout}), Effect.result);
+      if (checked._tag === 'Failure') {
+        if (
+          Schema.is(WorkflowAutomationError)(checked.failure) &&
+          (checked.failure.code === 'review-stale' || checked.failure.code === 'source-drift')
+        )
+          acceptedSnapshotCurrent = false;
+        else return yield* checked.failure;
+      }
+    }
     const projectionOptions = (offset: number) => ({
       ...(request.role === undefined ? {} : {role: request.role}),
       ...(planDrift === undefined ? {} : {planDrift}),
+      ...(acceptedSnapshotCurrent ? {} : {acceptedSnapshotCurrent: false}),
       ...(historicalCandidates.length > 0 ? {historicalWatchCount: historicalCandidates.length} : {}),
       ...(historicalCandidateHash ? {candidateHash: historicalCandidateHash} : {}),
       ...(offset === 0 ? {} : {offset}),

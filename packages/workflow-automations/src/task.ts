@@ -114,6 +114,8 @@ export interface NativeTaskProjectionOptions {
   readonly role?: NativeTaskRole;
   readonly offset?: number;
   readonly planDrift?: string;
+  /** Result of the application core's live check-phase for an accepted review. */
+  readonly acceptedSnapshotCurrent?: boolean;
   readonly historicalWatchCount?: number;
   /** Digest of the refreshed external candidate set used by the caller's paged projection. */
   readonly candidateHash?: string;
@@ -452,7 +454,7 @@ export function projectNativeTaskView(
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const validationWork =
-    pendingSnapshot && latestSnapshot && acceptedReview
+    pendingSnapshot && latestSnapshot && acceptedReview && options.acceptedSnapshotCurrent !== false
       ? {phase: pendingSnapshot, snapshot: latestSnapshot}
       : undefined;
   const latestInvalidAttempt = reviewWork

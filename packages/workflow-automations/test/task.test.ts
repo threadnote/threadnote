@@ -496,6 +496,9 @@ describe('native task projection', () => {
       next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
       phase: {snapshot: {snapshotRef: expect.any(String)}},
     });
+    expect(
+      projectNativeTaskView({...state, cycle: runtime}, 'review-revision', {acceptedSnapshotCurrent: false}),
+    ).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
     const validation = {
       snapshotTree: tree,
       reviewTree: tree,
@@ -512,7 +515,9 @@ describe('native task projection', () => {
       validation,
     );
     expect(
-      projectNativeTaskView({...state, cycle: {...runtime, state: validated}}, 'validation-revision'),
+      projectNativeTaskView({...state, cycle: {...runtime, state: validated}}, 'validation-revision', {
+        acceptedSnapshotCurrent: false,
+      }),
     ).toMatchObject({
       status: 'ready',
       next: {action: 'deliver', phaseId: 'phase-one'},

@@ -3546,6 +3546,112 @@ describe('native task actions', () => {
       }).pipe(run),
   );
 
+  effectIt.effect('routes a stale accepted review to fresh work while retaining current validation and delivery', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      yield* f.mutate('begin-phase', {phaseId: 'one'});
+      const firstWork = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'work',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          packet,
+        }),
+      );
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "first result";\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'First result']);
+      const first = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          workRef: String(firstWork.workRef),
+        }),
+      );
+      const report = {
+        mode: 'full',
+        selected: ['correctness', 'simplicity'],
+        lanes: [
+          {name: 'correctness', status: 'complete'},
+          {name: 'simplicity', status: 'complete'},
+        ],
+        findings: [],
+      };
+      const firstReview = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(first.snapshotRef),
+          report,
+        }),
+      );
+      expect(firstReview.status).toBe('recorded');
+      const card = () => readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      expect(yield* card()).toMatchObject({
+        next: {action: 'validate', snapshotId: object(object(first.snapshot).snapshot).snapshotId},
+      });
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same tree']);
+      expect(yield* card()).toMatchObject({next: {action: 'validate'}});
+      const originalBase = EffectString.trim((yield* f.git(['rev-parse', 'main'])).stdout);
+      const advancedBase = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+      yield* f.git(['update-ref', 'refs/heads/main', advancedBase]);
+      expect(yield* card()).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'one'}});
+      yield* f.git(['update-ref', 'refs/heads/main', originalBase]);
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "revised result";\n');
+      yield* f.git(['add', 'source.ts']);
+      yield* f.git(['commit', '-m', 'Revised result']);
+      expect(yield* card()).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'one'}});
+      const reindexed = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      expect(reindexed.snapshot.state).toBe('ready');
+      const nextWork = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'work',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          packet,
+        }),
+      );
+      expect(nextWork.workRef).not.toBe(firstWork.workRef);
+      const nextSnapshot = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          workRef: String(nextWork.workRef),
+          reason: 'The committed implementation changed after the first accepted review.',
+        }),
+      );
+      expect(nextSnapshot).toMatchObject({status: 'recorded', replayed: false});
+      const nextReview = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(nextSnapshot.snapshotRef),
+          report: {...report, mode: 'incremental'},
+        }),
+      );
+      expect(nextReview.status).toBe('recorded');
+      expect(yield* card()).toMatchObject({next: {action: 'validate'}});
+      const validated = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: String(nextReview.snapshotRef),
+          validation: {
+            checks: [{command: 'focused fixture check', result: 'passed', evidence: 'The revised source passed.'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'The revised source works.'}],
+          },
+        }),
+      );
+      expect(validated.status).toBe('recorded');
+      expect(yield* card()).toMatchObject({next: {action: 'deliver', phaseId: 'one'}});
+    }).pipe(run),
+  );
+
   // prettier-ignore
   effectIt.effect('continues a nonterminal P1 watch after P2 advances and closes out both terminal receipts', () =>
     Effect.gen(function* () {
