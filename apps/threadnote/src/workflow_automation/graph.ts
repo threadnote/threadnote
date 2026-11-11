@@ -8,6 +8,7 @@ import type {WorkflowBinding} from '../workflow_memory/protocol.js';
 import {resolveWorkflowGraphScope} from '../workflow_memory/graph_scope.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {nativeWorkflowError} from './memory.js';
+import {shellQuote} from '../utils.js';
 
 const isReady = (status: CodeGraphStatus, repo: string, selectedProject?: string) =>
   status.freshness === 'current' &&
@@ -47,7 +48,7 @@ export const makeWorkflowGraphAdapter = Effect.fn('workflowAutomation.graphAdapt
           if (options.prepare === false)
             return yield* WorkflowAutomationError.make({
               code: 'evidence-unavailable',
-              message: `Code citations require an already-published ready graph; run \`threadnote graph index --no-vectors${project ? ` --project ${project.name}` : ''}\` from callerCwd, then retry. No indexing was started.`,
+              message: `Code citations require an already-published ready graph; run \`threadnote graph index --no-vectors${project ? ` --project ${shellQuote(project.name)}` : ''}\` from callerCwd, then retry. No indexing was started.`,
               retryable: false,
             });
           yield* indexer.index({

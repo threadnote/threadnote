@@ -1,7 +1,7 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
 import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
-import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
+import {nativeCyclePhaseReviewUsage, nativeCycleSnapshotIsCurrentIteration} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
@@ -440,13 +440,12 @@ export function projectNativeTaskView(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
       if (localDelivery || canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
-      const boundary = runtime.invalidatedThroughSnapshot?.[candidate.id];
-      const retiredIndex = boundary
-        ? EffectArray.findFirstIndex(phaseSnapshots, entry => entry.snapshot.snapshotId === boundary)
-        : EffectOption.none();
-      const current = phaseSnapshots.slice(EffectOption.getOrElse(retiredIndex, () => -1) + 1);
-      const latest = current.at(-1)?.snapshot;
-      return Boolean(latest && latest.phaseHash === cycle.phases[candidate.id].phaseHash);
+      const latest = phaseSnapshots.at(-1)?.snapshot;
+      return Boolean(
+        latest &&
+        latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
+        nativeCycleSnapshotIsCurrentIteration(runtime, candidate.id, latest.snapshotId),
+      );
     }),
   );
   const latestSnapshot = pendingSnapshot

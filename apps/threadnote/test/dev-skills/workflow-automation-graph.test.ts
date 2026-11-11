@@ -12,6 +12,7 @@ import {makeWorkflowGraphAdapter} from '../../src/workflow_automation/graph.js';
 import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import * as EffectString from 'effect/String';
+import * as EffectOption from 'effect/Option';
 import * as Effect2 from 'effect';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
@@ -203,6 +204,46 @@ describe('native workflow graph adapter', () => {
       expect(yield* makeWorkflowGraphAdapter(f.config, binding).pipe(Effect.result)).toMatchObject({
         failure: {code: 'graph-scope-unavailable'},
       });
+    }).pipe(run),
+  );
+
+  effectIt.effect('renders the selected project as one executable shell argument', () =>
+    Effect.gen(function* () {
+      if (process.platform === 'win32') return;
+      const f = yield* nativeFixture();
+      const projectName = 'Alpha Beta;printf injected';
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: projectName, path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'}],
+        }),
+      );
+      const binding = {...bindingFor(f), graphProject: projectName};
+      const fixture = yield* makeReady(
+        f,
+        [graphStatus(f.repo, {stale: true})],
+        () => Effect.die('index must not start'),
+        {prepare: false},
+        binding,
+      );
+      const result = yield* fixture.adapter.ready(f.repo).pipe(Effect.result);
+      if (result._tag !== 'Failure') throw new Error('Expected recovery guidance for a stale graph.');
+      const command = Effect2.pipe(
+        result.failure.message,
+        EffectString.match(/run `([^`]+)` from callerCwd/u),
+        EffectOption.getOrUndefined,
+      )?.[1];
+      if (!command) throw new Error('Expected a bounded executable graph command.');
+      const argv = yield* runCommandEffect('sh', ['-c', `set -- ${command}; printf '%s\\n' "$@"`]);
+      expect(Effect2.pipe(argv.stdout, EffectString.trimEnd, EffectString.split('\n'))).toEqual([
+        'threadnote',
+        'graph',
+        'index',
+        '--no-vectors',
+        '--project',
+        projectName,
+      ]);
     }).pipe(run),
   );
 

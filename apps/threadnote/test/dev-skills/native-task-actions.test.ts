@@ -7111,6 +7111,57 @@ describe('native task actions', () => {
           }),
         );
         expect(resumed).toMatchObject({status: 'resumed', phaseId: 'one'});
+        const priorRuntime = invalidated.state.cycle;
+        const priorSnapshot = priorRuntime.snapshots.at(-1)?.snapshot;
+        const priorBaseline = priorRuntime.baselines.one;
+        if (!priorSnapshot || !priorBaseline) throw new Error('Expected the retired reviewed snapshot and baseline.');
+        const retiredSnapshotRef = encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'snapshot',
+          runId: 'native-run',
+          generationHash: sha256HexSync(invalidated.state.generation),
+          phaseId: 'one',
+          phaseHash: priorSnapshot.phaseHash,
+          baselineHead: priorBaseline.head,
+          baselineTree: priorBaseline.tree,
+          baselineRef: priorBaseline.pinnedRef,
+          snapshotId: priorSnapshot.snapshotId,
+          sourceHead: priorSnapshot.head,
+          sourceTree: priorSnapshot.tree,
+        });
+        const beforeRetiredReplay = yield* f.fs.readFileString(f.statePath());
+        const oldValidation = {
+          checks: [{command: 'retired check', result: 'passed' as const, evidence: 'Old source check.'}],
+          acceptance: [{criterion: 'one works', result: 'passed' as const, evidence: 'Old acceptance.'}],
+        };
+        expect(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-validation',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef: retiredSnapshotRef,
+            validation: oldValidation,
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-stale'}});
+        const actualHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        expect(
+          yield* f
+            .mutate('ready', {
+              phaseId: 'one',
+              snapshotId: priorSnapshot.snapshotId,
+              acceptedHead: actualHead,
+              validation: {
+                ...oldValidation,
+                snapshotTree: priorSnapshot.tree,
+                reviewTree: priorSnapshot.tree,
+                head: actualHead,
+                status: 'passed',
+                productState: 'working',
+              },
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-stale'}});
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRetiredReplay);
         const ready = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
         expect(ready.snapshot.state).toBe('ready');
         const work = object(

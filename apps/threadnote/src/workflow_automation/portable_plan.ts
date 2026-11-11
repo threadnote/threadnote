@@ -244,12 +244,25 @@ export function decodePortablePlanPayload(input: unknown): {
     if (applyScrubber(item.body, {redact: false}).blocker)
       throw fail('portable-plan-private', 'Shared evidence contains material that cannot be published.');
   }
-  const required = new Set([
-    ...EffectArray.map(plan.context.evidenceRefs, ref => ref.uri),
-    ...(spec ? EffectArray.map(spec.context.evidenceRefs, ref => ref.uri) : []),
-  ]);
-  if (required.size !== payload.evidence.length || EffectArray.some([...required], uri => !evidenceUris.has(uri)))
+  const required = new Map<string, PortablePlanPayload['evidence'][number]['reference']>();
+  for (const reference of [...plan.context.evidenceRefs, ...(spec?.context.evidenceRefs ?? [])]) {
+    const prior = required.get(reference.uri);
+    if (prior && stableJson(prior) !== stableJson(reference))
+      throw fail('portable-plan-conflict', 'The linked documents pin different revisions of one evidence URI.');
+    required.set(reference.uri, reference);
+  }
+  if (
+    required.size !== payload.evidence.length ||
+    EffectArray.some([...required.keys()], uri => !evidenceUris.has(uri))
+  )
     throw fail('portable-plan-missing', 'The required plan evidence closure is incomplete.');
+  if (
+    EffectArray.some(
+      payload.evidence,
+      item => stableJson(required.get(item.reference.uri)) !== stableJson(item.reference),
+    )
+  )
+    throw fail('portable-plan-conflict', 'Shared evidence identity or revision differs from the pinned plan.');
   return {payload, plan, ...(spec ? {spec} : {})};
 }
 

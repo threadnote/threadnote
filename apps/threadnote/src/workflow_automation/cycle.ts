@@ -36,6 +36,7 @@ import {
   decodeNativeCycleRuntime,
   nativeCyclePhaseReviewUsage,
   nativeCycleHasBasePlanTransition,
+  nativeCycleSnapshotIsCurrentIteration,
   type NativeCycleRuntime,
 } from '@threadnote/workflow-automations/cycle-runtime';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
@@ -1286,6 +1287,8 @@ export const runNativeCycle = <R>(
             entry.snapshot.phaseHash !== state.phases[selected.id].phaseHash
           )
             return yield* fail('review-stale', 'Snapshot belongs to another material phase contract.');
+          if (!nativeCycleSnapshotIsCurrentIteration(runtime, selected.id, entry.snapshot.snapshotId))
+            return yield* fail('review-stale', 'Record a fresh snapshot and review after phase invalidation.');
           const current = yield* currentSnapshot(repo, entry.snapshot, request.acceptedHead, selected);
           const report = EffectOption.getOrUndefined(
             EffectArray.findFirst(runtime.reviews, item => item.snapshotId === entry.snapshot.snapshotId),

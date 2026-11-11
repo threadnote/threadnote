@@ -106,6 +106,30 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
 });
 export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
 
+/** A retired snapshot cannot prove the current phase iteration, even when its tree is unchanged. */
+export function nativeCycleSnapshotIsCurrentIteration(
+  runtime: NativeCycleRuntime,
+  phaseId: string,
+  snapshotId: string,
+): boolean {
+  const snapshotIndex = EffectOption.getOrUndefined(
+    EffectArray.findFirstIndex(
+      runtime.snapshots,
+      entry => entry.snapshot.phaseId === phaseId && entry.snapshot.snapshotId === snapshotId,
+    ),
+  );
+  if (snapshotIndex === undefined) return false;
+  const boundaryId = runtime.invalidatedThroughSnapshot?.[phaseId];
+  if (!boundaryId) return true;
+  const retiredIndex = EffectOption.getOrUndefined(
+    EffectArray.findFirstIndex(
+      runtime.snapshots,
+      entry => entry.snapshot.phaseId === phaseId && entry.snapshot.snapshotId === boundaryId,
+    ),
+  );
+  return retiredIndex !== undefined && snapshotIndex > retiredIndex;
+}
+
 /** Counts accepted reports continuously across every snapshot for the phase. */
 export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
   const count = EffectArray.filter(

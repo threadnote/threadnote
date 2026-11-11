@@ -144,6 +144,36 @@ describe('portable plan admission', () => {
     ).toThrow();
   });
 
+  it('rejects an evidence body whose URI matches but pinned identity or revision differs', () => {
+    const pinned = ref('evidence', 'Original evidence');
+    const withEvidence = decodeNativeAuthoringDocument({
+      ...plan,
+      context: {...plan.context, evidenceRefs: [pinned]},
+    });
+    if (withEvidence.kind !== 'plan') throw new Error('Expected a plan with pinned evidence.');
+    const documentHash = nativeAuthoringDigest(withEvidence);
+    const changedBody = 'Different evidence';
+    const changedReference = {...pinned, memoryId: 'tn_substitute', revision: h(changedBody)};
+    const substitution = {
+      ...payload,
+      plan: {document: canonicalAuthoringJson(withEvidence), documentHash},
+      evidence: [
+        {reference: changedReference, body: changedBody, bodyHash: h(changedBody), review: 'approved-durable'},
+      ],
+      provenance: {...payload.provenance, documentHash, intentHash: nativeSpecIntentDigest(withEvidence, 2)},
+    };
+    expect(() => decodePortablePlanPayload(substitution)).toThrowError(
+      expect.objectContaining({code: 'portable-plan-conflict'}),
+    );
+    const matching = {
+      ...substitution,
+      evidence: [
+        {...substitution.evidence[0], reference: pinned, body: 'Original evidence', bodyHash: h('Original evidence')},
+      ],
+    };
+    expect(decodePortablePlanPayload(matching).plan).toEqual(withEvidence);
+  });
+
   it('splits a canonical snapshot and round-trips a user-independent reference', () => {
     expect(EffectArray.join(encodePortablePlanPages(payload), '')).toBe(body);
     const reference = encodePortablePlanRef({version: 1, team: 'team', project: 'project', payloadHash: h(body)});
