@@ -9,7 +9,7 @@ import {Array as EffectArray, Effect, Layer, Record as EffectRecord, Schema, Str
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
-import {semanticTreeDigest} from '../../../src/semantic/fingerprint.js';
+import {semanticTreeDigest, semanticSdkDigest} from '../../../src/semantic/fingerprint.js';
 import {providerFixture} from '../../../../../tools/semantic/semantic_provider_fixture.js';
 import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/semantic/semantic_probe_assertions.js';
 import {checkProposalStatusTransportParity} from './transport-oracle.js';
@@ -18,37 +18,76 @@ import type {Client} from '@modelcontextprotocol/sdk/client/index.js';
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const common = {
   version: Schema.Literal(1),
-  runtime: Schema.String,
-  runtimeDigest: digest,
-  runtimeVersion: Schema.Literal('24.19.0'),
-  serverDirectory: Schema.String,
-  serverTreeDigest: digest,
   notices: Schema.Array(Schema.Struct({component: Schema.String, file: Schema.String, sha256: digest})).check(
     Schema.isMinLength(1),
     Schema.isMaxLength(64),
   ),
 };
+const node = {
+  ...common,
+  runtime: Schema.String,
+  runtimeDigest: digest,
+  runtimeVersion: Schema.Literal('24.19.0'),
+  serverDirectory: Schema.String,
+  serverTreeDigest: digest,
+};
 export const ProviderInputs = Schema.Union([
   Schema.Struct({
-    ...common,
+    ...node,
     language: Schema.Literals(['typescript', 'javascript']),
     sdkDirectory: Schema.String,
     sdkTreeDigest: digest,
   }),
-  Schema.Struct({...common, language: Schema.Literal('python')}),
+  Schema.Struct({...node, language: Schema.Literal('python')}),
+  Schema.Struct({
+    ...common,
+    language: Schema.Literal('go'),
+    providerVersion: Schema.Literal('v0.24.0'),
+    executable: Schema.String,
+    executableDigest: digest,
+    goVersion: Schema.Literal('1.27.3'),
+    goExecutableDigest: digest,
+    sdkDirectory: Schema.String,
+    sdkTreeDigest: digest,
+  }),
 ]);
 export type ProviderInputs = typeof ProviderInputs.Type;
 const hash = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
-const tree = (directory: string) =>
-  // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Standalone operator boundary owns this complete byte-verification program and its narrow services.
-  Effect.runPromise(semanticTreeDigest(directory).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))));
+const tree = (directory: string, sdk = false) =>
+  Effect.runPromise(
+    (sdk ? semanticSdkDigest(directory) : semanticTreeDigest(directory)).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Standalone Promise boundary owns the complete byte-verification program and its narrow services.
+      Effect.provide(Layer.merge(BunServices.layer, cryptoLayer)),
+    ),
+  );
 
 export async function readProviderInputs(file: string) {
   const bytes = await readFile(file);
   const input = Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})(JSON.parse(bytes.toString()));
-  assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
-  assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
-  if ('sdkDirectory' in input) assert.equal(await tree(input.sdkDirectory), input.sdkTreeDigest, 'Complete SDK tree');
+  if (input.language === 'go') {
+    assert.equal(hash(await readFile(input.executable)), input.executableDigest, 'Pinned Go provider bytes');
+    assert.equal(
+      hash(await readFile(join(input.sdkDirectory, 'bin/go'))),
+      input.goExecutableDigest,
+      'Pinned Go tool bytes',
+    );
+    assert.equal(
+      EffectString.split('\n')(await readFile(join(input.sdkDirectory, 'VERSION'), 'utf8'))[0],
+      'go' + input.goVersion,
+      'Pinned Go SDK version metadata; no runtime execution',
+    );
+    assert.equal(await tree(input.sdkDirectory, true), input.sdkTreeDigest, 'Complete Go SDK tree');
+    assert.ok(
+      EffectArray.some(input.notices, notice => notice.component === 'gopls') &&
+        EffectArray.some(input.notices, notice => notice.component === 'go-sdk'),
+      'Explicit Go provider and SDK notice objects',
+    );
+  } else {
+    assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
+    assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
+    if (input.language !== 'python')
+      assert.equal(await tree(input.sdkDirectory), input.sdkTreeDigest, 'Complete SDK tree');
+  }
   for (const notice of input.notices)
     assert.equal(hash(await readFile(notice.file)), notice.sha256, 'Exact local notice bytes');
   return {
@@ -56,6 +95,12 @@ export async function readProviderInputs(file: string) {
     manifestSha256: hash(bytes),
     notices: input.notices,
     licenseDisposition: 'notice-bytes-recorded; selected-profile and redistribution review remain required',
+    ...(input.language === 'go'
+      ? {
+          sdkProofDisposition:
+            'complete local bytes recorded; SDK provenance and component inventory remain unqualified',
+        }
+      : {}),
   };
 }
 
@@ -71,6 +116,18 @@ export function selectedFixture(input: ProviderInputs) {
 }
 
 export async function providerCatalog(input: ProviderInputs, scratch: string) {
+  if (input.language === 'go')
+    return {
+      catalog: {
+        go: {
+          executable: input.executable,
+          executableDigest: input.executableDigest,
+          sdkDirectory: input.sdkDirectory,
+          sdkTreeDigest: input.sdkTreeDigest,
+        },
+      },
+      environment: undefined,
+    };
   const base = {
     runtime: input.runtime,
     runtimeDigest: input.runtimeDigest,
@@ -78,7 +135,7 @@ export async function providerCatalog(input: ProviderInputs, scratch: string) {
     serverDirectory: input.serverDirectory,
     serverTreeDigest: input.serverTreeDigest,
   };
-  if ('sdkDirectory' in input)
+  if (input.language !== 'python')
     return {
       catalog: {candidate: {...base, sdkDirectory: input.sdkDirectory, sdkTreeDigest: input.sdkTreeDigest}},
       environment: undefined,
@@ -131,6 +188,24 @@ interface CliResult {
 }
 export type QualificationCli = (args: readonly string[], request: object) => Promise<CliResult>;
 
+/** LSP characters count UTF-16 code units, including any non-BMP prefix in the authored line. */
+export function fixtureSymbolPosition(
+  text: string,
+  symbol: 'UnsavedName' | 'BufferName' = 'UnsavedName',
+  occurrence: 'first' | 'last' = 'first',
+) {
+  const lines = EffectString.split('\n')(text);
+  for (let index = 0; index < lines.length; index++) {
+    const line = occurrence === 'first' ? index : lines.length - 1 - index;
+    const character =
+      occurrence === 'first'
+        ? EffectString.indexOf(symbol)(lines[line])
+        : EffectString.lastIndexOf(symbol)(lines[line]);
+    if (character._tag === 'Some') return {line, character: character.value + 2};
+  }
+  throw new Error('Missing authored fixture symbol');
+}
+
 /** Fixed authored fixture operations, never caller-supplied results or assertions. */
 export async function runProviderNavigation(
   input: ProviderInputs,
@@ -145,11 +220,6 @@ export async function runProviderNavigation(
   const names = EffectRecord.keys(sources);
   const declaration = names[0],
     dependent = names[1];
-  const position = (file: string, line: number) => {
-    const marker = EffectString.indexOf('UnsavedName')(EffectString.split('\n')(sources[file])[line]);
-    assert.ok(marker._tag === 'Some');
-    return {line, character: marker.value + 2};
-  };
   const request = {
     callerCwd: project,
     language: input.language,
@@ -163,7 +233,11 @@ export async function runProviderNavigation(
       ...request,
       file: join(project, operation === 'definition' ? dependent : declaration),
       operation,
-      position: position(operation === 'definition' ? dependent : declaration, operation === 'definition' ? 1 : 0),
+      position: fixtureSymbolPosition(
+        sources[operation === 'definition' ? dependent : declaration],
+        'UnsavedName',
+        operation === 'definition' ? 'last' : 'first',
+      ),
     };
     const cli = await run(['semantic', 'query', '--json'], selected);
     const mcp = await within(
@@ -243,8 +317,7 @@ export async function runProviderPreview(
   results: unknown[],
 ) {
   const declaration = EffectRecord.keys(sources)[0];
-  const marker = EffectString.indexOf('UnsavedName')(EffectString.split('\n')(sources[declaration])[0]);
-  assert.ok(marker._tag === 'Some');
+  const position = fixtureSymbolPosition(sources[declaration]);
   const common = {version: 1, callerCwd: project, milliseconds: 10000, maxBytes: 8192};
   const mcpChange = async (action: 'status' | 'preflight' | 'apply', request: object) => {
     const response = await within(
@@ -270,7 +343,7 @@ export async function runProviderPreview(
     operation: 'rename',
     language: input.language,
     file: join(project, declaration),
-    position: {line: 0, character: marker.value + 2},
+    position,
     newName: 'RenamedName',
     ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
   };
@@ -466,15 +539,14 @@ export async function runOwnedBufferFixture(
       'Compiler sees exact unsaved symbol',
     );
     assert.ok(isDeepStrictEqual(cli.value, response.structuredContent), 'Owned buffer CLI/MCP evidence parity');
-    const marker = EffectString.indexOf('BufferName')(EffectString.split('\n')(text)[0]);
-    assert.ok(marker._tag === 'Some');
+    const position = fixtureSymbolPosition(text, 'BufferName');
     const preview = await run(['semantic', 'change', 'prepare', '--json'], {
       version: 1,
       ...common,
       file: join(project, declaration),
       language: input.language,
       operation: 'rename',
-      position: {line: 0, character: marker.value + 2},
+      position,
       newName: 'BufferRenamed',
       view: query.view,
       ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),

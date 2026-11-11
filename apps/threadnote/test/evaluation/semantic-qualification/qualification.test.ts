@@ -1,4 +1,12 @@
-import {redactCapabilities, protocolCapabilities} from './provider-fixture.js';
+import {
+  redactCapabilities,
+  protocolCapabilities,
+  ProviderInputs,
+  providerCatalog,
+  selectedFixture,
+  fixtureSymbolPosition,
+  readProviderInputs,
+} from './provider-fixture.js';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {observeCandidateTransport} from './transport-lifecycle.js';
@@ -8,9 +16,10 @@ import fc from 'fast-check';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Qualification exercises private evidence files and refuses a mismatched executable before spawning it. */
 import {readFileSync} from 'node:fs';
-import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 import {Ledger, qualificationInventory} from './inventory.js';
 import {candidateTargetMatchesHost, runCandidateChecks} from './candidate.js';
 import {checkMissingProfileTransportParity, checkProposalStatusTransportParity} from './transport-oracle.js';
@@ -22,6 +31,103 @@ const ledger = Schema.decodeUnknownSync(Ledger)(
 );
 const wrap = (value: unknown) => ({structuredContent: value, content: [{type: 'text', text: JSON.stringify(value)}]});
 describe('final combined qualification preparation', () => {
+  it('verifies independent Go provider, tool, complete SDK and notice bytes without launching them', async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-go-inputs-')));
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    try {
+      const sdkDirectory = join(directory, 'sdk');
+      await mkdir(join(sdkDirectory, 'bin'), {recursive: true});
+      const executable = join(directory, 'gopls');
+      const providerNotice = join(directory, 'gopls-LICENSE');
+      const sdkNotice = join(sdkDirectory, 'LICENSE');
+      const version = 'go1.27.3\ntime fixed\n';
+      await writeFile(executable, 'inert provider bytes');
+      await writeFile(join(sdkDirectory, 'bin/go'), 'inert Go tool bytes');
+      await writeFile(join(sdkDirectory, 'VERSION'), version);
+      await writeFile(providerNotice, 'provider notice fixture');
+      await writeFile(sdkNotice, 'SDK notice fixture');
+      // Independent known four-entry image; no production traversal used to generate the expected digest.
+      const sdkTreeDigest = hash(
+        JSON.stringify([
+          ['bin', 'directory'],
+          ['bin/go', hash('inert Go tool bytes')],
+          ['LICENSE', hash('SDK notice fixture')],
+          ['VERSION', hash(version)],
+        ]),
+      );
+      const input = {
+        version: 1,
+        language: 'go',
+        providerVersion: 'v0.24.0',
+        executable,
+        executableDigest: hash('inert provider bytes'),
+        goVersion: '1.27.3',
+        goExecutableDigest: hash('inert Go tool bytes'),
+        sdkDirectory,
+        sdkTreeDigest,
+        notices: [
+          {component: 'gopls', file: providerNotice, sha256: hash('provider notice fixture')},
+          {component: 'go-sdk', file: sdkNotice, sha256: hash('SDK notice fixture')},
+        ],
+      };
+      const file = join(directory, 'inputs.json');
+      await writeFile(file, JSON.stringify(input));
+      const verified = await readProviderInputs(file);
+      expect(verified.input).toEqual(input);
+      expect(await providerCatalog(verified.input, directory)).toEqual({
+        catalog: {go: {executable, executableDigest: input.executableDigest, sdkDirectory, sdkTreeDigest}},
+        environment: undefined,
+      });
+      expect(verified.licenseDisposition).toContain('review remain required');
+      expect(verified.sdkProofDisposition).toContain('remain unqualified');
+      const fixture = selectedFixture(verified.input);
+      expect(fixtureSymbolPosition(fixture.sources['a.go'])).toEqual({line: 1, character: 16});
+      expect(fixtureSymbolPosition(fixture.sources['b.go'], 'UnsavedName', 'last')).toEqual({line: 1, character: 15});
+      expect(fixture.projectFiles['go.mod']).toContain('go 1.27.0');
+      expect(() =>
+        Schema.decodeUnknownSync(ProviderInputs, {onExcessProperty: 'error'})({...input, runtime: '/node'}),
+      ).toThrow();
+      await writeFile(sdkNotice, 'changed SDK notice');
+      await expect(readProviderInputs(file)).rejects.toThrow('Complete Go SDK tree');
+      await writeFile(sdkNotice, 'SDK notice fixture');
+      await writeFile(providerNotice, 'changed provider notice');
+      await expect(readProviderInputs(file)).rejects.toThrow('Exact local notice bytes');
+      await writeFile(providerNotice, 'provider notice fixture');
+      await writeFile(join(sdkDirectory, 'bin/go'), 'changed Go tool');
+      await expect(readProviderInputs(file)).rejects.toThrow('Pinned Go tool bytes');
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('locates authored symbols across CRLF lines using UTF-16 coordinates', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('x', ' ', '🧵', 'é'), {maxLength: 30}),
+        fc.integer({min: 0, max: 12}),
+        (prefixParts, line) => {
+          const prefix = EffectArray.join(prefixParts, '');
+          const text = EffectString.repeat(line)('comment\r\n') + prefix + 'UnsavedName suffix\r\n';
+          const position = fixtureSymbolPosition(text);
+          // JS string.length is the independent UTF-16 model, rather than code-point count.
+          expect(position).toEqual({line, character: prefix.length + 2});
+          expect(
+            EffectString.slice(
+              position.character - 2,
+              position.character + 9,
+            )(EffectString.split('\n')(text)[position.line]),
+          ).toBe('UnsavedName');
+        },
+      ),
+      {numRuns: 50},
+    );
+    expect(fixtureSymbolPosition('import UnsavedName\r\nuse UnsavedName()\r\n', 'UnsavedName', 'last')).toEqual({
+      line: 1,
+      character: 6,
+    });
+    expect(() => fixtureSymbolPosition('no authored symbol')).toThrow('Missing authored fixture symbol');
+  });
+
   it('accepts only the exact canonical host release target, including Windows and libc/baseline boundaries', () => {
     const targets = [
       ['darwin-arm64', 'bun-darwin-arm64'],

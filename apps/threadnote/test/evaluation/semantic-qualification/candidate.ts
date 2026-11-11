@@ -294,7 +294,14 @@ export async function runCandidateChecks(
       report.provider = {
         started: null,
         artifact: provider,
-        runtime: {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
+        runtime:
+          provider.input.language === 'go'
+            ? {
+                version: provider.input.goVersion,
+                sha256: provider.input.goExecutableDigest,
+                sdkTreeDigest: provider.input.sdkTreeDigest,
+              }
+            : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
       };
       report.cost.providerLaunches = null;
     }
@@ -511,6 +518,12 @@ export async function runCandidateChecks(
           );
         });
       if (writerFixture) {
+        branches.push({
+          operation: 'semantic-context-graph-memory-join',
+          status: 'not-run',
+          reason: 'This writer fixture does not exercise the separate context branch',
+          fullScenarioQualified: false,
+        });
         const written = await runProviderApplication(
           home,
           project,
