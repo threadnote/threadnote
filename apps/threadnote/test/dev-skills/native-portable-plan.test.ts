@@ -701,43 +701,6 @@ effectIt.effect(
         '--review-outcome',
         'accepted',
       ]).pipe(Effect.provideService(SystemInfo, recipientSystem));
-      if (standalone) {
-        const result = yield* runCommandEffect(
-          standalone,
-          [
-            'workflow-automation',
-            'task-start',
-            '--caller-cwd',
-            recipient.repo,
-            '--shared-plan-ref',
-            published.sharedPlanRef,
-            '--installation-target',
-            'codex',
-            '--bindings-file',
-            bindingsFile,
-            '--delivery',
-            'local',
-            '--response',
-            recipientStart.userResponse,
-            '--review-outcome',
-            'accepted',
-          ],
-          {
-            cwd: recipient.repo,
-            env: {
-              ...system.environment(),
-              THREADNOTE_HOME: recipient.home,
-              THREADNOTE_ACCOUNT: recipientConfig.account,
-              THREADNOTE_USER: recipientConfig.user,
-              THREADNOTE_AGENT_ID: recipientConfig.agentId,
-            },
-            timeoutMs: 30_000,
-            maxOutputBytes: 32_000,
-          },
-        );
-        expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({taskRef: started.taskRef});
-      }
       expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
         recipientState.revision,
       );
@@ -790,6 +753,55 @@ effectIt.effect(
       }).pipe(Effect.result);
       expect(mismatchResult, JSON.stringify(mismatchResult)).toMatchObject({failure: {code: 'source-drift'}});
       expect(yield* readNativeWorkflowState(mismatchConfig, started.taskRef)).toBeUndefined();
+      if (standalone) {
+        yield* git(mismatchRepo, ['fetch', donor.repo, 'main']);
+        yield* git(mismatchRepo, ['reset', '--hard', 'FETCH_HEAD']);
+        const env = {
+          ...system.environment(),
+          HOME: mismatchHome,
+          THREADNOTE_HOME: mismatchHome,
+          THREADNOTE_ACCOUNT: mismatchConfig.account,
+          THREADNOTE_USER: mismatchConfig.user,
+          THREADNOTE_AGENT_ID: mismatchConfig.agentId,
+        };
+        yield* runCommandEffect(
+          standalone,
+          ['dev-skills', 'install', '--agent', 'codex', '--scope', 'user', '--profile', 'desktop'],
+          {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 16_000},
+        );
+        yield* runCommandEffect(standalone, ['graph', 'index', '--cwd', mismatchRepo, '--no-vectors'], {
+          cwd: mismatchRepo,
+          env,
+          timeoutMs: 30_000,
+          maxOutputBytes: 16_000,
+        });
+        const result = yield* runCommandEffect(
+          standalone,
+          [
+            'workflow-automation',
+            'task-start',
+            '--caller-cwd',
+            mismatchRepo,
+            '--shared-plan-ref',
+            published.sharedPlanRef,
+            '--installation-target',
+            'codex',
+            '--bindings-file',
+            bindingsFile,
+            '--delivery',
+            'local',
+            '--response',
+            recipientStart.userResponse,
+            '--review-outcome',
+            'accepted',
+          ],
+          {cwd: mismatchRepo, env, timeoutMs: 30_000, maxOutputBytes: 32_000},
+        );
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({taskRef: started.taskRef});
+        const binaryState = yield* readNativeWorkflowState(mismatchConfig, started.taskRef);
+        expect(binaryState?.state.cycle?.state.plan.source.root.uri).toContain('threadnote://user/mismatch/');
+      }
     }).pipe(TestClock.withLive, provideNative),
   {timeout: 120_000},
 );
