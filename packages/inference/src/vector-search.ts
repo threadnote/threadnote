@@ -11,10 +11,39 @@ export interface VectorSearchResult {
   readonly score: number;
 }
 
+export function compareVectorResults(left: VectorSearchResult, right: VectorSearchResult): number {
+  return right.score - left.score || compareCodeUnits(left.id, right.id);
+}
+
 export interface VectorBlobRecord {
   readonly id: string;
   /** Float32LE components; the view's byte offset and length are significant. */
   readonly vector: Uint8Array;
+}
+
+/** Canonical unit-vector encoding; the owning store supplies its error type. */
+export function unitVectorEncoder(
+  invalid: (message: string) => Error,
+): (vector: readonly number[], dimensions: number) => Uint8Array {
+  return (vector, dimensions) => encodeUnitVector(vector, dimensions, invalid);
+}
+
+function encodeUnitVector(
+  vector: readonly number[],
+  dimensions: number,
+  invalid: (message: string) => Error,
+): Uint8Array {
+  if (vector.length !== dimensions) throw invalid(`Vector has ${vector.length} dimensions; expected ${dimensions}.`);
+  const bytes = new Uint8Array(dimensions * 4);
+  const view = new DataView(bytes.buffer);
+  let squaredMagnitude = 0;
+  for (const [index, component] of vector.entries()) {
+    if (!Number.isFinite(component)) throw invalid('Vector contains a non-finite component.');
+    squaredMagnitude += component * component;
+    view.setFloat32(index * 4, component, true);
+  }
+  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.001) throw invalid('Vector is not L2-normalized.');
+  return bytes;
 }
 
 export class VectorInvalid extends Schema.TaggedError<VectorInvalid, {readonly brand: unique symbol}>()(

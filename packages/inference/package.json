@@ -19,7 +19,8 @@
     "./models/selection": "./src/models/selection.ts",
     "./models/setup": "./src/models/setup.ts",
     "./models/store": "./src/models/store.ts",
-    "./vector-search": "./src/vector-search.ts"
+    "./vector-search": "./src/vector-search.ts",
+    "./native/vector-search": "./src/native/vector-search.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

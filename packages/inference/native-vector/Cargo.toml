@@ -1,0 +1,21 @@
+[package]
+name = "threadnote-native-vector"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80.1"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "=2.16.5", default-features = false, features = ["napi6"] }
+napi-derive = "=2.16.5"
+
+[build-dependencies]
+napi-build = "=1.2.1"
+
+[profile.release]
+codegen-units = 1
+lto = true

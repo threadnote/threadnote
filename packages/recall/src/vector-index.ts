@@ -26,7 +26,14 @@ import {
   loadExternalResourceAccess,
 } from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
-import {normalizeVector, offerBoundedBest, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import {
+  compareVectorResults as compareVectorMatches,
+  unitVectorEncoder,
+  normalizeVector,
+  offerBoundedBest,
+  type VectorSearchResult,
+} from '@threadnote/inference/vector-search';
+import {experimentalNativeVectorSearch, mergeNativeVectorPage} from '@threadnote/inference/native/vector-search';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -759,6 +766,7 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
   options: SemanticScoreOptions<R> = {},
   validateCanonicalScores = false,
 ) {
+  const nativeScorer = yield* experimentalNativeVectorSearch;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const databasePath = vectorDatabasePath(path, config.agentContextHome, manifest.id);
@@ -831,21 +839,36 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
               [active.generation, cursor, ...selection.params, VECTOR_INDEX_PAGE_SIZE],
             );
             if (rows.length === 0) break;
-            const pageMatches = yield* Effect.try({
-              try: () =>
-                searchEncodedVectorRows(
+            const pageMatches = yield* boundedSelection && Option.isSome(nativeScorer)
+              ? mergeNativeVectorPage(
+                  nativeScorer.value,
                   normalizedQuery.value,
-                  rows,
+                  EffectArray.map(rows, row => ({
+                    id: row.chunk_id,
+                    uri: row.uri,
+                    vector: bytesFromSqlBlob(row.vector),
+                  })),
                   active.dimensions,
                   limit,
-                  boundedSelection ? best : [],
-                ),
-              catch: cause =>
-                VectorIndexCorrupt.make({
-                  message: cause instanceof Error ? cause.message : String(cause),
-                  modelId: manifest.id,
-                }),
-            });
+                  best,
+                ).pipe(
+                  Effect.mapError(cause => VectorIndexCorrupt.make({message: cause.message, modelId: manifest.id})),
+                )
+              : Effect.try({
+                  try: () =>
+                    searchEncodedVectorRows(
+                      normalizedQuery.value,
+                      rows,
+                      active.dimensions,
+                      limit,
+                      boundedSelection ? best : [],
+                    ),
+                  catch: cause =>
+                    VectorIndexCorrupt.make({
+                      message: cause instanceof Error ? cause.message : String(cause),
+                      modelId: manifest.id,
+                    }),
+                });
             // Preserve the existing Array.slice behavior for non-integer or negative limits.
             if (!boundedSelection) best = [...best, ...pageMatches].sort(compareVectorMatches).slice(0, limit);
             cursor = rows.at(-1)!.chunk_id;
@@ -1660,25 +1683,6 @@ function vectorStatus(
   };
 }
 
-function encodeVector(vector: readonly number[], dimensions: number): Uint8Array {
-  if (vector.length !== dimensions) {
-    throw VectorIndexOperationError.make({message: `Vector has ${vector.length} dimensions; expected ${dimensions}.`});
-  }
-  const bytes = new Uint8Array(dimensions * 4);
-  const view = new DataView(bytes.buffer);
-  let squaredMagnitude = 0;
-  for (const [index, component] of vector.entries()) {
-    if (!Number.isFinite(component))
-      throw VectorIndexOperationError.make({message: 'Vector contains a non-finite component.'});
-    squaredMagnitude += component * component;
-    view.setFloat32(index * 4, component, true);
-  }
-  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.001) {
-    throw VectorIndexOperationError.make({message: 'Vector is not L2-normalized.'});
-  }
-  return bytes;
-}
-
 function validateEncodedVector(value: unknown, dimensions: number): void {
   const bytes = bytesFromSqlBlob(value);
   if (bytes.byteLength !== dimensions * 4) {
@@ -1764,10 +1768,6 @@ function searchEncodedVectorRows(
   return Number.isInteger(limit) && limit >= 0
     ? matches
     : matches.sort(compareVectorMatches).slice(0, Math.min(limit, matches.length));
-}
-
-function compareVectorMatches(left: VectorSearchResult, right: VectorSearchResult): number {
-  return right.score - left.score || compareCodeUnits(left.id, right.id);
 }
 
 function compareCodeUnits(left: string, right: string): number {
@@ -1980,6 +1980,8 @@ function withVectorIndexLock<A, E, R>(
 export function chunksForRecallCandidates(candidates: readonly RecallCandidate[]): readonly RecallChunk[] {
   return EffectArray.flatMap(candidates, candidate => chunkRecallDocument(candidate.uri, candidate.text));
 }
+
+const encodeVector = unitVectorEncoder(message => VectorIndexOperationError.make({message}));
 
 /** Private resumable-builder primitives. Automatic callers validate existing storage before additive writes. */
 export const recallVectorStorage = {
