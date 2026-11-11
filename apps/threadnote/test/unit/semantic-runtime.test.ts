@@ -251,7 +251,8 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
         const coordinator = yield* f.make();
         const first = yield* coordinator.status;
         const expected = {
-          platform: 'darwin-arm64',
+          // Only the retained Darwin arm64 image has shipped Java execution pins.
+          platform: process.platform === 'darwin' && process.arch === 'arm64' ? 'darwin-arm64' : 'unavailable',
           runtimeSdk: {language: 'java', version: '25.0.5+8'},
           projectSdk: {language: 'java', version: '21.0.13+9'},
           nextAction: expect.stringContaining(

@@ -35,7 +35,7 @@ import {SemanticWriterAdmissionRequest} from '../../src/semantic/agent_change_pr
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, cryptoLayer);
-const supported = process.platform === 'darwin' && process.arch === 'arm64';
+const supported = Native.runtimeNativePlatformSupport().writer;
 const reorderObjectKeys = (value: unknown, shifts: readonly number[], depth = 0): unknown => {
   if (EffectArray.isArray(value)) return EffectArray.map(value, child => reorderObjectKeys(child, shifts, depth + 1));
   if (!Predicate.isObject(value)) return value;

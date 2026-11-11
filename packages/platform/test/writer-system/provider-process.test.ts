@@ -1,5 +1,7 @@
 import * as EffectString from 'effect/String';
 import {expect, it} from 'vitest';
+import fc from 'fast-check';
+import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
 import {
   runtimeSpawnOwnedProviderTree,
   runtimeObserveOwnedProviderTree,
@@ -11,6 +13,42 @@ import {
 } from '../../src/system.js';
 
 const supported = runtimeNativePlatformSupport().providerTree;
+
+it('decodes unreaped kernel exit statuses without treating stop or malformed records as termination', () => {
+  expect(decodeUnreapedPosixExitStatus(String(7 * 256))).toBe(7);
+  fc.assert(
+    fc.property(
+      fc.oneof(
+        fc.integer({min: 0, max: 255}).map(code => ({status: code * 256, code})),
+        fc.record({signal: fc.integer({min: 1, max: 64}), core: fc.boolean()}).map(({signal, core}) => ({
+          status: signal + (core ? 128 : 0),
+          code: 128 + signal,
+        })),
+      ),
+      ({status, code}) => {
+        expect(decodeUnreapedPosixExitStatus(String(status))).toBe(code);
+      },
+    ),
+    {numRuns: 100},
+  );
+  for (const invalid of [
+    undefined,
+    '',
+    '-1',
+    '1.5',
+    'NaN',
+    'Infinity',
+    ' 1792',
+    '01792',
+    '65536',
+    '127',
+    '65535',
+    '128',
+    '257',
+  ])
+    expect(() => decodeUnreapedPosixExitStatus(invalid)).toThrow();
+});
+
 const spawn = (source: string) =>
   runtimeSpawnOwnedProviderTree({
     command: process.execPath,

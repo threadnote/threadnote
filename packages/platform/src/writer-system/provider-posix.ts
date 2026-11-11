@@ -435,6 +435,20 @@ interface Member {
   readonly zombie: boolean;
   readonly exitCode: number | null;
 }
+/** Decode a kernel wait status without consuming the original child's PID/PGID reservation. */
+export function decodeUnreapedPosixExitStatus(value: string | undefined): number {
+  if (value === undefined || !/^(?:0|[1-9]\d*)$/u.test(value)) return fail('identity');
+  const status = Number(value);
+  if (!Number.isSafeInteger(status) || status > 0xffff) return fail('identity');
+  const signal = status & 0x7f;
+  if (signal === 0) {
+    if ((status & 0xff) !== 0) return fail('identity');
+    return status >>> 8;
+  }
+  // Stopped/continued or malformed statuses cannot authenticate a zombie's termination.
+  if (signal > 64 || status > 0xff) return fail('identity');
+  return 128 + signal;
+}
 function readGroupMember(pid: number): Member {
   const identity = readPosixProcessIdentity(pid, true);
   if (runtimeCurrentPlatform() === 'linux') {
@@ -443,7 +457,15 @@ function readGroupMember(pid: number): Member {
       fields = EffectString.split(EffectString.trim(EffectString.slice(end + 2)(text)), /\s+/u);
     const info = fs.lstatSync(`/proc/${pid}`, {bigint: true});
     if (readPosixProcessIdentity(pid, true) !== identity || fields.length < 20) fail('identity');
-    return {identity, uid: Number(info.uid), group: Number(fields[2]), zombie: fields[0] === 'Z', exitCode: null};
+    const zombie = fields[0] === 'Z';
+    return {
+      identity,
+      uid: Number(info.uid),
+      group: Number(fields[2]),
+      zombie,
+      // /proc/PID/stat field52 is the unreaped wait status; fields starts at field3 (state).
+      exitCode: zombie ? decodeUnreapedPosixExitStatus(fields[49]) : null,
+    };
   }
   const lib = dlopen('/usr/lib/libproc.dylib', {
     proc_pidinfo: {args: ['i32', 'i32', 'u64', 'buffer', 'i32'], returns: 'i32'},
