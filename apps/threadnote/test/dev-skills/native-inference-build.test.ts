@@ -1,5 +1,9 @@
 import {CommandExecutor} from '@threadnote/platform/command';
-import {assembleNativeInference, muslWorkflowRuntimeArguments} from '../../../../scripts/assemble-native-inference.js';
+import {
+  assembleNativeInference,
+  muslWorkflowRuntimeArguments,
+  MUSL_WORKFLOW_BWRAP_SHIM,
+} from '../../../../scripts/assemble-native-inference.js';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, String as EffectString} from 'effect';
@@ -38,6 +42,39 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(process.platform === 'win32')(
+      'drops all capabilities before forwarding the fixed namespace arguments without shell expansion',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-bwrap-boundary-'});
+          const binary = path.join(directory, 'fake bwrap');
+          const shim = path.join(directory, 'bwrap');
+          yield* fs.writeFileString(binary, `#!/bin/sh\nprintf '%s\\0' "$@"\n`);
+          yield* fs.chmod(binary, 0o755);
+          expect(MUSL_WORKFLOW_BWRAP_SHIM).toBe('#!/bin/sh\nexec /usr/bin/bwrap --cap-drop ALL "$@"\n');
+          const literal = "'" + EffectString.replaceAll("'", "'\"'\"'")(binary) + "'";
+          yield* fs.writeFileString(shim, EffectString.replace('/usr/bin/bwrap', literal)(MUSL_WORKFLOW_BWRAP_SHIM));
+          const arguments_ = [
+            '--unshare-net',
+            '--ro-bind',
+            '/path with spaces',
+            '/path with spaces',
+            'bun',
+            '-e',
+            'literal "$HOME"',
+          ];
+          const result = Bun.spawnSync({cmd: ['sh', shim, ...arguments_], stdout: 'pipe', stderr: 'pipe'});
+          expect(result.exitCode, result.stderr.toString()).toBe(0);
+          expect(EffectString.split(result.stdout.toString(), '\0').slice(0, -1)).toEqual([
+            '--cap-drop',
+            'ALL',
+            ...arguments_,
+          ]);
+        }),
+    );
+
     it.effect('rejects cross-platform inference assembly before invoking build tools', () =>
       Effect.gen(function* () {
         const result = yield* assembleNativeInference({

@@ -428,6 +428,20 @@ const MUSL_PINS = {
   },
 } as const;
 
+// The trusted harness supplies fixed namespace arguments and no capability-restoring options.
+export const MUSL_WORKFLOW_BWRAP_SHIM = '#!/bin/sh\nexec /usr/bin/bwrap --cap-drop ALL "$@"\n';
+const MUSL_WORKFLOW_CAPABILITY_PROBE = String.raw`
+const status = await Bun.file('/proc/self/status').text();
+const capabilities = {};
+for (const field of ['CapEff', 'CapPrm', 'CapAmb']) {
+  const line = status.split('\n').find(line => line.startsWith(field + ':'));
+  const value = line?.slice(field.length + 1).trim();
+  if (!value || !/^0+$/.test(value)) throw new Error('Inner workflow retained or omitted ' + field);
+  capabilities[field] = value;
+}
+console.log(JSON.stringify({pid: process.pid, capabilities}));
+`;
+
 /** Only the extracted-workflow harness needs nested mount/network namespaces and these two inputs. */
 export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.ProcessEnv>): readonly string[] {
   const archive = environment.THREADNOTE_RELEASE_ARCHIVE;
@@ -504,7 +518,17 @@ chmod 755 /tmp/rustup-init
 git config --global --add safe.directory ${shellRoot}
 cd ${shellRoot}
 bun install --frozen-lockfile
-bun ${shellDriver}
+${
+  options.workflowRuntime
+    ? `mkdir -p /usr/local/bin ${shellRoot}/.context/release-artifact
+printf '%s' ${shellLiteral(MUSL_WORKFLOW_BWRAP_SHIM)} > /usr/local/bin/bwrap
+chmod 755 /usr/local/bin/bwrap
+export PATH=/usr/local/bin:"$PATH"
+[ "$(command -v bwrap)" = /usr/local/bin/bwrap ]
+bwrap --unshare-net --die-with-parent --ro-bind / / --tmpfs ${shellRoot} --dev /dev --proc /proc --chdir /tmp bun -e ${shellLiteral(MUSL_WORKFLOW_CAPABILITY_PROBE)} > ${shellRoot}/.context/release-artifact/capabilities.json
+`
+    : ''
+}bun ${shellDriver}
 `;
   yield* runCommandEffect(
     'docker',

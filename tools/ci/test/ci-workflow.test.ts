@@ -242,6 +242,7 @@ it('executes musl extracted archives and their compiled harness inside the nativ
   const command = Schema.decodeUnknownSync(Schema.Array(Schema.String))(JSON.parse(encoded ?? 'null'));
   expect(command.slice(0, 2)).toEqual(['bash', '-ec']);
   expect(command[2]).toContain('command -v git; command -v rg; command -v bwrap;');
+  expect(command[2]).toContain('test -s .context/release-artifact/capabilities.json;');
   expect(command[2]).toContain('bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts');
   expect(command[2]).toContain(
     'bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
