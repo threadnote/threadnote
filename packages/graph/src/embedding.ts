@@ -30,7 +30,7 @@ import {
 } from '@threadnote/inference/models/catalog';
 import {readModelSelection, selectedEmbeddingModelId} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
-import {normalizeVector, searchExactVectors, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import {normalizeVector, searchExactVectorBlobs, type VectorSearchResult} from '@threadnote/inference/vector-search';
 import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from './layout.js';
 import {compareCodeUnits} from './ordering.js';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from './index_scope.js';
@@ -930,9 +930,9 @@ const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input
         if (rows.length === 0) break;
         const records = EffectArray.map(rows, row => ({
           id: row.symbol_id,
-          vector: decodeVector(row.vector, active.dimensions),
+          vector: validatedVectorBytes(row.vector, active.dimensions),
         }));
-        const pageMatches = searchExactVectors(queryVector, records, {
+        const pageMatches = searchExactVectorBlobs(queryVector, records, {
           dimensions: active.dimensions,
           limit: Math.min(boundedLimit, records.length),
           minimumScore: graphEmbeddingMinimumScore(selected.manifest),
@@ -1100,7 +1100,7 @@ function encodeVector(vector: readonly number[], dimensions: number): Uint8Array
   return bytes;
 }
 
-function decodeVector(value: unknown, dimensions: number): readonly number[] {
+function validatedVectorBytes(value: unknown, dimensions: number): Uint8Array {
   const bytes = bytesFromSqlBlob(value);
   if (bytes.byteLength !== dimensions * 4) {
     throw CodeGraphEmbeddingError.make({
@@ -1108,19 +1108,22 @@ function decodeVector(value: unknown, dimensions: number): readonly number[] {
     });
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const vector = Array.from({length: dimensions}, (_, index) => view.getFloat32(index * 4, true));
-  if (EffectArray.some(vector, component => !Number.isFinite(component))) {
-    throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
+  let squaredMagnitude = 0;
+  for (let index = 0; index < dimensions; index += 1) {
+    const component = view.getFloat32(index * 4, true);
+    if (!Number.isFinite(component)) {
+      throw CodeGraphEmbeddingError.make({message: 'Stored vector contains a non-finite component.'});
+    }
+    squaredMagnitude += component * component;
   }
-  const magnitude = Math.sqrt(EffectArray.reduce(vector, 0, (sum, component) => sum + component * component));
-  if (Math.abs(magnitude - 1) > 0.002)
+  if (Math.abs(Math.sqrt(squaredMagnitude) - 1) > 0.002)
     throw CodeGraphEmbeddingError.make({message: 'Stored vector is not L2-normalized.'});
-  return vector;
+  return bytes;
 }
 
 function isDecodableVector(value: unknown, dimensions: number): boolean {
   try {
-    decodeVector(value, dimensions);
+    validatedVectorBytes(value, dimensions);
     return true;
   } catch {
     return false;
