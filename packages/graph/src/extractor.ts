@@ -1,3 +1,4 @@
+import {createNavigationFactCollector} from './navigation_facts.js';
 import {
   collectLocalBindings,
   declarationKind,
@@ -599,6 +600,7 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
   const localBindings = surfaceOnly
     ? new Map<ts.Node, ReadonlySet<string>>()
     : collectLocalBindings(compiler, sourceFile);
+  const navigation = surfaceOnly ? undefined : createNavigationFactCollector(compiler, sourceFile, localBindings);
   let dynamicRelationships = 0;
   let dynamicRelationshipsBounded = surfaceOnly;
 
@@ -606,7 +608,7 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
     node: ts.CallExpression | ts.NewExpression,
     owner: CodeGraphSymbol,
     relation: 'calls' | 'constructs',
-  ): void => {
+  ): CodeGraphEdge | undefined => {
     if (surfaceOnly || dynamicRelationships >= TYPESCRIPT_DYNAMIC_RELATIONSHIP_LIMIT) {
       dynamicRelationshipsBounded = true;
       return;
@@ -614,10 +616,11 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
     const target = relationshipExpressionName(compiler, node.expression, localBindings);
     if (!target) return;
     dynamicRelationships += 1;
-    addUnresolvedEdge(facts, context, node, owner, target, relation, 'syntactic', node.arguments?.length ?? 0);
+    return addUnresolvedEdge(facts, context, node, owner, target, relation, 'syntactic', node.arguments?.length ?? 0);
   };
 
   const visit = (node: ts.Node): void => {
+    navigation?.observe(node);
     const declaration = declarationForNode(node, sourceFile, context, declarationStack, symbolIdentities);
     let pushed = false;
     if (declaration) {
@@ -688,7 +691,8 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
         }
       }
     } else if (compiler.isCallExpression(node)) {
-      addDynamicRelationship(node, owner, 'calls');
+      const edge = addDynamicRelationship(node, owner, 'calls');
+      if (edge) navigation?.call(node, owner, edge.id);
     } else if (compiler.isNewExpression(node)) {
       addDynamicRelationship(node, owner, 'constructs');
     } else if (compiler.isHeritageClause(node)) {
@@ -728,7 +732,13 @@ function extractTypeScript(content: string, context: ExtractionContext): CodeGra
             'module declarations, imports, reexports, and inheritance were preserved',
     );
   }
+  const capturedNavigationFacts = (parseDiagnostics?.length ?? 0) === 0 ? navigation?.finish() : undefined;
+  const navigationFacts =
+    dynamicRelationshipsBounded && capturedNavigationFacts
+      ? {...capturedNavigationFacts, omitted: true}
+      : capturedNavigationFacts;
   return {
+    ...(navigationFacts === undefined ? {} : {navigationFacts}),
     diagnostics: facts.diagnostics,
     edges: facts.edges,
     path: context.path,
@@ -1723,7 +1733,7 @@ function addUnresolvedEdge(
   relation: CodeGraphRelation,
   provenance: CodeGraphProvenance,
   arity?: number,
-): void {
+): CodeGraphEdge {
   const sourceFile = node.getSourceFile();
   const evidenceSpan = spanFor(sourceFile, node.getStart(sourceFile, false), node.getEnd());
   const edge: CodeGraphEdge = {
@@ -1746,7 +1756,7 @@ function addUnresolvedEdge(
     sourceName: source.name,
     targetName,
   };
-  if (facts.edgeIdentities?.has(edge.id)) return;
+  if (facts.edgeIdentities?.has(edge.id)) return edge;
   facts.edgeIdentities?.add(edge.id);
   facts.edges.push(edge);
   if (arity !== undefined) {
@@ -1764,6 +1774,7 @@ function addUnresolvedEdge(
       targetName: edge.targetName,
     });
   }
+  return edge;
 }
 
 function addTextEdge(
