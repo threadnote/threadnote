@@ -100,6 +100,80 @@ describe('final combined qualification preparation', () => {
     }
   });
 
+  it('verifies inert Rust inputs and authors the locked offline project without launching tools', async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-rust-inputs-')));
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    try {
+      const sdkDirectory = join(directory, 'sdk');
+      await mkdir(join(sdkDirectory, 'bin'), {recursive: true});
+      const executable = join(directory, 'rust-analyzer');
+      await writeFile(executable, 'inert Rust provider');
+      const sdkFiles = {
+        'bin/cargo': 'inert cargo',
+        'bin/rustc': 'inert rustc',
+        'bin/rustdoc': 'inert rustdoc',
+        'CARGO-LICENSE': 'Cargo notice fixture',
+        COPYRIGHT: 'Rust SDK notice fixture',
+      };
+      for (const [name, text] of EffectRecord.toEntries(sdkFiles)) await writeFile(join(sdkDirectory, name), text);
+      const mit = join(directory, 'ra-MIT'),
+        apache = join(directory, 'ra-APACHE');
+      await writeFile(mit, 'RA MIT source fixture');
+      await writeFile(apache, 'RA Apache source fixture');
+      // Independent known directory image, rather than computing the expectation with the production walker.
+      const sdkTreeDigest = hash(
+        JSON.stringify([
+          ['bin', 'directory'],
+          ['bin/cargo', hash(sdkFiles['bin/cargo'])],
+          ['bin/rustc', hash(sdkFiles['bin/rustc'])],
+          ['bin/rustdoc', hash(sdkFiles['bin/rustdoc'])],
+          ['CARGO-LICENSE', hash(sdkFiles['CARGO-LICENSE'])],
+          ['COPYRIGHT', hash(sdkFiles.COPYRIGHT)],
+        ]),
+      );
+      const input = {
+        version: 1,
+        language: 'rust',
+        providerVersion: '0.3.3097-standalone (0c4d74686b 2026-10-22)',
+        executable,
+        executableDigest: hash('inert Rust provider'),
+        rustVersion: '1.99.1',
+        rustcExecutableDigest: hash(sdkFiles['bin/rustc']),
+        cargoExecutableDigest: hash(sdkFiles['bin/cargo']),
+        rustdocExecutableDigest: hash(sdkFiles['bin/rustdoc']),
+        sdkDirectory,
+        sdkTreeDigest,
+        notices: [
+          {component: 'rust-analyzer-source-mit', file: mit, sha256: hash('RA MIT source fixture')},
+          {component: 'rust-analyzer-source-apache', file: apache, sha256: hash('RA Apache source fixture')},
+          {component: 'rust-sdk-copyright', file: join(sdkDirectory, 'COPYRIGHT'), sha256: hash(sdkFiles.COPYRIGHT)},
+          {
+            component: 'cargo-third-party',
+            file: join(sdkDirectory, 'CARGO-LICENSE'),
+            sha256: hash(sdkFiles['CARGO-LICENSE']),
+          },
+        ],
+      };
+      const file = join(directory, 'inputs.json');
+      await writeFile(file, JSON.stringify(input));
+      const verified = await readProviderInputs(file);
+      expect(verified.input).toEqual(input);
+      expect(await providerCatalog(verified.input, directory)).toEqual({
+        catalog: {rust: {executable, executableDigest: input.executableDigest, sdkDirectory, sdkTreeDigest}},
+        environment: undefined,
+      });
+      const fixture = selectedFixture(verified.input);
+      expect(fixture.projectFiles['Cargo.lock']).toBe(
+        'version = 4\n[[package]]\nname = "semantic-fixture"\nversion = "0.1.0"\n',
+      );
+      expect(fixture.sources['src/lib.rs']).toContain('UnsavedName');
+      await writeFile(join(sdkDirectory, 'bin/rustdoc'), 'changed rustdoc');
+      await expect(readProviderInputs(file)).rejects.toThrow('Pinned Rust rustdoc bytes');
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
   it('locates authored symbols across CRLF lines using UTF-16 coordinates', () => {
     fc.assert(
       fc.property(

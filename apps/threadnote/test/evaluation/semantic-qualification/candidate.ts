@@ -301,7 +301,15 @@ export async function runCandidateChecks(
                 sha256: provider.input.goExecutableDigest,
                 sdkTreeDigest: provider.input.sdkTreeDigest,
               }
-            : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
+            : provider.input.language === 'rust'
+              ? {
+                  version: provider.input.rustVersion,
+                  sha256: provider.input.rustcExecutableDigest,
+                  cargoSha256: provider.input.cargoExecutableDigest,
+                  rustdocSha256: provider.input.rustdocExecutableDigest,
+                  sdkTreeDigest: provider.input.sdkTreeDigest,
+                }
+              : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
       };
       report.cost.providerLaunches = null;
     }

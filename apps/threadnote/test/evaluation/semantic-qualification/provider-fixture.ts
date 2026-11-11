@@ -50,6 +50,19 @@ export const ProviderInputs = Schema.Union([
     sdkDirectory: Schema.String,
     sdkTreeDigest: digest,
   }),
+  Schema.Struct({
+    ...common,
+    language: Schema.Literal('rust'),
+    providerVersion: Schema.Literal('0.3.3097-standalone (0c4d74686b 2026-10-22)'),
+    executable: Schema.String,
+    executableDigest: digest,
+    rustVersion: Schema.Literal('1.99.1'),
+    rustcExecutableDigest: digest,
+    cargoExecutableDigest: digest,
+    rustdocExecutableDigest: digest,
+    sdkDirectory: Schema.String,
+    sdkTreeDigest: digest,
+  }),
 ]);
 export type ProviderInputs = typeof ProviderInputs.Type;
 const hash = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
@@ -82,6 +95,26 @@ export async function readProviderInputs(file: string) {
         EffectArray.some(input.notices, notice => notice.component === 'go-sdk'),
       'Explicit Go provider and SDK notice objects',
     );
+  } else if (input.language === 'rust') {
+    assert.equal(hash(await readFile(input.executable)), input.executableDigest, 'Pinned Rust provider bytes');
+    for (const [tool, expected] of [
+      ['rustc', input.rustcExecutableDigest],
+      ['cargo', input.cargoExecutableDigest],
+      ['rustdoc', input.rustdocExecutableDigest],
+    ])
+      assert.equal(
+        hash(await readFile(join(input.sdkDirectory, 'bin', tool))),
+        expected,
+        'Pinned Rust ' + tool + ' bytes',
+      );
+    assert.equal(await tree(input.sdkDirectory, true), input.sdkTreeDigest, 'Complete Rust SDK tree');
+    assert.ok(
+      EffectArray.every(
+        ['rust-analyzer-source-mit', 'rust-analyzer-source-apache', 'rust-sdk-copyright', 'cargo-third-party'],
+        component => EffectArray.some(input.notices, notice => notice.component === component),
+      ),
+      'Explicit Rust provider source and SDK notice objects',
+    );
   } else {
     assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
     assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
@@ -95,7 +128,7 @@ export async function readProviderInputs(file: string) {
     manifestSha256: hash(bytes),
     notices: input.notices,
     licenseDisposition: 'notice-bytes-recorded; selected-profile and redistribution review remain required',
-    ...(input.language === 'go'
+    ...(input.language === 'go' || input.language === 'rust'
       ? {
           sdkProofDisposition:
             'complete local bytes recorded; SDK provenance and component inventory remain unqualified',
@@ -112,22 +145,22 @@ export function selectedFixture(input: ProviderInputs) {
       EffectString.replaceAll('SavedName', 'UnsavedName')(text),
     ]),
   );
-  return {sources, projectFiles: fixture.projectFiles};
+  const projectFiles = {...fixture.projectFiles};
+  if (input.language === 'rust')
+    projectFiles['Cargo.lock'] = 'version = 4\n[[package]]\nname = "semantic-fixture"\nversion = "0.1.0"\n';
+  return {sources, projectFiles};
 }
 
 export async function providerCatalog(input: ProviderInputs, scratch: string) {
-  if (input.language === 'go')
-    return {
-      catalog: {
-        go: {
-          executable: input.executable,
-          executableDigest: input.executableDigest,
-          sdkDirectory: input.sdkDirectory,
-          sdkTreeDigest: input.sdkTreeDigest,
-        },
-      },
-      environment: undefined,
+  if (input.language === 'go' || input.language === 'rust') {
+    const candidate = {
+      executable: input.executable,
+      executableDigest: input.executableDigest,
+      sdkDirectory: input.sdkDirectory,
+      sdkTreeDigest: input.sdkTreeDigest,
     };
+    return {catalog: input.language === 'go' ? {go: candidate} : {rust: candidate}, environment: undefined};
+  }
   const base = {
     runtime: input.runtime,
     runtimeDigest: input.runtimeDigest,
