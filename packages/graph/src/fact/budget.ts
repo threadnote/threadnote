@@ -1,3 +1,4 @@
+import {closeNavigationFacts} from '../navigation_facts.js';
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
@@ -433,8 +434,19 @@ function closeMaterializationFacts(
                 !originalSymbolIds.has(reference.sourceId) ||
                 retainedSymbolIds.has(reference.sourceId)),
           );
-    if (edges.length === fact.edges.length && references?.length === fact.references?.length) return fact;
-    return {...fact, edges, ...(references === undefined ? {} : {references})};
+    const navigationFacts = closeNavigationFacts(fact.navigationFacts, fact.symbols, edges);
+    if (
+      edges.length === fact.edges.length &&
+      references?.length === fact.references?.length &&
+      navigationFacts === fact.navigationFacts
+    )
+      return fact;
+    return {
+      ...fact,
+      edges,
+      ...(navigationFacts === undefined ? {} : {navigationFacts}),
+      ...(references === undefined ? {} : {references}),
+    };
   });
 }
 
