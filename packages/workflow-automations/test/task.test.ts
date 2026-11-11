@@ -12,6 +12,7 @@ import {
 } from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
+import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
 import {
   decodeNativeTaskActionRef,
   decodeNativeTaskCursor,
@@ -82,6 +83,17 @@ const state: NativeWorkflowState = {
 };
 
 describe('native task projection', () => {
+  it('preserves old runtime images without a marker and rejects invalidated foreign snapshot IDs', () => {
+    const legacy = decodeNativeCycleRuntime(state.cycle);
+    expect(legacy).toEqual(state.cycle);
+    expect(legacy).not.toHaveProperty('invalidatedThroughSnapshot');
+    expect(() =>
+      decodeNativeCycleRuntime({...state.cycle, invalidatedThroughSnapshot: {'phase-one': 'missing-snapshot'}}),
+    ).toThrow();
+    expect(() =>
+      decodeNativeCycleRuntime({...state.cycle, invalidatedThroughSnapshot: {'other-phase': 'missing-snapshot'}}),
+    ).toThrow();
+  });
   it('accepts canonical run IDs and only task-view action references for task start', () => {
     const taskViewRef = encodeNativeTaskActionRef({
       version: 1,
@@ -533,6 +545,7 @@ describe('native task projection', () => {
       {
         status: 'complete',
         next: {action: 'complete'},
+        taskRef: expect.any(String),
       },
     );
   });

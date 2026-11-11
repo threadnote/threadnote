@@ -287,7 +287,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use the current task card to begin eligible phases, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with caller-provided human authority. Actor identity is not independently authenticated.',
+        'Use the current task card to begin eligible phases, reopen an explicitly selected validated or published phase after an observed failure, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with caller-provided human authority. Actor identity is not independently authenticated.',
       inputSchema: {
         runId: McpInput.requiredString('Existing workflow run ID'),
         callerCwd: McpInput.requiredString('Absolute bound checkout'),
@@ -297,6 +297,11 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('resume'),
             reason: McpInput.requiredString('Recovery reason'),
+          }),
+          Schema.Struct({
+            command: Schema.Literal('reopen'),
+            phaseId: McpInput.requiredString('Exact validated or published phase ID to reopen'),
+            reason: McpInput.requiredString('Observed failure or source-drift reason'),
           }),
           Schema.Struct({
             command: Schema.Literal('reconcile'),
@@ -322,24 +327,26 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           ? {command: control.command, runId, callerCwd, taskRef}
           : control.command === 'resume'
             ? {command: control.command, runId, callerCwd, taskRef, reason: control.reason}
-            : control.command === 'reconcile'
-              ? {
-                  command: control.command,
-                  runId,
-                  callerCwd,
-                  taskRef,
-                  reason: control.reason,
-                  ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
-                }
-              : {
-                  command: control.command,
-                  runId,
-                  callerCwd,
-                  taskRef,
-                  additionalReviews: control.additionalReviews,
-                  reason: control.reason,
-                  userAuthority: control.userAuthority,
-                };
+            : control.command === 'reopen'
+              ? {command: control.command, runId, callerCwd, taskRef, phaseId: control.phaseId, reason: control.reason}
+              : control.command === 'reconcile'
+                ? {
+                    command: control.command,
+                    runId,
+                    callerCwd,
+                    taskRef,
+                    reason: control.reason,
+                    ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
+                  }
+                : {
+                    command: control.command,
+                    runId,
+                    callerCwd,
+                    taskRef,
+                    additionalReviews: control.additionalReviews,
+                    reason: control.reason,
+                    userAuthority: control.userAuthority,
+                  };
       const result = yield* runNativeTaskAction(config, request);
       return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
     }),

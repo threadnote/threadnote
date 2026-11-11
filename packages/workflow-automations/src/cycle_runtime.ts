@@ -69,6 +69,8 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
   reviewLimits: Schema.Record(id, Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
   reviewExpansions: Schema.Array(NativeCycleReviewExpansionSchema).check(Schema.isMaxLength(256)),
   snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(Schema.isMaxLength(256)),
+  /** For each invalidated phase, the last snapshot that predates its current repair iteration. */
+  invalidatedThroughSnapshot: Schema.optionalKey(Schema.Record(id, id)),
   reviews: Schema.Array(Schema.Struct({snapshotId: id, report: NativeCycleReviewSchema})).check(
     Schema.isMaxLength(256),
   ),
@@ -151,6 +153,10 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     new Set(EffectArray.map(runtime.attempts, attempt => attempt.id)).size !== runtime.attempts.length
   )
     fail('Duplicate cycle evidence identity.');
+  for (const [phaseId, snapshotId] of EffectRecord.toEntries(runtime.invalidatedThroughSnapshot ?? {})) {
+    if (!runtime.state.phases[phaseId] || snapshots.get(snapshotId)?.snapshot.phaseId !== phaseId)
+      fail('Invalidated snapshot boundary does not belong to its canonical phase.');
+  }
   const admissions = runtime.historicalAdmissions ?? [];
   if (
     (runtime.historicalAdmission === undefined) !== (runtime.historicalAdmissions === undefined) ||

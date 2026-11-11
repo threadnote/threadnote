@@ -7030,6 +7030,247 @@ describe('native task actions', () => {
     windowsRealGitFixtureTimeout,
   );
 
+  effectIt.effect(
+    'reopens a published phase from its current card and carries fresh proof through local delivery',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(['one'], 'local');
+        yield* completeLocalPhase(f, 'one');
+        const current = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(current).toMatchObject({next: {action: 'complete'}, taskRef: expect.any(String)});
+        const stateBefore = yield* f.fs.readFileString(f.statePath());
+        const request = {
+          command: 'reopen' as const,
+          runId: 'native-run',
+          callerCwd: f.repo,
+          taskRef: String(current.taskRef),
+          phaseId: 'one',
+          reason: 'CI found a defect in the delivered phase.',
+        };
+        const wrongPhase = yield* runNativeTaskAction(f.config, {...request, phaseId: 'missing'}).pipe(Effect.result);
+        expect(wrongPhase).toMatchObject({failure: {code: 'phase-not-reopenable'}});
+        const decoded = decodeNativeTaskActionRef(request.taskRef);
+        if (!decoded) throw new Error('The complete task card must carry an opaque reference.');
+        const foreign = yield* runNativeTaskAction(f.config, {
+          ...request,
+          taskRef: encodeNativeTaskActionRef({...decoded, generationHash: sha256HexSync('foreign-generation')}),
+        }).pipe(Effect.result);
+        expect(foreign).toMatchObject({failure: {code: 'stale-task-ref'}});
+        yield* f.git(['checkout', '-b', 'wrong-branch']);
+        const wrongBranch = yield* runNativeTaskAction(f.config, request).pipe(Effect.result);
+        expect(wrongBranch).toMatchObject({failure: {code: 'wrong-branch'}});
+        yield* f.git(['checkout', 'feature/one']);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(stateBefore);
+
+        // The reviewed tree is still current: reopening must work before any source bytes change.
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const reopened = object(
+          (yield* mcp.invokeTool('workflow_task_control', {
+            runId: request.runId,
+            callerCwd: request.callerCwd,
+            taskRef: request.taskRef,
+            control: {command: 'reopen', phaseId: request.phaseId, reason: request.reason},
+          })).structuredContent,
+        );
+        expect(reopened).toMatchObject({status: 'reopened', phaseId: 'one', task: {next: {action: 'blocked'}}});
+        const invalidated = yield* readNativeWorkflowState(f.config, 'native-run');
+        expect(invalidated?.state.cycle?.state.phases.one).toMatchObject({
+          status: 'stale',
+          history: [expect.objectContaining({delivery: expect.any(Object), validation: expect.any(Object)})],
+        });
+        const retiredId = invalidated?.state.cycle?.snapshots.at(-1)?.snapshot.snapshotId;
+        expect(invalidated?.state.cycle?.invalidatedThroughSnapshot).toEqual({one: retiredId});
+        if (!invalidated?.state.cycle || !retiredId) throw new Error('Expected retained cycle proof.');
+        expect(() =>
+          decodeNativeCycleRuntime({
+            ...invalidated.state.cycle,
+            invalidatedThroughSnapshot: {one: 'missing-snapshot'},
+          }),
+        ).toThrow();
+        expect(() =>
+          decodeNativeCycleRuntime({...invalidated.state.cycle, invalidatedThroughSnapshot: {other: retiredId}}),
+        ).toThrow();
+        expect(invalidated?.state.cycle?.state.phases.one.history).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              tree: invalidated?.state.cycle?.snapshots.at(-1)?.snapshot.tree,
+            }),
+          ]),
+        );
+        const staleReplay = yield* runNativeTaskAction(f.config, request).pipe(Effect.result);
+        expect(staleReplay).toMatchObject({failure: {code: 'stale-task-ref'}});
+        const blocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        const resumed = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'resume',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            taskRef: String(blocked.taskRef),
+            reason: request.reason,
+          }),
+        );
+        expect(resumed).toMatchObject({status: 'resumed', phaseId: 'one'});
+        const ready = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+        expect(ready.snapshot.state).toBe('ready');
+        const work = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            packet,
+          }),
+        );
+        expect(work).toMatchObject({status: 'ready', phaseId: 'one', workRef: expect.any(String)});
+        const sameTree = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: String(work.workRef),
+            reason: 'Recheck the same source after the CI environment was corrected.',
+          }),
+        );
+        const sameTreeRef = String(sameTree.snapshotRef);
+        expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next).toMatchObject({
+          action: 'review',
+          phaseId: 'one',
+        });
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: sameTreeRef,
+          report: {
+            mode: 'incremental',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings: [],
+          },
+        });
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-validation',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef: sameTreeRef,
+          validation: {
+            checks: [{command: 'environment check', result: 'passed', evidence: 'The same source passed again.'}],
+            acceptance: [{criterion: 'one works', result: 'passed', evidence: 'The same source was rechecked.'}],
+          },
+        });
+        const validatedCard = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        expect(validatedCard.next.action).toBe('deliver');
+        let reopenedValidation: Record<string, unknown> | undefined;
+        const cliActions = makeNativeTaskActionCommands(
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          () => Effect.void,
+          options =>
+            runNativeTaskAction(f.config, options).pipe(
+              Effect.tap(value => Effect.sync(() => (reopenedValidation = object(value)))),
+              Effect.asVoid,
+            ),
+        );
+        const cli = Command.make('workflow-automation').pipe(Command.withSubcommands([cliActions]));
+        yield* Command.runWith(cli, {version: 'fixture'})([
+          'task-action',
+          'reopen',
+          '--run-id',
+          'native-run',
+          '--caller-cwd',
+          f.repo,
+          '--task-ref',
+          String(validatedCard.taskRef),
+          '--phase-id',
+          'one',
+          '--reason',
+          'The corrected CI environment revealed a remaining source defect.',
+        ]);
+        expect(reopenedValidation).toMatchObject({status: 'reopened', phaseId: 'one'});
+        const secondBlocked = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+        yield* runNativeTaskAction(f.config, {
+          command: 'resume',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          taskRef: String(secondBlocked.taskRef),
+          reason: 'The source defect is ready for another bounded implementation.',
+        });
+        const secondWork = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'work',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            packet,
+          }),
+        );
+        expect(secondWork).toMatchObject({status: 'ready', phaseId: 'one'});
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "CI repair";\n');
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', 'Repair delivered phase']);
+        const snapshot = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-snapshot',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            workRef: String(secondWork.workRef),
+            reason: request.reason,
+          }),
+        );
+        const snapshotRef = String(snapshot.snapshotRef);
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-review',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          snapshotRef,
+          report: {
+            mode: 'incremental',
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
+            findings: [],
+          },
+        });
+        const validation = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'record-validation',
+            runId: 'native-run',
+            callerCwd: f.repo,
+            snapshotRef,
+            validation: {
+              checks: [{command: 'CI repair check', result: 'passed', evidence: 'The corrected fixture passed.'}],
+              acceptance: [{criterion: 'one works', result: 'passed', evidence: 'The corrected fixture was checked.'}],
+            },
+          }),
+        );
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'deliver-local',
+              runId: 'native-run',
+              callerCwd: f.repo,
+              validationRef: String(validation.validationRef),
+            }),
+          ).status,
+        ).toBe('delivered');
+        expect((yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo})).next.action).toBe(
+          'complete',
+        );
+      }).pipe(run),
+    windowsRealGitFixtureTimeout,
+  );
+
   effectIt.effect('recovers an epochless first finish from only prepareRef through concurrent completion', () =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'local');
@@ -7085,6 +7326,17 @@ describe('native task actions', () => {
       });
       const completedBytes = yield* f.fs.readFileString(closeoutFile);
       const completedState = yield* f.fs.readFileString(f.statePath());
+      const finishedCard = yield* readNativeTaskView(f.config, {runId: 'native-run', callerCwd: f.repo});
+      const reopenFinished = yield* runNativeTaskAction(f.config, {
+        command: 'reopen',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        taskRef: String(finishedCard.taskRef),
+        phaseId: 'one',
+        reason: 'A finished closeout cannot be rewritten.',
+      }).pipe(Effect.result);
+      expect(reopenFinished).toMatchObject({failure: {code: 'closeout-in-progress'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(completedState);
       expect(yield* finish({prepareRef})).toEqual(completed);
       expect(yield* f.fs.readFileString(closeoutFile)).toBe(completedBytes);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(completedState);

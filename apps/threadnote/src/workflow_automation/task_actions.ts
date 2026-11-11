@@ -52,7 +52,7 @@ import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskView} from './task.js';
+import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {
@@ -185,6 +185,14 @@ const requestSchema = Schema.Union([
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     taskRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('reopen'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    taskRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    phaseId: id,
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
@@ -1015,6 +1023,20 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         ),
       );
       return {status: 'resumed', replayed: false, phaseId, cycle, task: yield* taskView()};
+    }
+
+    if (request.command === 'reopen') {
+      if (!EffectString.trim(request.reason))
+        return yield* fail('invalid-request', 'Record the observed reason for reopening the phase.');
+      const phaseId = yield* verifyNativeTaskReopen(config, stored, checkout, request);
+      const invalidation = cycleRequest(stored, {
+        command: 'invalidate',
+        phaseId,
+        reason: request.reason,
+        expectedRevision: stored.revision,
+      });
+      const cycle = unwrapCycle(yield* inCheckout(runWorkflowAutomation(config, invalidation), checkout));
+      return {status: 'reopened', phaseId, cycle, task: yield* taskView()};
     }
 
     if (request.command === 'reconcile') {

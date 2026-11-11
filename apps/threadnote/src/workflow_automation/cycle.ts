@@ -9,6 +9,7 @@ import {
   initializeNativeCycle,
   nextNativeCycle,
   nativeCycleParentsReady,
+  nativeCycleEffectiveParents,
   checkNativeCycleScope,
   validateNativeCyclePhase,
   recordNativeCycleDelivery,
@@ -587,14 +588,26 @@ export const runNativeCycle = <R>(
           return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
         }
         if (request.command === 'invalidate') {
+          const selected = yield* from(getPhase);
           const updated = yield* from(() =>
-            invalidateNativeCycle(
-              state,
-              getPhase().id,
-              required(request.reason, 'the observed failure or source drift'),
-            ),
+            invalidateNativeCycle(state, selected.id, required(request.reason, 'the observed failure or source drift')),
           );
-          return {status: 'ok', revision: yield* save({...runtime, state: updated}), next: nextNativeCycle(updated)};
+          const invalidatedThroughSnapshot = {...(runtime.invalidatedThroughSnapshot ?? {})};
+          const affected = new Set([selected.id]);
+          for (let pass = 0; pass < state.plan.phases.length; pass++)
+            for (const phase of state.plan.phases)
+              if (EffectArray.some(nativeCycleEffectiveParents(state.plan, phase.id), parent => affected.has(parent)))
+                affected.add(phase.id);
+          for (const phaseId of affected) {
+            const latest = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === phaseId).at(-1);
+            if (latest) invalidatedThroughSnapshot[phaseId] = latest.snapshot.snapshotId;
+          }
+          const marked = {
+            ...runtime,
+            state: updated,
+            ...(EffectRecord.keys(invalidatedThroughSnapshot).length > 0 ? {invalidatedThroughSnapshot} : {}),
+          };
+          return {status: 'ok', revision: yield* save(marked), next: nextNativeCycle(updated)};
         }
         if (request.command === 'snapshot') {
           const selected = yield* from(getPhase);

@@ -371,10 +371,11 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly reason: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   lifecycleHandler?: (options: {
-    readonly command: 'begin' | 'resume' | 'reconcile' | 'extend-review-budget';
+    readonly command: 'begin' | 'resume' | 'reopen' | 'reconcile' | 'extend-review-budget';
     readonly runId: string;
     readonly callerCwd: string;
     readonly taskRef: string;
+    readonly phaseId?: string;
     readonly reason?: string;
     readonly bindings?: unknown;
     readonly additionalReviews?: number;
@@ -419,6 +420,17 @@ export function makeNativeTaskActionCommands<E, R>(
     },
     options => lifecycle({command: 'resume', ...options}),
   ).pipe(Command.withDescription('Resume the current blocked phase after its dependencies are accepted'));
+  const reopen = Command.make(
+    'reopen',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current task card reference from workflow task view'),
+      phaseId: requiredString('phase-id', 'Exact validated or published phase to reopen'),
+      reason: requiredString('reason', 'Observed failure or source-drift reason'),
+    },
+    options => lifecycle({command: 'reopen', ...options}),
+  ).pipe(Command.withDescription('Reopen one validated or published phase and retain its proof history'));
   const reconcile = Command.make(
     'reconcile',
     {
@@ -793,6 +805,7 @@ export function makeNativeTaskActionCommands<E, R>(
       work,
       begin,
       resume,
+      reopen,
       reconcile,
       extendReviewBudget,
       recordSnapshot,

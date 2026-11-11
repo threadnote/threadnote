@@ -19,6 +19,9 @@ import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
 import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
+import {currentNativeTaskRef} from './task_action_helpers.js';
+import {decodeJournal} from './closeout_request_schema.js';
+import {readNativeCloseoutJournal} from './closeout_store.js';
 
 const requestSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
@@ -601,4 +604,46 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       ...result,
       historicalWatch: historicalTaskRefs(stored, selectedCandidate.value.candidate),
     });
+  });
+
+/** Resolve an explicit reopen target against the current card and terminal closeout state. */
+export const verifyNativeTaskReopen = (
+  config: RuntimeConfig,
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  checkout: string,
+  request: {readonly runId: string; readonly taskRef: string; readonly phaseId: string},
+) =>
+  Effect.gen(function* () {
+    const view = yield* readNativeTaskView(config, {runId: request.runId, callerCwd: checkout});
+    if (
+      ![
+        'implement',
+        'review',
+        'validate',
+        'deliver',
+        'complete',
+        'blocked',
+        'expand-review-budget',
+        'resolve-review-failure',
+      ].includes(view.next.action)
+    )
+      return yield* fail('task-not-ready', 'Resolve the current plan or authoring gate before reopening a phase.');
+    if (!currentNativeTaskRef(request.taskRef, stored.state, stored.revision, request.runId, view.next.action, view))
+      return yield* fail('stale-task-ref', 'Read the current task card before reopening a phase.');
+    const phases = stored.state.cycle?.state.plan.phases ?? [];
+    const selected = EffectArray.filter(phases, phase => phase.id === request.phaseId);
+    const phase = selected.length === 1 ? selected[0] : undefined;
+    const proof = stored.state.cycle?.state.phases[request.phaseId];
+    if (!phase || !proof || !['validated', 'published'].includes(proof.status))
+      return yield* fail('phase-not-reopenable', 'Select one current validated or published phase.');
+    const closeout = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
+    if (closeout)
+      return yield* fail(
+        'closeout-in-progress',
+        'The semantic closeout has started; its recorded proof cannot be reopened.',
+      );
+    const branch = yield* gitValue(['branch', '--show-current'], checkout);
+    if (branch !== phase.branch)
+      return yield* fail('wrong-branch', 'Reopen the phase from its bound implementation branch.');
+    return phase.id;
   });

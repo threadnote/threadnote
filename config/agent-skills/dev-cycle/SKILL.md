@@ -9,6 +9,7 @@ Start or resume with `workflow_task_start`, then follow `workflow_task_view` and
 
 When an admitted current plan can own a discovered workflow tooling fix, reconcile that fix into the plan instead of starting an auxiliary cycle solely for the repair; keep its source review, validation, and delivery gates.
 Keep reasonable owned path coverage for review corrections. Routine fixes within approved requirements need a fresh source snapshot and review, not repeated business-plan rewrites; reconcile the plan when requirements or ownership actually change.
+When a validated or published phase needs a routine correction, use its current task card reference with `workflow_task_control` `reopen`, an explicit phase ID, and the observed reason; then resume the stale phase and record fresh source, review, validation, and delivery. Reopening retains prior proof and does not rewrite a merged phase.
 
 Use the current card's missing inputs and returned opaque references. `workflow_task_work` prepares bounded implementation packets; assign the cheapest sufficient background implementer and require quiet work, including descendants. The coordinator coordinates but never implements source or reviews it. Give workers objective, acceptance, owned paths, constraints, necessary dependency context, and evidence. Escalate only on concrete evidence.
 

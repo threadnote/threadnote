@@ -440,7 +440,12 @@ export function projectNativeTaskView(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
       if (localDelivery || canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
-      const latest = phaseSnapshots.at(-1)?.snapshot;
+      const boundary = runtime.invalidatedThroughSnapshot?.[candidate.id];
+      const retiredIndex = boundary
+        ? EffectArray.findFirstIndex(phaseSnapshots, entry => entry.snapshot.snapshotId === boundary)
+        : EffectOption.none();
+      const current = phaseSnapshots.slice(EffectOption.getOrElse(retiredIndex, () => -1) + 1);
+      const latest = current.at(-1)?.snapshot;
       return Boolean(latest && latest.phaseHash === cycle.phases[candidate.id].phaseHash);
     }),
   );
@@ -648,16 +653,12 @@ export function projectNativeTaskView(
   };
   return {
     ...view,
-    ...(next.action === 'complete'
-      ? {}
-      : {
-          taskRef: nativeTaskCardRef(
-            state,
-            revision,
-            next.action,
-            next.phaseId,
-            'snapshotId' in next ? next.snapshotId : undefined,
-          ),
-        }),
+    taskRef: nativeTaskCardRef(
+      state,
+      revision,
+      next.action,
+      next.phaseId,
+      'snapshotId' in next ? next.snapshotId : undefined,
+    ),
   };
 }
