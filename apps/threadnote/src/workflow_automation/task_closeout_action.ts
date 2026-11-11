@@ -16,6 +16,18 @@ import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_
 import {fail, inCheckout} from './task_action_helpers.js';
 import type {NativeTaskActionRequest} from './task_actions.js';
 
+const closeoutValidationInputSchema = Schema.Struct({
+  status: Schema.Literal('ok'),
+  phases: Schema.Array(Schema.Struct({id: Schema.String, acceptanceCriteria: Schema.Array(Schema.String)})),
+  decisions: Schema.Array(Schema.Struct({id: Schema.String})),
+  scenarios: Schema.Array(Schema.Struct({id: Schema.String})),
+});
+
+const sameIds = (actual: readonly string[], expected: readonly string[]) =>
+  actual.length === expected.length &&
+  new Set(actual).size === actual.length &&
+  EffectArray.every(actual, id => expected.includes(id));
+
 const taskJobSummary = (value: unknown): Record<string, unknown> => {
   if (!Predicate.isObject(value) || typeof value.status !== 'string')
     return {status: 'unknown', nextAction: 'Inspect this task action using its opaque continuation reference.'};
@@ -23,18 +35,23 @@ const taskJobSummary = (value: unknown): Record<string, unknown> => {
     status: value.status,
     ...(Predicate.isObject(value.progress) ? {progress: value.progress} : {}),
     ...(typeof value.code === 'string' ? {code: value.code} : {}),
-    ...(value.status === 'blocked-with-progress' ||
-    value.status === 'stopped-with-progress' ||
-    value.status === 'failed'
+    ...(value.code === 'invalid-closeout' && value.status === 'failed'
       ? {
           nextAction:
-            'Resolve the reported issue, then explicitly retry this task action with resume:true and the same reference.',
+            'This preparation proposal cannot be retried. Match its phase evidence, decisions, and scenarios to the pinned plan and spec, then submit a corrected new finish request.',
         }
-      : value.status === 'accepted'
-        ? {nextAction: 'Continue this accepted task action with the same reference and resume:true.'}
-        : value.status === 'running'
-          ? {nextAction: 'Wait for this task action, then query again with the same reference.'}
-          : {}),
+      : value.status === 'blocked-with-progress' ||
+          value.status === 'stopped-with-progress' ||
+          value.status === 'failed'
+        ? {
+            nextAction:
+              'Resolve the reported issue, then explicitly retry this task action with resume:true and the same reference.',
+          }
+        : value.status === 'accepted'
+          ? {nextAction: 'Wait for this accepted task action, then query again with the same reference.'}
+          : value.status === 'running'
+            ? {nextAction: 'Wait for this task action, then query again with the same reference.'}
+            : {}),
   };
 };
 
@@ -255,6 +272,13 @@ export const runNativeTaskFinish = (
       const status = Predicate.isObject(result) && typeof result.status === 'string' ? result.status : 'unknown';
       if (status !== 'completed') {
         if (status === 'blocked-with-progress' || status === 'stopped-with-progress' || status === 'failed') {
+          if (
+            status === 'failed' &&
+            Predicate.isObject(result) &&
+            'code' in result &&
+            result.code === 'invalid-closeout'
+          )
+            return {status: 'blocked', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(result)};
           if (!request.resume)
             return {status: 'blocked', stage: 'prepare', prepareRef: request.prepareRef, job: taskJobSummary(result)};
           const resumed = yield* inCheckout(jobRequest('resume', ref.jobId), checkout);
@@ -405,8 +429,51 @@ export const runNativeTaskFinish = (
         }),
         checkout,
       );
-      if (!Predicate.isObject(validation) || validation.status !== 'ok')
-        return yield* fail('closeout-not-ready', 'The canonical closeout validation inputs are unavailable.');
+      const validationInput = yield* Schema.decodeUnknownEffect(closeoutValidationInputSchema)(validation).pipe(
+        Effect.mapError(() => fail('closeout-not-ready', 'The canonical closeout validation inputs are unavailable.')),
+      );
+      const mismatches: string[] = [];
+      if (
+        !sameIds(
+          EffectArray.map(closeoutProposal!.phaseEvidence, item => item.id),
+          EffectArray.map(validationInput.phases, item => item.id),
+        )
+      )
+        mismatches.push('phaseEvidence');
+      for (const phaseInput of validationInput.phases) {
+        const evidence = EffectArray.findFirst(closeoutProposal!.phaseEvidence, item => item.id === phaseInput.id);
+        if (
+          evidence._tag === 'None' ||
+          !sameIds(
+            EffectArray.map(evidence.value.acceptance, item => item.criterion),
+            phaseInput.acceptanceCriteria,
+          )
+        ) {
+          mismatches.push('acceptance');
+          break;
+        }
+      }
+      if (
+        !sameIds(
+          EffectArray.map(closeoutProposal!.decisions, item => item.id),
+          EffectArray.map(validationInput.decisions, item => item.id),
+        )
+      )
+        mismatches.push('decisions');
+      if (
+        !sameIds(
+          EffectArray.map(closeoutProposal!.scenarios, item => item.id),
+          EffectArray.map(validationInput.scenarios, item => item.id),
+        )
+      )
+        mismatches.push('scenarios');
+      if ((state.plan.spec === undefined) !== (closeoutProposal!.behaviorVerification === undefined))
+        mismatches.push('behaviorVerification');
+      if (mismatches.length > 0)
+        return yield* fail(
+          'invalid-closeout-proposal',
+          `Closeout proposal fields ${EffectArray.join(mismatches, ', ')} must match the pinned plan and spec. Correct the proposal and submit a new finish request.`,
+        );
       const submitted = yield* inCheckout(jobRequest('submit', undefined, prepareWork), checkout);
       const submittedValue: unknown = submitted;
       if (!Predicate.isObject(submittedValue) || typeof submittedValue.jobId !== 'string')

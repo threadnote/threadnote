@@ -5111,6 +5111,67 @@ describe('native task actions', () => {
       expect(exactDelivery.receipt).toEqual(delivery.receipt);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
       yield* f.git(['checkout', '--', 'source.ts']);
+      const invalidProposal = {
+        ...readbackProposal,
+        decisions: [{id: 'unknown', implemented: 'Unsupported decision.', rationale: 'Unsupported decision.'}],
+        scenarios: [{id: 'unknown', evidence: 'Unsupported scenario.'}],
+        behaviorVerification: 'No spec is pinned.',
+      };
+      const beforeInvalidFinish = yield* f.fs.readFileString(f.statePath());
+      const closeoutPath = yield* nativeCloseoutJournalPath(f.config, 'native-run');
+      const invalidFinish = yield* runNativeTaskAction(f.config, {
+        command: 'finish',
+        runId: 'native-run',
+        callerCwd: f.repo,
+        proposal: invalidProposal,
+      }).pipe(Effect.result);
+      expect(invalidFinish).toMatchObject({failure: {code: 'invalid-closeout-proposal'}});
+      if (invalidFinish._tag === 'Failure') {
+        expect(String(object(invalidFinish.failure).message)).toContain('decisions, scenarios, behaviorVerification');
+        expect(String(object(invalidFinish.failure).message)).not.toContain('unknown');
+      }
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeInvalidFinish);
+      expect(yield* f.fs.exists(closeoutPath)).toBe(false);
+      const storedForLegacyJob = yield* readNativeWorkflowState(f.config, 'native-run');
+      if (!storedForLegacyJob) throw new Error('Expected current native state.');
+      const legacyJob = object(
+        yield* f.call({
+          ...f.base('job'),
+          command: 'submit',
+          work: {...f.base('closeout'), command: 'prepare', proposal: invalidProposal},
+        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+      );
+      const legacyJobId = String(legacyJob.jobId);
+      expect(object(yield* runNativeJobWorker(f.config, 'native-run', legacyJobId, f.call))).toMatchObject({
+        status: 'failed',
+        code: 'invalid-closeout',
+      });
+      const legacyPrepareRef = encodeNativeTaskActionRef({
+        version: 1,
+        kind: 'closeout-prepare',
+        runId: 'native-run',
+        generationHash: sha256HexSync(storedForLegacyJob.state.generation),
+        payloadDigest: sha256HexSync(stableJson(invalidProposal)),
+        jobId: legacyJobId,
+      });
+      const failedJobBeforeRetry = object(yield* f.call({...f.base('job'), command: 'status', jobId: legacyJobId}));
+      const terminalInvalidFinish = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'finish',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          prepareRef: legacyPrepareRef,
+          resume: true,
+        }).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false)),
+      );
+      expect(terminalInvalidFinish).toMatchObject({
+        status: 'blocked',
+        stage: 'prepare',
+        job: {status: 'failed', code: 'invalid-closeout', nextAction: expect.stringContaining('corrected new finish')},
+      });
+      expect(object(yield* f.call({...f.base('job'), command: 'status', jobId: legacyJobId}))).toEqual(
+        failedJobBeforeRetry,
+      );
       const finishThroughMcp = (input: Record<string, unknown>) =>
         mcp.invokeTool('workflow_task_finish', input).pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
       let lostPrepareAcknowledgment: Record<string, unknown> | undefined;
