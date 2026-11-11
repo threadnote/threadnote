@@ -26,6 +26,70 @@ function fixture(run: (folder: string, vault: string) => void): void {
   }
 }
 
+it.skipIf(!supported)(
+  'keeps exact native flags and link refusal across fresh private-first and facade-first imports',
+  () =>
+    fixture((folder, vault) => {
+      const posixUrl = new URL('../../src/writer-system/posix-native.ts', import.meta.url).href;
+      const systemUrl = new URL('../../src/system.ts', import.meta.url).href;
+      for (const first of [posixUrl, systemUrl]) {
+        const name = first === posixUrl ? 'private-first' : 'facade-first';
+        const source = `
+        await import(${JSON.stringify(first)});
+        const posix = await import(${JSON.stringify(posixUrl)});
+        const system = await import(${JSON.stringify(systemUrl)});
+        const fs = process.getBuiltinModule('fs');
+        const vault = ${JSON.stringify(vault)}, name = ${JSON.stringify(name)};
+        const expectedDirectory = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW |
+          (process.platform === 'darwin' ? 0x01000000 : 0x00080000);
+        const expectedFile = fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK |
+          (process.platform === 'darwin' ? 0x01000000 : 0x00080000);
+        if (posix.posixDirectoryFlags !== expectedDirectory || posix.posixFileFlags !== expectedFile)
+          throw new Error('Cold native flags differ from OS flags');
+        const opened = [], originalOpen = fs.openSync.bind(fs);
+        fs.openSync = (file, flags, mode) => {
+          if (file === '/') opened.push(flags);
+          return originalOpen(file, flags, mode);
+        };
+        let directory;
+        try {
+          directory = system.runtimeOpenPrivateWriterDirectory(vault);
+          const bytes = new TextEncoder().encode('owned cold import fixture');
+          const published = system.runtimePublishPrivateWriterFile(directory, name, bytes, {
+            mode: 'exclusive', nonce: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assertCurrentSync: () => undefined,
+          });
+          const read = system.runtimeReadPrivateWriterFile(directory, name, 128);
+          if (published.status !== 'published' || !read || !Buffer.from(read.bytes).equals(Buffer.from(bytes)))
+            throw new Error('Cold native private operation failed');
+          fs.symlinkSync(vault + '/' + name, vault + '/' + name + '-link');
+          let refused = false;
+          try { system.runtimeReadPrivateWriterFile(directory, name + '-link', 128); }
+          catch { refused = true; }
+          if (!refused || !opened.length || opened.some(flags => flags !== expectedDirectory))
+            throw new Error('Cold native nofollow/directory guard failed');
+          process.stdout.write(JSON.stringify({published: true, flagsExact: true, linkRefused: true}));
+        } finally {
+          fs.openSync = originalOpen;
+          if (directory) system.runtimeClosePrivateWriterDirectory(directory);
+        }
+      `;
+        const child = Bun.spawnSync([process.execPath, '-e', source], {
+          cwd: folder,
+          stdout: 'pipe',
+          stderr: 'pipe',
+          timeout: 5000,
+        });
+        expect(new TextDecoder().decode(child.stderr), name).toBe('');
+        expect(child.exitCode, name).toBe(0);
+        expect(JSON.parse(new TextDecoder().decode(child.stdout))).toEqual({
+          published: true,
+          flagsExact: true,
+          linkRefused: true,
+        });
+      }
+    }),
+);
+
 // Use the actual native publisher. Only the owned fixture's post-file-sync stat
 // boundary is intercepted; no lease/assertion/publication action is retried.
 function publication(folder: string, vault: string, change: (sample: number) => void) {

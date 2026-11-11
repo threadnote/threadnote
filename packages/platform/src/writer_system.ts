@@ -28,8 +28,6 @@ import type {RuntimeStableOsUserIdentity as RuntimePosixStableOsUserIdentity} fr
 
 const native = runtimeNativeDescriptorOperations();
 const constants = native.constants;
-const directoryFlags = posixDirectoryFlags;
-const fileFlags = posixFileFlags;
 const maximumFileBytes = 16 * 1024 * 1024;
 export function runtimeReadStableOsUserIdentity(): RuntimeStableOsUserIdentity {
   if (runtimeCurrentPlatform() !== 'win32') return readPosixAccountIdentity();
@@ -157,10 +155,10 @@ function openDirectory(path: string): DirectoryState {
   const parts = path === '/' ? [] : EffectString.split(EffectString.slice(1)(path), '/');
   const chain: Edge[] = [];
   try {
-    const fd = native.openSync('/', directoryFlags);
+    const fd = native.openSync('/', posixDirectoryFlags);
     chain.push({fd, identity: stat(fd), name: '/'});
     for (const name of parts) {
-      const child = openAt(chain[chain.length - 1].fd, name, directoryFlags);
+      const child = openAt(chain[chain.length - 1].fd, name, posixDirectoryFlags);
       const info = stat(child);
       if (!info.isDirectory()) {
         native.closeSync(child);
@@ -187,7 +185,7 @@ function checkEdges(chain: readonly Edge[]) {
     )
       fail('path');
     if (i > 0) {
-      const reopened = openAt(chain[i - 1].fd, edge.name, directoryFlags);
+      const reopened = openAt(chain[i - 1].fd, edge.name, posixDirectoryFlags);
       try {
         if (!same(stat(reopened), edge.identity)) fail('path');
       } finally {
@@ -212,7 +210,7 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
     info.mode === edge.identity.mode;
   const namedStat = () => {
     if (!parent) return stat(edge.fd);
-    const reopened = openAt(parent.fd, edge.name, directoryFlags);
+    const reopened = openAt(parent.fd, edge.name, posixDirectoryFlags);
     try {
       return stat(reopened);
     } finally {
@@ -249,14 +247,14 @@ function requireFile(info: ReturnType<typeof stat>, bound: number, writable: boo
   if (writable && (info.mode & 0o222n) === 0n) fail('readonly');
 }
 function openWritableAt(parent: number, name: string, maximumBytes: number) {
-  const probe = openAt(parent, name, constants.O_RDONLY | fileFlags);
+  const probe = openAt(parent, name, constants.O_RDONLY | posixFileFlags);
   try {
     requireFile(stat(probe), maximumBytes, true);
   } finally {
     native.closeSync(probe);
   }
   try {
-    return openAt(parent, name, constants.O_RDWR | fileFlags);
+    return openAt(parent, name, constants.O_RDWR | posixFileFlags);
   } catch {
     return fail('readonly');
   }
@@ -314,7 +312,7 @@ export function runtimeOpenGuardedDiskTarget(
     let parent = last(state).fd;
     for (let i = 0; i < relativeSegments.length - 1; i++) {
       const name = relativeSegments[i];
-      const fd = openAt(parent, name, directoryFlags);
+      const fd = openAt(parent, name, posixDirectoryFlags);
       const identity = stat(fd);
       if (!identity.isDirectory()) {
         native.closeSync(fd);
@@ -474,7 +472,7 @@ export function runtimeOpenPrivateWriterChild(
       lib.close();
     }
   }
-  const child = openAt(last(state).fd, name, directoryFlags);
+  const child = openAt(last(state).fd, name, posixDirectoryFlags);
   try {
     const info = stat(child);
     if (!info.isDirectory() || info.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (info.mode & 0o077n) !== 0n)
@@ -546,7 +544,7 @@ export function runtimeReadPrivateWriterFile(
   const parent = last(state).fd;
   let fd: number;
   try {
-    fd = openAt(parent, name, constants.O_RDONLY | fileFlags);
+    fd = openAt(parent, name, constants.O_RDONLY | posixFileFlags);
   } catch {
     // Missing alone is absence; permission/symlink/type errors are authoritative failures.
     const nativePath = `${state.path}/${name}`;
@@ -567,7 +565,7 @@ export function runtimeReadPrivateWriterFile(
     const result = readFd(fd, maximumBytes);
     if (result.identity.uid !== BigInt(runtimeCurrentUserId() ?? -1) || (result.identity.mode & 0o077n) !== 0n)
       fail('private-storage');
-    const reopened = openAt(parent, name, constants.O_RDONLY | fileFlags);
+    const reopened = openAt(parent, name, constants.O_RDONLY | posixFileFlags);
     try {
       if (!stable(result.identity, stat(reopened))) fail('private-storage');
     } finally {
@@ -599,7 +597,7 @@ export function runtimePublishPrivateWriterFile(
   try {
     input.assertCurrentSync();
     if (input.mode === 'replace') runtimeReadPrivateWriterFile(directory, name, maximumFileBytes);
-    fd = openAt(parent, temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | fileFlags, 0o600);
+    fd = openAt(parent, temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | posixFileFlags, 0o600);
     const created = stat(fd);
     createdIdentity = created;
     requireFile(created, maximumFileBytes, true);
@@ -687,7 +685,7 @@ export function runtimeReadWriterLockToken(path: string): {
     const before = attempt === 0 ? anchor : native.lstatSync(path, {bigint: true});
     requireFile(before, 4096, false);
     if (before.isSymbolicLink() || !sameMetadata(anchor, before)) fail('identity');
-    const fd = native.openSync(path, constants.O_RDONLY | fileFlags);
+    const fd = native.openSync(path, constants.O_RDONLY | posixFileFlags);
     try {
       assertPrivateAcl(fd, true, true);
       const result = readFd(fd, 4096, true);
