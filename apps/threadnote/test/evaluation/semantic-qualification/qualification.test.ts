@@ -3,6 +3,8 @@ import {
   protocolCapabilities,
   ProviderInputs,
   providerCatalog,
+  providerEnvironment,
+  assertProviderFixtureBranch,
   selectedFixture,
   fixtureSymbolPosition,
   readProviderInputs,
@@ -16,9 +18,9 @@ import fc from 'fast-check';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Qualification exercises private evidence files and refuses a mismatched executable before spawning it. */
 import {readFileSync} from 'node:fs';
-import {mkdtemp, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, realpath, rm, writeFile, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, dirname} from 'node:path';
 import {createHash} from 'node:crypto';
 import {Ledger, qualificationInventory} from './inventory.js';
 import {candidateTargetMatchesHost, runCandidateChecks} from './candidate.js';
@@ -169,6 +171,119 @@ describe('final combined qualification preparation', () => {
       expect(fixture.sources['src/lib.rs']).toContain('UnsavedName');
       await writeFile(join(sdkDirectory, 'bin/rustdoc'), 'changed rustdoc');
       await expect(readProviderInputs(file)).rejects.toThrow('Pinned Rust rustdoc bytes');
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('seals an inert Java model from existing fixture bytes and verifies both SDKs without executing Java', async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-java-inputs-')));
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    try {
+      const homes = [join(directory, 'runtime-sdk'), join(directory, 'project-sdk')];
+      const sdkDigests: string[] = [];
+      for (const [index, home] of homes.entries()) {
+        await mkdir(join(home, 'bin'), {recursive: true});
+        await mkdir(join(home, 'lib'));
+        const release = 'JAVA_RUNTIME_VERSION="' + (index === 0 ? '25.0.5+8' : '21.0.13+9') + '-LTS"\n';
+        await writeFile(join(home, 'bin/java'), 'inert Java executable');
+        await writeFile(join(home, 'lib/jrt-fs.jar'), 'inert JRT image');
+        await writeFile(join(home, 'lib/src.zip'), 'inert source image');
+        await writeFile(join(home, 'release'), release);
+        await writeFile(join(home, 'NOTICE'), 'SDK notice fixture');
+        // Complete known seven-entry image, independent of the production SDK walker.
+        sdkDigests.push(
+          hash(
+            JSON.stringify([
+              ['bin', 'directory'],
+              ['bin/java', hash('inert Java executable')],
+              ['lib', 'directory'],
+              ['lib/jrt-fs.jar', hash('inert JRT image')],
+              ['lib/src.zip', hash('inert source image')],
+              ['NOTICE', hash('SDK notice fixture')],
+              ['release', hash(release)],
+            ]),
+          ),
+        );
+      }
+      const serverDirectory = join(directory, 'jdtls');
+      await mkdir(join(serverDirectory, 'config_mac_arm'), {recursive: true});
+      await writeFile(join(serverDirectory, 'config_mac_arm/config.ini'), 'inert JDT config');
+      const sourceNotice = join(directory, 'jdt-LICENSE');
+      await writeFile(sourceNotice, 'JDT source notice fixture');
+      const input = Schema.decodeSync(ProviderInputs)({
+        version: 1,
+        language: 'java',
+        providerVersion: '1.63.0-202610191322',
+        serverDirectory,
+        serverTreeDigest: hash(
+          JSON.stringify([
+            ['config_mac_arm', 'directory'],
+            ['config_mac_arm/config.ini', hash('inert JDT config')],
+          ]),
+        ),
+        configurationDigest: hash('inert JDT config'),
+        runtimeVersion: '25.0.5+8',
+        runtimeJavaHome: homes[0],
+        runtimeSdkDigest: sdkDigests[0],
+        runtimeExecutableDigest: hash('inert Java executable'),
+        projectVersion: '21.0.13+9',
+        projectJavaHome: homes[1],
+        projectSdkDigest: sdkDigests[1],
+        projectExecutableDigest: hash('inert Java executable'),
+        notices: [
+          {component: 'jdtls-source', file: sourceNotice, sha256: hash('JDT source notice fixture')},
+          {component: 'java-runtime-sdk', file: join(homes[0], 'NOTICE'), sha256: hash('SDK notice fixture')},
+          {component: 'java-project-sdk', file: join(homes[1], 'NOTICE'), sha256: hash('SDK notice fixture')},
+        ],
+      });
+      expect(input.language).toBe('java');
+      const file = join(directory, 'inputs.json');
+      await writeFile(file, JSON.stringify(input));
+      const verified = await readProviderInputs(file);
+      expect(verified.input).toEqual(input);
+      expect(verified.sdkProofDisposition).toContain('remain unqualified');
+      expect(() => assertProviderFixtureBranch(input, false)).toThrow('Java read fixture prerequisite');
+      expect(() => assertProviderFixtureBranch(input, true)).not.toThrow();
+      expect(providerEnvironment(input)).toEqual({environment: 'p11-synthetic-java-environment'});
+      const fixture = selectedFixture(input);
+      expect(fixtureSymbolPosition(fixture.sources['src/main/java/demo/Subject.java'])).toEqual({
+        line: 1,
+        character: 17,
+      });
+      const project = join(directory, 'project');
+      for (const [name, text] of EffectRecord.toEntries({...fixture.sources, ...fixture.projectFiles})) {
+        await mkdir(dirname(join(project, name)), {recursive: true});
+        await writeFile(join(project, name), text);
+      }
+      const selected = await providerCatalog(input, directory);
+      const environment = selected.environment;
+      expect(environment?.id).toBe('p11-synthetic-java-environment');
+      const metadataFile = join(directory, 'java-artifacts/model.json');
+      const text = await readFile(metadataFile, 'utf8');
+      expect(environment?.metadataDigest).toBe(hash(text));
+      expect((await stat(metadataFile)).mode & 0o777).toBe(0o600);
+      expect((await stat(dirname(metadataFile))).mode & 0o777).toBe(0o700);
+      const model = JSON.parse(text);
+      expect(model.project).toBe(project);
+      expect(model.javaSdkDigest).toBe(sdkDigests[1]);
+      expect(model.libraries).toEqual([]);
+      expect(model.sourceEncoding.sourceCount).toBe(2);
+      const names = EffectRecord.keys(fixture.sources).sort();
+      expect(model.sourceEncoding.sourceDigest).toBe(
+        hash(
+          'threadnote-java-source-encoding-v1\n' +
+            EffectArray.join(
+              EffectArray.map(names, name => name.length + ':' + name + hash(fixture.sources[name])),
+              '',
+            ),
+        ),
+      );
+      expect(model.resolvedClasspath[1].path).toBe(join(homes[1], 'lib/jrt-fs.jar'));
+      for (const [name, source] of EffectRecord.toEntries(fixture.sources))
+        expect(await readFile(join(project, name), 'utf8')).toBe(source);
+      await writeFile(join(homes[1], 'lib/jrt-fs.jar'), 'changed JRT image');
+      await expect(readProviderInputs(file)).rejects.toThrow('Complete Java SDK tree');
     } finally {
       await rm(directory, {recursive: true, force: true});
     }

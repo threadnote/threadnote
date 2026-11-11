@@ -1,7 +1,7 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- Qualification verifies explicit local artifacts and disposable fixture bytes. */
 import {createHash} from 'node:crypto';
 import {readFile, mkdir, writeFile, lstat} from 'node:fs/promises';
-import {join} from 'node:path';
+import {join, relative, isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {strict as assert} from 'node:assert';
 import {isDeepStrictEqual} from 'node:util';
@@ -10,6 +10,12 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
 import {isJsonObject} from '@threadnote/platform/json';
 import {semanticTreeDigest, semanticSdkDigest} from '../../../src/semantic/fingerprint.js';
+import {
+  javaPreparedModelJson,
+  javaSourceEncodingImage,
+  loadJavaPreparedModel,
+  type JavaPreparedModel,
+} from '../../../src/semantic/providers/java_preparation.js';
 import {providerFixture} from '../../../../../tools/semantic/semantic_provider_fixture.js';
 import {checkProbeDefinition, checkProbeReferences} from '../../../../../tools/semantic/semantic_probe_assertions.js';
 import {checkProposalStatusTransportParity} from './transport-oracle.js';
@@ -63,6 +69,22 @@ export const ProviderInputs = Schema.Union([
     sdkDirectory: Schema.String,
     sdkTreeDigest: digest,
   }),
+  Schema.Struct({
+    ...common,
+    language: Schema.Literal('java'),
+    providerVersion: Schema.Literal('1.63.0-202610191322'),
+    serverDirectory: Schema.String,
+    serverTreeDigest: digest,
+    configurationDigest: digest,
+    runtimeVersion: Schema.Literal('25.0.5+8'),
+    runtimeJavaHome: Schema.String,
+    runtimeSdkDigest: digest,
+    runtimeExecutableDigest: digest,
+    projectVersion: Schema.Literal('21.0.13+9'),
+    projectJavaHome: Schema.String,
+    projectSdkDigest: digest,
+    projectExecutableDigest: digest,
+  }),
 ]);
 export type ProviderInputs = typeof ProviderInputs.Type;
 const hash = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
@@ -115,6 +137,32 @@ export async function readProviderInputs(file: string) {
       ),
       'Explicit Rust provider source and SDK notice objects',
     );
+  } else if (input.language === 'java') {
+    for (const [directory, expected, executable, version] of [
+      [input.runtimeJavaHome, input.runtimeSdkDigest, input.runtimeExecutableDigest, input.runtimeVersion],
+      [input.projectJavaHome, input.projectSdkDigest, input.projectExecutableDigest, input.projectVersion],
+    ]) {
+      assert.equal(hash(await readFile(join(directory, 'bin/java'))), executable, 'Pinned Java executable bytes');
+      assert.ok(
+        EffectString.includes('JAVA_RUNTIME_VERSION="' + version + '-LTS"')(
+          await readFile(join(directory, 'release'), 'utf8'),
+        ),
+        'Pinned Java release metadata; no JVM execution',
+      );
+      assert.equal(await tree(directory, true), expected, 'Complete Java SDK tree');
+    }
+    assert.equal(await tree(input.serverDirectory, true), input.serverTreeDigest, 'Complete JDT provider tree');
+    assert.equal(
+      hash(await readFile(join(input.serverDirectory, 'config_mac_arm/config.ini'))),
+      input.configurationDigest,
+      'Pinned JDT Darwin arm64 configuration bytes',
+    );
+    assert.ok(
+      EffectArray.every(['jdtls-source', 'java-runtime-sdk', 'java-project-sdk'], component =>
+        EffectArray.some(input.notices, notice => notice.component === component),
+      ),
+      'Explicit JDT source and both Java SDK notice objects',
+    );
   } else {
     assert.equal(hash(await readFile(input.runtime)), input.runtimeDigest, 'Pinned runtime bytes');
     assert.equal(await tree(input.serverDirectory), input.serverTreeDigest, 'Complete provider tree');
@@ -128,7 +176,7 @@ export async function readProviderInputs(file: string) {
     manifestSha256: hash(bytes),
     notices: input.notices,
     licenseDisposition: 'notice-bytes-recorded; selected-profile and redistribution review remain required',
-    ...(input.language === 'go' || input.language === 'rust'
+    ...(input.language === 'go' || input.language === 'rust' || input.language === 'java'
       ? {
           sdkProofDisposition:
             'complete local bytes recorded; SDK provenance and component inventory remain unqualified',
@@ -151,7 +199,148 @@ export function selectedFixture(input: ProviderInputs) {
   return {sources, projectFiles};
 }
 
+export function providerEnvironment(input: ProviderInputs) {
+  return input.language === 'python'
+    ? {environment: 'p11-static-environment'}
+    : input.language === 'java'
+      ? {environment: 'p11-synthetic-java-environment'}
+      : {};
+}
+
+export function assertProviderFixtureBranch(input: ProviderInputs, writerFixture: boolean) {
+  if (input.language === 'java' && !writerFixture)
+    throw new Error(
+      'Java read fixture prerequisite: context source mutations require a separately bound prepared model',
+    );
+}
+
 export async function providerCatalog(input: ProviderInputs, scratch: string) {
+  if (input.language === 'java') {
+    const project = join(scratch, 'project');
+    const artifacts = join(scratch, 'java-artifacts');
+    const inside = (root: string, file: string) => {
+      const name = relative(root, file);
+      return !name || (!isAbsolute(name) && name !== '..' && !EffectString.startsWith('../')(name));
+    };
+    for (const directory of [
+      project,
+      input.serverDirectory,
+      input.runtimeJavaHome,
+      input.projectJavaHome,
+      join(scratch, 'home'),
+    ])
+      assert.ok(
+        !inside(directory, artifacts) && !inside(artifacts, directory),
+        'Separate private Java model artifacts',
+      );
+    await mkdir(artifacts, {mode: 0o700});
+    const common = {
+      exported: false,
+      combineAccessRules: false,
+      inclusions: [],
+      exclusions: [],
+      attributes: [],
+      accessRules: [],
+    };
+    const root = {
+      ...common,
+      kind: 3 as const,
+      contentKind: 1 as const,
+      path: 'src/main/java',
+      exists: true,
+      output: 'target/classes',
+    };
+    // Host-authored, no-dependency synthetic Maven-shaped facts, not an observed Maven/Gradle import.
+    const model: JavaPreparedModel = {
+      format: 'threadnote-prepared-java-project-v2',
+      provider: 'jdtls-1.63.0-202610191322',
+      build: 'maven',
+      project,
+      worktree: project,
+      sourceDigest: await tree(project),
+      javaHome: input.projectJavaHome,
+      javaSdkDigest: input.projectSdkDigest,
+      projectCharset: 'UTF-8',
+      sourceInputEncoding: 'utf8-original-inputs-v1',
+      sourceEncoding: javaSourceEncodingImage(
+        await Promise.all(
+          EffectArray.map(EffectRecord.keys(selectedFixture(input).sources), async name => ({
+            name,
+            digest: hash(await readFile(join(project, name))),
+          })),
+        ),
+      ),
+      compilerOptions: {
+        'org.eclipse.jdt.core.compiler.compliance': '21',
+        'org.eclipse.jdt.core.compiler.source': '21',
+        'org.eclipse.jdt.core.compiler.codegen.targetPlatform': '21',
+        'org.eclipse.jdt.core.compiler.release': 'enabled',
+        'org.eclipse.jdt.core.compiler.processAnnotations': 'disabled',
+      },
+      resourceFilters: [],
+      output: 'target/classes',
+      rawClasspath: [
+        root,
+        {
+          ...common,
+          kind: 5,
+          contentKind: 1,
+          path: 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER',
+          combineAccessRules: true,
+        },
+        {
+          ...common,
+          kind: 5,
+          contentKind: 1,
+          path: 'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21',
+          combineAccessRules: true,
+        },
+      ],
+      resolvedClasspath: [
+        root,
+        {
+          ...common,
+          kind: 1,
+          contentKind: 2,
+          path: join(input.projectJavaHome, 'lib/jrt-fs.jar'),
+          sourceAttachmentPath: join(input.projectJavaHome, 'lib/src.zip'),
+        },
+      ],
+      libraries: [],
+    };
+    const text = javaPreparedModelJson(model);
+    const metadataFile = join(artifacts, 'model.json');
+    await writeFile(metadataFile, text, {mode: 0o600, flag: 'wx'});
+    const environment = {id: 'p11-synthetic-java-environment', metadataFile, metadataDigest: hash(text)};
+    await Effect.runPromise(
+      loadJavaPreparedModel({
+        metadataFile,
+        metadataDigest: environment.metadataDigest,
+        project,
+        worktree: project,
+        javaHome: input.projectJavaHome,
+      }).pipe(
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Standalone private-file Promise boundary validates its sealed model with narrow services.
+        Effect.provide(Layer.merge(BunServices.layer, cryptoLayer)),
+      ),
+    );
+    const runtimeCandidate = {
+      serverDirectory: input.serverDirectory,
+      serverTreeDigest: input.serverTreeDigest,
+      runtimeJavaHome: input.runtimeJavaHome,
+      runtimeSdkDigest: input.runtimeSdkDigest,
+      projectJavaHome: input.projectJavaHome,
+      projectSdkDigest: input.projectSdkDigest,
+    };
+    return {
+      catalog: {java: {runtimeCandidate, environments: [environment]}},
+      environment: {
+        ...environment,
+        metadata: model,
+        provenance: 'host-authored synthetic no-dependency model; no Maven/Gradle import or real-project qualification',
+      },
+    };
+  }
   if (input.language === 'go' || input.language === 'rust') {
     const candidate = {
       executable: input.executable,
@@ -256,7 +445,7 @@ export async function runProviderNavigation(
   const request = {
     callerCwd: project,
     language: input.language,
-    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    ...providerEnvironment(input),
     milliseconds: 10000,
     maxBytes: 8192,
     maxItems: 32,
@@ -378,7 +567,7 @@ export async function runProviderPreview(
     file: join(project, declaration),
     position,
     newName: 'RenamedName',
-    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    ...providerEnvironment(input),
   };
   const cli = await run(['semantic', 'change', 'prepare', '--json'], selected);
   const record = {
@@ -521,7 +710,7 @@ export async function runOwnedBufferFixture(
     file: join(project, declaration),
     language: input.language,
     text,
-    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    ...providerEnvironment(input),
   });
   results.push({
     operation: 'owned-buffer-open',
@@ -539,7 +728,7 @@ export async function runOwnedBufferFixture(
     milliseconds: 10000,
     maxBytes: 8192,
     maxItems: 32,
-    ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+    ...providerEnvironment(input),
   };
   try {
     const cli = await run(['semantic', 'query', '--json'], query);
@@ -582,10 +771,10 @@ export async function runOwnedBufferFixture(
       position,
       newName: 'BufferRenamed',
       view: query.view,
-      ...(input.language === 'python' ? {environment: 'p11-static-environment'} : {}),
+      ...providerEnvironment(input),
     });
     results.push({
-      operation: 'owned-buffer-unapplied-preview',
+      operation: input.language === 'java' ? 'owned-buffer-mutation-refusal' : 'owned-buffer-unapplied-preview',
       fullScenarioQualified: false,
       result: redactCapabilities(preview.value),
     });
@@ -595,6 +784,16 @@ export async function runOwnedBufferFixture(
         preview.value.writerAuthorityRequired === true,
       'Buffer preview cannot become an immediate disk mutation',
     );
+    if (input.language === 'java') {
+      assert.ok(
+        isJsonObject(preview.value) &&
+          ['unsupported', 'unavailable', 'stale', 'conflict'].includes(String(preview.value.status)) &&
+          preview.value.handle === undefined &&
+          preview.value.writer === undefined &&
+          protocolCapabilities(preview.value).length === 0,
+        'Java owned overlay mutation must refuse without a proposal or writer capability',
+      );
+    }
     for (const [name, bytes] of EffectRecord.toEntries(sources))
       assert.equal(await readFile(join(project, name), 'utf8'), bytes, 'Unsaved owner never rewrites disk');
     const updated = await run(['semantic', 'view', '--json'], {

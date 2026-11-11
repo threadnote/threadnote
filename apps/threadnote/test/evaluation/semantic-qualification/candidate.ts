@@ -18,6 +18,7 @@ import {installProbeSignalCleanup} from '../../../../../tools/semantic/semantic_
 import {qualificationInventory} from './inventory.js';
 import {
   readProviderInputs,
+  assertProviderFixtureBranch,
   selectedFixture,
   providerCatalog,
   runProviderNavigation,
@@ -309,8 +310,19 @@ export async function runCandidateChecks(
                   rustdocSha256: provider.input.rustdocExecutableDigest,
                   sdkTreeDigest: provider.input.sdkTreeDigest,
                 }
-              : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
+              : provider.input.language === 'java'
+                ? {
+                    version: provider.input.runtimeVersion,
+                    sha256: provider.input.runtimeExecutableDigest,
+                    sdkTreeDigest: provider.input.runtimeSdkDigest,
+                    projectVersion: provider.input.projectVersion,
+                    projectSha256: provider.input.projectExecutableDigest,
+                    projectSdkTreeDigest: provider.input.projectSdkDigest,
+                  }
+                : {version: provider.input.runtimeVersion, sha256: provider.input.runtimeDigest},
       };
+      if (provider.input.language === 'java' && !writerFixture) report.provider.started = false;
+      assertProviderFixtureBranch(provider.input, writerFixture);
       report.cost.providerLaunches = null;
     }
     report.operations = [];
@@ -324,6 +336,8 @@ export async function runCandidateChecks(
       'provider-shutdown.ts',
       'writer-fixture.ts',
       '../../../src/semantic/fingerprint.ts',
+      '../../../src/semantic/providers/java_preparation.ts',
+      '../../../src/semantic/providers/java_project.ts',
       '../../../../../tools/semantic/semantic_provider_fixture.ts',
       '../../../../../tools/semantic/semantic_probe_assertions.ts',
       'inventory.ts',
