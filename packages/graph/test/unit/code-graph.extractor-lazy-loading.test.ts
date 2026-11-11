@@ -41,7 +41,7 @@ const compiler = await import('typescript-compiler');
 const compilerVersion = compiler.default.version;
 const packageVersion = (await import('typescript-compiler/package.json')).default.version;
 const expectedIdentity = new Bun.CryptoHasher('sha256')
-  .update('typescript-compiler-v5-bounded-deduplicated-relationship-surface\\ntypescript:' + compilerVersion)
+  .update('typescript-compiler-v9-finite-navigation-proofs\\ntypescript:' + compilerVersion)
   .digest('hex');
 process.stdout.write(JSON.stringify({
   states, compilerVersion, packageVersion, expectedIdentity, identityBefore,
