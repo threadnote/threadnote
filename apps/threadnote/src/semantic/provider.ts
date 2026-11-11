@@ -810,7 +810,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         ? ({version: 1, status: 'ok', evidence: evidence(fixed), items} satisfies QueryOutcome)
         : stale();
     });
-  const diagnostics = (observation: Observation, milliseconds: number) =>
+  const diagnostics = (observation: Observation, milliseconds: number, commit = true) =>
     Effect.gen(function* () {
       const fixed = structuredClone(yield* decode(Observation, observation));
       const document = current(fixed);
@@ -885,7 +885,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
             )
           : [],
       };
-      document.delivered = structuredClone(snapshot);
+      if (commit) document.delivered = structuredClone(snapshot);
       return structuredClone(delta);
     });
   const editEntries = (raw: unknown) =>
@@ -1092,27 +1092,260 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         ? ({version: 1, status: 'ok', evidence: evidence(fixed), items} satisfies QueryOutcome)
         : stale();
     });
-  const qualifiedRename = (
+  const actionRequest = (
+    observation: Observation,
+    query: SemanticActionQuery,
+    selection: SemanticActionSelection | undefined,
+    remaining: Effect.Effect<number, LspFault>,
+  ) =>
+    Effect.gen(function* () {
+      const document = documents.get(observation.uri);
+      if (!document || !current(document.observation)) return yield* SemanticSessionFault.make({reason: 'stale'});
+      const fixed = structuredClone(document.observation);
+      const refreshed = yield* diagnostics(fixed, yield* remaining, false);
+      const diagnosticSequence = document.diagnosticRequest;
+      const subset = query.diagnosticIds;
+      if (
+        subset &&
+        (new Set(subset).size !== subset.length ||
+          EffectArray.some(subset, id => !EffectArray.some(refreshed.items, item => item.id === id)))
+      )
+        return yield* SemanticSessionFault.make({reason: 'stale'});
+      const queryDigest = sha256HexSync(
+        JSON.stringify([
+          'lsp-quickfix-query-v1',
+          observationKey({...fixed, projectEpoch: 0}),
+          options.profile,
+          query.range,
+          query.only ? [...query.only].sort() : null,
+          EffectArray.map(refreshed.items, item => item.id).sort(),
+          subset ? [...subset].sort() : null,
+        ]),
+      );
+      const native = EffectArray.map(
+        EffectArray.filter(refreshed.items, item => !subset || subset.includes(item.id)),
+        item => ({
+          range: item.range,
+          code: item.code,
+          message: item.message,
+          ...(['error', 'warning', 'information', 'hint'].includes(item.category)
+            ? {severity: ['unknown', 'error', 'warning', 'information', 'hint'].indexOf(item.category)}
+            : {}),
+        }),
+      );
+      const response = yield* client.request(
+        'textDocument/codeAction',
+        {
+          textDocument: {uri: fixed.uri},
+          range: query.range,
+          context: {diagnostics: native, ...(query.only ? {only: [...query.only]} : {})},
+        },
+        yield* remaining,
+      );
+      const rawActions =
+        (yield* decode(Schema.NullOr(Schema.Array(Schema.Json).check(Schema.isMaxLength(128))), response)) ?? [];
+      const canResolve =
+        options.policy.resolveCodeActions &&
+        isJsonObject(capabilities.codeActionProvider) &&
+        capabilities.codeActionProvider.resolveProvider === true;
+      const sources = new Map<
+        string,
+        {text: string; content: string; identity: string | null; documentVersion: number | null}
+      >();
+      let retainedBytes = 0;
+      const choices = [];
+      for (let raw of rawActions) {
+        if (!isJsonObject(raw) || typeof raw.title !== 'string' || !wellFormed(raw.title) || raw.title.length > 8192)
+          return yield* invalid();
+        if (
+          canResolve &&
+          raw.kind === 'quickfix' &&
+          !('command' in raw) &&
+          !('disabled' in raw) &&
+          !('edit' in raw) &&
+          'data' in raw &&
+          (!query.only || query.only.includes('quickfix'))
+        ) {
+          raw = yield* client.request('codeAction/resolve', raw, yield* remaining);
+          if (!isJsonObject(raw) || typeof raw.title !== 'string' || !wellFormed(raw.title) || raw.title.length > 8192)
+            return yield* invalid();
+        }
+        const kind = typeof raw.kind === 'string' ? raw.kind : '';
+        if (!wellFormed(kind) || kind.length > 512) return yield* invalid();
+        const command = 'command' in raw;
+        const disabled =
+          'disabled' in raw
+            ? isJsonObject(raw.disabled) &&
+              typeof raw.disabled.reason === 'string' &&
+              wellFormed(raw.disabled.reason) &&
+              raw.disabled.reason.length <= 8192 &&
+              raw.disabled.reason
+              ? raw.disabled.reason
+              : 'Provider disabled this action'
+            : null;
+        const family = kind === 'quickfix' && (!query.only || query.only.includes(kind));
+        const parsed =
+          !command && disabled === null && family && 'edit' in raw
+            ? yield* editEntries(raw.edit).pipe(Effect.option)
+            : Option.none();
+        let entries = Option.getOrUndefined(parsed);
+        const witness: Schema.Json[] = [];
+        if (entries) {
+          entries = EffectArray.map(
+            [...entries].sort((a, b) => EffectString.localeCompare(b.uri)(a.uri)),
+            entry => ({
+              ...entry,
+              edits: [...entry.edits].sort(
+                (a, b) => compare(a.range.start, b.range.start) || compare(a.range.end, b.range.end),
+              ),
+            }),
+          );
+          let count = 0;
+          for (const entry of entries) {
+            let captured = sources.get(entry.uri);
+            if (!captured) {
+              if (sources.size >= maxDocuments) return yield* LspFault.make({code: 'capacity'});
+              const retained = documents.get(entry.uri);
+              if (retained && retained.observation.documentVersion !== null) {
+                if (!current(retained.observation)) return yield* SemanticSessionFault.make({reason: 'stale'});
+                captured = {
+                  text: retained.text,
+                  content: retained.observation.content,
+                  identity: null,
+                  documentVersion: retained.observation.documentVersion,
+                };
+              } else {
+                const disk = yield* options.captureEditSource!(entry.uri);
+                if (disk.uri !== entry.uri || !wellFormed(disk.text) || sha256HexSync(disk.text) !== disk.content)
+                  return yield* SemanticSessionFault.make({reason: 'stale'});
+                if (options.policy.editSourceQualification === 'immutable-provider-input-v1') {
+                  if (!options.policy.verifyClosedEditSource) return yield* invalid();
+                  yield* options.policy.verifyClosedEditSource(entry.uri, disk.content);
+                }
+                captured = {...disk, documentVersion: null};
+              }
+              retainedBytes += new TextEncoder().encode(captured.text).length;
+              if (retainedBytes > Math.min(8 * 1024 * 1024, maxTotalTextLength * 3))
+                return yield* LspFault.make({code: 'capacity'});
+              sources.set(entry.uri, captured);
+            }
+            if (
+              !entry.edits.length ||
+              EffectArray.some(
+                entry.edits,
+                (edit, index) =>
+                  ++count > 100000 ||
+                  !validRange(captured.text, edit.range) ||
+                  !wellFormed(edit.newText) ||
+                  edit.newText.length > maxTextLength ||
+                  (index > 0 &&
+                    (compare(entry.edits[index - 1].range.end, edit.range.start) > 0 ||
+                      compare(entry.edits[index - 1].range.start, edit.range.start) === 0)),
+              )
+            ) {
+              entries = undefined;
+              break;
+            }
+            // Provider wire versions can advance only through our later source synchronization;
+            // semantic choice identity binds the complete edits and exact source bytes/physical identity.
+            witness.push([entry.uri, captured.content, captured.identity, captured.documentVersion, entry.edits]);
+          }
+        }
+        const qualified = !!entries;
+        const selector = sha256HexSync(
+          JSON.stringify([
+            'lsp-text-only-quickfix-v1',
+            queryDigest,
+            raw.title,
+            kind,
+            disabled,
+            command,
+            qualified ? witness : null,
+          ]),
+        );
+        choices.push({
+          entries,
+          choice: {
+            kind: 'action-choice' as const,
+            title: raw.title,
+            actionKind: kind,
+            disabled,
+            command,
+            qualified,
+            selector,
+            queryDigest,
+            blocker:
+              disabled !== null
+                ? 'disabled'
+                : command
+                  ? 'command'
+                  : !family
+                    ? 'unqualified-action-family'
+                    : qualified
+                      ? null
+                      : 'unsupported-operation-sequence',
+          },
+        });
+      }
+      if (
+        !current(fixed) ||
+        document.diagnosticRequest !== diagnosticSequence ||
+        !document.published ||
+        observationKey(document.published.observation) !== observationKey(fixed) ||
+        JSON.stringify(EffectArray.map(document.published.items, item => item.id).sort()) !==
+          JSON.stringify(EffectArray.map(refreshed.items, item => item.id).sort())
+      )
+        return yield* SemanticSessionFault.make({reason: 'stale'});
+      for (const item of choices)
+        if (EffectArray.filter(choices, other => other.choice.selector === item.choice.selector).length > 1) {
+          item.choice.qualified = false;
+          item.choice.blocker = 'ambiguous';
+        }
+      const items = EffectArray.map(choices, item => item.choice);
+      const outcome = (prefix: Schema.Json[] = []): QueryOutcome => ({
+        version: 1,
+        status: 'ok',
+        evidence: evidence(fixed),
+        items: [...prefix, ...items],
+      });
+      if (!selection) return {outcome: outcome()};
+      if (selection.queryDigest !== queryDigest)
+        return {outcome: outcome([{kind: 'action-result', status: 'changed-selection'}])};
+      const matches = EffectArray.filter(choices, item => item.choice.selector === selection.selector);
+      if (matches.length !== 1)
+        return {outcome: outcome([{kind: 'action-result', status: matches.length ? 'ambiguous' : 'no-match'}])};
+      const selected = matches[0];
+      return selected.entries
+        ? {entries: selected.entries}
+        : {outcome: outcome([{kind: 'action-result', status: 'unsupported', reason: selected.choice.blocker}])};
+    });
+  const qualifiedPreparation = (
     observation: Observation,
     position: Position,
     newName: string | undefined,
     milliseconds: number,
+    actionQuery?: SemanticActionQuery,
+    selection?: SemanticActionSelection,
   ) =>
     mutations
       .withPermit(
         Effect.gen(function* () {
           const fixed = structuredClone(yield* decode(Observation, observation));
+          const operation = actionQuery ? 'code-action' : 'rename';
           const initiating = current(fixed);
           if (!initiating) return stale();
           if (
             !validTextPosition(initiating.text, position) ||
-            !newName ||
-            newName.length > 512 ||
-            !wellFormed(newName) ||
-            /\p{Cc}/u.test(newName)
+            (actionQuery
+              ? !validRange(initiating.text, actionQuery.range)
+              : !newName || newName.length > 512 || !wellFormed(newName) || /\p{Cc}/u.test(newName))
           )
             return yield* invalid();
-          if (!capabilities.renameProvider || !options.captureEditSource)
+          if (
+            !(actionQuery ? capabilities.codeActionProvider : capabilities.renameProvider) ||
+            !options.captureEditSource ||
+            !options.policy.editSourceQualification
+          )
             return {
               version: 1,
               status: 'unsupported',
@@ -1126,15 +1359,18 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
             return left;
           });
           const request = Effect.gen(function* () {
+            if (actionQuery) return yield* actionRequest(fixed, actionQuery, selection, remaining);
             const raw = yield* client.request(
               'textDocument/rename',
-              {textDocument: {uri: fixed.uri}, position, newName},
+              {textDocument: {uri: fixed.uri}, position, newName: newName!},
               yield* remaining,
             );
-            return raw === null ? [] : yield* editEntries(raw);
+            return {entries: raw === null ? [] : yield* editEntries(raw)};
           });
           // Discovery identifies targets only. Its edits never acquire source authority.
-          let discovered = yield* request;
+          const discovery = yield* request;
+          if (discovery.outcome) return discovery.outcome;
+          let discovered = discovery.entries;
           if (!discovered.length)
             return {
               version: 1,
@@ -1215,7 +1451,9 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
                   return yield* SemanticSessionFault.make({reason: 'stale'});
               }
             }
-            const final = yield* request;
+            const completion = yield* request;
+            if (completion.outcome) return completion.outcome;
+            const final = completion.entries;
             if (!final.length) return yield* invalid();
             if (EffectArray.some(final, entry => !uris.includes(entry.uri))) {
               discovered = final;
@@ -1271,6 +1509,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
                 source: sourceKind,
                 observation: saved.observation,
                 beforeText: saved.text,
+                ...(actionQuery ? {providerDocumentVersion: entry.version} : {}),
                 edits,
                 precondition: {
                   sourceKind,
@@ -1290,7 +1529,19 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
               items: [
                 {
                   kind: 'prepared-edit',
-                  operation: 'rename',
+                  operation,
+                  ...(actionQuery
+                    ? {
+                        qualification: 'qualified-text-only',
+                        operations: EffectArray.map(final, (entry, index) => ({
+                          kind: 'text',
+                          uri: entry.uri,
+                          version: entry.version,
+                          edits: entry.edits,
+                          target: index,
+                        })),
+                      }
+                    : {}),
                   sourceBasis: 'pre-request-synchronized-text-v1',
                   files,
                   scope: 'all-provider-returned-edits',
@@ -1318,7 +1569,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
     const fixed = structuredClone(observation);
     const cursor = structuredClone(position);
     return operation === 'rename' && options.policy.editSourceQualification && options.captureEditSource
-      ? qualifiedRename(fixed, cursor, newName, milliseconds)
+      ? qualifiedPreparation(fixed, cursor, newName, milliseconds)
       : prepareLegacy(operation, fixed, cursor, newName, milliseconds);
   };
   return {
@@ -1326,6 +1577,23 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
     query,
     diagnostics,
     prepare,
+    actions: (
+      observation: Observation,
+      query: SemanticActionQuery,
+      milliseconds: number,
+      selection?: SemanticActionSelection,
+    ) => {
+      const fixed = structuredClone(observation);
+      const actionQuery = structuredClone(query);
+      return qualifiedPreparation(
+        fixed,
+        actionQuery.range.start,
+        undefined,
+        milliseconds,
+        actionQuery,
+        selection ? structuredClone(selection) : undefined,
+      );
+    },
     available: Effect.sync(() => !invalidated),
     project: (_uri: string) => Effect.succeed({configuration: basis.project, profile: options.profile}),
     invalidate: Effect.sync(() => {

@@ -9,6 +9,7 @@ import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
+import {SemanticActionChoice} from '../../src/semantic/action_choices.js';
 import {Observation, Position} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
@@ -91,6 +92,99 @@ const diagnostic = {
   severity: 1,
 };
 describe('Python session fences and preparation', () => {
+  effectIt.effect(
+    'lists and selects exact Python quickfix text without consuming diagnostics or resolving commands',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const edit = {changes: {[f.uri]: [{range: diagnostic.range, newText: 'other'}]}};
+        const safe = {title: 'Fix assignment', kind: 'quickfix', edit};
+        let actions: Schema.Json[] = [
+          safe,
+          {...safe, title: 'Command', command: {command: 'unsafe'}},
+          {...safe, title: 'Disabled', disabled: {reason: ''}},
+          {title: 'Opaque', kind: 'quickfix', data: {}},
+          {...safe, title: 'Missing kind', kind: ''},
+          {...safe, title: 'Mixed', edit: {...edit, documentChanges: []}},
+          {...safe, title: 'Resource', edit: {documentChanges: [{kind: 'create', uri: f.uri}]}},
+          {...safe, title: 'Overlap', edit: {changes: {[f.uri]: [edit.changes[f.uri][0], edit.changes[f.uri][0]]}}},
+        ];
+        const methods: string[] = [];
+        let changeDiagnostics = false;
+        const session = yield* makePythonSession(
+          fake(method => {
+            methods.push(method);
+            if (changeDiagnostics)
+              f.notifications.receive('textDocument/publishDiagnostics', {
+                uri: f.uri,
+                version: 1,
+                diagnostics: [{...diagnostic, message: 'changed diagnostic'}],
+              });
+            return method === 'textDocument/codeAction'
+              ? Effect.succeed(actions)
+              : Effect.die('Forbidden action RPC ' + method);
+          }),
+          {...f.options, captureEditSource: () => Effect.die('Owned overlay is not disk authority')},
+        );
+        const view = yield* session.upsert(f.basis, f.text, 'python', 1000);
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: [diagnostic]});
+        const query = {range: diagnostic.range, only: ['quickfix']};
+        const listed = yield* session.actions(view, query, 1000);
+        expect(listed.status).toBe('ok');
+        if (listed.status !== 'ok') return;
+        const choices = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listed.items);
+        expect(EffectArray.filter(choices, choice => choice.qualified)).toHaveLength(1);
+        expect(choices[2]).toMatchObject({qualified: false, blocker: 'disabled'});
+        const selected = yield* session.actions(view, query, 1000, choices[0]);
+        expect(selected).toMatchObject({
+          status: 'ok',
+          items: [
+            {
+              operation: 'code-action',
+              qualification: 'qualified-text-only',
+              sourceBasis: 'pre-request-synchronized-text-v1',
+              files: [{beforeText: f.text, observation: view}],
+              operations: [{kind: 'text', uri: f.uri, version: null, target: 0}],
+            },
+          ],
+        });
+        expect((yield* session.diagnostics(view, 1000)).added).toHaveLength(1);
+        expect((yield* session.diagnostics(view, 1000)).remaining).toHaveLength(1);
+        for (const choice of EffectArray.drop(choices, 1)) {
+          const refused = yield* session.actions(view, query, 1000, choice);
+          expect(refused.status).toBe('ok');
+          if (refused.status === 'ok')
+            expect(refused.items[0]).toMatchObject({kind: 'action-result', status: 'unsupported'});
+        }
+        actions = [{...safe, edit: {changes: {[f.uri]: [{range: diagnostic.range, newText: 'changed'}]}}}];
+        const changed = yield* session.actions(view, query, 1000, choices[0]);
+        expect(changed.status).toBe('ok');
+        if (changed.status === 'ok')
+          expect(changed.items[0]).toMatchObject({kind: 'action-result', status: 'no-match'});
+        const delta = yield* session.diagnostics(view, 1000);
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: []});
+        expect(
+          yield* session.actions(view, {...query, diagnosticIds: [delta.items[0].id]}, 1000).pipe(Effect.flip),
+        ).toMatchObject({reason: 'stale'});
+        changeDiagnostics = true;
+        expect(yield* session.actions(view, query, 1000).pipe(Effect.flip)).toMatchObject({reason: 'stale'});
+        const unavailable = yield* makePythonSession(
+          fake(() => Effect.die('Unadvertised actions must not issue RPCs'), {
+            ...capabilities,
+            codeActionProvider: false,
+          }),
+          {
+            ...f.options,
+            captureEditSource: () => Effect.die('No source capture'),
+          },
+        );
+        const unavailableView = yield* unavailable.upsert(f.basis, f.text, 'python', 1000);
+        expect(yield* unavailable.actions(unavailableView, query, 1000)).toMatchObject({status: 'unsupported'});
+        expect(EffectArray.every(methods, method => method === 'textDocument/codeAction')).toBe(true);
+        expect(yield* f.fs.readFileString(f.path.join(f.project, 'main.py'))).toBe(f.text);
+      }).pipe(Effect.provide(io)),
+  );
+
   effectIt.effect('fences a multi-request hierarchy when the source changes before incoming calls finish', () =>
     Effect.gen(function* () {
       const f = yield* fixture;

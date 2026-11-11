@@ -20,6 +20,7 @@ import {
   wellFormed,
   type LspSessionClient,
   type LspSessionOptions,
+  type SemanticSession,
 } from '../provider.js';
 import {readBounded} from '../fingerprint.js';
 import {
@@ -263,7 +264,7 @@ export const makeJavaAnalysis = Effect.fn('semantic.makeJavaAnalysis')(
       yield* started(launched.wire.pid, launched.wire.finish);
       const notifications = makeSemanticNotifications();
       const client = yield* makeLspClient(launched.wire, notifications.receive, prepared.settings);
-      const api = yield* makeJavaSession(client, {
+      const api: SemanticSession = yield* makeJavaSession(client, {
         basis: captured.basis,
         notifications,
         roots: [],
@@ -802,6 +803,12 @@ export const makeJavaSession = Effect.fn('semantic.makeJavaSession')(
         Effect.suspend(() => {
           const position = structuredClone(args[2]);
           return targets(args[1], args[3], fixed => session.query(args[0], fixed, position, args[3]));
+        }),
+      actions: (...args: Parameters<typeof session.actions>) =>
+        Effect.suspend(() => {
+          const query = structuredClone(args[1]);
+          const selection = args[3] ? structuredClone(args[3]) : undefined;
+          return targets(args[0], args[2], fixed => session.actions(fixed, query, args[2], selection));
         }),
       prepare: (...args: Parameters<typeof session.prepare>) =>
         Effect.suspend(() => {

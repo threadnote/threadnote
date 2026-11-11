@@ -884,7 +884,8 @@ export const makeSemanticCoordinator = Effect.fn('semantic.makeCoordinator')(fun
             reads: 'experimental',
             diagnostics: 'experimental',
             rename: id === 'typescript-language-server' ? 'experimental-preparation-only' : 'preparation-only',
-            codeActions: id === 'typescript-language-server' ? 'unsupported' : 'inline-preparation-only',
+            codeActions:
+              id === 'typescript-language-server' ? 'unsupported' : 'candidate-quickfix-text-only-retained-selection',
             optional: id === 'typescript-language-server' ? 'unsupported-unqualified' : 'provider-advertised-reads',
             apply: 'unsupported',
             commands: 'unsupported',

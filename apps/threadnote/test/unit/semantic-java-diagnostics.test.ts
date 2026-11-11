@@ -16,6 +16,7 @@ import {makeJavaAnalysis, type JavaAnalysisOptions} from '../../src/semantic/pro
 import {semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {SemanticActionChoice} from '../../src/semantic/action_choices.js';
 import {Observation} from '@threadnote/semantic/contracts';
 import {
   makeLspSession,
@@ -597,6 +598,91 @@ describe('Java request diagnostics', () => {
         expect(made.calls).toHaveLength(before);
         expect(yield* session.observation(current.uri)).toEqual(current);
         expect(yield* session.available).toBe(true);
+      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+
+    effectIt.effect(
+      'selects closed Java quickfix text but refuses a versionless owned overlay without disk fallback',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* preparedSessionFixture();
+          const range = {start: {line: 0, character: 6}, end: {line: 0, character: 10}};
+          const raw = [
+            {title: 'Fix Main', kind: 'quickfix', edit: {changes: {[f.uris['Main.java']]: [{range, newText: 'Next'}]}}},
+          ];
+          for (const disk of [true, false]) {
+            const basis: Observation = {
+              ...f.basis,
+              documentVersion: disk ? null : 1,
+              view: {...f.basis.view, kind: disk ? 'disk' : 'overlay'},
+            };
+            const made = yield* f.create(raw, options => {
+              Reflect.set(options, 'basis', basis);
+              Reflect.set(options, 'captureEditSource', (uri: string) =>
+                Effect.gen(function* () {
+                  expect(disk).toBe(true);
+                  expect(uri).toBe(f.uris['Main.java']);
+                  const text = yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'));
+                  return {uri, text, content: sha256HexSync(text), identity: 'controlled-main-identity'};
+                }),
+              );
+            });
+            const session = yield* made.result;
+            const current = yield* session.upsert(basis, f.texts['Main.java'], 'java', 1000);
+            const query = {range, only: ['quickfix']};
+            const listed = yield* session.actions(current, query, 1000);
+            if (listed.status !== 'ok') return yield* Effect.die('Expected Java action list');
+            const choices = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listed.items);
+            const selected = yield* Effect.exit(session.actions(current, query, 1000, choices[0]));
+            if (disk) {
+              expect(selected).toMatchObject({
+                _tag: 'Success',
+                value: {
+                  status: 'ok',
+                  items: [
+                    {
+                      operation: 'code-action',
+                      qualification: 'qualified-text-only',
+                      files: [
+                        {
+                          beforeText: f.texts['Main.java'],
+                          precondition: {sourceKind: 'disk', physicalIdentity: 'controlled-main-identity'},
+                        },
+                      ],
+                    },
+                  ],
+                },
+              });
+            } else expect(selected._tag).toBe('Failure');
+            expect(
+              EffectArray.some(
+                made.calls,
+                call => call.method === 'codeAction/resolve' || call.method === 'workspace/applyEdit',
+              ),
+            ).toBe(false);
+            expect(yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'))).toBe(f.texts['Main.java']);
+          }
+        }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
+    );
+
+    effectIt.effect('rejects prepared model drift while a public Java action response is returning', () =>
+      Effect.gen(function* () {
+        const f = yield* preparedSessionFixture();
+        const made = yield* f.create(
+          [],
+          options => Reflect.set(options, 'captureEditSource', () => Effect.die('No target expected')),
+          method =>
+            method === 'textDocument/codeAction' ? f.fs.writeFileString(f.metadataFile, 'changed model') : Effect.void,
+        );
+        const session = yield* made.result;
+        const current = yield* session.upsert(f.basis, f.texts['Main.java'], 'java', 1000);
+        expect(
+          (yield* Effect.exit(
+            session.actions(current, {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}}, 1000),
+          ))._tag,
+        ).toBe('Failure');
+        expect(yield* session.available).toBe(false);
+        expect(yield* f.fs.readFileString(f.path.join(f.source, 'Main.java'))).toBe(f.texts['Main.java']);
       }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
     );
 

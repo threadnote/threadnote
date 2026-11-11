@@ -12,6 +12,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {CommandExecutor} from '@threadnote/platform/command';
+import {SemanticActionChoice} from '../../src/semantic/action_choices.js';
 import {Observation} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
@@ -1912,4 +1913,197 @@ it('uses native Windows executable and cache paths without inherited tool hooks'
   expect(rust.RUSTDOC).toBe('D:\\Rust SDK\\bin\\rustdoc.exe');
   expect(rust.CARGO_BUILD_RUSTC_WRAPPER).toBe('');
   expect(rust.CARGO_NET_OFFLINE).toBe('true');
+});
+
+describe('public native quickfix selection', () => {
+  for (const language of ['go', 'rust'] as const) {
+    effectIt.effect(`selects a source-qualified ${language} quickfix with bounded advertised resolution`, () =>
+      Effect.gen(function* () {
+        const f = yield* goView;
+        const basis =
+          language === 'go'
+            ? f.basis
+            : {...f.basis, provider: {id: 'rust-analyzer', version: rustProviderVersion, generation: 0}};
+        const budgets: number[] = [];
+        let resolvedCommand = false;
+        let versionless = false;
+        const ordinary = goClient((method, _params, ms) =>
+          Effect.gen(function* (): Effect.fn.Return<Schema.Json> {
+            budgets.push(ms);
+            if (method === 'textDocument/diagnostic') return {kind: 'full', items: []};
+            if (method === 'textDocument/codeAction') return [{title: 'Fix', kind: 'quickfix', data: {fix: 'one'}}];
+            if (method === 'codeAction/resolve') {
+              yield* TestClock.adjust(1);
+              return resolvedCommand
+                ? {title: 'Fix', kind: 'quickfix', command: {command: 'unsafe'}}
+                : {
+                    title: 'Fix',
+                    kind: 'quickfix',
+                    edit: versionless
+                      ? {documentChanges: [{...f.edit.documentChanges[0], textDocument: {uri: f.uri, version: null}}]}
+                      : f.edit,
+                  };
+            }
+            return yield* Effect.die('Unexpected public action RPC ' + method);
+          }),
+        );
+        const client: LspClient = {
+          ...ordinary,
+          request: (method, params, ms) =>
+            language === 'rust' && method === 'initialize'
+              ? Effect.succeed({
+                  serverInfo: {name: 'rust-analyzer', version: rustProviderVersion},
+                  capabilities: {
+                    codeActionProvider: {resolveProvider: true},
+                    diagnosticProvider: {interFileDependencies: false, workspaceDiagnostics: false},
+                  },
+                })
+              : ordinary.request(method, params, ms),
+          notify: method =>
+            Effect.sync(() => {
+              if (method === 'initialized')
+                f.notifications.receive('experimental/serverStatus', {health: 'ok', quiescent: true});
+            }),
+        };
+        const options = {...f.options, basis, captureEditSource: () => Effect.die('Overlay is not disk')};
+        const session = yield* language === 'go' ? makeGoSession(client, options) : makeRustSession(client, options);
+        const view = yield* session.upsert(basis, f.text, language, 1000);
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: []});
+        const query = {range: f.edit.documentChanges[0].edits[0].range, only: ['quickfix']};
+        const listed = yield* session.actions(view, query, 1000);
+        if (listed.status !== 'ok') return yield* Effect.die('Expected action choices');
+        const choices = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listed.items);
+        const result = yield* session.actions(view, query, 1000, choices[0]);
+        expect(result).toMatchObject({
+          status: 'ok',
+          items: [
+            {
+              operation: 'code-action',
+              qualification: 'qualified-text-only',
+              files: [{beforeText: f.text, providerDocumentVersion: 1, precondition: {sourceKind: 'overlay'}}],
+            },
+          ],
+        });
+        expect(EffectArray.every(budgets, value => value > 0 && value <= 1000)).toBe(true);
+        expect(budgets).toContain(999);
+        resolvedCommand = true;
+        const blocked = yield* session.actions(view, query, 1000, choices[0]);
+        expect(blocked.status).toBe('ok');
+        if (blocked.status === 'ok')
+          expect(blocked.items[0]).toMatchObject({kind: 'action-result', status: 'no-match'});
+        resolvedCommand = false;
+        versionless = true;
+        expect(yield* session.actions(view, query, 1000, choices[0]).pipe(Effect.flip)).toMatchObject({
+          reason: 'stale',
+        });
+        expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+      }).pipe(Effect.provide(io)),
+    );
+  }
+  effectIt.effect.prop(
+    'keeps only unique unchanged quickfix selection under permutations and mutations',
+    {
+      permutation: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 5})),
+      mutation: Schema.Literals(['none', 'edit', 'query', 'source', 'duplicate']),
+    },
+    ({permutation, mutation}) =>
+      Effect.gen(function* () {
+        const f = yield* goView;
+        const actions = EffectArray.map([0, 1, 2], index => ({
+          title: 'Fix ' + index,
+          kind: 'quickfix',
+          edit: {
+            documentChanges: [
+              {...f.edit.documentChanges[0], edits: [{...f.edit.documentChanges[0].edits[0], newText: String(index)}]},
+            ],
+          },
+        }));
+        let response: Schema.Json[] = actions;
+        const session = yield* makeGoSession(
+          goClient(method =>
+            method === 'textDocument/codeAction' ? Effect.succeed(response) : Effect.die('Unexpected selection RPC'),
+          ),
+          {
+            ...f.options,
+            captureEditSource: () => Effect.die('Overlay is not disk'),
+          },
+        );
+        let view = yield* session.upsert(f.basis, f.text, 'go', 1000);
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: []});
+        let query = {range: f.edit.documentChanges[0].edits[0].range};
+        const first = yield* session.actions(view, query, 1000);
+        if (first.status !== 'ok') return yield* Effect.die('Missing list');
+        const choices = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(first.items);
+        const selected = choices[1];
+        const permutations = [
+          [0, 1, 2],
+          [0, 2, 1],
+          [1, 0, 2],
+          [1, 2, 0],
+          [2, 0, 1],
+          [2, 1, 0],
+        ];
+        response = EffectArray.map(permutations[permutation], index => actions[index]);
+        if (mutation === 'edit')
+          response = EffectArray.map(response, action =>
+            action === actions[1]
+              ? {
+                  ...actions[1],
+                  edit: {
+                    documentChanges: [
+                      {...f.edit.documentChanges[0], edits: [{...f.edit.documentChanges[0].edits[0], newText: '9'}]},
+                    ],
+                  },
+                }
+              : action,
+          );
+        if (mutation === 'duplicate') response.push(actions[1]);
+        if (mutation === 'query') query = {range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}}};
+        if (mutation === 'source') {
+          const text = f.text + '// changed\n';
+          view = yield* session.upsert({...view, content: sha256HexSync(text), documentVersion: 2}, text, 'go', 1000);
+          f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 2, diagnostics: []});
+        }
+        const result = yield* session.actions(view, query, 1000, selected);
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+          const prepared = EffectArray.filter(result.items, item =>
+            Schema.is(Schema.Struct({kind: Schema.Literal('prepared-edit')}))(item),
+          );
+          expect(prepared.length).toBe(mutation === 'none' ? 1 : 0);
+          if (mutation === 'none') expect(prepared[0]).toMatchObject({files: [{edits: [{newText: '1'}]}]});
+        }
+        expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+      }).pipe(Effect.provide(io)),
+    {arbitrary: {runs: 20}},
+  );
+
+  effectIt.effect('refuses a source invalidated while the public action resolver is pending', () =>
+    Effect.gen(function* () {
+      const f = yield* goView;
+      const entered = yield* Deferred.make<void>();
+      const response = yield* Deferred.make<Schema.Json>();
+      const session = yield* makeGoSession(
+        goClient(method =>
+          method === 'textDocument/codeAction'
+            ? Effect.succeed([{title: 'Fix', kind: 'quickfix', data: {}}])
+            : Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(response))),
+        ),
+        {
+          ...f.options,
+          captureEditSource: () => Effect.die('Overlay is not disk'),
+        },
+      );
+      const view = yield* session.upsert(f.basis, f.text, 'go', 1000);
+      f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: []});
+      const pending = yield* Effect.forkChild(
+        Effect.exit(session.actions(view, {range: f.edit.documentChanges[0].edits[0].range}, 1000)),
+      );
+      yield* Deferred.await(entered);
+      yield* session.invalidate;
+      yield* Deferred.succeed(response, {title: 'Fix', kind: 'quickfix', edit: f.edit});
+      expect((yield* Fiber.join(pending))._tag).toBe('Failure');
+      expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+    }).pipe(Effect.provide(io)),
+  );
 });

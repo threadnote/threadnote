@@ -242,6 +242,8 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
     const worktree = canonicalFileUri((yield* path.toFileUrl(f.request.callerCwd)).href);
     const uri = canonicalFileUri((yield* path.toFileUrl(path.join(f.request.callerCwd, 'a.ts'))).href);
     const text = 'export const target = 1;';
+    const identity = yield* f.fs.stat(path.join(f.request.callerCwd, 'a.ts'));
+    if (identity.ino._tag !== 'Some') return yield* Effect.die('Fixture requires an actual file identity');
     const observed: Observation = {
       version: 1,
       repository: 'repo',
@@ -274,7 +276,7 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
                 sourceKind: 'disk',
                 rawDigest: observed.content,
                 encoding: 'utf-8',
-                physicalIdentity: 'inode',
+                physicalIdentity: JSON.stringify([String(identity.dev), String(identity.ino.value)]),
                 owner: 'test',
                 documentVersion: null,
               },
@@ -284,6 +286,7 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
       ],
     };
     let actionCalls = 0;
+    let quickfix = false;
     const blockedChoice = {
       kind: 'action-choice',
       title: 'Opaque command',
@@ -295,15 +298,42 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
       queryDigest: sha256HexSync('query'),
       blocker: 'command',
     };
+    const preparedAction = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Json))(
+      outcome.items[0],
+    );
     const session: SemanticSession = {
       actions: (_observation, _query, _milliseconds, selection) =>
         Effect.sync(() => {
           actionCalls++;
           return {
             ...outcome,
-            items: selection
-              ? [{kind: 'action-result', status: 'unsupported', reason: 'command'}, blockedChoice]
-              : [blockedChoice],
+            items: quickfix
+              ? selection
+                ? [
+                    {
+                      ...preparedAction,
+                      operation: 'code-action',
+                      qualification: 'qualified-text-only',
+                      operations: [
+                        {
+                          kind: 'text',
+                          uri,
+                          version: null,
+                          edits: [
+                            {
+                              range: {start: {line: 0, character: 13}, end: {line: 0, character: 19}},
+                              newText: 'renamed',
+                            },
+                          ],
+                          target: 0,
+                        },
+                      ],
+                    },
+                  ]
+                : [{...blockedChoice, title: 'Quickfix', command: false, qualified: true, blocker: null}]
+              : selection
+                ? [{kind: 'action-result', status: 'unsupported', reason: 'command'}, blockedChoice]
+                : [blockedChoice],
           };
         }),
       prepare: () => Effect.succeed(outcome),
@@ -425,7 +455,38 @@ it.effect('rolls back failed publication quotas and fences the initiating view a
       reason: 'command',
     });
     expect(actionCalls).toBe(2);
-    expect(yield* blobs()).toHaveLength(1);
+    quickfix = true;
+    const quickfixList = yield* runSemanticAgentChangeWith(endpointHost, f.config, action);
+    const retained = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({choices: Schema.Array(Schema.Struct({choiceHandle: Schema.String}))}),
+    )(quickfixList);
+    const actionProposal = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+      ...action,
+      choiceHandle: retained.choices[0].choiceHandle,
+    });
+    expect(actionProposal).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+    expect(actionProposal).toHaveProperty('handle');
+    const actionHandle = yield* Schema.decodeUnknownEffect(
+      Schema.Struct({handle: Schema.Struct({id: Schema.String, capability: Schema.String, digest: Schema.String})}),
+    )(actionProposal);
+    const actionStatus = yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+      version: 1,
+      callerCwd: f.request.callerCwd,
+      action: 'status',
+      handle: actionHandle.handle,
+    });
+    expect(actionStatus).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+    expect(actionStatus).toHaveProperty('page');
+    expect(
+      yield* runSemanticAgentChangeWith(endpointHost, f.config, {
+        version: 1,
+        callerCwd: f.request.callerCwd,
+        action: 'preflight',
+        handle: actionHandle.handle,
+      }),
+    ).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true, conflicts: []});
+
+    expect(yield* blobs()).toHaveLength(2);
     expect(yield* f.fs.readFileString(path.join(f.request.callerCwd, 'a.ts'))).toBe(text);
   }).pipe(
     // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Narrow publication filesystem and coordinator seam.
