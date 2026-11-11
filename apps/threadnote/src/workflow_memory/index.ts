@@ -22,7 +22,20 @@ export {readWorkflowReadiness} from './profile.js';
 export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Schema.decodeUnknownEffect(
     Schema.Union([WorkflowRequestSchema, WorkflowPublicationRequestSchema, WorkflowOperationInspectionRequestSchema]),
-  )(input, {onExcessProperty: 'error'});
+  )(input, {onExcessProperty: 'error'}).pipe(
+    Effect.mapError(error =>
+      typeof input === 'object' &&
+      input !== null &&
+      'action' in input &&
+      input.action === 'bind' &&
+      'graphProject' in input
+        ? workflowError(
+            'invalid-request',
+            'Ordinary workflow-memory bind does not accept a graph selection; use native init with graphProject.',
+          )
+        : error,
+    ),
+  );
   if (
     'evidenceRefs' in request &&
     request.evidenceRefs?.length &&

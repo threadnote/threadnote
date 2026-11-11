@@ -61,6 +61,7 @@ const graph: readonly WorkflowPublicationNode[] = [
 ];
 const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(function* (
   prefix = 'threadnote-publication-coordinator-',
+  selectedGraphProject?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -105,8 +106,25 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
     agentId: 'test',
     user: 'tester',
     manifestPath: path.join(home, 'manifest.yaml'),
-    manifestSource: 'bundled-example' as const,
+    manifestSource: selectedGraphProject === undefined ? ('bundled-example' as const) : ('configured' as const),
   };
+  if (selectedGraphProject !== undefined)
+    yield* fs.writeFileString(
+      config.manifestPath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {name: 'Alpha', path: repo, seed: [], uri: 'threadnote://resources/repos/alpha'},
+          {
+            name: 'Beta',
+            path: repo,
+            seed: [],
+            uri: 'threadnote://resources/repos/beta',
+            graph: {closure: 'dependencies', roots: ['src']},
+          },
+        ],
+      }),
+    );
   yield* persistCodexCloudProfile(config, ['default']);
   const context = {
     ...system,
@@ -119,14 +137,18 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
         ),
       ),
   };
-  const binding = yield* resolveWorkflowBinding(config, {
-    protocolVersion: 1,
-    action: 'bind',
-    workflowRunId: 'workflow-publication',
-    project: 'fixture',
-    featureId: 'feature',
-    generation: 'bundle-v1',
-  }).pipe(Effect.provideService(SystemInfo, context));
+  const binding = yield* resolveWorkflowBinding(
+    config,
+    {
+      protocolVersion: 1,
+      action: 'bind',
+      workflowRunId: 'workflow-publication',
+      project: 'fixture',
+      featureId: 'feature',
+      generation: 'bundle-v1',
+    },
+    selectedGraphProject,
+  ).pipe(Effect.provideService(SystemInfo, context));
   const state = yield* bindWorkflow(config, binding);
   const call = (input: WorkflowPublicationRequest) =>
     withWorkflowLock(config, binding.bindingId, runWorkflowPublication(config, state, input)).pipe(
@@ -176,6 +198,25 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
 });
 
 describe('approved workflow graph publication', () => {
+  effectIt.effect('captures and publishes in the bound graph project when the memory project differs', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture('threadnote-publication-scope-', 'Alpha');
+      expect(f.binding.project).toBe('fixture');
+      expect(f.binding.graphProject).toBe('Alpha');
+      yield* (yield* CodeGraphIndexer).index({
+        cwd: f.repo,
+        threadnoteHome: f.home,
+        ensureVectors: false,
+        project: {uri: 'threadnote://resources/repos/alpha'},
+      });
+      const preview = yield* f.preview([{...graph[0], codeRefs: ['src/value.ts']}]);
+      if (!('stages' in preview)) return yield* Effect.die('Expected scoped publication preview');
+      expect(preview.nodes[0].codeCitations).toMatchObject([{sourceCommit: f.sourceCommit}]);
+      yield* f.approve(preview.approvalDigest);
+      expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   for (const boundary of process.platform === 'win32' ? [245, 247, 249] : [200, 206, 212]) {
     effectIt.effect(`verifies exact final and external blobs with explicit revision boundaries ${boundary}`, () =>
       Effect.gen(function* () {

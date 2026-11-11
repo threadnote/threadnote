@@ -27,8 +27,10 @@ import {describe, expect} from 'vitest';
 import {
   decodeNativeTaskActionRef,
   encodeNativeTaskActionRef,
+  nativeTaskStartRunId,
   nativeTaskSnapshotId,
 } from '@threadnote/workflow-automations/task';
+import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {
   NativeAuthoringPlanDocumentSchema,
   NativeCompactSourceSnapshotSchema,
@@ -51,6 +53,8 @@ import {runNativeTaskAction, runNativeTaskStart} from '../../src/workflow_automa
 import {readNativeTaskInstalledTarget} from '../../src/workflow_automation/task_admission.js';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
 import {applyDevSkills, statusDevSkills} from '../../src/dev_skills/index.js';
+import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
+import {enrollmentContext} from '../../src/dev_skills/registry.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   nativeCloseoutJournalPath,
@@ -548,6 +552,121 @@ describe('native task actions', () => {
       if (unknown._tag !== 'Failure') throw new Error('Expected unknown target to fail');
       expect(unknown.failure.message).toContain('codex');
       expect(unknown.failure.message).not.toContain(f.root);
+      const sourceRoot = f.path.join(f.root, 'updated-skill-source');
+      const sourceBundle = yield* loadDevSkillsBundleAt(
+        Bun.fileURLToPath(new URL('../../../../', import.meta.url)),
+        '5.3.0-beta.7',
+        false,
+      );
+      for (const [key, encoded] of EffectRecord.toEntries(sourceBundle.files)) {
+        const destination = f.path.join(sourceRoot, 'config', 'agent-skills', key);
+        yield* f.fs.makeDirectory(f.path.dirname(destination), {recursive: true});
+        const content = Buffer.from(encoded, 'base64');
+        yield* f.fs.writeFile(
+          destination,
+          key === 'dev-spec/SKILL.md' ? Buffer.concat([content, Buffer.from('\nUpdated generation.\n')]) : content,
+        );
+      }
+      const inventory = {
+        schemaVersion: sourceBundle.manifest.schemaVersion,
+        nativeRequirements: sourceBundle.manifest.nativeRequirements,
+        workflowProtocol: sourceBundle.manifest.workflowProtocol,
+        stateSchema: sourceBundle.manifest.stateSchema,
+        minimumRuntime: sourceBundle.manifest.minimumRuntime,
+        skills: sourceBundle.manifest.skills,
+      };
+      yield* f.fs.writeFileString(f.path.join(sourceRoot, 'config', 'dev-skills.json'), JSON.stringify(inventory));
+      const updatedSource = {root: sourceRoot, runtimeVersion: sourceBundle.manifest.releaseVersion};
+      const stale = yield* readNativeTaskInstalledTarget(config, 'codex', repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+        Effect.result,
+      );
+      expect(stale).toMatchObject({failure: {code: 'needs-resources'}});
+      if (stale._tag === 'Failure') {
+        expect(stale.failure.message).toContain('dev-skills update --agent codex-cli --scope user --profile desktop');
+        expect(stale.failure.message).not.toContain(f.root);
+      }
+      yield* applyDevSkills(config, 'update', {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      expect(
+        yield* readNativeTaskInstalledTarget(config, 'codex', repo).pipe(
+          Effect.provideService(SystemInfo, scoped),
+          Effect.provideService(DevSkillsSource, updatedSource),
+        ),
+      ).toMatchObject({installationState: 'current'});
+      yield* applyDevSkills(config, 'install', {agent: 'devin-local', scope: 'project', cwd: repo}).pipe(
+        Effect.provideService(SystemInfo, scoped),
+      );
+      const projectStale = yield* readNativeTaskInstalledTarget(config, 'devin-local', repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+        Effect.result,
+      );
+      expect(projectStale).toMatchObject({failure: {code: 'needs-resources'}});
+      if (projectStale._tag === 'Failure') {
+        expect(projectStale.failure.message).toContain(
+          'dev-skills update --agent devin-local --scope project --profile desktop --cwd .',
+        );
+        expect(projectStale.failure.message).toContain('from the target checkout');
+        expect(projectStale.failure.message).not.toContain(f.root);
+      }
+      yield* applyDevSkills(config, 'update', {agent: 'devin-local', scope: 'project', cwd: repo}).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      yield* applyDevSkills(config, 'install', {agent: 'devin-local', scope: 'user'}).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      const context = yield* enrollmentContext(config);
+      let projectId: string | undefined;
+      for (const [id, entry] of EffectRecord.toEntries(context.homeIndex.targets))
+        if (entry.target.surfaceId === 'devin-local' && entry.target.scope === 'project') projectId = id;
+      expect(projectId).toMatch(/^[a-f0-9]{64}$/u);
+      if (!projectId) throw new Error('Expected recorded project consumer ID.');
+      const explicitProject = yield* readNativeTaskInstalledTarget(config, projectId, repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      expect(explicitProject).toMatchObject({
+        consumerId: projectId,
+        target: {scope: 'project'},
+        installationState: 'current',
+      });
+      const wrongCheckout = yield* readNativeTaskInstalledTarget(config, projectId, home).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+        Effect.result,
+      );
+      expect(wrongCheckout).toMatchObject({failure: {code: 'needs-resources'}});
+      if (wrongCheckout._tag === 'Failure') expect(wrongCheckout.failure.message).toContain('target-checkout-mismatch');
+      const bareUser = yield* readNativeTaskInstalledTarget(config, 'devin-local', repo).pipe(
+        Effect.provideService(SystemInfo, scoped),
+        Effect.provideService(DevSkillsSource, updatedSource),
+      );
+      expect(bareUser).toMatchObject({target: {scope: 'user'}, installationState: 'current'});
+      const unknownId = EffectString.repeat(64)('a');
+      const invalidStart = yield* runNativeTaskStart(config, {
+        callerCwd: repo,
+        featureName: 'Unknown installed target',
+        installationTarget: unknownId,
+        intent: {
+          title: 'Unknown installed target',
+          currentBehavior: 'Target admission fails.',
+          desiredChange: 'Admit a recorded target.',
+          affectedPaths: ['source.ts'],
+          acceptanceCriterion: 'The recorded target is admitted.',
+          verification: 'Inspect target admission.',
+          eligibilityRationale: 'The failure is isolated.',
+          eligibility: {status: 'eligible'},
+          review: {required: false, reason: 'Focused fixture.'},
+        },
+      }).pipe(Effect.provideService(SystemInfo, scoped), Effect.result);
+      expect(invalidStart).toMatchObject({failure: {code: 'needs-resources'}});
+      expect(yield* f.fs.exists(f.path.join(home, 'workflow-automations'))).toBe(false);
     }).pipe(run),
   );
 
@@ -623,6 +742,38 @@ describe('native task actions', () => {
       if (typeof started.taskRef !== 'string') throw new Error('Expected task reference after start');
       const state = yield* readNativeWorkflowState(config, started.taskRef);
       expect(state?.state.graphProject).toBe('Alpha');
+      const selectedBytes = yield* f.fs.readFileString(f.statePath(started.taskRef));
+      expect(
+        yield* runNativeTaskStart(config, {...request, graphProject: 'Beta'}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'graph-scope-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath(started.taskRef))).toBe(selectedBytes);
+      const legacyName = 'Legacy graph task';
+      const legacyRunId = nativeTaskStartRunId(undefined, workflowTitleSlug('repo'), workflowTitleSlug(legacyName));
+      const installed = yield* statusDevSkills(config, {agent: 'codex'}).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+      );
+      yield* runWorkflowAutomation(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'init',
+        runId: legacyRunId,
+        project: 'repo',
+        featureId: workflowTitleSlug(legacyName),
+        generation: installed.bundle.digest,
+        profile: 'desktop',
+        title: intent.title,
+      }).pipe(Effect.provideService(SystemInfo, testSystem));
+      const legacyBytes = yield* f.fs.readFileString(f.statePath(legacyRunId));
+      expect(
+        yield* runNativeTaskStart(config, {...request, featureName: legacyName, graphProject: 'Alpha'}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.result,
+        ),
+      ).toMatchObject({failure: {code: 'graph-scope-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath(legacyRunId))).toBe(legacyBytes);
     }).pipe(run),
   );
 

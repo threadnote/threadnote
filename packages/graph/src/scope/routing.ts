@@ -27,6 +27,7 @@ export class CodeGraphScopeRoutingError extends Schema.TaggedError<
   {readonly brand: unique symbol}
 >()('CodeGraphScopeRoutingError', {
   message: Schema.String,
+  reason: Schema.optionalKey(Schema.Literal('ambiguous')),
   projects: Schema.optionalKey(Schema.Array(Schema.Struct({name: Schema.String, roots: Schema.Array(Schema.String)}))),
 }) {}
 
@@ -205,6 +206,7 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
     '\n',
   );
   return yield* CodeGraphScopeRoutingError.make({
+    reason: 'ambiguous',
     projects: EffectArray.map(projects, project => ({name: project.name, roots: project.graph?.roots ?? []})),
     message: `Graph scope is ambiguous for this cwd: ${matches.length} configured scopes match. Set project (or CLI --project) to one of:\n${scopeChoices}`,
   });

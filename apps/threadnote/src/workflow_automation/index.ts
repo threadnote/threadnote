@@ -107,6 +107,7 @@ const currentBinding = Effect.fn('workflowAutomation.currentBinding')(function* 
       ...(state.team ? {team: state.team} : {}),
     },
     state.graphProject,
+    true,
   );
   if (binding.bindingId !== state.bindingId)
     return yield* issue(

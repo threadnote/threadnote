@@ -1,6 +1,6 @@
 import * as EffectString from 'effect/String';
 import {Array as EffectArray} from 'effect';
-import {Effect, FileSystem, Predicate, Result} from 'effect';
+import {Effect, FileSystem, Predicate, Result, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -8,7 +8,8 @@ import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store'
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
-import {stableJson} from '../../src/workflow_memory/protocol.js';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {stableJson, WorkflowMemoryError} from '../../src/workflow_memory/protocol.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import * as EffectRecord from 'effect/Record';
@@ -26,9 +27,43 @@ function textField(value: Record<string, unknown>, key: string, label: string): 
 }
 
 describe('native workflow automation', () => {
+  effectIt.effect('rejects a graph selector on ordinary memory bind before any state exists', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const privateValue = `private-selector:${f.root}`;
+      const result = yield* runWorkflowMemory(f.config, {
+        protocolVersion: 1,
+        action: 'bind',
+        workflowRunId: 'ordinary-v1',
+        project: 'fixture',
+        featureId: 'feature',
+        generation: 'skill-generation-v1',
+        graphProject: privateValue,
+      }).pipe(Effect.result);
+      expect(result).toMatchObject({failure: {code: 'invalid-request'}});
+      if (result._tag !== 'Failure') throw new Error('Expected an invalid ordinary bind.');
+      if (!Schema.is(WorkflowMemoryError)(result.failure)) throw new Error('Expected a typed workflow error.');
+      expect(new TextEncoder().encode(result.failure.message).byteLength).toBeLessThanOrEqual(256);
+      expect(result.failure.message).not.toContain(privateValue);
+      expect(result.failure.message).not.toContain(f.root);
+      expect(result.failure.message).not.toContain('ParseError');
+      expect(yield* f.fs.exists(f.path.join(f.home, 'workflow-memory'))).toBe(false);
+      const ordinary = yield* runWorkflowMemory(f.config, {
+        protocolVersion: 1,
+        action: 'bind',
+        workflowRunId: 'ordinary-v1',
+        project: 'fixture',
+        featureId: 'feature',
+        generation: 'skill-generation-v1',
+      });
+      expect(ordinary).not.toHaveProperty('graphProject');
+    }).pipe(run),
+  );
+
   effectIt.effect('binds a configured graph project canonically and preserves unselected identity', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
+      const bundledConfig: RuntimeConfig = {...f.config, manifestSource: 'bundled-example'};
       yield* runCommandEffect('git', [
         '-C',
         f.repo,
@@ -41,23 +76,60 @@ describe('native workflow automation', () => {
         '-m',
         'fixture',
       ]);
+      const bundled = yield* failure(
+        f.call(
+          {
+            ...f.base('init'),
+            project: 'fixture',
+            featureId: 'feature',
+            graphProject: 'Alpha',
+          },
+          bundledConfig,
+        ),
+      );
+      expect(bundled).toMatchObject({failure: {code: 'graph-scope-invalid'}});
+      expect(yield* f.fs.exists(f.statePath())).toBe(false);
+      const foreign = f.path.join(f.root, 'foreign');
+      yield* f.fs.makeDirectory(foreign);
+      yield* runCommandEffect('git', ['init', '--initial-branch=main', foreign]);
       yield* f.fs.writeFileString(
         f.config.manifestPath,
         JSON.stringify({
           version: 1,
-          projects: EffectArray.map(['Alpha', 'Beta'], name => ({
-            name,
-            path: f.repo,
-            seed: [],
-            uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
-            graph: {closure: 'dependencies', roots: [EffectString.toLowerCase(name)]},
-          })),
+          projects: [
+            ...EffectArray.map(['Alpha', 'Beta'], name => ({
+              name,
+              path: f.repo,
+              seed: [],
+              uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+              graph: {closure: 'dependencies', roots: [EffectString.toLowerCase(name)]},
+            })),
+            {name: 'Full', path: f.repo, seed: [], uri: 'threadnote://resources/repos/full'},
+            {
+              name: 'Named',
+              path: f.repo,
+              seed: [],
+              uri: 'threadnote://resources/repos/named',
+              graph: {closure: 'dependencies', roots: ['alias']},
+            },
+            {
+              name: 'Outside',
+              path: foreign,
+              seed: [],
+              uri: 'threadnote://resources/repos/outside',
+              graph: {closure: 'dependencies', roots: ['src']},
+            },
+          ],
         }),
       );
       const invalid = yield* failure(
         f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject: 'unknown'}),
       );
       expect(invalid).toMatchObject({failure: {code: 'graph-scope-invalid'}});
+      for (const graphProject of ['alias', 'Outside'])
+        expect(
+          yield* failure(f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject})),
+        ).toMatchObject({failure: {code: 'graph-scope-invalid'}});
       expect(yield* f.fs.exists(f.statePath())).toBe(false);
       const unselected = yield* f.init('unselected');
       const unselectedState = JSON.parse(yield* f.fs.readFileString(f.statePath('unselected')));
@@ -66,6 +138,18 @@ describe('native workflow automation', () => {
       expect(unselectedJournal.binding).not.toHaveProperty('graphProject');
       const {bindingId, ...identity} = unselectedJournal.binding;
       expect(bindingId).toBe(sha256HexSync(stableJson(identity)));
+      const unselectedBytes = yield* f.fs.readFileString(f.statePath('unselected'));
+      expect(
+        yield* failure(
+          f.call({
+            ...f.base('init', 'unselected'),
+            project: 'fixture',
+            featureId: 'feature',
+            graphProject: 'Alpha',
+          }),
+        ),
+      ).toMatchObject({failure: {code: 'graph-scope-conflict'}});
+      expect(yield* f.fs.readFileString(f.statePath('unselected'))).toBe(unselectedBytes);
       expect(yield* failure(f.call(f.base('graph-ready', 'unselected')))).toMatchObject({
         failure: {code: 'graph-scope-required'},
       });
@@ -90,6 +174,49 @@ describe('native workflow automation', () => {
         failure: {code: 'graph-scope-conflict'},
       });
       expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+      for (const command of ['status', 'result', 'cancel', 'resume'] as const)
+        expect(yield* failure(f.call({...f.base('job'), command, jobId: 'missing-job'}))).toMatchObject({
+          failure: {code: 'job-not-found'},
+        });
+      const full = yield* f.call({...selectedRequest, runId: 'full-run', graphProject: 'Full'});
+      expect(full).toMatchObject({graphProject: 'Full'});
+      expect(yield* f.call(f.base('graph-ready', 'full-run'))).toMatchObject({status: 'ok', graph: {state: 'ready'}});
+      expect(yield* failure(f.call(f.base('graph-ready'), bundledConfig))).toMatchObject({
+        failure: {code: 'graph-scope-unavailable'},
+      });
+      const written = yield* f.call(f.write());
+      if (!('artifact' in written)) throw new Error('Expected selected workflow artifact');
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'Beta', path: f.repo, seed: [], uri: 'threadnote://resources/repos/beta'}],
+        }),
+      );
+      expect(yield* failure(f.call(f.base('graph-ready')))).toMatchObject({failure: {code: 'graph-scope-unavailable'}});
+      expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok', graphProject: 'Alpha'});
+      expect(yield* f.call({...f.base('read'), uri: written.artifact.uri})).toMatchObject({status: 'ok'});
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'ALPHA', path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'}],
+        }),
+      );
+      expect(yield* failure(f.call(f.base('graph-ready')))).toMatchObject({failure: {code: 'graph-scope-unavailable'}});
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [{name: 'Alpha', path: foreign, seed: [], uri: 'threadnote://resources/repos/alpha'}],
+        }),
+      );
+      const relocated = yield* failure(f.call(f.base('graph-ready')));
+      expect(relocated).toMatchObject({failure: {code: 'graph-scope-unavailable'}});
+      if (relocated._tag === 'Failure') expect(relocated.failure.message).not.toContain(f.root);
+      yield* f.fs.remove(f.config.manifestPath);
+      expect(yield* failure(f.call(f.base('graph-ready')))).toMatchObject({failure: {code: 'graph-scope-unavailable'}});
+      expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok'});
     }).pipe(run),
   );
 

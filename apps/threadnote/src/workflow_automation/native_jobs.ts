@@ -1227,18 +1227,23 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
   const runId = run.state.runId;
-  const callerBinding = yield* resolveWorkflowBinding(config, {
-    protocolVersion: 1,
-    action: 'bind',
-    workflowRunId: 'native-v1-' + runId,
-    project: run.state.project,
-    ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
-    featureId: run.state.featureId,
-    generation: run.state.generation,
-    profile: run.state.profile ?? 'desktop',
-    ...(run.state.team === undefined ? {} : {team: run.state.team}),
-    ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
-  });
+  const callerBinding = yield* resolveWorkflowBinding(
+    config,
+    {
+      protocolVersion: 1,
+      action: 'bind',
+      workflowRunId: 'native-v1-' + runId,
+      project: run.state.project,
+      ...(run.state.graphProject === undefined ? {} : {graphProject: run.state.graphProject}),
+      featureId: run.state.featureId,
+      generation: run.state.generation,
+      profile: run.state.profile ?? 'desktop',
+      ...(run.state.team === undefined ? {} : {team: run.state.team}),
+      ...(run.state.naming === undefined ? {} : {naming: run.state.naming}),
+    },
+    run.state.graphProject,
+    true,
+  );
   if (callerBinding.bindingId !== run.state.bindingId)
     return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   // Read-only status/result still serialize against the journal. Stop/resume

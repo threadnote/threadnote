@@ -91,6 +91,7 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   config: RuntimeConfig,
   request: WorkflowRequest,
   graphProject?: string,
+  bound = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
@@ -100,7 +101,23 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   if (!repoRoot) return yield* workflowError('repository-missing', 'Run the workflow from its Git checkout.');
   const repo = yield* fs.realPath(repoRoot);
   const selectedGraphProject =
-    graphProject === undefined ? undefined : yield* validateWorkflowGraphProject(config, repo, graphProject);
+    graphProject === undefined
+      ? undefined
+      : yield* validateWorkflowGraphProject(config, repo, graphProject).pipe(
+          bound
+            ? Effect.catch(() =>
+                workflowError(
+                  'graph-scope-unavailable',
+                  'The bound graph project is unavailable in this checkout. Restore its original manifest entry and checkout.',
+                ),
+              )
+            : effect => effect,
+        );
+  if (bound && graphProject !== undefined && selectedGraphProject !== graphProject)
+    return yield* workflowError(
+      'graph-scope-unavailable',
+      'The bound graph project changed. Restore its original manifest spelling or start a fresh run.',
+    );
   const scope =
     detected === 'codex-cloud-personal'
       ? yield* codexCloudMemoryScope(config)
@@ -162,11 +179,11 @@ export const verifyWorkflowBinding = Effect.fn('workflowMemory.verifyBinding')(f
   config: RuntimeConfig,
   binding: WorkflowBinding,
 ) {
-  const current = yield* resolveWorkflowBinding(
-    config,
-    {protocolVersion: 1, action: 'bind', ...binding},
-    binding.graphProject,
-  );
+  const base = yield* resolveWorkflowBinding(config, {protocolVersion: 1, action: 'bind', ...binding});
+  const {bindingId: _baseId, ...baseIdentity} = base;
+  const identity =
+    binding.graphProject === undefined ? baseIdentity : {...baseIdentity, graphProject: binding.graphProject};
+  const current = {...identity, bindingId: yield* sha256Hex(stableJson(identity))};
   if (stableJson(current) !== stableJson(binding))
     return yield* workflowError(
       'binding-drift',

@@ -232,6 +232,48 @@ const contentionFixture = (pinned = false) =>
   });
 
 describe('native private job lifecycle', () => {
+  effectIt.effect('admits selected-scope job citations when the memory project names another scope', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      yield* f.fs.writeFileString(
+        f.config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [
+            {name: 'Alpha', path: f.repo, seed: [], uri: 'threadnote://resources/repos/alpha'},
+            {
+              name: 'fixture',
+              path: f.repo,
+              seed: [],
+              uri: 'threadnote://resources/repos/fixture',
+              graph: {closure: 'dependencies', roots: ['other']},
+            },
+          ],
+        }),
+      );
+      const initialized = object(
+        yield* f.call({...f.base('init'), project: 'fixture', featureId: 'feature', graphProject: 'Alpha'}),
+      );
+      expect(initialized.graphProject).toBe('Alpha');
+      yield* (yield* CodeGraphIndexer).index({
+        cwd: f.repo,
+        threadnoteHome: f.home,
+        project: {uri: 'threadnote://resources/repos/alpha'},
+      });
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document(null, ['source.ts']),
+        ready: false,
+        expectedRevision: null,
+      };
+      const accepted = object(yield* submit(f, work));
+      expect(accepted.status).toBe('accepted');
+      expect(accepted.jobId).toBeTruthy();
+    }).pipe(run),
+  );
+
   for (const stage of ['zero', 'partial'] as const)
     effectIt.effect(`resumes pure memory contention with ${stage} canonical progress and the same identities`, () =>
       Effect.gen(function* () {

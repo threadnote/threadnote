@@ -43,6 +43,7 @@ import {
   decodeNativeAuthoringTaskRef,
 } from '../../src/workflow_automation/task_authoring.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
@@ -371,6 +372,24 @@ effectIt.effect('selects a configured graph project on task-author start in an a
     expect(selected.status).toBe('draft');
     const state = yield* readNativeWorkflowState(f.config, String(selected.runId));
     expect(state?.state.graphProject).toBe('Alpha');
+    if (!state) throw new Error('Expected selected run state');
+    const body = 'Outside selected graph.\n';
+    const outside = yield* runWorkflowMemory(f.config, {
+      protocolVersion: 1,
+      action: 'create',
+      bindingId: state.state.bindingId,
+      operationId: 'outside-scope',
+      artifactKey: 'outside',
+      sourceRunId: state.state.runId,
+      role: 'evidence',
+      body,
+      bodySha256: sha256HexSync(body),
+      expectedRevision: null,
+      storageKind: 'durable',
+      codeRefs: ['apps/beta/source.ts'],
+      citationPolicy: 'require-current',
+    }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+    expect(outside).toMatchObject({failure: {failureCode: 'outside-project-graph'}});
   }).pipe(TestClock.withLive, provideNative),
 );
 

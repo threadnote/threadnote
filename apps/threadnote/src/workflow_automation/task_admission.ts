@@ -23,12 +23,12 @@ const updateCommand = (target: DevSkillsTarget) =>
 const targetChoices = Effect.fn('workflowTask.targetChoices')(function* (config: RuntimeConfig, checkout: string) {
   const context = yield* enrollmentContext(config).pipe(Effect.result);
   if (context._tag === 'Failure') return `Recorded target inspection failed (${codeOf(context.failure)}).`;
-  const targets = EffectRecord.values(context.success.homeIndex.targets).sort((left, right) =>
-    EffectString.localeCompare(right.target.surfaceId)(left.target.surfaceId),
+  const targets = EffectRecord.toEntries(context.success.homeIndex.targets).sort((left, right) =>
+    EffectString.localeCompare(right[1].target.surfaceId)(left[1].target.surfaceId),
   );
   if (targets.length === 0)
     return 'No recorded targets; install one with `threadnote dev-skills install --agent <agent>`, then retry.';
-  const choices = yield* Effect.forEach(targets.slice(0, MAX_TARGET_CHOICES), entry =>
+  const choices = yield* Effect.forEach(targets.slice(0, MAX_TARGET_CHOICES), ([id, entry]) =>
     inCheckout(statusDevSkills(config, selectorFor(entry.target)), checkout).pipe(
       Effect.result,
       Effect.map(result => {
@@ -36,7 +36,11 @@ const targetChoices = Effect.fn('workflowTask.targetChoices')(function* (config:
           result._tag === 'Success'
             ? (result.success.targets[0]?.installationState ?? 'unavailable')
             : `inspection failed (${codeOf(result.failure)})`;
-        return `${safeName(entry.target.surfaceId)} [${entry.target.profile}/${entry.target.scope}]: ${state}`;
+        const recovery =
+          state === 'update-available'
+            ? `; run ${updateCommand(entry.target)}${entry.target.cwd === undefined ? '' : ' from the target checkout'}`
+            : '';
+        return `${safeName(entry.target.surfaceId)} [${entry.target.profile}/${entry.target.scope}, installationTarget ${id}]: ${state}${recovery}`;
       }),
     ),
   );
@@ -68,8 +72,24 @@ export const readNativeTaskInstalledTarget = (
 ) =>
   Effect.gen(function* () {
     if (!installationTarget) return yield* fail('needs-resources', yield* targetRecovery(config, checkout));
+    const recorded = /^[a-f0-9]{64}$/u.test(installationTarget)
+      ? yield* enrollmentContext(config).pipe(Effect.result)
+      : undefined;
+    if (recorded?._tag === 'Failure')
+      return yield* fail(
+        'needs-resources',
+        yield* targetRecovery(config, checkout, undefined, codeOf(recorded.failure)),
+      );
+    const exactTarget = recorded?.success.homeIndex.targets[installationTarget]?.target;
+    if (recorded && !exactTarget)
+      return yield* fail('needs-resources', yield* targetRecovery(config, checkout, undefined, 'unknown-target'));
+    if (exactTarget?.cwd !== undefined && exactTarget.cwd !== checkout)
+      return yield* fail(
+        'needs-resources',
+        yield* targetRecovery(config, checkout, undefined, 'target-checkout-mismatch'),
+      );
     const installed = yield* inCheckout(
-      statusDevSkills(config, {agent: installationTarget}).pipe(Effect.result),
+      statusDevSkills(config, exactTarget ? selectorFor(exactTarget) : {agent: installationTarget}).pipe(Effect.result),
       checkout,
     );
     if (installed._tag === 'Failure')

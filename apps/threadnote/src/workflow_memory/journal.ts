@@ -21,6 +21,7 @@ import {
   type WorkflowOperationInspectionRequest,
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
+import {resolveWorkflowGraphScope} from './graph_scope.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
@@ -323,6 +324,12 @@ export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(funct
       'The workflow binding is unavailable. Its local cloud workspace may have expired; do not create a new binding to reinterpret old receipts.',
     );
   yield* verifyWorkflowBinding(config, state.binding);
+  if (
+    state.binding.graphProject !== undefined &&
+    admissionRequest &&
+    !['read', 'inspect-operation'].includes(admissionRequest.action)
+  )
+    yield* resolveWorkflowGraphScope(config, state.binding);
   // Admission precedes even manifest recovery. Rejected evidence cannot advance
   // a partially committed native transition or reinterpret its pending intent.
   if (admissionRequest) {
@@ -401,6 +408,8 @@ export const withWorkflowJournalSession = <A, E, R>(
                 const state = yield* readJournalFile(config, bindingId);
                 if (!state || stableJson(state.binding) !== stableJson(admission.state.binding))
                   return yield* workflowError('binding-drift', 'The native memory session binding changed.');
+                if (state.binding.graphProject !== undefined && !['read', 'inspect-operation'].includes(request.action))
+                  yield* resolveWorkflowGraphScope(config, state.binding);
                 const evidenceRefs =
                   request.action === 'recover'
                     ? state.operations[request.operationId ?? '']?.request.evidenceRefs

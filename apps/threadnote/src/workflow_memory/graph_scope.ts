@@ -85,7 +85,7 @@ export const resolveWorkflowGraphScope = Effect.fn('workflowGraph.resolveScope')
   }
   return yield* resolveCodeGraphScopeRoute(config.manifestPath, binding.repo).pipe(
     Effect.catch(error =>
-      Schema.is(CodeGraphScopeRoutingError)(error) && error.projects
+      Schema.is(CodeGraphScopeRoutingError)(error) && error.reason === 'ambiguous' && error.projects
         ? workflowError(
             'graph-scope-required',
             `Graph scope is ambiguous. ${recovery === 'same-task' ? 'Retry this task start with the same feature name' : recovery === 'new-task' ? 'Start a new task with a new feature name' : 'Start a fresh run'} and graphProject or --graph-project set to one of: ${choices(error.projects)}. Alternatively, make the graph manifest unambiguous${recovery === 'same-task' ? ', then retry this task start' : ', then retry this run'}.`,
