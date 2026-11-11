@@ -53,7 +53,7 @@ fn invalid(message: &str) -> Error { Error::new(Status::InvalidArg, message) }
 #[napi]
 pub fn search_batch(
     protocol: u32, rows: Uint8Array, query: Float64Array, ranks: Uint32Array,
-    limit: u32, threshold: f64, validate_unit: bool, signal: Option<AbortSignal>,
+    limit: u32, threshold: f64, validate_unit: bool,
 ) -> Result<AsyncTask<SearchTask>> {
     if protocol != 1 { return Err(invalid("Unsupported vector batch protocol")); }
     let dimensions = query.len();
@@ -70,10 +70,10 @@ pub fn search_batch(
     INFLIGHT.fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| (n < 2).then_some(n + 1))
         .map_err(|_| Error::new(Status::GenericFailure, "Vector batch capacity exceeded"))?;
     let permit = Permit;
-    Ok(AsyncTask::with_optional_signal(SearchTask {
+    Ok(AsyncTask::new(SearchTask {
         rows: rows.to_vec(), query: query.to_vec(), ranks: ranks.to_vec(),
         limit: limit as usize, threshold, validate_unit, _permit: permit,
-    }, signal))
+    }))
 }
 
 fn score_batch(rows: &[u8], query: &[f64], ranks: &[u32], limit: usize, threshold: f64, validate_unit: bool) -> Result<BatchResult> {

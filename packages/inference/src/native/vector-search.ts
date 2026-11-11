@@ -18,7 +18,6 @@ interface NativeBinding {
     limit: number,
     threshold: number,
     validateUnit: boolean,
-    signal?: AbortSignal,
   ): Promise<unknown>;
 }
 
@@ -183,8 +182,8 @@ export function makeNativeVectorSearch(binding: NativeBinding): NativeVectorSear
             catch: cause =>
               NativeVectorSearchError.make({message: cause instanceof Error ? cause.message : String(cause)}),
           }),
-        // napi2 AbortSignal rejects early even for running tasks. Drain the original
-        // bounded task instead, so interruption cannot outlive its owned page.
+        // The native export has no cancellation signal. Drain its original bounded
+        // task so interruption cannot outlive its owned page.
         ({pending}) =>
           Effect.promise(() =>
             pending.then(

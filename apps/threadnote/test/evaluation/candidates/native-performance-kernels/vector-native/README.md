@@ -12,9 +12,10 @@ environment selector. Cargo output belongs under `.context/native-vector-target`
 use `cargo test --locked --manifest-path packages/inference/native-vector/Cargo.toml
 --target-dir .context/native-vector-target` for the native test.
 
-The adapter drains its original owned task before interruption finishes. NAPI2's
-AbortSignal can reject before running work finishes, so this flow deliberately
-uses bounded draining. Admission allows two tasks; recall selects at most 400 rows
+The raw Node-API export accepts seven arguments and exposes no AbortSignal or native
+task cancellation. The adapter drains its original owned task before interruption
+finishes. This avoids napi2's unsafe queued-task cancellation completion path.
+Admission allows two tasks; recall selects at most 400 rows
 per page. This does not promise instantaneous cancellation or a scheduling deadline.
 
 `first-rust-10k-dense.raw` preserves the unchanged runner's original JSON bytes from

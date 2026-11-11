@@ -103,6 +103,25 @@ describe.runIf(process.env.THREADNOTE_NATIVE_VECTOR_EXPERIMENT === '1')(
       expect(await pending).toEqual({indices: [0, 1], scores: [Math.fround(1.001) * 0.5, 0.5]});
     });
 
+    it('ignores an extra AbortSignal instead of exposing raw task cancellation', async () => {
+      const controller = new AbortController();
+      // Exercise untyped JS callers: the seven-argument export must never wrap
+      // an extra signal in napi2's unsafe queued-task cancellation machinery.
+      const pending = Reflect.apply(native.searchBatch, native, [
+        1,
+        encode([1]),
+        new Float64Array([1]),
+        new Uint32Array([0]),
+        1,
+        -1,
+        true,
+        controller.signal,
+      ]);
+      expect(controller.signal.onabort).toBeNull();
+      controller.abort();
+      await expect(pending).resolves.toEqual({indices: [0], scores: [1]});
+    });
+
     it('rejects malformed protocol and invalid graph rows visibly, with bounded admission', async () => {
       const call = (protocol: number, bytes = encode([1]), ranks = new Uint32Array([0])) =>
         native.searchBatch(protocol, bytes, new Float64Array([1]), ranks, 1, -1, false);
