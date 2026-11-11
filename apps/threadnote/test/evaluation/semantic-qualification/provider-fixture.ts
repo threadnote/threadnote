@@ -185,7 +185,7 @@ export async function readProviderInputs(file: string) {
   };
 }
 
-export function selectedFixture(input: ProviderInputs) {
+export function selectedFixture(input: ProviderInputs, actions = false) {
   const fixture = providerFixture({language: input.language});
   const sources = EffectRecord.fromEntries(
     EffectArray.map(EffectRecord.toEntries(fixture.sources), ([name, text]) => [
@@ -196,8 +196,59 @@ export function selectedFixture(input: ProviderInputs) {
   const projectFiles = {...fixture.projectFiles};
   if (input.language === 'rust')
     projectFiles['Cargo.lock'] = 'version = 4\n[[package]]\nname = "semantic-fixture"\nversion = "0.1.0"\n';
-  return {sources, projectFiles};
+  const action = actions ? authoredActionFixture(input.language) : undefined;
+  if (action) {
+    sources[action.file] = action.before;
+    if (input.language === 'python')
+      projectFiles['pyrightconfig.json'] = JSON.stringify({
+        typeCheckingMode: 'strict',
+        reportUnusedCallResult: 'warning',
+      });
+    if (input.language === 'rust') sources['src/lib.rs'] += 'mod action_case;\r\n';
+  }
+  return {sources, projectFiles, action};
 }
+
+/** Authored before any engine response; proposed cases remain unproven until an exact real receipt. */
+export function authoredActionFixture(language: ProviderInputs['language']) {
+  switch (language) {
+    case 'python':
+      return {
+        id: 'explicit-discard-unused-call-result',
+        file: 'action_case.py',
+        line: 3,
+        before: 'def selected() -> int:\n    return 1\n\nselected()\n',
+        after: 'def selected() -> int:\n    return 1\n\n_ = selected()\n',
+      };
+    case 'go':
+      return {
+        id: 'remove-unused-stdlib-import',
+        file: 'action_case.go',
+        line: 2,
+        before: 'package demo\n\nimport "fmt"\n',
+        after: 'package demo\n\n',
+      };
+    case 'rust':
+      return {
+        id: 'generate-missing-local-function',
+        file: 'src/action_case.rs',
+        line: 0,
+        before: 'pub fn invoke() { missing_one(); }\n',
+        after: 'pub fn invoke() { missing_one(); }\n\nfn missing_one() {\n    todo!()\n}\n',
+      };
+    case 'java':
+      return {
+        id: 'remove-unused-java-import',
+        file: 'src/main/java/demo/ActionCase.java',
+        line: 1,
+        before: 'package demo;\nimport java.util.List;\nclass ActionCase {}\n',
+        after: 'package demo;\nclass ActionCase {}\n',
+      };
+    default:
+      throw new Error('Action fixture prerequisite: only Python, Go, Rust and Java are authored');
+  }
+}
+export type AuthoredActionFixture = ReturnType<typeof authoredActionFixture>;
 
 export function providerEnvironment(input: ProviderInputs) {
   return input.language === 'python'
@@ -214,7 +265,11 @@ export function assertProviderFixtureBranch(input: ProviderInputs, writerFixture
     );
 }
 
-export async function providerCatalog(input: ProviderInputs, scratch: string) {
+export async function providerCatalog(
+  input: ProviderInputs,
+  scratch: string,
+  sources = selectedFixture(input).sources,
+) {
   if (input.language === 'java') {
     const project = join(scratch, 'project');
     const artifacts = join(scratch, 'java-artifacts');
@@ -264,7 +319,7 @@ export async function providerCatalog(input: ProviderInputs, scratch: string) {
       sourceInputEncoding: 'utf8-original-inputs-v1',
       sourceEncoding: javaSourceEncodingImage(
         await Promise.all(
-          EffectArray.map(EffectRecord.keys(selectedFixture(input).sources), async name => ({
+          EffectArray.map(EffectRecord.keys(sources), async name => ({
             name,
             digest: hash(await readFile(join(project, name))),
           })),
@@ -386,7 +441,7 @@ export function redactCapabilities(value: unknown): unknown {
     return EffectRecord.fromEntries(
       EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [
         key,
-        key === 'capability' || key === 'token' ? '<redacted>' : redactCapabilities(item),
+        key === 'capability' || key === 'token' || key === 'choiceHandle' ? '<redacted>' : redactCapabilities(item),
       ]),
     );
   return value;
@@ -396,7 +451,9 @@ export function protocolCapabilities(value: unknown): string[] {
   if (EffectArray.isArray(value)) return EffectArray.flatMap(value, protocolCapabilities);
   if (isJsonObject(value))
     return EffectArray.flatMap(EffectRecord.toEntries(value), ([key, item]) =>
-      (key === 'capability' || key === 'token') && typeof item === 'string' ? [item] : protocolCapabilities(item),
+      (key === 'capability' || key === 'token' || key === 'choiceHandle') && typeof item === 'string'
+        ? [item]
+        : protocolCapabilities(item),
     );
   return [];
 }
@@ -527,6 +584,118 @@ const Target = Schema.Struct({
   precondition: Schema.Struct({rawDigest: digest, sourceKind: Schema.String, physicalIdentity: Schema.String}),
 });
 
+async function verifyFixtureProposal(
+  project: string,
+  sources: Record<string, string>,
+  expected: Record<string, string>,
+  prepared: typeof Prepared.Type,
+  status: (offset: number) => Promise<unknown>,
+  action = false,
+  onPage: (pages: number) => void = () => {},
+) {
+  assert.equal(prepared.targetCount, EffectRecord.keys(expected).length, 'Exact complete authored target count');
+  let pages = 0;
+  const chunks: (typeof Page.Type.chunks)[number][] = [];
+  let page = prepared.page;
+  for (;;) {
+    assert.ok(
+      page.digest === prepared.handle.digest && page.offset === chunks.length,
+      'Stable proposal digest and contiguous pages',
+    );
+    chunks.push(...page.chunks);
+    pages++;
+    onPage(pages);
+    assert.ok(pages <= 128 && Buffer.byteLength(JSON.stringify(chunks)) <= 1024 * 1024, 'Bounded complete preview');
+    if (page.next === null) break;
+    assert.ok(page.next === chunks.length && page.next > page.offset, 'Monotonic proposal continuation');
+    const next = await status(page.next);
+    assert.ok(isJsonObject(next));
+    page = Schema.decodeUnknownSync(Page)(next.page);
+  }
+  assert.equal(chunks.length, page.chunkCount, 'All proposal chunks retrieved');
+  const chunkText = (selected: readonly (typeof chunks)[number][]) =>
+    EffectArray.join(
+      EffectArray.map(selected, chunk => chunk.text),
+      '',
+    );
+  const raw: unknown = JSON.parse(chunkText(EffectArray.filter(chunks, chunk => chunk.kind === 'manifest')));
+  const manifest = Schema.decodeUnknownSync(Schema.Struct({targets: Schema.Array(Target)}))(raw);
+  if (action) {
+    const v2 = Schema.decodeUnknownSync(
+      Schema.Struct({
+        version: Schema.Literal(2),
+        operation: Schema.Literal('code-action'),
+        qualification: Schema.Literal('qualified-text-only'),
+        operations: Schema.Array(
+          Schema.Struct({
+            kind: Schema.Literal('text'),
+            uri: Schema.String,
+            target: Schema.Finite,
+            edits: Schema.Array(Schema.Unknown).check(Schema.isMinLength(1)),
+          }),
+        ).check(Schema.isMinLength(1)),
+        targets: Schema.Array(
+          Schema.Struct({observation: Schema.Struct({uri: Schema.String}), edits: Schema.Array(Schema.Unknown)}),
+        ),
+      }),
+    )(raw);
+    assert.equal(v2.operations.length, v2.targets.length, 'One complete text operation per authored target');
+    assert.equal(
+      new Set(EffectArray.map(v2.operations, operation => operation.target)).size,
+      v2.targets.length,
+      'No duplicate or omitted V2 operation target',
+    );
+    for (const chunk of chunks)
+      assert.ok(
+        chunk.kind === 'manifest'
+          ? chunk.target == null
+          : EffectArray.contains(['before', 'after'], chunk.kind) &&
+              Number.isSafeInteger(chunk.target) &&
+              chunk.target != null &&
+              chunk.target >= 0 &&
+              chunk.target < v2.targets.length,
+        'No foreign action chunk',
+      );
+    for (const operation of v2.operations) {
+      const target = v2.targets[operation.target];
+      assert.ok(
+        target && operation.uri === target.observation.uri && isDeepStrictEqual(operation.edits, target.edits),
+        'Complete V2 text operations match targets',
+      );
+    }
+  }
+  const expectedUris = EffectArray.map(
+    EffectRecord.keys(expected),
+    name => pathToFileURL(join(project, name)).href,
+  ).sort();
+  assert.ok(
+    isDeepStrictEqual(EffectArray.map(manifest.targets, target => target.observation.uri).sort(), expectedUris),
+    'Exact complete target identity set',
+  );
+  for (let index = 0; index < manifest.targets.length; index++) {
+    const target = manifest.targets[index];
+    const found = EffectArray.findFirst(
+      EffectRecord.keys(expected),
+      name => pathToFileURL(join(project, name)).href === target.observation.uri,
+    );
+    assert.ok(found._tag === 'Some', 'No foreign proposal target');
+    const name = found.value;
+    const before = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'before'));
+    const after = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'after'));
+    assert.equal(before, sources[name], 'Complete original proposal bytes');
+    assert.equal(after, expected[name], 'Complete exact authored bytes');
+    const identity = await lstat(join(project, name), {bigint: true});
+    assert.ok(
+      target.precondition.rawDigest === hash(before) &&
+        target.observation.content === hash(before) &&
+        target.precondition.sourceKind === 'disk' &&
+        target.precondition.physicalIdentity === JSON.stringify([identity.dev.toString(), identity.ino.toString()]),
+      'Exact raw-byte physical source preconditions',
+    );
+  }
+  return pages;
+}
+
 /** The independent expected before/after bytes cover every provider-returned target and operation. */
 export async function runProviderPreview(
   input: ProviderInputs,
@@ -580,67 +749,22 @@ export async function runProviderPreview(
   results.push(record);
   const prepared = Schema.decodeUnknownSync(Prepared)(cli.value);
   assert.equal(prepared.targetCount, EffectRecord.keys(sources).length, 'Every fixture file in complete proposal');
-  const chunks: (typeof Page.Type.chunks)[number][] = [];
-  let page = prepared.page;
-  for (;;) {
-    assert.ok(
-      page.digest === prepared.handle.digest && page.offset === chunks.length,
-      'Stable proposal digest and contiguous pages',
-    );
-    chunks.push(...page.chunks);
-    record.pages++;
-    assert.ok(
-      record.pages <= 128 && Buffer.byteLength(JSON.stringify(chunks)) <= 1024 * 1024,
-      'Bounded complete preview',
-    );
-    if (page.next === null) break;
-    assert.ok(page.next === chunks.length && page.next > page.offset, 'Monotonic proposal continuation');
-    const next = await mcpChange('status', {handle: prepared.handle, offset: page.next});
-    assert.ok(isJsonObject(next));
-    page = Schema.decodeUnknownSync(Page)(next.page);
-  }
-  assert.equal(chunks.length, page.chunkCount, 'All proposal chunks retrieved');
-  const chunkText = (selected: readonly (typeof chunks)[number][]) =>
-    EffectArray.join(
-      EffectArray.map(selected, chunk => chunk.text),
-      '',
-    );
-  const manifest = Schema.decodeUnknownSync(Schema.Struct({targets: Schema.Array(Target)}))(
-    JSON.parse(chunkText(EffectArray.filter(chunks, chunk => chunk.kind === 'manifest'))),
+  record.pages = await verifyFixtureProposal(
+    project,
+    sources,
+    EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(sources), ([name, text]) => [
+        name,
+        EffectString.replaceAll('UnsavedName', 'RenamedName')(text),
+      ]),
+    ),
+    prepared,
+    offset => mcpChange('status', {handle: prepared.handle, offset}),
+    false,
+    pages => {
+      record.pages = pages;
+    },
   );
-  const expectedUris = EffectArray.map(
-    EffectRecord.keys(sources),
-    name => pathToFileURL(join(project, name)).href,
-  ).sort();
-  assert.ok(
-    isDeepStrictEqual(EffectArray.map(manifest.targets, target => target.observation.uri).sort(), expectedUris),
-    'Exact complete target identity set',
-  );
-  for (let index = 0; index < manifest.targets.length; index++) {
-    const target = manifest.targets[index];
-    const found = EffectArray.findFirst(
-      EffectRecord.keys(sources),
-      name => pathToFileURL(join(project, name)).href === target.observation.uri,
-    );
-    assert.ok(found._tag === 'Some', 'No foreign proposal target');
-    const name = found.value;
-    const before = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'before'));
-    const after = chunkText(EffectArray.filter(chunks, chunk => chunk.target === index && chunk.kind === 'after'));
-    assert.equal(before, sources[name], 'Complete original proposal bytes');
-    assert.equal(
-      after,
-      EffectString.replaceAll('UnsavedName', 'RenamedName')(sources[name]),
-      'Complete exact rename bytes',
-    );
-    const identity = await lstat(join(project, name), {bigint: true});
-    assert.ok(
-      target.precondition.rawDigest === hash(before) &&
-        target.observation.content === hash(before) &&
-        target.precondition.sourceKind === 'disk' &&
-        target.precondition.physicalIdentity === JSON.stringify([identity.dev.toString(), identity.ino.toString()]),
-      'Exact raw-byte physical source preconditions',
-    );
-  }
   const statusStarted = Date.now();
   const cliStatus = await run(['semantic', 'change', 'status', '--json'], {
     ...common,
@@ -688,6 +812,191 @@ export async function runProviderPreview(
   );
   record.status = 'passed';
   return prepared;
+}
+
+const Choice = Schema.Struct({
+  choiceHandle: digest,
+  title: Schema.String,
+  kind: Schema.Literal('quickfix'),
+  qualified: Schema.Literal(true),
+  command: Schema.Literal(false),
+  disabled: Schema.Null,
+  blocker: Schema.Null,
+});
+
+/** No first-choice/title heuristic: the exact diagnostic query must offer exactly one safe choice. */
+export function uniqueFixtureAction(value: unknown) {
+  const listing = Schema.decodeUnknownSync(
+    Schema.Struct({
+      status: Schema.Literal('choices'),
+      applicable: Schema.Literal(false),
+      writerAuthorityRequired: Schema.Literal(true),
+      choices: Schema.Array(Choice).check(Schema.isBetweenLength(1, 1)),
+      observation: Schema.Struct({uri: Schema.String, content: digest}),
+    }),
+  )(value);
+  return listing;
+}
+
+/** Separate CLI/MCP retained capabilities; compare authored semantics, never borrow another client's choice. */
+export async function runProviderActionPreview(
+  input: ProviderInputs,
+  project: string,
+  sources: Record<string, string>,
+  action: AuthoredActionFixture,
+  run: QualificationCli,
+  client: Client,
+  within: <A>(promise: Promise<A>, milliseconds: number) => Promise<A>,
+  deadline: number,
+  results: unknown[],
+) {
+  assert.equal(sources[action.file], action.before, 'Authored action before bytes were sealed before engine use');
+  const file = join(project, action.file),
+    uri = pathToFileURL(file).href;
+  const common = {version: 1, callerCwd: project, milliseconds: 10000, maxBytes: 8192};
+  const unchanged = async () => {
+    for (const [name, text] of EffectRecord.toEntries(sources))
+      assert.equal(await readFile(join(project, name), 'utf8'), text, 'Action reads/preparation must not mutate disk');
+  };
+  const callMcp = async (name: string, request: object) => {
+    const response = await within(
+      client.callTool(
+        {name, arguments: {request, ...(name === 'semantic_query' ? {responseFormat: 'dual'} : {})}},
+        undefined,
+        {
+          timeout: Math.max(1, Math.min(15000, deadline - Date.now())),
+        },
+      ),
+      deadline - Date.now(),
+    );
+    assert.ok(
+      !response.isError &&
+        EffectArray.isArray(response.content) &&
+        response.content.length === 1 &&
+        isJsonObject(response.content[0]) &&
+        typeof response.content[0].text === 'string',
+      'Canonical MCP action response',
+    );
+    const value: unknown = JSON.parse(response.content[0].text);
+    assert.ok(isDeepStrictEqual(value, response.structuredContent), 'Complete MCP action compact/canonical parity');
+    return value;
+  };
+  const record = {
+    operation: 'public-action-preview',
+    actionCase: action.id,
+    status: 'observing',
+    fullScenarioQualified: false,
+    clients: [] as unknown[],
+  };
+  results.push(record);
+  let cliPrepared: typeof Prepared.Type | undefined;
+  let cliSelection: unknown;
+  for (const channel of ['cli', 'mcp'] as const) {
+    const query = {
+      callerCwd: project,
+      milliseconds: 10000,
+      maxBytes: 8192,
+      language: input.language,
+      file,
+      ...providerEnvironment(input),
+      operation: 'diagnostics',
+      maxItems: 32,
+    };
+    const diagnostics =
+      channel === 'cli'
+        ? (await run(['semantic', 'query', '--json'], query)).value
+        : await callMcp('semantic_query', query);
+    record.clients.push({channel, stage: 'diagnostics', result: redactCapabilities(diagnostics)});
+    const snapshot = Schema.decodeUnknownSync(
+      Schema.Struct({
+        status: Schema.Literal('ok'),
+        next: Schema.Null,
+        evidence: Schema.Struct({observation: Schema.Struct({uri: Schema.String, content: digest})}),
+        items: Schema.Array(
+          Schema.Struct({
+            id: digest,
+            range: Schema.Struct({
+              start: Schema.Struct({line: Schema.Finite, character: Schema.Finite}),
+              end: Schema.Struct({line: Schema.Finite, character: Schema.Finite}),
+            }),
+          }),
+        ),
+      }),
+    )(diagnostics);
+    assert.equal(snapshot.evidence.observation.uri, uri, 'Diagnostic target identity');
+    assert.equal(snapshot.evidence.observation.content, hash(action.before), 'Current authored diagnostic bytes');
+    const matches = EffectArray.filter(snapshot.items, item => item.range.start.line === action.line);
+    assert.equal(matches.length, 1, 'One exact authored-line diagnostic, no arbitrary fallback');
+    const range = matches[0].range;
+    const request = {
+      ...common,
+      language: input.language,
+      file,
+      ...providerEnvironment(input),
+      operation: 'code-action',
+      position: range.start,
+      range,
+      only: ['quickfix'],
+      diagnosticIds: [matches[0].id],
+    };
+    const prepare = async (body: object) =>
+      channel === 'cli'
+        ? (await run(['semantic', 'change', 'prepare', '--json'], body)).value
+        : callMcp('semantic_change_prepare', body);
+    const listed = await prepare(request);
+    record.clients.push({channel, stage: 'listing', result: redactCapabilities(listed)});
+    const listing = uniqueFixtureAction(listed);
+    assert.equal(listing.observation.uri, uri, 'Action listing exact target');
+    assert.equal(listing.observation.content, hash(action.before), 'Action listing exact source');
+    const choice = listing.choices[0];
+    const semantics = {
+      range,
+      only: request.only,
+      title: choice.title,
+      kind: choice.kind,
+      qualified: choice.qualified,
+      disabled: choice.disabled,
+      command: choice.command,
+      blocker: choice.blocker,
+    };
+    if (channel === 'cli') cliSelection = semantics;
+    else assert.ok(isDeepStrictEqual(semantics, cliSelection), 'CLI/MCP selected action/query semantic parity');
+    await unchanged();
+    const selected = await prepare({...request, choiceHandle: listing.choices[0].choiceHandle});
+    record.clients.push({channel, stage: 'selected-proposal', result: redactCapabilities(selected)});
+    const prepared = Schema.decodeUnknownSync(Prepared)(selected);
+    const status = async (offset: number) =>
+      channel === 'cli'
+        ? (await run(['semantic', 'change', 'status', '--json'], {...common, handle: prepared.handle, offset})).value
+        : callMcp('semantic_change_status', {...common, handle: prepared.handle, offset});
+    const pages = await verifyFixtureProposal(project, sources, {[action.file]: action.after}, prepared, status, true);
+    const preflight =
+      channel === 'cli'
+        ? (await run(['semantic', 'change', 'preflight', '--json'], {...common, handle: prepared.handle})).value
+        : await callMcp('semantic_change_preflight', {...common, handle: prepared.handle});
+    record.clients.push({channel, stage: 'preflight', pages, result: redactCapabilities(preflight)});
+    assert.ok(
+      isJsonObject(preflight) &&
+        preflight.status === 'ok' &&
+        preflight.applicable === false &&
+        preflight.writerAuthorityRequired === true,
+      'Action preflight requires separate writer authority',
+    );
+    const denied =
+      channel === 'cli'
+        ? (await run(['semantic', 'change', 'apply', '--json'], {...common, handle: prepared.handle})).value
+        : await callMcp('semantic_change_apply', {...common, handle: prepared.handle});
+    record.clients.push({channel, stage: 'unauthorized-application', result: redactCapabilities(denied)});
+    assert.ok(
+      isJsonObject(denied) && denied.status === 'invalid-request' && denied.applicable === false,
+      'Action read capability cannot authorize a write',
+    );
+    await unchanged();
+    if (channel === 'cli') cliPrepared = prepared;
+  }
+  assert.ok(cliPrepared, 'CLI-selected proposal for local writer admission');
+  record.status = 'passed';
+  return cliPrepared;
 }
 
 /** Volatile owned buffers must preserve disk and reject stale document versions without an editor integration. */

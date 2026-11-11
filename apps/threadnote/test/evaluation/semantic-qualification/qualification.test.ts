@@ -8,17 +8,24 @@ import {
   selectedFixture,
   fixtureSymbolPosition,
   readProviderInputs,
+  authoredActionFixture,
+  runProviderActionPreview,
+  uniqueFixtureAction,
+  type QualificationCli,
 } from './provider-fixture.js';
+import {expectedFixtureSources} from './writer-fixture.js';
+import {SemanticAgentQuery} from '../../../src/semantic/agent_query_protocol.js';
+import {SemanticAgentChangeRequest} from '../../../src/semantic/agent_change_protocol.js';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {observeCandidateTransport} from './transport-lifecycle.js';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Qualification exercises private evidence files and refuses a mismatched executable before spawning it. */
 import {readFileSync} from 'node:fs';
-import {mkdtemp, mkdir, readFile, realpath, rm, writeFile, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, realpath, rm, writeFile, stat, lstat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -33,6 +40,218 @@ const ledger = Schema.decodeUnknownSync(Ledger)(
 );
 const wrap = (value: unknown) => ({structuredContent: value, content: [{type: 'text', text: JSON.stringify(value)}]});
 describe('final combined qualification preparation', () => {
+  it('authors finite actions and refuses ambiguous or unsafe public listings', () => {
+    const expected = {
+      python: ['action_case.py', 'def selected() -> int:\n    return 1\n\n_ = selected()\n'],
+      go: ['action_case.go', 'package demo\n\n'],
+      rust: ['src/action_case.rs', 'pub fn invoke() { missing_one(); }\n\nfn missing_one() {\n    todo!()\n}\n'],
+      java: ['src/main/java/demo/ActionCase.java', 'package demo;\nclass ActionCase {}\n'],
+    } as const;
+    for (const language of ['python', 'go', 'rust', 'java'] as const) {
+      const action = authoredActionFixture(language);
+      expect([action.file, action.after]).toEqual(expected[language]);
+      expect(action.before).not.toBe(action.after);
+    }
+    const choice = {
+      choiceHandle: EffectString.repeat(64)('a'),
+      title: 'An engine title',
+      kind: 'quickfix',
+      qualified: true,
+      command: false,
+      disabled: null,
+      blocker: null,
+    };
+    const listing = {
+      status: 'choices',
+      applicable: false,
+      writerAuthorityRequired: true,
+      observation: {uri: 'file:///fixture/a.py', content: EffectString.repeat(64)('b')},
+      choices: [choice],
+    };
+    expect(uniqueFixtureAction(listing).choices[0].choiceHandle).toBe(choice.choiceHandle);
+    for (const choices of [
+      [],
+      [choice, {...choice, choiceHandle: EffectString.repeat(64)('c')}],
+      [{...choice, command: true}],
+      [{...choice, disabled: 'disabled'}],
+      [{...choice, qualified: false}],
+      [{...choice, blocker: 'resource-operation'}],
+      [{...choice, kind: 'source.organizeImports'}],
+    ])
+      expect(() => uniqueFixtureAction({...listing, choices})).toThrow();
+    expect(protocolCapabilities(listing)).toEqual([choice.choiceHandle]);
+    expect(JSON.stringify(redactCapabilities(listing))).not.toContain(choice.choiceHandle);
+    expect(expectedFixtureSources({'a.py': 'UnsavedName'})).toEqual({'a.py': 'RenamedName'});
+    expect(expectedFixtureSources({'a.py': 'before'}, {'a.py': 'after'})).toEqual({'a.py': 'after'});
+    expect(() => expectedFixtureSources({'a.py': 'before'}, {})).toThrow('cover every authored source');
+    expect(() => expectedFixtureSources({'a.py': 'before'}, {'foreign.py': 'after'})).toThrow();
+  });
+
+  it('keeps client choices separate and rejects engine bytes different from the authored V2 action', async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-action-preview-')));
+    const action = authoredActionFixture('python');
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    const sources = {[action.file]: action.before};
+    const input = Schema.decodeSync(ProviderInputs)({
+      version: 1,
+      language: 'python',
+      runtime: '/inert',
+      runtimeDigest: EffectString.repeat(64)('a'),
+      runtimeVersion: '24.19.0',
+      serverDirectory: '/inert',
+      serverTreeDigest: EffectString.repeat(64)('b'),
+      notices: [{component: 'inert', file: '/inert', sha256: EffectString.repeat(64)('c')}],
+    });
+    try {
+      await writeFile(join(directory, action.file), action.before);
+      const info = await lstat(join(directory, action.file), {bigint: true});
+      const uri = pathToFileURL(join(directory, action.file)).href;
+      const observation = {uri, content: hash(action.before)};
+      const range = {start: {line: 3, character: 0}, end: {line: 3, character: 10}};
+      let selections = 0,
+        wrongAfter = false;
+      const respond = (channel: 'cli' | 'mcp', stage: string, request: Record<string, unknown>): unknown => {
+        if (stage === 'query') Schema.decodeUnknownSync(SemanticAgentQuery, {onExcessProperty: 'error'})(request);
+        else if (stage !== 'apply')
+          Schema.decodeUnknownSync(SemanticAgentChangeRequest, {onExcessProperty: 'error'})({
+            ...request,
+            action: stage,
+          });
+        const ownChoice = EffectString.repeat(64)(channel === 'cli' ? '1' : '2');
+        const ownProposal = EffectString.repeat(64)(channel === 'cli' ? '3' : '4');
+        if (stage === 'query')
+          return {
+            status: 'ok',
+            next: null,
+            evidence: {observation},
+            items: [{id: EffectString.repeat(64)('d'), range}],
+          };
+        if (stage === 'prepare' && !request.choiceHandle)
+          return {
+            status: 'choices',
+            applicable: false,
+            writerAuthorityRequired: true,
+            observation,
+            choices: [
+              {
+                choiceHandle: ownChoice,
+                title: 'Discard call result',
+                kind: 'quickfix',
+                command: false,
+                disabled: null,
+                qualified: true,
+                blocker: null,
+              },
+            ],
+          };
+        if (stage === 'prepare') {
+          selections++;
+          expect(request.choiceHandle).toBe(ownChoice);
+          expect(request.diagnosticIds).toEqual([EffectString.repeat(64)('d')]);
+          expect(request.only).toEqual(['quickfix']);
+          const edits = [{range, newText: '_ = selected()'}];
+          const manifest = {
+            version: 2,
+            operation: 'code-action',
+            qualification: 'qualified-text-only',
+            operations: [{kind: 'text', uri, target: 0, edits}],
+            targets: [
+              {
+                observation,
+                edits,
+                precondition: {
+                  rawDigest: hash(action.before),
+                  sourceKind: 'disk',
+                  physicalIdentity: JSON.stringify([String(info.dev), String(info.ino)]),
+                },
+              },
+            ],
+          };
+          return {
+            status: 'ok',
+            applicable: false,
+            writerAuthorityRequired: true,
+            targetCount: 1,
+            handle: {id: ownProposal, capability: ownProposal, digest: EffectString.repeat(64)('e')},
+            page: {
+              digest: EffectString.repeat(64)('e'),
+              offset: 0,
+              next: null,
+              chunkCount: 3,
+              chunks: [
+                {kind: 'manifest', text: JSON.stringify(manifest)},
+                {kind: 'before', target: 0, text: action.before},
+                {
+                  kind: 'after',
+                  target: 0,
+                  text: wrongAfter
+                    ? 'unrelated engine bytes'
+                    : 'def selected() -> int:\n    return 1\n\n_ = selected()\n',
+                },
+              ],
+            },
+          };
+        }
+        expect(request.handle).toMatchObject({id: ownProposal});
+        return {status: stage === 'apply' ? 'invalid-request' : 'ok', applicable: false, writerAuthorityRequired: true};
+      };
+      const run: QualificationCli = async (args, request) => ({
+        pid: 1,
+        code: 0,
+        stdout: '',
+        stderr: '',
+        value: respond('cli', args[1] === 'query' ? 'query' : args[2], {...request}),
+      });
+      const client = new Client({name: 'inert-action-boundary', version: '1'});
+      client.callTool = async request => {
+        const stage =
+          request.name === 'semantic_query' ? 'query' : EffectString.slice('semantic_change_'.length)(request.name);
+        const value = respond(
+          'mcp',
+          stage,
+          Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(request.arguments?.request),
+        );
+        return {
+          structuredContent: Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(value),
+          content: [{type: 'text' as const, text: JSON.stringify(value)}],
+        };
+      };
+      const results: unknown[] = [];
+      const prepared = await runProviderActionPreview(
+        input,
+        directory,
+        sources,
+        action,
+        run,
+        client,
+        promise => promise,
+        Date.now() + 10000,
+        results,
+      );
+      expect(prepared.handle.id).toBe(EffectString.repeat(64)('3'));
+      expect(selections).toBe(2);
+      expect(results).toMatchObject([{status: 'passed', fullScenarioQualified: false}]);
+      expect(JSON.stringify(results)).not.toContain(EffectString.repeat(64)('1'));
+      expect(await readFile(join(directory, action.file), 'utf8')).toBe(action.before);
+      wrongAfter = true;
+      await expect(
+        runProviderActionPreview(
+          input,
+          directory,
+          sources,
+          action,
+          run,
+          client,
+          promise => promise,
+          Date.now() + 10000,
+          [],
+        ),
+      ).rejects.toThrow('Complete exact authored bytes');
+      expect(await readFile(join(directory, action.file), 'utf8')).toBe(action.before);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
   it('verifies independent Go provider, tool, complete SDK and notice bytes without launching them', async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), 'tn11-go-inputs-')));
     const hash = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -246,7 +465,7 @@ describe('final combined qualification preparation', () => {
       expect(() => assertProviderFixtureBranch(input, false)).toThrow('Java read fixture prerequisite');
       expect(() => assertProviderFixtureBranch(input, true)).not.toThrow();
       expect(providerEnvironment(input)).toEqual({environment: 'p11-synthetic-java-environment'});
-      const fixture = selectedFixture(input);
+      const fixture = selectedFixture(input, true);
       expect(fixtureSymbolPosition(fixture.sources['src/main/java/demo/Subject.java'])).toEqual({
         line: 1,
         character: 17,
@@ -256,7 +475,7 @@ describe('final combined qualification preparation', () => {
         await mkdir(dirname(join(project, name)), {recursive: true});
         await writeFile(join(project, name), text);
       }
-      const selected = await providerCatalog(input, directory);
+      const selected = await providerCatalog(input, directory, fixture.sources);
       const environment = selected.environment;
       expect(environment?.id).toBe('p11-synthetic-java-environment');
       const metadataFile = join(directory, 'java-artifacts/model.json');
@@ -268,7 +487,10 @@ describe('final combined qualification preparation', () => {
       expect(model.project).toBe(project);
       expect(model.javaSdkDigest).toBe(sdkDigests[1]);
       expect(model.libraries).toEqual([]);
-      expect(model.sourceEncoding.sourceCount).toBe(2);
+      expect(model.sourceEncoding.sourceCount).toBe(3);
+      expect(await readFile(join(project, 'src/main/java/demo/ActionCase.java'), 'utf8')).toBe(
+        'package demo;\nimport java.util.List;\nclass ActionCase {}\n',
+      );
       const names = EffectRecord.keys(fixture.sources).sort();
       expect(model.sourceEncoding.sourceDigest).toBe(
         hash(

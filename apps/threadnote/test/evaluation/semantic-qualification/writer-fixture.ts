@@ -21,6 +21,23 @@ export interface WriterFixtureRecord {
 }
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 
+/** Exact caller-authored bytes, validated before acquiring or admitting a writer. */
+export function expectedFixtureSources(sources: Record<string, string>, expected?: Record<string, string>) {
+  if (expected) {
+    assert.ok(
+      isDeepStrictEqual(EffectRecord.keys(expected).sort(), EffectRecord.keys(sources).sort()),
+      'Expected writer bytes must cover every authored source and no foreign file',
+    );
+    return {...expected};
+  }
+  return EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(sources), ([name, text]) => [
+      name,
+      EffectString.replaceAll('UnsavedName', 'RenamedName')(text),
+    ]),
+  );
+}
+
 /** Opt-in task authorization covers only this authored temporary project, never the caller's repository. */
 export async function runProviderApplication(
   home: string,
@@ -33,7 +50,9 @@ export async function runProviderApplication(
   deadline: number,
   results: unknown[],
   records: WriterFixtureRecord[],
+  expectedSources?: Record<string, string>,
 ) {
+  const expected = expectedFixtureSources(sources, expectedSources);
   const common = {version: 1, callerCwd: project, milliseconds: 10000, maxBytes: 8192};
   const taskAuthorization = 'p11-owned-disposable-' + EffectString.slice(0, 32)(hash(project));
   const directory = Native.runtimeOpenPrivateWriterDirectory(home);
@@ -61,12 +80,6 @@ export async function runProviderApplication(
     const recoveryName = 'p11-' + writer.operation + '.json';
     let recovery: ReturnType<typeof Native.runtimeReadPrivateWriterFile> | undefined;
     let applyStarted = false;
-    const expected = EffectRecord.fromEntries(
-      EffectArray.map(EffectRecord.toEntries(sources), ([name, text]) => [
-        name,
-        EffectString.replaceAll('UnsavedName', 'RenamedName')(text),
-      ]),
-    );
     const snapshot = async () =>
       EffectRecord.fromEntries(
         await Promise.all(
@@ -119,7 +132,7 @@ export async function runProviderApplication(
       record.status = 'observed-application';
       assert.ok(isJsonObject(applied) && applied.status === 'applied', 'Exact admitted operation applies');
       for (const [name, text] of EffectRecord.toEntries(expected))
-        assert.equal(await readFile(join(project, name), 'utf8'), text, 'Only expected rename bytes');
+        assert.equal(await readFile(join(project, name), 'utf8'), text, 'Only expected authored bytes');
       const first = await snapshot();
       const retry = await mcp('apply');
       assert.ok(isJsonObject(retry) && retry.status === 'applied', 'Retry reconciles the same operation');

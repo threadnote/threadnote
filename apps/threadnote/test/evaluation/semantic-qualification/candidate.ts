@@ -24,6 +24,7 @@ import {
   runProviderNavigation,
   runOwnedBufferFixture,
   runProviderPreview,
+  runProviderActionPreview,
   redactCapabilities,
   protocolCapabilities,
 } from './provider-fixture.js';
@@ -134,6 +135,7 @@ export async function runCandidateChecks(
   output: string,
   providerInputsPath?: string,
   writerFixture = false,
+  actionFixture = false,
 ) {
   // Reserve before launching; an existing receipt is never overwritten or rerun.
   await writeFile(
@@ -249,6 +251,8 @@ export async function runCandidateChecks(
     await finish();
   });
   try {
+    if (actionFixture && (!providerInputsPath || !writerFixture))
+      throw new Error('Action fixture requires pinned provider inputs and writer fixture');
     report.releaseGate = qualificationInventory(
       JSON.parse(
         await readFile(
@@ -291,7 +295,12 @@ export async function runCandidateChecks(
     };
     const provider = providerInputsPath ? await readProviderInputs(providerInputsPath) : undefined;
     if (provider) {
-      report.branch = writerFixture ? 'pinned-provider-authorized-writer-fixture' : 'pinned-provider-read-fixture';
+      if (actionFixture) report.scenario = 'S01';
+      report.branch = actionFixture
+        ? 'pinned-provider-public-action-writer-fixture'
+        : writerFixture
+          ? 'pinned-provider-authorized-writer-fixture'
+          : 'pinned-provider-read-fixture';
       report.provider = {
         started: null,
         artifact: provider,
@@ -369,10 +378,11 @@ export async function runCandidateChecks(
     await mkdir(home, {mode: 0o700});
     await mkdir(project, {mode: 0o700});
     const fixture = provider
-      ? selectedFixture(provider.input)
+      ? selectedFixture(provider.input, actionFixture)
       : {
           sources: {'a.ts': 'export const selected = "🧵 private-fixture";\r\n'},
           projectFiles: {'tsconfig.json': '{"files":["a.ts"]}\n'},
+          action: undefined,
         };
     const files = {...fixture.sources, ...fixture.projectFiles};
     let expectedFiles = files;
@@ -413,6 +423,9 @@ export async function runCandidateChecks(
     report.fixture = {
       id: provider ? 'pinned-provider-unicode-crlf' : 'missing-profile-unicode-crlf',
       version: 1,
+      ...(fixture.action
+        ? {action: {...fixture.action, engineShape: 'unproven-proposed-case', fullScenarioQualified: false}}
+        : {}),
       root,
       files: EffectRecord.fromEntries(
         EffectArray.map(EffectRecord.toEntries(files), ([name, text]) => [name, hash(text)]),
@@ -455,7 +468,7 @@ export async function runCandidateChecks(
       maxItems: 8,
     };
     if (provider) {
-      const selected = await providerCatalog(provider.input, root);
+      const selected = await providerCatalog(provider.input, root, fixture.sources);
       const setup = await run(['semantic', 'setup', '--json'], {
         version: 1,
         callerCwd: project,
@@ -502,16 +515,19 @@ export async function runCandidateChecks(
       report.providerChecks = {setup, navigation: {status: 'observing', branches, fullScenarioQualified: false}};
       await runProviderNavigation(provider.input, project, fixture.sources, run, client, within, deadline, branches);
       await runOwnedBufferFixture(provider.input, project, fixture.sources, run, client, within, deadline, branches);
-      const prepared = await runProviderPreview(
-        provider.input,
-        project,
-        fixture.sources,
-        run,
-        client,
-        within,
-        deadline,
-        branches,
-      );
+      const prepared = fixture.action
+        ? await runProviderActionPreview(
+            provider.input,
+            project,
+            fixture.sources,
+            fixture.action,
+            run,
+            client,
+            within,
+            deadline,
+            branches,
+          )
+        : await runProviderPreview(provider.input, project, fixture.sources, run, client, within, deadline, branches);
       if (!writerFixture)
         await runContextFixture(provider.input, project, fixture.sources, run, within, deadline, branches, async () => {
           const gitOptions = {
@@ -557,6 +573,7 @@ export async function runCandidateChecks(
           deadline,
           branches,
           report.writerRecords,
+          fixture.action ? {...fixture.sources, [fixture.action.file]: fixture.action.after} : undefined,
         );
         expectedFiles = {...files, ...written};
       }
@@ -620,6 +637,7 @@ export async function runQualificationCommand(arguments_: readonly string[] = pr
       'candidate-manifest': {type: 'string'},
       'provider-inputs': {type: 'string'},
       'writer-fixture': {type: 'boolean'},
+      'action-fixture': {type: 'boolean'},
       output: {type: 'string'},
     },
     strict: true,
@@ -627,6 +645,7 @@ export async function runQualificationCommand(arguments_: readonly string[] = pr
   if (!values.output || Boolean(values.inventory) === Boolean(values['candidate-manifest']))
     throw new Error('Use --inventory OR --candidate-manifest <manifest.json>, and --output <new-report.json>');
   if (
+    (values['action-fixture'] && !values['writer-fixture']) ||
     (values['writer-fixture'] && !values['provider-inputs']) ||
     (values.inventory && (values['provider-inputs'] || values['writer-fixture']))
   )
@@ -649,6 +668,7 @@ export async function runQualificationCommand(arguments_: readonly string[] = pr
       values.output,
       values['provider-inputs'],
       values['writer-fixture'],
+      values['action-fixture'],
     );
     // A branch receipt is not a complete scenario or family/platform/client receipt.
     // There is intentionally no input that promotes caller assertions into qualification.
