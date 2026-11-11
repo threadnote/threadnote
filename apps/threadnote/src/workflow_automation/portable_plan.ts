@@ -19,7 +19,12 @@ import {
   resourceExists,
   writeMemoryFile,
 } from '../share/core.js';
-import {assertSharedWorktreeFileReady, publishShareGitChange, writeSharedWorktreeFile} from '../share/git.js';
+import {
+  assertSharedWorktreeFileReady,
+  gitFileContent,
+  publishShareGitChange,
+  writeSharedWorktreeFile,
+} from '../share/git.js';
 import {
   decodeNativeAuthoringDocument,
   canonicalAuthoringJson,
@@ -430,12 +435,29 @@ export const readPortablePlanPayload = Effect.fn('workflowAutomation.readPortabl
   const decoded = decodePortablePlanRef(reference);
   if (decoded.project !== project)
     return yield* fail('portable-plan-scope', 'The shared plan belongs to another project.');
-  yield* resolveTeam(config, decoded.team).pipe(
+  const team = yield* resolveTeam(config, decoded.team).pipe(
     Effect.mapError(() => fail('portable-plan-scope', 'Configure and sync the selected shared team first.')),
   );
-  const rootUri = sharedUri(config, decoded.team, sharedRelative(project, decoded.payloadHash, 'root'));
-  const rootBytes = yield* readMemoryContent(config, NATIVE_RESOURCE_BACKEND, rootUri, false).pipe(
-    Effect.mapError(() => fail('portable-plan-missing', 'Sync the selected team before starting this plan.')),
+  const readCommittedPage = (relative: string, uri: string, missing: string, changed: string) =>
+    Effect.gen(function* () {
+      const cached = yield* readMemoryContent(config, NATIVE_RESOURCE_BACKEND, uri, false).pipe(
+        Effect.mapError(() => fail('portable-plan-missing', missing)),
+      );
+      const committed = yield* gitFileContent(team.config.worktree, 'HEAD', relative);
+      if (committed === undefined) return yield* fail('portable-plan-missing', missing);
+      // Git may check out LF memory pages as CRLF. Keep the committed bytes as the
+      // hash authority while requiring the synchronized cache to match that page.
+      if (cached !== committed && pipe(cached, EffectString.replace(/\r\n/gu, '\n')) !== committed)
+        return yield* fail('portable-plan-conflict', changed);
+      return committed;
+    });
+  const rootRelative = sharedRelative(project, decoded.payloadHash, 'root');
+  const rootUri = sharedUri(config, decoded.team, rootRelative);
+  const rootBytes = yield* readCommittedPage(
+    rootRelative,
+    rootUri,
+    'Sync the selected team before starting this plan.',
+    'The shared plan root changed after synchronization.',
   );
   const record = parseMemoryDocument(rootUri, rootBytes);
   if (
@@ -457,18 +479,18 @@ export const readPortablePlanPayload = Effect.fn('workflowAutomation.readPortabl
     return yield* fail('portable-plan-conflict', 'The shared plan root differs from its reference.');
   const pages = [];
   for (const pinned of checked.pages) {
-    const localUri = sharedUri(
-      config,
-      decoded.team,
-      sharedRelative(project, decoded.payloadHash, `page-${pages.length}`),
-    );
+    const relative = sharedRelative(project, decoded.payloadHash, `page-${pages.length}`);
+    const localUri = sharedUri(config, decoded.team, relative);
     if (
       pipe(pinned.reference.uri, EffectString.replace(/^threadnote:\/\/user\/[^/]+\//u, '')) !==
       pipe(localUri, EffectString.replace(/^threadnote:\/\/user\/[^/]+\//u, ''))
     )
       return yield* fail('portable-plan-scope', 'A shared plan page belongs to another closure.');
-    const bytes = yield* readMemoryContent(config, NATIVE_RESOURCE_BACKEND, localUri, false).pipe(
-      Effect.mapError(() => fail('portable-plan-missing', 'A shared plan page is missing. Sync the selected team.')),
+    const bytes = yield* readCommittedPage(
+      relative,
+      localUri,
+      'A shared plan page is missing. Sync the selected team.',
+      'A shared plan page revision changed.',
     );
     if (sha256HexSync(bytes) !== pinned.reference.revision)
       return yield* fail('portable-plan-conflict', 'A shared plan page revision changed.');

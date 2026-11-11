@@ -339,7 +339,9 @@ effectIt.effect(
       yield* runShareInit(donorConfig, remote, {team: 'default'});
       yield* runShareInit(recipientConfig, remote, {team: 'default'});
       yield* setGitIdentity(yield* teamWorktreePath(donorConfig, 'default'));
-      yield* setGitIdentity(yield* teamWorktreePath(recipientConfig, 'default'));
+      const recipientWorktree = yield* teamWorktreePath(recipientConfig, 'default');
+      yield* setGitIdentity(recipientWorktree);
+      yield* git(recipientWorktree, ['config', '--local', 'core.autocrlf', 'true']);
       const location = {account: donorConfig.account, home: donor.home, user: donorConfig.user};
       const store = yield* ResourceStore;
       const evidenceDirectory = 'threadnote://user/donor/memories/durable/projects/repo';
@@ -605,6 +607,16 @@ effectIt.effect(
         'task-' + pipe(h('repo\nfixture'), EffectString.slice(0, 48)),
       );
       yield* runShareSync(recipientConfig, {team: 'default', push: false});
+      const recipientPage = path.join(
+        recipientWorktree,
+        'durable',
+        'projects',
+        'repo',
+        'portable-plans',
+        decodePortablePlanRef(published.sharedPlanRef).payloadHash,
+        'page-0.md',
+      );
+      expect(yield* fs.readFileString(recipientPage)).toContain('\r\n');
       const recipientStart = {
         callerCwd: recipient.repo,
         sharedPlanRef: published.sharedPlanRef,
