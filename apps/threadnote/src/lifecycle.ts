@@ -171,36 +171,43 @@ export const prepareRecallIndexes = Effect.fn('lifecycle.prepareRecallIndexes')(
   authorizationKey: string,
   verifyInputs: Effect.Effect<void, E, R>,
 ) {
-  yield* Console.log('Preparing lexical recall from canonical documents.');
-  const index = yield* Effect.acquireUseRelease(
-    startProgress('Rebuilding lexical recall index from canonical documents.'),
-    progress =>
-      loadRecallIndexData(config, {
-        forceRefresh: true,
-        includeInactive: false,
-        onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
-      }),
-    progress => progress.stop,
-  );
-  yield* verifyInputs;
-  yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
-  yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
-  const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
-    corpusGeneration: index.generation,
-    currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
-  });
-  yield* verifyRecallIndexMaintenanceReadiness({
-    manifestId: manifest.id,
-    readLexicalStatus: () => recallIndexStatus(config, false),
-    readVectorReadiness: () =>
-      vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
-    requestedGeneration: index.generation,
-  });
-  yield* verifyInputs;
-  yield* Console.log(
-    `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
-  );
-  yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+  for (let completedRetries = 0; ; completedRetries += 1) {
+    const attempt = yield* Effect.gen(function* () {
+      yield* Console.log('Preparing lexical recall from canonical documents.');
+      const index = yield* Effect.acquireUseRelease(
+        startProgress('Rebuilding lexical recall index from canonical documents.'),
+        progress =>
+          loadRecallIndexData(config, {
+            forceRefresh: true,
+            includeInactive: false,
+            onProgress: state => progress.update(recallProgressMessage(state)).pipe(Effect.ignore),
+          }),
+        progress => progress.stop,
+      );
+      yield* verifyInputs;
+      yield* Console.log(`Lexical recall prepared: ${index.corpusStatistics.documentCount} canonical document(s).`);
+      yield* Console.log(`Embedding ${index.candidates.length} canonical document(s) with ${manifest.id}.`);
+      const result = yield* rebuildVectorIndex(config, manifest, index.candidates, {
+        corpusGeneration: index.generation,
+        currentCorpusGeneration: () => verifyInputs.pipe(Effect.andThen(currentRecallCorpusGeneration(config))),
+      });
+      yield* verifyRecallIndexMaintenanceReadiness({
+        manifestId: manifest.id,
+        readLexicalStatus: () => recallIndexStatus(config, false),
+        readVectorReadiness: () =>
+          vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation, authorizationKey),
+        requestedGeneration: index.generation,
+      });
+      yield* verifyInputs;
+      yield* Console.log(
+        `Activated vector generation ${result.generation}: ${result.chunkCount} chunk(s), ${result.dimensions} dimensions.`,
+      );
+      yield* Console.log(`Lexical and vector recall indexes are ready for ${manifest.id}.`);
+    }).pipe(Effect.result);
+    if (Result.isSuccess(attempt)) return;
+    if (!recallIndexMaintenanceShouldRetry(attempt.failure, completedRetries))
+      return yield* Effect.fail(attempt.failure);
+  }
 });
 
 interface RunInstallOptions extends InstallOptions {
