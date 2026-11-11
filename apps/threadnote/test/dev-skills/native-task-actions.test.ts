@@ -2828,6 +2828,7 @@ describe('native task actions', () => {
         snapshotRef,
         report,
       });
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree PR build marker']);
       const validation = object(
         yield* runNativeTaskAction(f.config, {
           command: 'record-validation',
@@ -3284,6 +3285,7 @@ describe('native task actions', () => {
       }).pipe(run),
   );
 
+  // prettier-ignore
   effectIt.effect('continues a nonterminal P1 watch after P2 advances and closes out both terminal receipts', () =>
     Effect.gen(function* () {
       const f = yield* fixture(
@@ -3351,6 +3353,7 @@ describe('native task actions', () => {
               findings: [],
             },
           });
+          if (phaseId === 'one') yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree P1 build marker']);
           const validation = object(
             yield* runNativeTaskAction(f.config, {
               command: 'record-validation',
@@ -3939,6 +3942,7 @@ describe('native task actions', () => {
         consumerId: p2Watch.consumerId,
       });
     }).pipe(run),
+    windowsRealGitFixtureTimeout,
   );
 
   effectIt.effect('drains an old binding only after its job and PR watch owner receipts settle', () =>
@@ -4003,6 +4007,7 @@ describe('native task actions', () => {
           findings: [],
         },
       });
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree watch build marker']);
       const validation = object(
         yield* runNativeTaskAction(f.config, {
           command: 'record-validation',
@@ -4749,6 +4754,13 @@ describe('native task actions', () => {
             workRef: String(work.workRef),
           }),
         );
+        const mcp = new EffectMcpServerAdapter('test', '1', 'fixture');
+        registerWorkflowTaskTool(mcp, f.config);
+        const reviewCard = object(
+          object(yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}))
+            .structuredContent,
+        );
+        expect(reviewCard.next).toMatchObject({action: 'review', tool: 'workflow_task_record_review'});
         const review = object(
           yield* runNativeTaskAction(f.config, {
             command: 'record-review',
@@ -4766,6 +4778,15 @@ describe('native task actions', () => {
             },
           }),
         );
+        const validationCard = object(
+          object(yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}))
+            .structuredContent,
+        );
+        expect(validationCard.next).toMatchObject({
+          action: 'validate',
+          snapshotId: decodeNativeTaskActionRef(String(snapshot.snapshotRef))?.snapshotId,
+          tool: 'workflow_task_record_validation',
+        });
         const reviewedHead = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         const reviewedTree = EffectString.trim((yield* f.git(['rev-parse', 'HEAD^{tree}'])).stdout);
         if (changedTree) {
@@ -4796,7 +4817,34 @@ describe('native task actions', () => {
           expect(yield* validation.pipe(Effect.result)).toMatchObject({failure: {code: 'source-drift'}});
           expect(yield* f.fs.readFileString(journalPath)).toBe(beforeJournal);
           expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeState);
-        } else expect(object(yield* validation)).toMatchObject({status: 'recorded', replayed: false});
+        } else {
+          const accepted = object(yield* validation);
+          expect(accepted).toMatchObject({status: 'recorded', replayed: false});
+          const deliveryCard = object(
+            object(yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}))
+              .structuredContent,
+          );
+          expect(deliveryCard).toMatchObject({
+            status: 'ready',
+            next: {action: 'deliver', tool: 'workflow_task_deliver'},
+          });
+          const delivered = object(
+            object(
+              yield* mcp.invokeTool('workflow_task_deliver', {
+                runId: 'native-run',
+                callerCwd: f.repo,
+                delivery: {command: 'local', validationRef: String(accepted.validationRef)},
+              }),
+            ).structuredContent,
+          );
+          expect(delivered).toMatchObject({status: 'delivered', replayed: false});
+          expect(
+            object(
+              object(yield* mcp.invokeTool('workflow_task_view', {runId: 'native-run', callerCwd: f.repo}))
+                .structuredContent,
+            ),
+          ).toMatchObject({status: 'complete', next: {action: 'complete', tool: 'workflow_task_finish'}});
+        }
       }
     }).pipe(run),
   );
@@ -5387,6 +5435,7 @@ describe('native task actions', () => {
         snapshotRef,
         report,
       });
+      yield* f.git(['commit', '--allow-empty', '-m', 'Same-tree commit build marker']);
       const validation = object(
         yield* runNativeTaskAction(f.config, {
           command: 'record-validation',

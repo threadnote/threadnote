@@ -82,7 +82,6 @@ const historicalPhaseProof = (
     item =>
       item.snapshot.phaseId === phaseId &&
       item.snapshot.phaseHash === proof.phaseHash &&
-      item.snapshot.head === proof.head &&
       item.snapshot.tree === proof.tree &&
       item.snapshot.repo === baseline.repo &&
       item.snapshot.baseTree === baseline.tree,

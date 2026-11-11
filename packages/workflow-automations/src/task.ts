@@ -1,5 +1,5 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
-import {nextNativeCycle as cycleNext} from './cycle.js';
+import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -409,22 +409,39 @@ export function projectNativeTaskView(
 
   const runtime = state.cycle;
   const canonicalNext = cycleNext(cycle);
-  const openReview = EffectOption.getOrUndefined(
+  const localDelivery =
+    cycle.plan.delivery === 'local'
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            cycle.plan.phases,
+            candidate =>
+              cycle.phases[candidate.id].status === 'validated' &&
+              !cycle.phases[candidate.id].delivery &&
+              nativeCycleParentsReady(cycle, candidate.id),
+          ),
+        )
+      : undefined;
+  const pendingSnapshot = EffectOption.getOrUndefined(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
-      if (canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
+      if (localDelivery || canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
       const latest = phaseSnapshots.at(-1)?.snapshot;
-      return Boolean(
-        latest &&
-        latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
-        !EffectArray.some(runtime.reviews, item => item.snapshotId === latest.snapshotId),
-      );
+      return Boolean(latest && latest.phaseHash === cycle.phases[candidate.id].phaseHash);
     }),
   );
-  const reviewSnapshot = openReview
-    ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === openReview.id).at(-1)
+  const latestSnapshot = pendingSnapshot
+    ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
-  const reviewWork = openReview && reviewSnapshot ? {phase: openReview, snapshot: reviewSnapshot} : undefined;
+  const acceptedReview =
+    latestSnapshot && EffectArray.some(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId);
+  const reviewWork =
+    pendingSnapshot && latestSnapshot && !acceptedReview
+      ? {phase: pendingSnapshot, snapshot: latestSnapshot}
+      : undefined;
+  const validationWork =
+    pendingSnapshot && latestSnapshot && acceptedReview
+      ? {phase: pendingSnapshot, snapshot: latestSnapshot}
+      : undefined;
   const latestInvalidAttempt = reviewWork
     ? EffectArray.filter(
         runtime.attempts,
@@ -447,14 +464,18 @@ export function projectNativeTaskView(
         snapshotId: reviewWork.snapshot.snapshot.snapshotId,
         ...(latestInvalidAttempt ? {reason: latestInvalidAttempt.message} : {}),
       }
-    : cycleNext(cycle);
+    : validationWork
+      ? {action: 'validate', phaseId: validationWork.phase.id, snapshotId: validationWork.snapshot.snapshot.snapshotId}
+      : localDelivery
+        ? {action: 'deliver', phaseId: localDelivery.id}
+        : canonicalNext;
   const phase = next.phaseId
     ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
     : undefined;
   const scope = phase?.allowedPaths ?? [];
   const acceptance = phase?.acceptanceCriteria ?? [];
   const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
-  const snapshot = reviewWork?.snapshot.snapshot;
+  const snapshot = (reviewWork ?? validationWork)?.snapshot.snapshot;
   const snapshotFiles = snapshot?.files ?? [];
   const snapshotScopeFiles = snapshot?.scopeFiles ?? [];
   const counts = {
@@ -491,11 +512,18 @@ export function projectNativeTaskView(
             `A complete independent review for snapshot ${reviewWork.snapshot.snapshot.snapshotId}`,
             'Correctness and simplicity review lanes with complete reports',
           ]
-    : phase
-      ? [...(scope.length ? [] : ['Implementation scope paths']), ...(acceptance.length ? [] : ['Acceptance criteria'])]
-      : next.action === 'complete'
-        ? []
-        : ['An eligible phase'];
+    : validationWork
+      ? [`Passed check and acceptance evidence for snapshot ${validationWork.snapshot.snapshot.snapshotId}`]
+      : localDelivery && next.action === 'deliver'
+        ? ['The validation reference returned by workflow_task_record_validation']
+        : phase
+          ? [
+              ...(scope.length ? [] : ['Implementation scope paths']),
+              ...(acceptance.length ? [] : ['Acceptance criteria']),
+            ]
+          : next.action === 'complete'
+            ? []
+            : ['An eligible phase'];
   const view: NativeTaskView = {
     status:
       next.action === 'complete'

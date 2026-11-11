@@ -181,19 +181,29 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
               tool: 'workflow_task_deliver',
               guidance: 'Choose local, commit, or pr to match the approved plan.',
             }
-          : result.next.action === 'implement'
+          : result.next.action === 'validate'
             ? {
-                tool: 'workflow_task_snapshot',
-                guidance:
-                  'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
+                tool: 'workflow_task_record_validation',
+                guidance: 'Record passed checks and acceptance for the reviewed snapshotRef.',
               }
-            : result.next.action === 'complete'
+            : result.next.action === 'review'
               ? {
-                  tool: 'workflow_task_finish',
-                  guidance:
-                    'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
+                  tool: 'workflow_task_record_review',
+                  guidance: 'Record the independent review for this snapshotRef.',
                 }
-              : undefined;
+              : result.next.action === 'implement'
+                ? {
+                    tool: 'workflow_task_snapshot',
+                    guidance:
+                      'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
+                  }
+                : result.next.action === 'complete'
+                  ? {
+                      tool: 'workflow_task_finish',
+                      guidance:
+                        'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
+                    }
+                  : undefined;
       const response = nextTool ? {...result, next: {...result.next, ...nextTool}} : result;
       const text = JSON.stringify(response);
       return {content: [{type: 'text' as const, text}], structuredContent: response};

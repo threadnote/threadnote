@@ -78,7 +78,7 @@ export const runNativeTaskCommitDelivery = (
     const validationDigest = proof.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
     if (
       !proof.validation ||
-      proof.head !== ref.sourceHead ||
+      proof.head !== (proof.validation.head ?? ref.sourceHead) ||
       (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
     )
       return yield* fail('stale-validation-ref', 'The reference does not match current canonical phase validation.');
@@ -172,7 +172,7 @@ export const runNativeTaskPrDelivery = (
       !phase ||
       !proof?.validation ||
       proof.phaseHash !== ref.phaseHash ||
-      proof.head !== ref.sourceHead ||
+      proof.head !== (proof.validation.head ?? ref.sourceHead) ||
       proof.tree !== ref.sourceTree ||
       (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
     )
@@ -362,7 +362,6 @@ export const runNativeTaskPrWatch = (
         item =>
           item.snapshot.phaseId === request.phaseId &&
           item.snapshot.phaseHash === phase.phaseHash &&
-          item.snapshot.head === phase.head &&
           item.snapshot.tree === phase.tree &&
           item.snapshot.repo === baseline.repo &&
           item.snapshot.baseTree === baseline.tree,
@@ -462,7 +461,6 @@ export const runNativeTaskPrWatch = (
       sha256HexSync(stableJson(embeddedDelivery)) !== deliveryAction.payloadDigest ||
       embeddedDelivery.delivery !== 'pr' ||
       (embeddedDelivery.pr?.state !== 'open' && embeddedDelivery.pr?.state !== 'merged') ||
-      embeddedDelivery.headSha !== validation.sourceHead ||
       embeddedDelivery.validatedTree !== validation.sourceTree
     )
       return yield* fail(
@@ -485,9 +483,12 @@ export const runNativeTaskPrWatch = (
       return yield* fail('snapshot-ambiguous', 'The watch reference needs one unique canonical reviewed snapshot.');
     if (
       !phase ||
-      phase.head !== validation.sourceHead ||
+      phase.head !== (phase.validation?.head ?? validation.sourceHead) ||
       phase.tree !== validation.sourceTree ||
       phase.phaseHash !== validation.phaseHash ||
+      embeddedDelivery.headSha !== phase.head ||
+      !phase.validation ||
+      sha256HexSync(stableJson(phase.validation)) !== validation.payloadDigest ||
       (phase.delivery !== undefined &&
         (phase.delivery.delivery !== 'pr' ||
           phase.delivery.pr?.url !== embeddedDelivery.pr.url ||
@@ -657,9 +658,11 @@ export const runNativeTaskPrWatch = (
         planPhases.length !== 1 ||
         !currentProof ||
         currentProof.phaseHash !== validation.phaseHash ||
-        currentProof.head !== validation.sourceHead ||
+        currentProof.head !== embeddedDelivery.headSha ||
         currentProof.tree !== validation.sourceTree ||
-        currentProof.validation?.snapshotTree !== validation.sourceTree
+        currentProof.validation?.snapshotTree !== validation.sourceTree ||
+        (currentProof.validation.head ?? validation.sourceHead) !== currentProof.head ||
+        sha256HexSync(stableJson(currentProof.validation)) !== validation.payloadDigest
       )
         return yield* fail(
           'stale-delivery-ref',
@@ -690,7 +693,7 @@ export const runNativeTaskPrWatch = (
           canonicalPr?.state === 'open' &&
           (canonicalReceipt.watch?.state !== 'active' ||
             canonicalReceipt.watch.prUrl !== embeddedDelivery.pr.url ||
-            canonicalReceipt.watch.headSha !== validation.sourceHead ||
+            canonicalReceipt.watch.headSha !== embeddedDelivery.headSha ||
             canonicalReceipt.watch.consumerId !== consumer.id)
         )
           return yield* fail('stale-delivery-ref', 'The published phase is bound to another PR watch consumer.');
@@ -768,7 +771,7 @@ export const runNativeTaskPrWatch = (
         if (
           EffectString.trim(branchHead.stderr) ||
           EffectString.trim(branchTree.stderr) ||
-          EffectString.trim(branchHead.stdout) !== validation.sourceHead ||
+          EffectString.trim(branchHead.stdout) !== embeddedDelivery.headSha ||
           EffectString.trim(branchTree.stdout) !== validation.sourceTree
         )
           return yield* fail(
@@ -789,7 +792,7 @@ export const runNativeTaskPrWatch = (
             checkout,
           ),
         );
-        if (ready.head !== validation.sourceHead || ready.tree !== validation.sourceTree)
+        if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
           return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
       }
       const finalReceiptPr = finalReceipt.pr;

@@ -4,7 +4,12 @@ import * as Effect from 'effect';
 import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {initializeNativeCycle, type NativeCyclePlan} from '../src/cycle.js';
+import {
+  initializeNativeCycle,
+  recordNativeCycleDelivery,
+  validateNativeCyclePhase,
+  type NativeCyclePlan,
+} from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
 import {
@@ -431,6 +436,100 @@ describe('native task projection', () => {
     expect(projectMode(snapshot)).toBe('full');
     expect(projectMode(followup)).toBe('incremental');
     expect(projectMode(requalified)).toBe('full');
+  });
+
+  it('projects accepted review, pending local receipt, and completed delivery in order', () => {
+    const initial = state.cycle!.state;
+    const reviewedHead = EffectString.repeat(40)('a');
+    const acceptedHead = EffectString.repeat(40)('f');
+    const tree = EffectString.repeat(40)('e');
+    const snapshot: NativeCycleSnapshot = {
+      format: 'threadnote-native-cycle-snapshot',
+      version: 1,
+      snapshotId: 'reviewed-one',
+      phaseId: 'phase-one',
+      phaseHash: initial.phases['phase-one'].phaseHash,
+      repo: '/repo',
+      head: reviewedHead,
+      baseTree: EffectString.repeat(40)('b'),
+      scopeBase: EffectString.repeat(40)('c'),
+      declaredBaseHead: EffectString.repeat(40)('d'),
+      scopeFiles: ['src/task.ts'],
+      tree,
+      files: ['src/task.ts'],
+      pinnedRef: 'refs/threadnote/snapshot/reviewed-one',
+    };
+    const runtime = {
+      ...state.cycle!,
+      baselines: {
+        'phase-one': {
+          repo: '/repo',
+          head: EffectString.repeat(40)('b'),
+          tree: EffectString.repeat(40)('c'),
+          preservedFiles: [],
+          pinnedRef: 'refs/heads/main',
+        },
+      },
+      snapshots: [{snapshot, incoming: []}],
+      reviews: [
+        {
+          snapshotId: snapshot.snapshotId,
+          report: {
+            snapshotId: snapshot.snapshotId,
+            phaseHash: snapshot.phaseHash,
+            snapshotTree: tree,
+            status: 'complete' as const,
+            mode: 'full' as const,
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete' as const},
+              {name: 'simplicity', status: 'complete' as const},
+            ],
+            findings: [],
+          },
+        },
+      ],
+    };
+    const reviewed = projectNativeTaskView({...state, cycle: runtime}, 'review-revision');
+    expect(reviewed).toMatchObject({
+      status: 'ready',
+      next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
+      phase: {snapshot: {snapshotRef: expect.any(String)}},
+    });
+    const validation = {
+      snapshotTree: tree,
+      reviewTree: tree,
+      head: acceptedHead,
+      status: 'passed' as const,
+      productState: 'working' as const,
+      checks: [{command: 'focused check', result: 'passed' as const, evidence: 'passed'}],
+      acceptance: [{criterion: plan.phases[0].acceptanceCriteria[0], result: 'passed' as const, evidence: 'passed'}],
+    };
+    const validated = validateNativeCyclePhase(
+      initial,
+      'phase-one',
+      {head: acceptedHead, tree, files: ['src/task.ts']},
+      validation,
+    );
+    expect(
+      projectNativeTaskView({...state, cycle: {...runtime, state: validated}}, 'validation-revision'),
+    ).toMatchObject({
+      status: 'ready',
+      next: {action: 'deliver', phaseId: 'phase-one'},
+    });
+    const delivered = recordNativeCycleDelivery(validated, 'phase-one', {
+      phaseId: 'phase-one',
+      phaseHash: snapshot.phaseHash,
+      delivery: 'local',
+      headSha: acceptedHead,
+      validatedTree: tree,
+    });
+    expect(projectNativeTaskView({...state, cycle: {...runtime, state: delivered}}, 'delivery-revision')).toMatchObject(
+      {
+        status: 'complete',
+        next: {action: 'complete'},
+      },
+    );
   });
 
   it('keeps canonical invalidation blocking ahead of stale snapshot review hints', () => {

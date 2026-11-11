@@ -1464,7 +1464,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (
         !proof?.validation ||
         proof.phaseHash !== ref.phaseHash ||
-        proof.head !== ref.sourceHead ||
+        proof.head !== (proof.validation.head ?? ref.sourceHead) ||
         proof.tree !== ref.sourceTree ||
         (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
       )
