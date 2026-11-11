@@ -1,0 +1,1904 @@
+{
+  "nativePerformance": {
+    "contract": {
+      "version": 1,
+      "primaryP95ImprovementRatio": 0.2,
+      "secondaryP95RegressionRatio": 0.05,
+      "secondaryNoiseMilliseconds": 5,
+      "processTreePeakRssGrowthRatio": 0.1,
+      "minimumPairedRuns": 3,
+      "minimumWarmVectorQueries": 30,
+      "platforms": [
+        "darwin-arm64",
+        "linux-x64"
+      ],
+      "vectorDocuments": [
+        10000,
+        100000
+      ],
+      "vectorDistributions": [
+        "dense",
+        "tied"
+      ],
+      "primaryBoundaries": {
+        "vector": "complete semantic retrieval including pinned-model inference and authorized SQLite reads",
+        "parser": "cold polyglot indexing and whole worker request including serialization and persistence",
+        "topology": "each CLI analysis operation including snapshot loading and output projection; more than 100000 nodes"
+      },
+      "controls": [
+        "first-use separately",
+        "incremental indexing",
+        "small-scale secondary flows"
+      ],
+      "refresh": "refresh after separately owned crypto lands; identical configuration apart from candidate change"
+    },
+    "artifact": {
+      "createdAt": "2026-11-11T09:08:34.198Z",
+      "environment": {
+        "architecture": "arm64",
+        "commit": "364fe1e4414ce0acb221fb55f1ea8f0dc1cb3a06",
+        "cpu": "Apple M1 Max",
+        "dirty": false,
+        "fixtureHash": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+        "memoryBytes": 68719476736,
+        "model": {
+          "backend": "node-llama-cpp-query/synthetic-documents",
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801"
+        },
+        "node": "v26.3.0",
+        "operatingSystem": "macOS 27.2",
+        "packageManager": "bun@1.4.4",
+        "runner": "benchmark-recall-vectors.ts",
+        "runnerVersion": "native-performance-v1"
+      },
+      "measurements": [
+        {
+          "maximum": 2874.981791,
+          "mean": 2874.981791,
+          "minimum": 2874.981791,
+          "name": "first-use-request",
+          "p50": 2874.981791,
+          "p95": 2874.981791,
+          "p99": 2874.981791,
+          "samples": 1,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 54.804959,
+          "mean": 51.625486333333335,
+          "minimum": 49.621459,
+          "name": "warm-request",
+          "p50": 50.450041,
+          "p95": 54.804959,
+          "p99": 54.804959,
+          "samples": 3,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 124.67,
+          "mean": 100.31833333333333,
+          "minimum": 80.928,
+          "name": "warm-parent-cpu",
+          "p50": 95.357,
+          "p95": 124.67,
+          "p99": 124.67,
+          "samples": 3,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 259704368,
+          "mean": 259704368,
+          "minimum": 259704368,
+          "name": "parent-peak-rss",
+          "p50": 259704368,
+          "p95": 259704368,
+          "p99": 259704368,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 578617344,
+          "mean": 578617344,
+          "minimum": 578617344,
+          "name": "process-tree-sampled-peak-rss",
+          "p50": 578617344,
+          "p95": 578617344,
+          "p99": 578617344,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 32227328,
+          "mean": 32227328,
+          "minimum": 32227328,
+          "name": "database",
+          "p50": 32227328,
+          "p95": 32227328,
+          "p99": 32227328,
+          "samples": 1,
+          "unit": "bytes"
+        },
+        {
+          "maximum": 53.71375,
+          "mean": 51.556763999999994,
+          "minimum": 50.116,
+          "name": "warm-observer-disabled-control",
+          "p50": 50.840542,
+          "p95": 53.71375,
+          "p99": 53.71375,
+          "samples": 3,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 0.07687500000065484,
+          "mean": 0.07259733333345746,
+          "minimum": 0.0694999999996071,
+          "name": "observer-postprocessing",
+          "p50": 0.07141700000011042,
+          "p95": 0.07687500000065484,
+          "p99": 0.07687500000065484,
+          "samples": 3,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 31.171629,
+          "mean": 30.484001666666668,
+          "minimum": 29.834668,
+          "name": "warm-sql-row-transport",
+          "p50": 30.445708,
+          "p95": 31.171629,
+          "p99": 31.171629,
+          "samples": 3,
+          "unit": "milliseconds"
+        },
+        {
+          "maximum": 13.477167,
+          "mean": 12.356206333333333,
+          "minimum": 10.982537,
+          "name": "warm-reader-exclusive-sql-residual",
+          "p50": 12.608915,
+          "p95": 13.477167,
+          "p99": 13.477167,
+          "samples": 3,
+          "unit": "milliseconds"
+        }
+      ],
+      "metadata": {
+        "documents": 10000,
+        "distribution": "dense",
+        "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "modelPurpose": "recall",
+        "inference": "real-query",
+        "correctnessDigest": "83a0d03ee40934af1a314a48dcb164bbe93ee7ed78ca28ee358e76bf6fe2c882",
+        "qualification": false,
+        "stageMethod": "actual-sql-spans-union-v1/interleaved-observer-control"
+      },
+      "suite": "native-performance-recall-vector-diagnostic-v1",
+      "version": 1,
+      "warmups": 1
+    },
+    "capture": {
+      "version": 1,
+      "kind": "diagnostic",
+      "component": "vector",
+      "pair": 1,
+      "arm": "candidate",
+      "configurationHash": "243f8b3d92cc8b09036961f14614adc217342fb46ddfcb5613663ba4270425b9",
+      "platform": "darwin-arm64",
+      "workload": {
+        "kind": "vector",
+        "documents": 10000,
+        "dimensions": 384,
+        "distribution": "dense"
+      },
+      "inference": {
+        "kind": "real-query",
+        "purpose": "recall",
+        "templateIdentity": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "weightsVerified": true,
+        "model": {
+          "id": "bge-small-en-v1.5-q8",
+          "revision": "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+          "sha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+          "dimensions": 384,
+          "backend": "node-llama-cpp-query/synthetic-documents"
+        }
+      },
+      "sourceFence": {
+        "opening": {
+          "commit": "364fe1e4414ce0acb221fb55f1ea8f0dc1cb3a06",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "b0e11c524289682dfed9c62e0db7c12b8f823d4719d4ffd93af20bb37b719ac6",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        },
+        "closing": {
+          "commit": "364fe1e4414ce0acb221fb55f1ea8f0dc1cb3a06",
+          "dirty": false,
+          "trackedDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "indexHash": "b0e11c524289682dfed9c62e0db7c12b8f823d4719d4ffd93af20bb37b719ac6",
+          "statusHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e"
+        }
+      },
+      "identities": {
+        "model": "bge-small-en-v1.5-q8:f2068edd9b54f2a369549ccc71f70ed273a2a801:f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804",
+        "purpose": "recall",
+        "platform": "darwin-arm64",
+        "method": "selectedSemanticScores/sql-span-union-v1/interleaved-observer-control",
+        "template": "manifest-query-prefix-v1:7464b930c2cc8e34a73134b093018fc8dc39ed774cb1c42902cb4f8cb1290fc4",
+        "dimensions": "384",
+        "fixture": "e89c37de0a0f63f11edcc664fb9497afdf5ecd8d75f43e786ee1d38d6510272a",
+        "runtime": "1.4.4",
+        "workers": "0",
+        "grammar": "not-applicable",
+        "sampler": "existing external recursive process-tree sampler (effective interval in telemetry); parent RSS interval2ms; parent process.cpuUsage request delta",
+        "boundary": "selectedSemanticScores with synthetic document embeddings"
+      },
+      "correctnessDigest": "83a0d03ee40934af1a314a48dcb164bbe93ee7ed78ca28ee358e76bf6fe2c882",
+      "firstUseMeasurement": "first-use-request",
+      "warmMeasurement": "warm-request",
+      "processTreePeakRssMeasurement": "process-tree-sampled-peak-rss",
+      "cpuMeasurement": "warm-parent-cpu",
+      "diskMeasurement": "database",
+      "stages": {
+        "sql-row-transport": {
+          "state": "measured",
+          "measurement": "warm-sql-row-transport",
+          "boundary": "Actual request SQLite span UNION: SQL compilation/acquisition/native execution and row construction"
+        },
+        "validation-scoring-top-k": {
+          "state": "measured",
+          "measurement": "warm-reader-exclusive-sql-residual",
+          "boundary": "Observed reader envelope minus UNION of its SQLite intervals: validation/scoring/top-k plus reader/transaction/control residual, not pure math"
+        },
+        "parse": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "query": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "fact-construction": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "ipc": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-load": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        },
+        "topology-compute": {
+          "state": "not-applicable",
+          "reason": "Vector workload"
+        }
+      },
+      "limitations": [
+        "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+        "Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.",
+        "Stage mode alternates observed/control order for3 matched warm query pairs: 3 primary observed requests and3 separately labeled observer-disabled controls. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.",
+        "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+        "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+        "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+        "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+      ]
+    },
+    "instrumentationHash": "4b8eef242551063342cc50046cce3f78daaffc0cef2763edc0056f518e0a7e5e",
+    "processTreeSampler": {
+      "intervalMilliseconds": 25,
+      "phases": {
+        "finish": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 0,
+          "processSampleAttempts": 0,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 0,
+          "processSamples": 0,
+          "rssPeakBytes": 0,
+          "temporaryLinkedPeakBytes": 63170170,
+          "temporaryOpenAttempts": 1,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 1,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170170,
+          "walPeakBytes": 0
+        },
+        "start": {
+          "cpuMilliseconds": 0,
+          "processPeakCount": 1,
+          "processSampleAttempts": 1,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 6,
+          "processSamples": 1,
+          "rssPeakBytes": 407764992,
+          "temporaryLinkedPeakBytes": 63168594,
+          "temporaryOpenAttempts": 1,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 1,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 1,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63168594,
+          "walPeakBytes": 0
+        },
+        "vector-query": {
+          "cpuMilliseconds": 1110,
+          "processPeakCount": 1,
+          "processSampleAttempts": 11,
+          "processSampleFailures": 0,
+          "processSampleGapPeakMilliseconds": 310,
+          "processSamples": 11,
+          "rssPeakBytes": 578617344,
+          "temporaryLinkedPeakBytes": 63170168,
+          "temporaryOpenAttempts": 2,
+          "temporaryOpenFailures": 0,
+          "temporaryOpenPeakBytes": 0,
+          "temporaryOpenSamples": 2,
+          "databasePeakBytes": 32227328,
+          "journalPeakBytes": 0,
+          "samples": 96,
+          "shmPeakBytes": 32768,
+          "temporaryPeakBytes": 63170168,
+          "walPeakBytes": 0
+        }
+      },
+      "platform": "darwin",
+      "processTelemetry": {
+        "availability": "available",
+        "parentIdentityValidation": "darwin-ps-lstart",
+        "sampleIntervalMilliseconds": 250,
+        "scope": "recursive-process-tree",
+        "source": "darwin-ps"
+      },
+      "samples": 98,
+      "temporaryTelemetry": {
+        "availability": "available",
+        "maximumOpenFileDescriptors": 65536,
+        "maximumProcesses": 4096,
+        "openFileSampleIntervalMilliseconds": 1000,
+        "projectionByteLimit": 8388608,
+        "scope": "temporary-root-linked-plus-process-tree-open-files",
+        "source": "darwin-lsof"
+      },
+      "version": 4
+    },
+    "captureStartedAt": "2026-11-11T09:08:27.532Z",
+    "captureFinishedAt": "2026-11-11T09:08:34.252Z",
+    "rawWarmMilliseconds": [
+      49.621459,
+      50.450041,
+      54.804959
+    ],
+    "rawWarmCpuMilliseconds": [
+      80.928,
+      95.357,
+      124.67
+    ],
+    "rawFirstUseMilliseconds": [
+      2874.981791
+    ],
+    "stageAttribution": {
+      "observerPairs": [
+        {
+          "sample": 1,
+          "order": "observed-first",
+          "observedMilliseconds": 49.621459,
+          "controlMilliseconds": 53.71375,
+          "signedRequestDeltaMilliseconds": -4.092290999999996,
+          "postprocessingMilliseconds": 0.07141700000011042
+        },
+        {
+          "sample": 2,
+          "order": "control-first",
+          "observedMilliseconds": 50.450041,
+          "controlMilliseconds": 50.840542,
+          "signedRequestDeltaMilliseconds": -0.39050100000000043,
+          "postprocessingMilliseconds": 0.0694999999996071
+        },
+        {
+          "sample": 3,
+          "order": "observed-first",
+          "observedMilliseconds": 54.804959,
+          "controlMilliseconds": 50.116,
+          "signedRequestDeltaMilliseconds": 4.688958999999997,
+          "postprocessingMilliseconds": 0.07687500000065484
+        }
+      ],
+      "enabled": true,
+      "stagesAvailable": true,
+      "samples": [
+        {
+          "sample": 0,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 2874.8695,
+              "intervals": [
+                {
+                  "startMilliseconds": 2.013625,
+                  "endMilliseconds": 2.056375
+                },
+                {
+                  "startMilliseconds": 2.078208,
+                  "endMilliseconds": 2.094
+                },
+                {
+                  "startMilliseconds": 2.097958,
+                  "endMilliseconds": 2.667583
+                },
+                {
+                  "startMilliseconds": 2.687916,
+                  "endMilliseconds": 2.799583
+                },
+                {
+                  "startMilliseconds": 2.808125,
+                  "endMilliseconds": 2.8275
+                },
+                {
+                  "startMilliseconds": 2.832791,
+                  "endMilliseconds": 2.853625
+                },
+                {
+                  "startMilliseconds": 2.859416,
+                  "endMilliseconds": 2.872833
+                },
+                {
+                  "startMilliseconds": 2.878541,
+                  "endMilliseconds": 2.89125
+                },
+                {
+                  "startMilliseconds": 2.90825,
+                  "endMilliseconds": 3.900541
+                },
+                {
+                  "startMilliseconds": 2821.630041,
+                  "endMilliseconds": 2821.673458
+                },
+                {
+                  "startMilliseconds": 2821.683125,
+                  "endMilliseconds": 2821.70525
+                },
+                {
+                  "startMilliseconds": 2821.709,
+                  "endMilliseconds": 2822.697333
+                },
+                {
+                  "startMilliseconds": 2822.759666,
+                  "endMilliseconds": 2822.878166
+                },
+                {
+                  "startMilliseconds": 2822.887333,
+                  "endMilliseconds": 2822.901208
+                },
+                {
+                  "startMilliseconds": 2822.906458,
+                  "endMilliseconds": 2822.918708
+                },
+                {
+                  "startMilliseconds": 2822.934708,
+                  "endMilliseconds": 2822.945708
+                },
+                {
+                  "startMilliseconds": 2822.948916,
+                  "endMilliseconds": 2822.958333
+                },
+                {
+                  "startMilliseconds": 2822.978291,
+                  "endMilliseconds": 2823.972416
+                },
+                {
+                  "startMilliseconds": 2824.418,
+                  "endMilliseconds": 2825.729583
+                },
+                {
+                  "startMilliseconds": 2830.952333,
+                  "endMilliseconds": 2832.53825
+                },
+                {
+                  "startMilliseconds": 2837.890916,
+                  "endMilliseconds": 2839.266333
+                },
+                {
+                  "startMilliseconds": 2839.851708,
+                  "endMilliseconds": 2841.017791
+                },
+                {
+                  "startMilliseconds": 2841.541666,
+                  "endMilliseconds": 2842.763916
+                },
+                {
+                  "startMilliseconds": 2843.265208,
+                  "endMilliseconds": 2844.421375
+                },
+                {
+                  "startMilliseconds": 2844.908791,
+                  "endMilliseconds": 2845.935208
+                },
+                {
+                  "startMilliseconds": 2846.320541,
+                  "endMilliseconds": 2847.344875
+                },
+                {
+                  "startMilliseconds": 2847.706583,
+                  "endMilliseconds": 2848.663541
+                },
+                {
+                  "startMilliseconds": 2848.990875,
+                  "endMilliseconds": 2849.985416
+                },
+                {
+                  "startMilliseconds": 2850.392791,
+                  "endMilliseconds": 2851.539833
+                },
+                {
+                  "startMilliseconds": 2851.980791,
+                  "endMilliseconds": 2853.102
+                },
+                {
+                  "startMilliseconds": 2853.54075,
+                  "endMilliseconds": 2854.567541
+                },
+                {
+                  "startMilliseconds": 2855.030083,
+                  "endMilliseconds": 2856.095916
+                },
+                {
+                  "startMilliseconds": 2856.619208,
+                  "endMilliseconds": 2857.770125
+                },
+                {
+                  "startMilliseconds": 2858.231458,
+                  "endMilliseconds": 2859.311083
+                },
+                {
+                  "startMilliseconds": 2859.732875,
+                  "endMilliseconds": 2860.858041
+                },
+                {
+                  "startMilliseconds": 2861.339541,
+                  "endMilliseconds": 2862.396083
+                },
+                {
+                  "startMilliseconds": 2862.766333,
+                  "endMilliseconds": 2863.76
+                },
+                {
+                  "startMilliseconds": 2864.117291,
+                  "endMilliseconds": 2865.094208
+                },
+                {
+                  "startMilliseconds": 2865.459958,
+                  "endMilliseconds": 2866.432541
+                },
+                {
+                  "startMilliseconds": 2866.904041,
+                  "endMilliseconds": 2868.101291
+                },
+                {
+                  "startMilliseconds": 2868.570791,
+                  "endMilliseconds": 2869.6605
+                },
+                {
+                  "startMilliseconds": 2870.117583,
+                  "endMilliseconds": 2871.312875
+                },
+                {
+                  "startMilliseconds": 2871.792416,
+                  "endMilliseconds": 2872.973
+                },
+                {
+                  "startMilliseconds": 2873.426708,
+                  "endMilliseconds": 2873.533291
+                },
+                {
+                  "startMilliseconds": 2873.853708,
+                  "endMilliseconds": 2874.157875
+                }
+              ],
+              "coveredMilliseconds": 32.621046,
+              "exclusiveResidualMilliseconds": 2842.248454
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 71.633708,
+              "intervals": [
+                {
+                  "startMilliseconds": 18.413916,
+                  "endMilliseconds": 18.457333
+                },
+                {
+                  "startMilliseconds": 18.467,
+                  "endMilliseconds": 18.489125
+                },
+                {
+                  "startMilliseconds": 18.492875,
+                  "endMilliseconds": 19.481208
+                },
+                {
+                  "startMilliseconds": 19.543541,
+                  "endMilliseconds": 19.662041
+                },
+                {
+                  "startMilliseconds": 19.671208,
+                  "endMilliseconds": 19.685083
+                },
+                {
+                  "startMilliseconds": 19.690333,
+                  "endMilliseconds": 19.702583
+                },
+                {
+                  "startMilliseconds": 19.718583,
+                  "endMilliseconds": 19.729583
+                },
+                {
+                  "startMilliseconds": 19.732791,
+                  "endMilliseconds": 19.742208
+                },
+                {
+                  "startMilliseconds": 19.762166,
+                  "endMilliseconds": 20.756291
+                },
+                {
+                  "startMilliseconds": 21.201875,
+                  "endMilliseconds": 22.513458
+                },
+                {
+                  "startMilliseconds": 27.736208,
+                  "endMilliseconds": 29.322125
+                },
+                {
+                  "startMilliseconds": 34.674791,
+                  "endMilliseconds": 36.050208
+                },
+                {
+                  "startMilliseconds": 36.635583,
+                  "endMilliseconds": 37.801666
+                },
+                {
+                  "startMilliseconds": 38.325541,
+                  "endMilliseconds": 39.547791
+                },
+                {
+                  "startMilliseconds": 40.049083,
+                  "endMilliseconds": 41.20525
+                },
+                {
+                  "startMilliseconds": 41.692666,
+                  "endMilliseconds": 42.719083
+                },
+                {
+                  "startMilliseconds": 43.104416,
+                  "endMilliseconds": 44.12875
+                },
+                {
+                  "startMilliseconds": 44.490458,
+                  "endMilliseconds": 45.447416
+                },
+                {
+                  "startMilliseconds": 45.77475,
+                  "endMilliseconds": 46.769291
+                },
+                {
+                  "startMilliseconds": 47.176666,
+                  "endMilliseconds": 48.323708
+                },
+                {
+                  "startMilliseconds": 48.764666,
+                  "endMilliseconds": 49.885875
+                },
+                {
+                  "startMilliseconds": 50.324625,
+                  "endMilliseconds": 51.351416
+                },
+                {
+                  "startMilliseconds": 51.813958,
+                  "endMilliseconds": 52.879791
+                },
+                {
+                  "startMilliseconds": 53.403083,
+                  "endMilliseconds": 54.554
+                },
+                {
+                  "startMilliseconds": 55.015333,
+                  "endMilliseconds": 56.094958
+                },
+                {
+                  "startMilliseconds": 56.51675,
+                  "endMilliseconds": 57.641916
+                },
+                {
+                  "startMilliseconds": 58.123416,
+                  "endMilliseconds": 59.179958
+                },
+                {
+                  "startMilliseconds": 59.550208,
+                  "endMilliseconds": 60.543875
+                },
+                {
+                  "startMilliseconds": 60.901166,
+                  "endMilliseconds": 61.878083
+                },
+                {
+                  "startMilliseconds": 62.243833,
+                  "endMilliseconds": 63.216416
+                },
+                {
+                  "startMilliseconds": 63.687916,
+                  "endMilliseconds": 64.885166
+                },
+                {
+                  "startMilliseconds": 65.354666,
+                  "endMilliseconds": 66.444375
+                },
+                {
+                  "startMilliseconds": 66.901458,
+                  "endMilliseconds": 68.09675
+                },
+                {
+                  "startMilliseconds": 68.576291,
+                  "endMilliseconds": 69.756875
+                },
+                {
+                  "startMilliseconds": 70.210583,
+                  "endMilliseconds": 70.317166
+                },
+                {
+                  "startMilliseconds": 70.637583,
+                  "endMilliseconds": 70.94175
+                }
+              ],
+              "coveredMilliseconds": 30.822586,
+              "exclusiveResidualMilliseconds": 40.811122
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 1,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 49.598625,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.711709,
+                  "endMilliseconds": 0.737042
+                },
+                {
+                  "startMilliseconds": 0.7415,
+                  "endMilliseconds": 0.751584
+                },
+                {
+                  "startMilliseconds": 0.754125,
+                  "endMilliseconds": 1.144
+                },
+                {
+                  "startMilliseconds": 1.172209,
+                  "endMilliseconds": 1.270917
+                },
+                {
+                  "startMilliseconds": 1.277959,
+                  "endMilliseconds": 1.299875
+                },
+                {
+                  "startMilliseconds": 1.304042,
+                  "endMilliseconds": 1.32475
+                },
+                {
+                  "startMilliseconds": 1.3865,
+                  "endMilliseconds": 1.485834
+                },
+                {
+                  "startMilliseconds": 1.500834,
+                  "endMilliseconds": 1.536417
+                },
+                {
+                  "startMilliseconds": 1.609667,
+                  "endMilliseconds": 2.591542
+                },
+                {
+                  "startMilliseconds": 8.027334,
+                  "endMilliseconds": 8.043334
+                },
+                {
+                  "startMilliseconds": 8.046625,
+                  "endMilliseconds": 8.056417
+                },
+                {
+                  "startMilliseconds": 8.05825,
+                  "endMilliseconds": 8.494459
+                },
+                {
+                  "startMilliseconds": 8.516792,
+                  "endMilliseconds": 8.609709
+                },
+                {
+                  "startMilliseconds": 8.620125,
+                  "endMilliseconds": 8.633167
+                },
+                {
+                  "startMilliseconds": 8.645875,
+                  "endMilliseconds": 8.657625
+                },
+                {
+                  "startMilliseconds": 8.661875,
+                  "endMilliseconds": 8.684292
+                },
+                {
+                  "startMilliseconds": 8.686709,
+                  "endMilliseconds": 8.695375
+                },
+                {
+                  "startMilliseconds": 8.715084,
+                  "endMilliseconds": 9.739625
+                },
+                {
+                  "startMilliseconds": 9.837834,
+                  "endMilliseconds": 11.114042
+                },
+                {
+                  "startMilliseconds": 11.697959,
+                  "endMilliseconds": 12.909542
+                },
+                {
+                  "startMilliseconds": 13.408834,
+                  "endMilliseconds": 14.765209
+                },
+                {
+                  "startMilliseconds": 15.17975,
+                  "endMilliseconds": 16.3355
+                },
+                {
+                  "startMilliseconds": 16.762959,
+                  "endMilliseconds": 17.858959
+                },
+                {
+                  "startMilliseconds": 18.307,
+                  "endMilliseconds": 19.419375
+                },
+                {
+                  "startMilliseconds": 19.889542,
+                  "endMilliseconds": 20.930584
+                },
+                {
+                  "startMilliseconds": 21.333834,
+                  "endMilliseconds": 22.306167
+                },
+                {
+                  "startMilliseconds": 22.678584,
+                  "endMilliseconds": 23.603709
+                },
+                {
+                  "startMilliseconds": 26.154042,
+                  "endMilliseconds": 27.373625
+                },
+                {
+                  "startMilliseconds": 27.833125,
+                  "endMilliseconds": 28.961959
+                },
+                {
+                  "startMilliseconds": 29.402459,
+                  "endMilliseconds": 30.493209
+                },
+                {
+                  "startMilliseconds": 30.921042,
+                  "endMilliseconds": 32.02375
+                },
+                {
+                  "startMilliseconds": 32.4065,
+                  "endMilliseconds": 33.377917
+                },
+                {
+                  "startMilliseconds": 33.696459,
+                  "endMilliseconds": 34.722292
+                },
+                {
+                  "startMilliseconds": 35.085584,
+                  "endMilliseconds": 36.190542
+                },
+                {
+                  "startMilliseconds": 36.571292,
+                  "endMilliseconds": 37.566667
+                },
+                {
+                  "startMilliseconds": 37.877959,
+                  "endMilliseconds": 38.816584
+                },
+                {
+                  "startMilliseconds": 39.103625,
+                  "endMilliseconds": 40.012
+                },
+                {
+                  "startMilliseconds": 40.318417,
+                  "endMilliseconds": 41.26575
+                },
+                {
+                  "startMilliseconds": 41.617334,
+                  "endMilliseconds": 42.644292
+                },
+                {
+                  "startMilliseconds": 43.017667,
+                  "endMilliseconds": 44.129584
+                },
+                {
+                  "startMilliseconds": 44.545375,
+                  "endMilliseconds": 45.610542
+                },
+                {
+                  "startMilliseconds": 45.945,
+                  "endMilliseconds": 46.961667
+                },
+                {
+                  "startMilliseconds": 47.252375,
+                  "endMilliseconds": 48.242875
+                },
+                {
+                  "startMilliseconds": 48.539417,
+                  "endMilliseconds": 48.605459
+                },
+                {
+                  "startMilliseconds": 48.722834,
+                  "endMilliseconds": 48.991959
+                }
+              ],
+              "coveredMilliseconds": 30.445708,
+              "exclusiveResidualMilliseconds": 19.152917
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 42.239459,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.687959,
+                  "endMilliseconds": 0.703959
+                },
+                {
+                  "startMilliseconds": 0.70725,
+                  "endMilliseconds": 0.717042
+                },
+                {
+                  "startMilliseconds": 0.718875,
+                  "endMilliseconds": 1.155084
+                },
+                {
+                  "startMilliseconds": 1.177417,
+                  "endMilliseconds": 1.270334
+                },
+                {
+                  "startMilliseconds": 1.28075,
+                  "endMilliseconds": 1.293792
+                },
+                {
+                  "startMilliseconds": 1.3065,
+                  "endMilliseconds": 1.31825
+                },
+                {
+                  "startMilliseconds": 1.3225,
+                  "endMilliseconds": 1.344917
+                },
+                {
+                  "startMilliseconds": 1.347334,
+                  "endMilliseconds": 1.356
+                },
+                {
+                  "startMilliseconds": 1.375709,
+                  "endMilliseconds": 2.40025
+                },
+                {
+                  "startMilliseconds": 2.498459,
+                  "endMilliseconds": 3.774667
+                },
+                {
+                  "startMilliseconds": 4.358584,
+                  "endMilliseconds": 5.570167
+                },
+                {
+                  "startMilliseconds": 6.069459,
+                  "endMilliseconds": 7.425834
+                },
+                {
+                  "startMilliseconds": 7.840375,
+                  "endMilliseconds": 8.996125
+                },
+                {
+                  "startMilliseconds": 9.423584,
+                  "endMilliseconds": 10.519584
+                },
+                {
+                  "startMilliseconds": 10.967625,
+                  "endMilliseconds": 12.08
+                },
+                {
+                  "startMilliseconds": 12.550167,
+                  "endMilliseconds": 13.591209
+                },
+                {
+                  "startMilliseconds": 13.994459,
+                  "endMilliseconds": 14.966792
+                },
+                {
+                  "startMilliseconds": 15.339209,
+                  "endMilliseconds": 16.264334
+                },
+                {
+                  "startMilliseconds": 18.814667,
+                  "endMilliseconds": 20.03425
+                },
+                {
+                  "startMilliseconds": 20.49375,
+                  "endMilliseconds": 21.622584
+                },
+                {
+                  "startMilliseconds": 22.063084,
+                  "endMilliseconds": 23.153834
+                },
+                {
+                  "startMilliseconds": 23.581667,
+                  "endMilliseconds": 24.684375
+                },
+                {
+                  "startMilliseconds": 25.067125,
+                  "endMilliseconds": 26.038542
+                },
+                {
+                  "startMilliseconds": 26.357084,
+                  "endMilliseconds": 27.382917
+                },
+                {
+                  "startMilliseconds": 27.746209,
+                  "endMilliseconds": 28.851167
+                },
+                {
+                  "startMilliseconds": 29.231917,
+                  "endMilliseconds": 30.227292
+                },
+                {
+                  "startMilliseconds": 30.538584,
+                  "endMilliseconds": 31.477209
+                },
+                {
+                  "startMilliseconds": 31.76425,
+                  "endMilliseconds": 32.672625
+                },
+                {
+                  "startMilliseconds": 32.979042,
+                  "endMilliseconds": 33.926375
+                },
+                {
+                  "startMilliseconds": 34.277959,
+                  "endMilliseconds": 35.304917
+                },
+                {
+                  "startMilliseconds": 35.678292,
+                  "endMilliseconds": 36.790209
+                },
+                {
+                  "startMilliseconds": 37.206,
+                  "endMilliseconds": 38.271167
+                },
+                {
+                  "startMilliseconds": 38.605625,
+                  "endMilliseconds": 39.622292
+                },
+                {
+                  "startMilliseconds": 39.913,
+                  "endMilliseconds": 40.9035
+                },
+                {
+                  "startMilliseconds": 41.200042,
+                  "endMilliseconds": 41.266084
+                },
+                {
+                  "startMilliseconds": 41.383459,
+                  "endMilliseconds": 41.652584
+                }
+              ],
+              "coveredMilliseconds": 28.762292,
+              "exclusiveResidualMilliseconds": 13.477167
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 2,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 50.424291,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.741541,
+                  "endMilliseconds": 0.766166
+                },
+                {
+                  "startMilliseconds": 0.79,
+                  "endMilliseconds": 0.802291
+                },
+                {
+                  "startMilliseconds": 0.808,
+                  "endMilliseconds": 1.251666
+                },
+                {
+                  "startMilliseconds": 1.284208,
+                  "endMilliseconds": 1.394416
+                },
+                {
+                  "startMilliseconds": 1.402875,
+                  "endMilliseconds": 1.423416
+                },
+                {
+                  "startMilliseconds": 1.427708,
+                  "endMilliseconds": 1.444625
+                },
+                {
+                  "startMilliseconds": 1.448708,
+                  "endMilliseconds": 1.4655
+                },
+                {
+                  "startMilliseconds": 1.469416,
+                  "endMilliseconds": 1.484208
+                },
+                {
+                  "startMilliseconds": 1.500625,
+                  "endMilliseconds": 2.479875
+                },
+                {
+                  "startMilliseconds": 10.72825,
+                  "endMilliseconds": 10.755208
+                },
+                {
+                  "startMilliseconds": 10.761,
+                  "endMilliseconds": 10.771041
+                },
+                {
+                  "startMilliseconds": 10.773083,
+                  "endMilliseconds": 11.252083
+                },
+                {
+                  "startMilliseconds": 11.27825,
+                  "endMilliseconds": 11.381083
+                },
+                {
+                  "startMilliseconds": 11.386708,
+                  "endMilliseconds": 11.398375
+                },
+                {
+                  "startMilliseconds": 11.400916,
+                  "endMilliseconds": 11.410875
+                },
+                {
+                  "startMilliseconds": 11.414333,
+                  "endMilliseconds": 11.42
+                },
+                {
+                  "startMilliseconds": 11.421541,
+                  "endMilliseconds": 11.427375
+                },
+                {
+                  "startMilliseconds": 11.44475,
+                  "endMilliseconds": 12.449166
+                },
+                {
+                  "startMilliseconds": 12.52175,
+                  "endMilliseconds": 13.865666
+                },
+                {
+                  "startMilliseconds": 14.367958,
+                  "endMilliseconds": 15.6165
+                },
+                {
+                  "startMilliseconds": 16.0725,
+                  "endMilliseconds": 17.271666
+                },
+                {
+                  "startMilliseconds": 17.627041,
+                  "endMilliseconds": 18.999125
+                },
+                {
+                  "startMilliseconds": 19.420541,
+                  "endMilliseconds": 20.601875
+                },
+                {
+                  "startMilliseconds": 20.9965,
+                  "endMilliseconds": 22.025041
+                },
+                {
+                  "startMilliseconds": 22.410291,
+                  "endMilliseconds": 23.409
+                },
+                {
+                  "startMilliseconds": 23.777958,
+                  "endMilliseconds": 24.911708
+                },
+                {
+                  "startMilliseconds": 25.290291,
+                  "endMilliseconds": 26.30225
+                },
+                {
+                  "startMilliseconds": 26.657083,
+                  "endMilliseconds": 27.6655
+                },
+                {
+                  "startMilliseconds": 27.988166,
+                  "endMilliseconds": 28.9715
+                },
+                {
+                  "startMilliseconds": 29.322375,
+                  "endMilliseconds": 30.346458
+                },
+                {
+                  "startMilliseconds": 30.702916,
+                  "endMilliseconds": 31.731375
+                },
+                {
+                  "startMilliseconds": 32.061916,
+                  "endMilliseconds": 33.026
+                },
+                {
+                  "startMilliseconds": 33.320208,
+                  "endMilliseconds": 34.23675
+                },
+                {
+                  "startMilliseconds": 34.514625,
+                  "endMilliseconds": 35.463458
+                },
+                {
+                  "startMilliseconds": 35.772291,
+                  "endMilliseconds": 36.734125
+                },
+                {
+                  "startMilliseconds": 37.08125,
+                  "endMilliseconds": 38.12425
+                },
+                {
+                  "startMilliseconds": 38.517125,
+                  "endMilliseconds": 39.720375
+                },
+                {
+                  "startMilliseconds": 40.087541,
+                  "endMilliseconds": 41.206625
+                },
+                {
+                  "startMilliseconds": 41.56125,
+                  "endMilliseconds": 42.724125
+                },
+                {
+                  "startMilliseconds": 43.220541,
+                  "endMilliseconds": 44.51875
+                },
+                {
+                  "startMilliseconds": 44.908333,
+                  "endMilliseconds": 46.0115
+                },
+                {
+                  "startMilliseconds": 46.386708,
+                  "endMilliseconds": 47.500416
+                },
+                {
+                  "startMilliseconds": 47.848541,
+                  "endMilliseconds": 48.931708
+                },
+                {
+                  "startMilliseconds": 49.288708,
+                  "endMilliseconds": 49.391208
+                },
+                {
+                  "startMilliseconds": 49.482666,
+                  "endMilliseconds": 49.776291
+                }
+              ],
+              "coveredMilliseconds": 31.171629,
+              "exclusiveResidualMilliseconds": 19.252662
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 40.515084,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.833084,
+                  "endMilliseconds": 0.860042
+                },
+                {
+                  "startMilliseconds": 0.865834,
+                  "endMilliseconds": 0.875875
+                },
+                {
+                  "startMilliseconds": 0.877917,
+                  "endMilliseconds": 1.356917
+                },
+                {
+                  "startMilliseconds": 1.383084,
+                  "endMilliseconds": 1.485917
+                },
+                {
+                  "startMilliseconds": 1.491542,
+                  "endMilliseconds": 1.503209
+                },
+                {
+                  "startMilliseconds": 1.50575,
+                  "endMilliseconds": 1.515709
+                },
+                {
+                  "startMilliseconds": 1.519167,
+                  "endMilliseconds": 1.524834
+                },
+                {
+                  "startMilliseconds": 1.526375,
+                  "endMilliseconds": 1.532209
+                },
+                {
+                  "startMilliseconds": 1.549584,
+                  "endMilliseconds": 2.554
+                },
+                {
+                  "startMilliseconds": 2.626584,
+                  "endMilliseconds": 3.9705
+                },
+                {
+                  "startMilliseconds": 4.472792,
+                  "endMilliseconds": 5.721334
+                },
+                {
+                  "startMilliseconds": 6.177334,
+                  "endMilliseconds": 7.3765
+                },
+                {
+                  "startMilliseconds": 7.731875,
+                  "endMilliseconds": 9.103959
+                },
+                {
+                  "startMilliseconds": 9.525375,
+                  "endMilliseconds": 10.706709
+                },
+                {
+                  "startMilliseconds": 11.101334,
+                  "endMilliseconds": 12.129875
+                },
+                {
+                  "startMilliseconds": 12.515125,
+                  "endMilliseconds": 13.513834
+                },
+                {
+                  "startMilliseconds": 13.882792,
+                  "endMilliseconds": 15.016542
+                },
+                {
+                  "startMilliseconds": 15.395125,
+                  "endMilliseconds": 16.407084
+                },
+                {
+                  "startMilliseconds": 16.761917,
+                  "endMilliseconds": 17.770334
+                },
+                {
+                  "startMilliseconds": 18.093,
+                  "endMilliseconds": 19.076334
+                },
+                {
+                  "startMilliseconds": 19.427209,
+                  "endMilliseconds": 20.451292
+                },
+                {
+                  "startMilliseconds": 20.80775,
+                  "endMilliseconds": 21.836209
+                },
+                {
+                  "startMilliseconds": 22.16675,
+                  "endMilliseconds": 23.130834
+                },
+                {
+                  "startMilliseconds": 23.425042,
+                  "endMilliseconds": 24.341584
+                },
+                {
+                  "startMilliseconds": 24.619459,
+                  "endMilliseconds": 25.568292
+                },
+                {
+                  "startMilliseconds": 25.877125,
+                  "endMilliseconds": 26.838959
+                },
+                {
+                  "startMilliseconds": 27.186084,
+                  "endMilliseconds": 28.229084
+                },
+                {
+                  "startMilliseconds": 28.621959,
+                  "endMilliseconds": 29.825209
+                },
+                {
+                  "startMilliseconds": 30.192375,
+                  "endMilliseconds": 31.311459
+                },
+                {
+                  "startMilliseconds": 31.666084,
+                  "endMilliseconds": 32.828959
+                },
+                {
+                  "startMilliseconds": 33.325375,
+                  "endMilliseconds": 34.623584
+                },
+                {
+                  "startMilliseconds": 35.013167,
+                  "endMilliseconds": 36.116334
+                },
+                {
+                  "startMilliseconds": 36.491542,
+                  "endMilliseconds": 37.60525
+                },
+                {
+                  "startMilliseconds": 37.953375,
+                  "endMilliseconds": 39.036542
+                },
+                {
+                  "startMilliseconds": 39.393542,
+                  "endMilliseconds": 39.496042
+                },
+                {
+                  "startMilliseconds": 39.5875,
+                  "endMilliseconds": 39.881125
+                }
+              ],
+              "coveredMilliseconds": 29.532547,
+              "exclusiveResidualMilliseconds": 10.982537
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        },
+        {
+          "sample": 3,
+          "observation": {
+            "available": true,
+            "request": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 54.783125,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.640667,
+                  "endMilliseconds": 0.660042
+                },
+                {
+                  "startMilliseconds": 0.66975,
+                  "endMilliseconds": 0.67875
+                },
+                {
+                  "startMilliseconds": 0.681625,
+                  "endMilliseconds": 1.100459
+                },
+                {
+                  "startMilliseconds": 1.122542,
+                  "endMilliseconds": 1.2175
+                },
+                {
+                  "startMilliseconds": 1.222209,
+                  "endMilliseconds": 1.23875
+                },
+                {
+                  "startMilliseconds": 1.241417,
+                  "endMilliseconds": 1.259167
+                },
+                {
+                  "startMilliseconds": 1.263542,
+                  "endMilliseconds": 1.275209
+                },
+                {
+                  "startMilliseconds": 1.277125,
+                  "endMilliseconds": 1.288542
+                },
+                {
+                  "startMilliseconds": 1.301459,
+                  "endMilliseconds": 2.242625
+                },
+                {
+                  "startMilliseconds": 14.56025,
+                  "endMilliseconds": 14.576959
+                },
+                {
+                  "startMilliseconds": 14.579667,
+                  "endMilliseconds": 14.587167
+                },
+                {
+                  "startMilliseconds": 14.588792,
+                  "endMilliseconds": 15.024792
+                },
+                {
+                  "startMilliseconds": 15.041,
+                  "endMilliseconds": 15.131167
+                },
+                {
+                  "startMilliseconds": 15.135542,
+                  "endMilliseconds": 15.144792
+                },
+                {
+                  "startMilliseconds": 15.146917,
+                  "endMilliseconds": 15.155042
+                },
+                {
+                  "startMilliseconds": 15.157917,
+                  "endMilliseconds": 15.162625
+                },
+                {
+                  "startMilliseconds": 15.163959,
+                  "endMilliseconds": 15.169209
+                },
+                {
+                  "startMilliseconds": 15.180334,
+                  "endMilliseconds": 16.182125
+                },
+                {
+                  "startMilliseconds": 16.246292,
+                  "endMilliseconds": 17.513667
+                },
+                {
+                  "startMilliseconds": 17.944584,
+                  "endMilliseconds": 19.079292
+                },
+                {
+                  "startMilliseconds": 21.757542,
+                  "endMilliseconds": 23.049167
+                },
+                {
+                  "startMilliseconds": 23.46675,
+                  "endMilliseconds": 24.647375
+                },
+                {
+                  "startMilliseconds": 25.045167,
+                  "endMilliseconds": 26.135542
+                },
+                {
+                  "startMilliseconds": 26.505834,
+                  "endMilliseconds": 27.510709
+                },
+                {
+                  "startMilliseconds": 27.879584,
+                  "endMilliseconds": 28.886542
+                },
+                {
+                  "startMilliseconds": 29.23,
+                  "endMilliseconds": 30.238334
+                },
+                {
+                  "startMilliseconds": 30.6095,
+                  "endMilliseconds": 31.626834
+                },
+                {
+                  "startMilliseconds": 31.962875,
+                  "endMilliseconds": 32.9825
+                },
+                {
+                  "startMilliseconds": 33.299709,
+                  "endMilliseconds": 34.287084
+                },
+                {
+                  "startMilliseconds": 34.608625,
+                  "endMilliseconds": 35.54075
+                },
+                {
+                  "startMilliseconds": 35.861,
+                  "endMilliseconds": 36.789542
+                },
+                {
+                  "startMilliseconds": 37.098542,
+                  "endMilliseconds": 38.0795
+                },
+                {
+                  "startMilliseconds": 38.437667,
+                  "endMilliseconds": 39.487875
+                },
+                {
+                  "startMilliseconds": 39.823875,
+                  "endMilliseconds": 40.840875
+                },
+                {
+                  "startMilliseconds": 41.154,
+                  "endMilliseconds": 42.329292
+                },
+                {
+                  "startMilliseconds": 42.785709,
+                  "endMilliseconds": 43.899709
+                },
+                {
+                  "startMilliseconds": 44.222375,
+                  "endMilliseconds": 45.198334
+                },
+                {
+                  "startMilliseconds": 45.477125,
+                  "endMilliseconds": 46.422834
+                },
+                {
+                  "startMilliseconds": 46.755834,
+                  "endMilliseconds": 47.844042
+                },
+                {
+                  "startMilliseconds": 48.210625,
+                  "endMilliseconds": 49.206917
+                },
+                {
+                  "startMilliseconds": 49.503625,
+                  "endMilliseconds": 50.470709
+                },
+                {
+                  "startMilliseconds": 50.779167,
+                  "endMilliseconds": 51.875792
+                },
+                {
+                  "startMilliseconds": 52.226459,
+                  "endMilliseconds": 53.260292
+                },
+                {
+                  "startMilliseconds": 53.609709,
+                  "endMilliseconds": 53.705917
+                },
+                {
+                  "startMilliseconds": 53.821042,
+                  "endMilliseconds": 54.12825
+                }
+              ],
+              "coveredMilliseconds": 29.834668,
+              "exclusiveResidualMilliseconds": 24.948457
+            },
+            "reader": {
+              "available": true,
+              "errors": [],
+              "envelopeMilliseconds": 40.902875,
+              "intervals": [
+                {
+                  "startMilliseconds": 0.694041,
+                  "endMilliseconds": 0.71075
+                },
+                {
+                  "startMilliseconds": 0.713458,
+                  "endMilliseconds": 0.720958
+                },
+                {
+                  "startMilliseconds": 0.722583,
+                  "endMilliseconds": 1.158583
+                },
+                {
+                  "startMilliseconds": 1.174791,
+                  "endMilliseconds": 1.264958
+                },
+                {
+                  "startMilliseconds": 1.269333,
+                  "endMilliseconds": 1.278583
+                },
+                {
+                  "startMilliseconds": 1.280708,
+                  "endMilliseconds": 1.288833
+                },
+                {
+                  "startMilliseconds": 1.291708,
+                  "endMilliseconds": 1.296416
+                },
+                {
+                  "startMilliseconds": 1.29775,
+                  "endMilliseconds": 1.303
+                },
+                {
+                  "startMilliseconds": 1.314125,
+                  "endMilliseconds": 2.315916
+                },
+                {
+                  "startMilliseconds": 2.380083,
+                  "endMilliseconds": 3.647458
+                },
+                {
+                  "startMilliseconds": 4.078375,
+                  "endMilliseconds": 5.213083
+                },
+                {
+                  "startMilliseconds": 7.891333,
+                  "endMilliseconds": 9.182958
+                },
+                {
+                  "startMilliseconds": 9.600541,
+                  "endMilliseconds": 10.781166
+                },
+                {
+                  "startMilliseconds": 11.178958,
+                  "endMilliseconds": 12.269333
+                },
+                {
+                  "startMilliseconds": 12.639625,
+                  "endMilliseconds": 13.6445
+                },
+                {
+                  "startMilliseconds": 14.013375,
+                  "endMilliseconds": 15.020333
+                },
+                {
+                  "startMilliseconds": 15.363791,
+                  "endMilliseconds": 16.372125
+                },
+                {
+                  "startMilliseconds": 16.743291,
+                  "endMilliseconds": 17.760625
+                },
+                {
+                  "startMilliseconds": 18.096666,
+                  "endMilliseconds": 19.116291
+                },
+                {
+                  "startMilliseconds": 19.4335,
+                  "endMilliseconds": 20.420875
+                },
+                {
+                  "startMilliseconds": 20.742416,
+                  "endMilliseconds": 21.674541
+                },
+                {
+                  "startMilliseconds": 21.994791,
+                  "endMilliseconds": 22.923333
+                },
+                {
+                  "startMilliseconds": 23.232333,
+                  "endMilliseconds": 24.213291
+                },
+                {
+                  "startMilliseconds": 24.571458,
+                  "endMilliseconds": 25.621666
+                },
+                {
+                  "startMilliseconds": 25.957666,
+                  "endMilliseconds": 26.974666
+                },
+                {
+                  "startMilliseconds": 27.287791,
+                  "endMilliseconds": 28.463083
+                },
+                {
+                  "startMilliseconds": 28.9195,
+                  "endMilliseconds": 30.0335
+                },
+                {
+                  "startMilliseconds": 30.356166,
+                  "endMilliseconds": 31.332125
+                },
+                {
+                  "startMilliseconds": 31.610916,
+                  "endMilliseconds": 32.556625
+                },
+                {
+                  "startMilliseconds": 32.889625,
+                  "endMilliseconds": 33.977833
+                },
+                {
+                  "startMilliseconds": 34.344416,
+                  "endMilliseconds": 35.340708
+                },
+                {
+                  "startMilliseconds": 35.637416,
+                  "endMilliseconds": 36.6045
+                },
+                {
+                  "startMilliseconds": 36.912958,
+                  "endMilliseconds": 38.009583
+                },
+                {
+                  "startMilliseconds": 38.36025,
+                  "endMilliseconds": 39.394083
+                },
+                {
+                  "startMilliseconds": 39.7435,
+                  "endMilliseconds": 39.839708
+                },
+                {
+                  "startMilliseconds": 39.954833,
+                  "endMilliseconds": 40.262041
+                }
+              ],
+              "coveredMilliseconds": 28.29396,
+              "exclusiveResidualMilliseconds": 12.608915
+            },
+            "requestSqlCount": 45,
+            "readerSqlCount": 36
+          }
+        }
+      ],
+      "observerControlMilliseconds": [
+        53.71375,
+        50.840542,
+        50.116
+      ],
+      "observerProjectionMilliseconds": [
+        0.07141700000011042,
+        0.0694999999996071,
+        0.07687500000065484
+      ],
+      "accounting": "exclusive wall time subtracts interval UNION; overlapping envelopes are not additive; invalid coverage is unavailable and never clamped"
+    },
+    "limitations": [
+      "Synthetic document embeddings; real-query mode verifies the pinned installed model without downloading it.",
+      "Actual SQLite spans include compilation/acquisition/native SQL and row construction; reader-exclusive-SQL residual includes validation/scoring/top-k plus transaction/session/reader control, not pure math.",
+      "Stage mode alternates observed/control order for3 matched warm query pairs: 3 primary observed requests and3 separately labeled observer-disabled controls. Tracer construction/completion is inside observed request clocks; interval projection is timed separately outside the request.",
+      "Parent CPU uses process.cpuUsage; external process-tree RSS samples (effective interval retained in telemetry) can miss peaks and cover the whole query phase. See sampler availability, failures and maximum gap.",
+      "First-use is the first retrieval after fixture build, not cold process or filesystem cache.",
+      "Independent fixture-oracle work runs after the query phase and external sampler have stopped.",
+      "No native comparison or qualification; crypto refresh and Linux paired captures remain required."
+    ]
+  },
+  "budgets": {
+    "performance": {
+      "incrementalBuildLinearMaximumMilliseconds": 3000,
+      "incrementalBuildMaximumMilliseconds": 3000,
+      "incrementalBuildSameRunnerMaximumMilliseconds": 1255.4908752000001,
+      "incrementalBuildWithinBudget": true,
+      "initialBuildMaximumMilliseconds": 15000,
+      "initialBuildWithinBudget": true,
+      "semanticQueryP95MaximumMilliseconds": 750,
+      "semanticQueryWithinBudget": true,
+      "sharedRunnerAdjustmentApplied": false
+    }
+  },
+  "database": {
+    "bytesAfterIncremental": 42946560,
+    "bytesAfterInitial": 32227328,
+    "compactedBytesAfterIncremental": 30908416,
+    "compactedBytesAfterInitial": 30908416,
+    "incrementalBytes": 10719232,
+    "incrementalCompactedBytes": 0,
+    "chunkMappings": 10000,
+    "generations": 1,
+    "vectorValues": 10000
+  },
+  "environment": {
+    "architecture": "arm64",
+    "bun": "1.4.4",
+    "operatingSystem": "darwin"
+  },
+  "fixture": {
+    "dimensions": 384,
+    "documents": 10000,
+    "querySamples": 3
+  },
+  "scenarios": {
+    "incrementalBuild": {
+      "embeddedChunks": 1,
+      "milliseconds": 553.659333,
+      "peakRssBytes": 257492528,
+      "reusedChunks": 9999
+    },
+    "initialBuild": {
+      "embeddedChunks": 10000,
+      "milliseconds": 2092.484792,
+      "peakRssBytes": 325616720
+    },
+    "semanticQuery": {
+      "p50Milliseconds": 50.450041,
+      "p95Milliseconds": 54.804959,
+      "peakRssBytes": 259704368,
+      "resultCount": 25,
+      "rssDeltaBytes": 115130848,
+      "rssAfterBytes": 259704368,
+      "rssBeforeBytes": 144573520,
+      "samples": 3
+    }
+  },
+  "suite": "recall-vector-storage-v1",
+  "version": 1
+}

@@ -843,14 +843,11 @@ export const readSelectedSemanticVectorScores = Effect.fn('vectorIndex.readSelec
               ? mergeNativeVectorPage(
                   nativeScorer.value,
                   normalizedQuery.value,
-                  EffectArray.map(rows, row => ({
-                    id: row.chunk_id,
-                    uri: row.uri,
-                    vector: bytesFromSqlBlob(row.vector),
-                  })),
+                  rows,
                   active.dimensions,
                   limit,
                   best,
+                  bytesFromSqlBlob,
                 ).pipe(
                   Effect.mapError(cause => VectorIndexCorrupt.make({message: cause.message, modelId: manifest.id})),
                 )

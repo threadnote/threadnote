@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "status": "first-real-case-pass-not-qualified",
+  "sourceCommit": "364fe1e4414ce0acb221fb55f1ea8f0dc1cb3a06",
+  "sourceDirty": false,
+  "invocation": {
+    "runner": "scripts/benchmark-recall-vectors.ts",
+    "environment": {
+      "THREADNOTE_NATIVE_VECTOR_EXPERIMENT": "1"
+    },
+    "documents": 10000,
+    "distribution": "dense",
+    "samples": 3,
+    "stageAttribution": true,
+    "inference": "real-query",
+    "modelSha256": "f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804"
+  },
+  "rawArtifactSha256": "4dfff72f635f5d85ca5c290c09b3beaaf66c56f2413766bbd36cdbfcb89db96a",
+  "retainedNativeLibrarySha256": "270eba53205ab34a88b9fe60444375a27689eabcf726f449d7c6b4d11c4ad127",
+  "firstUseMilliseconds": [2874.981791],
+  "warmMilliseconds": [49.621459, 50.450041, 54.804959],
+  "observerControlMilliseconds": [53.71375, 50.840542, 50.116],
+  "correctnessDigest": "83a0d03ee40934af1a314a48dcb164bbe93ee7ed78ca28ee358e76bf6fe2c882",
+  "measurements": {
+    "parent-peak-rss": {
+      "maximum": 259704368,
+      "mean": 259704368,
+      "minimum": 259704368,
+      "name": "parent-peak-rss",
+      "p50": 259704368,
+      "p95": 259704368,
+      "p99": 259704368,
+      "samples": 1,
+      "unit": "bytes"
+    },
+    "process-tree-sampled-peak-rss": {
+      "maximum": 578617344,
+      "mean": 578617344,
+      "minimum": 578617344,
+      "name": "process-tree-sampled-peak-rss",
+      "p50": 578617344,
+      "p95": 578617344,
+      "p99": 578617344,
+      "samples": 1,
+      "unit": "bytes"
+    }
+  },
+  "qualification": false,
+  "limitations": [
+    "Three diagnostic samples on a shared loaded macOS host; no paired TypeScript comparison or R5 claim.",
+    "Native library checksum was retained after capture; the unchanged runner records its existing source fences and scalar oracle.",
+    "Cancellation drains the bounded original task; it does not claim immediate native abort or a scheduling deadline."
+  ]
+}

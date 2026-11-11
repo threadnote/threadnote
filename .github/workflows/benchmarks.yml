@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_native_recall_vector_pair:
+        description: Compare P2 TypeScript and experimental Rust serially on one Linux VM
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '23 3 * * 1'
 
@@ -987,6 +992,89 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
+
+  recall-vector-native-pair:
+    name: Recall vectors · same-VM P2/Rust experiment
+    if: github.event_name == 'workflow_dispatch' && inputs.include_native_recall_vector_pair
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      P2_SOURCE: 217edfe1e2d3d358a4ff761bab93fb26f27ff98d
+      MODEL_RELATIVE_PATH: apps/threadnote/embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Prepare exact sources and native experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git worktree add --detach "$RUNNER_TEMP/p3-vector-reference" "$P2_SOURCE"
+          bun install --frozen-lockfile
+          (cd "$RUNNER_TEMP/p3-vector-reference" && bun install --frozen-lockfile)
+          rustup toolchain install 1.80.1 --profile minimal
+          bun scripts/build-native-vector-search.ts
+          cargo +1.80.1 test --locked --manifest-path packages/inference/native-vector/Cargo.toml --target-dir .context/native-vector-target
+          THREADNOTE_NATIVE_VECTOR_EXPERIMENT=1 bun --bun vitest run packages/inference/test/native-vector-search.test.ts packages/inference/test/native-vector-search-boundary.test.ts
+          test -z "$(git status --porcelain=v1)"
+          test -z "$(git -C "$RUNNER_TEMP/p3-vector-reference" status --porcelain=v1)"
+          mkdir -p "$RUNNER_TEMP/p3-vector-pair"
+          lscpu --json > "$RUNNER_TEMP/p3-vector-pair/host.json"
+          bun --version > "$RUNNER_TEMP/p3-vector-pair/bun-version.txt"
+          rustc +1.80.1 --version > "$RUNNER_TEMP/p3-vector-pair/rust-version.txt"
+
+      - name: Capture counterbalanced serial pairs with real pinned query inference
+        timeout-minutes: 100
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$GITHUB_WORKSPACE/apps/threadnote/test/evaluation/candidates/native-performance-kernels/vector-native/capture.ts"
+          for replica in 1 2 3; do
+            order="typescript rust"
+            if [ "$replica" = 2 ]; then order="rust typescript"; fi
+            for documents in 10000 100000; do
+              for distribution in dense tied; do
+                for backend in $order; do
+                  checkout="$GITHUB_WORKSPACE"
+                  arm=candidate
+                  expected_source="$GITHUB_SHA"
+                  if [ "$backend" = typescript ]; then
+                    checkout="$RUNNER_TEMP/p3-vector-reference"
+                    arm=baseline
+                    expected_source="$P2_SOURCE"
+                  fi
+                  test "$(git -C "$checkout" rev-parse HEAD)" = "$expected_source"
+                  model_file="$checkout/$MODEL_RELATIVE_PATH"
+                  test -f "$model_file"
+                  output="$RUNNER_TEMP/p3-vector-pair/${documents}-${distribution}-replica-${replica}-${backend}.json"
+                  bun "$wrapper" --checkout "$checkout" --backend "$backend" \
+                    --pair "$replica" --arm "$arm" --documents "$documents" \
+                    --distribution "$distribution" --samples 30 --stage-attribution \
+                    --model bge-small-en-v1.5-q8 --model-file "$model_file" --output "$output"
+                done
+              done
+            done
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: recall-vector-native-pair-${{ github.run_id }}
+          path: ${{ runner.temp }}/p3-vector-pair/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove experiment worktree and capture outputs
+        if: always()
+        shell: bash
+        run: |
+          git worktree remove --force "$RUNNER_TEMP/p3-vector-reference" || true
+          rm -rf -- "$RUNNER_TEMP/p3-vector-pair"
 
   recall-vector-native-linux:
     name: Recall vectors · Linux serial diagnostic capture

@@ -1,6 +1,6 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Effect, Fiber, Layer, Path, Ref} from 'effect';
-import {NativeVectorSearch, makeNativeVectorSearch} from '../src/native/vector-search.js';
+import {NativeVectorSearch, makeNativeVectorSearch, mergeNativeVectorPage} from '../src/native/vector-search.js';
 import {offerBoundedBest, searchExactVectorBlobs, type VectorSearchResult} from '../src/vector-search.js';
 
 function bytes(x: number, y: number): Uint8Array {
@@ -65,6 +65,23 @@ describe.runIf(process.env.THREADNOTE_NATIVE_VECTOR_EXPERIMENT === '1')(
               };
             });
           },
+        });
+        const malformed = yield* Effect.result(
+          mergeNativeVectorPage(
+            adapter,
+            [1, 0],
+            [{chunk_id: 'bad-bytes', uri: 'fixture', vector: 'text'}],
+            2,
+            25,
+            [],
+            () => {
+              throw new Error('Stored vector is not a binary SQLite value.');
+            },
+          ),
+        );
+        expect(malformed).toMatchObject({
+          _tag: 'Failure',
+          failure: {message: 'Stored vector is not a binary SQLite value.'},
         });
         const published = yield* Ref.make(false);
         const fiber = yield* adapter.search([1, 0], [{id: 'a', vector: bytes(1, 0)}], 2, 1).pipe(

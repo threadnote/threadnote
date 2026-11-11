@@ -82,23 +82,31 @@ interface NativePageMatch extends VectorSearchResult {
 export function mergeNativeVectorPage(
   scorer: NativeVectorSearchShape,
   query: readonly number[],
-  records: readonly (VectorBlobRecord & {readonly uri: string})[],
+  rows: readonly {readonly chunk_id: string; readonly uri: string; readonly vector: unknown}[],
   dimensions: number,
   limit: number,
   best: NativePageMatch[],
+  decode: (value: unknown) => Uint8Array,
 ) {
-  return scorer.search(query, records, dimensions, limit).pipe(
-    Effect.map(results => {
-      const rowsById = new Map(EffectArray.map(records, row => [row.id, row] as const));
-      for (const result of results)
-        offerBoundedBest(
-          best,
-          {...result, uri: rowsById.get(result.id)!.uri},
-          limit,
-          (left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
-        );
-      return best;
-    }),
+  return Effect.try({
+    try: () => EffectArray.map(rows, row => ({id: row.chunk_id, uri: row.uri, vector: decode(row.vector)})),
+    catch: cause => NativeVectorSearchError.make({message: cause instanceof Error ? cause.message : String(cause)}),
+  }).pipe(
+    Effect.flatMap(records =>
+      scorer.search(query, records, dimensions, limit).pipe(
+        Effect.map(results => {
+          const rowsById = new Map(EffectArray.map(records, row => [row.id, row] as const));
+          for (const result of results)
+            offerBoundedBest(
+              best,
+              {...result, uri: rowsById.get(result.id)!.uri},
+              limit,
+              (left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+            );
+          return best;
+        }),
+      ),
+    ),
   );
 }
 
