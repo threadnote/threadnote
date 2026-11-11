@@ -522,6 +522,38 @@ effectIt.effect(
         '--team',
         'default',
       ]).pipe(Effect.provideService(SystemInfo, donorSystem));
+      const standalone = system.environment().THREADNOTE_STANDALONE_SMOKE;
+      if (standalone) {
+        const result = yield* runCommandEffect(
+          standalone,
+          [
+            'workflow-automation',
+            'task-author',
+            '--operation',
+            'share',
+            '--caller-cwd',
+            donor.repo,
+            '--authoring-ref',
+            readyPlan.authoringRef,
+            '--team',
+            'default',
+          ],
+          {
+            cwd: donor.repo,
+            env: {
+              ...system.environment(),
+              THREADNOTE_HOME: donor.home,
+              THREADNOTE_ACCOUNT: donorConfig.account,
+              THREADNOTE_USER: donorConfig.user,
+              THREADNOTE_AGENT_ID: donorConfig.agentId,
+            },
+            timeoutMs: 30_000,
+            maxOutputBytes: 16_000,
+          },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({sharedPlanRef: published.sharedPlanRef});
+      }
       const donorPlanRead = yield* donorAuthor({
         command: 'read',
         authoringRef: readyPlan.authoringRef,
@@ -669,6 +701,43 @@ effectIt.effect(
         '--review-outcome',
         'accepted',
       ]).pipe(Effect.provideService(SystemInfo, recipientSystem));
+      if (standalone) {
+        const result = yield* runCommandEffect(
+          standalone,
+          [
+            'workflow-automation',
+            'task-start',
+            '--caller-cwd',
+            recipient.repo,
+            '--shared-plan-ref',
+            published.sharedPlanRef,
+            '--installation-target',
+            'codex',
+            '--bindings-file',
+            bindingsFile,
+            '--delivery',
+            'local',
+            '--response',
+            recipientStart.userResponse,
+            '--review-outcome',
+            'accepted',
+          ],
+          {
+            cwd: recipient.repo,
+            env: {
+              ...system.environment(),
+              THREADNOTE_HOME: recipient.home,
+              THREADNOTE_ACCOUNT: recipientConfig.account,
+              THREADNOTE_USER: recipientConfig.user,
+              THREADNOTE_AGENT_ID: recipientConfig.agentId,
+            },
+            timeoutMs: 30_000,
+            maxOutputBytes: 32_000,
+          },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({taskRef: started.taskRef});
+      }
       expect((yield* readNativeWorkflowState(recipientConfig, started.taskRef))?.revision).toBe(
         recipientState.revision,
       );
