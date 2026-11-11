@@ -129,7 +129,7 @@ export const nativeCycleRequestSchema = Schema.Struct({
   ),
   offsetBytes: Schema.optionalKey(Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   sourceDigest: Schema.optionalKey(digest),
-  maxBytes: Schema.optionalKey(Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1024, maximum: 65_536}))),
+  maxBytes: Schema.optionalKey(Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1024, maximum: 66_048}))),
 });
 const nativeCycleReadOnlyCommands = new Set([
   'inspect',
@@ -285,6 +285,8 @@ export const runNativeCycle = <R>(
     const request = yield* Schema.decodeUnknownEffect(nativeCycleRequestSchema, {onExcessProperty: 'error'})(
       input,
     ).pipe(Effect.mapError(() => fail('invalid-request', 'Provide a closed native cycle request.')));
+    if (request.command !== 'packet' && request.maxBytes !== undefined && request.maxBytes > 65_536)
+      return yield* fail('invalid-request', 'Only packet responses may reserve an additional 512 envelope bytes.');
     if (
       (request.protocolVersion === 2) !== !!request.ordinaryMergeQualificationV1 ||
       (request.ordinaryMergeQualificationV1 && (request.command !== 'snapshot' || request.baseRequalification))

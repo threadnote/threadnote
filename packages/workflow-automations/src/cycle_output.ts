@@ -11,7 +11,7 @@ const outputCapacity = (message: string): never => {
 };
 
 export const nativeCyclePacketRequestOptions = (budgetBytes: number | undefined) =>
-  budgetBytes === undefined ? {} : {maxBytes: Math.min(budgetBytes + 512, 65_536)};
+  budgetBytes === undefined ? {} : {maxBytes: Math.min(budgetBytes + 512, 66_048)};
 
 export const nativeCyclePacketRecovery = (packet: Readonly<Record<string, unknown>>, phaseId: string) => {
   if (
@@ -45,8 +45,10 @@ export const nativeCyclePacketFailure = (packet: Readonly<Record<string, unknown
     packet.reason === 'response-budget-exceeded'
   )
     return undefined;
-  const code = typeof packet.reason === 'string' ? packet.reason : 'packet-unavailable';
-  return {code, message: code === 'packet-unavailable' ? 'The packet is unavailable.' : code};
+  return {
+    code: 'packet-unavailable',
+    message: typeof packet.reason === 'string' ? packet.reason : 'The packet is unavailable.',
+  };
 };
 
 const isContinuationByte = (byte: number): boolean => (byte & 0xc0) === 0x80;

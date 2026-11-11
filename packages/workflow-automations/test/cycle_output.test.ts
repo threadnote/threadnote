@@ -2,7 +2,12 @@ import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {boundNativeCycleOutput, nativeCycleTextPage} from '../src/cycle_output.js';
+import {
+  boundNativeCycleOutput,
+  nativeCyclePacketFailure,
+  nativeCyclePacketRequestOptions,
+  nativeCycleTextPage,
+} from '../src/cycle_output.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -95,6 +100,17 @@ describe('native cycle text paging', () => {
 });
 
 describe('native cycle output budgeting', () => {
+  it('reserves the response envelope for the full packet ceiling and preserves packet failure codes', () => {
+    expect(nativeCyclePacketRequestOptions(65_536)).toEqual({maxBytes: 66_048});
+    expect(nativeCyclePacketFailure({available: false, reason: 'graph-or-anchor-proof-unavailable'})).toEqual({
+      code: 'packet-unavailable',
+      message: 'graph-or-anchor-proof-unavailable',
+    });
+    expect(nativeCyclePacketFailure({available: false})).toEqual({
+      code: 'packet-unavailable',
+      message: 'The packet is unavailable.',
+    });
+  });
   it('retains failure semantics and exact detail identity when a failed report is oversized', () => {
     const result = boundNativeCycleOutput(
       {status: 'error', code: 'invalid-cycle-review', report: Effect.pipe('x', EffectString.repeat(8000))},

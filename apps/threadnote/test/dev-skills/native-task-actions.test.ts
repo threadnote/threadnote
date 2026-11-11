@@ -6765,6 +6765,51 @@ describe('native task actions', () => {
       expect(largePacketBytes).toBeGreaterThan(16_384);
       expect(largePacketBytes).toBeLessThanOrEqual(48_000);
 
+      const ceilingRefs = Array.from(
+        {length: 16},
+        (_, index) => `threadnote://fixture/spec/${index}-${EffectString.repeat(1_500)('r')}`,
+      );
+      let remaining =
+        65_536 -
+        new TextEncoder().encode(
+          JSON.stringify({...object(largeWork.packet), checks: largePacket.checks, detailRefs: ceilingRefs}),
+        ).byteLength;
+      expect(remaining).toBeGreaterThan(0);
+      for (let index = 0; index < ceilingRefs.length && remaining > 0; index += 1) {
+        const room = 4_096 - new TextEncoder().encode(ceilingRefs[index]).byteLength;
+        const added = Math.min(remaining, room);
+        ceilingRefs[index] += EffectString.repeat(added)('r');
+        remaining -= added;
+      }
+      expect(remaining).toBe(0);
+      const ceilingPacket = {...largePacket, budgetBytes: 65_536, detailRefs: ceilingRefs};
+      const ceilingResponse = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...ceilingPacket,
+        }),
+      );
+      const ceilingWork = object(ceilingResponse.structuredContent);
+      expect(ceilingWork.status).toBe('ready');
+      expect(new TextEncoder().encode(JSON.stringify(ceilingWork.packet)).byteLength).toBe(65_536);
+
+      const shortResponse = object(
+        yield* mcp.invokeTool('workflow_task_work', {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          ...ceilingPacket,
+          budgetBytes: 65_535,
+        }),
+      );
+      expect(shortResponse.structuredContent).toMatchObject({
+        status: 'unavailable',
+        reason: 'packet-budget-exceeded',
+        requiredBytes: 65_536,
+      });
+      const nonPacket = yield* f.call({...f.base('cycle'), command: 'inspect', maxBytes: 66_048}).pipe(Effect.result);
+      expect(nonPacket).toMatchObject({failure: {code: 'invalid-request'}});
+
       const smallResponse = object(
         yield* mcp.invokeTool('workflow_task_work', {
           runId: 'native-run',
