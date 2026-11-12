@@ -202,9 +202,13 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
       serviceCanary.fill(0xa5);
       let serviceResolved = false,
         serviceLookupCode = 0;
+      let serviceValidationStage:
+        'computer' | 'lookup' | 'canary' | 'header' | 'bounds' | 'native-validity' | 'native-length' | 'resolved' =
+        'computer';
       if (setup.symbols.GetComputerNameW(computer, computerLength) === 0)
         serviceLookupCode = setup.symbols.GetLastError();
       else if (computerLength[0] > 0 && computerLength[0] < computer.length && computer[computerLength[0]] === 0) {
+        serviceValidationStage = 'lookup';
         if (
           security.symbols.LookupAccountNameW(
             computer,
@@ -217,16 +221,28 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
           ) === 0
         )
           serviceLookupCode = setup.symbols.GetLastError();
-        else
-          serviceResolved =
-            serviceCanary.every(value => value === 0xa5) &&
-            serviceSidLength[0] >= 8 &&
-            serviceSidLength[0] <= serviceSid.length &&
-            serviceSid[0] === 1 &&
-            serviceSid[1] <= 15 &&
-            serviceSidLength[0] === 8 + serviceSid[1] * 4 &&
-            security.symbols.IsValidSid(serviceAddress) !== 0 &&
-            security.symbols.GetLengthSid(serviceAddress) === serviceSidLength[0];
+        else {
+          // cbSid is input capacity; only insufficient-buffer failure promises a required output size.
+          // Authenticate the actual SID span from the retained header before either native SID reader.
+          serviceValidationStage = 'canary';
+          if (serviceCanary.every(value => value === 0xa5)) {
+            serviceValidationStage = 'header';
+            if (serviceSid[0] === 1 && serviceSid[1] <= 15) {
+              const sidBytes = 8 + serviceSid[1] * 4;
+              serviceValidationStage = 'bounds';
+              if (sidBytes <= serviceSid.length) {
+                serviceValidationStage = 'native-validity';
+                if (security.symbols.IsValidSid(serviceAddress) !== 0) {
+                  serviceValidationStage = 'native-length';
+                  if (security.symbols.GetLengthSid(serviceAddress) === sidBytes) {
+                    serviceResolved = true;
+                    serviceValidationStage = 'resolved';
+                  }
+                }
+              }
+            }
+          }
+        }
       }
       type Sample = {
         edge: number;
@@ -321,6 +337,7 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
                 defaultOwnerIsUser,
                 serviceResolved,
                 serviceLookupCode,
+                serviceValidationStage,
                 incomplete: observation.incomplete,
                 samples,
               }) +

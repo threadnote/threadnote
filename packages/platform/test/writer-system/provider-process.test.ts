@@ -1,9 +1,9 @@
-import {dlopen} from 'bun:ffi';
+import {dlopen, type FFIFunction} from 'bun:ffi';
 import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine} from '../../src/writer-system/provider-windows.js';
 import * as EffectString from 'effect/String';
 import * as EffectArray from 'effect/Array';
-import {expect, it} from 'vitest';
+import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
 import {
@@ -15,6 +15,63 @@ import {
   runtimeNativePlatformSupport,
   type RuntimeOwnedProviderProcess,
 } from '../../src/system.js';
+
+// Borrow only the original Job while its production owner retains it. No handles enter emitted metadata.
+const jobSample = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        incomplete: boolean;
+        getLastError(): number;
+        setLastError(code: number): void;
+        called(name: string, args: readonly unknown[], result: unknown): void;
+      }
+    | undefined,
+}));
+vi.mock('bun:ffi', async importOriginal => {
+  const real = await importOriginal<typeof import('bun:ffi')>();
+  return {
+    ...real,
+    dlopen: <Fns extends Record<string, FFIFunction>>(name: Parameters<typeof real.dlopen>[0], symbols: Fns) => {
+      const library = real.dlopen(name, symbols),
+        observed = new Map<string, (...args: unknown[]) => unknown>();
+      for (const key of ['CreateJobObjectW', 'QueryInformationJobObject', 'TerminateJobObject', 'CloseHandle']) {
+        const original: unknown = Reflect.get(library.symbols, key);
+        if (typeof original !== 'function') continue;
+        observed.set(key, (...args: unknown[]) => {
+          const result: unknown = Reflect.apply(original, undefined, args);
+          const active = jobSample.active;
+          if (active) {
+            let lastError: number | undefined;
+            try {
+              lastError = active.getLastError();
+              // Failed native calls still belong to the caller; make no secondary observations of them.
+              if (result !== 0 && result !== 0n) active.called(key, args, result);
+            } catch {
+              active.incomplete = true;
+            } finally {
+              try {
+                if (lastError !== undefined) active.setLastError(lastError);
+              } catch {
+                active.incomplete = true;
+              }
+            }
+          }
+          return result;
+        });
+      }
+      return {
+        ...library,
+        symbols: new Proxy(library.symbols, {
+          get(target, key, receiver) {
+            return typeof key === 'string' && observed.has(key)
+              ? observed.get(key)
+              : Reflect.get(target, key, receiver);
+          },
+        }),
+      };
+    },
+  };
+});
 
 const supported = runtimeNativePlatformSupport().providerTree;
 
@@ -223,9 +280,100 @@ it.skipIf(!supported)(
       ? dlopen('kernel32.dll', {
           OpenProcess: {args: ['u32', 'i32', 'u32'], returns: 'u64'},
           WaitForSingleObject: {args: ['u64', 'u32'], returns: 'u32'},
+          IsProcessInJob: {args: ['u64', 'u64', 'buffer'], returns: 'i32'},
+          GetLastError: {args: [], returns: 'u32'},
+          SetLastError: {args: ['u32'], returns: 'void'},
           CloseHandle: {args: ['u64'], returns: 'i32'},
         })
       : undefined;
+    type JobQuery = {
+      active: number;
+      total: number;
+      terminatedByLimit: number;
+      childMember: 'yes' | 'no' | 'unknown';
+      membershipCode: number;
+      childWait: number;
+    };
+    let childHandle = 0n,
+      originalJob = 0n,
+      jobClosed = false,
+      queryCount = 0,
+      terminationCalls = 0,
+      beforeTermination: JobQuery | undefined,
+      firstAfterTermination: JobQuery | undefined,
+      lastAfterTermination: JobQuery | undefined,
+      firstZeroAfterTermination: JobQuery | undefined,
+      drainedQuery: JobQuery | undefined,
+      drainedChildWait: number | undefined;
+    const priorJobSample = jobSample.active;
+    const observation: NonNullable<typeof jobSample.active> = {
+      incomplete: false,
+      getLastError() {
+        if (!kernel) throw new Error('Windows observation has no native kernel boundary.');
+        return kernel.symbols.GetLastError();
+      },
+      setLastError(code) {
+        if (!kernel) throw new Error('Windows observation has no native kernel boundary.');
+        kernel.symbols.SetLastError(code);
+      },
+      called(name, args, result) {
+        if (name === 'CreateJobObjectW') {
+          if (originalJob !== 0n || typeof result !== 'bigint' || result === 0xffffffffffffffffn) {
+            observation.incomplete = true;
+            return;
+          }
+          originalJob = result;
+          return;
+        }
+        if (args[0] !== originalJob || originalJob === 0n) return;
+        if (name === 'CloseHandle') {
+          jobClosed = true;
+          return;
+        }
+        if (jobClosed) {
+          observation.incomplete = true;
+          return;
+        }
+        if (name === 'TerminateJobObject') {
+          terminationCalls++;
+          return;
+        }
+        if (name !== 'QueryInformationJobObject' || childHandle === 0n || !kernel) return;
+        if (
+          typeof result !== 'number' ||
+          result === 0 ||
+          args[1] !== 1 ||
+          !(args[2] instanceof Uint8Array) ||
+          args[2].byteLength !== 48 ||
+          args[3] !== 48 ||
+          !(args[4] instanceof Uint32Array) ||
+          args[4][0] !== 48 ||
+          ++queryCount > 10000
+        ) {
+          observation.incomplete = true;
+          return;
+        }
+        const view = new DataView(args[2].buffer, args[2].byteOffset, args[2].byteLength),
+          member = new Int32Array(1),
+          membershipResult = kernel.symbols.IsProcessInJob(childHandle, originalJob, member),
+          membershipCode = membershipResult === 0 ? kernel.symbols.GetLastError() : 0,
+          query: JobQuery = {
+            active: view.getUint32(40, true),
+            total: view.getUint32(36, true),
+            terminatedByLimit: view.getUint32(44, true),
+            childMember: membershipResult === 0 ? 'unknown' : member[0] !== 0 ? 'yes' : 'no',
+            membershipCode,
+            childWait: kernel.symbols.WaitForSingleObject(childHandle, 0),
+          };
+        if (terminationCalls === 0) beforeTermination = query;
+        else {
+          firstAfterTermination ??= query;
+          lastAfterTermination = query;
+          if (query.active === 0) firstZeroAfterTermination ??= query;
+        }
+      },
+    };
+    if (windows) jobSample.active = observation;
     const provider = (() => {
       try {
         return spawn(
@@ -234,11 +382,11 @@ it.skipIf(!supported)(
             : `Bun.spawn([process.execPath,'-e',${JSON.stringify(childSource)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});setTimeout(()=>process.exit(7),100);`,
         );
       } catch (error) {
+        jobSample.active = priorJobSample;
         kernel?.close();
         throw error;
       }
     })();
-    let childHandle = 0n;
     const reader = provider.stdout.getReader();
     let output = '';
     const collect = (async () => {
@@ -291,10 +439,15 @@ it.skipIf(!supported)(
         o => o.leaderExitCode === 7,
       );
       // Query the same retained creation-authenticated HANDLE after leader exit, before backend-state assertions.
-      if (kernel) expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(258);
+      if (kernel) {
+        expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(258);
+        expect(beforeTermination?.childMember).toBe('yes');
+        expect(beforeTermination?.active).toBeGreaterThanOrEqual(1);
+      }
       expect(leaderExited.state).toBe('running');
       expect(leaderExited.stdioClosed).toBe(false);
       runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
+      if (kernel) expect(terminationCalls).toBe(1);
       await provider.closeInput();
       await collect;
       expect(await errors).toBe('');
@@ -303,12 +456,18 @@ it.skipIf(!supported)(
         o => o.state === 'drained',
       );
       expect(final.leaderExitCode).toBe(7);
-      if (kernel) expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(0);
+      if (kernel) {
+        drainedQuery = lastAfterTermination;
+        drainedChildWait = kernel.symbols.WaitForSingleObject(childHandle, 0);
+        expect(drainedQuery?.active).toBe(0);
+        expect(drainedChildWait).toBe(0);
+        expect(observation.incomplete).toBe(false);
+      }
       passed = true;
     } finally {
       try {
         await stop(provider);
-        if (windows && !passed) {
+        if (windows && (!passed || observation.incomplete || !jobClosed)) {
           const settled = await Promise.allSettled([collect, errors]),
             stderr = settled[1].status === 'fulfilled' ? settled[1].value : '',
             failure =
@@ -320,6 +479,17 @@ it.skipIf(!supported)(
               JSON.stringify({
                 nativeStage: failure?.[1] ?? 'unobserved',
                 nativeCode: failure ? Number(failure[2]) : null,
+                originalJobObserved: originalJob !== 0n,
+                originalJobClosed: jobClosed,
+                jobObservationIncomplete: observation.incomplete,
+                queryCount,
+                terminationCalls,
+                beforeTermination,
+                firstAfterTermination,
+                firstZeroAfterTermination,
+                lastAfterTermination,
+                drainedQuery,
+                drainedChildWait,
                 receiptObserved: /"childIdentity":"win32:[0-9]+"/u.test(output),
                 childReadyObserved: EffectString.includes('descendant-ready')(output),
                 stdoutBytes: new TextEncoder().encode(output).length,
@@ -329,7 +499,12 @@ it.skipIf(!supported)(
               String.fromCharCode(10),
           );
         }
+        if (windows) {
+          expect(observation.incomplete).toBe(false);
+          expect(jobClosed).toBe(true);
+        }
       } finally {
+        jobSample.active = priorJobSample;
         if (kernel) {
           if (childHandle !== 0n && childHandle !== 0xffffffffffffffffn)
             expect(kernel.symbols.CloseHandle(childHandle)).toBe(1);
