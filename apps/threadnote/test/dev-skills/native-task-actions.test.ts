@@ -212,21 +212,43 @@ const attemptSimulatedTaskWatch = (
       FileSystem.FileSystem | Path.Path | SecureRandom.SecureRandom
     >();
     let collectorSpawns = 0;
+    let hostPreflights = 0;
+    let collectorAlive = true;
+    let remoteBaseBranch = 'main';
     const fakeCommands = CommandExecutor.of({
       ...commands,
       execute: (executable, args, options) => {
-        if (executable === wakeup.executable && args.length === 2 && args[0] === 'queue' && args[1] === '--help')
+        if (executable === wakeup.executable && args.length === 2 && args[0] === 'queue' && args[1] === '--help') {
+          hostPreflights += 1;
           return Effect.succeed({
             exitCode: 0,
             stderr: '',
             stdout:
               'Usage: codex queue [OPTIONS]\n\nOptions:\n      --thread <THREAD>\n          Thread UUID\n      --message <MESSAGE>\n          Message body\n',
           });
+        }
+        if (executable === 'gh' && args.includes('--jq')) {
+          const url = new URL(prUrl);
+          const [, owner, repo, , number] = EffectString.split(url.pathname, '/');
+          return Effect.succeed({
+            exitCode: 0,
+            stderr: '',
+            stdout: JSON.stringify({
+              number: Number(number),
+              url: prUrl,
+              baseRepository: `${owner}/${repo}`,
+              headRepository: `fixture-fork/${repo}`,
+              baseBranch: remoteBaseBranch,
+              headBranch: `feature/${phaseId}`,
+            }),
+          });
+        }
         return commands.execute(executable, args, options);
       },
       spawnDetached: () =>
         Effect.gen(function* () {
           collectorSpawns += 1;
+          collectorAlive = true;
           const starting = yield* readNativeWatch(f.config, watchId);
           if (!starting?.envelope.collector) return false;
           yield* writeNativeWatch(
@@ -250,7 +272,7 @@ const attemptSimulatedTaskWatch = (
     });
     const fakeSystem = SystemInfo.of({
       ...system,
-      isProcessRunning: pid => pid === 77777,
+      isProcessRunning: pid => pid === 77777 && collectorAlive,
       processStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
       canonicalProcessStartIdentity: () => Effect.succeed(EffectOption.getOrUndefined(EffectOption.none<string>())),
     });
@@ -271,7 +293,26 @@ const attemptSimulatedTaskWatch = (
       Effect.provideService(SystemInfo, fakeSystem),
     );
     const startedWatch = yield* readNativeWatch(f.config, watchId);
-    return {watchId, consumerId, wakeupId, wakeup, prUrl, result, startedWatch, collectorSpawns};
+    return {
+      watchId,
+      consumerId,
+      wakeupId,
+      wakeup,
+      prUrl,
+      result,
+      startedWatch,
+      collectorSpawns,
+      commands: fakeCommands,
+      system: fakeSystem,
+      spawnCount: () => collectorSpawns,
+      hostPreflightCount: () => hostPreflights,
+      setCollectorAlive: (alive: boolean) => {
+        collectorAlive = alive;
+      },
+      setRemoteBase: (branch: string) => {
+        remoteBaseBranch = branch;
+      },
+    };
   });
 
 const startSimulatedTaskWatch = (
@@ -3233,6 +3274,120 @@ describe('native task actions', () => {
             }).pipe(Effect.result),
           ).toMatchObject({failure: {code: 'stale-delivery-ref'}});
         }
+        const beforeRenew = yield* readNativeWatch(f.config, watchId);
+        if (!beforeRenew?.envelope.state.consumer) throw new Error('Expected the exact retained watch consumer.');
+        yield* writeNativeWatch(
+          f.config,
+          {
+            ...beforeRenew.envelope,
+            state: {
+              ...beforeRenew.envelope.state,
+              consumer: {
+                ...beforeRenew.envelope.state.consumer,
+                lastSeenAt: 1,
+                leaseUntil: 1 + beforeRenew.envelope.state.consumer.leaseMilliseconds,
+              },
+            },
+          },
+          beforeRenew.revision,
+        );
+        watch.setCollectorAlive(false);
+        const renew = (input: object) =>
+          runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'renew', ...watchRequest, ...input}).pipe(
+            Effect.provideService(CommandExecutor, watch.commands),
+            Effect.provideService(SystemInfo, watch.system),
+          );
+        const beforeRejectedRenew = yield* f.fs.readFileString(watchPath);
+        expect(
+          yield* renew({wakeup: {...watch.wakeup, threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}}).pipe(
+            Effect.result,
+          ),
+        ).toMatchObject({failure: {code: 'watch-identity-conflict'}});
+        watch.setRemoteBase('wrong-base');
+        expect(yield* renew({}).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-identity-conflict'}});
+        const retargeted = {...provisionalRef.delivery, pr: {...provisionalRef.delivery.pr, baseBranch: 'wrong-base'}};
+        const retargetedRef = encodeNativeTaskActionRef({
+          ...provisionalRef,
+          kind: 'delivery',
+          delivery: retargeted,
+          payloadDigest: sha256HexSync(stableJson(retargeted)),
+        });
+        expect(yield* renew({deliveryRef: retargetedRef}).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'base-ref-unverified'},
+        });
+        watch.setRemoteBase('main');
+        expect(yield* f.fs.readFileString(watchPath)).toBe(beforeRejectedRenew);
+        const beforeStartup = yield* readNativeWatch(f.config, watchId);
+        if (!beforeStartup?.envelope.collector) throw new Error('Expected the retained collector claim.');
+        const youngStartup = yield* writeNativeWatch(
+          f.config,
+          {
+            ...beforeStartup.envelope,
+            collector: {
+              ...beforeStartup.envelope.collector,
+              pid: 0,
+              status: 'starting',
+              startedAt: yield* Clock.currentTimeMillis,
+            },
+          },
+          beforeStartup.revision,
+        );
+        const youngStartupBytes = yield* f.fs.readFileString(watchPath);
+        expect(yield* renew({}).pipe(Effect.result)).toMatchObject({failure: {code: 'collector-starting'}});
+        expect(yield* f.fs.readFileString(watchPath)).toBe(youngStartupBytes);
+        expect(watch.spawnCount()).toBe(1);
+        yield* writeNativeWatch(f.config, beforeStartup.envelope, youngStartup.revision);
+        const renewedResponse = object(
+          yield* mcp
+            .invokeTool('workflow_task_watch_pr', {operation: 'renew', ...watchRequest})
+            .pipe(
+              Effect.provideService(CommandExecutor, watch.commands),
+              Effect.provideService(SystemInfo, watch.system),
+            ),
+        );
+        expect(renewedResponse.isError).not.toBe(true);
+        expect(object(renewedResponse.structuredContent).status).toBe('watching');
+        expect(watch.spawnCount()).toBe(2);
+        expect(watch.hostPreflightCount()).toBe(1);
+        const renewed = yield* readNativeWatch(f.config, watchId);
+        if (!renewed) throw new Error('Expected the renewed retained watch.');
+        expect(renewed.envelope.state.consumer?.leaseUntil).toBeGreaterThan(yield* Clock.currentTimeMillis);
+        const {consumer: _oldConsumer, ...beforeRenewState} = beforeRenew.envelope.state;
+        const {consumer: _newConsumer, ...afterRenewState} = renewed.envelope.state;
+        expect(afterRenewState).toEqual(beforeRenewState);
+        expect(renewed.envelope.notification).toEqual(beforeRenew.envelope.notification);
+        expect(renewed.envelope.provider).toEqual(beforeRenew.envelope.provider);
+        expect(object(yield* renew({})).status).toBe('watching');
+        expect(watch.spawnCount()).toBe(2);
+        const nativeRenew = {
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'watch',
+          command: 'renew',
+          watchId,
+          pr: openPr.url,
+          consumerId: watch.consumerId,
+          wakeupId: watch.wakeupId,
+          wakeup: watch.wakeup,
+          baseBranch: 'main',
+          headBranch: 'feature/one',
+        };
+        for (const change of [
+          {consumerId: 'foreign-consumer'},
+          {pr: 'https://github.com/foreign/repo/pull/99'},
+          {watchId: 'missing-renew'},
+        ]) {
+          expect(
+            yield* f
+              .call({...nativeRenew, ...change})
+              .pipe(
+                Effect.provideService(CommandExecutor, watch.commands),
+                Effect.provideService(SystemInfo, watch.system),
+                Effect.result,
+              ),
+          ).toMatchObject({failure: {code: change.watchId ? 'watch-not-found' : 'watch-identity-conflict'}});
+        }
+        expect(yield* readNativeWatch(f.config, 'missing-renew')).toBeUndefined();
         const historicalWatchBytes = yield* f.fs.readFileString(watchPath);
         const decodedValidation = decodeNativeTaskActionRef(validationRef);
         if (!decodedValidation) throw new Error('Expected the canonical validation reference.');
@@ -3287,6 +3442,12 @@ describe('native task actions', () => {
           ...watchRequest,
           watchDeliveryRef,
         });
+        const beforeWorkRenew = yield* readNativeWatch(f.config, watchId);
+        yield* renew({});
+        expect((yield* readNativeWatch(f.config, watchId))?.envelope.state.work).toEqual(
+          beforeWorkRenew?.envelope.state.work,
+        );
+        expect(watch.spawnCount()).toBe(2);
         const retainedWork = object(
           yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'work', ...watchRequest}),
         );
@@ -3321,13 +3482,46 @@ describe('native task actions', () => {
         expect(
           object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'stop', ...watchRequest})),
         ).toMatchObject({status: 'watch-updated'});
-        yield* f.fs.remove(watchPath);
+        const stoppedBytes = yield* f.fs.readFileString(watchPath);
+        expect(yield* renew({}).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-stopped'}});
+        expect(yield* f.fs.readFileString(watchPath)).toBe(stoppedBytes);
+        expect(watch.hostPreflightCount()).toBe(1);
+        expect(watch.spawnCount()).toBe(2);
+        const removedBeforeLock = CommandExecutor.of({
+          ...watch.commands,
+          execute: (executable, args, options) =>
+            executable === 'gh'
+              ? f.fs
+                  .remove(watchPath)
+                  .pipe(Effect.orDie, Effect.andThen(watch.commands.execute(executable, args, options)))
+              : watch.commands.execute(executable, args, options),
+        });
+        expect(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'renew', ...watchRequest}).pipe(
+            Effect.provideService(CommandExecutor, removedBeforeLock),
+            Effect.provideService(SystemInfo, watch.system),
+            Effect.result,
+          ),
+        ).toMatchObject({failure: {code: 'watch-not-found'}});
+        expect(watch.spawnCount()).toBe(2);
+        expect(yield* renew({}).pipe(Effect.result)).toMatchObject({failure: {code: 'watch-not-found'}});
         expect(
           yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest}).pipe(
             Effect.result,
           ),
         ).toMatchObject({failure: {code: 'watch-not-found'}});
         expect(yield* f.fs.exists(watchPath)).toBe(false);
+        if (!maintained) throw new Error('Expected the retained watch before terminal qualification.');
+        yield* writeNativeWatch(
+          f.config,
+          {...maintained.envelope, state: {...maintained.envelope.state, prState: 'merged'}},
+          null,
+        );
+        const terminalBytes = yield* f.fs.readFileString(watchPath);
+        expect(object(yield* renew({})).status).toBe('terminal-empty');
+        expect(yield* f.fs.readFileString(watchPath)).toBe(terminalBytes);
+        expect(watch.hostPreflightCount()).toBe(1);
+        expect(watch.spawnCount()).toBe(2);
         return;
       }
       const forgedStart = yield* attemptSimulatedTaskWatch(

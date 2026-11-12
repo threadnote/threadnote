@@ -131,6 +131,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly phaseId?: string;
     readonly operation:
       | 'start'
+      | 'renew'
       | 'inspect'
       | 'relay'
       | 'disposition'
@@ -173,6 +174,7 @@ export function makeNativeTaskPrWatchCommand<E, R>(
         'operation',
         [
           'start',
+          'renew',
           'inspect',
           'relay',
           'disposition',

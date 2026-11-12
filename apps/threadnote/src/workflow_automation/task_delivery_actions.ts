@@ -669,6 +669,40 @@ export const runNativeTaskPrWatch = (
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')
     )
       return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
+    if (request.operation === 'renew') {
+      if (request.takeover || request.recoverWakeup)
+        return yield* fail(
+          'invalid-request',
+          'Renewal preserves the exact host and does not allow takeover or wake recovery.',
+        );
+      if (terminalEmpty)
+        return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
+      yield* verifyNativeCycleDeliveryRepository(checkout, embeddedDelivery);
+      if (phase.delivery === undefined) {
+        const approved = EffectArray.filter(runtime.state.plan.phases, item => item.id === validation.phaseId);
+        if (approved.length !== 1 || approved[0].branch !== embeddedDelivery.pr.branch)
+          return yield* fail(
+            'stale-delivery-ref',
+            'Renewal requires the canonical approved phase branch and base binding.',
+          );
+        const {baseRefBinding: _untrustedBinding, ...pr} = embeddedDelivery.pr;
+        yield* bindNativeCycleDeliveryBase(checkout, approved[0].baseBranch, {...embeddedDelivery, pr});
+      }
+      const renewed = yield* runNativeWatch(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'renew',
+        watchId,
+        pr: embeddedDelivery.pr.url,
+        consumerId,
+        wakeupId,
+        wakeup: request.wakeup ?? watch.envelope.notification?.target,
+        baseBranch: embeddedDelivery.pr.baseBranch,
+        headBranch: embeddedDelivery.pr.branch,
+      });
+      return {status: 'watching', watchId, prUrl: embeddedDelivery.pr.url, consumerId, watch: renewed};
+    }
     if (request.operation === 'complete') {
       const notification = watch.envelope.notification;
       const now = yield* Clock.currentTimeMillis;

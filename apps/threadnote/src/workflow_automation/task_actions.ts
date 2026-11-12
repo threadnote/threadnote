@@ -120,6 +120,7 @@ export type NativeTaskCommitDeliveryFields = typeof NativeTaskCommitDeliveryFiel
 export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   operation: Schema.Literals([
     'start',
+    'renew',
     'inspect',
     'relay',
     'disposition',
@@ -1637,7 +1638,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       });
       return {status: 'ready', phaseId, workRef, packet};
     }
-
     const readCanonicalSnapshot = (snapshotId: string, previousRevision?: string) =>
       Effect.gen(function* () {
         const latest = yield* readNativeWorkflowState(config, request.runId);
