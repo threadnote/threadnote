@@ -491,8 +491,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           );
         return {status: 'resumed' as const, taskRef: runId, view};
       }
-      // Only the original initial compact save may continue through this semantic entry point.
-      // Its complete document/save digest and deterministic receipt prefix are checked by the existing saver.
+      // Only the initial compact save continues here; the saver verifies its complete digest and receipt prefix.
       const pendingCompactSave = reservation?.operationStart === 0 && reservation.rootUri === null;
       if ((stored.state.operations.length > 0 || reservation) && !pendingCompactSave)
         return yield* fail(
@@ -618,9 +617,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
     const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
     if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
-    // Git may report a Windows root with a different separator/casing form than
-    // realPath used when the native run binding was created. Compare filesystem
-    // canonical roots, not two textual renderings of the same checkout.
+    // Canonicalize both filesystem roots: Windows Git may report a different casing or separator.
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
@@ -829,8 +826,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         typeof existingConfirmation.response === 'string'
           ? existingConfirmation.response
           : undefined;
-      // An implicit replay is valid only when the caller supplies no new response
-      // and the exact current intent already has a stored approval.
+      // Implicit replay requires no new response and a stored approval for the exact current intent.
       const implicitReplay = request.userDecision === undefined && request.userResponse === undefined;
       const userDecision = request.userDecision ?? (implicitReplay && priorResponse ? 'approve' : undefined);
       const userResponse = request.userResponse ?? (implicitReplay ? priorResponse : undefined);
@@ -1642,6 +1638,18 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       return {status: 'ready', phaseId, workRef, packet};
     }
 
+    const readCanonicalSnapshot = (snapshotId: string, previousRevision?: string) =>
+      Effect.gen(function* () {
+        const latest = yield* readNativeWorkflowState(config, request.runId);
+        const entry = EffectArray.findFirst(
+          latest?.state.cycle?.snapshots ?? [],
+          item => item.snapshot.snapshotId === snapshotId,
+        );
+        if (entry._tag === 'None' || (previousRevision !== undefined && latest?.revision === previousRevision))
+          return yield* fail('snapshot-not-recorded', 'The canonical snapshot was not persisted.');
+        return entry.value;
+      });
+
     if (request.command === 'requalify-base-snapshot') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
       const generationHash = sha256HexSync(stored.state.generation);
@@ -1791,12 +1799,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           checkout,
         ),
       );
-      const latest = yield* readNativeWorkflowState(config, request.runId);
-      const admitted = EffectOption.getOrUndefined(
-        EffectArray.findFirst(latest?.state.cycle?.snapshots ?? [], item => item.snapshot.snapshotId === existingId),
-      );
-      if (!admitted || latest?.revision === stored.revision)
-        return yield* fail('snapshot-not-recorded', 'The canonical requalified snapshot was not persisted.');
+      const admitted = yield* readCanonicalSnapshot(existingId, stored.revision);
       return {
         status: 'recorded',
         replayed: false,
@@ -1886,29 +1889,28 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         );
       const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
-      const result = unwrapCycle(
-        yield* inCheckout(
-          runWorkflowAutomation(
-            config,
-            cycleRequest(stored, {
-              command: 'snapshot',
-              phaseId: ref.phaseId,
-              snapshotId,
-              previous: ref.snapshotId,
-              supersedeUnreviewed: true,
-              acceptedHead: head,
-              reason: request.reason,
-              expectedRevision: stored.revision,
-            }),
-          ),
-          checkout,
+      yield* inCheckout(
+        runWorkflowAutomation(
+          config,
+          cycleRequest(stored, {
+            command: 'snapshot',
+            phaseId: ref.phaseId,
+            snapshotId,
+            previous: ref.snapshotId,
+            supersedeUnreviewed: true,
+            acceptedHead: head,
+            reason: request.reason,
+            expectedRevision: stored.revision,
+          }),
         ),
+        checkout,
       );
+      const canonical = yield* readCanonicalSnapshot(snapshotId);
       return {
         status: 'recorded',
         replayed: alreadyAdmitted._tag === 'Some',
-        snapshot: result.snapshot,
-        snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
+        snapshot: canonical,
+        snapshotRef: taskActionSnapshotRef(ref, canonical),
       };
     }
 
@@ -1973,27 +1975,26 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     )?.snapshot;
     if (previous && !request.reason)
       return yield* fail('review-history', 'Give a concrete reason before recording another source iteration.');
-    const result = unwrapCycle(
-      yield* inCheckout(
-        runWorkflowAutomation(
-          config,
-          cycleRequest(stored, {
-            command: 'snapshot',
-            phaseId: ref.phaseId,
-            snapshotId,
-            acceptedHead: head,
-            ...(previous ? {previous: previous.snapshotId} : {}),
-            reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
-            expectedRevision: stored.revision,
-          }),
-        ),
-        checkout,
+    yield* inCheckout(
+      runWorkflowAutomation(
+        config,
+        cycleRequest(stored, {
+          command: 'snapshot',
+          phaseId: ref.phaseId,
+          snapshotId,
+          acceptedHead: head,
+          ...(previous ? {previous: previous.snapshotId} : {}),
+          reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
+          expectedRevision: stored.revision,
+        }),
       ),
+      checkout,
     );
+    const canonical = yield* readCanonicalSnapshot(snapshotId);
     return {
       status: 'recorded',
       replayed: false,
-      snapshot: result.snapshot,
-      snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
+      snapshot: canonical,
+      snapshotRef: taskActionSnapshotRef(ref, canonical),
     };
   });

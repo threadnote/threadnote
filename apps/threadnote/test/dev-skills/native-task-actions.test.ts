@@ -1562,7 +1562,14 @@ describe('native task actions', () => {
 
   effectIt.effect('recovers an unreviewed snapshot through the public task action and requires full review', () =>
     Effect.gen(function* () {
-      const f = yield* fixture(['one'], 'local');
+      const affectedPaths = Array.from(
+        {length: 40},
+        (_, index) => `receipt-${index}-${EffectString.repeat(190)('x')}.txt`,
+      );
+      const f = yield* fixture(['one'], 'local', false, false, true, undefined, undefined, {one: affectedPaths});
+      for (const path of affectedPaths) yield* f.fs.writeFileString(f.path.join(f.repo, path), 'Admitted text.\n');
+      yield* f.git(['add', ...affectedPaths]);
+      yield* f.git(['commit', '-m', 'Admit bounded-response snapshot scope']);
       yield* f.mutate('begin-phase', {phaseId: 'one'});
       const work = object(
         yield* runNativeTaskAction(f.config, {
@@ -1573,7 +1580,8 @@ describe('native task actions', () => {
         }),
       );
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "first admitted files";\n');
-      yield* f.git(['add', 'source.ts']);
+      for (const path of affectedPaths) yield* f.fs.writeFileString(f.path.join(f.repo, path), 'Changed text.\n');
+      yield* f.git(['add', 'source.ts', ...affectedPaths]);
       yield* f.git(['commit', '-m', 'First source candidate']);
       const firstResult = object(
         yield* runNativeTaskAction(f.config, {
@@ -1585,6 +1593,24 @@ describe('native task actions', () => {
       );
       const firstSnapshot = object(object(firstResult.snapshot).snapshot);
       const firstSnapshotRef = String(firstResult.snapshotRef);
+      expect(new TextEncoder().encode(JSON.stringify(firstResult.snapshot)).byteLength).toBeGreaterThan(16_384);
+      expect(decodeNativeTaskActionRef(firstSnapshotRef)).toMatchObject({
+        snapshotId: firstSnapshot.snapshotId,
+        sourceHead: firstSnapshot.head,
+        sourceTree: firstSnapshot.tree,
+      });
+      const afterFirst = yield* f.fs.readFileString(f.statePath());
+      const firstReplay = object(
+        yield* runNativeTaskAction(f.config, {
+          command: 'record-snapshot',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          workRef: String(work.workRef),
+        }),
+      );
+      expect(firstReplay).toMatchObject({status: 'recorded', replayed: true, snapshotRef: firstSnapshotRef});
+      expect(firstReplay.snapshot).toEqual(firstResult.snapshot);
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(afterFirst);
 
       yield* f.fs.writeFileString(
         f.path.join(f.repo, 'source.ts'),
@@ -1624,6 +1650,12 @@ describe('native task actions', () => {
         baseTree: firstSnapshot.baseTree,
       });
       expect(secondSnapshot.tree).not.toBe(firstSnapshot.tree);
+      expect(new TextEncoder().encode(JSON.stringify(recovered.snapshot)).byteLength).toBeGreaterThan(16_384);
+      expect(decodeNativeTaskActionRef(String(recovered.snapshotRef))).toMatchObject({
+        snapshotId: secondSnapshot.snapshotId,
+        sourceHead: secondSnapshot.head,
+        sourceTree: secondSnapshot.tree,
+      });
       const afterRecovery = yield* f.fs.readFileString(f.statePath());
       const replay = object(yield* runNativeTaskAction(f.config, recoveryRequest));
       expect(replay).toMatchObject({status: 'recorded', replayed: true});
