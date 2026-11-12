@@ -176,6 +176,18 @@ Version needs section '.gnu.version_r' contains 1 entry:
         const proof = {sourcePath: yield* fs.realPath(source), sha256: sha256HexSync('captured compiler runtime')};
         const audit = yield* fixture(providerElf, providerSymbols, binary);
         expect(yield* audit('bun-linux-arm64-musl', true, proof)).toMatch(/^[a-f0-9]{64}$/u);
+        const hiddenProviderElf = EffectString.replace(
+          'Index: 2 Cnt: 1',
+          'Index: 31 Cnt: 1',
+        )(EffectString.replace('2 (GLIBC_2.0)', '1fh(GLIBC_2.0)')(providerElf));
+        const hidden = yield* fixture(hiddenProviderElf, providerSymbols, binary);
+        expect(yield* hidden('bun-linux-arm64-musl', true, proof)).toMatch(/^[a-f0-9]{64}$/u);
+        const wrongHidden = yield* fixture(
+          EffectString.replace('1fh(GLIBC_2.0)', '1eh(GLIBC_2.0)')(hiddenProviderElf),
+          providerSymbols,
+          binary,
+        );
+        expect(Exit.isFailure(yield* wrongHidden('bun-linux-arm64-musl', true, proof).pipe(Effect.exit))).toBe(true);
         expect(Exit.isFailure(yield* audit('bun-linux-arm64-musl', true).pipe(Effect.exit))).toBe(true);
         for (const [target, inference, identity] of [
           ['bun-linux-arm64-musl', false, proof],
@@ -214,6 +226,15 @@ Version needs section '.gnu.version_r' contains 1 entry:
         const audit = yield* fixture(libgccMusl);
         for (const inference of [false, true])
           expect(yield* audit('bun-linux-arm64-musl', inference)).toMatch(/^[a-f0-9]{64}$/u);
+        const hiddenConsumerElf = EffectString.replace(
+          'Version: 3',
+          'Version: 31',
+        )(EffectString.replace('3 (GLIBC_2.0)', '1fh(GLIBC_2.0)')(libgccMusl));
+        const hidden = yield* fixture(hiddenConsumerElf);
+        for (const inference of [false, true])
+          expect(yield* hidden('bun-linux-arm64-musl', inference)).toMatch(/^[a-f0-9]{64}$/u);
+        const wrongHidden = yield* fixture(EffectString.replace('1fh(GLIBC_2.0)', '1eh(GLIBC_2.0)')(hiddenConsumerElf));
+        expect(Exit.isFailure(yield* wrongHidden().pipe(Effect.exit))).toBe(true);
         const otherTarget = yield* audit('bun-linux-x64-baseline-musl').pipe(Effect.exit);
         expect(Exit.isFailure(otherTarget)).toBe(true);
       }),

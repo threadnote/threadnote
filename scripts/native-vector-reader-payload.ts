@@ -162,7 +162,7 @@ function isMuslLibgccCompatibility(elf: string, definedSymbols: string, target: 
     }
   }
   if (remaining !== 0 || files !== Number(section[1]) || compatibilityIndices.length !== 1) return false;
-  const symbolPattern = /\b([0-9a-f]+)h?\s+\(GLIBC_2\.0\)/gu;
+  const symbolPattern = /\b([0-9a-f]+)(?:h|\s+)\(GLIBC_2\.0\)/gu;
   const references = [...EffectString.matchAll(symbolPattern)(symbolSection[1] ?? '')];
   if (
     references.length === 0 ||
@@ -253,7 +253,7 @@ function isMuslLibgccProvider(elf: string, definedSymbols: string): boolean {
     EffectArray.some(parents, name => !names.includes(name))
   )
     return false;
-  const symbolPattern = /\b([0-9a-f]+)h?\s+\(GLIBC_2\.0\)/gu;
+  const symbolPattern = /\b([0-9a-f]+)(?:h|\s+)\(GLIBC_2\.0\)/gu;
   const references = [...EffectString.matchAll(symbolPattern)(symbolSection[1] ?? '')];
   if (
     references.length === 0 ||
