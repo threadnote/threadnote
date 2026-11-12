@@ -14,6 +14,8 @@ import {
   Path,
   Ref,
   Schema,
+  Scope,
+  Context,
   Stdio,
   Terminal,
 } from 'effect';
@@ -28,6 +30,8 @@ import {CommandExecutor, commandEnvironment, runCommandEffect} from '@threadnote
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
+import {makeCodeGraphStoreRuntime} from '@threadnote/graph/store/runtime';
 import {SecureRandom} from 'effect/crypto';
 import {
   NativeAuthoringSpecDocumentSchema,
@@ -1613,6 +1617,10 @@ const removeFixtureEntrywise = (root: string, path: Path.Path, removeFile: typeo
     }),
   }).pipe(Effect.orDie);
 };
+const cleanupAfterApplication =
+  (scope: Scope.Scope, cleanup: (root: string) => Effect.Effect<void>) => (root: string) =>
+    Scope.addFinalizer(scope, cleanup(root));
+
 const preserveCleanupCause = <E, R>(cause: Cause.Cause<E>, diagnostic: Effect.Effect<void, unknown, R>) =>
   diagnostic.pipe(Effect.ignoreCause, Effect.andThen(Effect.failCause(cause)));
 const reportDirtyCleanupFailure = (
@@ -1774,78 +1782,140 @@ effectIt.effect('bounds dirty cleanup evidence without following links or replac
   }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('closes application-owned graph cleanup before strict fixture root removal', () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const released = yield* Deferred.make<void>();
+    let removed = false;
+    class FixtureGraphRuntime extends Context.Service<
+      FixtureGraphRuntime,
+      Effect.Success<typeof makeCodeGraphStoreRuntime>
+    >()('@threadnote/threadnote/test/dev-skills/native-task-authoring.test/FixtureGraphRuntime') {}
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const cleanupScope = yield* Effect.scope;
+        yield* Effect.gen(function* () {
+          // Match the real store's layer-owned scope, rather than a body-owned child fiber.
+          const runtime = Context.get(
+            yield* Layer.build(Layer.effect(FixtureGraphRuntime, makeCodeGraphStoreRuntime)),
+            FixtureGraphRuntime,
+          );
+          const path = yield* Path.Path;
+          const fs = yield* FileSystem.FileSystem;
+          const f = yield* nativeFixture(
+            {},
+            cleanupAfterApplication(cleanupScope, root =>
+              Effect.gen(function* () {
+                expect(yield* Deferred.isDone(released)).toBe(true);
+                yield* removeFixtureEntrywise(root, path);
+                expect(yield* fs.exists(root).pipe(Effect.orDie)).toBe(false);
+                removed = true;
+              }),
+            ),
+          );
+          // Schema initialization does not start the indexer's competing opportunistic collectors.
+          const databasePath = path.join(
+            f.home,
+            'indexes',
+            'code-graph',
+            'repositories',
+            EffectString.repeat(64)('a'),
+            `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
+          );
+          yield* (yield* CodeGraphStore).initialize(databasePath);
+          yield* runtime.startCompletedBuildCleanup(databasePath, undefined, false, {
+            onCompletedBuildCleanupConnection: () =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.interruptible,
+                Effect.ensuring(Deferred.succeed(released, undefined)),
+              ),
+          });
+          yield* Deferred.await(entered);
+        }).pipe(provideNative);
+      }),
+    );
+    expect(removed).toBe(true);
+  }).pipe(TestClock.withLive),
+);
+
 effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () => {
   let cleanup: DirtyCleanupContext | undefined;
-  return Effect.gen(function* () {
-    const path = yield* Path.Path;
-    const f = yield* setupWithCleanup(
-      process.platform === 'win32' ? root => removeFixtureEntrywise(root, path) : undefined,
-    );
-    if (process.platform === 'win32') {
-      const started = performance.now();
-      const git = yield* runCommandEffect(
-        'git',
-        [
-          '-C',
-          f.repo,
-          'config',
-          '--null',
-          '--show-origin',
-          '--show-scope',
-          '--get-regexp',
-          '^(core\\.(fsmonitor|untrackedcache)|gc\\.auto|maintenance\\.auto)$',
-        ],
-        {
-          allowFailure: true,
-          maxOutputBytes: 4096,
-          timeoutMs: 400,
-          forceKillAfterMilliseconds: 25,
-          sensitiveOutput: true,
-        },
-      ).pipe(Effect.result);
-      cleanup = {
-        root: f.root,
-        path: f.path,
-        git: git._tag === 'Success' ? parseCleanupGitSettings(git.success.stdout) : parseCleanupGitSettings(''),
-        gitStatus:
-          git._tag === 'Success'
-            ? git.success.exitCode <= 1
-              ? 'complete'
-              : 'unavailable'
-            : git.failure._tag === 'CommandTimedOut'
-              ? 'timed-out'
-              : git.failure._tag === 'CommandOutputLimitExceeded'
-                ? 'truncated'
-                : 'unavailable',
-        gitElapsedMs: Math.ceil(performance.now() - started),
-      };
-    }
-    const file = f.path.join(f.root, 'dirty-background-spec.json');
-    yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
-    yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty";\n');
-    const featureName = 'Dirty background authoring';
-    const project = workflowTitleSlug(f.path.basename(f.repo));
-    const featureId = workflowTitleSlug(featureName);
-    const runId = 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
-    const result = yield* runNativeTaskAuthoring(f.config, {
-      command: 'start',
-      callerCwd: f.repo,
-      featureName,
-      kind: 'spec',
-      contentFile: file,
-      installationTarget: 'codex',
-      saveMode: 'background',
-    }).pipe(
-      Effect.provideService(SystemInfo, f.scoped),
-      Effect.provideService(CurrentNativeJobAutoLaunch, false),
-      Effect.result,
-    );
-    expect(result).toMatchObject({failure: {code: 'evidence-unavailable'}});
-    const state = yield* readNativeWorkflowState(f.config, runId);
-    expect(state).toBeUndefined();
-  }).pipe(
-    TestClock.withLive,
-    provideNative,
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const cleanupScope = yield* Effect.scope;
+      return yield* Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const f = yield* setupWithCleanup(
+          process.platform === 'win32'
+            ? cleanupAfterApplication(cleanupScope, root => removeFixtureEntrywise(root, path))
+            : undefined,
+        );
+        if (process.platform === 'win32') {
+          const started = performance.now();
+          const git = yield* runCommandEffect(
+            'git',
+            [
+              '-C',
+              f.repo,
+              'config',
+              '--null',
+              '--show-origin',
+              '--show-scope',
+              '--get-regexp',
+              '^(core\\.(fsmonitor|untrackedcache)|gc\\.auto|maintenance\\.auto)$',
+            ],
+            {
+              allowFailure: true,
+              maxOutputBytes: 4096,
+              timeoutMs: 400,
+              forceKillAfterMilliseconds: 25,
+              sensitiveOutput: true,
+            },
+          ).pipe(Effect.result);
+          cleanup = {
+            root: f.root,
+            path: f.path,
+            git: git._tag === 'Success' ? parseCleanupGitSettings(git.success.stdout) : parseCleanupGitSettings(''),
+            gitStatus:
+              git._tag === 'Success'
+                ? git.success.exitCode <= 1
+                  ? 'complete'
+                  : 'unavailable'
+                : git.failure._tag === 'CommandTimedOut'
+                  ? 'timed-out'
+                  : git.failure._tag === 'CommandOutputLimitExceeded'
+                    ? 'truncated'
+                    : 'unavailable',
+            gitElapsedMs: Math.ceil(performance.now() - started),
+          };
+        }
+        const file = f.path.join(f.root, 'dirty-background-spec.json');
+        yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty";\n');
+        const featureName = 'Dirty background authoring';
+        const project = workflowTitleSlug(f.path.basename(f.repo));
+        const featureId = workflowTitleSlug(featureName);
+        const runId = 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
+        const result = yield* runNativeTaskAuthoring(f.config, {
+          command: 'start',
+          callerCwd: f.repo,
+          featureName,
+          kind: 'spec',
+          contentFile: file,
+          installationTarget: 'codex',
+          saveMode: 'background',
+        }).pipe(
+          Effect.provideService(SystemInfo, f.scoped),
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
+          Effect.result,
+        );
+        expect(result).toMatchObject({failure: {code: 'evidence-unavailable'}});
+        const state = yield* readNativeWorkflowState(f.config, runId);
+        expect(state).toBeUndefined();
+      }).pipe(TestClock.withLive, provideNative);
+    }),
+  ).pipe(
     Effect.catchCause(cause =>
       cleanup
         ? preserveCleanupCause(cause, reportDirtyCleanupFailure(cleanup, cause).pipe(TestClock.withLive))
