@@ -26,7 +26,7 @@ import {decodeNativeAuthoringDocument, validateNativeAuthoring} from '@threadnot
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
+import {inspectWorkflowJournal, readWorkflowProgressBinding, withWorkflowLock} from '../workflow_memory/journal.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
@@ -1512,15 +1512,26 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
   if (!run || run.state.generation !== request.generation)
     return yield* fail('job-not-found', 'No accepted job has this run and generation.');
   const runId = run.state.runId;
-  const readOnly = request.command === 'status' || request.command === 'result';
-  // The canonical journal verifies stored identity against the current caller
-  // without routing the graph. Read-only accepted-job inspection survives a
-  // missing graph manifest; mutations still require the live bound scope.
-  const canonicalJournal = readOnly
-    ? yield* withWorkflowLock(config, run.state.bindingId, inspectWorkflowJournal(config, run.state.bindingId))
-    : undefined;
-  const callerBinding = canonicalJournal
-    ? canonicalJournal.state.binding
+  const stored = yield* read(config, runId, request.jobId);
+  if (
+    !stored ||
+    stored.state.runId !== runId ||
+    stored.state.generation !== run.state.generation ||
+    stored.state.bindingId !== run.state.bindingId
+  )
+    return yield* fail('job-not-found', 'No accepted job has this run and generation.');
+  const progressRead =
+    request.command === 'status' || (request.command === 'result' && stored.state.status !== 'completed');
+  // Progress observes retained receipts without waiting for a publisher. Completed results
+  // still require canonical external-manifest inspection before exposing artifact results.
+  const journalBinding = progressRead
+    ? yield* readWorkflowProgressBinding(config, run.state.bindingId)
+    : request.command === 'result'
+      ? (yield* withWorkflowLock(config, run.state.bindingId, inspectWorkflowJournal(config, run.state.bindingId)))
+          .state.binding
+      : undefined;
+  const callerBinding = journalBinding
+    ? journalBinding
     : yield* resolveWorkflowBinding(
         config,
         {
@@ -1540,26 +1551,8 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       );
   if (callerBinding.bindingId !== run.state.bindingId)
     return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
-  // Read-only status/result still serialize against the journal. Stop/resume
-  // must remain available while a writer owns that lock; their immutable job
-  // input, run binding and current checkout are verified below, while resumed
-  // authoring work re-enters the canonical journal transaction before writing.
-  if (canonicalJournal) {
-    if (
-      canonicalJournal.state.binding.bindingId !== run.state.bindingId ||
-      canonicalJournal.state.binding.graphProject !== run.state.graphProject ||
-      canonicalJournal.state.binding.repo !== callerBinding.repo
-    )
-      return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
-  }
-  const stored = yield* read(config, runId, request.jobId);
-  if (
-    !stored ||
-    stored.state.runId !== runId ||
-    stored.state.generation !== run.state.generation ||
-    stored.state.bindingId !== run.state.bindingId
-  )
-    return yield* fail('job-not-found', 'No accepted job has this run and generation.');
+  if (journalBinding && journalBinding.graphProject !== run.state.graphProject)
+    return yield* fail('binding-drift', 'Use the original checkout and workflow binding for this job.');
   const admitted = yield* readInput(config, stored.state);
   if (
     admitted.runId !== runId ||

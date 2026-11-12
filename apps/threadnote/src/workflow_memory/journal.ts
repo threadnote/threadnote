@@ -365,6 +365,27 @@ export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')
   return {state, needsRecovery};
 });
 
+/** Retained job progress grants no artifact read or mutation capability. Validate only the atomic private image. */
+export const readWorkflowProgressBinding = Effect.fn('workflowMemory.progressBinding')(function* (
+  config: RuntimeConfig,
+  bindingId: string,
+) {
+  const state = yield* readJournalFile(config, bindingId);
+  if (!state) return yield* workflowError('task-state-lost', 'The original workflow journal is unavailable.');
+  yield* verifyWorkflowBinding(config, state.binding);
+  const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
+  yield* Effect.try({
+    try: () =>
+      assertWorkflowJournalIntegrity(
+        state,
+        state.manifestCommitted ? state.manifestContent : state.previousManifestContent,
+        sharedRoots,
+      ),
+    catch: () => workflowError('invalid-journal', 'The retained workflow ownership or pending lineage is invalid.'),
+  });
+  return state.binding;
+});
+
 /** Internal capability: one already-held journal lock, never request-supplied. */
 export const withWorkflowJournalSession = <A, E, R>(
   config: RuntimeConfig,

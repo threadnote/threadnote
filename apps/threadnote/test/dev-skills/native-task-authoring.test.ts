@@ -3,6 +3,8 @@ import {
   Array as EffectArray,
   Record as EffectRecord,
   Clock,
+  Deferred,
+  Fiber,
   Cause,
   String as EffectString,
   Effect,
@@ -44,6 +46,7 @@ import {
 } from '../../src/workflow_automation/task_authoring.js';
 import {readNativeWorkflowState, withNativeWorkflowLock} from '../../src/workflow_automation/store.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
+import {withWorkflowLock} from '../../src/workflow_memory/journal.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
@@ -165,6 +168,20 @@ const setup = Effect.gen(function* () {
       }),
     );
   return {...f, config, repo, home, scoped, author, mcp};
+});
+
+const snapshotAuthoringJobFiles = Effect.fn('test.snapshotAuthoringJobFiles')(function* (
+  f: Effect.Success<typeof setup>,
+  directory: string,
+) {
+  const names = [...(yield* f.fs.readDirectory(directory, {recursive: true}))].sort();
+  const contents: Array<readonly [string, string]> = [];
+  for (const name of names) {
+    const file = f.path.join(directory, name);
+    if ((yield* f.fs.stat(file)).type === 'File')
+      contents.push([name, Buffer.from(yield* f.fs.readFile(file)).toString('base64')]);
+  }
+  return contents;
 });
 
 effectIt.effect(
@@ -728,13 +745,7 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
     yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
     const foreignSystem = {...f.scoped, currentDirectory: () => foreignRepo};
     const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-    const snapshotJobFiles = () =>
-      Effect.gen(function* () {
-        const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-        const contents: Array<readonly [string, string]> = [];
-        for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
-        return contents;
-      });
+    const snapshotJobFiles = () => snapshotAuthoringJobFiles(f, jobDirectory);
     const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
     const beforeJobs = yield* snapshotJobFiles();
     const operations = ['status', 'result', 'cancel', 'resume'] as const;
@@ -774,7 +785,7 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
   }).pipe(TestClock.withLive, provideNative),
 );
 
-effectIt.effect('reads an accepted authoring job status while the native run lock is held', () =>
+effectIt.effect('reads accepted authoring job progress while native run and journal writers are held', () =>
   Effect.gen(function* () {
     const f = yield* setup;
     const file = f.path.join(f.root, 'held-run-lock-spec.json');
@@ -798,6 +809,50 @@ effectIt.effect('reads an accepted authoring job status while the native run loc
       f.author({command: 'job', jobRef, operation: 'status'}),
     );
     expect(status).toMatchObject({status: 'accepted', jobRef});
+    const admitted = yield* readNativeWorkflowState(f.config, runId);
+    if (!admitted) throw new Error('The accepted job has no native run.');
+    const job = object(accepted.job);
+    const receipt = f.path.join(
+      yield* f.fs.realPath(f.home),
+      'workflow-automations',
+      'native-v1',
+      'jobs',
+      runId,
+      String(job.jobId) + '.json',
+    );
+    const progress = {verifiedOperations: 2, rootVerified: false, stage: 'canonical-work', lastProgressAt: 23};
+    yield* f.fs.writeFileString(
+      receipt,
+      JSON.stringify({
+        ...object(JSON.parse(yield* f.fs.readFileString(receipt))),
+        status: 'running',
+        started: true,
+        progress,
+      }),
+    );
+    const beforeReceipt = yield* f.fs.readFileString(receipt);
+    const acquired = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    // Fork from the unlocked caller so readers cannot inherit the writer's reentrant lock capability.
+    const writer = yield* withWorkflowLock(
+      f.config,
+      admitted.state.bindingId,
+      Effect.gen(function* () {
+        yield* Deferred.succeed(acquired, undefined);
+        yield* Deferred.await(release);
+      }),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(acquired).pipe(Effect.timeout('5 seconds'));
+    yield* Effect.gen(function* () {
+      for (const operation of ['status', 'result']) {
+        const response = yield* f.author({command: 'job', jobRef, operation}).pipe(Effect.timeout('5 seconds'));
+        expect(response).toMatchObject({status: 'running', jobRef, job: {progress}});
+        expect(response).not.toHaveProperty('authoring');
+      }
+      expect(Option.isNone(yield* Deferred.poll(release))).toBe(true);
+      expect(yield* f.fs.readFileString(receipt)).toBe(beforeReceipt);
+    }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    yield* Fiber.join(writer);
   }).pipe(TestClock.withLive, provideNative),
 );
 
@@ -823,13 +878,7 @@ effectIt.effect(
       const admitted = yield* readNativeWorkflowState(f.config, runId);
       if (!admitted) throw new Error('The submitted job has no native run.');
       const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-      const snapshotJobFiles = () =>
-        Effect.gen(function* () {
-          const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-          const contents: Array<readonly [string, string]> = [];
-          for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
-          return contents;
-        });
+      const snapshotJobFiles = () => snapshotAuthoringJobFiles(f, jobDirectory);
 
       const sourceRoot = f.path.join(f.root, 'updated-skill-source');
       const currentSource = Bun.fileURLToPath(new URL('../../../../', import.meta.url));
@@ -2406,9 +2455,7 @@ fcEffectProp(
       yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
       const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
       const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-      const jobNames = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-      const beforeJobs: Array<readonly [string, string]> = [];
-      for (const name of jobNames) beforeJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      const beforeJobs = yield* snapshotAuthoringJobFiles(f, jobDirectory);
       const result = yield* runNativeJob(
         f.config,
         {
@@ -2424,8 +2471,7 @@ fcEffectProp(
       ).pipe(Effect.provideService(SystemInfo, {...f.scoped, currentDirectory: () => foreignRepo}), Effect.result);
       expect(result).toMatchObject({failure: {code: 'binding-drift'}});
       expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
-      const afterJobs: Array<readonly [string, string]> = [];
-      for (const name of jobNames) afterJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      const afterJobs = yield* snapshotAuthoringJobFiles(f, jobDirectory);
       expect(afterJobs).toEqual(beforeJobs);
     }).pipe(TestClock.withLive, provideNative),
   {fastCheck: {numRuns: 4}},

@@ -643,6 +643,20 @@ describe('native private job lifecycle', () => {
       expect(new Set(EffectArray.map(native.operations, item => object(object(item).intent).operationId)).size).toBe(
         native.operations.length,
       );
+      const journalBytes = yield* f.fs.readFileString(f.journalPath(requiredString(persisted.bindingId)));
+      const journalText = yield* Effect.promise(() => decodeWorkflowJournal(journalBytes));
+      const manifestUri = requiredString(
+        object(decodeWorkflowJournalStorageImage(JSON.parse(journalText))).manifestUri,
+      );
+      const manifest = yield* f.store.read(f.location, manifestUri);
+      yield* f.store.write(f.location, manifestUri, manifest + '\nChanged external manifest.\n', {
+        mode: 'replace',
+        expectedFingerprint: yield* f.store.fingerprint(manifest),
+      });
+      expect(object(yield* f.call({...f.base('job'), command: 'status', jobId}))).toMatchObject({status: 'completed'});
+      expect(yield* f.call({...f.base('job'), command: 'result', jobId}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'task-state-lost'},
+      });
     }).pipe(run),
   );
 
@@ -759,28 +773,43 @@ describe('native private job lifecycle', () => {
     }).pipe(run),
   );
 
-  effectIt.effect('waits for the canonical workflow journal before reading an accepted job', () =>
+  effectIt.effect('reads retained progress while the canonical workflow journal writer is held', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
-      const head = yield* commit(f.repo, 'source');
-      yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home});
+      yield* commit(f.repo, 'source');
       const initialized = yield* f.init();
       const bindingId = requiredString(initialized.bindingId);
       const work = {
         ...f.base('authoring'),
         command: 'save',
-        document: document(
-          {head, files: [{path: 'source.ts', sha256: sha256HexSync('export const fixture = true;\n')}]},
-          ['source.ts'],
-        ),
+        document: document(),
         ready: false,
         expectedRevision: null,
       };
-      const accepted = object(yield* submit(f, work));
-      const jobId = requiredString(accepted.jobId);
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
+      const receipt = f.path.join(
+        yield* f.fs.realPath(f.home),
+        'workflow-automations',
+        'native-v1',
+        'jobs',
+        'native-run',
+        jobId + '.json',
+      );
+      const progress = {verifiedOperations: 3, rootVerified: false, stage: 'canonical-work', lastProgressAt: 17};
+      yield* f.fs.writeFileString(
+        receipt,
+        stableJson({
+          ...object(JSON.parse(yield* f.fs.readFileString(receipt))),
+          status: 'running',
+          started: true,
+          progress,
+        }),
+      );
+      const beforeReceipt = yield* f.fs.readFileString(receipt);
+      const beforeJournal = yield* f.fs.readFileString(f.journalPath(bindingId));
+      const beforeRun = yield* f.fs.readFileString(f.statePath());
       const acquired = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
-      const completed = yield* Deferred.make<void>();
       const journal = yield* withWorkflowLock(
         f.config,
         bindingId,
@@ -789,16 +818,84 @@ describe('native private job lifecycle', () => {
           yield* Deferred.await(release);
         }),
       ).pipe(Effect.forkChild);
-      yield* Deferred.await(acquired);
-      const status = yield* f.call({...f.base('job'), command: 'status', jobId}).pipe(
-        Effect.tap(() => Deferred.succeed(completed, undefined)),
-        Effect.forkChild,
-      );
-      yield* Effect.sleep('100 millis');
-      expect(Option.isNone(yield* Deferred.poll(completed))).toBe(true);
-      yield* Deferred.succeed(release, undefined);
-      expect(object(yield* Fiber.join(status))).toMatchObject({jobId, status: 'accepted'});
+      yield* Deferred.await(acquired).pipe(Effect.timeout('5 seconds'));
+      yield* Effect.gen(function* () {
+        for (const command of ['status', 'result']) {
+          const response = object(yield* f.call({...f.base('job'), command, jobId}).pipe(Effect.timeout('5 seconds')));
+          expect(response).toMatchObject({jobId, status: 'running', progress});
+          expect(response.result).toBeUndefined();
+        }
+        expect(Option.isNone(yield* Deferred.poll(release))).toBe(true);
+        const otherUser = yield* runNativeJob(
+          {...f.config, user: 'foreign-user'},
+          {...f.base('job'), command: 'status', jobId},
+          f.call,
+        ).pipe(Effect.result);
+        expect(otherUser).toMatchObject({failure: {code: 'binding-drift'}});
+        const wrongGeneration = yield* f
+          .call({...f.base('job'), generation: 'foreign-generation', command: 'status', jobId})
+          .pipe(Effect.result);
+        expect(wrongGeneration).toMatchObject({failure: {code: 'job-not-found'}});
+        expect(
+          yield* f.call({...f.base('job'), runId: 'foreign-run', command: 'status', jobId}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'job-not-found'}});
+        expect(yield* f.fs.readFileString(receipt)).toBe(beforeReceipt);
+        expect(yield* f.fs.readFileString(f.journalPath(bindingId))).toBe(beforeJournal);
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(beforeRun);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
       yield* Fiber.join(journal);
+    }).pipe(run),
+  );
+
+  effectIt.effect('qualifies pending journal lineage for progress and rejects an invalid atomic image', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* commit(f.repo, 'source');
+      const initialized = yield* f.init();
+      const journalPath = f.journalPath(requiredString(initialized.bindingId));
+      const readJournal = () =>
+        f.fs.readFileString(journalPath).pipe(
+          Effect.flatMap(bytes => Effect.promise(() => decodeWorkflowJournal(bytes))),
+          Effect.map(bytes => object(decodeWorkflowJournalStorageImage(JSON.parse(bytes)))),
+        );
+      const empty = yield* readJournal();
+      yield* f.call(f.write({operationId: 'pending-first', artifactKey: 'pending-first'}));
+      const predecessor = yield* readJournal();
+      yield* f.call(f.write({operationId: 'pending-second', artifactKey: 'pending-second'}));
+      const current = yield* readJournal();
+      const work = {
+        ...f.base('authoring'),
+        command: 'save',
+        document: document(),
+        ready: false,
+        expectedRevision: null,
+      };
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
+      const prepared = {...current, manifestCommitted: false, previousManifestContent: predecessor.manifestContent};
+      yield* f.fs.writeFileString(journalPath, stableJson(prepared));
+      const manifestUri = requiredString(current.manifestUri);
+      const manifestBytes = yield* f.store.read(f.location, manifestUri);
+      const readonlyStore = ResourceStore.of({
+        ...f.store,
+        read: (location, uri, options) => {
+          expect(uri).not.toBe(manifestUri);
+          return f.store.read(location, uri, options);
+        },
+      });
+      const status = object(
+        yield* f
+          .call({...f.base('job'), command: 'status', jobId})
+          .pipe(Effect.provideService(ResourceStore, readonlyStore)),
+      );
+      expect(status).toMatchObject({jobId, status: 'accepted'});
+      expect(yield* f.fs.readFileString(journalPath)).toBe(stableJson(prepared));
+      const invalid = stableJson({...prepared, previousManifestContent: empty.manifestContent});
+      yield* f.fs.writeFileString(journalPath, invalid);
+      expect(yield* f.call({...f.base('job'), command: 'status', jobId}).pipe(Effect.result)).toMatchObject({
+        failure: {code: 'invalid-journal'},
+      });
+      expect(yield* f.fs.readFileString(journalPath)).toBe(invalid);
+      expect(yield* f.store.read(f.location, manifestUri)).toBe(manifestBytes);
     }).pipe(run),
   );
 
