@@ -3,6 +3,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer, Path, Console, Array as EffectArray, String as EffectString} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError} from './effect/errors.js';
 import {
@@ -15,6 +16,29 @@ import {
   nativeVectorReaderHostProfile,
   nativeVectorReaderBuildEnvironmentSha256,
 } from '@threadnote/recall/vector/native-reader-payload';
+
+export const buildNativeVectorReaderCargo = Effect.fn('buildNativeVectorReaderCargo')(function* (options: {
+  readonly cargo: string;
+  readonly crateRoot: string;
+  readonly target: string;
+  readonly targetDirectory: string;
+  readonly env: NodeJS.ProcessEnv;
+}) {
+  const system = yield* SystemInfo;
+  return yield* runCommandEffect(
+    options.cargo,
+    ['build', '--locked', '--release', '--target', options.target, '--target-dir', options.targetDirectory],
+    {
+      cwd: options.crateRoot,
+      env: options.env,
+      timeoutMs: 20 * 60_000,
+      maxOutputBytes: 4 * 1024 * 1024,
+      detached: true,
+      // Retain scoped Windows tree cleanup and leader confirmation; POSIX also verifies its owned group.
+      verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+    },
+  );
+});
 
 export const assembleNativeVectorReader = Effect.fn('assembleNativeVectorReader')(function* (options: {
   readonly root: string;
@@ -89,32 +113,27 @@ export const assembleNativeVectorReader = Effect.fn('assembleNativeVectorReader'
   };
   const buildEnvironmentSha256 = nativeVectorReaderBuildEnvironmentSha256(buildEnvironment);
   const targetDirectory = path.join(options.root, '.context', 'native-vector-reader-cargo');
-  yield* runCommandEffect(
+  yield* buildNativeVectorReaderCargo({
     cargo,
-    ['build', '--locked', '--release', '--target', target, '--target-dir', targetDirectory],
-    {
-      cwd: crateRoot,
-      env: {
-        ...Bun.env,
-        CC: compilerPath,
-        // Override user Cargo configuration too: assets use portable default target features.
-        CARGO_ENCODED_RUSTFLAGS: encodedRustFlags,
-        THREADNOTE_NATIVE_BUILD_ENVIRONMENT_SHA256: buildEnvironmentSha256,
-        MACOSX_DEPLOYMENT_TARGET: '13.0',
-        THREADNOTE_NATIVE_DEPLOYMENT_TARGET: EffectString.endsWith('-apple-darwin')(target) ? '13.0' : '',
-        RUSTFLAGS: '',
-        THREADNOTE_NATIVE_SOURCE_COMMIT: before.sourceCommit,
-        THREADNOTE_NATIVE_SOURCE_TREE: before.sourceTree,
-        THREADNOTE_NATIVE_LOCK_SHA256: before.lockSha256,
-        THREADNOTE_NATIVE_TOOLCHAIN_SHA256: before.toolchainSha256,
-        THREADNOTE_NATIVE_SOURCE_SHA256: before.sourceSha256,
-      },
-      timeoutMs: 20 * 60_000,
-      maxOutputBytes: 4 * 1024 * 1024,
-      detached: true,
-      verifyOwnedProcessExit: 'group',
+    crateRoot,
+    target,
+    targetDirectory,
+    env: {
+      ...Bun.env,
+      CC: compilerPath,
+      // Override user Cargo configuration too: assets use portable default target features.
+      CARGO_ENCODED_RUSTFLAGS: encodedRustFlags,
+      THREADNOTE_NATIVE_BUILD_ENVIRONMENT_SHA256: buildEnvironmentSha256,
+      MACOSX_DEPLOYMENT_TARGET: '13.0',
+      THREADNOTE_NATIVE_DEPLOYMENT_TARGET: EffectString.endsWith('-apple-darwin')(target) ? '13.0' : '',
+      RUSTFLAGS: '',
+      THREADNOTE_NATIVE_SOURCE_COMMIT: before.sourceCommit,
+      THREADNOTE_NATIVE_SOURCE_TREE: before.sourceTree,
+      THREADNOTE_NATIVE_LOCK_SHA256: before.lockSha256,
+      THREADNOTE_NATIVE_TOOLCHAIN_SHA256: before.toolchainSha256,
+      THREADNOTE_NATIVE_SOURCE_SHA256: before.sourceSha256,
     },
-  );
+  });
   if (
     sha256HexSync(new Uint8Array(yield* Effect.promise(() => Bun.file(compilerPath).arrayBuffer()))) !== compilerSha256
   )

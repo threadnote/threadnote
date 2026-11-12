@@ -3,7 +3,7 @@ import {Console, Effect, Layer, Schema, String as EffectString, Array as EffectA
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {CommandFailed, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
-import {platformPathFor} from '@threadnote/platform/system';
+import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer} from './effect/errors.js';
@@ -76,6 +76,29 @@ cp /tmp/threadnote-original-world /etc/apk/world
 `;
 }
 
+// Root prepare installs development hooks/lint replacements; the pinned Oxlint patch has no musl build.
+// Refuse this exemption if required installation hooks or trusted dependency scripts are introduced.
+export const MUSL_BUILD_DEPENDENCY_INSTALL = String.raw`bun -e '
+const root = await Bun.file("package.json").json();
+const prepare = "bun --bun husky && bun --bun effect-tsgo patch --no-typescript --oxlint";
+const hooks = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare"];
+if (root.scripts?.prepare !== prepare || JSON.stringify(root.trustedDependencies) !== "[]" || !Array.isArray(root.workspaces))
+  throw new Error("Musl build dependency lifecycle policy changed; inspect required install contracts.");
+const check = (manifest, root = false) => {
+  if (JSON.stringify(manifest.trustedDependencies ?? []) !== "[]" ||
+      hooks.some(hook => !(root && hook === "prepare") && manifest.scripts?.[hook] !== undefined))
+    throw new Error("Musl build cannot skip a required package installation hook.");
+};
+check(root, true);
+for (const pattern of root.workspaces)
+  for await (const file of new Bun.Glob(pattern + "/package.json").scan({onlyFiles: true}))
+    check(await Bun.file(file).json());
+'
+bun install --frozen-lockfile --ignore-scripts
+HUSKY=0 bun --bun husky
+bun --bun effect-tsgo patch --no-typescript --oxlint --skip-missing
+`;
+
 async function sourceInputs(root: string) {
   const packageRoot = path.join(root, 'node_modules', 'node-llama-cpp');
   const inputs: [string, string][] = [];
@@ -130,6 +153,23 @@ async function sourceInputs(root: string) {
   }
   return {packageRoot, sourceInputDigest: sha256HexSync(JSON.stringify({inputs, portableOptions: PORTABLE_OPTIONS}))};
 }
+
+export const buildNativeInferenceDriver = Effect.fn('nativeInference.buildDriver')(function* (options: {
+  readonly driver: string;
+  readonly scratch: string;
+  readonly env: NodeJS.ProcessEnv;
+}) {
+  const system = yield* SystemInfo;
+  return yield* runCommandEffect(process.execPath, [options.driver], {
+    cwd: options.scratch,
+    timeoutMs: 30 * 60_000,
+    maxOutputBytes: 4 * 1024 * 1024,
+    detached: true,
+    // Windows retains scoped tree cleanup and leader confirmation; POSIX can also observe its owned group.
+    verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
+    env: options.env,
+  });
+});
 
 /** CI/build-time only. Runtime always uses build:never and skipDownload:true. */
 export const assembleNativeInference = Effect.fn('assembleNativeInference')(function* (options: {
@@ -286,12 +326,9 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     `,
       ),
     );
-    const buildResult = yield* runCommandEffect(process.execPath, [driver], {
-      cwd: scratch,
-      timeoutMs: 30 * 60_000,
-      maxOutputBytes: 4 * 1024 * 1024,
-      detached: true,
-      verifyOwnedProcessExit: 'group',
+    const buildResult = yield* buildNativeInferenceDriver({
+      driver,
+      scratch,
       env: {...buildEnvironment, CFLAGS: '', CXXFLAGS: '', SOURCE_DATE_EPOCH: '0'},
     });
     yield* filesystem.writeFileString(
@@ -605,7 +642,7 @@ chmod 755 /tmp/rustup-init
 git config --global --add safe.directory ${shellRoot}
 cd ${shellRoot}
 stage=frozen-dependency-install
-bun install --frozen-lockfile
+${MUSL_BUILD_DEPENDENCY_INSTALL}
 ${
   options.workflowRuntime
     ? `stage=workflow-capability-boundary

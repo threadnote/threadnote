@@ -1,4 +1,6 @@
-import {CommandExecutor, CommandFailed, CommandTimedOut} from '@threadnote/platform/command';
+import {CommandExecutor, CommandFailed, CommandTimedOut, type CommandOptions} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   assembleNativeInference,
   muslWorkflowRuntimeArguments,
@@ -7,10 +9,12 @@ import {
   nativeInferenceBuildEnvironment,
   GNU_INFERENCE_COMPILER_BOOTSTRAP,
   muslToolchainFetchScript,
+  MUSL_BUILD_DEPENDENCY_INSTALL,
+  buildNativeInferenceDriver,
 } from '../../../../scripts/assemble-native-inference.js';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, String as EffectString} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
   NATIVE_INFERENCE_LLAMA_COMMIT,
@@ -91,7 +95,112 @@ describe('native inference overlay filesystem boundary', () => {
       expect(() => muslWorkflowRuntimeArguments(environment)).toThrow('extracted release archive and profile');
   });
 
-  effectIt.layer(BunServices.layer)(it => {
+  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect('confirms Windows inference leader exit and keeps POSIX groups and original driver bounds', () =>
+      Effect.gen(function* () {
+        const base = yield* SystemInfo;
+        for (const platform of ['win32', 'linux', 'darwin'] as const) {
+          const observed: CommandOptions[] = [];
+          const env = {NATIVE_BUILD_FIXTURE: 'preserved'};
+          const result = yield* buildNativeInferenceDriver({driver: 'build.mjs', scratch: 'scratch', env}).pipe(
+            Effect.provideService(SystemInfo, SystemInfo.of({...base, platform})),
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                execute: (executable, args, options = {}) => {
+                  expect(executable).toBe(process.execPath);
+                  expect(args).toEqual(['build.mjs']);
+                  observed.push(options);
+                  return Effect.succeed({exitCode: 0, stdout: 'compiled', stderr: ''});
+                },
+                executeStreaming: () => Effect.die('Unexpected streaming build'),
+              }),
+            ),
+          );
+          expect(result).toEqual({exitCode: 0, stdout: 'compiled', stderr: ''});
+          expect(observed).toEqual([
+            {
+              cwd: 'scratch',
+              timeoutMs: 30 * 60_000,
+              maxOutputBytes: 4 * 1024 * 1024,
+              detached: true,
+              verifyOwnedProcessExit: platform === 'win32' ? 'leader' : 'group',
+              env,
+            },
+          ]);
+        }
+      }),
+    );
+
+    it.effect.skipIf(process.platform === 'win32')(
+      'scopes the musl devtool prepare exemption and refuses changed product install contracts',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'musl dependency prepare '});
+          const workspace = path.join(directory, 'packages', 'fixture');
+          yield* fs.makeDirectory(workspace, {recursive: true});
+          const manifest = {
+            scripts: {prepare: 'bun --bun husky && bun --bun effect-tsgo patch --no-typescript --oxlint'},
+            trustedDependencies: [],
+            workspaces: ['packages/*'],
+          };
+          const rootManifest = path.join(directory, 'package.json');
+          const workspaceManifest = path.join(workspace, 'package.json');
+          const calls = path.join(directory, 'calls');
+          const literal = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
+          const bun = path.join(directory, 'bun');
+          yield* fs.writeFileString(
+            bun,
+            `#!/bin/sh
+if [ "$1" = -e ]; then exec ${literal(process.execPath)} "$@"; fi
+printf '%s\\n' "$*" >> ${literal(calls)}
+if [ "$1" = --bun ] && [ "$2" = husky ]; then [ "$HUSKY" = 0 ] || exit 41; fi
+`,
+          );
+          yield* fs.chmod(bun, 0o755);
+          const run = () =>
+            Bun.spawnSync({
+              cmd: ['sh', '-ec', MUSL_BUILD_DEPENDENCY_INSTALL],
+              cwd: directory,
+              env: {...Bun.env, PATH: `${directory}:${Bun.env.PATH ?? ''}`},
+              stdout: 'pipe',
+              stderr: 'pipe',
+            });
+          yield* fs.writeFileString(rootManifest, JSON.stringify(manifest));
+          yield* fs.writeFileString(workspaceManifest, '{}');
+          const installed = run();
+          expect(installed.exitCode, installed.stderr.toString()).toBe(0);
+          expect(EffectString.trim(yield* fs.readFileString(calls))).toBe(
+            EffectArray.join(
+              [
+                'install --frozen-lockfile --ignore-scripts',
+                '--bun husky',
+                '--bun effect-tsgo patch --no-typescript --oxlint --skip-missing',
+              ],
+              '\n',
+            ),
+          );
+          yield* fs.remove(calls);
+          for (const changed of [
+            {...manifest, trustedDependencies: ['requires-postinstall']},
+            {...manifest, scripts: {...manifest.scripts, postinstall: 'required-product-setup'}},
+          ]) {
+            yield* fs.writeFileString(rootManifest, JSON.stringify(changed));
+            expect(run().exitCode).not.toBe(0);
+            expect(yield* fs.exists(calls)).toBe(false);
+          }
+          yield* fs.writeFileString(rootManifest, JSON.stringify(manifest));
+          yield* fs.writeFileString(
+            workspaceManifest,
+            JSON.stringify({scripts: {postinstall: 'required-workspace-setup'}}),
+          );
+          expect(run().exitCode).not.toBe(0);
+          expect(yield* fs.exists(calls)).toBe(false);
+        }),
+    );
+
     it.effect.skipIf(process.platform === 'win32')(
       'passes exact APK constraints through world, restores it, and pins the compiler helper arguments',
       () =>

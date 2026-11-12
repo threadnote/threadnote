@@ -1,9 +1,15 @@
 import {describe, expect} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, String as EffectString} from 'effect';
+import {Context, Effect, FileSystem, Layer, Path, Result, String as EffectString} from 'effect';
+import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
+import {CommandExecutor, type CommandOptions} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
 import {NATIVE_VECTOR_READER_FILES} from '@threadnote/recall/vector/native-reader-payload';
 import {nativeReaderBuildInputs, nativeReaderGit} from '../../../../scripts/native-vector-reader-payload.js';
+import {buildNativeVectorReaderCargo} from '../../../../scripts/assemble-native-vector-reader.js';
+import {ScriptCommandExecutorLayer} from '../../../../scripts/effect/system-layer.js';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -29,6 +35,97 @@ const fixture = Effect.gen(function* () {
   });
   yield* fs.makeDirectory(path.join(root, 'dist'));
   return {fs, path, root, crate};
+});
+
+describe('native vector Cargo command cleanup', () => {
+  const commandFixture = Effect.fn(function* (platform: 'win32' | 'linux', leaderRunning?: boolean) {
+    const native = yield* SystemInfo;
+    let groupProbes = 0;
+    const system = SystemInfo.of({
+      ...native,
+      platform,
+      isProcessRunning: leaderRunning === undefined ? native.isProcessRunning : () => leaderRunning,
+      isProcessGroupRunning: () => {
+        groupProbes += 1;
+        return platform === 'win32' ? undefined : false;
+      },
+    });
+    const context = yield* Layer.build(
+      ScriptCommandExecutorLayer.pipe(Layer.provide(Layer.succeed(SystemInfo, system))),
+    );
+    return {system, command: Context.get(context, CommandExecutor), groupProbes: () => groupProbes};
+  });
+  const invokeCargo = (f: Effect.Success<ReturnType<typeof commandFixture>>, program: string) => {
+    const command = CommandExecutor.of({
+      ...f.command,
+      execute: (executable, args, options: CommandOptions = {}) => {
+        expect(executable).toBe('cargo');
+        expect(args).toEqual([
+          'build',
+          '--locked',
+          '--release',
+          '--target',
+          'fixture-target',
+          '--target-dir',
+          'fixture-output',
+        ]);
+        expect(options.timeoutMs).toBe(20 * 60_000);
+        expect(options.maxOutputBytes).toBe(4 * 1024 * 1024);
+        expect(options.detached).toBe(true);
+        return f.command.execute(process.execPath, ['-e', program], {...options, cwd: process.cwd()});
+      },
+    });
+    return buildNativeVectorReaderCargo({
+      cargo: 'cargo',
+      crateRoot: process.cwd(),
+      target: 'fixture-target',
+      targetDirectory: 'fixture-output',
+      env: {},
+    }).pipe(Effect.provideService(SystemInfo, f.system), Effect.provideService(CommandExecutor, command));
+  };
+
+  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect('reproduces successful-child masking when Windows cannot observe a POSIX group', () =>
+      Effect.gen(function* () {
+        const f = yield* commandFixture('win32');
+        const result = yield* f.command
+          .execute(process.execPath, ['-e', 'process.stdout.write("compiled")'], {
+            timeoutMs: 5_000,
+            detached: true,
+            verifyOwnedProcessExit: 'group',
+          })
+          .pipe(Effect.result);
+        expect(Result.isFailure(result) && result.failure._tag).toBe('CommandCleanupUnconfirmed');
+        expect(f.groupProbes()).toBe(1);
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('confirms Windows leader exit while retaining POSIX group verification and Cargo bounds', () =>
+      Effect.gen(function* () {
+        for (const platform of ['win32', 'linux'] as const) {
+          const f = yield* commandFixture(platform);
+          const result = yield* invokeCargo(f, 'process.stdout.write("compiled")');
+          expect(result).toEqual({exitCode: 0, stdout: 'compiled', stderr: ''});
+          expect(f.groupProbes()).toBe(platform === 'win32' ? 0 : 1);
+        }
+      }).pipe(TestClock.withLive),
+    );
+    it.effect('preserves original Windows child errors and rejects unconfirmed leader exit', () =>
+      Effect.gen(function* () {
+        const f = yield* commandFixture('win32');
+        const failed = yield* invokeCargo(f, 'process.stderr.write("compiler failed"); process.exit(7)').pipe(
+          Effect.result,
+        );
+        expect(Result.isFailure(failed) && failed.failure._tag).toBe('CommandFailed');
+        if (Result.isFailure(failed) && failed.failure._tag === 'CommandFailed') {
+          expect(failed.failure.exitCode).toBe(7);
+          expect(failed.failure.stderr).toBe('compiler failed');
+        }
+        const unconfirmed = yield* commandFixture('win32', true);
+        const result = yield* invokeCargo(unconfirmed, 'process.stdout.write("compiled")').pipe(Effect.result);
+        expect(Result.isFailure(result) && result.failure._tag).toBe('CommandCleanupUnconfirmed');
+      }).pipe(TestClock.withLive),
+    );
+  });
 });
 
 describe('native vector build identity', () => {
