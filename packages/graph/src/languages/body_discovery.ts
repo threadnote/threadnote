@@ -12,7 +12,7 @@ import type {
   CodeGraphSymbol,
 } from '../types.js';
 
-export const BODY_DISCOVERY_POLICY = 'body-discovery-v2-utf16-cursor-combined-64k';
+export const BODY_DISCOVERY_POLICY = 'body-discovery-v3-owner-presence-utf16-cursor-combined-64k';
 export const BODY_DISCOVERY_PREFIX = '~body:v1:';
 export const BODY_DISCOVERY_WORK_BYTES = 65_536;
 export const BODY_DISCOVERY_WINDOW_BYTES = 4_096;
@@ -69,6 +69,9 @@ function ownerMatches(
 
 /** One monotonic locator; window reads are separately charged, including overlaps. No source survives this call. */
 export function captureBodyDiscovery(file: CodeGraphInventoryFile, facts: CodeGraphFileFacts): CodeGraphFileFacts {
+  const owners = EffectArray.filter(facts.symbols, s => s.kind === 'function' || s.kind === 'method');
+  // No path-bound body evidence is needed without owners. Preserve other derivation inputs unchanged.
+  if (owners.length === 0) return facts;
   const records: CodeGraphBodyDiscoveryRecord[] = [];
   const omissions = new Set<string>();
   let workBytes = 0;
@@ -87,9 +90,7 @@ export function captureBodyDiscovery(file: CodeGraphInventoryFile, facts: CodeGr
   });
   if (source === undefined || facts.path !== file.path) omissions.add('source-unavailable');
   else {
-    const owners = EffectArray.filter(facts.symbols, s => s.kind === 'function' || s.kind === 'method').sort(
-      (a, b) => compare(a.span, b.span) || EffectString.localeCompare(b.id)(a.id),
-    );
+    owners.sort((a, b) => compare(a.span, b.span) || EffectString.localeCompare(b.id)(a.id));
     const ownerCounts = new Map<string, number>();
     for (const owner of owners) ownerCounts.set(owner.id, (ownerCounts.get(owner.id) ?? 0) + 1);
     if (owners.length > BODY_DISCOVERY_OWNERS) omissions.add('owner-limit');

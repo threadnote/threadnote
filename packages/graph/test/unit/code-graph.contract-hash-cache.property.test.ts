@@ -36,9 +36,9 @@ function packState(pack: CodeGraphLanguagePack): string {
 describe('code graph pure contract digest caches', () => {
   it('preserves retained catalog contract and language-pack digests', () => {
     expect(fixturePack.id).toBe('apex');
-    expect(packCacheIdentity(fixturePack)).toBe('1ae3c72785e4366235b6bf56e564b7d3343e37cf8f3c02c0e471cc42c89f7b1b');
+    expect(packCacheIdentity(fixturePack)).toBe('7e153d6937bbad2cbf6e80aa1b415b74c834e5ba4a6b46dfcecb250694c65b7f');
     expect(packDerivationIdentity(fixturePack)).toBe(
-      '4f6f1342b041ba4c5d8da7349dc7c47d1c546df24d4d64434af4056f5c4eb4e2',
+      '37ea063e57aff18200bc29edcdb0dc00a3c98aa4759ed0982fb628d8d3afbfcb',
     );
     expect(codeGraphInventoryReuseContract(BUILTIN_LANGUAGE_PACK_REGISTRY, false)).toBe(
       '1feefb92a50bab0c7fde218feca02ef1dfceeb1e08abd1fd1807b2322b83fc5a',

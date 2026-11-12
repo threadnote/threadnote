@@ -4,7 +4,7 @@ import * as EffectArray from 'effect/Array';
 import * as EffectString from 'effect/String';
 import {expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Layer} from 'effect';
+import {Effect, Layer, Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   captureBodyDiscovery,
@@ -15,6 +15,10 @@ import {
 } from '@threadnote/graph/languages/body_discovery';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY, packCacheIdentity} from '@threadnote/graph/languages/registry';
 import {codeGraphLanguagePack} from '@threadnote/graph/languages/typescript/pack';
+import {
+  extractStructuredSchemaFacts,
+  relocateStructuredSchemaFacts,
+} from '@threadnote/graph/languages/schemas/extractor';
 import {NAVIGATION_PROOF_CACHE_IDENTITY} from '@threadnote/graph/query/navigation_facts';
 import {serializeBoundedCodeGraphFact, budgetCachedCodeGraphFacts} from '@threadnote/graph/fact/budget';
 import {encodeStoredCodeGraphFact, decodeStoredCodeGraphFact} from '@threadnote/graph/fact/storage';
@@ -57,6 +61,28 @@ export function ownerFacts(file: CodeGraphInventoryFile, spans: readonly CodeGra
     })),
   };
 }
+it('keeps ownerless structured facts relocatable without adding private body evidence', () => {
+  const file = {...bodyFile('{"message":"pending"}\n', 'a.json'), language: 'json'};
+  const extracted = extractStructuredSchemaFacts(file, {packageName: Option.none(), project: Option.none()});
+  const facts: CodeGraphFileFacts = {
+    ...extracted,
+    derivationInputs: {
+      rationale: [{documentation: 'Retained rationale', line: 1, marker: 'WHY', name: 'message'}],
+    },
+  };
+  const before = JSON.stringify([file, facts]);
+  const captured = captureBodyDiscovery(file, facts);
+  const donor = serializeBoundedCodeGraphFact(captured).facts;
+  const relocated = relocateStructuredSchemaFacts({...file, path: 'b.json'}, donor)!;
+  expect(relocated).toBeDefined();
+  expect(serializeBoundedCodeGraphFact(relocated).facts.path).toBe('b.json');
+  expect(captureBodyDiscovery(file, extracted).derivationInputs).toBeUndefined();
+  expect(captured.derivationInputs?.bodyDiscovery).toBeUndefined();
+  expect(captured.derivationInputs).toBe(facts.derivationInputs);
+  expect(donor.derivationInputs?.rationale).toEqual(facts.derivationInputs?.rationale);
+  expect(relocated.derivationInputs?.rationale).toEqual(facts.derivationInputs?.rationale);
+  expect(JSON.stringify([file, facts])).toBe(before);
+});
 it('charges one monotonic UTF16 locator plus each overlapping UTF8 window and retains no source', () => {
   const file = bodyFile('é\r\nfunction f() { "pending items"; }\n');
   const span = {line: 2, column: 1, endLine: 2, endColumn: 34};
@@ -133,6 +159,10 @@ it('omits ambiguous owner IDs and source spans beyond the retained source', () =
     symbols: [{...facts.symbols[0], span: {line: 1, column: 1, endLine: 100, endColumn: 1}}],
   });
   expect(invalid.derivationInputs!.bodyDiscovery).toMatchObject({records: [], omissions: ['invalid-window']});
+  expect(captureBodyDiscovery({...file, content: undefined}, facts).derivationInputs!.bodyDiscovery).toMatchObject({
+    records: [],
+    omissions: ['source-unavailable'],
+  });
 });
 it('keeps metadata and body key spaces separate and preserves legacy facts', () => {
   const file = bodyFile('function f() { "pending items"; }');
@@ -148,9 +178,9 @@ it('keeps metadata and body key spaces separate and preserves legacy facts', () 
   expect(serializeBoundedCodeGraphFact(raw).facts.derivationInputs).toBeUndefined();
 });
 it('binds finite TypeScript proof support to the exact new registry identity independently', () => {
-  expect(BODY_DISCOVERY_POLICY).toBe('body-discovery-v2-utf16-cursor-combined-64k');
+  expect(BODY_DISCOVERY_POLICY).toBe('body-discovery-v3-owner-presence-utf16-cursor-combined-64k');
   expect(packCacheIdentity(codeGraphLanguagePack)).toBe(NAVIGATION_PROOF_CACHE_IDENTITY);
-  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('d07f3644892772ca8570dee0525b2ad9a6b2ea30a5f19b345ec5fdd997141650');
+  expect(NAVIGATION_PROOF_CACHE_IDENTITY).toBe('57a35e49fc3aaac3e897faf3ce928b546a3ec4b5404d82b21dfd76a59c96212f');
 });
 effectIt.layer(TreeSitterRuntime.layer.pipe(Layer.provideMerge(citationPlatformLayer)))(it =>
   it.effect('captures actual TypeScript and Python owners through the registry before source release', () =>
