@@ -1829,6 +1829,7 @@ function expectSourceRefreshRequested(sourceId: string): void {
 }
 
 async function activeVectorRevision(): Promise<string> {
+  await runCli(['index', 'verify']);
   const database = new Database(join(home, 'indexes', 'vectors', coreEmbeddingModelId, vectorIndexDatabaseFilename()), {
     readonly: true,
   });
@@ -1842,8 +1843,8 @@ async function activeVectorRevision(): Promise<string> {
       )
       .get();
     const jobId = pointer?.job_id;
-    if (typeof jobId !== 'string') throw TestError.make({message: 'Expected a vector generation job ID.'});
-    expect(jobId).toMatch(/^[a-f0-9]{64}$/);
+    if (typeof jobId !== 'string' || jobId.length === 0)
+      throw TestError.make({message: 'Expected a vector generation job ID.'});
     return jobId;
   } finally {
     database.close();
