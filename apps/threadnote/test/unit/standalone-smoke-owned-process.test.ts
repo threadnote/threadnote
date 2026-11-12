@@ -145,6 +145,64 @@ it('preserves deadline failure without claiming an observed close', async () => 
   await expect(command).rejects.toThrow('Fixture deadline expired');
 });
 
+it.each([
+  [{errorType: 'ModelLoadFailed', message: 'PRIVATE_MESSAGE', path: 'PRIVATE_PATH'}, {errorType: 'ModelLoadFailed'}],
+  [
+    {
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'crash',
+      stack: 'PRIVATE_STACK',
+    },
+    {errorType: 'EmbeddingFailed', domain: 'model-worker', operation: 'embed-many', reason: 'crash'},
+  ],
+  [
+    {
+      errorType: 'SqlError',
+      sqlReason: 'LockTimeoutError',
+      sqliteCode: 'SQLITE_BUSY',
+      sql: 'PRIVATE_SQL',
+      body: 'PRIVATE_BODY',
+    },
+    {errorType: 'SqlError', sqlReason: 'LockTimeoutError', sqliteCode: 'SQLITE_BUSY'},
+  ],
+  [
+    {errorType: 'SqlError', sqlReason: 'PRIVATE_REASON', sqliteCode: 'SQLITE_BUSY_PRIVATE', token: 'PRIVATE_TOKEN'},
+    {errorType: 'SqlError', sqlReason: 'UnknownError'},
+  ],
+  [
+    {errorType: 'PRIVATE_TYPE', domain: 'model-worker', operation: 'PRIVATE_OPERATION', reason: 'PRIVATE_REASON'},
+    {errorType: 'UnknownError'},
+  ],
+] as const)('retains only the exact closed repair failure fields for %j', async (input, expected) => {
+  const child = commandChild();
+  const processes = new FixtureProcesses(() => child);
+  const command = runFixtureCommand(processes, 'PRIVATE_COMMAND', ['PRIVATE_ARGUMENT'], {
+    stage: 'repair',
+    cwd: 'PRIVATE_PATH',
+    env: {PRIVATE_ENV: 'PRIVATE_VALUE'},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 1024,
+  }).catch((cause: unknown) => cause);
+  child.emit('spawn');
+  child.stderr.write(
+    `Recall repair failure diagnostic: ${JSON.stringify(input)}\nRecall index repair failed: PRIVATE_ERROR\n`,
+  );
+  child.emit('exit', 7, null);
+  child.emit('close');
+  const details = commandFailureDetails(await command);
+  expect(details).toMatchObject({
+    stage: 'repair',
+    observed: 'owned-close',
+    reason: 'nonzero-exit',
+    exitCode: 7,
+    overflow: false,
+    repair: {typedFailure: expected},
+  });
+  expect(JSON.stringify(details)).not.toContain('PRIVATE_');
+});
+
 it('keeps command acceptance and private failure projection invariant under output chunking', async () => {
   await fc.assert(
     fc.asyncProperty(

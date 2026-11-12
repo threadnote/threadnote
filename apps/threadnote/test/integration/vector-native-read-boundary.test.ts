@@ -194,12 +194,22 @@ const observedWorker = (f: Effect.Success<typeof fixture>, promote = false) =>
     const script = f.path.join(f.home, 'observed-vector-worker.ts');
     const entered = f.path.join(f.home, 'native-query-entered.pid');
     const timeoutFile = f.path.join(f.home, 'native-query-timeout.json');
+    const stageFile = f.path.join(f.home, 'native-worker-stages.json');
     const native = true;
     yield* f.fs.writeFileString(
       script,
       `
 import {Database} from 'bun:sqlite';
 import {renameSync, writeFileSync} from 'node:fs';
+const started = performance.now();
+const stages = [];
+function mark(stage) {
+  if (stages.length >= 8) throw new Error('Unexpected fixture stage count.');
+  stages.push({stage, atMilliseconds: Date.now(), elapsedMilliseconds: Math.round(performance.now() - started)});
+  writeFileSync(${JSON.stringify(stageFile)} + '.tmp', JSON.stringify(stages));
+  renameSync(${JSON.stringify(stageFile)} + '.tmp', ${JSON.stringify(stageFile)});
+}
+mark('entry');
 let promoted = false;
 function promoteGeneration() {
   ${
@@ -219,15 +229,18 @@ function promoteGeneration() {
 if (${native}) {
   const originalDlopen = process.dlopen;
   process.dlopen = function(module, filename, flags) {
+    if (String(filename).endsWith('threadnote-vector-reader.node')) mark('dlopen-start');
     const result = originalDlopen.call(process, module, filename, flags);
     if (typeof module.exports.readSelected === 'function') {
+      mark('dlopen-complete');
       const originalRead = module.exports.readSelected;
       module.exports.readSelected = function(...args) {
         const pending = originalRead.apply(this, args);
+        mark('native-call');
         const entered = ${JSON.stringify(entered)};
         writeFileSync(entered + '.tmp', String(process.pid));
         renameSync(entered + '.tmp', entered);
-        return pending.then(value => { promoteGeneration(); return value; });
+        return pending.then(value => { mark('native-settled'); promoteGeneration(); return value; });
       };
     }
     return result;
@@ -241,6 +254,7 @@ const {withCliDiagnostics} = await import(${JSON.stringify(Bun.fileURLToPath(new
 const {runtimeEntrypointLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/effect/runtime-entrypoint.ts', import.meta.url)))});
 const {signalTransparentTeardown} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/process/signal_transparent_main.ts', import.meta.url)))});
 const {telemetryChildEnvironmentPolicyLayer} = await import(${JSON.stringify(Bun.fileURLToPath(new URL('../../src/telemetry/session.ts', import.meta.url)))});
+mark('imports-complete');
 Runtime.makeRunMain(signalTransparentTeardown)(
   makeReadyRecallReadWorkerProgram(process.argv.slice(2), process.env).pipe(
     Effect.provide(readyRecallReadWorkerLayer.pipe(
@@ -253,7 +267,7 @@ Runtime.makeRunMain(signalTransparentTeardown)(
 `,
     );
     const bundled = yield* bundledReadyWorker(f, script);
-    return {system: bundled.system, entered, timeoutFile, native};
+    return {...bundled, entered, timeoutFile, stageFile, native};
   });
 
 const awaitNativePid = (f: Effect.Success<typeof fixture>, entered: string) =>
@@ -282,12 +296,74 @@ describe.skipIf(!nativeVectorTestsEnabled)('bundled native vector capability', (
         const binding = yield* Effect.tryPromise(() => loadNativeVectorReader(system));
         expect(binding).toBeDefined();
         const bundled = yield* observedWorker(f);
+        const command = yield* CommandExecutor;
+        let requestOrdinal = 0;
         const read = (request: RecallReadyReadRequest) =>
           Effect.gen(function* () {
+            const ordinal = ++requestOrdinal;
+            let allowance: number | undefined;
+            let commandStartedAt: number | undefined;
+            yield* f.fs.remove(bundled.stageFile, {force: true});
             const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
               Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  ...command,
+                  execute: (executable, arguments_, options) =>
+                    Effect.gen(function* () {
+                      allowance = options?.timeoutMs;
+                      commandStartedAt = yield* Clock.currentTimeMillis;
+                      return yield* command.execute(executable, arguments_, options);
+                    }),
+                }),
+              ),
             );
-            return yield* boundary.read(request);
+            return yield* boundary.read(request).pipe(
+              Effect.tapError(() =>
+                Effect.gen(function* () {
+                  const stages = yield* Effect.gen(function* () {
+                    const stat = yield* f.fs.stat(bundled.stageFile);
+                    if (Number(stat.size) > 4096) return [];
+                    return yield* Schema.decodeEffect(
+                      Schema.fromJsonString(
+                        Schema.Array(
+                          Schema.Struct({
+                            stage: Schema.Literals([
+                              'entry',
+                              'imports-complete',
+                              'dlopen-start',
+                              'dlopen-complete',
+                              'native-call',
+                              'native-settled',
+                            ]),
+                            atMilliseconds: Schema.Finite,
+                            elapsedMilliseconds: Schema.Finite,
+                          }),
+                        ).check(Schema.isMaxLength(8)),
+                      ),
+                    )(yield* f.fs.readFileString(bundled.stageFile));
+                  }).pipe(Effect.orElseSucceed(() => []));
+                  yield* Effect.logError('Native capability worker failed', {
+                    operation: request.operation,
+                    requestOrdinal: ordinal,
+                    timeoutMilliseconds: allowance,
+                    setupMilliseconds: bundled.setupMilliseconds,
+                    bundleBytes: bundled.bundleBytes,
+                    bundleSha256: bundled.bundleSha256,
+                    // Epoch time correlates two processes for diagnostics only;
+                    // every deadline above continues to use its original monotonic clock.
+                    stages: EffectArray.map(stages, stage => ({
+                      stage: stage.stage,
+                      elapsedMilliseconds: stage.elapsedMilliseconds,
+                      ...(commandStartedAt === undefined
+                        ? {}
+                        : {afterCommandMilliseconds: stage.atMilliseconds - commandStartedAt}),
+                    })),
+                  });
+                }),
+              ),
+            );
           });
         const opening = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opening.value);
@@ -567,14 +643,20 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         let wakes = 0;
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(RecallEmbeddingWakePort, () =>
-            Effect.sync(() => {
-              wakes++;
-            }),
-          ),
-        );
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        const bundled = yield* bundledReadyWorker(f);
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+              Effect.provideService(RecallEmbeddingWakePort, () =>
+                Effect.sync(() => {
+                  wakes++;
+                }),
+              ),
+            );
+            return yield* boundary.read(request);
+          });
+        const reply = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
         if (proof.readiness !== 'current') return yield* Effect.die('Missing private opening proof');
         yield* f.fs.writeFileString(
@@ -585,7 +667,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
           withProductionLogging(
             f.home,
             {component: 'mcp', operation: 'recall_context'},
-            boundary.read({
+            read({
               operation: 'vector-scores',
               config: f.config,
               options: {
@@ -633,10 +715,14 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
       Effect.gen(function* () {
         const f = yield* fixture;
         const bundled = yield* bundledReadyWorker(f);
-        const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        );
-        const opened = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
+        const read = (request: RecallReadyReadRequest) =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+              Effect.provideService(SystemInfo, bundled.system),
+            );
+            return yield* boundary.read(request);
+          });
+        const opened = yield* read({operation: 'vector-state', config: f.config, options: {model}});
         expect(opened.outcome).toBe('success');
         const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(opened.value);
         expect(proof.readiness).toBe('current');
@@ -654,13 +740,11 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             limit: 12,
           },
         };
-        const scores = yield* boundary.read(request);
+        const scores = yield* read(request);
         expect(scores.outcome).toBe('success');
         expect(scores.value).toEqual([[f.uris[0], 1]]);
         expect(JSON.stringify(scores)).not.toContain('PRIVATE_VECTOR');
-        const wrong = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read({
+        const wrong = yield* read({
           ...request,
           config: {...f.config, user: 'other'},
         });
@@ -681,9 +765,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             'PRIVATE_CHANGED_SOURCE',
           ),
         );
-        const changed = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read(request);
+        const changed = yield* read(request);
         expect(changed.outcome).toBe('success');
         expect(changed.value).toEqual([]);
         expect(JSON.stringify(changed)).not.toContain('PRIVATE_CHANGED_SOURCE');
@@ -774,7 +856,17 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             },
           })
           .pipe(Effect.forkScoped);
-        const pid = yield* awaitNativePid(f, observed.entered);
+        const pid = yield* Effect.raceFirst(
+          Effect.gen(function* () {
+            while (!(yield* f.fs.exists(observed.entered))) yield* Effect.sleep(5);
+            return yield* awaitNativePid(f, observed.entered);
+          }),
+          Fiber.join(child).pipe(
+            Effect.andThen(
+              TestError.make({message: 'Owned vector worker completed before native scoring could be cancelled.'}),
+            ),
+          ),
+        );
         yield* Fiber.interrupt(child);
         expect(observed.system.isProcessRunning(pid)).toBe(false);
         // Native SQL views assert the actual connection timeout inside the query.

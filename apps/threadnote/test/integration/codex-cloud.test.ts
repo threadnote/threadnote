@@ -5,6 +5,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {TestError} from '@threadnote/testing/test-error';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {describe, expect, it} from 'vitest';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -193,35 +194,59 @@ describe('Codex Cloud CLI integration', () => {
       expect((await f.cli(['graph', 'query', '--cwd', repo, '--query', 'greeting', '--json'])).stdout).toContain(
         'greeting',
       );
-      await f.run([
-        'remember',
-        '--project',
-        'source',
-        '--topic',
-        'greeting',
-        '--cwd',
-        repo,
-        '--code-ref',
-        'greeting.ts',
-        '--text',
-        'Greeting contract: return a friendly message.',
-      ]);
-      await f.run([
-        'remember',
-        '--kind',
-        'handoff',
-        '--project',
-        'source',
-        '--topic',
-        'greeting-task',
-        '--text',
-        'Task: greeting contract. Next step: preserve the friendly message.',
-      ]);
+      const durableBody = 'Greeting contract: return a friendly message.';
+      const durable = parsed(
+        (
+          await f.run([
+            'remember',
+            '--project',
+            'source',
+            '--topic',
+            'greeting',
+            '--cwd',
+            repo,
+            '--code-ref',
+            'greeting.ts',
+            '--text',
+            durableBody,
+            '--json',
+          ])
+        ).stdout,
+      );
+      const durableUri = durable.structuredContent!.memoryUri!;
+      const handoffBody = 'Task: greeting contract. Next step: preserve the friendly message.';
+      const handoff = parsed(
+        (
+          await f.run([
+            'remember',
+            '--kind',
+            'handoff',
+            '--project',
+            'source',
+            '--topic',
+            'greeting-task',
+            '--text',
+            handoffBody,
+            '--json',
+          ])
+        ).stdout,
+      );
+      const handoffUri = handoff.structuredContent!.memoryUri!;
+      const handoffRead = JSON.parse((await f.run(['read', '--uri', handoffUri, '--json'])).stdout);
+      expect(handoffRead).toMatchObject({
+        structuredContent: {complete: true, mode: 'content', resourceCount: 1},
+      });
+      const handoffRecord = parseMemoryDocument(handoffUri, handoffRead.structuredContent.content);
+      expect(handoffRecord?.body).toBe(handoffBody);
+      expect(handoffRecord?.metadata.memoryId).toMatch(/^tn_[a-f0-9]+$/u);
       const teams = JSON.parse(await readFile(join(f.home, 'share', 'teams.json'), 'utf8'));
       const shared = await readFile(
         join(teams.teams.personal.worktree, 'durable', 'projects', 'source', 'greeting.md'),
         'utf8',
       );
+      const durableRecord = parseMemoryDocument(durableUri, shared);
+      expect(durableRecord?.body).toBe(durableBody);
+      expect(durableRecord?.metadata.memoryId).toMatch(/^tn_[a-f0-9]+$/u);
       for (const parts of [
         ['durable'],
         ['shared', 'unconfigured', 'durable'],
@@ -246,12 +271,63 @@ describe('Codex Cloud CLI integration', () => {
       }
       for (const args of [[], ['--code-ref', 'greeting.ts']]) {
         const brief = await f.run(['brief', '--cwd', repo, '--task', 'greeting contract', '--json', ...args]);
-        expect(brief.stdout).toContain('greeting');
-        expect(brief.stdout).toContain('Greeting contract: return a friendly message.');
-        expect(brief.stdout).toContain('preserve the friendly message.');
+        const projected = JSON.parse(brief.stdout);
+        expect(projected.coverage.graph).toEqual({
+          complete: true,
+          consideredRepositories: 1,
+          readyRepositories: 1,
+          requestedRepositories: 1,
+          states: {current: 1},
+        });
+        expect(projected.graph.cards).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({symbol: expect.objectContaining({name: 'greeting', path: 'greeting.ts'})}),
+          ]),
+        );
+        expect(projected.durableDecisions).toEqual([
+          expect.objectContaining({
+            uri: args.length > 0 ? `threadnote://memory/${durableRecord?.metadata.memoryId}` : durableUri,
+            excerpt: durableBody,
+            freshness: 'fresh',
+            freshnessBasis: 'code-citations',
+            preciseStatus: 'exact',
+            citationSummary: expect.objectContaining({
+              coverage: 'current-complete',
+              exact: 1,
+              relocated: 0,
+              stale: 0,
+              unknown: 0,
+            }),
+          }),
+        ]);
+        // Lexical recall may expire independently of the current code-citation lane.
+        // The canonical read above proves the local handoff remains intact in either case.
+        if (projected.coverage.gaps.includes('memory-recall-budget-exhausted')) {
+          expect(projected.coverage.gaps).toEqual(['memory-recall-budget-exhausted']);
+          expect(projected.evidenceState).toBe('partial');
+          expect(projected.activeHandoffs).toEqual([]);
+        } else {
+          // This unanchored handoff has no source commit, so selection reports unknown freshness.
+          expect(projected.coverage.gaps).toEqual(['memory-freshness-unknown']);
+          expect(projected.evidenceState).toBe('degraded');
+          expect(projected.activeHandoffs).toEqual([
+            expect.objectContaining({
+              uri: args.length > 0 ? `threadnote://memory/${handoffRecord?.metadata.memoryId}` : handoffUri,
+              excerpt: expect.stringContaining('preserve the friendly message.'),
+              freshness: 'unknown',
+              freshnessBasis: 'source-commit',
+            }),
+          ]);
+        }
         expect(brief.stdout).not.toContain('OUTSIDE_SCOPE_MARKER');
         expect(brief.stdout).not.toContain('/shared/unconfigured/');
-        if (args.length > 0) expect(JSON.parse(brief.stdout).coverage.memory.codeAnchors.matchedMemories).toBe(1);
+        if (args.length > 0)
+          expect(projected.coverage.memory.codeAnchors).toEqual({
+            complete: true,
+            matchedMemories: 1,
+            requested: 1,
+            resolved: 1,
+          });
       }
       await expect(
         f.run(['brief', '--cwd', repo, '--task', 'greeting', '--team', 'unconfigured']),

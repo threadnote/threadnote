@@ -6,6 +6,7 @@ import {ReadBuffer, serializeMessage} from '@modelcontextprotocol/sdk/shared/std
 import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {JSONRPCMessage} from '@modelcontextprotocol/sdk/types.js';
 import {FixtureProducers, type FixtureProducerObservation} from '@threadnote/testing/fixture-producers';
+import {projectAnonymousTelemetryDiagnostic} from '@threadnote/threadnote/telemetry/diagnostic';
 
 interface FixtureChild {
   readonly stdin: ChildProcess['stdin'];
@@ -154,6 +155,98 @@ const REPAIR_ERROR_MARKERS = [
   ['output-drain', /\bCliOutputError\b/u],
 ] as const;
 
+const REPAIR_SQL_REASONS = new Set([
+  'ConnectionError',
+  'AuthenticationError',
+  'AuthorizationError',
+  'SqlSyntaxError',
+  'UniqueViolation',
+  'ConstraintError',
+  'DeadlockError',
+  'SerializationError',
+  'LockTimeoutError',
+  'StatementTimeoutError',
+  'UnknownError',
+]);
+const REPAIR_SQLITE_CODES = new Set([
+  'SQLITE_ERROR',
+  'SQLITE_INTERNAL',
+  'SQLITE_PERM',
+  'SQLITE_ABORT',
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+  'SQLITE_NOMEM',
+  'SQLITE_READONLY',
+  'SQLITE_INTERRUPT',
+  'SQLITE_IOERR',
+  'SQLITE_CORRUPT',
+  'SQLITE_NOTFOUND',
+  'SQLITE_FULL',
+  'SQLITE_CANTOPEN',
+  'SQLITE_PROTOCOL',
+  'SQLITE_EMPTY',
+  'SQLITE_SCHEMA',
+  'SQLITE_TOOBIG',
+  'SQLITE_CONSTRAINT',
+  'SQLITE_MISMATCH',
+  'SQLITE_MISUSE',
+  'SQLITE_NOLFS',
+  'SQLITE_AUTH',
+  'SQLITE_FORMAT',
+  'SQLITE_RANGE',
+  'SQLITE_NOTADB',
+  'SQLITE_BUSY_RECOVERY',
+  'SQLITE_BUSY_SNAPSHOT',
+  'SQLITE_BUSY_TIMEOUT',
+  'SQLITE_LOCKED_SHAREDCACHE',
+  'SQLITE_CONSTRAINT_UNIQUE',
+  'SQLITE_CONSTRAINT_FOREIGNKEY',
+]);
+const REPAIR_WORKER_REASONS = [
+  'crash',
+  'exit',
+  'protocol',
+  'spawn',
+  'timeout',
+  'write',
+  'cleanup-unconfirmed',
+] as const;
+const repairTypedFailure = (stderr: string) => {
+  const line = /^Recall repair failure diagnostic: (\{[^\r\n]{1,512}\})$/m.exec(stderr)?.[1];
+  if (line === undefined) return undefined;
+  try {
+    const value: unknown = JSON.parse(line);
+    if (typeof value !== 'object' || value === null || !('errorType' in value)) return {errorType: 'UnknownError'};
+    if (value.errorType === 'SqlError') {
+      return {
+        errorType: 'SqlError',
+        sqlReason:
+          'sqlReason' in value && typeof value.sqlReason === 'string' && REPAIR_SQL_REASONS.has(value.sqlReason)
+            ? value.sqlReason
+            : 'UnknownError',
+        ...('sqliteCode' in value && typeof value.sqliteCode === 'string' && REPAIR_SQLITE_CODES.has(value.sqliteCode)
+          ? {sqliteCode: value.sqliteCode}
+          : {}),
+      };
+    }
+    const projected = projectAnonymousTelemetryDiagnostic({
+      errorType: typeof value.errorType === 'string' ? value.errorType : 'UnknownError',
+      ...('domain' in value && value.domain === 'model-worker'
+        ? {
+            domain: 'model-worker',
+            operation: 'operation' in value && typeof value.operation === 'string' ? value.operation : undefined,
+            reason: Option.getOrUndefined(
+              EffectArray.findFirst(REPAIR_WORKER_REASONS, reason => 'reason' in value && value.reason === reason),
+            ),
+          }
+        : {}),
+    });
+    return projected?.domain === 'model-worker' ? projected : {errorType: projected?.errorType ?? 'UnknownError'};
+  } catch {
+    return {errorType: 'UnknownError'};
+  }
+};
+
 const repairFailureMarkers = (stdout: string, stderr: string) => {
   const milestones = EffectArray.map(
     EffectArray.filter(REPAIR_PROGRESS_MARKERS, ([, pattern]) => pattern.test(stdout)),
@@ -163,7 +256,12 @@ const repairFailureMarkers = (stdout: string, stderr: string) => {
     EffectArray.filter(REPAIR_ERROR_MARKERS, ([, pattern]) => pattern.test(stderr)),
     ([name]) => name,
   );
-  return {milestones, errorCategories: errors.length > 0 ? errors : ['unknown']};
+  const typedFailure = repairTypedFailure(stderr);
+  return {
+    milestones,
+    errorCategories: errors.length > 0 ? errors : ['unknown'],
+    ...(typedFailure === undefined ? {} : {typedFailure}),
+  };
 };
 const FIXTURE_DIAGNOSTIC_SIGNALS: readonly NodeJS.Signals[] = [
   'SIGINT',
