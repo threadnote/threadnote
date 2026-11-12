@@ -4121,7 +4121,17 @@ describe('Threadnote MCP toolsets', () => {
             ),
         );
         expect(automaticMemoryMatches).toHaveLength(1);
-        expect(automaticMemoryMatches[0]).toMatchObject({
+        expect(
+          automaticMemoryMatches[0],
+          Effect.pipe(
+            JSON.stringify({
+              citationReceipts: automaticMemoryMatches[0]?.citationReceipts,
+              citationSummary: automaticMemoryMatches[0]?.citationSummary,
+              coverageGaps: automaticBrief.coverage.gaps,
+            }),
+            EffectString.slice(0, 2_000),
+          ),
+        ).toMatchObject({
           codeRelations: [
             {
               anchorOrdinal: 0,

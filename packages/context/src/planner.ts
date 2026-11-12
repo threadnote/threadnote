@@ -121,7 +121,7 @@ export function assembleContextBriefLogicalResult(input: {
       relation => relation.status === 'exact' || relation.status === 'relocated',
     ).slice(0, CONTEXT_BRIEF_MAXIMUM_PUBLIC_CODE_RELATIONS);
     const codeRelations = validatedCodeRelations.slice(0, CONTEXT_BRIEF_DEFAULT_PUBLIC_CODE_RELATIONS);
-    const citationReceipts = compactCodeLinkedCitationReceipts(publicReceipts, validatedCodeRelations);
+    const citationReceipts = compactCodeLinkedCitationReceipts(publicReceipts, codeRelations);
     const coarse = classifyMemoryFreshness(candidate.sourceCommit, input.graph.resolvedSnapshots);
     const {
       actionCard: privateActionCard,
@@ -710,9 +710,19 @@ function compactCodeLinkedCitationReceipts(
   relations: readonly NonNullable<ContextBriefMemoryEvidenceV1['codeRelations']>[number][],
 ): readonly ContextBriefCitationReceiptV2[] {
   if (relations.length === 0) return receipts;
-  return EffectArray.filter(
+  const audit = EffectArray.filter(
     receipts,
     receipt => receipt.observedNodeId !== undefined || receipt.relocationHint !== undefined,
+  ).slice(0, 1);
+  if (audit.length > 0) return audit;
+  return EffectArray.filter(
+    receipts,
+    receipt =>
+      receipt.status === 'unknown' &&
+      EffectArray.some(
+        relations,
+        relation => relation.citationId === receipt.citationId && relation.status === 'unknown',
+      ),
   ).slice(0, 1);
 }
 
