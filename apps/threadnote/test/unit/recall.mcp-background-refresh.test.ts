@@ -11,12 +11,10 @@ import {
 } from '@threadnote/recall/background/demand';
 import {stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
 import {Array as EffectArray} from 'effect';
-import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Fiber, FileSystem, Option, Path, Ref, Schema} from 'effect';
-import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
 import * as LockBoundary from '@threadnote/platform/file/lock';
 import * as RefreshBoundary from '@threadnote/recall/mcp/refresh';
@@ -906,13 +904,13 @@ describe('MCP recall background vector refresh', () => {
   );
 
   describe.skipIf(!nativeVectorTestsEnabled)('native semantic refresh qualification', () => {
-    fcEffectProp(
-      effectIt,
-      'returns promptly and single-flights every bounded number of concurrent refreshes for one canonical home',
-      {callers: FC.integer({max: 24, min: 2})},
-      ({callers}) => concurrentRefreshFixture(callers),
-      {fastCheck: {numRuns: 8}},
-    );
+    // The existing 20-caller example covers the interior. Exercise both bounds
+    // separately so each real-SQLite fixture keeps the ordinary test deadline.
+    for (const callers of [2, 24])
+      effectIt.effect(
+        `returns promptly and single-flights ${callers} concurrent refreshes for one canonical home`,
+        () => concurrentRefreshFixture(callers),
+      );
     effectIt.effect('fixed20 concurrent refresh diagnostic fixture preserves durable intent', () =>
       concurrentRefreshFixture(20),
     );

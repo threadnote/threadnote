@@ -11,6 +11,7 @@ import {
   muslToolchainFetchScript,
   MUSL_BUILD_DEPENDENCY_INSTALL,
   buildNativeInferenceDriver,
+  nativeInferenceBuildDriverSource,
   nativeContainerCheckoutRoot,
   probeMuslArmVariants,
   muslArmVariantSource,
@@ -19,7 +20,19 @@ import {
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
-import {Array as EffectArray, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
+import {
+  Array as EffectArray,
+  Cause,
+  Context,
+  Effect,
+  Exit,
+  FileSystem,
+  Layer,
+  Path,
+  String as EffectString,
+} from 'effect';
+import {TestClock} from 'effect/testing';
+import {ScriptCommandExecutorLayer} from '../../../../scripts/effect/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
   NATIVE_INFERENCE_LLAMA_COMMIT,
@@ -286,6 +299,45 @@ describe('native inference overlay filesystem boundary', () => {
           expect(dirty.stdout.toString()).toContain('M input.txt');
           expect(git(['-C', root, 'rev-parse', 'HEAD', 'HEAD^{tree}'], true).stdout.toString()).toBe(identity);
         }),
+    );
+
+    it.effect('bounds live compiler progress while retaining final diagnostics and actual failure exit', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const scratch = yield* fs.makeTempDirectoryScoped({prefix: 'native-build-output-'});
+        const driver = path.join(scratch, 'build.mjs');
+        const context = yield* Layer.build(ScriptCommandExecutorLayer);
+        const command = Context.get(context, CommandExecutor);
+        const body = `
+for (let index = 0; index < 80; index++) {
+  process.stdout.write('o'.repeat(65536));
+  process.stderr.write('e'.repeat(65536));
+}
+await new Promise(resolve => process.stderr.write('final compiler diagnostic\\n', resolve));
+process.stdout.write('final build progress\\n');
+`;
+        yield* fs.writeFileString(driver, body);
+        const overflow = yield* buildNativeInferenceDriver({driver, scratch, env: {...Bun.env}}).pipe(
+          Effect.provideService(CommandExecutor, command),
+          Effect.exit,
+        );
+        expect(Exit.isFailure(overflow) && Cause.pretty(overflow.cause)).toContain('CommandOutputLimitExceeded');
+        for (const code of [0, 7]) {
+          yield* fs.writeFileString(driver, nativeInferenceBuildDriverSource(body + `\nprocess.exitCode = ${code};`));
+          const result = yield* buildNativeInferenceDriver({driver, scratch, env: {...Bun.env}}).pipe(
+            Effect.provideService(CommandExecutor, command),
+            Effect.catchTag('CommandFailed', error => Effect.succeed(error)),
+          );
+          expect(result.exitCode).toBe(code);
+          if (code !== 0) expect(result).toMatchObject({_tag: 'CommandFailed'});
+          expect(result.stdout).toContain('retained final 524288 of');
+          expect(result.stderr).toContain('retained final 524288 of');
+          expect(result.stdout).toContain('final build progress');
+          expect(result.stderr).toContain('final compiler diagnostic');
+          expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThan(1_049_000);
+        }
+      }).pipe(TestClock.withLive),
     );
 
     it.effect('confirms Windows inference leader exit and keeps POSIX groups and original driver bounds', () =>

@@ -283,6 +283,49 @@ export const buildNativeInferenceDriver = Effect.fn('nativeInference.buildDriver
   });
 });
 
+/** Upstream forwards every compiler progress line; retain live bounded tails in this isolated build process. */
+export function nativeInferenceBuildDriverSource(body: string): string {
+  return String.raw`
+import {Buffer} from 'node:buffer';
+const maximumTailBytes = 512 * 1024;
+const captures = [process.stdout, process.stderr].map((stream, index) => {
+  const write = stream.write.bind(stream);
+  const tail = Buffer.alloc(maximumTailBytes);
+  let offset = 0;
+  let totalBytes = 0;
+  stream.write = (chunk, encoding, callback) => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : undefined);
+    totalBytes += bytes.length;
+    const last = bytes.subarray(Math.max(0, bytes.length - maximumTailBytes));
+    const firstLength = Math.min(last.length, maximumTailBytes - offset);
+    last.copy(tail, offset, 0, firstLength);
+    last.copy(tail, 0, firstLength);
+    offset = (offset + last.length) % maximumTailBytes;
+    const done = typeof encoding === 'function' ? encoding : callback;
+    if (done) queueMicrotask(() => done());
+    return true;
+  };
+  return {
+    restore() { stream.write = write; },
+    flush() {
+      const retained = totalBytes < maximumTailBytes ? tail.subarray(0, totalBytes)
+        : Buffer.concat([tail.subarray(offset), tail.subarray(0, offset)]);
+      const notice = totalBytes > retained.length
+        ? Buffer.from('Threadnote native build ' + (index === 0 ? 'stdout' : 'stderr') + ': retained final ' + retained.length + ' of ' + totalBytes + ' bytes.\n')
+        : Buffer.alloc(0);
+      return new Promise((resolve, reject) => write(Buffer.concat([notice, retained]), error => error ? reject(error) : resolve()));
+    }
+  };
+});
+try {
+${body}
+} finally {
+  for (const capture of captures) capture.restore();
+  await Promise.all(captures.map(capture => capture.flush()));
+}
+`;
+}
+
 /** CI/build-time only. Runtime always uses build:never and skipDownload:true. */
 export const assembleNativeInference = Effect.fn('assembleNativeInference')(function* (options: {
   readonly root: string;
@@ -450,15 +493,15 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     yield* Effect.promise(() =>
       Bun.write(
         driver,
-        `
-      import {compileLlamaCpp} from './node-llama-cpp/dist/bindings/utils/compileLLamaCpp.js';
-      import {getPlatformInfo} from './node-llama-cpp/dist/bindings/utils/getPlatformInfo.js';
+        nativeInferenceBuildDriverSource(`
+      const {compileLlamaCpp} = await import('./node-llama-cpp/dist/bindings/utils/compileLLamaCpp.js');
+      const {getPlatformInfo} = await import('./node-llama-cpp/dist/bindings/utils/getPlatformInfo.js');
       await compileLlamaCpp({customCmakeOptions:new Map(Object.entries(${JSON.stringify({...PORTABLE_OPTIONS, ...(sourceGpu === 'metal' ? {GGML_METAL: 'ON', GGML_METAL_EMBED_LIBRARY: 'ON'} : {}), ...(process.platform === 'win32' ? {GGML_CPU_ALL_VARIANTS: 'OFF', GGML_CPU_ARM_ARCH: 'armv8-a', CMAKE_MSVC_RUNTIME_LIBRARY: 'MultiThreaded'} : {})})})),
         progressLogs:'stderr',platform:${JSON.stringify(process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'win' : 'linux')},
         platformInfo:await getPlatformInfo(),arch:process.arch,gpu:${JSON.stringify(sourceGpu)},
         llamaCpp:{repo:'ggml-org/llama.cpp',release:'v0.7.0'}},
         {includeBuildOptionsInBinaryFolderName:false,downloadCmakeIfNeeded:false,ensureLlamaCppRepoIsCloned:false,ciMode:true});
-    `,
+    `),
       ),
     );
     const buildResult = yield* buildNativeInferenceDriver({

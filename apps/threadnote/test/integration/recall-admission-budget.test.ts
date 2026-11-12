@@ -109,13 +109,14 @@ const compileFixtureWorker = (home: string) =>
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const system = yield* SystemInfo;
+    const importer = Bun.fileURLToPath(import.meta.url);
     const entrypoint = path.join(home, 'admission-worker.ts');
     yield* fs.writeFileString(
       entrypoint,
       `
-import {Effect, FileSystem, Layer, Runtime} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('effect')))};
-import {CommandExecutor, CommandSpawnFailed} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('@threadnote/platform/command')))};
-import {RuntimeEntrypoint} from ${JSON.stringify(Bun.fileURLToPath(import.meta.resolve('@threadnote/platform/runtime-entrypoint')))};
+import {Effect, FileSystem, Layer, Runtime} from ${JSON.stringify(Bun.resolveSync('effect', importer))};
+import {CommandExecutor, CommandSpawnFailed} from ${JSON.stringify(Bun.resolveSync('@threadnote/platform/command', importer))};
+import {RuntimeEntrypoint} from ${JSON.stringify(Bun.resolveSync('@threadnote/platform/runtime-entrypoint', importer))};
 import {recallReadyReadWorkerProgram, readyRecallReadWorkerLayer} from ${JSON.stringify(Bun.fileURLToPath(new URL('../../src/recall/ready_read_worker.ts', import.meta.url)))};
 import {telemetryChildEnvironmentPolicyLayer} from ${JSON.stringify(Bun.fileURLToPath(new URL('../../src/telemetry/session.ts', import.meta.url)))};
 const commands = CommandExecutor.of({
