@@ -28,6 +28,7 @@ import {
 import {
   ContextBriefCitationScaleGraphInstrumentation,
   evaluateContextBriefCitationScale,
+  makeContextBriefCitationScaleDiagnostics,
   makeContextBriefCitationScaleGraphInstrumentation,
   makeContextBriefCitationScaleEmbeddingIndex,
   type ContextBriefCitationScaleRssObserver,
@@ -167,6 +168,10 @@ const program = Effect.scoped(
           `threadnote-${yield* getThreadnoteVersion()}`,
         )
       : undefined;
+    const diagnostics =
+      (yield* SystemInfo).environment().THREADNOTE_CONTEXT_BRIEF_SCALE_DIAGNOSTICS === '1'
+        ? makeContextBriefCitationScaleDiagnostics()
+        : undefined;
     const evaluatedArtifact = yield* evaluateContextBriefCitationScale({
       budget,
       builtArtifactSha256: options.builtArtifactSha256,
@@ -177,8 +182,28 @@ const program = Effect.scoped(
       ...(candidate === undefined ? {} : {releaseCandidateBinding: candidate}),
       samples: options.samples,
       startRssObserver: startContextBriefCitationRssObserver(options.builtArtifactSha256),
+      ...(diagnostics ? {observeObservation: diagnostics.observe} : {}),
       warmups: options.warmups,
     });
+    if (diagnostics && options.outputPath)
+      yield* atomicWrite(
+        `${options.outputPath}.diagnostics.json`,
+        `${JSON.stringify(
+          {
+            ...diagnostics.snapshot(),
+            identity: {
+              evidenceClass: 'diagnostic-only',
+              sourceCommit: evaluatedArtifact.environment.commit,
+              sourceDirty: evaluatedArtifact.environment.dirty,
+              candidateCommit: options.candidateCommit ?? 'unclaimed',
+              builtArtifactSha256: options.builtArtifactSha256,
+              fixtureHash: evaluatedArtifact.fixture.hash,
+            },
+          },
+          undefined,
+          2,
+        )}\n`,
+      );
     const artifact = parseContextBriefCitationScaleArtifactV2(evaluatedArtifact, budget, candidate);
     if (options.outputPath !== undefined) {
       yield* atomicWrite(options.outputPath, `${JSON.stringify(artifact, undefined, 2)}\n`);

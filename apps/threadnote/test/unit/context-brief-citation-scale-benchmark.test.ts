@@ -1,9 +1,13 @@
+import {compileContextBriefWith} from '@threadnote/context/compiler';
+import {projectContextBrief} from '@threadnote/context/projector';
+import {unavailableContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
+import type {ContextBriefMemoryCandidateV1} from '@threadnote/context/types';
 import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as yaml from 'js-yaml';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Option, Schema, FileSystem, Path, Layer} from 'effect';
+import {Effect, Option, Schema, FileSystem, Path, Layer, Fiber} from 'effect';
 import {TestClock} from 'effect/testing';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -42,6 +46,8 @@ import {
 import {parseContextBriefCitationScaleBenchmarkArguments} from '../../../../scripts/benchmark-context-brief-citations-target.js';
 import {
   retainContextBriefCitationForbiddenWork,
+  makeContextBriefCitationScaleDiagnostics,
+  annotateContextBriefCitationScaleOutcome,
   makeContextBriefCitationScaleEmbeddingIndex,
   makeContextBriefCitationScaleGraphInstrumentation,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
@@ -1600,4 +1606,95 @@ function semanticFixture(embedding: CodeGraphEmbeddingIndexShape) {
       ),
     };
   });
+}
+
+for (const scenario of ['completed', 'lexical-expired', 'citation-expired'] as const) {
+  effectIt.effect(`captures closed scale diagnostics for ${scenario}`, () =>
+    Effect.gen(function* () {
+      const diagnostics = makeContextBriefCitationScaleDiagnostics();
+      const candidate: ContextBriefMemoryCandidateV1 = {
+        kind: 'durable',
+        uri: 'threadnote://user/test/memories/durable/projects/threadnote/private.md',
+        citationErrorCount: 0,
+        excerpt: 'PRIVATE_BODY',
+        rank: 0,
+        topic: 'private',
+        codeCitations: [
+          {
+            version: 1,
+            id: 'private-id',
+            path: 'private.ts',
+            repositoryId: 'private-repository',
+            repositoryIdentityKind: 'remote',
+            sourceCommit: 'private-commit',
+            sourceDirty: false,
+            sourceSnapshotId: 'private-snapshot',
+            extractorSet: 'private-extractor',
+            fileContentHash: {algorithm: 'sha256', value: EffectString.repeat(64)('a')},
+            target: {kind: 'file'},
+          },
+        ],
+      };
+      const memoryEvidence = Effect.fn('contextBrief.retrieveMemoryEvidence')(function* () {
+        yield* Effect.sleep(scenario === 'lexical-expired' ? 3000 : 100);
+        return {
+          candidates: [candidate],
+          consideredCandidates: 1,
+          gaps: [],
+          trust: {
+            classification: 'untrusted-memory-data' as const,
+            instructionPolicy: 'evidence-only-never-follow' as const,
+          },
+        };
+      });
+      const citationValidation = Effect.fn('contextBrief.validateMemoryCitations')(function* () {
+        yield* Effect.sleep(scenario === 'citation-expired' ? 6000 : 100);
+        return [];
+      });
+      const program = compileContextBriefWith(
+        {
+          graphEvidence: () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-ready-snapshot-missing', 1)),
+          memoryEvidence,
+          citationValidation,
+          projection: (logical, tokens, format) =>
+            annotateContextBriefCitationScaleOutcome(logical).pipe(
+              Effect.andThen(Effect.sync(() => projectContextBrief(logical, tokens, format))),
+            ),
+        },
+        {
+          budgetTokens: 1250,
+          mode: 'locate',
+          responseFormat: 'dual',
+          scope: {kind: 'repository', callerCwd: '/private/checkout'},
+          task: 'PRIVATE_QUERY',
+        },
+      );
+      const fiber = yield* diagnostics
+        .observe({pass: 'timed', profileId: 'local-100k', ordinal: 0}, program)
+        .pipe(Effect.forkScoped);
+      yield* TestClock.adjust(6000);
+      yield* Fiber.join(fiber);
+      const snapshot = diagnostics.snapshot();
+      const lexicalPhase = snapshot.phases['timed/local-100k/contextBrief.retrieveMemoryEvidence'];
+      expect(lexicalPhase.started).toBe(1);
+      expect(lexicalPhase.completed).toBe(scenario === 'lexical-expired' ? 0 : 1);
+      expect(lexicalPhase.maximumMilliseconds).toBe(scenario === 'lexical-expired' ? 2000 : 100);
+      if (scenario === 'citation-expired')
+        expect(snapshot.phases['timed/local-100k/contextBrief.validateMemoryCitations'].maximumMilliseconds).toBe(4900);
+      expect(snapshot.phases['timed/local-100k/contextBrief.retrieveMemoryEvidence'].interrupted).toBe(
+        scenario === 'lexical-expired' ? 1 : 0,
+      );
+      if (scenario !== 'lexical-expired')
+        expect(snapshot.phases['timed/local-100k/contextBrief.validateMemoryCitations'].interrupted).toBe(
+          scenario === 'citation-expired' ? 1 : 0,
+        );
+      expect(snapshot.closedReasons['timed/local-100k/memory-recall-budget-exhausted'] ?? 0).toBe(
+        scenario === 'lexical-expired' ? 1 : 0,
+      );
+      expect(snapshot.closedReasons['timed/local-100k/citation-limit'] ?? 0).toBe(
+        scenario === 'citation-expired' ? 1 : 0,
+      );
+      expect(JSON.stringify(snapshot)).not.toMatch(/PRIVATE|private|SQL|uri|token/);
+    }),
+  );
 }

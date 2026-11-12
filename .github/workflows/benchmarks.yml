@@ -442,6 +442,7 @@ jobs:
         run: test "$RUNNER_ARCH" = "ARM64"
 
       - name: Collect full-history diagnostic evidence separately from the scale gate
+        if: github.ref != 'refs/heads/codex/context-brief-scale-diagnostics'
         env:
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-macos-15-ARM64
         run: >-
@@ -449,8 +450,31 @@ jobs:
           --candidate "${{ github.sha }}"
           --output artifacts/context-brief-citation-phase-diagnostic.json
 
+      - name: Collect bounded phase summaries for diagnostic D
+        if: github.ref == 'refs/heads/codex/context-brief-scale-diagnostics'
+        env:
+          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-macos-15-ARM64
+          THREADNOTE_CONTEXT_BRIEF_SCALE_DIAGNOSTICS: '1'
+        run: >-
+          bun run bench:context-brief-citations --
+          --candidate-commit "$GITHUB_SHA"
+          --memory-candidates 100000
+          --profiles local-100k,workset-50,workset-128
+          --samples 100
+          --warmups 5
+          --output "artifacts/context-brief-scale-diagnostic-$GITHUB_SHA.json"
+
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && github.ref == 'refs/heads/codex/context-brief-scale-diagnostics'
+        with:
+          name: context-brief-scale-diagnostic-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            artifacts/context-brief-scale-diagnostic-${{ github.sha }}.json
+            artifacts/context-brief-scale-diagnostic-${{ github.sha }}.json.diagnostics.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: always() && github.ref != 'refs/heads/codex/context-brief-scale-diagnostics'
         with:
           name: context-brief-citation-phase-diagnostic-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: artifacts/context-brief-citation-phase-diagnostic.json

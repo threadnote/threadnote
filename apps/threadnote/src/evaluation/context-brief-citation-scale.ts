@@ -1,5 +1,5 @@
-import {Array as EffectArray} from 'effect';
-import {Clock, Context, DateTime, Effect, FileSystem, Scope} from 'effect';
+import {Array as EffectArray, Record as EffectRecord} from 'effect';
+import {Clock, Context, DateTime, Effect, FileSystem, Scope, Tracer, Cause} from 'effect';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {
   CodeGraphEmbeddingIndex,
@@ -8,6 +8,7 @@ import {
 } from '@threadnote/graph/embedding';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
 import {SystemInfo} from '@threadnote/platform/system';
+import type {ContextBriefLogicalResultV1} from '@threadnote/context/types';
 import {compileContextBriefWith} from '@threadnote/context/compiler';
 import {
   projectContextBrief,
@@ -84,6 +85,113 @@ export function observeContextBriefCitationScaleObservation<A, E, R>(
   observation: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> {
   return observer === undefined ? observation : observer(descriptor, observation);
+}
+
+const diagnosticPhases = new Set([
+  'contextBrief.compileWith',
+  'contextBrief.retrieveMemoryEvidence',
+  'manifest.resolveWorkset',
+  'recall.loadIndexDataInternal',
+  'recall.executeIndexQuery',
+  'contextBrief.readMemoryCandidates',
+  'contextBrief.validateMemoryCitations',
+]);
+const diagnosticReasons = ['memory-recall-budget-exhausted', 'graph-read-budget-exhausted', 'citation-limit'] as const;
+const diagnosticAttribute = 'contextBrief.scale.closedOutcome';
+const boundedDiagnostic = (value: number) => Math.min(2_147_483_647, Math.max(0, value));
+
+/** Evaluation-only closed evidence; no memory identity, payload or arbitrary gap text is retained. */
+export function annotateContextBriefCitationScaleOutcome(logical: ContextBriefLogicalResultV1) {
+  const outcome = {
+    'memory-recall-budget-exhausted': Number(logical.coverage.gaps.includes('memory-recall-budget-exhausted')),
+    'graph-read-budget-exhausted': Number(logical.coverage.gaps.includes('graph-read-budget-exhausted')),
+    'citation-limit': EffectArray.reduce(
+      [...logical.durableDecisions, ...logical.activeHandoffs],
+      0,
+      (count, memory) =>
+        count +
+        EffectArray.filter(
+          memory.citationReceipts ?? [],
+          receipt => receipt.status === 'unknown' && receipt.reason === 'citation-limit',
+        ).length,
+    ),
+  };
+  return Effect.annotateCurrentSpan(diagnosticAttribute, outcome);
+}
+
+/** Fixed phase/profile/pass buckets; span attributes and event histories are never copied. */
+export function makeContextBriefCitationScaleDiagnostics() {
+  const totals = new Map<
+    string,
+    {
+      started: number;
+      completed: number;
+      failed: number;
+      interrupted: number;
+      inclusiveMilliseconds: number;
+      maximumMilliseconds: number;
+    }
+  >();
+  const reasons = new Map<string, number>();
+  const observe: ContextBriefCitationScaleObservationWrapper = (descriptor, observation) =>
+    Effect.gen(function* () {
+      const delegate = yield* Effect.tracer;
+      const prefix = `${descriptor.pass}/${descriptor.profileId}`;
+      const tracer = Tracer.make({
+        ...(delegate.context ? {context: delegate.context.bind(delegate)} : {}),
+        span(options) {
+          const span = delegate.span.call(delegate, options);
+          if (!diagnosticPhases.has(options.name)) return span;
+          const key = `${prefix}/${options.name}`;
+          const total = totals.get(key) ?? {
+            started: 0,
+            completed: 0,
+            failed: 0,
+            interrupted: 0,
+            inclusiveMilliseconds: 0,
+            maximumMilliseconds: 0,
+          };
+          totals.set(key, total);
+          total.started = boundedDiagnostic(total.started + 1);
+          const end = span.end.bind(span);
+          let ended = false;
+          span.end = (at, exit) => {
+            end(at, exit);
+            if (ended) return;
+            ended = true;
+            const elapsed = boundedDiagnostic(Number(at - options.startTime) / 1_000_000);
+            total.inclusiveMilliseconds = boundedDiagnostic(total.inclusiveMilliseconds + elapsed);
+            total.maximumMilliseconds = Math.max(total.maximumMilliseconds, elapsed);
+            if (exit._tag === 'Success') total.completed = boundedDiagnostic(total.completed + 1);
+            else {
+              total.failed = boundedDiagnostic(total.failed + 1);
+              if (Cause.hasInterrupts(exit.cause)) total.interrupted = boundedDiagnostic(total.interrupted + 1);
+            }
+            const outcome = span.attributes.get(diagnosticAttribute);
+            if (typeof outcome === 'object' && outcome !== null)
+              for (const reason of diagnosticReasons) {
+                if (!(reason in outcome)) continue;
+                const count: unknown = Object.getOwnPropertyDescriptor(outcome, reason)?.value;
+                if (typeof count === 'number' && Number.isSafeInteger(count) && count > 0) {
+                  const reasonKey = `${prefix}/${reason}`;
+                  reasons.set(reasonKey, boundedDiagnostic((reasons.get(reasonKey) ?? 0) + count));
+                }
+              }
+          };
+          return span;
+        },
+      });
+      return yield* observation.pipe(Effect.withTracer(tracer));
+    });
+  return {
+    observe,
+    snapshot: () => ({
+      version: 1,
+      timing: 'inclusive elapsed; overlapping phases are not CPU or additive',
+      phases: EffectRecord.fromEntries(totals),
+      closedReasons: EffectRecord.fromEntries(reasons),
+    }),
+  };
 }
 
 export interface ContextBriefCitationScaleRssObservation {
@@ -226,6 +334,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
                 runObservation(fixture, graph, profileId, index, {
                   captureBoundaryRss: true,
                   prepare: false,
+                  diagnostics: options.observeObservation !== undefined,
                 }),
               ),
             );
@@ -253,6 +362,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
         runObservation(fixture, graph, profileId, options.samples + index, {
           captureBoundaryRss: false,
           prepare: true,
+          diagnostics: options.observeObservation !== undefined,
         }),
       );
     }
@@ -265,6 +375,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
           runObservation(fixture, graph, profileId, options.samples + options.warmups + index, {
             captureBoundaryRss: false,
             prepare: true,
+            diagnostics: options.observeObservation !== undefined,
           }),
         ),
       );
@@ -456,7 +567,7 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
   graph: ContextBriefCitationScaleGraphInstrumentationShape,
   profileId: ContextBriefCitationScaleProfileId,
   ordinal: number,
-  options: {readonly captureBoundaryRss: boolean; readonly prepare: boolean},
+  options: {readonly captureBoundaryRss: boolean; readonly prepare: boolean; readonly diagnostics: boolean},
 ) {
   const system = yield* SystemInfo;
   const prepared = fixture.profiles.get(profileId)!;
@@ -507,12 +618,16 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
           observeRss();
           return evidence;
         }),
-      projection: (logical, maximumEstimatedTokens) =>
-        Effect.sync(() => {
+      projection: (logical, maximumEstimatedTokens) => {
+        const project = Effect.sync(() => {
           const projected = projectContextBrief(logical, maximumEstimatedTokens);
           observeRss();
           return projected;
-        }),
+        });
+        return options.diagnostics
+          ? annotateContextBriefCitationScaleOutcome(logical).pipe(Effect.andThen(project))
+          : project;
+      },
     },
     {
       budgetTokens: fixtureBudgetTokens(prepared),
