@@ -48,6 +48,11 @@ describe('native vector build identity', () => {
             'clean committed checkout',
           ),
         );
+        yield* Effect.promise(() =>
+          expect(nativeReaderBuildInputs(f.root, 'bun-darwin-arm64', false)).rejects.toThrow(
+            'packages/recall/native-vector-reader/src/lib.rs',
+          ),
+        );
       }),
     );
     it.effect('requires the JavaScript distribution identity to match clean HEAD and target', () =>

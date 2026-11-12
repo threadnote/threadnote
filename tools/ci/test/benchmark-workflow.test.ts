@@ -565,6 +565,19 @@ describe('platform benchmark workflow', () => {
     );
     expect(recallJob['runs-on']).toBe('ubuntu-latest');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
+    const sourceReader = Option.getOrUndefined(
+      EffectArray.findFirst(
+        recallJob.steps ?? [],
+        step => step.name === 'Assemble the required source benchmark reader',
+      ),
+    );
+    expect(sourceReader?.run).toContain('assemble-native-inference.ts --gnu-container');
+    const sourceCommand = /--container-command-json '([^']+)'/u.exec(sourceReader?.run ?? '')?.[1];
+    expect(JSON.parse(sourceCommand ?? 'null')).toEqual([
+      'bun',
+      'scripts/assemble-native-vector-reader.ts',
+      '--development',
+    ]);
     expect(recallCommand).toContain('bun tools/ci/recall-confirmation.ts');
     const recallDiagnosticsStep = Option.getOrUndefined(
       Option.map(Option.fromNullishOr(recallJob.steps), findArray =>
@@ -580,7 +593,7 @@ describe('platform benchmark workflow', () => {
     );
     expect(recallDiagnosticsStep?.if).toBe('always()');
     expect(recallDiagnosticsStep?.with?.path).toBe(
-      'artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n',
+      'artifacts/recall-production-10000.json\nartifacts/recall-confirmation/\n.context/native-inference-container/*-failure.json\n',
     );
     expect(recallDiagnosticsStep?.with?.['if-no-files-found']).toBe('warn');
     expect(recallCommand).toContain('bun run bench:recall:vectors');

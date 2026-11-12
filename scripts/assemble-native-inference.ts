@@ -1,8 +1,8 @@
 import {FileSystem} from 'effect';
-import {Effect, Layer, String as EffectString, Array as EffectArray} from 'effect';
+import {Console, Effect, Layer, Schema, String as EffectString, Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandFailed, runCommandEffect, type CommandExecutionError} from '@threadnote/platform/command';
 import {platformPathFor} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
@@ -348,6 +348,39 @@ const GNU_PINS = {
     rustupSha: 'e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c',
   },
 } as const;
+
+/** Command adapter streams are already redacted; keep both when Docker stderr masks a build failure on stdout. */
+export function nativeContainerFailureReport(error: CommandExecutionError) {
+  return Schema.is(CommandFailed)(error)
+    ? {version: 1, failure: error._tag, exitCode: error.exitCode, stdout: error.stdout, stderr: error.stderr}
+    : {version: 1, failure: error._tag, message: error.message};
+}
+
+const retainNativeContainerFailure = Effect.fn('nativeInference.containerFailure')(function* (
+  scratch: string,
+  container: 'gnu' | 'musl',
+  error: CommandExecutionError,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const report = nativeContainerFailureReport(error);
+  yield* fs
+    .writeFileString(path.join(scratch, `${container}-failure.json`), JSON.stringify(report, null, 2))
+    .pipe(Effect.catch(() => Console.error(`Could not retain ${container} container failure receipt.`)));
+  // The receipt retains the complete bounded streams; CI logs need only the final diagnostic from each.
+  yield* Console.error(
+    `Native ${container} container failure:`,
+    JSON.stringify(
+      Schema.is(CommandFailed)(error)
+        ? {
+            ...report,
+            stdout: EffectString.slice(-32_768)(error.stdout),
+            stderr: EffectString.slice(-32_768)(error.stderr),
+          }
+        : report,
+    ),
+  );
+});
+
 export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(function* (
   root: string,
   command: readonly string[],
@@ -366,18 +399,23 @@ export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(fu
   );
   const quote = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
   const bootstrap = `set -eu
+stage=bun-bootstrap
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "Native GNU container failed at %s (exit %s)\\n" "$stage" "$status" >&2; fi' 0
 curl --fail --location --silent --show-error 'https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/${pins.bun}.zip' -o /tmp/bun.zip
 printf '${pins.bunSha}  /tmp/bun.zip\\n' | sha256sum -c -
 unzip -q /tmp/bun.zip -d /tmp/bun
 export PATH='/tmp/bun/${pins.bun}:/tmp/threadnote-cargo/bin':"$PATH"
 export CARGO_HOME=/tmp/threadnote-cargo RUSTUP_HOME=/tmp/threadnote-rustup
+stage=rust-bootstrap
 curl --fail --location --silent --show-error 'https://static.rust-lang.org/rustup/archive/1.28.2/${pins.rust}/rustup-init' -o /tmp/rustup-init
 printf '${pins.rustupSha}  /tmp/rustup-init\\n' | sha256sum -c -
 chmod 755 /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-host '${pins.rust}' --default-toolchain 1.89.0
 git config --global --add safe.directory ${quote(root)}
 cd ${quote(root)}
+stage=frozen-dependency-install
 bun install --frozen-lockfile
+stage=requested-command
 bun ${quote(driver)}
 `;
   yield* runCommandEffect(
@@ -402,7 +440,7 @@ bun ${quote(driver)}
       bootstrap,
     ],
     {timeoutMs: 40 * 60_000, maxOutputBytes: 8 * 1024 * 1024, detached: true, verifyOwnedProcessExit: 'group'},
-  );
+  ).pipe(Effect.tapError(error => retainNativeContainerFailure(scratch, 'gnu', error)));
 });
 
 export const MUSL_BUILD_IMAGE =
@@ -439,7 +477,7 @@ for (const field of ['CapEff', 'CapPrm', 'CapAmb']) {
   if (!value || !/^0+$/.test(value)) throw new Error('Inner workflow retained or omitted ' + field);
   capabilities[field] = value;
 }
-console.log(JSON.stringify({pid: process.pid, capabilities}));
+process.stdout.write(JSON.stringify({pid: process.pid, capabilities}) + '\n');
 `;
 
 /** Only the extracted-workflow harness needs nested mount/network namespaces and these two inputs. */
@@ -489,38 +527,48 @@ export const runMuslBuildContainer = Effect.fn('nativeInference.muslContainer')(
   const shellDriver = shellLiteral(driver);
   const bootstrap = `
 set -eu
+stage=host-architecture
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "Native musl container failed at %s (exit %s)\\n" "$stage" "$status" >&2; fi' 0
 [ "$(uname -m)" = '${pins.arch}' ]
 mkdir -p /tmp/threadnote-index /tmp/threadnote-apks ${shellRoot}/.context/native-inference-toolchain
 printf '%s\\n' 'https://dl-cdn.alpinelinux.org/alpine/v3.17/main' 'https://dl-cdn.alpinelinux.org/alpine/v3.17/community' > /etc/apk/repositories
+stage=apk-index-update
 apk --cache-dir /tmp/threadnote-index update
+stage=apk-index-bytepins
 find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /tmp/index-sha256
 [ "$(wc -l < /tmp/index-sha256)" -eq 2 ]
 grep -q '^${pins.main} ' /tmp/index-sha256
 grep -q '^${pins.community} ' /tmp/index-sha256
+stage=apk-package-fetch
 apk --cache-dir /tmp/threadnote-index fetch --recursive --output /tmp/threadnote-apks \
  build-base=0.5-r3 cmake=3.24.4-r0 samurai=1.2-r2 nodejs=18.20.1-r0 npm=9.1.2-r0 \
  python3=3.10.15-r0 git=2.39.5-r0 curl=8.9.0-r0 bash=5.2.15-r0 linux-headers=5.19.5-r0${options.workflowRuntime ? ' ripgrep=13.0.0-r1 bubblewrap=0.7.0-r0' : ''}
 find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /tmp/index-after-sha256
 cmp /tmp/index-sha256 /tmp/index-after-sha256
+stage=apk-offline-install
 apk --no-network add /tmp/threadnote-apks/*.apk
 sha256sum /tmp/threadnote-apks/*.apk > ${shellRoot}/.context/native-inference-toolchain/apk-sha256.txt
 apk info -v > ${shellRoot}/.context/native-inference-toolchain/installed-packages.txt
 sha256sum /lib/apk/db/installed > ${shellRoot}/.context/native-inference-toolchain/installed-db-sha256.txt
+stage=bun-bootstrap
 curl --fail --location --silent --show-error 'https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/${pins.bun}.zip' -o /tmp/bun.zip
 printf '${pins.bunSha}  /tmp/bun.zip\\n' | sha256sum -c -
 unzip -q /tmp/bun.zip -d /tmp/bun
 export PATH='/tmp/bun/${pins.bun}:/tmp/threadnote-cargo/bin':"$PATH"
 export CARGO_HOME=/tmp/threadnote-cargo RUSTUP_HOME=/tmp/threadnote-rustup
+stage=rust-bootstrap
 curl --fail --location --silent --show-error 'https://static.rust-lang.org/rustup/archive/1.28.2/${pins.rust}/rustup-init' -o /tmp/rustup-init
 printf '${pins.rustupSha}  /tmp/rustup-init\\n' | sha256sum -c -
 chmod 755 /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-host '${pins.rust}' --default-toolchain 1.89.0
 git config --global --add safe.directory ${shellRoot}
 cd ${shellRoot}
+stage=frozen-dependency-install
 bun install --frozen-lockfile
 ${
   options.workflowRuntime
-    ? `mkdir -p /usr/local/bin ${shellRoot}/.context/release-artifact
+    ? `stage=workflow-capability-boundary
+mkdir -p /usr/local/bin ${shellRoot}/.context/release-artifact
 printf '%s' ${shellLiteral(MUSL_WORKFLOW_BWRAP_SHIM)} > /usr/local/bin/bwrap
 chmod 755 /usr/local/bin/bwrap
 export PATH=/usr/local/bin:"$PATH"
@@ -528,7 +576,8 @@ export PATH=/usr/local/bin:"$PATH"
 bwrap --unshare-net --die-with-parent --ro-bind / / --tmpfs ${shellRoot} --dev /dev --proc /proc --chdir /tmp bun -e ${shellLiteral(MUSL_WORKFLOW_CAPABILITY_PROBE)} > ${shellRoot}/.context/release-artifact/capabilities.json
 `
     : ''
-}bun ${shellDriver}
+}stage=requested-command
+bun ${shellDriver}
 `;
   yield* runCommandEffect(
     'docker',
@@ -553,7 +602,7 @@ bwrap --unshare-net --die-with-parent --ro-bind / / --tmpfs ${shellRoot} --dev /
       bootstrap,
     ],
     {timeoutMs: 40 * 60_000, maxOutputBytes: 8 * 1024 * 1024, detached: true, verifyOwnedProcessExit: 'group'},
-  );
+  ).pipe(Effect.tapError(error => retainNativeContainerFailure(scratch, 'musl', error)));
 });
 
 if (import.meta.main) {

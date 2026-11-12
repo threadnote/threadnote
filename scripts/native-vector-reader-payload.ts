@@ -22,8 +22,14 @@ export function nativeReaderGit(root: string, args: readonly string[]): string {
 }
 
 export async function nativeReaderBuildInputs(root: string, bunTarget: string, development: boolean) {
-  if (!development && nativeReaderGit(root, ['status', '--porcelain', '--untracked-files=normal']) !== '') {
-    throw new Error('Native vector reader release assembly requires a clean committed checkout.');
+  if (!development) {
+    const status = nativeReaderGit(root, ['status', '--porcelain', '--untracked-files=normal']);
+    if (status !== '') {
+      throw new Error(
+        'Native vector reader release assembly requires a clean committed checkout. ' +
+          `Repository-relative Git status (bounded): ${JSON.stringify(EffectString.slice(0, 4096)(status))}`,
+      );
+    }
   }
   const sourceCommit = nativeReaderGit(root, ['rev-parse', 'HEAD']);
   const sourceTree = nativeReaderGit(root, ['rev-parse', 'HEAD^{tree}']);

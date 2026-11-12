@@ -1,8 +1,9 @@
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, CommandFailed, CommandTimedOut} from '@threadnote/platform/command';
 import {
   assembleNativeInference,
   muslWorkflowRuntimeArguments,
   MUSL_WORKFLOW_BWRAP_SHIM,
+  nativeContainerFailureReport,
 } from '../../../../scripts/assemble-native-inference.js';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
@@ -16,6 +17,36 @@ import {
 } from '../../../../scripts/native-inference-payload.js';
 
 describe('native inference overlay filesystem boundary', () => {
+  it('retains build stdout even when Docker pull diagnostics occupy stderr', () => {
+    const error = CommandFailed.make({
+      args: ['run'],
+      executable: 'docker',
+      exitCode: 7,
+      message: 'Docker failed: pull progress',
+      stdout: 'actual native build failure',
+      stderr: 'image pull progress\nNative GNU container failed at requested-command (exit 7)',
+    });
+    expect(nativeContainerFailureReport(error)).toEqual({
+      version: 1,
+      failure: 'CommandFailed',
+      exitCode: 7,
+      stdout: error.stdout,
+      stderr: error.stderr,
+    });
+    expect(error.exitCode).toBe(7);
+    const timeout = CommandTimedOut.make({
+      args: ['run'],
+      executable: 'docker',
+      timeoutMs: 1000,
+      message: 'container timed out',
+    });
+    expect(nativeContainerFailureReport(timeout)).toEqual({
+      version: 1,
+      failure: 'CommandTimedOut',
+      message: timeout.message,
+    });
+  });
+
   it('runs the extracted musl harness with only its explicit archive/profile environment', () => {
     const arguments_ = muslWorkflowRuntimeArguments({
       THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-arm64-musl.tar.gz',

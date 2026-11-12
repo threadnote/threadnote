@@ -135,9 +135,9 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: Assemble the required source benchmark reader
-        run: |
-          rustup toolchain install 1.89.0 --profile minimal
-          bun scripts/assemble-native-vector-reader.ts --development
+        run: >-
+          bun scripts/assemble-native-inference.ts --gnu-container
+          --container-command-json '["bun","scripts/assemble-native-vector-reader.ts","--development"]'
 
       - name: Gate production lexical and exact-search behavior
         run: bun tools/ci/recall-confirmation.ts
@@ -149,6 +149,7 @@ jobs:
           path: |
             artifacts/recall-production-10000.json
             artifacts/recall-confirmation/
+            .context/native-inference-container/*-failure.json
           if-no-files-found: warn
           retention-days: 14
 

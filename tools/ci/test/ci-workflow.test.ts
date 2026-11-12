@@ -250,6 +250,48 @@ it('executes musl extracted archives and their compiled harness inside the nativ
   expect(command[2]).not.toContain('build:release');
 });
 
+it('requires native admission tests and isolates the real worker deadline suite on every host', () => {
+  const boundary = 'apps/threadnote/test/integration/vector-native-read-boundary.test.ts';
+  const admission = 'apps/threadnote/test/integration/recall-admission-budget.test.ts';
+  for (const name of [
+    'Build GNU payload at the preserved libc floor',
+    'Build musl payload at the preserved libc floor',
+  ]) {
+    const builder = step(releaseJobs.build, name);
+    expect(builder?.run).toContain('--container-command-json "$NATIVE_RELEASE_COMMAND_JSON"');
+    const command = Schema.decodeUnknownSync(Schema.Array(Schema.String))(
+      JSON.parse(builder?.env?.NATIVE_RELEASE_COMMAND_JSON ?? 'null'),
+    );
+    expect(command.slice(0, 2)).toEqual(['bash', '-ec']);
+    expect(command[2]).toContain('THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1');
+    expect(command[2]).toContain(
+      'THREADNOTE_NATIVE_VECTOR_READER_MANIFEST="$PWD/dist/runtime/vector-reader/manifest.json"',
+    );
+    const tests = EffectArray.filter(
+      EffectString.split(';')(command[2]),
+      value => EffectString.includes('vitest run')(value) && !EffectString.includes('vitest.e2e')(value),
+    );
+    expect(tests).toHaveLength(2);
+    expect(tests[0]).toContain(admission);
+    expect(tests[0]).not.toContain(boundary);
+    expect(EffectString.trim(tests[1] ?? '')).toBe(
+      `bun --bun vitest run --maxWorkers=1 --no-file-parallelism ${boundary}`,
+    );
+  }
+  const callers = step(releaseJobs.build, 'Exercise Rust through the production ready-read worker');
+  const child = step(releaseJobs.build, 'Exercise the actual ready-read worker without competing suites');
+  expect(callers?.run).toContain(admission);
+  expect(callers?.run).not.toContain(boundary);
+  expect(child?.run).toBe(`bun --bun vitest run --maxWorkers=1 --no-file-parallelism ${boundary}`);
+  for (const candidate of [callers, child]) {
+    expect(candidate?.if).toBe("runner.os != 'Linux'");
+    expect(candidate?.env?.THREADNOTE_NATIVE_VECTOR_READER_REQUIRED).toBe('1');
+    expect(candidate?.env?.THREADNOTE_NATIVE_VECTOR_READER_MANIFEST).toBe(
+      '${{ github.workspace }}/dist/runtime/vector-reader/manifest.json',
+    );
+  }
+});
+
 it('partitions only catalog-supported macOS profiles while other platforms retain complete qualification', () => {
   const cloudProfiles = EffectArray.flatMap(AGENT_CATALOG, entry => {
     const skills = entry.devSkills;

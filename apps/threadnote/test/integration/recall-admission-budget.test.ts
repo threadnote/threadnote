@@ -47,7 +47,9 @@ import {
   recallReadyReadResponseSchema,
   recallReadyReadRequestSchema,
 } from '@threadnote/recall/read_boundary';
-import {ensureVectorIndex} from '@threadnote/recall/vector-index';
+import {ensureVectorIndex, vectorIndexDatabaseFilename} from '@threadnote/recall/vector-index';
+import * as NativeVectorReaderPayload from '@threadnote/recall/vector/native-reader-payload';
+import {nativeVectorTestsEnabled} from '@threadnote/testing/native-vector-fixture';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {withProductionLogging} from '../../src/effect/production_log.js';
 import {captureConsole} from '../../src/effect/console.js';
@@ -237,6 +239,32 @@ const fixture = (model: boolean) =>
         Effect.provideService(LocalModelRuntime, fastRuntime),
         Effect.provideService(LocalModelStore, store),
       );
+      if (!nativeVectorTestsEnabled) {
+        // Composition examples use one known e0 fixture vector. Keep protocol,
+        // corpus and canonical closing checks real without making hermetic Bazel
+        // compile an addon. The required native lane installs no mock at all.
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(NativeVectorReaderPayload, 'loadNativeVectorReader').mockResolvedValue({
+              CancellationToken: class {
+                cancel() {}
+              },
+              readSelected: (request, queryVector) => {
+                expect(request.model.id).toBe(embedding.id);
+                expect(request.dbPath).toBe(
+                  path.join(home, 'indexes', 'vectors', embedding.id, vectorIndexDatabaseFilename()),
+                );
+                return Promise.resolve({
+                  status: 'success',
+                  corpusCheckRequired: true,
+                  scores: [{uri, score: Math.max(0, queryVector?.[0] ?? 0)}],
+                });
+              },
+            }),
+          ),
+          mock => Effect.sync(() => mock.mockRestore()),
+        );
+      }
     }
     return {fs, filename, config, uri, store, system: yield* compileFixtureWorker(home)};
   });

@@ -33,6 +33,7 @@ import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
+import {fromPromise} from '@threadnote/platform/errors';
 import {
   activeInstalledRelease,
   activeInstalledVersion,
@@ -291,10 +292,7 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
   checks.push(
     yield* safeDoctorCheck(
       'native vector reader',
-      Effect.tryPromise({
-        try: () => loadNativeVectorReader(system),
-        catch: cause => LifecycleOperationError.make({cause, message: errorMessage(cause)}),
-      }).pipe(
+      fromPromise('doctor.nativeVectorReader', () => loadNativeVectorReader(system)).pipe(
         Effect.map(() => ({
           detail: 'verified required native vector reader',
           name: 'native vector reader',

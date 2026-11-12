@@ -76,12 +76,20 @@ jobs:
         if: runner.os == 'Linux' && !endsWith(inputs.target, '-musl')
         run: >-
           bun scripts/assemble-native-inference.ts --gnu-container
-          --container-command-json '["bash", "-ec", "set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/vector-native-read-boundary.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]'
+          --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
+        env:
+          # Keep $PWD literal until Bash runs inside the pinned native container.
+          NATIVE_RELEASE_COMMAND_JSON: >-
+            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
       - name: Build musl payload at the preserved libc floor
         if: endsWith(inputs.target, '-musl')
         run: >-
           bun scripts/assemble-native-inference.ts --musl-container
-          --container-command-json '["bash", "-ec", "set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/vector-native-read-boundary.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]'
+          --container-command-json "$NATIVE_RELEASE_COMMAND_JSON"
+        env:
+          # Keep $PWD literal until Bash runs inside the pinned native container.
+          NATIVE_RELEASE_COMMAND_JSON: >-
+            ["bash","-ec","set -euo pipefail; bun run build:release; bun scripts/verify-native-vector-reader.ts --required; export THREADNOTE_NATIVE_VECTOR_READER_REQUIRED=1 THREADNOTE_NATIVE_VECTOR_READER_MANIFEST=\"$PWD/dist/runtime/vector-reader/manifest.json\" THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT=\"$PWD\"; bun --bun vitest run packages/recall/test/unit/native-vector-reader.test.ts packages/recall/test/background-vector-step.test.ts apps/threadnote/test/integration/recall-admission-budget.test.ts apps/threadnote/test/unit/vector-index.test.ts apps/threadnote/test/unit/vector-index.eligibility.test.ts packages/recall/test/unit/vector-scope-upgrade.test.ts apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts; bun --bun vitest run --maxWorkers=1 --no-file-parallelism apps/threadnote/test/integration/vector-native-read-boundary.test.ts; bun scripts/smoke-self-contained.ts; bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/local-bins.e2e.ts -t \"recalls saved memory|loads only the bundled\""]
       - name: Verify bundled vector reader
         if: runner.os != 'Linux'
         run: bun scripts/verify-native-vector-reader.ts --required
@@ -91,11 +99,20 @@ jobs:
           bun --bun vitest run
           packages/recall/test/unit/native-vector-reader.test.ts
           packages/recall/test/background-vector-step.test.ts
-          apps/threadnote/test/integration/vector-native-read-boundary.test.ts
+          apps/threadnote/test/integration/recall-admission-budget.test.ts
           apps/threadnote/test/unit/vector-index.test.ts
           apps/threadnote/test/unit/vector-index.eligibility.test.ts
           packages/recall/test/unit/vector-scope-upgrade.test.ts
           apps/threadnote/test/unit/recall.mcp-background-refresh.test.ts
+        env:
+          THREADNOTE_NATIVE_VECTOR_READER_REQUIRED: '1'
+          THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
+          THREADNOTE_NATIVE_VECTOR_READER_SOURCE_ROOT: ${{ github.workspace }}
+      - name: Exercise the actual ready-read worker without competing suites
+        if: runner.os != 'Linux'
+        run: >-
+          bun --bun vitest run --maxWorkers=1 --no-file-parallelism
+          apps/threadnote/test/integration/vector-native-read-boundary.test.ts
         env:
           THREADNOTE_NATIVE_VECTOR_READER_REQUIRED: '1'
           THREADNOTE_NATIVE_VECTOR_READER_MANIFEST: ${{ github.workspace }}/dist/runtime/vector-reader/manifest.json
@@ -107,6 +124,12 @@ jobs:
         run: bun run archive:release
         env:
           THREADNOTE_RELEASE_TARGET: ${{ inputs.target }}
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: native-container-failure-${{ inputs.target }}
+          path: .context/native-inference-container/*-failure.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: native-release-${{ inputs.target }}

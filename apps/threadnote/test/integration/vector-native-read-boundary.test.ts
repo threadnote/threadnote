@@ -14,6 +14,7 @@ import {
   vectorIndexDatabaseFilename,
   loadRecallVectorAuthorizationKey,
   recallVectorStorage,
+  readSelectedSemanticVectorState,
 } from '@threadnote/recall/vector-index';
 import {loadNativeVectorReader} from '@threadnote/recall/vector/native-reader-payload';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
@@ -520,13 +521,16 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
     ([project, selected]) =>
       Effect.gen(function* () {
         const f = yield* fixture;
+        // Opening is setup for this authorization oracle; only the actual Rust
+        // scoring child consumes its bounded request allowance.
+        const state = yield* readSelectedSemanticVectorState(f.config, model, {
+          corpusGeneration: f.lexical.generation,
+        });
+        if (state === undefined) return yield* Effect.die('Missing property opening proof');
         const bundled = yield* bundledReadyWorker(f);
         const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
           Effect.provideService(SystemInfo, bundled.system),
         );
-        const reply = yield* boundary.read({operation: 'vector-state', config: f.config, options: {model}});
-        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(reply.value);
-        if (proof.readiness !== 'current') return yield* Effect.die('Missing property opening proof');
         const allowedUriScopes = EffectArray.map(
           selected,
           name => `threadnote://user/test/memories/durable/projects/${name}`,
@@ -536,7 +540,7 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
           config: f.config,
           options: {
             model,
-            state: proof.state,
+            state,
             queryVector: vector,
             allowedUriScopes,
             eligibility: deriveRecallEligibilityPolicy({explicitProject: project, originalQuery: 'private vector'}),
@@ -687,16 +691,12 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        const bundled = yield* bundledReadyWorker(f);
-        const proofReply = yield* (yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
-          Effect.provideService(SystemInfo, bundled.system),
-        )).read({
-          operation: 'vector-state',
-          config: f.config,
-          options: {model},
+        // Prepare opening metadata before the measured stalled scoring request.
+        // Cold opening-process startup is covered by the separate worker examples.
+        const state = yield* readSelectedSemanticVectorState(f.config, model, {
+          corpusGeneration: f.lexical.generation,
         });
-        const proof = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(proofReply.value);
-        if (proof.readiness !== 'current') return yield* Effect.die('Vector opening proof unavailable.');
+        if (state === undefined) return yield* Effect.die('Vector opening proof unavailable.');
         yield* installSynchronousScoringStall(f.database);
         const observed = yield* observedWorker(f);
         const deadline = yield* makeReadDeadline(1800);
@@ -710,8 +710,8 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
             config: f.config,
             options: {
               model,
-              state: proof.state,
-              corpusGeneration: proof.corpusGeneration,
+              state,
+              corpusGeneration: f.lexical.generation,
               queryVector: vector,
               limit: 12,
             },
