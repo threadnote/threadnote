@@ -27,13 +27,17 @@ export const provideNative = <A, E, R>(program: Effect.Effect<A, E, R>) =>
 
 export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function* (
   environment: Readonly<Record<string, string | undefined>> = {},
+  cleanupRoot?: (root: string) => Effect.Effect<void>,
 ) {
   const observer = yield* CurrentNativeProgress;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const store = yield* ResourceStore;
-  const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-automation-'});
+  const options = {prefix: 'threadnote-native-automation-'};
+  const root = yield* cleanupRoot
+    ? Effect.acquireRelease(fs.makeTempDirectory(options), cleanupRoot)
+    : fs.makeTempDirectoryScoped(options);
   const home = path.join(root, 'home');
   const repo = path.join(root, 'repo');
   yield* fs.makeDirectory(home);

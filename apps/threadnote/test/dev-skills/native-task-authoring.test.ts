@@ -60,7 +60,7 @@ import {TestClock} from 'effect/testing';
 import {object} from './native-cycle-lifecycle-fixture.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
-import {lstat, readdir, symlink} from '@threadnote/testing/node-fs-promises';
+import {lstat, readdir, symlink, unlink, rmdir} from '@threadnote/testing/node-fs-promises';
 
 const specBusiness = {
   title: 'Reliable fixture readback',
@@ -136,8 +136,10 @@ const planBusiness = {
   openQuestions: [],
   review: {required: true, reason: 'An independent architecture review is required.'},
 };
-const setup = Effect.gen(function* () {
-  const f = yield* nativeFixture();
+const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
+  cleanupRoot?: (root: string) => Effect.Effect<void>,
+) {
+  const f = yield* nativeFixture({}, cleanupRoot);
   yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
   yield* runCommandEffect('git', [
     '-C',
@@ -170,6 +172,8 @@ const setup = Effect.gen(function* () {
     );
   return {...f, config, repo, home, scoped, author, mcp};
 });
+
+const setup = setupWithCleanup();
 
 const snapshotAuthoringJobFiles = Effect.fn('test.snapshotAuthoringJobFiles')(function* (
   f: Effect.Success<typeof setup>,
@@ -1579,6 +1583,36 @@ const collectCleanupLeftovers = async (root: string, path: Path.Path, signal: Ab
   }
   return {entries, truncated: truncated || queue.length > 0, timedOut: signal.aborted};
 };
+const removeFixtureEntrywise = (root: string, path: Path.Path, removeFile: typeof unlink = unlink) => {
+  let operation = 'lstat';
+  let relative = '.';
+  const perform = async <A>(method: string, file: string, action: () => Promise<A>) => {
+    operation = method;
+    relative = EffectString.slice(0, 128)(path.relative(root, file) || '.');
+    return action();
+  };
+  const visit = async (file: string): Promise<void> => {
+    const info = await perform('lstat', file, () => lstat(file));
+    if (info.isDirectory() && !info.isSymbolicLink()) {
+      const names = await perform('readdir', file, () => readdir(file));
+      for (const name of names) await visit(path.join(file, name));
+      await perform('rmdir', file, () => rmdir(file));
+    } else await perform('unlink', file, () => removeFile(file));
+  };
+  return Effect.tryPromise({
+    try: () => visit(root),
+    catch: cause => ({
+      reason: {
+        module: 'FileSystem',
+        method: 'makeTempDirectoryScoped',
+        pathOrDescriptor: root,
+        syscall: operation,
+        relativePath: relative,
+        cause,
+      },
+    }),
+  }).pipe(Effect.orDie);
+};
 const preserveCleanupCause = <E, R>(cause: Cause.Cause<E>, diagnostic: Effect.Effect<void, unknown, R>) =>
   diagnostic.pipe(Effect.ignoreCause, Effect.andThen(Effect.failCause(cause)));
 const reportDirtyCleanupFailure = (
@@ -1595,6 +1629,7 @@ const reportDirtyCleanupFailure = (
         method: Schema.Literal('makeTempDirectoryScoped'),
         pathOrDescriptor: Schema.String,
         syscall: Schema.optionalKey(Schema.String),
+        relativePath: Schema.optionalKey(Schema.String),
         cause: Schema.optionalKey(Schema.Unknown),
       }),
     });
@@ -1634,7 +1669,8 @@ const reportDirtyCleanupFailure = (
       cwdRelation: relativeCwd === '' ? 'fixture-root' : inside ? 'fixture-descendant' : 'outside-fixture',
       errno: native?.errno,
       code: native && /^[A-Z0-9_]{1,24}$/u.test(native.code) ? native.code : 'unknown',
-      syscall: reason.syscall === 'rm' ? 'rm' : 'other',
+      syscall: ['rm', 'lstat', 'readdir', 'unlink', 'rmdir'].includes(reason.syscall ?? '') ? reason.syscall : 'other',
+      ...(reason.relativePath ? {relativePath: EffectString.slice(0, 128)(reason.relativePath)} : {}),
       git: context.git,
       gitStatus: context.gitStatus,
       gitElapsedMs: context.gitElapsedMs,
@@ -1697,6 +1733,41 @@ effectIt.effect('bounds dirty cleanup evidence without following links or replac
       truncated: true,
       entries: [],
     });
+    let removedRoot = '';
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* nativeFixture({}, root => removeFixtureEntrywise(root, path));
+        removedRoot = fixture.root;
+        yield* fs.makeDirectory(path.join(fixture.root, 'nested', 'deep'), {recursive: true});
+        yield* fs.writeFileString(path.join(fixture.root, 'nested', 'deep', 'child'), 'fixture');
+        if (process.platform !== 'win32')
+          yield* Effect.tryPromise(() => symlink(outside, path.join(fixture.root, 'outside-link'), 'dir'));
+      }),
+    );
+    expect(yield* fs.exists(removedRoot)).toBe(false);
+    expect(yield* fs.exists(path.join(outside, 'private-sentinel'))).toBe(true);
+    const blockedRoot = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-blocked-'});
+    const blockedChild = path.join(blockedRoot, 'child');
+    yield* fs.writeFileString(blockedChild, 'fixture');
+    const blocked = yield* Effect.scoped(
+      Effect.acquireRelease(Effect.succeed(blockedRoot), root =>
+        removeFixtureEntrywise(root, path, async () => {
+          throw Object.assign(new Error('Owned child refuses removal'), {code: 'EBUSY', errno: -4082});
+        }),
+      ),
+    ).pipe(Effect.exit);
+    expect(blocked._tag).toBe('Failure');
+    expect(yield* fs.exists(blockedRoot)).toBe(true);
+    expect(yield* fs.exists(blockedChild)).toBe(true);
+    if (blocked._tag === 'Failure') {
+      lines.length = 0;
+      yield* reportDirtyCleanupFailure({...context, root: blockedRoot}, blocked.cause, line => {
+        lines.push(line);
+      });
+      expect(
+        object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0]))),
+      ).toMatchObject({code: 'EBUSY', errno: -4082, syscall: 'unlink', relativePath: 'child'});
+    }
     const failed = yield* preserveCleanupCause(cause, Effect.die(new Error('Diagnostic failed'))).pipe(Effect.exit);
     expect(failed._tag).toBe('Failure');
     if (failed._tag === 'Failure') expect(failed.cause).toBe(cause);
@@ -1706,7 +1777,10 @@ effectIt.effect('bounds dirty cleanup evidence without following links or replac
 effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () => {
   let cleanup: DirtyCleanupContext | undefined;
   return Effect.gen(function* () {
-    const f = yield* setup;
+    const path = yield* Path.Path;
+    const f = yield* setupWithCleanup(
+      process.platform === 'win32' ? root => removeFixtureEntrywise(root, path) : undefined,
+    );
     if (process.platform === 'win32') {
       const started = performance.now();
       const git = yield* runCommandEffect(
