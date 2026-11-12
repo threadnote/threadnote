@@ -12,6 +12,7 @@ import {
   type WorkflowArtifact,
   type WorkflowWriteIntent,
 } from '@threadnote/workflow-automations/contracts';
+import {CurrentNativeJobMemoryFailure} from './native_jobs.js';
 import {runWorkflowMemory} from '../workflow_memory/index.js';
 import {
   stableJson,
@@ -139,10 +140,45 @@ export const makeWorkflowMemoryAdapter = Effect.fn('workflowAutomation.memoryAda
   >,
 ) {
   const context = yield* Effect.context<Effect.Services<ReturnType<typeof runWorkflowMemory>>>();
+  const failureObserver = yield* CurrentNativeJobMemoryFailure;
   const call = (input: unknown) =>
     (sessionCall ? sessionCall(input) : runWorkflowMemory(config, input)).pipe(
       Effect.provideContext(context),
-      Effect.mapError(nativeWorkflowError),
+      Effect.mapError(error => {
+        const mapped = nativeWorkflowError(error);
+        const action = isJsonObject(input) ? input.action : undefined;
+        if (
+          failureObserver &&
+          isJsonObject(input) &&
+          typeof input.operationId === 'string' &&
+          (action === 'preflight' ||
+            action === 'create' ||
+            action === 'replace' ||
+            action === 'recover' ||
+            action === 'inspect-operation')
+        ) {
+          failureObserver(mapped, {
+            bindingId: binding.bindingId,
+            generation: binding.generation,
+            operationId: input.operationId,
+            operationAction: action,
+            domainCause: Schema.is(WorkflowMemoryError)(error)
+              ? 'memory'
+              : Schema.is(ResourceIoFailed)(error)
+                ? 'resource-io'
+                : Schema.is(MemoryCodeCitationCaptureError)(error)
+                  ? 'citation'
+                  : Schema.is(RecallIdentityAdmissionBusy)(error)
+                    ? 'admission'
+                    : Schema.is(FileLockTimeout)(error)
+                      ? 'lock'
+                      : Schema.is(WorkflowAutomationError)(error)
+                        ? 'workflow'
+                        : 'unknown',
+          });
+        }
+        return mapped;
+      }),
     );
   const admitted = (bindingId: string) =>
     bindingId === binding.bindingId

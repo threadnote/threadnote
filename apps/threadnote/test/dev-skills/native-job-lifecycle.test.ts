@@ -26,7 +26,7 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceStore, ResourceIoFailed} from '@threadnote/store/resource-store';
 import {
   expireRecallIndexValidation,
   loadRecallMemoryIdentities,
@@ -1719,6 +1719,111 @@ describe('native private job lifecycle', () => {
     }).pipe(run),
   );
 
+  effectIt.effect(
+    'retains sanitized exact failed-call diagnostics without inferring canonical commit from a prepared receipt',
+    () =>
+      Effect.gen(function* () {
+        for (const mode of ['before', 'after', 'translated'] as const) {
+          const f = yield* nativeFixture();
+          yield* commit(f.repo, 'source');
+          yield* f.init();
+          const work = {
+            ...f.base('authoring'),
+            command: 'save',
+            document: document(),
+            ready: false,
+            expectedRevision: null,
+          };
+          const jobId = requiredString(object(yield* submit(f, work)).jobId);
+          const original = yield* ResourceStore;
+          let injected = false;
+          const failing = ResourceStore.of({
+            ...original,
+            writeChecked: (...args) =>
+              injected
+                ? original.writeChecked(...args)
+                : Effect.gen(function* () {
+                    injected = true;
+                    if (mode === 'after') yield* original.writeChecked(...args);
+                    return yield* ResourceIoFailed.make({
+                      operation: 'write',
+                      uri: '/private/secret',
+                      message: 'secret payload',
+                      cause: new Error('secret stack'),
+                    });
+                  }),
+          });
+          const failed = object(
+            yield* runNativeJobWorker(f.config, 'native-run', jobId, request =>
+              f.call(request).pipe(
+                Effect.catch(error =>
+                  mode === 'translated'
+                    ? Effect.fail(
+                        WorkflowAutomationError.make({
+                          code: 'synthetic-dispatch-failure',
+                          message: 'secret unrelated error',
+                        }),
+                      )
+                    : Effect.fail(error),
+                ),
+              ),
+            ).pipe(Effect.provideService(ResourceStore, failing)),
+          );
+          expect(injected).toBe(true);
+          if (mode === 'translated')
+            expect(failed.failure).toMatchObject({
+              domainCause: 'unknown',
+              nativeReceipt: 'unavailable',
+              canonicalOutcome: 'unknown',
+            });
+          else
+            expect(failed).toMatchObject({
+              status: 'failed',
+              code: 'workflow-operation-failed',
+              failure: {
+                stage: 'canonical-work',
+                domainCode: 'workflow-operation-failed',
+                domainCause: 'resource-io',
+                operationAction: 'create',
+                nativeReceipt: 'prepared',
+                canonicalOutcome: 'unknown',
+              },
+            });
+          const state = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+            JSON.parse(yield* f.fs.readFileString(f.statePath())),
+          );
+          const pending = Option.getOrUndefined(
+            EffectArray.findFirst(state.operations, item => object(item).status === 'prepared'),
+          );
+          expect(object(failed.failure).operationId).toBe(
+            mode !== 'translated' && pending ? object(object(pending).intent).operationId : undefined,
+          );
+          expect(JSON.stringify(failed)).not.toMatch(/secret|private\//u);
+          expect(Buffer.byteLength(JSON.stringify(failed.failure))).toBeLessThan(1024);
+          for (const command of ['status', 'result']) {
+            expect(object(yield* f.call({...f.base('job'), command, jobId})).failure).toEqual(failed.failure);
+          }
+          if (mode === 'before') {
+            const receipt = f.path.join(
+              yield* f.fs.realPath(f.home),
+              'workflow-automations',
+              'native-v1',
+              'jobs',
+              'native-run',
+              jobId + '.json',
+            );
+            const {failure: _failure, ...legacy} = object(JSON.parse(yield* f.fs.readFileString(receipt)));
+            yield* f.fs.writeFileString(receipt, JSON.stringify(legacy) + '\n');
+            expect(object(yield* f.call({...f.base('job'), command: 'result', jobId})).failure).toBeUndefined();
+          }
+          yield* f.call({...f.base('job'), command: 'resume', jobId});
+          const completed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
+          expect(completed.status).toBe('completed');
+          expect(completed.failure).toBeUndefined();
+        }
+      }).pipe(run),
+  );
+
   effectIt.effect('reconciles a verified canonical root after a lost worker acknowledgment and restart', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -1750,6 +1855,12 @@ describe('native private job lifecycle', () => {
         );
       const failed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, lostAck));
       expect(failed.status).toBe('failed');
+      expect(failed.failure).toMatchObject({
+        domainCause: 'unknown',
+        nativeReceipt: 'unavailable',
+        canonicalOutcome: 'unknown',
+      });
+      expect(object(failed.failure).operationId).toBeUndefined();
       expect(interrupted).toBe(true);
       const before = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
         JSON.parse(yield* f.fs.readFileString(f.statePath())),

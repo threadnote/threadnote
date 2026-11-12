@@ -285,6 +285,30 @@ export function advanceNativeJobProgress(
     lastProgressAt: Math.max(at, previous?.lastProgressAt ?? 0),
   };
 }
+const failureDetailSchema = Schema.Struct({
+  stage: Schema.Literals(['preparation', 'canonical-work', 'source-verification']),
+  domainCode: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,63}$/u)),
+  domainCause: Schema.Literals(['workflow', 'memory', 'resource-io', 'citation', 'admission', 'lock', 'unknown']),
+  message: Schema.String.check(Schema.isMaxLength(256)),
+  operationId: Schema.optionalKey(id),
+  operationAction: Schema.optionalKey(
+    Schema.Literals(['preflight', 'create', 'replace', 'recover', 'inspect-operation']),
+  ),
+  nativeReceipt: Schema.Literals(['verified', 'prepared', 'absent', 'unavailable']),
+  canonicalOutcome: Schema.Literals(['verified-readback', 'unknown']),
+});
+type FailureDetail = typeof failureDetailSchema.Type;
+/** Attempt-local evidence, bound by error identity to the call that actually fails dispatch. */
+export const CurrentNativeJobMemoryFailure = Context.Reference<
+  | ((
+      error: WorkflowAutomationError,
+      detail: Pick<FailureDetail, 'operationId' | 'operationAction' | 'domainCause'> & {
+        readonly bindingId: string;
+        readonly generation: string;
+      },
+    ) => void)
+  | undefined
+>('threadnote/NativeJobMemoryFailure', {defaultValue: () => undefined});
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-job'),
   version: Schema.Literal(1),
@@ -309,6 +333,7 @@ const envelopeSchema = Schema.Struct({
   action: Schema.optionalKey(Schema.String),
   updatedAt: Schema.Finite,
   progress: Schema.optionalKey(progressSchema),
+  failure: Schema.optionalKey(failureDetailSchema),
 });
 type Envelope = typeof envelopeSchema.Type;
 const inputSchema = Schema.Struct({
@@ -335,7 +360,16 @@ export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: s
 export function nativeJobStatus(
   envelope: Pick<
     Envelope,
-    'jobId' | 'runId' | 'generation' | 'status' | 'stopRequested' | 'updatedAt' | 'code' | 'action' | 'progress'
+    | 'jobId'
+    | 'runId'
+    | 'generation'
+    | 'status'
+    | 'stopRequested'
+    | 'updatedAt'
+    | 'code'
+    | 'action'
+    | 'progress'
+    | 'failure'
   >,
 ) {
   return {
@@ -349,6 +383,7 @@ export function nativeJobStatus(
     stopRequested: envelope.stopRequested,
     updatedAt: envelope.updatedAt,
     ...(envelope.progress ? {progress: envelope.progress} : {}),
+    ...(envelope.failure ? {failure: envelope.failure} : {}),
     ...(envelope.code ? {code: envelope.code} : {}),
     ...(envelope.action ? {nextAction: envelope.action} : {}),
   };
@@ -1219,24 +1254,25 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
       }
       const loaded = yield* Effect.result(readInput(config, current.state));
       if (loaded._tag === 'Failure') {
-        current = yield* transition(config, runId, jobId, state => ({
-          ...state,
-          status: 'failed',
-          code: 'invalid-job-state',
-          action: 'Restore the exact immutable admitted input before resuming this job.',
-          updatedAt: Date.now(),
-        }));
+        current = yield* transition(config, runId, jobId, state => {
+          const {failure: _failure, ...rest} = state;
+          return {
+            ...rest,
+            status: 'failed',
+            code: 'invalid-job-state',
+            action: 'Restore the exact immutable admitted input before resuming this job.',
+            updatedAt: Date.now(),
+          };
+        });
         return nativeJobStatus(current.state);
       }
       const input = loaded.success;
       const view = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness);
       const firstStart = !current.state.started;
-      current = yield* transition(config, runId, jobId, state => ({
-        ...state,
-        status: 'running',
-        started: true,
-        updatedAt: Date.now(),
-      }));
+      current = yield* transition(config, runId, jobId, state => {
+        const {failure: _failure, ...rest} = state;
+        return {...rest, status: 'running', started: true, updatedAt: Date.now()};
+      });
       const boundary = Effect.gen(function* () {
         const latest = yield* read(config, runId, jobId);
         if (!latest || latest.state.stopRequested)
@@ -1280,6 +1316,13 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         );
 
       let workAction: Work['action'] | undefined;
+      let stage: FailureDetail['stage'] = 'preparation';
+      let memoryFailure:
+        | {
+            error: WorkflowAutomationError;
+            detail: Pick<FailureDetail, 'operationId' | 'operationAction' | 'domainCause'>;
+          }
+        | undefined;
       const execute = Effect.gen(function* () {
         const work = yield* Effect.try({
           try: () => parseWork(input.work, runId, generation),
@@ -1329,7 +1372,9 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         }
         const beforeDispatch = yield* CurrentNativeJobBeforeDispatch;
         if (beforeDispatch) yield* beforeDispatch;
+        stage = 'canonical-work';
         const prepared = yield* dispatch(work);
+        stage = 'source-verification';
         // A historical draft may materialize from the admitted witness, but
         // changed live source never makes the overall job completed in v1.
         yield* assertNativeJobLiveSource(view);
@@ -1338,13 +1383,21 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
         Effect.provideService(CurrentNativeJobSourceView, view),
         Effect.provideService(CurrentNativeJobBoundary, boundary),
         Effect.provideService(CurrentNativeJobProgress, reportProgress),
+        Effect.provideService(CurrentNativeJobMemoryFailure, (error, detail) => {
+          if (
+            detail.bindingId === view.bindingId &&
+            detail.generation === generation &&
+            Schema.is(id)(detail.operationId)
+          )
+            memoryFailure = {error, detail};
+        }),
       );
       const result = yield* Effect.result(execute);
       if (result._tag === 'Success') {
         const serialized = stableJson(result.success);
         if (Buffer.byteLength(serialized) > 32_768) {
           current = yield* transition(config, runId, jobId, state => {
-            const {code: _code, ...rest} = state;
+            const {code: _code, failure: _failure, ...rest} = state;
             return {
               ...rest,
               status: 'completed',
@@ -1360,17 +1413,52 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           return nativeJobStatus(current.state);
         }
         current = yield* transition(config, runId, jobId, state => {
-          const {code: _code, action: _action, ...rest} = state;
+          const {code: _code, action: _action, failure: _failure, ...rest} = state;
           return {...rest, status: 'completed', stopRequested: false, result: result.success, updatedAt: Date.now()};
         });
       } else {
         const error = result.failure;
         const code = Schema.is(WorkflowAutomationError)(error) ? error.code : 'job-failed';
+        const call = memoryFailure?.error === error ? memoryFailure.detail : undefined;
+        const observed = yield* readNativeWorkflowState(config, runId).pipe(Effect.result);
+        const controller = observed._tag === 'Success' ? observed.success : undefined;
+        const operation =
+          controller?.state.bindingId === view.bindingId &&
+          controller.state.generation === generation &&
+          call?.operationId
+            ? Option.getOrUndefined(
+                EffectArray.findFirst(
+                  controller.state.operations,
+                  item => item.intent.operationId === call.operationId,
+                ),
+              )
+            : undefined;
+        const nativeReceipt: FailureDetail['nativeReceipt'] =
+          !call?.operationId ||
+          !controller ||
+          controller.state.bindingId !== view.bindingId ||
+          controller.state.generation !== generation
+            ? 'unavailable'
+            : (operation?.status ?? 'absent');
+        const failure: FailureDetail = {
+          stage,
+          domainCode: /^[a-z][a-z0-9-]{0,63}$/u.test(code) ? code : 'job-failed',
+          domainCause: call?.domainCause ?? 'unknown',
+          ...(call?.operationId ? {operationId: call.operationId} : {}),
+          ...(call?.operationAction ? {operationAction: call.operationAction} : {}),
+          nativeReceipt,
+          canonicalOutcome: nativeReceipt === 'verified' ? 'verified-readback' : 'unknown',
+          message:
+            nativeReceipt === 'verified'
+              ? 'The native receipt records verified canonical readback. Job completion still failed; inspect this exact operation before same-job resume.'
+              : 'No verified canonical outcome is established for the failed call. Preserve the exact job and operation; inspect receipts before same-job resume.',
+        };
         const stop = code === 'job-stopped';
         const contended = retryableContention(error);
         const blocked = /drift|conflict|approval|source|evidence|publication|busy/u.test(code);
         current = yield* transition(config, runId, jobId, state => ({
           ...state,
+          failure,
           status: stop ? 'stopped-with-progress' : blocked ? 'blocked-with-progress' : 'failed',
           code,
           action: stop
@@ -1586,11 +1674,11 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     fs,
     file + '.worker.lock',
     workerLockOptions,
-    transition(config, runId, jobId, state =>
-      state.status === 'completed'
-        ? state
-        : {...state, stopRequested: false, status: 'accepted', updatedAt: Date.now()},
-    ).pipe(Effect.map(reopened => ({reopened, active: false}))),
+    transition(config, runId, jobId, state => {
+      if (state.status === 'completed') return state;
+      const {failure: _failure, ...rest} = state;
+      return {...rest, stopRequested: false, status: 'accepted', updatedAt: Date.now()};
+    }).pipe(Effect.map(reopened => ({reopened, active: false}))),
   ).pipe(
     Effect.catchIf(Schema.is(FileLockTimeout), () =>
       read(config, runId, jobId).pipe(
