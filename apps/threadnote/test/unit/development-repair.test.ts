@@ -6,6 +6,7 @@ import * as FC from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {classifySqliteError, SqlError} from 'effect/sql/SqlError';
 import {attachAnonymousTelemetryDiagnostic} from '@threadnote/threadnote/telemetry/diagnostic';
+import {LocalModelWorkerTransportError} from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -188,6 +189,27 @@ describe('development installer repair isolation', () => {
       operation: 'embed-many',
       reason: 'crash',
     });
+    const transport = LocalModelWorkerTransportError.make({
+      message: privateText,
+      operation: 'embedMany',
+      reason: 'exit',
+    });
+    Object.defineProperty(transport, 'exitObservation', {
+      value: {stage: 'process-exit', exitCode: -1073741819, signal: null, body: privateText},
+      enumerable: false,
+    });
+    const exitedWorker = attachAnonymousTelemetryDiagnostic(
+      EmbeddingFailed.make({cause: transport, message: privateText, modelId: privateText}),
+      {errorType: 'EmbeddingFailed', domain: 'model-worker', operation: 'embed-many', reason: 'exit'},
+    );
+    expect(recallIndexRepairFailureDiagnostic(exitedWorker)).toEqual({
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'exit',
+      exitObservation: {stage: 'process-exit', exitCode: -1073741819, signal: null},
+    });
+    expect(JSON.stringify(recallIndexRepairFailureDiagnostic(exitedWorker))).not.toContain(privateText);
     const busy = SqlError.make({
       reason: classifySqliteError(
         {code: 'SQLITE_BUSY', message: privateText},

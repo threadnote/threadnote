@@ -25,7 +25,7 @@ import {
 } from '@threadnote/recall/read_boundary';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {SystemInfo} from '@threadnote/platform/system';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, type CommandExecutionError} from '@threadnote/platform/command';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {makeReadyRecallReadBoundary, readyReadWorkerInvocation} from '../../src/recall/ready_read_boundary.js';
 import {RECALL_READY_READ_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
@@ -609,24 +609,72 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         });
         if (state === undefined) return yield* Effect.die('Missing property opening proof');
         const bundled = yield* bundledReadyWorker(f);
+        const command = yield* CommandExecutor;
+        let commandOutcome: 'not-invoked' | 'running' | 'completed' | 'failed' = 'not-invoked';
+        let allowance: number | undefined;
+        let commandFailure:
+          {tag: CommandExecutionError['_tag']; elapsedMilliseconds: number; exitCode?: number} | undefined;
         const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
           Effect.provideService(SystemInfo, bundled.system),
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              ...command,
+              execute: (executable, arguments_, options) =>
+                Effect.gen(function* () {
+                  commandOutcome = 'running';
+                  allowance = options?.timeoutMs;
+                  const started = yield* Clock.currentTimeMillis;
+                  return yield* command.execute(executable, arguments_, options).pipe(
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        commandOutcome = 'completed';
+                      }),
+                    ),
+                    Effect.tapError(error =>
+                      Effect.gen(function* () {
+                        commandOutcome = 'failed';
+                        commandFailure = {
+                          tag: error._tag,
+                          elapsedMilliseconds: Math.max(0, (yield* Clock.currentTimeMillis) - started),
+                          ...(error._tag === 'CommandFailed' ? {exitCode: error.exitCode} : {}),
+                        };
+                      }),
+                    ),
+                  );
+                }),
+            }),
+          ),
         );
         const allowedUriScopes = EffectArray.map(
           selected,
           name => `threadnote://user/test/memories/durable/projects/${name}`,
         );
-        const result = yield* boundary.read({
-          operation: 'vector-scores',
-          config: f.config,
-          options: {
-            model,
-            state,
-            queryVector: vector,
-            allowedUriScopes,
-            eligibility: deriveRecallEligibilityPolicy({explicitProject: project, originalQuery: 'private vector'}),
-          },
-        });
+        const result = yield* boundary
+          .read({
+            operation: 'vector-scores',
+            config: f.config,
+            options: {
+              model,
+              state,
+              queryVector: vector,
+              allowedUriScopes,
+              eligibility: deriveRecallEligibilityPolicy({explicitProject: project, originalQuery: 'private vector'}),
+            },
+          })
+          .pipe(
+            Effect.tapError(error =>
+              Effect.logError('Native scope property worker failed', {
+                reason: error.reason,
+                commandOutcome,
+                timeoutMilliseconds: allowance,
+                commandFailure,
+                setupMilliseconds: bundled.setupMilliseconds,
+                bundleBytes: bundled.bundleBytes,
+                bundleSha256: bundled.bundleSha256,
+              }),
+            ),
+          );
         expect(result.outcome).toBe('success');
         expect(result.value).toEqual(
           selected.includes(project)

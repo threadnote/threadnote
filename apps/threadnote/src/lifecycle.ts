@@ -112,6 +112,11 @@ import {assertSafeThreadnoteHomeForErase, formatStatus} from './utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {isSqlError} from 'effect/sql/SqlError';
 import {anonymousTelemetryDiagnosticFromError} from './telemetry/diagnostic.js';
+import {EmbeddingFailed} from '@threadnote/inference/engine/errors';
+import {
+  LocalModelWorkerTransportError,
+  projectLocalModelWorkerExitObservation,
+} from './effect/ai/isolated-local-model-runtime.js';
 import {memoryFrontmatterField, memoryUriProjectSegment} from '@threadnote/recall/results';
 import {toolRoot} from '@threadnote/workspace/installation';
 import * as EffectRecord from 'effect/Record';
@@ -194,12 +199,17 @@ export function recallIndexRepairFailureDiagnostic(error: unknown) {
       };
     }
     const diagnostic = anonymousTelemetryDiagnosticFromError(error);
+    const exitObservation =
+      Schema.is(EmbeddingFailed)(error) && Schema.is(LocalModelWorkerTransportError)(error.cause)
+        ? projectLocalModelWorkerExitObservation(error.cause.exitObservation)
+        : undefined;
     return diagnostic?.domain === 'model-worker'
       ? {
           errorType: diagnostic.errorType,
           domain: diagnostic.domain,
           operation: diagnostic.operation,
           reason: diagnostic.reason,
+          ...(exitObservation === undefined ? {} : {exitObservation}),
         }
       : {errorType: diagnostic?.errorType ?? 'UnknownError'};
   } catch {

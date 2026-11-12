@@ -5,11 +5,13 @@ import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, Fiber, Layer, Schema} from 'effect';
-import {describe, vi} from 'vitest';
+import {describe, it, vi} from 'vitest';
 import {
   isolatedLocalModelRuntimeLayer,
   localModelWorkerSpawnOptions,
   serveWorker,
+  LocalModelWorkerTransportError,
+  projectLocalModelWorkerExitObservation,
   type LocalModelWorkerProcess,
   type LocalModelWorkerSpawnOptions,
   type LocalModelWorkerSpawner,
@@ -51,6 +53,33 @@ const backgroundAuthority = {
 };
 
 describe('isolated local model runtime', () => {
+  it('projects only bounded OS exit facts and finite transport stages', () => {
+    expect(
+      projectLocalModelWorkerExitObservation({
+        stage: 'process-exit',
+        exitCode: -1073741819,
+        signal: null,
+        body: 'PRIVATE_BODY',
+      }),
+    ).toEqual({stage: 'process-exit', exitCode: -1073741819, signal: null});
+    expect(
+      projectLocalModelWorkerExitObservation({stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'}),
+    ).toEqual({stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'});
+    expect(projectLocalModelWorkerExitObservation({stage: 'stdout-eof', signal: 9})).toEqual({
+      stage: 'stdout-eof',
+      signal: 9,
+    });
+    expect(
+      projectLocalModelWorkerExitObservation({
+        stage: 'PRIVATE_STAGE',
+        exitCode: 4294967296,
+        signal: 'PRIVATE_SIGNAL',
+        stderr: 'PRIVATE_STDERR',
+      }),
+    ).toBeUndefined();
+    expect(projectLocalModelWorkerExitObservation({exitCode: -2147483649, signal: 65})).toBeUndefined();
+    expect(projectLocalModelWorkerExitObservation({exitCode: NaN, signal: 1.5})).toBeUndefined();
+  });
   effectIt.effect('bounded transport timeout survives clean exit and response arrival while write is unsettled', () => {
     const written = Promise.withResolvers<void>();
     const writing = Promise.withResolvers<void>();
@@ -155,7 +184,7 @@ describe('isolated local model runtime', () => {
       const processes: FakeWorkerProcess[] = [];
       const spawn: LocalModelWorkerSpawner = () => {
         const worker = new FakeWorkerProcess(request => {
-          worker.exit(scenario === 'nonzero' ? 1 : 0);
+          worker.exit(scenario === 'nonzero' ? 3221225477 : 0, scenario === 'nonzero' ? 'SIGABRT' : null);
           queueMicrotask(() => {
             if (scenario === 'nonzero') worker.respond(request, [[1, 2]]);
             if (scenario === 'truncated') worker.stdoutFeed.push('{"id":');
@@ -178,6 +207,22 @@ describe('isolated local model runtime', () => {
             errorType: 'EmbeddingFailed',
             reason: scenario === 'nonzero' || scenario === 'missing' ? 'exit' : 'protocol',
           });
+        if (Exit.isFailure(result) && (scenario === 'nonzero' || scenario === 'missing')) {
+          const failure = Cause.squash(result.cause);
+          expect(Schema.is(EmbeddingFailed)(failure)).toBe(true);
+          if (Schema.is(EmbeddingFailed)(failure)) {
+            expect(Schema.is(LocalModelWorkerTransportError)(failure.cause)).toBe(true);
+            if (Schema.is(LocalModelWorkerTransportError)(failure.cause)) {
+              expect(failure.cause.exitObservation).toEqual(
+                scenario === 'nonzero'
+                  ? {stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'}
+                  : {stage: 'stdout-eof', exitCode: 0, signal: null},
+              );
+              expect(Object.getOwnPropertyDescriptor(failure.cause, 'exitObservation')?.enumerable).toBe(false);
+              expect(JSON.stringify(failure.cause)).not.toContain('exitObservation');
+            }
+          }
+        }
         expect(processes).toHaveLength(2);
       }).pipe(provideTestLayer(runtimeLayer(spawn)));
     });
@@ -928,6 +973,13 @@ describe('isolated local model runtime', () => {
       expect(Exit.isFailure(exit)).toBe(true);
       expect(processes).toHaveLength(2);
       expect(EffectArray.every(processes, worker => worker.killed)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const failure = Cause.squash(exit.cause);
+        if (Schema.is(EmbeddingFailed)(failure) && Schema.is(LocalModelWorkerTransportError)(failure.cause))
+          expect(failure.cause.exitObservation).toBeUndefined();
+        else expect.fail('Expected the typed transport cause');
+      }
+      expect(processes[0].readExitStatus()).toEqual({exitCode: 137, signal: 'SIGKILL'});
     }).pipe(provideTestLayer(runtimeLayer(spawn, 10)));
   });
 
@@ -1327,6 +1379,11 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
   inputClosed = false;
   killed = false;
   private resolveExit = (_code: number) => {};
+  private exitStatus: {exitCode: number | null; signal: NodeJS.Signals | number | null} = {
+    exitCode: null,
+    signal: null,
+  };
+  readExitStatus = () => this.exitStatus;
 
   constructor(
     private readonly onWrite: (request: FakeRequest) => void,
@@ -1343,11 +1400,13 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
     const result = this.closeInputResult?.();
     this.stderrFeed.end();
     this.stdoutFeed.end();
-    this.resolveExit(0);
+    this.exit(0);
     return result;
   }
 
-  exit(code: number): void {
+  exit(code: number, signal: NodeJS.Signals | number | null = null): void {
+    if (this.exitStatus.exitCode === null && this.exitStatus.signal === null)
+      this.exitStatus = {exitCode: code, signal};
     this.resolveExit(code);
   }
 
@@ -1356,7 +1415,7 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
     this.killed = true;
     this.stderrFeed.end();
     this.stdoutFeed.end();
-    this.resolveExit(137);
+    this.exit(137, 'SIGKILL');
   }
 
   respond(request: FakeRequest, result: unknown): void {

@@ -7,6 +7,7 @@ import type {Transport} from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {JSONRPCMessage} from '@modelcontextprotocol/sdk/types.js';
 import {FixtureProducers, type FixtureProducerObservation} from '@threadnote/testing/fixture-producers';
 import {projectAnonymousTelemetryDiagnostic} from '@threadnote/threadnote/telemetry/diagnostic';
+import {projectLocalModelWorkerExitObservation} from '@threadnote/threadnote/effect/ai/isolated-local-model-runtime';
 
 interface FixtureChild {
   readonly stdin: ChildProcess['stdin'];
@@ -241,7 +242,11 @@ const repairTypedFailure = (stderr: string) => {
           }
         : {}),
     });
-    return projected?.domain === 'model-worker' ? projected : {errorType: projected?.errorType ?? 'UnknownError'};
+    const exitObservation =
+      'exitObservation' in value ? projectLocalModelWorkerExitObservation(value.exitObservation) : undefined;
+    return projected?.domain === 'model-worker'
+      ? {...projected, ...(exitObservation === undefined ? {} : {exitObservation})}
+      : {errorType: projected?.errorType ?? 'UnknownError'};
   } catch {
     return {errorType: 'UnknownError'};
   }

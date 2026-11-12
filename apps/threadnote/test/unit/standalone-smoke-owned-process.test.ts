@@ -146,6 +146,32 @@ it('preserves deadline failure without claiming an observed close', async () => 
 });
 
 it.each([
+  [
+    {
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'exit',
+      exitObservation: {stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT', stderr: 'PRIVATE_STDERR'},
+    },
+    {
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'exit',
+      exitObservation: {stage: 'process-exit', exitCode: 3221225477, signal: 'SIGABRT'},
+    },
+  ],
+  [
+    {
+      errorType: 'EmbeddingFailed',
+      domain: 'model-worker',
+      operation: 'embed-many',
+      reason: 'exit',
+      exitObservation: {stage: 'PRIVATE_STAGE', exitCode: 4294967296, signal: 'PRIVATE_SIGNAL'},
+    },
+    {errorType: 'EmbeddingFailed', domain: 'model-worker', operation: 'embed-many', reason: 'exit'},
+  ],
   [{errorType: 'ModelLoadFailed', message: 'PRIVATE_MESSAGE', path: 'PRIVATE_PATH'}, {errorType: 'ModelLoadFailed'}],
   [
     {
