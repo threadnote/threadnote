@@ -2000,6 +2000,202 @@ describe('public native quickfix selection', () => {
       }).pipe(Effect.provide(io)),
     );
   }
+  for (const language of ['go', 'rust'] as const) {
+    effectIt.effect(
+      `round-trips private ${language} diagnostic context and refuses changed or ambiguous witnesses`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* goView;
+          const basis =
+            language === 'go'
+              ? f.basis
+              : {...f.basis, provider: {id: 'rust-analyzer', version: rustProviderVersion, generation: 0}};
+          const diagnostic = {
+            range: f.edit.documentChanges[0].edits[0].range,
+            code: 'UndeclaredName',
+            severity: 1,
+            message: 'undefined: missing',
+            source: language === 'go' ? 'compiler' : 'rustc',
+            data: {opaque: 'opaque-private:original'},
+          };
+          let native = [diagnostic],
+            actionCalls = 0;
+          const contexts: (readonly Schema.Json[])[] = [];
+          const paramsSchema = Schema.Struct({context: Schema.Struct({diagnostics: Schema.Array(Schema.Json)})});
+          const ordinary = goClient((method, params) =>
+            Effect.sync(() => {
+              if (method === 'textDocument/diagnostic') return {kind: 'full', items: native};
+              if (method !== 'textDocument/codeAction' || !Schema.is(paramsSchema)(params))
+                throw new Error('Unexpected diagnostic action RPC');
+              actionCalls++;
+              contexts.push(structuredClone(params.context.diagnostics));
+              // A wire client must not be able to mutate the retained provider publication.
+              const first = params.context.diagnostics[0];
+              if (Schema.is(Schema.Record(Schema.String, Schema.Json))(first))
+                expect(Reflect.set(first, 'data', 'wire-only-mutation')).toBe(true);
+              return [{title: 'Fix', kind: 'quickfix', edit: f.edit}];
+            }),
+          );
+          const client: LspClient = {
+            ...ordinary,
+            request: (method, params, ms) =>
+              language === 'rust' && method === 'initialize'
+                ? Effect.succeed({
+                    serverInfo: {name: 'rust-analyzer', version: rustProviderVersion},
+                    capabilities: {
+                      codeActionProvider: {resolveProvider: true},
+                      diagnosticProvider: {interFileDependencies: false, workspaceDiagnostics: false},
+                    },
+                  })
+                : ordinary.request(method, params, ms),
+            notify: method =>
+              Effect.sync(() => {
+                if (method === 'initialized')
+                  f.notifications.receive('experimental/serverStatus', {health: 'ok', quiescent: true});
+              }),
+          };
+          const options = {...f.options, basis, captureEditSource: () => Effect.die('Overlay is not disk')};
+          const session = yield* language === 'go' ? makeGoSession(client, options) : makeRustSession(client, options);
+          const view = yield* session.upsert(basis, f.text, language, 1000);
+          const publish = () =>
+            f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: native});
+          publish();
+          const delta = yield* session.diagnostics(view, 1000);
+          const query = {range: diagnostic.range, only: ['quickfix'], diagnosticIds: [delta.items[0].id]};
+          const listed = yield* session.actions(view, query, 1000);
+          if (listed.status !== 'ok') return yield* Effect.die('Missing native-context list');
+          const [choice] = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listed.items);
+          const prepared = yield* session.actions(view, query, 1000, choice);
+          expect(prepared).toMatchObject({status: 'ok', items: [{kind: 'prepared-edit'}]});
+          for (const context of contexts) expect(context).toEqual([diagnostic]);
+          expect(native).toEqual([diagnostic]);
+          expect(JSON.stringify({delta, listed, prepared})).not.toContain('opaque-private:');
+          const after = yield* session.diagnostics(view, 1000);
+          expect(after.added).toEqual([]);
+          expect(after.remaining).toEqual(delta.items);
+          native = [{...diagnostic, data: {opaque: 'opaque-private:changed'}}];
+          publish();
+          const changed = yield* session.actions(view, query, 1000, choice);
+          expect(changed.status).toBe('ok');
+          if (changed.status === 'ok') {
+            expect(changed.items[0]).toMatchObject({kind: 'action-result', status: 'changed-selection'});
+            expect(
+              EffectArray.filter(changed.items, item =>
+                Schema.is(Schema.Struct({kind: Schema.Literal('prepared-edit')}))(item),
+              ),
+            ).toHaveLength(0);
+          }
+          native = [diagnostic, {...diagnostic, data: {opaque: 'opaque-private:ambiguous'}}];
+          publish();
+          const before = actionCalls;
+          expect(yield* session.actions(view, query, 1000).pipe(Effect.flip)).toMatchObject({reason: 'provider'});
+          expect(actionCalls).toBe(before);
+          expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+        }).pipe(Effect.provide(io)),
+    );
+  }
+
+  effectIt.effect.prop(
+    'preserves native optional metadata and source association under diagnostic permutations without mutation',
+    {
+      source: Schema.Literals(['absent', 'empty', 'compiler']),
+      data: Schema.Literals(['absent', 'null', 'object']),
+      reverse: Schema.Boolean,
+      token: Schema.String.check(Schema.isMaxLength(20)),
+    },
+    ({source, data, reverse, token}) =>
+      Effect.gen(function* () {
+        const f = yield* goView;
+        const selected = {
+          range: f.edit.documentChanges[0].edits[0].range,
+          message: 'missing',
+          severity: 1,
+          ...(source === 'absent' ? {} : {source: source === 'empty' ? '' : 'compiler'}),
+          ...(data === 'absent'
+            ? {}
+            : {data: data === 'null' ? null : {token: 'opaque-private:' + token, values: [null, false, 0]}}),
+        };
+        const native = [
+          selected,
+          {...selected, message: 'another diagnostic', data: {opaque: 'opaque-private:unselected'}},
+        ];
+        const original = structuredClone(native),
+          contexts: (readonly Schema.Json[])[] = [];
+        const paramsSchema = Schema.Struct({context: Schema.Struct({diagnostics: Schema.Array(Schema.Json)})});
+        const session = yield* makeGoSession(
+          goClient((method, params) =>
+            Effect.sync(() => {
+              if (method !== 'textDocument/codeAction' || !Schema.is(paramsSchema)(params))
+                throw new Error('Unexpected metadata RPC');
+              contexts.push(structuredClone(params.context.diagnostics));
+              const first = params.context.diagnostics[0];
+              if (Schema.is(Schema.Record(Schema.String, Schema.Json))(first))
+                expect(Reflect.set(first, 'data', 'wire-only-mutation')).toBe(true);
+              return [{title: 'Fix', kind: 'quickfix', edit: f.edit}];
+            }),
+          ),
+          {...f.options, captureEditSource: () => Effect.die('Overlay is not disk')},
+        );
+        const view = yield* session.upsert(f.basis, f.text, 'go', 1000);
+        f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: native});
+        const diagnostics = yield* session.diagnostics(view, 1000);
+        const target = EffectOption.getOrUndefined(
+          EffectArray.findFirst(diagnostics.items, item => item.message === 'missing'),
+        );
+        if (!target) return yield* Effect.die('Missing selected diagnostic');
+        const query = {range: selected.range, diagnosticIds: [target.id]};
+        const listed = yield* session.actions(view, query, 1000);
+        if (listed.status !== 'ok') return yield* Effect.die('Missing metadata list');
+        const [choice] = yield* Schema.decodeUnknownEffect(Schema.Array(SemanticActionChoice))(listed.items);
+        f.notifications.receive('textDocument/publishDiagnostics', {
+          uri: f.uri,
+          version: 1,
+          diagnostics: reverse ? [...native].reverse() : native,
+        });
+        expect(yield* session.actions(view, query, 1000, choice)).toMatchObject({
+          status: 'ok',
+          items: [{kind: 'prepared-edit'}],
+        });
+        for (const context of contexts) expect(context).toEqual([selected]);
+        expect(native).toEqual(original);
+        expect(JSON.stringify({diagnostics, listed})).not.toContain('opaque-private:');
+      }).pipe(Effect.provide(io)),
+    {arbitrary: {runs: 16}},
+  );
+
+  effectIt.effect('refuses native diagnostic metadata changed while a public action request is pending', () =>
+    Effect.gen(function* () {
+      const f = yield* goView;
+      const entered = yield* Deferred.make<void>(),
+        response = yield* Deferred.make<Schema.Json>();
+      const session = yield* makeGoSession(
+        goClient(method =>
+          method === 'textDocument/codeAction'
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(response)))
+            : Effect.die('Unexpected metadata-race RPC'),
+        ),
+        {...f.options, captureEditSource: () => Effect.die('Overlay is not disk')},
+      );
+      const view = yield* session.upsert(f.basis, f.text, 'go', 1000);
+      const diagnostic = {
+        range: f.edit.documentChanges[0].edits[0].range,
+        message: 'missing',
+        data: {opaque: 'before'},
+      };
+      f.notifications.receive('textDocument/publishDiagnostics', {uri: f.uri, version: 1, diagnostics: [diagnostic]});
+      const pending = yield* Effect.forkChild(Effect.result(session.actions(view, {range: diagnostic.range}, 1000)));
+      yield* Deferred.await(entered);
+      f.notifications.receive('textDocument/publishDiagnostics', {
+        uri: f.uri,
+        version: 1,
+        diagnostics: [{...diagnostic, data: {opaque: 'after'}}],
+      });
+      yield* Deferred.succeed(response, [{title: 'Fix', kind: 'quickfix', edit: f.edit}]);
+      expect(yield* Fiber.join(pending)).toMatchObject({_tag: 'Failure', failure: {reason: 'stale'}});
+      expect(yield* f.fs.readFileString(f.file)).toBe(f.text);
+    }).pipe(Effect.provide(io)),
+  );
+
   effectIt.effect.prop(
     'keeps only unique unchanged quickfix selection under permutations and mutations',
     {

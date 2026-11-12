@@ -235,6 +235,7 @@ interface Document {
   ready: boolean;
   published?: DiagnosticSnapshot;
   nativeDiagnostics?: readonly Schema.Json[];
+  nativeDiagnosticSnapshot?: {readonly byId: ReadonlyMap<string, Schema.Json | null>};
   delivered?: DiagnosticSnapshot;
   wake: Deferred.Deferred<void>;
   diagnosticRequest: number;
@@ -421,6 +422,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
     const document = documents.get(params.uri);
     if (!document || params.version !== document.wireVersion) return false;
     const items = new Map<string, SemanticDiagnostic>();
+    const nativeIds: string[] = [];
     for (const diagnostic of params.diagnostics) {
       if (
         !validRange(document.text, diagnostic.range) ||
@@ -432,13 +434,21 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       const code = diagnostic.code ?? '';
       const id = sha256HexSync(JSON.stringify([diagnostic.range, code, category, diagnostic.message]));
       items.set(id, {id, range: structuredClone(diagnostic.range), code, category, message: diagnostic.message});
+      nativeIds.push(id);
     }
     document.published = {observation: structuredClone(document.observation), items: [...items.values()]};
-    if (
-      (options.policy.resolveCodeActions || options.policy.requestDiagnostics) &&
-      Schema.is(Schema.Array(Schema.Json))(params.diagnostics)
-    )
-      document.nativeDiagnostics = structuredClone(params.diagnostics);
+    document.nativeDiagnosticSnapshot = undefined;
+    if (Schema.is(Schema.Array(Schema.Json))(params.diagnostics)) {
+      const native = structuredClone(params.diagnostics);
+      const byId = new Map<string, Schema.Json | null>();
+      for (const [index, diagnostic] of native.entries()) {
+        const id = nativeIds[index];
+        // Identical semantic fields cannot select between duplicate native source/data witnesses.
+        byId.set(id, byId.has(id) ? null : diagnostic);
+      }
+      if (options.policy.resolveCodeActions || options.policy.requestDiagnostics) document.nativeDiagnostics = native;
+      document.nativeDiagnosticSnapshot = {byId};
+    }
     Deferred.doneUnsafe(document.wake, Effect.void);
     return true;
   };
@@ -530,6 +540,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
           entry.ready = false;
           entry.published = undefined;
           entry.nativeDiagnostics = undefined;
+          entry.nativeDiagnosticSnapshot = undefined;
           Deferred.doneUnsafe(entry.wake, Effect.void);
           entry.wake = Deferred.makeUnsafe<void>();
           if (++entry.wireVersion > 2147483647) return yield* SemanticSessionFault.make({reason: 'not-ready'});
@@ -1111,27 +1122,35 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
           EffectArray.some(subset, id => !EffectArray.some(refreshed.items, item => item.id === id)))
       )
         return yield* SemanticSessionFault.make({reason: 'stale'});
+      const nativeSnapshot = document.nativeDiagnosticSnapshot;
+      // Fingerprinting is action-only; ordinary diagnostic reads do not sort/hash private metadata.
+      const nativeDigest = () => {
+        const snapshot = document.nativeDiagnosticSnapshot;
+        return snapshot
+          ? sha256HexSync(JSON.stringify([...snapshot.byId].sort(([a], [b]) => EffectString.localeCompare(b)(a))))
+          : null;
+      };
+      const nativeFingerprint = nativeDigest();
+      const native: Schema.Json[] = [];
+      for (const item of refreshed.items) {
+        if (subset && !subset.includes(item.id)) continue;
+        const diagnostic = nativeSnapshot?.byId.get(item.id);
+        if (diagnostic === undefined || diagnostic === null)
+          return yield* SemanticSessionFault.make({reason: 'provider'});
+        // Echo only our current provider publication, never caller metadata or a reduced public DTO.
+        native.push(structuredClone(diagnostic));
+      }
       const queryDigest = sha256HexSync(
         JSON.stringify([
-          'lsp-quickfix-query-v1',
+          'lsp-quickfix-query-v2',
           observationKey({...fixed, projectEpoch: 0}),
           options.profile,
           query.range,
           query.only ? [...query.only].sort() : null,
           EffectArray.map(refreshed.items, item => item.id).sort(),
           subset ? [...subset].sort() : null,
+          nativeFingerprint,
         ]),
-      );
-      const native = EffectArray.map(
-        EffectArray.filter(refreshed.items, item => !subset || subset.includes(item.id)),
-        item => ({
-          range: item.range,
-          code: item.code,
-          message: item.message,
-          ...(['error', 'warning', 'information', 'hint'].includes(item.category)
-            ? {severity: ['unknown', 'error', 'warning', 'information', 'hint'].indexOf(item.category)}
-            : {}),
-        }),
       );
       const response = yield* client.request(
         'textDocument/codeAction',
@@ -1290,6 +1309,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       if (
         !current(fixed) ||
         document.diagnosticRequest !== diagnosticSequence ||
+        nativeDigest() !== nativeFingerprint ||
         !document.published ||
         observationKey(document.published.observation) !== observationKey(fixed) ||
         JSON.stringify(EffectArray.map(document.published.items, item => item.id).sort()) !==

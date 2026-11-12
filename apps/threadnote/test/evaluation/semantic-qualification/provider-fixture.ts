@@ -222,11 +222,11 @@ export function authoredActionFixture(language: ProviderInputs['language']) {
       };
     case 'go':
       return {
-        id: 'remove-unused-stdlib-import',
+        id: 'declare-local-with-colon',
         file: 'action_case.go',
-        line: 2,
-        before: 'package demo\n\nimport "fmt"\n',
-        after: 'package demo\n\n',
+        line: 3,
+        before: 'package demo\n\nfunc actionCase() {\n\tx = 1\n\t_ = x\n}\n',
+        after: 'package demo\n\nfunc actionCase() {\n\tx := 1\n\t_ = x\n}\n',
       };
     case 'rust':
       return {

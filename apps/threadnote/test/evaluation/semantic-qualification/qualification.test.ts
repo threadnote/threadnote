@@ -43,7 +43,7 @@ describe('final combined qualification preparation', () => {
   it('authors finite actions and refuses ambiguous or unsafe public listings', () => {
     const expected = {
       python: ['action_case.py', 'def selected() -> int:\n    return 1\n\n_ = selected()\n'],
-      go: ['action_case.go', 'package demo\n\n'],
+      go: ['action_case.go', 'package demo\n\nfunc actionCase() {\n\tx := 1\n\t_ = x\n}\n'],
       rust: ['src/action_case.rs', 'pub fn invoke() { missing_one(); }\n\nfn missing_one() {\n    todo!()\n}\n'],
       java: ['src/main/java/demo/ActionCase.java', 'package demo;\nclass ActionCase {}\n'],
     } as const;
@@ -52,6 +52,10 @@ describe('final combined qualification preparation', () => {
       expect([action.file, action.after]).toEqual(expected[language]);
       expect(action.before).not.toBe(action.after);
     }
+    const go = authoredActionFixture('go');
+    expect(go).toMatchObject({id: 'declare-local-with-colon', line: 3});
+    expect(go.before).toBe('package demo\n\nfunc actionCase() {\n\tx = 1\n\t_ = x\n}\n');
+    expect(go.after).toBe(EffectString.replace('x = 1', 'x := 1')(go.before));
     const choice = {
       choiceHandle: EffectString.repeat(64)('a'),
       title: 'An engine title',
