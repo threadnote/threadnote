@@ -103,6 +103,76 @@ export async function publishNativeReaderManifest(
   return manifest;
 }
 
+/** GCC 12 config/libgcc-glibc.ver and config/t-linux retain GLIBC_2.0 for libgcc's historical helpers. */
+function isMuslLibgccCompatibility(elf: string, definedSymbols: string, target: string): boolean {
+  if (target !== 'bun-linux-arm64-musl' || /\bGLIBC_/u.test(definedSymbols)) return false;
+  const needed = EffectArray.map(
+    [...EffectString.matchAll(/^\s*0x[0-9a-f]+\s+\(NEEDED\)\s+Shared library: \[([A-Za-z0-9_.+-]+)\]\s*$/gmu)(elf)],
+    match => match[1] ?? '',
+  );
+  if (
+    needed.length !== [...EffectString.matchAll(/\(NEEDED\)/gu)(elf)].length ||
+    !needed.includes('libgcc_s.so.1') ||
+    !needed.includes('libc.musl-aarch64.so.1') ||
+    EffectArray.some(needed, name => /^(?:ld-linux|lib(?:c|m|dl|pthread|rt|resolv|util|anl)\.so(?:\.|$))/u.test(name))
+  )
+    return false;
+  const needs = [
+    ...EffectString.matchAll(
+      /(?:^|\n)Version needs section '\.gnu\.version_r' contains (\d+) entr(?:y|ies):\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/gu,
+    )(elf),
+  ];
+  const symbols = [
+    ...EffectString.matchAll(
+      /(?:^|\n)Version symbols section '\.gnu\.version'[^\n]*\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/gu,
+    )(elf),
+  ];
+  const section = needs[0];
+  const symbolSection = symbols[0];
+  if (needs.length !== 1 || symbols.length !== 1 || !section || !symbolSection) return false;
+  let owner = '';
+  let remaining = 0;
+  let files = 0;
+  const seenFiles: string[] = [];
+  const seenIndices: number[] = [];
+  const compatibilityIndices: number[] = [];
+  for (const line of EffectString.split(/\r?\n/)(section[2] ?? '')) {
+    if (/^\s*$/u.test(line)) continue;
+    if (/^\s*Addr: 0x[0-9a-f]+\s+Offset: 0x[0-9a-f]+\s+Link: \d+ \(\.dynstr\)\s*$/u.test(line)) continue;
+    const file = /^\s*(?:0x)?[0-9a-f]+:\s+Version: 1\s+File: ([A-Za-z0-9_.+-]+)\s+Cnt: (\d+)\s*$/u.exec(line);
+    if (file) {
+      if (remaining !== 0 || !file[1] || seenFiles.includes(file[1])) return false;
+      owner = file[1];
+      seenFiles.push(owner);
+      remaining = Number(file[2]);
+      if (remaining < 1 || !needed.includes(owner)) return false;
+      files++;
+      continue;
+    }
+    const name =
+      /^\s*(?:0x)?[0-9a-f]+:\s+Name: ([A-Za-z0-9_.+-]+)\s+Flags: (?:none|[A-Z_ |]+)\s+Version: (\d+)\s*$/u.exec(line);
+    if (!name || !owner || remaining < 1) return false;
+    const index = Number(name[2]);
+    if (index < 2 || index > 0x7fff || seenIndices.includes(index)) return false;
+    seenIndices.push(index);
+    remaining--;
+    if (EffectString.startsWith('GLIBC_')(name[1] ?? '')) {
+      if (owner !== 'libgcc_s.so.1' || name[1] !== 'GLIBC_2.0') return false;
+      compatibilityIndices.push(index);
+    }
+  }
+  if (remaining !== 0 || files !== Number(section[1]) || compatibilityIndices.length !== 1) return false;
+  const symbolPattern = /\b([0-9a-f]+)h?\s+\(GLIBC_2\.0\)/gu;
+  const references = [...EffectString.matchAll(symbolPattern)(symbolSection[1] ?? '')];
+  if (
+    references.length === 0 ||
+    EffectArray.some(references, match => !compatibilityIndices.includes(Number.parseInt(match[1] ?? '', 16)))
+  )
+    return false;
+  if (/\bGLIBC_/u.test(EffectString.replaceAll(symbolPattern, '')(symbolSection[1] ?? ''))) return false;
+  return !/\bGLIBC_/u.test(EffectString.replace(section[0], '')(EffectString.replace(symbolSection[0], '')(elf)));
+}
+
 /** Inspect the actual native artifact, including dependencies hidden from source metadata. */
 export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(function* (
   binaryPath: string,
@@ -139,14 +209,18 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
     throw new Error('Native vector reader unexpectedly exports private SQLite symbols.');
   if (platform === 'linux') {
     const versions = [...EffectString.matchAll(/\bGLIBC_(\d+)\.(\d+)/gu)(output)];
-    if (EffectString.endsWith('-musl')(bunTarget) && versions.length !== 0) {
+    if (
+      EffectString.endsWith('-musl')(bunTarget) &&
+      /\bGLIBC_/u.test(output) &&
+      !isMuslLibgccCompatibility(elfOutput, definedSymbolsOutput, bunTarget)
+    ) {
       const names = (value: string) =>
-        EffectArray.map([...EffectString.matchAll(/\bGLIBC_\d+(?:\.\d+)+\b/gu)(value)], match => match[0]);
+        EffectArray.map([...EffectString.matchAll(/\bGLIBC_[A-Za-z0-9_.]+/gu)(value)], match => match[0]);
       const sample = (values: readonly string[]) => {
         const unique = EffectArray.dedupe(values);
         return {count: unique.length, values: EffectArray.map(EffectArray.take(unique, 8), EffectString.slice(0, 64))};
       };
-      // Keep version requirements separate from definitions and defined exports without changing rejection policy.
+      // Keep requirement identities separate from definitions and defined exports in the bounded failure report.
       const needs =
         /(?:^|\n)Version needs section[^\n]*\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/u.exec(elfOutput)?.[1] ?? '';
       const definitions =

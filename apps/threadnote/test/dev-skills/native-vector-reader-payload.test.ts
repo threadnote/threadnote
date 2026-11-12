@@ -88,6 +88,22 @@ if (${args.includes('/EXPORTS')}) {
 });
 
 describe('Linux native binary audit failures', () => {
+  // GCC12 config/libgcc-glibc.ver assigns frame registration helpers GLIBC_2.0 in libgcc itself.
+  const libgccMusl = `
+ELF Header:
+  Machine: AArch64
+Dynamic section at offset 0x0 contains 2 entries:
+ 0x0000000000000001 (NEEDED) Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED) Shared library: [libc.musl-aarch64.so.1]
+Version symbols section '.gnu.version' contains 4 entries:
+ Addr: 0x0000000000000400  Offset: 0x000400  Link: 3 (.dynsym)
+  000:   0 (*local*)   1 (*global*)   2 (GCC_3.0)   3 (GLIBC_2.0)
+Version needs section '.gnu.version_r' contains 1 entry:
+ Addr: 0x0000000000000500  Offset: 0x000500  Link: 4 (.dynstr)
+  000000: Version: 1  File: libgcc_s.so.1  Cnt: 2
+  0x0010:   Name: GCC_3.0  Flags: none  Version: 2
+  0x0020:   Name: GLIBC_2.0  Flags: none  Version: 3
+`;
   const fixture = Effect.fn(function* (elf: string, symbols = '000000000001 T napi_register_module_v1\n') {
     const native = yield* SystemInfo;
     const system = SystemInfo.of({...native, platform: 'linux'});
@@ -122,6 +138,45 @@ describe('Linux native binary audit failures', () => {
     return value;
   };
   effectIt.layer(TestSystemInfoLayer)(layerIt => {
+    layerIt.effect('accepts the pinned ARM musl libgcc compatibility namespace with complete ownership', () =>
+      Effect.gen(function* () {
+        const audit = yield* fixture(libgccMusl);
+        for (const inference of [false, true])
+          expect(yield* audit('bun-linux-arm64-musl', inference)).toMatch(/^[a-f0-9]{64}$/u);
+        const otherTarget = yield* audit('bun-linux-x64-baseline-musl').pipe(Effect.exit);
+        expect(Exit.isFailure(otherTarget)).toBe(true);
+      }),
+    );
+    layerIt.effect('rejects GNU libc, unowned or ambiguous versions rather than trusting a namespace alone', () =>
+      Effect.gen(function* () {
+        const substitute = (before: string, after: string) => EffectString.replaceAll(before, after)(libgccMusl);
+        const invalid = [
+          substitute('libc.musl-aarch64.so.1', 'libc.so.6'),
+          substitute('libgcc_s.so.1', 'libother.so.1'),
+          substitute('GLIBC_2.0', 'GLIBC_2.17'),
+          substitute('GLIBC_2.0', 'GLIBC_PRIVATE'),
+          substitute('File: libgcc_s.so.1', 'File: libc.musl-aarch64.so.1'),
+          substitute('Cnt: 2', 'Cnt: 3'),
+          substitute('Version: 3', 'Version: 2'),
+          substitute('3 (GLIBC_2.0)', '4 (GLIBC_2.0)'),
+          substitute('File: libgcc_s.so.1', 'Unparsed owner: libgcc_s.so.1'),
+          substitute("Version needs section '.gnu.version_r'", 'Unknown requirement section'),
+          substitute('Shared library: [libgcc_s.so.1]', 'Shared library: [/untrusted/libgcc_s.so.1]'),
+          `${libgccMusl}\nUnclassified GLIBC_2.0\n`,
+          `${libgccMusl}\nVersion definition section '.gnu.version_d' contains 1 entry:\n 0x1: Name: GLIBC_2.0\n`,
+          EffectString.replace('contains 1 entry:', 'contains 2 entries:')(libgccMusl) +
+            '  0x0030: Version: 1  File: libc.musl-aarch64.so.1  Cnt: 1\n' +
+            '  0x0040:   Name: GLIBC_2.0  Flags: none  Version: 4\n',
+        ];
+        for (const elf of invalid) {
+          const audit = yield* fixture(elf);
+          const exit = yield* audit().pipe(Effect.exit);
+          expect(Exit.isFailure(exit) && Cause.pretty(exit.cause)).toContain('GNU libc symbol dependencies');
+        }
+        const exportedLookalike = yield* fixture(libgccMusl, '00000001 A GLIBC_2.0\n');
+        expect(Exit.isFailure(yield* exportedLookalike().pipe(Effect.exit))).toBe(true);
+      }),
+    );
     layerIt.effect('retains musl rejection and reports capped required versions and library identities', () =>
       Effect.gen(function* () {
         const versions = EffectArray.makeBy(40, index => `GLIBC_2.${index + 17}`);
