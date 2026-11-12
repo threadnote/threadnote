@@ -142,6 +142,36 @@ describe('native task projection', () => {
     ).toBeUndefined();
   });
 
+  it('round-trips retained work references and rejects incomplete or mixed reference closures', () => {
+    const ref = {
+      version: 1 as const,
+      kind: 'retained-work' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      watchId: 'watch',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      watchEventId: 'watch:1',
+      workViewDigest: EffectString.repeat(64)('b'),
+      workRowDigest: EffectString.repeat(64)('c'),
+    };
+    expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(ref))).toEqual(ref);
+    for (const key of [
+      'watchId',
+      'consumerId',
+      'wakeupId',
+      'watchEventId',
+      'workViewDigest',
+      'workRowDigest',
+    ] as const) {
+      const incomplete = {...ref, [key]: undefined};
+      expect(() => encodeNativeTaskActionRef(incomplete)).toThrow();
+    }
+    expect(() => encodeNativeTaskActionRef({...ref, watchDeliveryId: 'delivery'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, kind: 'delivery'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, workViewDigest: 'malformed'})).toThrow();
+  });
+
   it('is deterministic, bounded, and returns only actionable fields', () => {
     const revision = Effect.pipe('f', EffectString.repeat(64));
     const view = projectNativeTaskView(state, revision);

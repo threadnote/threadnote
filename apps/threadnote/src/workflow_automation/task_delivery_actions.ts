@@ -2,7 +2,7 @@ import {NativeCycleDeliverySchema, nextNativeCycle} from '@threadnote/workflow-a
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {Effect, Array as EffectArray, FileSystem, Path, Predicate, Schema} from 'effect';
+import {Effect, Array as EffectArray, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -12,6 +12,12 @@ import {runWorkflowAutomation} from './index.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
+import {
+  assertNativeWatchOutput,
+  nativeWatchOutputLimit,
+  nativeWatchWorkDetail,
+  nativeWatchWorkList,
+} from './watch_output.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
@@ -866,9 +872,148 @@ export const runNativeTaskPrWatch = (
         next: recorded.result.next,
       };
     }
-    const notice = request.noticeRef ? decodeNativeTaskActionRef(request.noticeRef) : undefined;
+    const workViewDigest = sha256HexSync(stableJson(watch.envelope.state.work));
+    if (request.operation === 'work-detail') {
+      const ref = request.workEventRef ? decodeNativeTaskActionRef(request.workEventRef) : undefined;
+      const row = ref?.watchEventId
+        ? Option.getOrUndefined(
+            EffectArray.findFirst(watch.envelope.state.work, item => item.eventId === ref.watchEventId),
+          )
+        : undefined;
+      // Like work, detail reads bind the current owner without requiring or renewing its lease.
+      if (
+        !ref ||
+        ref.kind !== 'retained-work' ||
+        ref.runId !== request.runId ||
+        ref.generationHash !== sha256HexSync(stored.state.generation) ||
+        ref.watchId !== watchId ||
+        ref.consumerId !== consumer.id ||
+        ref.wakeupId !== consumer.wakeupId ||
+        ref.workViewDigest !== workViewDigest ||
+        !row ||
+        ref.workRowDigest !== sha256HexSync(stableJson(row))
+      )
+        return yield* fail(
+          'stale-watch-work-ref',
+          'Read retained work detail with a current opaque row reference returned by work.',
+        );
+      const workDetail = yield* Effect.try({
+        try: () =>
+          nativeWatchWorkDetail(watch.envelope.state.work, row.eventId, request.offsetBytes, request.sourceDigest),
+        catch: () =>
+          fail(
+            'invalid-watch-page',
+            'Work detail changed or its UTF-8 cursor or sourceDigest is invalid; reload work.',
+          ),
+      });
+      return assertNativeWatchOutput({
+        status: 'watch-updated',
+        operation: request.operation,
+        watchId,
+        revision: watch.revision,
+        result: {workDetail},
+      });
+    }
+    if (request.operation === 'work') {
+      if ((request.workOffset ?? 0) > 0 && !request.workViewDigest)
+        return yield* fail('stale-watch-work-view', 'Continue work paging with its complete workViewDigest.');
+      if (request.workViewDigest !== undefined && request.workViewDigest !== workViewDigest)
+        return yield* fail('stale-watch-work-view', 'Retained work changed; restart work paging at offset zero.');
+      const page = nativeWatchWorkList(watch.envelope.state.work, request.workOffset ?? 0);
+      const items: Record<string, unknown>[] = EffectArray.map(page.items, item => {
+        if (!Predicate.isObject(item) || typeof item.eventId !== 'string')
+          throw fail('invalid-watch-work', 'A retained work row has no canonical identity.');
+        const row = Option.getOrUndefined(
+          EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === item.eventId),
+        );
+        if (!row) throw fail('invalid-watch-work', 'A retained work row is unavailable.');
+        const eventRef = encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'retained-work',
+          runId: request.runId,
+          generationHash: sha256HexSync(stored.state.generation),
+          watchId,
+          consumerId: consumer.id,
+          wakeupId: consumer.wakeupId,
+          watchEventId: row.eventId,
+          workViewDigest,
+          workRowDigest: sha256HexSync(stableJson(row)),
+        });
+        return {
+          ...item,
+          eventRef,
+          ...('detail' in item
+            ? {
+                detail: {
+                  operation: 'work-detail',
+                  workEventRef: eventRef,
+                  offsetBytes: 0,
+                  sourceDigest: sha256HexSync(stableJson(row)),
+                },
+              }
+            : {}),
+        };
+      });
+      const output = () => ({
+        status: 'watch-updated',
+        operation: request.operation,
+        watchId,
+        prUrl: watch.envelope.state.pr,
+        headSha: watch.envelope.state.head,
+        revision: watch.revision,
+        result: {
+          protocolVersion: 1,
+          executorVersion: 1,
+          status: 'ok',
+          watchId,
+          revision: watch.revision,
+          work: {
+            items,
+            offset: page.offset,
+            nextOffset:
+              page.offset + items.length < watch.envelope.state.work.length ? page.offset + items.length : null,
+            workViewDigest,
+          },
+        },
+      });
+      while (new TextEncoder().encode(JSON.stringify(output())).byteLength > nativeWatchOutputLimit && items.length > 1)
+        items.pop();
+      if (new TextEncoder().encode(JSON.stringify(output())).byteLength > nativeWatchOutputLimit && items[0]) {
+        const item = items[0];
+        const row = Option.getOrUndefined(
+          EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === item.eventId),
+        );
+        items[0] = {
+          eventId: item.eventId,
+          status: item.status,
+          at: item.at,
+          eventRef: item.eventRef,
+          available: false,
+          detail: {
+            operation: 'work-detail',
+            workEventRef: item.eventRef,
+            offsetBytes: 0,
+            sourceDigest: sha256HexSync(stableJson(row)),
+          },
+        };
+      }
+      return assertNativeWatchOutput(output());
+    }
+    const retained =
+      request.operation === 'work-disposition' &&
+      EffectArray.some(
+        request.dispositions ?? [],
+        item => decodeNativeTaskActionRef(item.eventRef)?.kind === 'retained-work',
+      );
+    if (retained && request.watchDeliveryRef)
+      return yield* fail('stale-watch-event-ref', 'Retained work references do not use a relay delivery reference.');
+    const notice =
+      request.operation !== 'work-disposition' && request.noticeRef
+        ? decodeNativeTaskActionRef(request.noticeRef)
+        : undefined;
     const watchDelivery = request.watchDeliveryRef ? decodeNativeTaskActionRef(request.watchDeliveryRef) : undefined;
     if (
+      request.operation !== 'work-disposition' &&
       request.noticeRef &&
       (!notice ||
         notice.kind !== 'delivery' ||
@@ -917,32 +1062,48 @@ export const runNativeTaskPrWatch = (
           'This notice does not belong to the current PR watch consumer and attempt.',
         );
     }
-    const dispositions =
-      request.dispositions === undefined
-        ? undefined
-        : EffectArray.map(request.dispositions, item => {
-            const eventRef = decodeNativeTaskActionRef(item.eventRef);
-            if (
-              !eventRef ||
-              eventRef.runId !== request.runId ||
-              eventRef.generationHash !== sha256HexSync(stored.state.generation) ||
-              eventRef.watchId !== watchId ||
-              eventRef.consumerId !== consumer.id ||
-              eventRef.wakeupId !== consumer.wakeupId ||
-              eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId ||
-              !eventRef.watchEventId
-            )
-              throw fail(
-                'stale-watch-event-ref',
-                'A disposition must use an event from the current opaque watch delivery.',
-              );
-            return {
-              eventId: eventRef.watchEventId,
-              status: item.status,
-              reason: item.reason,
-              evidence: item.evidence,
-            };
-          });
+    const dispositionIds = new Set<string>();
+    const dispositions:
+      | {eventId: string; status: 'open' | 'blocked' | 'resolved' | 'ignored'; reason: string; evidence: string}[]
+      | undefined = request.dispositions === undefined ? undefined : [];
+    for (const item of request.dispositions ?? []) {
+      const eventRef = decodeNativeTaskActionRef(item.eventRef);
+      if (
+        !eventRef ||
+        (retained ? eventRef.kind !== 'retained-work' : eventRef.kind !== 'delivery') ||
+        eventRef.runId !== request.runId ||
+        eventRef.generationHash !== sha256HexSync(stored.state.generation) ||
+        eventRef.watchId !== watchId ||
+        eventRef.consumerId !== consumer.id ||
+        eventRef.wakeupId !== consumer.wakeupId ||
+        (retained
+          ? eventRef.workViewDigest !== workViewDigest ||
+            eventRef.workRowDigest !==
+              sha256HexSync(
+                stableJson(
+                  Option.getOrNull(
+                    EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
+                  ),
+                ),
+              )
+          : eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId) ||
+        !eventRef.watchEventId ||
+        dispositionIds.has(eventRef.watchEventId)
+      )
+        return yield* fail(
+          'stale-watch-event-ref',
+          retained
+            ? 'Use current retained work references returned by work; reload its complete view.'
+            : 'A disposition must use an event from the current opaque watch delivery.',
+        );
+      dispositionIds.add(eventRef.watchEventId);
+      dispositions?.push({
+        eventId: eventRef.watchEventId,
+        status: item.status,
+        reason: item.reason,
+        evidence: item.evidence,
+      });
+    }
     const result = yield* runNativeWatch(config, {
       protocolVersion: 1,
       executorVersion: 1,

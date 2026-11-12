@@ -123,7 +123,16 @@ export interface NativeTaskProjectionOptions {
 
 export const NativeTaskActionRefSchema = Schema.Struct({
   version: Schema.Literal(1),
-  kind: Schema.Literals(['task', 'work', 'snapshot', 'validation', 'delivery', 'closeout-prepare', 'closeout-finish']),
+  kind: Schema.Literals([
+    'task',
+    'work',
+    'snapshot',
+    'validation',
+    'delivery',
+    'retained-work',
+    'closeout-prepare',
+    'closeout-finish',
+  ]),
   runId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)),
   generationHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   stateRevision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
@@ -151,10 +160,28 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   ),
   watchDeliveryId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(32))),
   watchEventId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(384))),
+  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  workRowDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   closeoutRevision: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)))),
   transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
-});
+}).check(
+  Schema.makeFilter(ref =>
+    ref.kind === 'retained-work'
+      ? Boolean(
+          ref.watchId &&
+          ref.consumerId &&
+          ref.wakeupId &&
+          ref.watchEventId &&
+          ref.workViewDigest &&
+          ref.workRowDigest &&
+          !ref.watchDeliveryId &&
+          !ref.eventKey &&
+          !ref.watchAttemptId,
+        )
+      : ref.workViewDigest === undefined && ref.workRowDigest === undefined,
+  ),
+);
 export type NativeTaskActionRef = typeof NativeTaskActionRefSchema.Type;
 
 const nativeTaskStartRunIdSchema = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));

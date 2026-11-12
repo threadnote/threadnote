@@ -46,6 +46,7 @@ import {registerWorkflowTaskTool} from '../../src/mcp/server/workflow.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {
   makeNativeTaskActionCommands,
+  makeNativeTaskPrWatchCommand,
   makeNativeTaskStartCommand,
   makeNativeTaskViewCommand,
 } from '../../src/effect/workflow_cli.js';
@@ -4973,7 +4974,7 @@ describe('native task actions', () => {
         }),
       );
       expect(acked.status).toBe('watch-updated');
-      const afterAck = yield* readNativeWatch(f.config, watchId);
+      let afterAck = yield* readNativeWatch(f.config, watchId);
       expect(afterAck?.envelope.state.work).toMatchObject([{eventId: watchId + ':1', status: 'open'}]);
       expect(afterAck?.envelope.state.acknowledged).toBe(1);
       expect(afterAck?.envelope.notification?.outbox).toMatchObject({
@@ -4984,23 +4985,404 @@ describe('native task actions', () => {
       yield* runNativeTaskAction(f.config, {
         command: 'watch-pr',
         operation: 'work-disposition',
-        watchDeliveryRef,
-        dispositions: [
-          {
-            eventRef: String(eventRefs[0]),
-            status: 'resolved',
-            reason: 'The simulated review follow-up is settled.',
-            evidence: 'The exact private fixture event was handled.',
-          },
-        ],
         runId: 'native-run',
         callerCwd: f.repo,
         validationRef,
         deliveryRef,
+        watchDeliveryRef,
+        dispositions: [
+          {
+            eventRef: String(eventRefs[0]),
+            status: 'open',
+            reason: 'Review follow-up remains open.',
+            evidence: 'Private fixture event.',
+          },
+        ],
       });
-      expect((yield* readNativeWatch(f.config, watchId))?.envelope.state.work).toMatchObject([
-        {eventId: watchId + ':1', status: 'resolved'},
+      afterAck = yield* readNativeWatch(f.config, watchId);
+      if (!afterAck) throw new Error('Expected the ACKed watch.');
+      // Simulate another provider page, then retain its rows through the public task protocol.
+      const expectedIds = Array.from({length: 19}, (_, index) => watchId + ':' + (index + 1));
+      const largeReason = EffectString.repeat(256)('"\\é猫');
+      const largeEvidence = EffectString.repeat(512)('😀\\n');
+      yield* writeNativeWatch(
+        f.config,
+        {
+          ...afterAck.envelope,
+          notification: {
+            ...afterAck.envelope.notification!,
+            // The fake collector finalizes the first actual host receipt after notice readback and ACK.
+            notifiedThrough: 1,
+            lastReceipt: {key: watchId + ':1:1', receipt: receiptId, attemptId, kind: 'queued-message', at: now},
+            outbox: {
+              ...afterAck.envelope.notification!.outbox!,
+              key: watchId + ':2:19',
+              attemptId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+              receipt: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+              first: 2,
+              last: 19,
+              consumedThrough: 0,
+            },
+          },
+          state: {
+            ...afterAck.envelope.state,
+            nextSequence: 20,
+            events: EffectArray.map(expectedIds.slice(1), (id, index) => ({
+              ...event,
+              id,
+              sequence: index + 2,
+              key: 'comment-' + (index + 2),
+              ...(index === 0 ? {url: 'https://github.com/acme/repo/issues/1#' + EffectString.repeat(1980)('x')} : {}),
+            })),
+          },
+        },
+        afterAck.revision,
+      );
+      const watchRequest = {runId: 'native-run', callerCwd: f.repo, validationRef, deliveryRef};
+      const arrival = object(
+        yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest}),
+      );
+      for (;;) {
+        const relay = object(
+          yield* runNativeTaskAction(f.config, {
+            command: 'watch-pr',
+            operation: 'relay',
+            ...watchRequest,
+            noticeRef: String(arrival.noticeRef),
+          }),
+        );
+        const refs = relay.eventRefs;
+        if (!EffectArray.isArray(refs) || !refs.length) break;
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'disposition',
+          ...watchRequest,
+          watchDeliveryRef: String(relay.watchDeliveryRef),
+          dispositions: EffectArray.map(refs, ref => ({
+            eventRef: String(ref),
+            status: 'blocked',
+            reason:
+              decodeNativeTaskActionRef(String(ref))?.watchEventId === expectedIds[1]
+                ? largeReason
+                : 'Retained follow-up',
+            evidence:
+              decodeNativeTaskActionRef(String(ref))?.watchEventId === expectedIds[1]
+                ? largeEvidence
+                : 'Fixture provider page',
+          })),
+        });
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'ack',
+          ...watchRequest,
+          watchDeliveryRef: String(relay.watchDeliveryRef),
+        });
+      }
+      const settled = yield* readNativeWatch(f.config, watchId);
+      if (!settled) throw new Error('Expected the retained work.');
+      // A stopped collector must not prevent retained work resolution or be relaunched by it.
+      yield* writeNativeWatch(
+        f.config,
+        {...settled.envelope, collector: {...settled.envelope.collector!, status: 'stopped'}},
+        settled.revision,
+      );
+      const spawnsBeforeWork = spawnCalls;
+      const seen: string[] = [];
+      let workOffset = 0;
+      let workViewDigest: string | undefined;
+      let retainedRef = '';
+      let detailContinuation: Record<string, unknown> | undefined;
+      let pageCount = 0;
+      for (;;) {
+        const response = object(
+          yield* mcp.invokeTool('workflow_task_watch_pr', {
+            operation: 'work',
+            ...watchRequest,
+            workOffset,
+            ...(workViewDigest ? {workViewDigest} : {}),
+          }),
+        );
+        expect(response.isError).not.toBe(true);
+        const content = object(response.structuredContent);
+        expect(new TextEncoder().encode(JSON.stringify(content)).byteLength).toBeLessThanOrEqual(8192);
+        const page = object(object(content.result).work);
+        workViewDigest = String(page.workViewDigest);
+        const rows = EffectArray.isArray(page.items) ? page.items : [];
+        for (const row of rows) {
+          const item = object(row);
+          seen.push(String(item.eventId));
+          if (!retainedRef) retainedRef = String(item.eventRef);
+          if (item.eventId === expectedIds[1]) detailContinuation = object(item.detail);
+        }
+        pageCount += 1;
+        if (page.nextOffset === null) break;
+        workOffset = Number(page.nextOffset);
+      }
+      let cliPage: Record<string, unknown> | undefined;
+      const workCli = Command.make('workflow-automation').pipe(
+        Command.withSubcommands([
+          makeNativeTaskPrWatchCommand(options =>
+            runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              ...watchRequest,
+              operation: options.operation,
+              ...(options.workOffset === undefined ? {} : {workOffset: options.workOffset}),
+              ...(options.workViewDigest === undefined ? {} : {workViewDigest: options.workViewDigest}),
+              ...(options.workEventRef === undefined ? {} : {workEventRef: options.workEventRef}),
+              ...(options.offsetBytes === undefined ? {} : {offsetBytes: options.offsetBytes}),
+              ...(options.sourceDigest === undefined ? {} : {sourceDigest: options.sourceDigest}),
+            }).pipe(
+              Effect.tap(value =>
+                Effect.sync(() => {
+                  cliPage = object(value);
+                }),
+              ),
+              Effect.asVoid,
+            ),
+          ),
+        ]),
+      );
+      yield* Command.runWith(workCli, {version: 'fixture'})([
+        'watch-pr',
+        '--run-id',
+        'native-run',
+        '--caller-cwd',
+        f.repo,
+        '--operation',
+        'work',
+        '--work-offset',
+        '1',
+        '--work-view-digest',
+        String(workViewDigest),
       ]);
+      expect(object(object(cliPage?.result).work).offset).toBe(1);
+      expect(pageCount).toBeGreaterThan(1);
+      expect(seen).toEqual(expectedIds);
+      if (!detailContinuation) throw new Error('Expected an executable retained work detail continuation.');
+      expect(detailContinuation).toEqual({
+        operation: 'work-detail',
+        workEventRef: expect.any(String),
+        offsetBytes: 0,
+        sourceDigest: expect.any(String),
+      });
+      const expectedDetailRow = EffectOption.getOrThrow(
+        EffectArray.findFirst(settled.envelope.state.work, row => row.eventId === expectedIds[1]),
+      );
+      const expectedDetailText = stableJson(expectedDetailRow);
+      const expectedDetailBytes = new TextEncoder().encode(expectedDetailText);
+      const beforeDetails = yield* f.fs.readFileString(watchFile);
+      const chunks: string[] = [];
+      let continuation = detailContinuation;
+      let detailPageCount = 0;
+      for (;;) {
+        let content: Record<string, unknown>;
+        if (detailPageCount % 2 === 0) {
+          const response = object(yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...continuation}));
+          expect(response.isError).not.toBe(true);
+          content = object(response.structuredContent);
+        } else {
+          yield* Command.runWith(workCli, {version: 'fixture'})([
+            'watch-pr',
+            '--run-id',
+            'native-run',
+            '--caller-cwd',
+            f.repo,
+            '--operation',
+            String(continuation.operation),
+            '--work-event-ref',
+            String(continuation.workEventRef),
+            '--offset-bytes',
+            String(continuation.offsetBytes),
+            '--source-digest',
+            String(continuation.sourceDigest),
+          ]);
+          content = object(cliPage);
+        }
+        expect(new TextEncoder().encode(JSON.stringify(content)).byteLength).toBeLessThanOrEqual(8192);
+        const page = object(object(content.result).workDetail);
+        expect(page.sourceDigest).toBe(sha256HexSync(expectedDetailText));
+        expect(page.totalBytes).toBe(expectedDetailBytes.byteLength);
+        expect(page.offsetBytes).toBe(continuation.offsetBytes);
+        const text = String(page.text);
+        chunks.push(text);
+        const end = Number(page.offsetBytes) + new TextEncoder().encode(text).byteLength;
+        expect(
+          new TextDecoder('utf-8', {fatal: true}).decode(expectedDetailBytes.subarray(Number(page.offsetBytes), end)),
+        ).toBe(text);
+        detailPageCount += 1;
+        if (page.nextOffsetBytes === null) {
+          expect(end).toBe(expectedDetailBytes.byteLength);
+          break;
+        }
+        expect(page.nextOffsetBytes).toBe(end);
+        continuation = {...continuation, offsetBytes: page.nextOffsetBytes, sourceDigest: page.sourceDigest};
+      }
+      expect(detailPageCount).toBeGreaterThan(2);
+      expect(EffectArray.join(chunks, '')).toBe(expectedDetailText);
+      expect(JSON.parse(EffectArray.join(chunks, ''))).toEqual(expectedDetailRow);
+      expect(yield* f.fs.readFileString(watchFile)).toBe(beforeDetails);
+      expect(spawnCalls).toBe(spawnsBeforeWork);
+      const detailRef = decodeNativeTaskActionRef(String(detailContinuation.workEventRef));
+      if (!detailRef) throw new Error('Expected the returned opaque detail row reference.');
+      const splitOffset = EffectOption.getOrThrow(
+        EffectArray.findFirstIndex(Array.from(expectedDetailBytes), byte => (byte & 0xc0) === 0x80),
+      );
+      for (const invalid of [
+        {...detailContinuation, sourceDigest: EffectString.repeat(64)('a')},
+        {...detailContinuation, offsetBytes: expectedDetailBytes.byteLength + 1},
+        {...detailContinuation, offsetBytes: splitOffset},
+        {...detailContinuation, workEventRef: encodeNativeTaskActionRef({...detailRef, consumerId: 'foreign'})},
+        {
+          ...detailContinuation,
+          workEventRef: encodeNativeTaskActionRef({...detailRef, workViewDigest: EffectString.repeat(64)('a')}),
+        },
+      ]) {
+        expect(
+          (yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...invalid}).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(yield* f.fs.readFileString(watchFile)).toBe(beforeDetails);
+      }
+      const beforeInvalid = yield* f.fs.readFileString(watchFile);
+      const ref = decodeNativeTaskActionRef(retainedRef);
+      if (!ref) throw new Error('Expected a returned retained work reference.');
+      const disposition = {
+        eventRef: retainedRef,
+        status: 'resolved' as const,
+        reason: 'Settled follow-up',
+        evidence: 'Fixture handled',
+      };
+      for (const dispositions of [
+        [{...disposition, reason: 'Invalid\ncontrol'}],
+        [disposition, disposition],
+        [disposition, {...disposition, eventRef: String(eventRefs[0])}],
+        [disposition, {...disposition, eventRef: encodeNativeTaskActionRef({...ref, consumerId: 'foreign'})}],
+        [
+          disposition,
+          {...disposition, eventRef: encodeNativeTaskActionRef({...ref, workViewDigest: EffectString.repeat(64)('a')})},
+        ],
+      ]) {
+        expect(
+          (yield* runNativeTaskAction(f.config, {
+            command: 'watch-pr',
+            operation: 'work-disposition',
+            ...watchRequest,
+            dispositions,
+          }).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect(yield* f.fs.readFileString(watchFile)).toBe(beforeInvalid);
+      }
+      const beforeExpiry = yield* readNativeWatch(f.config, watchId);
+      if (!beforeExpiry?.envelope.state.consumer) throw new Error('Expected the bound consumer.');
+      const liveConsumer = beforeExpiry.envelope.state.consumer;
+      yield* writeNativeWatch(
+        f.config,
+        {
+          ...beforeExpiry.envelope,
+          state: {
+            ...beforeExpiry.envelope.state,
+            consumer: {...liveConsumer, lastSeenAt: 0, leaseUntil: liveConsumer.leaseMilliseconds},
+          },
+        },
+        beforeExpiry.revision,
+      );
+      const expiredBytes = yield* f.fs.readFileString(watchFile);
+      const expiredDetail = object(
+        yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...detailContinuation}),
+      );
+      expect(expiredDetail.isError).not.toBe(true);
+      expect(yield* f.fs.readFileString(watchFile)).toBe(expiredBytes);
+      expect(
+        (yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'work-disposition',
+          ...watchRequest,
+          dispositions: [disposition],
+        }).pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      expect(yield* f.fs.readFileString(watchFile)).toBe(expiredBytes);
+      const expiredWatch = yield* readNativeWatch(f.config, watchId);
+      if (!expiredWatch) throw new Error('Expected the expired watch.');
+      yield* writeNativeWatch(
+        f.config,
+        {...expiredWatch.envelope, state: {...expiredWatch.envelope.state, consumer: liveConsumer}},
+        expiredWatch.revision,
+      );
+      // Collector-only revision changes do not stale an otherwise identical complete work view.
+      const collectorChurn = yield* readNativeWatch(f.config, watchId);
+      if (!collectorChurn) throw new Error('Expected watch before collector churn.');
+      yield* writeNativeWatch(
+        f.config,
+        {
+          ...collectorChurn.envelope,
+          metrics: {
+            ...collectorChurn.envelope.metrics,
+            consumerReads: collectorChurn.envelope.metrics.consumerReads + 1,
+          },
+        },
+        collectorChurn.revision,
+      );
+      yield* runNativeTaskAction(f.config, {
+        command: 'watch-pr',
+        operation: 'work-disposition',
+        ...watchRequest,
+        dispositions: [disposition],
+      });
+      const beforeStale = yield* f.fs.readFileString(watchFile);
+      expect(
+        (yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'work',
+          ...watchRequest,
+          workOffset: 1,
+          workViewDigest,
+        }).pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      expect(
+        (yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'work-disposition',
+          ...watchRequest,
+          dispositions: [disposition],
+        }).pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      expect(yield* f.fs.readFileString(watchFile)).toBe(beforeStale);
+      expect(
+        (yield* mcp.invokeTool('workflow_task_watch_pr', {...watchRequest, ...detailContinuation}).pipe(Effect.result))
+          ._tag,
+      ).toBe('Failure');
+      expect(yield* f.fs.readFileString(watchFile)).toBe(beforeStale);
+      // Read each fresh view after mutation and settle the remaining rows without a delivery ID.
+      for (;;) {
+        const content = object(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'work', ...watchRequest}),
+        );
+        const page = object(object(content.result).work);
+        const rows = EffectArray.filter(
+          EffectArray.isArray(page.items) ? page.items : [],
+          row => object(row).status === 'open' || object(row).status === 'blocked',
+        );
+        if (!rows.length) break;
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'work-disposition',
+          ...watchRequest,
+          dispositions: EffectArray.map(rows, row => ({...disposition, eventRef: String(object(row).eventRef)})),
+        });
+      }
+      expect(
+        EffectArray.every(
+          (yield* readNativeWatch(f.config, watchId))?.envelope.state.work ?? [],
+          row => row.status === 'resolved',
+        ),
+      ).toBe(true);
+      expect(spawnCalls).toBe(spawnsBeforeWork);
+      const afterWork = yield* readNativeWatch(f.config, watchId);
+      if (!afterWork) throw new Error('Expected the settled watch.');
+      yield* writeNativeWatch(
+        f.config,
+        {...afterWork.envelope, collector: settled.envelope.collector},
+        afterWork.revision,
+      );
       const cycleBeforeSourceDrift = yield* f.fs.readFileString(f.statePath());
       const watchBeforeSourceDrift = yield* f.fs.readFileString(watchFile);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "drifted after watch";\n');
@@ -5066,7 +5448,7 @@ describe('native task actions', () => {
       expect(afterDrainedState?.state.operations).toEqual(beforeDrainedState?.state.operations);
       expect(yield* observeCutover()).toEqual(drained);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(drainedInputBytes);
-      expect(stored?.envelope.notification?.outbox?.receipt).toBe(receiptId);
+      expect(stored?.envelope.notification?.outbox?.receipt).toBe('dddddddd-dddd-4ddd-8ddd-dddddddddddd');
       const closeout = object(
         yield* runNativeTaskAction(f.config, {
           command: 'finish',
@@ -5126,7 +5508,7 @@ describe('native task actions', () => {
         expect(result.status).toBe('terminal-empty');
         expect(yield* f.fs.readFileString(watchFile)).toBe(terminalBytes);
       }
-    }).pipe(run),
+    }).pipe(run, provideTestLayer(cliTestLayer)),
   );
 
   effectIt.effect('validates a reviewed tree after a new commit and rejects committed tree drift', () =>

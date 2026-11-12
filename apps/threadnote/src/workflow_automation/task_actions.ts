@@ -126,6 +126,7 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
     'ack',
     'work',
     'work-disposition',
+    'work-detail',
     'stop',
     'complete',
   ]),
@@ -134,6 +135,11 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   takeover: Schema.optionalKey(Schema.Boolean),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
   noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  workEventRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}))),
+  sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  workOffset: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8192}))),
+  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   watchDeliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   dispositions: Schema.optionalKey(
     Schema.Array(
@@ -302,7 +308,6 @@ const requestSchema = Schema.Union([
     resume: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
-
 export type NativeTaskActionRequest = typeof requestSchema.Type;
 const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknown): boolean => {
   if (!Predicate.isObject(value) || value.kind !== 'plan' || !Predicate.isObject(value.compactOrigin)) return false;
@@ -342,9 +347,7 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
     intent.eligibility.status === 'eligible'
   );
 };
-
 export {readNativeTaskInstalledTarget} from './task_admission.js';
-
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
@@ -409,7 +412,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           ? {}
           : {graphProject: stored?.state.graphProject ?? graphProject}),
       }).pipe(inCallerCheckout);
-
     if (stored) {
       if (graphProject !== undefined && graphProject !== stored.state.graphProject)
         return yield* fail(
@@ -523,7 +525,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       });
       return {...started, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
     }
-
     if (request.taskRef)
       return yield* fail('run-not-found', 'The supplied task reference does not resolve to an existing native task.');
     if (request.intent.eligibility.status === 'needs-planning')
@@ -569,7 +570,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
   );
-
 const authoringRequest = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
   command: string,

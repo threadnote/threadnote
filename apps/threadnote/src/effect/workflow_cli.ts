@@ -130,7 +130,16 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly deliveryRef?: string;
     readonly phaseId?: string;
     readonly operation:
-      'start' | 'inspect' | 'relay' | 'disposition' | 'ack' | 'work' | 'work-disposition' | 'stop' | 'complete';
+      | 'start'
+      | 'inspect'
+      | 'relay'
+      | 'disposition'
+      | 'ack'
+      | 'work'
+      | 'work-detail'
+      | 'work-disposition'
+      | 'stop'
+      | 'complete';
     readonly host?: 'codex' | 'cursor-cli';
     readonly executable?: string;
     readonly hostReference?: string;
@@ -139,6 +148,11 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly recoverWakeup?: boolean;
     readonly noticeRef?: string;
     readonly watchDeliveryRef?: string;
+    readonly workEventRef?: string;
+    readonly offsetBytes?: number;
+    readonly sourceDigest?: string;
+    readonly workOffset?: number;
+    readonly workViewDigest?: string;
     readonly dispositionEventRefs: readonly string[];
     readonly dispositionStatuses: readonly string[];
     readonly dispositionReasons: readonly string[];
@@ -157,7 +171,18 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       phaseId: optionalString('phase-id', 'Current phase for provisional inspect or stop'),
       operation: requiredChoice(
         'operation',
-        ['start', 'inspect', 'relay', 'disposition', 'ack', 'work', 'work-disposition', 'stop', 'complete'],
+        [
+          'start',
+          'inspect',
+          'relay',
+          'disposition',
+          'ack',
+          'work',
+          'work-detail',
+          'work-disposition',
+          'stop',
+          'complete',
+        ],
         'Task-bound watch operation',
       ),
       host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
@@ -165,6 +190,11 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
       workspace: optionalString('workspace', 'Cursor workspace path'),
       noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      workEventRef: optionalString('work-event-ref', 'Opaque retained work reference returned by work'),
+      offsetBytes: optional(integerFlag('offset-bytes')),
+      sourceDigest: optionalString('source-digest', 'Canonical work detail digest returned by work'),
+      workOffset: optional(integerFlag('work-offset')),
+      workViewDigest: optionalString('work-view-digest', 'Complete retained work view digest returned by work'),
       watchDeliveryRef: optionalString('watch-delivery-ref', 'Opaque current event delivery returned by relay'),
       takeover: boolean('takeover', 'Explicitly take over an expired task watch consumer'),
       recoverWakeup: boolean('recover-wakeup', 'Explicitly recover the owned ambiguous host wakeup'),

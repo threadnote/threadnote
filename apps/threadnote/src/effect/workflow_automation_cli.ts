@@ -231,6 +231,11 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
             ...(options.takeover ? {takeover: true} : {}),
             ...(options.recoverWakeup ? {recoverWakeup: true} : {}),
             ...(options.noticeRef === undefined ? {} : {noticeRef: options.noticeRef}),
+            ...(options.workEventRef === undefined ? {} : {workEventRef: options.workEventRef}),
+            ...(options.offsetBytes === undefined ? {} : {offsetBytes: options.offsetBytes}),
+            ...(options.sourceDigest === undefined ? {} : {sourceDigest: options.sourceDigest}),
+            ...(options.workOffset === undefined ? {} : {workOffset: options.workOffset}),
+            ...(options.workViewDigest === undefined ? {} : {workViewDigest: options.workViewDigest}),
             ...(options.watchDeliveryRef === undefined ? {} : {watchDeliveryRef: options.watchDeliveryRef}),
             ...(options.dispositions === undefined ? {} : {dispositions: options.dispositions}),
           }).pipe(
