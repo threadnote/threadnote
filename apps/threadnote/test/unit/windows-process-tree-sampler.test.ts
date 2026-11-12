@@ -150,7 +150,7 @@ describe('Windows process-tree collector', () => {
         const system = yield* SystemInfo;
         const grandchildProgram =
           'const held = new Uint8Array(48*1024*1024); held.fill(1); setInterval(() => held[0], 1000);';
-        const childProgram = `const child = Bun.spawn([process.execPath, '--eval', ${JSON.stringify(grandchildProgram)}], {stdout:'ignore', stderr:'ignore'}); console.log(JSON.stringify({grandchild: child.pid})); setInterval(() => {}, 1000);`;
+        const childProgram = `const child = Bun.spawn([process.execPath, '--eval', ${JSON.stringify(grandchildProgram)}], {stdout:'ignore', stderr:'ignore'}); process.stdout.write(JSON.stringify({grandchild: child.pid}) + '\\n'); setInterval(() => {}, 1000);`;
         const child = yield* Effect.acquireRelease(
           Effect.sync(() => Bun.spawn([process.execPath, '--eval', childProgram], {stdout: 'pipe', stderr: 'ignore'})),
           child =>

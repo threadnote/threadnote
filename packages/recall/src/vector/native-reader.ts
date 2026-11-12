@@ -1,5 +1,6 @@
 import {Effect, Semaphore} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {loadNativeVectorReader} from './native-reader-payload.js';
 import {
   nativeVectorWireRequest,
@@ -18,7 +19,7 @@ const operationError = (cause: unknown) =>
 
 export const requiredNativeVectorReader = Effect.gen(function* () {
   const system = yield* SystemInfo;
-  return yield* Effect.tryPromise({try: () => loadNativeVectorReader(system), catch: operationError});
+  return yield* fromPromiseInterruptible(() => loadNativeVectorReader(system), operationError);
 });
 
 export const runNativeVectorRead = (
@@ -37,7 +38,7 @@ export const runNativeVectorRead = (
           try: () => ({promise: binding.readSelected(ownedRequest, ownedQuery, token)}),
           catch: operationError,
         });
-        const settled = Effect.tryPromise({try: () => original.promise, catch: operationError});
+        const settled = fromPromiseInterruptible(() => original.promise, operationError);
         return yield* restore(settled).pipe(
           Effect.onInterrupt(() =>
             // Never abort an N-API queued task. Its input storage and admission remain
