@@ -143,7 +143,31 @@ describe.skipIf(!nativeVectorTestsEnabled)('required actual native numeric compa
               vector: [nan, positive, negative][(index * 31 + Math.floor(index / 9)) % 3],
             }));
             const f = yield* fixture(rows);
-            for (const limit of [0, 1, 2, 7, 17, 400, 401, count, 1.9, -1, Infinity, NaN]) {
+            for (const limit of [
+              0,
+              -0,
+              -0.1,
+              -0.5,
+              -0.999,
+              -Number.MIN_VALUE,
+              Number.MIN_VALUE,
+              0.1,
+              0.5,
+              1,
+              2,
+              7,
+              17,
+              400,
+              401,
+              count,
+              1.9,
+              -1,
+              -1.5,
+              -2,
+              -Infinity,
+              Infinity,
+              NaN,
+            ]) {
               const result = yield* f.read({...f.request, limit}, query);
               expect(result.status).toBe('success');
               if (result.status === 'success') expect(result.scores).toEqual(legacy(rows, query, limit));
@@ -220,15 +244,18 @@ describe.skipIf(!nativeVectorTestsEnabled)('required actual native numeric compa
     }).pipe(provide),
   );
 
-  effectIt.effect('validates all rows at k0 and preserves schema/count/preparation/corpus/query error precedence', () =>
+  effectIt.effect('validates all rows at coerced-zero cutoffs and preserves metadata/error precedence', () =>
     Effect.gen(function* () {
       const f = yield* fixture([
         {id: 'a', uri: 'representative', vector: [1]},
         {id: 'z', uri: 'last', vector: [1]},
       ]);
       f.db.exec('UPDATE vector_values SET vector=zeroblob(4) WHERE id=1');
-      const corrupt = yield* f.read({...f.request, limit: 0}, [1]);
-      expect(corrupt.status).toBe('corrupt');
+      for (const limit of [0, -0.1, -0.5, -0.999, -Number.MIN_VALUE]) {
+        const corrupt = yield* f.read({...f.request, limit}, [1]);
+        expect(corrupt.status).toBe('corrupt');
+        expect(corrupt.corpusCheckRequired).toBe(true);
+      }
       f.db.exec('UPDATE vector_generations SET chunk_count=3');
       const count = yield* f.read({...f.request, generation: 'other', corpusGeneration: 'other'}, []);
       expect(count.status).toBe('operation-error');

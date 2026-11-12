@@ -45,7 +45,12 @@ interface FixtureFile {
 }
 const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
   files: readonly FixtureFile[],
-  options: {readonly bunTarget?: string; readonly inferenceTarget?: string} = {},
+  options: {
+    readonly bunTarget?: string;
+    readonly inferenceTarget?: string;
+    readonly nativeSourceCommit?: string;
+    readonly nativeSourceTree?: string;
+  } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -57,6 +62,13 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
   yield* fs.makeDirectory(extracted);
   const bunTarget = options.bunTarget ?? nativeVectorReaderHostProfile(system);
   const target = releaseTargetForBunTarget(bunTarget);
+  const sourceIdentity = {
+    version: 1,
+    commit: EffectString.repeat(40)('a'),
+    tree: EffectString.repeat(40)('b'),
+    bun: '1.4.4',
+    target: bunTarget,
+  };
   const vectorBytes = new TextEncoder().encode('fixture-native-vector');
   const nativeManifest = {
     schemaVersion: 1,
@@ -76,8 +88,8 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
       buildEnvironmentSha256: nativeVectorReaderBuildEnvironmentSha256({compiler: 'fixture'}),
       crtStatic: EffectString.startsWith('bun-windows-')(bunTarget),
       deploymentTarget: EffectString.startsWith('bun-darwin-')(bunTarget) ? '13.0' : '',
-      sourceCommit: EffectString.repeat(40)('a'),
-      sourceTree: EffectString.repeat(40)('b'),
+      sourceCommit: options.nativeSourceCommit ?? sourceIdentity.commit,
+      sourceTree: options.nativeSourceTree ?? sourceIdentity.tree,
       lockSha256: EffectString.repeat(64)('c'),
       toolchainSha256: EffectString.repeat(64)('d'),
       sourceSha256: EffectString.repeat(64)('e'),
@@ -103,7 +115,10 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
     })),
   };
   const allFiles: readonly FixtureFile[] = [
-    {name: 'release.json', bytes: new TextEncoder().encode(JSON.stringify({version: 'fixture', target: bunTarget}))},
+    {
+      name: 'release.json',
+      bytes: new TextEncoder().encode(JSON.stringify({version: 'fixture', target: bunTarget, sourceIdentity})),
+    },
     ...inferenceFiles,
     {name: 'native-inference.json', bytes: new TextEncoder().encode(JSON.stringify(descriptor))},
     {name: 'runtime/vector-reader/threadnote-vector-reader.node', bytes: vectorBytes},
@@ -123,7 +138,7 @@ const fixture = Effect.fn('test.releaseArchive.fixture')(function* (
     yield* fs.writeFile(destination, file.bytes);
     yield* fs.chmod(destination, file.executable ? 0o755 : 0o644);
   }
-  return {fs, path, system, root, dist, extracted, files: allFiles, target};
+  return {fs, path, system, root, dist, extracted, files: allFiles, target, bunTarget, sourceIdentity};
 });
 const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(function* (
   f: Effect.Success<ReturnType<typeof fixture>>,
@@ -160,6 +175,48 @@ const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(functio
 });
 
 describe('production release archives', () => {
+  effectIt.effect('rejects stale same-target native commit or tree before creating outputs', () =>
+    Effect.gen(function* () {
+      for (const source of [
+        {nativeSourceCommit: EffectString.repeat(40)('c')},
+        {nativeSourceTree: EffectString.repeat(40)('d')},
+      ]) {
+        const f = yield* fixture([], source);
+        const result = yield* archiveRelease({root: f.root, target: f.target}).pipe(Effect.result);
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure')
+          expect(result.failure).toMatchObject({
+            message: 'Native vector reader source identity differs from this release.',
+          });
+        expect(yield* f.fs.exists(f.path.join(f.root, 'artifacts'))).toBe(false);
+      }
+    }).pipe(testLayer),
+  );
+  effectIt.effect('requires a complete valid release source identity before creating outputs', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([]);
+      for (const sourceIdentity of [
+        undefined,
+        null,
+        {},
+        {...f.sourceIdentity, commit: 'invalid'},
+        {...f.sourceIdentity, tree: undefined},
+        {...f.sourceIdentity, target: 'invalid'},
+      ]) {
+        yield* f.fs.writeFileString(
+          f.path.join(f.dist, 'release.json'),
+          JSON.stringify({version: 'fixture', target: f.bunTarget, sourceIdentity}),
+        );
+        const result = yield* archiveRelease({root: f.root, target: f.target}).pipe(Effect.result);
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure')
+          expect(result.failure).toMatchObject({
+            message: 'Release source identity is missing, invalid or differs from its target.',
+          });
+        expect(yield* f.fs.exists(f.path.join(f.root, 'artifacts'))).toBe(false);
+      }
+    }).pipe(testLayer),
+  );
   effectIt.effect('rejects verified inference overlays from another OS, architecture or libc before output', () =>
     Effect.gen(function* () {
       for (const [bunTarget, inferenceTarget] of [

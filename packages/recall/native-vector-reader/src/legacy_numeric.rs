@@ -51,14 +51,15 @@ pub fn js_max(left: f64, right: f64) -> f64 {
     }
 }
 
-/// Array.slice(0, end): negative ends are relative to the current array length.
+/// Array.slice(0, end): integer coercion precedes relative negative indexing.
 pub fn slice_end(end: f64, length: usize) -> usize {
+    let end = end.trunc();
     if end.is_nan() {
         0
     } else if end < 0.0 {
-        (length as f64 + end.trunc()).max(0.0) as usize
+        (length as f64 + end).max(0.0) as usize
     } else {
-        end.min(length as f64).trunc() as usize
+        end.min(length as f64) as usize
     }
 }
 
