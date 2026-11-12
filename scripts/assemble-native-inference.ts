@@ -44,6 +44,118 @@ const PORTABLE_OPTIONS = {
   LLAMA_BUILD_SERVER: 'OFF',
 };
 
+const MUSL_ARM_CMAKE_SHA256 = 'bae77e31bc3498973b435e29681c74e8a28857e84383698ef3b88ca2fb6b900a';
+export const MUSL_ARM_BASE_VARIANTS = ['armv8.0_1', 'armv8.2_1', 'armv8.2_2', 'armv8.2_3', 'armv8.6_1', 'armv8.6_2'];
+const MUSL_ARM_SME_VARIANTS = [
+  {
+    name: 'armv9.2_1',
+    features: 'DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SME',
+    flags: '-march=armv9.2-a+dotprod+fp16+sve+i8mm+sme',
+  },
+  {
+    name: 'armv9.2_2',
+    features: 'DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME',
+    flags: '-march=armv9.2-a+dotprod+fp16+sve+i8mm+sve2+sme',
+  },
+] as const;
+
+/** Only optional SME registrations change; the caller also verifies the entire pinned upstream file. */
+export function muslArmVariantSource(original: string, included: readonly string[]) {
+  let adapted = original;
+  for (const variant of MUSL_ARM_BASE_VARIANTS) {
+    if (EffectString.split(original, `ggml_add_cpu_backend_variant(${variant}`).length !== 2)
+      throw new Error('Pinned musl ARM baseline variant context changed.');
+  }
+  for (const variant of MUSL_ARM_SME_VARIANTS) {
+    const call = `            ggml_add_cpu_backend_variant(${variant.name}    ${variant.features})`;
+    if (EffectString.split(original, call).length !== 2)
+      throw new Error('Pinned musl ARM SME variant context changed.');
+    if (!included.includes(variant.name))
+      adapted = EffectString.replace(
+        call,
+        `            # Threadnote: ${variant.name} omitted after target compiler capability probe.`,
+      )(adapted);
+  }
+  const patch = JSON.stringify({path: 'ggml/src/CMakeLists.txt', original, adapted});
+  return {
+    adapted,
+    patch,
+    identity: {
+      originalSha256: sha256HexSync(original),
+      adaptedSha256: sha256HexSync(adapted),
+      patchSha256: sha256HexSync(patch),
+    },
+  };
+}
+
+/** Compile only with the selected target compilers; neither execute instructions nor inspect the build host CPU. */
+export const probeMuslArmVariants = Effect.fn('nativeInference.muslArmVariants')(function* (options: {
+  readonly scratch: string;
+  readonly env: NodeJS.ProcessEnv;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const probes = [];
+  for (const variant of [{name: 'baseline', features: '', flags: '-march=armv8-a'}, ...MUSL_ARM_SME_VARIANTS]) {
+    const features = variant.features ? EffectString.split(variant.features, ' ') : [];
+    const source = `${EffectArray.join(
+      EffectArray.map(
+        features,
+        feature => `#ifndef __ARM_FEATURE_${feature}\n#error Required target feature ${feature} is unavailable\n#endif`,
+      ),
+      '\n',
+    )}\nint threadnote_compiler_probe(void) { return 0; }\n`;
+    const languages = [];
+    for (const [language, compiler, extension] of [
+      ['c', options.env.CC ?? 'cc', 'c'],
+      ['cxx', options.env.CXX ?? 'c++', 'cpp'],
+    ] as const) {
+      const input = path.join(options.scratch, `threadnote-${variant.name}.${extension}`);
+      yield* fs.writeFileString(input, source);
+      const args = [variant.flags, '-c', input, '-o', `${input}.o`];
+      const result = yield* runCommandEffect(compiler, args, {
+        cwd: options.scratch,
+        env: options.env,
+        timeoutMs: 10_000,
+        maxOutputBytes: 16_384,
+      }).pipe(
+        Effect.map(result => ({
+          supported: true,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        })),
+        Effect.catchTag('CommandFailed', error =>
+          error.exitCode === 1 && variant.name !== 'baseline'
+            ? Effect.succeed({supported: false, exitCode: error.exitCode, stdout: error.stdout, stderr: error.stderr})
+            : Effect.fail(error),
+        ),
+      );
+      languages.push({language, compiler, args, sourceSha256: sha256HexSync(source), ...result});
+    }
+    probes.push({variant: variant.name, flags: variant.flags, requiredFeatures: features, languages});
+  }
+  const included = [
+    ...MUSL_ARM_BASE_VARIANTS,
+    ...EffectArray.map(
+      EffectArray.filter(
+        probes,
+        probe => probe.variant !== 'baseline' && EffectArray.every(probe.languages, language => language.supported),
+      ),
+      probe => probe.variant,
+    ),
+  ];
+  return {
+    requested: 'GGML_CPU_ALL_VARIANTS=ON',
+    effective: 'compiler-supported-linux-arm-variants',
+    included,
+    omitted: EffectArray.map(
+      EffectArray.filter(MUSL_ARM_SME_VARIANTS, variant => !included.includes(variant.name)),
+      variant => ({variant: variant.name, reason: 'target-compiler-rejected-required-feature-probe'}),
+    ),
+    probes,
+  };
+});
+
 /** Scope the newer GNU compiler to inference; vector assembly keeps the container's original compiler. */
 export function nativeInferenceBuildEnvironment(environment: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   return {
@@ -185,6 +297,8 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     throw new Error('Native inference assembly rejects ambient compiler/linker flags.');
   const before = yield* Effect.promise(() => sourceInputs(options.root));
   const toolchain: Record<string, string> = {bun: Bun.version};
+  let muslArmSourceIdentity: {originalSha256: string; adaptedSha256: string; patchSha256: string} | undefined;
+  let includedMuslArmVariants: readonly string[] | undefined;
   const portable =
     options.portable ||
     EffectString.startsWith('bun-linux-')(options.bunTarget) ||
@@ -310,6 +424,27 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     });
     if (nativeReaderGit(source, ['rev-parse', 'HEAD']) !== NATIVE_INFERENCE_LLAMA_COMMIT)
       throw new Error('Pinned llama.cpp source commit differs from the bundled source.');
+    if (options.bunTarget === 'bun-linux-arm64-musl') {
+      const cmakePath = path.join(source, 'ggml', 'src', 'CMakeLists.txt');
+      const original = yield* filesystem.readFileString(cmakePath);
+      if (sha256HexSync(original) !== MUSL_ARM_CMAKE_SHA256)
+        throw new Error('Pinned musl ARM inference CMake source changed.');
+      const policy = yield* probeMuslArmVariants({scratch, env: buildEnvironment});
+      const adaptation = muslArmVariantSource(original, policy.included);
+      muslArmSourceIdentity = adaptation.identity;
+      includedMuslArmVariants = policy.included;
+      toolchain.muslArmVariantPolicy = JSON.stringify({
+        ...policy,
+        source: {
+          baseCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
+          baseSourceInputDigest: before.sourceInputDigest,
+          ...muslArmSourceIdentity,
+        },
+      });
+      yield* filesystem.writeFileString(path.join(scratch, 'musl-arm-sme.patch.json'), adaptation.patch);
+      yield* filesystem.writeFileString(path.join(scratch, 'musl-arm-sme-policy.json'), toolchain.muslArmVariantPolicy);
+      yield* filesystem.writeFileString(cmakePath, adaptation.adapted);
+    }
     const driver = path.join(scratch, 'build.mjs');
     // Use upstream's real build driver: it owns metadata, completion marker and full Release closure.
     yield* Effect.promise(() =>
@@ -331,6 +466,12 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       scratch,
       env: {...buildEnvironment, CFLAGS: '', CXXFLAGS: '', SOURCE_DATE_EPOCH: '0'},
     });
+    if (
+      muslArmSourceIdentity &&
+      sha256HexSync(yield* filesystem.readFileString(path.join(source, 'ggml', 'src', 'CMakeLists.txt'))) !==
+        muslArmSourceIdentity.adaptedSha256
+    )
+      throw new Error('Musl ARM inference CMake source changed during assembly.');
     yield* filesystem.writeFileString(
       path.join(scratch, 'build-output.log'),
       `${buildResult.stdout}\n${buildResult.stderr}`,
@@ -343,6 +484,22 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       const cmakeCache = yield* filesystem.readFileString(path.join(builtRoot, folder, 'CMakeCache.txt'));
       const compileCommands = yield* filesystem.readFileString(path.join(builtRoot, folder, 'compile_commands.json'));
       toolchain[`compileCommandsSha256:${folder}`] = sha256HexSync(compileCommands);
+      if (includedMuslArmVariants) {
+        for (const variant of [
+          ...MUSL_ARM_BASE_VARIANTS,
+          ...EffectArray.map(MUSL_ARM_SME_VARIANTS, variant => variant.name),
+        ]) {
+          const included = includedMuslArmVariants.includes(variant);
+          const libraryExists = yield* filesystem.exists(
+            path.join(builtRoot, folder, 'Release', `libggml-cpu-${variant}.so`),
+          );
+          if (
+            EffectString.includes(`CMakeFiles/ggml-cpu-${variant}.dir/`)(compileCommands) !== included ||
+            libraryExists !== included
+          )
+            throw new Error(`Musl ARM compile commands differ from the verified variant policy: ${variant}.`);
+        }
+      }
       if (process.platform === 'win32') {
         if (
           !EffectString.includes('-march=armv8-a')(compileCommands) ||
@@ -406,7 +563,9 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     bunTarget: options.bunTarget,
     packageVersion: NATIVE_INFERENCE_PACKAGE_VERSION,
     llamaCommit: NATIVE_INFERENCE_LLAMA_COMMIT,
-    sourceInputDigest: before.sourceInputDigest,
+    sourceInputDigest: muslArmSourceIdentity
+      ? sha256HexSync(JSON.stringify({baseSourceInputDigest: before.sourceInputDigest, muslArmSourceIdentity}))
+      : before.sourceInputDigest,
     origin: portable ? 'portable-local-build' : 'locked-prebuilt',
     toolchain,
   });
@@ -461,6 +620,12 @@ const retainNativeContainerFailure = Effect.fn('nativeInference.containerFailure
   );
 });
 
+/** Git2.39 compares safe.directory literally, including trailing slashes and symlink spellings. */
+export const nativeContainerCheckoutRoot = Effect.fn('nativeInference.checkoutRoot')(function* (root: string) {
+  const fs = yield* FileSystem.FileSystem;
+  return path.resolve(yield* fs.realPath(root));
+});
+
 export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(function* (
   root: string,
   command: readonly string[],
@@ -468,14 +633,15 @@ export const runGnuBuildContainer = Effect.fn('nativeInference.gnuContainer')(fu
   const fs = yield* FileSystem.FileSystem;
   if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
     throw new Error('GNU CI builds require a native Linux host.');
+  const checkoutRoot = yield* nativeContainerCheckoutRoot(root);
   const pins = GNU_PINS[process.arch];
   const target = process.arch === 'x64' ? 'bun-linux-x64-baseline' : 'bun-linux-arm64';
-  const scratch = path.join(root, '.context', 'native-inference-container');
+  const scratch = path.join(checkoutRoot, '.context', 'native-inference-container');
   yield* fs.makeDirectory(scratch, {recursive: true});
   const driver = path.join(scratch, 'run-gnu.mjs');
   yield* fs.writeFileString(
     driver,
-    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(root)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
+    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(checkoutRoot)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
   );
   const quote = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
   const bootstrap = `set -eu
@@ -492,8 +658,10 @@ printf '${pins.rustupSha}  /tmp/rustup-init\\n' | sha256sum -c -
 chmod 755 /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-host '${pins.rust}' --default-toolchain 1.89.0
 stage=inference-compiler-bootstrap
-${GNU_INFERENCE_COMPILER_BOOTSTRAP}git config --global --add safe.directory ${quote(root)}
-cd ${quote(root)}
+${GNU_INFERENCE_COMPILER_BOOTSTRAP}git config --global --add safe.directory ${quote(checkoutRoot)}
+stage=checkout-git-preflight
+git -C ${quote(checkoutRoot)} status --porcelain --untracked-files=normal > /dev/null
+cd ${quote(checkoutRoot)}
 stage=frozen-dependency-install
 bun install --frozen-lockfile
 stage=requested-command
@@ -506,9 +674,9 @@ bun ${quote(driver)}
       '--rm',
       '--init',
       '--volume',
-      `${root}:${root}`,
+      `${checkoutRoot}:${checkoutRoot}`,
       '--workdir',
-      root,
+      checkoutRoot,
       '--env',
       `THREADNOTE_BUILD_TARGET=${target}`,
       '--env',
@@ -594,17 +762,18 @@ export const runMuslBuildContainer = Effect.fn('nativeInference.muslContainer')(
   const workflowArguments = options.workflowRuntime ? muslWorkflowRuntimeArguments(Bun.env) : [];
   if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
     throw new Error('Musl CI builds require a native Linux x64 or ARM64 Docker host.');
+  const checkoutRoot = yield* nativeContainerCheckoutRoot(root);
   const pins = MUSL_PINS[process.arch];
   const target = process.arch === 'x64' ? 'bun-linux-x64-baseline-musl' : 'bun-linux-arm64-musl';
-  const scratch = path.join(root, '.context', 'native-inference-container');
+  const scratch = path.join(checkoutRoot, '.context', 'native-inference-container');
   yield* fs.makeDirectory(scratch, {recursive: true});
   const driver = path.join(scratch, 'run.mjs');
   yield* fs.writeFileString(
     driver,
-    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(root)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
+    `const child=Bun.spawn(${JSON.stringify(command)},{cwd:${JSON.stringify(checkoutRoot)},stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exitCode=await child.exited;`,
   );
   const shellLiteral = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
-  const shellRoot = shellLiteral(root);
+  const shellRoot = shellLiteral(checkoutRoot);
   const shellDriver = shellLiteral(driver);
   const bootstrap = `
 set -eu
@@ -640,6 +809,8 @@ printf '${pins.rustupSha}  /tmp/rustup-init\\n' | sha256sum -c -
 chmod 755 /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-host '${pins.rust}' --default-toolchain 1.89.0
 git config --global --add safe.directory ${shellRoot}
+stage=checkout-git-preflight
+git -C ${shellRoot} status --porcelain --untracked-files=normal > /dev/null
 cd ${shellRoot}
 stage=frozen-dependency-install
 ${MUSL_BUILD_DEPENDENCY_INSTALL}
@@ -665,9 +836,9 @@ bun ${shellDriver}
       '--init',
       ...workflowArguments,
       '--volume',
-      `${root}:${root}`,
+      `${checkoutRoot}:${checkoutRoot}`,
       '--workdir',
-      root,
+      checkoutRoot,
       '--env',
       `THREADNOTE_BUILD_TARGET=${target}`,
       '--env',

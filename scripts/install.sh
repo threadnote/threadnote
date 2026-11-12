@@ -648,8 +648,10 @@ if [ "$platform" = "darwin" ] &&
   [ -z "${THREADNOTE_RELEASE_DOWNLOAD_ROOT:-}" ]; then
   require_command codesign
   require_command file
-  find "$staged_root/runtime" -type f -print |
+  # Native code can live outside runtime, including portable llama/localBuilds.
+  find "$staged_root" -type f -print |
     while IFS= read -r native_file; do
+      [ "$native_file" != "$staged_root/threadnote" ] || continue
       if file "$native_file" | grep -q 'Mach-O'; then
         verify_code_signature "$native_file"
       fi

@@ -11,7 +11,12 @@ import {
   muslToolchainFetchScript,
   MUSL_BUILD_DEPENDENCY_INSTALL,
   buildNativeInferenceDriver,
+  nativeContainerCheckoutRoot,
+  probeMuslArmVariants,
+  muslArmVariantSource,
+  MUSL_ARM_BASE_VARIANTS,
 } from '../../../../scripts/assemble-native-inference.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import {Array as EffectArray, Effect, FileSystem, Layer, Path, String as EffectString} from 'effect';
@@ -24,6 +29,37 @@ import {
 } from '../../../../scripts/native-inference-payload.js';
 
 describe('native inference overlay filesystem boundary', () => {
+  it('adapts only the two pinned SME registrations and binds the exact original, adapted source and patch', () => {
+    const baseline = EffectArray.map(
+      MUSL_ARM_BASE_VARIANTS,
+      name => `            ggml_add_cpu_backend_variant(${name})`,
+    );
+    const first =
+      '            ggml_add_cpu_backend_variant(armv9.2_1    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SME)';
+    const second =
+      '            ggml_add_cpu_backend_variant(armv9.2_2    DOTPROD FP16_VECTOR_ARITHMETIC SVE MATMUL_INT8 SVE2 SME)';
+    const original = EffectArray.join(
+      ['unrelated upstream context', ...baseline, first, second, 'unchanged suffix'],
+      '\n',
+    );
+    const all = muslArmVariantSource(original, [...MUSL_ARM_BASE_VARIANTS, 'armv9.2_1', 'armv9.2_2']);
+    expect(all.adapted).toBe(original);
+    const adapted = muslArmVariantSource(original, [...MUSL_ARM_BASE_VARIANTS, 'armv9.2_2']);
+    expect(adapted.adapted).not.toContain(first);
+    expect(adapted.adapted).toContain(second);
+    for (const call of baseline) expect(adapted.adapted).toContain(call);
+    expect(adapted.adapted).toContain('unchanged suffix');
+    expect(JSON.parse(adapted.patch)).toEqual({path: 'ggml/src/CMakeLists.txt', original, adapted: adapted.adapted});
+    expect(adapted.identity).toEqual({
+      originalSha256: sha256HexSync(original),
+      adaptedSha256: sha256HexSync(adapted.adapted),
+      patchSha256: sha256HexSync(adapted.patch),
+    });
+    expect(adapted.identity.adaptedSha256).not.toBe(all.identity.adaptedSha256);
+    expect(() => muslArmVariantSource(EffectString.replace(first, 'changed source context')(original), [])).toThrow(
+      'context changed',
+    );
+  });
   it('selects the pinned GNU compiler only for inference without changing vector build inputs', () => {
     const environment = {
       CC: '/original/gcc',
@@ -96,6 +132,162 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect(
+      'probes each optional SME variant with selected target C/C++ compilers and discloses only rejected variants',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const scratch = yield* fs.makeTempDirectoryScoped({prefix: 'musl-arm-probe-'});
+          for (const rejected of [[], ['armv9.2_1'], ['armv9.2_1', 'armv9.2_2']]) {
+            const calls: string[] = [];
+            const env = {CC: '/selected/target-cc', CXX: '/selected/target-c++', PATH: '/preserved'};
+            const policy = yield* probeMuslArmVariants({scratch, env}).pipe(
+              Effect.provideService(
+                CommandExecutor,
+                CommandExecutor.of({
+                  execute: (compiler, args, options = {}) =>
+                    Effect.gen(function* () {
+                      calls.push(compiler);
+                      expect(options).toMatchObject({cwd: scratch, env, timeoutMs: 10_000, maxOutputBytes: 16_384});
+                      expect(args[1]).toBe('-c');
+                      expect(args[3]).toBe('-o');
+                      const input = args[2];
+                      if (input === undefined) return yield* Effect.die('Missing compile-only input');
+                      const body = yield* fs.readFileString(input).pipe(Effect.orDie);
+                      expect(body).toContain('int threadnote_compiler_probe(void)');
+                      if (EffectString.includes('armv9.2')(input)) {
+                        expect(body).toContain('#ifndef __ARM_FEATURE_SME');
+                        expect(args[0]).toMatch(/^-march=armv9\.2-a\+dotprod\+fp16\+sve\+i8mm(?:\+sve2)?\+sme$/u);
+                      } else expect(args[0]).toBe('-march=armv8-a');
+                      if (
+                        compiler === env.CXX &&
+                        EffectArray.some(rejected, variant => EffectString.includes(variant)(input))
+                      )
+                        return yield* CommandFailed.make({
+                          executable: compiler,
+                          args: [...args],
+                          exitCode: 1,
+                          message: 'target compiler rejected feature',
+                          stdout: '',
+                          stderr: 'unsupported target feature',
+                        });
+                      return {exitCode: 0, stdout: '', stderr: ''};
+                    }),
+                  executeStreaming: () => Effect.die('Unexpected streaming capability probe'),
+                }),
+              ),
+            );
+            expect(calls).toEqual([env.CC, env.CXX, env.CC, env.CXX, env.CC, env.CXX]);
+            expect(policy).toMatchObject({
+              requested: 'GGML_CPU_ALL_VARIANTS=ON',
+              effective: 'compiler-supported-linux-arm-variants',
+            });
+            expect(policy.included).toEqual([
+              ...MUSL_ARM_BASE_VARIANTS,
+              ...EffectArray.filter(['armv9.2_1', 'armv9.2_2'], variant => !rejected.includes(variant)),
+            ]);
+            expect(EffectArray.map(policy.omitted, entry => entry.variant)).toEqual(rejected);
+            expect(
+              policy.probes[0] && EffectArray.every(policy.probes[0].languages, language => language.supported),
+            ).toBe(true);
+            for (const probe of policy.probes)
+              for (const language of probe.languages) expect(language.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+          }
+        }),
+    );
+
+    it.effect('fails a baseline compiler error instead of retrying with fewer variants', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const scratch = yield* fs.makeTempDirectoryScoped({prefix: 'musl-arm-baseline-'});
+        let calls = 0;
+        const error = CommandFailed.make({
+          executable: 'cc',
+          args: [],
+          exitCode: 1,
+          message: 'broken baseline compiler',
+          stdout: '',
+          stderr: 'broken sysroot',
+        });
+        const result = yield* probeMuslArmVariants({scratch, env: {}}).pipe(
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              execute: () => {
+                calls++;
+                return Effect.fail(error);
+              },
+              executeStreaming: () => Effect.die('Unexpected streaming capability probe'),
+            }),
+          ),
+          Effect.result,
+        );
+        expect(result).toMatchObject({_tag: 'Failure', failure: error});
+        expect(calls).toBe(1);
+      }),
+    );
+
+    it.effect.skipIf(process.platform === 'win32')(
+      'registers only the physical checkout for Git ownership checks and retains dirty/source identity evidence',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'native container git '});
+          const repo = path.join(directory, 'physical repo');
+          const alias = path.join(directory, 'checkout alias');
+          yield* fs.makeDirectory(repo);
+          yield* fs.symlink(repo, alias);
+          const root = yield* nativeContainerCheckoutRoot(`${alias}/`);
+          expect(root).toBe(path.resolve(yield* fs.realPath(repo)));
+          const env = {
+            ...Bun.env,
+            GIT_CONFIG_GLOBAL: path.join(directory, 'gitconfig'),
+            GIT_CONFIG_SYSTEM: '/dev/null',
+          };
+          const git = (args: readonly string[], foreign = false) =>
+            Bun.spawnSync({
+              cmd: ['git', ...args],
+              env: {...env, GIT_TEST_ASSUME_DIFFERENT_OWNER: foreign ? '1' : '0'},
+              stdout: 'pipe',
+              stderr: 'pipe',
+            });
+          expect(git(['init', '--quiet', repo]).exitCode).toBe(0);
+          yield* fs.writeFileString(path.join(repo, 'input.txt'), 'committed');
+          expect(git(['-C', repo, 'add', '.']).exitCode).toBe(0);
+          expect(
+            git([
+              '-C',
+              repo,
+              '-c',
+              'user.name=Fixture',
+              '-c',
+              'user.email=fixture@example.invalid',
+              'commit',
+              '--quiet',
+              '-m',
+              'fixture',
+            ]).exitCode,
+          ).toBe(0);
+          const rejected = git(['-C', root, 'status', '--porcelain'], true);
+          expect(rejected.exitCode).not.toBe(0);
+          expect(rejected.stderr.toString()).toContain('dubious ownership');
+          expect(git(['config', '--global', '--add', 'safe.directory', root]).exitCode).toBe(0);
+          expect(EffectString.trim(git(['config', '--global', '--get-all', 'safe.directory']).stdout.toString())).toBe(
+            root,
+          );
+          const clean = git(['-C', root, 'status', '--porcelain'], true);
+          expect(clean.exitCode, clean.stderr.toString()).toBe(0);
+          expect(clean.stdout.toString()).toBe('');
+          const identity = git(['-C', root, 'rev-parse', 'HEAD', 'HEAD^{tree}'], true).stdout.toString();
+          yield* fs.writeFileString(path.join(repo, 'input.txt'), 'dirty');
+          const dirty = git(['-C', root, 'status', '--porcelain'], true);
+          expect(dirty.exitCode, dirty.stderr.toString()).toBe(0);
+          expect(dirty.stdout.toString()).toContain('M input.txt');
+          expect(git(['-C', root, 'rev-parse', 'HEAD', 'HEAD^{tree}'], true).stdout.toString()).toBe(identity);
+        }),
+    );
+
     it.effect('confirms Windows inference leader exit and keeps POSIX groups and original driver bounds', () =>
       Effect.gen(function* () {
         const base = yield* SystemInfo;

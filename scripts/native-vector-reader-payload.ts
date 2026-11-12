@@ -10,7 +10,7 @@ import {
 } from '@threadnote/recall/vector/native-reader-payload';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {platformPathFor} from '@threadnote/platform/system';
+import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 
 export {nativeVectorReaderTarget, verifyNativeVectorReaderPayload};
 const path = platformPathFor(process.platform);
@@ -109,19 +109,21 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
   bunTarget: string,
   options: {readonly inference?: boolean} = {},
 ) {
+  const {platform} = yield* SystemInfo;
+  // Windows inference permits upstream C++ exports; only the reader checks private SQLite export leakage.
   const commands: readonly (readonly [string, readonly string[]])[] =
-    process.platform === 'linux'
+    platform === 'linux'
       ? [
           ['readelf', ['--file-header', '--dynamic', '--version-info', binaryPath]],
           ['nm', ['-D', '--defined-only', binaryPath]],
         ]
-      : process.platform === 'darwin'
+      : platform === 'darwin'
         ? [
             ['otool', ['-L', binaryPath]],
             ['xcrun', ['vtool', '-show-build', binaryPath]],
             ['nm', ['-gU', binaryPath]],
           ]
-        : [['dumpbin', ['/HEADERS', '/DEPENDENTS', '/EXPORTS', binaryPath]]];
+        : [['dumpbin', ['/HEADERS', '/DEPENDENTS', ...(options.inference ? [] : ['/EXPORTS']), binaryPath]]];
   let output = '';
   for (const [command, arguments_] of commands) {
     const result = yield* runCommandEffect(command, arguments_, {timeoutMs: 30_000, maxOutputBytes: 512 * 1024});
@@ -131,7 +133,7 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
     throw new Error('Native payload unexpectedly depends on external SQLite.');
   if (!options.inference && /\b_?sqlite3_[A-Za-z0-9_]+\b/u.test(output))
     throw new Error('Native vector reader unexpectedly exports private SQLite symbols.');
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     const versions = [...EffectString.matchAll(/\bGLIBC_(\d+)\.(\d+)/gu)(output)];
     if (EffectString.endsWith('-musl')(bunTarget) && versions.length !== 0)
       throw new Error('Musl native payload contains GNU libc symbol dependencies.');
@@ -141,7 +143,7 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
     )
       throw new Error('Native payload raises the supported glibc 2.17 floor.');
   }
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
     const floor = options.inference ? 14 : 13;
     if (
       EffectArray.some(
@@ -152,7 +154,7 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
       throw new Error(`Native payload raises the supported macOS ${floor}.0 floor.`);
   }
   if (
-    process.platform === 'win32' &&
+    platform === 'win32' &&
     (!options.inference || bunTarget === 'bun-windows-arm64') &&
     /\b(?:vcruntime\d*|msvcp\d*|msvcr\d*|msvcrt)(?:_[a-z0-9]+)?\.dll\b/iu.test(output)
   )

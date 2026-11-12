@@ -1,7 +1,9 @@
 import {Schema} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
-import {readFileSync} from '@threadnote/testing/node-fs';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {spawnSync} from '@threadnote/testing/node-child-process';
+import {tmpdir} from '@threadnote/testing/node-os';
+import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
@@ -142,20 +144,37 @@ it('routes native Bun caches through step-scoped runner paths before the first B
   // Exercise the exact shell boundary with Windows separators, spaces and a literal dollar sign.
   const install = 'D:\\runner temp\\$cache/threadnote-bun-install';
   const transpiler = 'D:\\runner temp\\$cache/threadnote-bun-transpiler';
-  const exported = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', setup?.run ?? 'exit 98'], {
-    encoding: 'utf8',
-    env: {
-      BASH_ENV: '',
-      PATH: '',
-      GITHUB_ENV: '/dev/stdout',
-      BUN_INSTALL_CACHE_DIR: install,
-      BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpiler,
-    },
-    timeout: 2_000,
-  });
-  expect(exported.error).toBeUndefined();
-  expect(exported.status).toBe(0);
-  expect(exported.stdout).toBe(`BUN_INSTALL_CACHE_DIR=${install}\nBUN_RUNTIME_TRANSPILER_CACHE_PATH=${transpiler}\n`);
+  const root = mkdtempSync(join(tmpdir(), 'threadnote-bun-cache-routing-'));
+  const environmentFile = join(root, 'step env $literal');
+  try {
+    // GitHub supplies a regular env file. A /dev/stdout proxy also depends on
+    // whether the host can reopen the subprocess's captured output descriptor.
+    writeFileSync(environmentFile, 'EXISTING=preserved\n');
+    const exported = spawnSync(
+      '/bin/bash',
+      ['--noprofile', '--norc', '-eo', 'pipefail', '-c', setup?.run ?? 'exit 98'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          BASH_ENV: '',
+          PATH: '',
+          GITHUB_ENV: environmentFile,
+          BUN_INSTALL_CACHE_DIR: install,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpiler,
+        },
+        timeout: 2_000,
+      },
+    );
+    expect(exported.error).toBeUndefined();
+    expect(exported.status, exported.stderr).toBe(0);
+    expect(exported.stdout).toBe('');
+    expect(readFileSync(environmentFile, 'utf8')).toBe(
+      `EXISTING=preserved\nBUN_INSTALL_CACHE_DIR=${install}\nBUN_RUNTIME_TRANSPILER_CACHE_PATH=${transpiler}\n`,
+    );
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });
 
 it('runs affected-target Bazel CI for every maintained pull-request base', () => {
