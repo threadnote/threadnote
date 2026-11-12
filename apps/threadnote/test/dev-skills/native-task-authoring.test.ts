@@ -60,6 +60,7 @@ import {TestClock} from 'effect/testing';
 import {object} from './native-cycle-lifecycle-fixture.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {lstat, readdir, symlink} from '@threadnote/testing/node-fs-promises';
 
 const specBusiness = {
   title: 'Reliable fixture readback',
@@ -1514,9 +1515,237 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
-effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () =>
+const cleanupGitKeys = ['core.fsmonitor', 'core.untrackedcache', 'gc.auto', 'maintenance.auto'] as const;
+const parseCleanupGitSettings = (text: string) => {
+  const fields = EffectString.split('\0')(text);
+  const effective = new Map<string, {key: string; value: string; scope: string; origin: string}>();
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const [key, ...rest] = EffectString.split('\n')(fields[index + 2]);
+    if (!EffectArray.some(cleanupGitKeys, known => known === key)) continue;
+    const raw = EffectString.toLowerCase(EffectArray.join(rest, '\n'));
+    const safe = /^(?:true|false|yes|no|on|off|keep|[0-9]{1,9})$/u.test(raw);
+    effective.set(key, {
+      key,
+      value: safe ? raw : 'custom-value-redacted',
+      scope: /^(?:system|global|local|worktree|command)$/u.test(fields[index]) ? fields[index] : 'other',
+      origin: EffectString.startsWith('file:')(fields[index + 1]) ? 'file' : 'other',
+    });
+  }
+  return EffectArray.map(
+    cleanupGitKeys,
+    key => effective.get(key) ?? {key, value: 'unset', scope: 'none', origin: 'none'},
+  );
+};
+type DirtyCleanupContext = {
+  root: string;
+  path: Path.Path;
+  git: ReturnType<typeof parseCleanupGitSettings>;
+  gitStatus: string;
+  gitElapsedMs: number;
+};
+const collectCleanupLeftovers = async (root: string, path: Path.Path, signal: AbortSignal) => {
+  const queue = [root];
+  const entries: Array<{path: string; type: string; size?: number}> = [];
+  let truncated = false;
+  while (queue.length && entries.length < 32 && !signal.aborted) {
+    const before = entries.length;
+    const current = queue.shift()!;
+    try {
+      // lstat does not follow file symlinks or directory junctions; linked directories are never queued.
+      const info = await lstat(current);
+      const relative = path.relative(root, current) || '.';
+      if (relative.length > 128) truncated = true;
+      const type = info.isSymbolicLink()
+        ? 'symlink'
+        : info.isDirectory()
+          ? 'directory'
+          : info.isFile()
+            ? 'file'
+            : 'other';
+      entries.push({path: EffectString.slice(0, 128)(relative), type, ...(type === 'file' ? {size: info.size} : {})});
+      if (type === 'directory')
+        for (const name of (await readdir(current)).sort()) {
+          if (queue.length + entries.length >= 32) {
+            truncated = true;
+            break;
+          }
+          queue.push(path.join(current, name));
+        }
+    } catch {
+      if (entries.length === before)
+        entries.push({path: EffectString.slice(0, 128)(path.relative(root, current) || '.'), type: 'unreadable'});
+      else truncated = true;
+    }
+  }
+  return {entries, truncated: truncated || queue.length > 0, timedOut: signal.aborted};
+};
+const preserveCleanupCause = <E, R>(cause: Cause.Cause<E>, diagnostic: Effect.Effect<void, unknown, R>) =>
+  diagnostic.pipe(Effect.ignoreCause, Effect.andThen(Effect.failCause(cause)));
+const reportDirtyCleanupFailure = (
+  context: DirtyCleanupContext,
+  cause: Cause.Cause<unknown>,
+  emit: (line: string) => void = line => {
+    process.stdout.write(line);
+  },
+) =>
   Effect.gen(function* () {
+    const shape = Schema.Struct({
+      reason: Schema.Struct({
+        module: Schema.Literal('FileSystem'),
+        method: Schema.Literal('makeTempDirectoryScoped'),
+        pathOrDescriptor: Schema.String,
+        syscall: Schema.optionalKey(Schema.String),
+        cause: Schema.optionalKey(Schema.Unknown),
+      }),
+    });
+    const failure = EffectArray.findFirst(
+      cause.reasons,
+      reason => reason._tag === 'Die' && Schema.is(shape)(reason.defect),
+    );
+    if (Option.isNone(failure) || failure.value._tag !== 'Die' || !Schema.is(shape)(failure.value.defect)) return;
+    const reason = failure.value.defect.reason;
+    if (reason.pathOrDescriptor !== context.root) return;
+    const native = Schema.is(Schema.Struct({code: Schema.String, errno: Schema.Finite}))(reason.cause)
+      ? reason.cause
+      : undefined;
+    const remaining = Math.max(0, 2000 - context.gitElapsedMs);
+    let collectionFailed = false;
+    const observed =
+      remaining > 0
+        ? yield* Effect.tryPromise(signal => collectCleanupLeftovers(context.root, context.path, signal)).pipe(
+            Effect.timeoutOption(remaining),
+            Effect.catchCause(() =>
+              Effect.sync(() => {
+                collectionFailed = true;
+                return Option.none();
+              }),
+            ),
+          )
+        : Option.none();
+    const relativeCwd = context.path.relative(context.root, process.cwd());
+    const inside =
+      !context.path.isAbsolute(relativeCwd) &&
+      relativeCwd !== '..' &&
+      !EffectString.startsWith('..' + context.path.sep)(relativeCwd);
+    const summary = {
+      version: 1,
+      role: 'dirty-source-cleanup',
+      selfPid: process.pid,
+      cwdRelation: relativeCwd === '' ? 'fixture-root' : inside ? 'fixture-descendant' : 'outside-fixture',
+      errno: native?.errno,
+      code: native && /^[A-Z0-9_]{1,24}$/u.test(native.code) ? native.code : 'unknown',
+      syscall: reason.syscall === 'rm' ? 'rm' : 'other',
+      git: context.git,
+      gitStatus: context.gitStatus,
+      gitElapsedMs: context.gitElapsedMs,
+      ownedChildren: [],
+      childCoverage: 'authoring-auto-launch-disabled; internal-descendants-unobserved',
+      ...Option.getOrElse(observed, () => ({entries: [], truncated: true, timedOut: !collectionFailed})),
+      collectionFailed,
+    };
+    while (Buffer.byteLength(JSON.stringify(summary)) > 8000 && summary.entries.length) {
+      summary.entries.pop();
+      summary.truncated = true;
+    }
+    yield* Effect.sync(() => {
+      emit('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS ' + JSON.stringify(summary) + '\n');
+    });
+  });
+
+effectIt.effect('bounds dirty cleanup evidence without following links or replacing the original failure', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-diagnostic-'});
+    const outside = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-outside-'});
+    yield* fs.writeFileString(path.join(outside, 'private-sentinel'), 'Never read or emit this content.');
+    if (process.platform !== 'win32')
+      yield* Effect.tryPromise(() => symlink(outside, path.join(root, '00-link'), 'dir'));
+    for (let index = 0; index < 40; index++)
+      yield* fs.writeFileString(path.join(root, `entry-${index}`), 'private-data');
+    const settings = parseCleanupGitSettings(
+      'global\0file:/private/config\0core.fsmonitor\n/private/hook --secret\0local\0file:/private/local\0gc.auto\n0\0',
+    );
+    expect(settings[0]).toMatchObject({value: 'custom-value-redacted', scope: 'global', origin: 'file'});
+    const cause = Cause.die({
+      reason: {
+        module: 'FileSystem',
+        method: 'makeTempDirectoryScoped',
+        pathOrDescriptor: root,
+        syscall: 'rm',
+        cause: {code: 'EBUSY', errno: -4082},
+      },
+    });
+    const context = {root, path, git: settings, gitStatus: 'complete', gitElapsedMs: 0};
+    const lines: string[] = [];
+    yield* reportDirtyCleanupFailure(context, cause, line => {
+      lines.push(line);
+    });
+    expect(Buffer.byteLength(lines[0])).toBeLessThanOrEqual(8192);
+    expect(lines[0]).not.toContain('private-sentinel');
+    expect(lines[0]).not.toContain('/private/config');
+    expect(lines[0]).not.toContain('private-data');
+    const evidence = object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0])));
+    expect(evidence).toMatchObject({truncated: true, timedOut: false, code: 'EBUSY', errno: -4082, syscall: 'rm'});
+    if (process.platform !== 'win32') expect(evidence.entries).toContainEqual({path: '00-link', type: 'symlink'});
+    lines.length = 0;
+    yield* reportDirtyCleanupFailure({...context, gitElapsedMs: 2000}, cause, line => {
+      lines.push(line);
+    });
+    expect(object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0])))).toMatchObject({
+      timedOut: true,
+      truncated: true,
+      entries: [],
+    });
+    const failed = yield* preserveCleanupCause(cause, Effect.die(new Error('Diagnostic failed'))).pipe(Effect.exit);
+    expect(failed._tag).toBe('Failure');
+    if (failed._tag === 'Failure') expect(failed.cause).toBe(cause);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () => {
+  let cleanup: DirtyCleanupContext | undefined;
+  return Effect.gen(function* () {
     const f = yield* setup;
+    if (process.platform === 'win32') {
+      const started = performance.now();
+      const git = yield* runCommandEffect(
+        'git',
+        [
+          '-C',
+          f.repo,
+          'config',
+          '--null',
+          '--show-origin',
+          '--show-scope',
+          '--get-regexp',
+          '^(core\\.(fsmonitor|untrackedcache)|gc\\.auto|maintenance\\.auto)$',
+        ],
+        {
+          allowFailure: true,
+          maxOutputBytes: 4096,
+          timeoutMs: 400,
+          forceKillAfterMilliseconds: 25,
+          sensitiveOutput: true,
+        },
+      ).pipe(Effect.result);
+      cleanup = {
+        root: f.root,
+        path: f.path,
+        git: git._tag === 'Success' ? parseCleanupGitSettings(git.success.stdout) : parseCleanupGitSettings(''),
+        gitStatus:
+          git._tag === 'Success'
+            ? git.success.exitCode <= 1
+              ? 'complete'
+              : 'unavailable'
+            : git.failure._tag === 'CommandTimedOut'
+              ? 'timed-out'
+              : git.failure._tag === 'CommandOutputLimitExceeded'
+                ? 'truncated'
+                : 'unavailable',
+        gitElapsedMs: Math.ceil(performance.now() - started),
+      };
+    }
     const file = f.path.join(f.root, 'dirty-background-spec.json');
     yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
     yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty";\n');
@@ -1540,8 +1769,16 @@ effectIt.effect('dirty-source background preparation refuses without a synchrono
     expect(result).toMatchObject({failure: {code: 'evidence-unavailable'}});
     const state = yield* readNativeWorkflowState(f.config, runId);
     expect(state).toBeUndefined();
-  }).pipe(TestClock.withLive, provideNative),
-);
+  }).pipe(
+    TestClock.withLive,
+    provideNative,
+    Effect.catchCause(cause =>
+      cleanup
+        ? preserveCleanupCause(cause, reportDirtyCleanupFailure(cleanup, cause).pipe(TestClock.withLive))
+        : Effect.failCause(cause),
+    ),
+  );
+});
 
 effectIt.effect('admits an approved standard plan as PR delivery through semantic authoring', () =>
   Effect.gen(function* () {
