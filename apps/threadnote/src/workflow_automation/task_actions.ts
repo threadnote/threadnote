@@ -13,6 +13,7 @@ import {
   NativeCycleValidationSchema,
 } from '@threadnote/workflow-automations/cycle';
 import {NativeCyclePacketOptionsSchema} from '@threadnote/workflow-automations/cycle-packet';
+import * as CycleOutput from '@threadnote/workflow-automations/cycle-output';
 import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {nativeCyclePhaseReviewUsage} from '@threadnote/workflow-automations/cycle-runtime';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
@@ -39,19 +40,19 @@ import {
 } from 'effect';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
-import {statusDevSkills} from '../dev_skills/index.js';
 import {gitValue} from '../utils.js';
 import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
-import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
+import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {inspectNativeSourcePaths} from './authoring.js';
 import {makeWorkflowGitAdapter} from './cycle_git.js';
-import {makeWorkflowGraphAdapter} from './graph.js';
+import {requireWorkflowGraphReady} from './graph.js';
+import {readNativeTaskInstalledTarget} from './task_admission.js';
 import {runCompactOriginAuthoringSave, runWorkflowAutomation} from './index.js';
 import {nativeWorkflowError} from './memory.js';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskView} from './task.js';
+import {readNativeTaskView, verifyNativeTaskReopen} from './task.js';
 import {inspectOldBindingOwners} from './task_binding_transition.js';
 import {nativeWatchWakeupSchema} from './watch_notification_state.js';
 import {
@@ -73,6 +74,7 @@ import {
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
+import {runNativeSharedPlanStart} from './portable_plan_start.js';
 import {runNativeTaskCommitDelivery, runNativeTaskPrDelivery, runNativeTaskPrWatch} from './task_delivery_actions.js';
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const packetInputSchema = Schema.Struct({
@@ -118,12 +120,14 @@ export type NativeTaskCommitDeliveryFields = typeof NativeTaskCommitDeliveryFiel
 export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   operation: Schema.Literals([
     'start',
+    'renew',
     'inspect',
     'relay',
     'disposition',
     'ack',
     'work',
     'work-disposition',
+    'work-detail',
     'stop',
     'complete',
   ]),
@@ -132,6 +136,11 @@ export const NativeTaskPrWatchFieldsSchema = Schema.Struct({
   takeover: Schema.optionalKey(Schema.Boolean),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
   noticeRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  workEventRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+  offsetBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}))),
+  sourceDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  workOffset: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8192}))),
+  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   watchDeliveryRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
   dispositions: Schema.optionalKey(
     Schema.Array(
@@ -183,6 +192,14 @@ const requestSchema = Schema.Union([
     runId: id,
     callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
     taskRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('reopen'),
+    runId: id,
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    taskRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    phaseId: id,
     reason: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   }),
   Schema.Struct({
@@ -292,7 +309,6 @@ const requestSchema = Schema.Union([
     resume: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
-
 export type NativeTaskActionRequest = typeof requestSchema.Type;
 const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknown): boolean => {
   if (!Predicate.isObject(value) || value.kind !== 'plan' || !Predicate.isObject(value.compactOrigin)) return false;
@@ -332,46 +348,7 @@ const compactIntentMatchesDocument = (intent: NativeCompactIntent, value: unknow
     intent.eligibility.status === 'eligible'
   );
 };
-
-/** The installed selector is checked for start and resume, never treated as actor/publication authority. */
-export const readNativeTaskInstalledTarget = (
-  config: RuntimeConfig,
-  installationTarget: string | undefined,
-  checkout: string,
-  allowedProfiles: readonly ('desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal')[] = ['desktop'],
-) =>
-  Effect.gen(function* () {
-    if (!installationTarget)
-      return yield* fail(
-        'needs-resources',
-        'Select an installed Threadnote skill target. It must have the current verified workflow bundle before a task can start or resume.',
-      );
-    const installed = yield* inCheckout(
-      statusDevSkills(config, {agent: installationTarget}).pipe(
-        Effect.mapError(() =>
-          fail('needs-resources', 'The selected skill target could not verify an installed workflow bundle.'),
-        ),
-      ),
-      checkout,
-    );
-    if (installed.targets.length !== 1)
-      return yield* fail('needs-selection', 'Select exactly one installed Threadnote skill target for this task.');
-    const target = installed.targets[0];
-    if (
-      !target.enrolled ||
-      !target.enabled ||
-      target.installationState !== 'current' ||
-      !allowedProfiles.includes(target.target.profile) ||
-      target.installedDigest !== installed.bundle.digest ||
-      target.installed?.digest !== installed.bundle.digest
-    )
-      return yield* fail(
-        'needs-resources',
-        'The selected target does not have the current verified Threadnote workflow generation enabled. Update or repair that installation, then retry.',
-      );
-    return {...target, installedDigest: installed.bundle.digest};
-  });
-
+export {readNativeTaskInstalledTarget} from './task_admission.js';
 export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
     const request = yield* Schema.decodeUnknownEffect(NativeTaskStartRequestSchema, {onExcessProperty: 'error'})(
@@ -384,6 +361,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         ),
       ),
     );
+    if ('sharedPlanRef' in request) return yield* runNativeSharedPlanStart(config, request);
     const taskStartReference = request.taskRef ? decodeNativeTaskStartReference(request.taskRef) : undefined;
     if (request.taskRef && !taskStartReference)
       return yield* fail('invalid-task-ref', 'Provide a canonical run ID or current task-view reference.');
@@ -413,27 +391,34 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     const currentSystem = yield* SystemInfo;
     const inCallerCheckout = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(Effect.provideService(SystemInfo, {...currentSystem, currentDirectory: () => checkout}));
+    const graphProject =
+      request.graphProject === undefined
+        ? undefined
+        : yield* validateWorkflowGraphProject(config, checkout, request.graphProject);
     const requireGraphReady = (
       generation: string,
       profile: 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal',
       team?: string,
     ) =>
-      Effect.gen(function* () {
-        const binding = yield* resolveWorkflowBinding(config, {
-          protocolVersion: 1,
-          action: 'bind',
-          workflowRunId: 'native-v1-' + runId,
-          project,
-          featureId,
-          generation,
-          profile,
-          ...(team === undefined ? {} : {team}),
-        });
-        const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false});
-        return yield* graph.ready(checkout);
+      requireWorkflowGraphReady(config, {
+        checkout,
+        runId,
+        project,
+        featureId,
+        generation,
+        profile,
+        recovery: stored ? 'new-task' : 'same-task',
+        ...(team === undefined ? {} : {team}),
+        ...((stored?.state.graphProject ?? graphProject) === undefined
+          ? {}
+          : {graphProject: stored?.state.graphProject ?? graphProject}),
       }).pipe(inCallerCheckout);
-
     if (stored) {
+      if (graphProject !== undefined && graphProject !== stored.state.graphProject)
+        return yield* fail(
+          'graph-scope-conflict',
+          'This run already has an immutable graph scope. Start a new task with a new feature name and graphProject or --graph-project, or make the manifest unambiguous.',
+        );
       if (
         stored.state.project !== project ||
         stored.state.featureId !== featureId ||
@@ -509,8 +494,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
           );
         return {status: 'resumed' as const, taskRef: runId, view};
       }
-      // Only the original initial compact save may continue through this semantic entry point.
-      // Its complete document/save digest and deterministic receipt prefix are checked by the existing saver.
+      // Only the initial compact save continues here; the saver verifies its complete digest and receipt prefix.
       const pendingCompactSave = reservation?.operationStart === 0 && reservation.rootUri === null;
       if ((stored.state.operations.length > 0 || reservation) && !pendingCompactSave)
         return yield* fail(
@@ -542,7 +526,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
       });
       return {...started, taskRef: runId, resumed: true, ...(pendingCompactSave ? {recovered: true} : {})};
     }
-
     if (request.taskRef)
       return yield* fail('run-not-found', 'The supplied task reference does not resolve to an existing native task.');
     if (request.intent.eligibility.status === 'needs-planning')
@@ -568,6 +551,7 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
         generation: target.installedDigest,
         profile: target.target.profile,
         title: request.intent.title,
+        ...(graphProject === undefined ? {} : {graphProject}),
       }),
     );
     const initResult: unknown = initialized;
@@ -587,7 +571,6 @@ export const runNativeTaskStart = (config: RuntimeConfig, input: unknown) =>
     Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
     Effect.mapError(nativeWorkflowError),
   );
-
 const authoringRequest = (
   stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
   command: string,
@@ -635,9 +618,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'callerCwd must resolve to an existing checkout.')));
     const reportedCheckout = yield* gitValue(['rev-parse', '--show-toplevel'], callerCwd);
     if (!reportedCheckout) return yield* fail('workspace-not-found', 'callerCwd must be inside a Git checkout.');
-    // Git may report a Windows root with a different separator/casing form than
-    // realPath used when the native run binding was created. Compare filesystem
-    // canonical roots, not two textual renderings of the same checkout.
+    // Canonicalize both filesystem roots: Windows Git may report a different casing or separator.
     const checkout = yield* fs
       .realPath(reportedCheckout)
       .pipe(Effect.mapError(() => fail('workspace-not-found', 'The Git checkout root could not be resolved.')));
@@ -846,8 +827,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         typeof existingConfirmation.response === 'string'
           ? existingConfirmation.response
           : undefined;
-      // An implicit replay is valid only when the caller supplies no new response
-      // and the exact current intent already has a stored approval.
+      // Implicit replay requires no new response and a stored approval for the exact current intent.
       const implicitReplay = request.userDecision === undefined && request.userResponse === undefined;
       const userDecision = request.userDecision ?? (implicitReplay && priorResponse ? 'approve' : undefined);
       const userResponse = request.userResponse ?? (implicitReplay ? priorResponse : undefined);
@@ -1040,6 +1020,20 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         ),
       );
       return {status: 'resumed', replayed: false, phaseId, cycle, task: yield* taskView()};
+    }
+
+    if (request.command === 'reopen') {
+      if (!EffectString.trim(request.reason))
+        return yield* fail('invalid-request', 'Record the observed reason for reopening the phase.');
+      const phaseId = yield* verifyNativeTaskReopen(config, stored, checkout, request);
+      const invalidation = cycleRequest(stored, {
+        command: 'invalidate',
+        phaseId,
+        reason: request.reason,
+        expectedRevision: stored.revision,
+      });
+      const cycle = unwrapCycle(yield* inCheckout(runWorkflowAutomation(config, invalidation), checkout));
+      return {status: 'reopened', phaseId, cycle, task: yield* taskView()};
     }
 
     if (request.command === 'reconcile') {
@@ -1353,7 +1347,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         attempt,
       };
     }
-
     if (request.command === 'record-validation') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
       if (
@@ -1387,16 +1380,18 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === ref.snapshotId),
       );
       if (!report) return yield* fail('review-pending', 'Record the complete accepted review before validation.');
+      const proof = state.phases[ref.phaseId];
+      const head = proof?.validation ? proof.head : yield* gitValue(['rev-parse', 'HEAD'], checkout);
+      if (!head) return yield* fail('source-unavailable', 'Could not read the current validation source head.');
       const validation = {
         snapshotTree: entry.snapshot.tree,
         reviewTree: entry.snapshot.tree,
-        head: entry.snapshot.head,
+        head,
         status: 'passed' as const,
         productState: 'working' as const,
         checks: request.validation.checks,
         acceptance: request.validation.acceptance,
       };
-      const proof = state.phases[ref.phaseId];
       const validationDigest = sha256HexSync(stableJson(validation));
       const validationRef = encodeNativeTaskActionRef({
         ...ref,
@@ -1406,7 +1401,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (proof?.validation) {
         if (
           proof.phaseHash !== ref.phaseHash ||
-          proof.head !== entry.snapshot.head ||
+          proof.head !== validation.head ||
           proof.tree !== entry.snapshot.tree ||
           stableJson(proof.validation) !== stableJson(validation) ||
           (ref.kind === 'validation' && ref.payloadDigest !== validationDigest)
@@ -1424,6 +1419,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
               command: 'ready',
               phaseId: ref.phaseId,
               snapshotId: ref.snapshotId,
+              acceptedHead: head,
               validation,
               expectedRevision: stored.revision,
             }),
@@ -1436,7 +1432,6 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (!accepted) return yield* fail('validation-not-recorded', 'The canonical phase validation was not persisted.');
       return {status: 'recorded', replayed: false, validationRef, validation: accepted};
     }
-
     if (request.command === 'deliver-local') {
       const ref = decodeNativeTaskActionRef(request.validationRef);
       if (
@@ -1462,7 +1457,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       if (
         !proof?.validation ||
         proof.phaseHash !== ref.phaseHash ||
-        proof.head !== ref.sourceHead ||
+        proof.head !== (proof.validation.head ?? ref.sourceHead) ||
         proof.tree !== ref.sourceTree ||
         (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
       )
@@ -1534,7 +1529,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         callerCwd: checkout,
         role: 'implementation',
       });
-      if (view.status !== 'ready' || view.next.action !== 'implement' || !view.next.phaseId)
+      if (view.status !== 'ready' || !['implement', 'validate'].includes(view.next.action) || !view.next.phaseId)
         return yield* fail(
           'task-not-ready',
           EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action.',
@@ -1606,17 +1601,17 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
             cycleRequest(current, {
               command: 'packet',
               phaseId,
+              ...CycleOutput.nativeCyclePacketRequestOptions(request.packet.budgetBytes),
               packet: {...request.packet, anchors: packetAnchors, graphProof: {...graph, tree}},
             }),
           ),
           checkout,
         ),
       );
-      if (packet.available !== true)
-        return yield* fail(
-          'packet-unavailable',
-          typeof packet.reason === 'string' ? packet.reason : 'The packet is unavailable.',
-        );
+      const packetRecovery = CycleOutput.nativeCyclePacketRecovery(packet, phaseId);
+      if (packetRecovery) return packetRecovery;
+      const packetFailure = CycleOutput.nativeCyclePacketFailure(packet);
+      if (packetFailure) return yield* fail(packetFailure.code, packetFailure.message);
       const latest = yield* readNativeWorkflowState(config, request.runId);
       const baseline = requireEffectValue(
         latest?.state.cycle?.baselines[phaseId],
@@ -1643,6 +1638,17 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       });
       return {status: 'ready', phaseId, workRef, packet};
     }
+    const readCanonicalSnapshot = (snapshotId: string, previousRevision?: string) =>
+      Effect.gen(function* () {
+        const latest = yield* readNativeWorkflowState(config, request.runId);
+        const entry = EffectArray.findFirst(
+          latest?.state.cycle?.snapshots ?? [],
+          item => item.snapshot.snapshotId === snapshotId,
+        );
+        if (entry._tag === 'None' || (previousRevision !== undefined && latest?.revision === previousRevision))
+          return yield* fail('snapshot-not-recorded', 'The canonical snapshot was not persisted.');
+        return entry.value;
+      });
 
     if (request.command === 'requalify-base-snapshot') {
       const ref = decodeNativeTaskActionRef(request.snapshotRef);
@@ -1793,12 +1799,7 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
           checkout,
         ),
       );
-      const latest = yield* readNativeWorkflowState(config, request.runId);
-      const admitted = EffectOption.getOrUndefined(
-        EffectArray.findFirst(latest?.state.cycle?.snapshots ?? [], item => item.snapshot.snapshotId === existingId),
-      );
-      if (!admitted || latest?.revision === stored.revision)
-        return yield* fail('snapshot-not-recorded', 'The canonical requalified snapshot was not persisted.');
+      const admitted = yield* readCanonicalSnapshot(existingId, stored.revision);
       return {
         status: 'recorded',
         replayed: false,
@@ -1888,29 +1889,28 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
         );
       const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
       if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
-      const result = unwrapCycle(
-        yield* inCheckout(
-          runWorkflowAutomation(
-            config,
-            cycleRequest(stored, {
-              command: 'snapshot',
-              phaseId: ref.phaseId,
-              snapshotId,
-              previous: ref.snapshotId,
-              supersedeUnreviewed: true,
-              acceptedHead: head,
-              reason: request.reason,
-              expectedRevision: stored.revision,
-            }),
-          ),
-          checkout,
+      yield* inCheckout(
+        runWorkflowAutomation(
+          config,
+          cycleRequest(stored, {
+            command: 'snapshot',
+            phaseId: ref.phaseId,
+            snapshotId,
+            previous: ref.snapshotId,
+            supersedeUnreviewed: true,
+            acceptedHead: head,
+            reason: request.reason,
+            expectedRevision: stored.revision,
+          }),
         ),
+        checkout,
       );
+      const canonical = yield* readCanonicalSnapshot(snapshotId);
       return {
         status: 'recorded',
         replayed: alreadyAdmitted._tag === 'Some',
-        snapshot: result.snapshot,
-        snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
+        snapshot: canonical,
+        snapshotRef: taskActionSnapshotRef(ref, canonical),
       };
     }
 
@@ -1959,7 +1959,11 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
       callerCwd: checkout,
       role: 'implementation',
     });
-    if (view.status !== 'ready' || view.next.action !== 'implement' || view.next.phaseId !== ref.phaseId)
+    if (
+      view.status !== 'ready' ||
+      !['implement', 'validate'].includes(view.next.action) ||
+      view.next.phaseId !== ref.phaseId
+    )
       return yield* fail(
         'task-not-ready',
         EffectArray.join(view.missingInputs, ' ') || 'Follow the current native task action.',
@@ -1971,27 +1975,26 @@ export const runNativeTaskAction = (config: RuntimeConfig, input: unknown) =>
     )?.snapshot;
     if (previous && !request.reason)
       return yield* fail('review-history', 'Give a concrete reason before recording another source iteration.');
-    const result = unwrapCycle(
-      yield* inCheckout(
-        runWorkflowAutomation(
-          config,
-          cycleRequest(stored, {
-            command: 'snapshot',
-            phaseId: ref.phaseId,
-            snapshotId,
-            acceptedHead: head,
-            ...(previous ? {previous: previous.snapshotId} : {}),
-            reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
-            expectedRevision: stored.revision,
-          }),
-        ),
-        checkout,
+    yield* inCheckout(
+      runWorkflowAutomation(
+        config,
+        cycleRequest(stored, {
+          command: 'snapshot',
+          phaseId: ref.phaseId,
+          snapshotId,
+          acceptedHead: head,
+          ...(previous ? {previous: previous.snapshotId} : {}),
+          reason: request.reason ?? 'Record the exact worker source result for this implementation packet.',
+          expectedRevision: stored.revision,
+        }),
       ),
+      checkout,
     );
+    const canonical = yield* readCanonicalSnapshot(snapshotId);
     return {
       status: 'recorded',
       replayed: false,
-      snapshot: result.snapshot,
-      snapshotRef: taskActionSnapshotRef(ref, result.snapshot),
+      snapshot: canonical,
+      snapshotRef: taskActionSnapshotRef(ref, canonical),
     };
   });

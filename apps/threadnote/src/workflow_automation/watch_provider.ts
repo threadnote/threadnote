@@ -124,6 +124,42 @@ export function nativeWatchPullRequest(pr: string) {
   return {owner: match[1], repo: match[2], number: Number(match[3])};
 }
 
+/** Renewal observes PR identity only; it neither validates nor adopts the current head. */
+export const verifyNativeWatchRenewalPr = Effect.fn('nativeWatch.verifyRenewalPr')(function* (
+  pr: string,
+  expected: {readonly baseBranch: string; readonly headBranch: string},
+) {
+  const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr), catch: () => fail('invalid-pr')});
+  const response = yield* runCommandEffect(
+    'gh',
+    [
+      'api',
+      '--hostname',
+      'github.com',
+      '--method',
+      'GET',
+      `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
+      '--jq',
+      '{number, url: .html_url, baseRepository: .base.repo.full_name, baseBranch: .base.ref, headBranch: .head.ref}',
+    ],
+    {timeoutMs: 15_000, maxOutputBytes: 16_384, sensitiveOutput: true},
+  ).pipe(Effect.mapError(() => fail('provider-transport', true)));
+  const identity = yield* Effect.try({
+    try: () => object(JSON.parse(response.stdout)),
+    catch: () => fail('provider-shape'),
+  });
+  const repository = EffectString.toLowerCase(`${target.owner}/${target.repo}`);
+  if (
+    identity.number !== target.number ||
+    identity.url !== pr ||
+    typeof identity.baseRepository !== 'string' ||
+    EffectString.toLowerCase(identity.baseRepository) !== repository ||
+    identity.baseBranch !== expected.baseBranch ||
+    identity.headBranch !== expected.headBranch
+  )
+    return yield* fail('watch-identity-conflict');
+});
+
 /** Parse only the selected response headers; raw headers/bodies never enter watch state. */
 export function nativeWatchHttpResponse(stdout: string) {
   const boundary = /\r?\n\r?\n/u.exec(stdout);

@@ -254,48 +254,28 @@ describe('Cursor Cloud integration', () => {
     },
   );
 
-  it('prints deterministic Dashboard configuration and idempotently bootstraps a writable share', async () => {
-    const fixture = await cloudFixture();
+  it('prints Dashboard share configuration and discovery selectors', async () => {
+    const signal = AbortSignal.timeout(25_000);
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-cursor-config-')));
+    const home = join(root, 'home');
     try {
-      const existingSkillPath = join(fixture.userHome, '.cursor', 'skills', 'threadnote-context', 'SKILL.md');
-      const obsoleteGraphSkillPath = join(fixture.userHome, '.cursor', 'skills', 'threadnote-code-graph', 'SKILL.md');
-      await mkdir(join(fixture.userHome, '.cursor', 'skills', 'threadnote-context'), {recursive: true});
-      await writeFile(
-        existingSkillPath,
-        await readFile(join(process.cwd(), 'config', 'agent-skills', 'threadnote-context', 'SKILL.md'), 'utf8'),
+      const firstConfig = await runCli(
+        [
+          'cloud',
+          'cursor',
+          'config',
+          '--home',
+          home,
+          '--team',
+          'engineering',
+          '--user',
+          'cloud-user',
+          '--agent-id',
+          'cloud-agent',
+        ],
+        {HOME: root},
+        signal,
       );
-      await mkdir(join(fixture.userHome, '.cursor', 'skills', 'threadnote-code-graph'), {recursive: true});
-      await writeFile(
-        obsoleteGraphSkillPath,
-        await readFile(join(process.cwd(), 'config', 'agent-skills', 'threadnote-code-graph', 'SKILL.md'), 'utf8'),
-      );
-      const firstConfig = await runCli([
-        'cloud',
-        'cursor',
-        'config',
-        '--home',
-        fixture.home,
-        '--team',
-        'engineering',
-        '--user',
-        'cloud-user',
-        '--agent-id',
-        'cloud-agent',
-      ]);
-      const secondConfig = await runCli([
-        'cloud',
-        'cursor',
-        'config',
-        '--home',
-        fixture.home,
-        '--team',
-        'engineering',
-        '--user',
-        'cloud-user',
-        '--agent-id',
-        'cloud-agent',
-      ]);
-      expect(secondConfig.stdout).toBe(firstConfig.stdout);
       expect(JSON.parse(firstConfig.stdout)).toMatchObject({
         args: ['-lc', 'exec "$HOME/.local/bin/threadnote-mcp-server"'],
         command: '/bin/sh',
@@ -309,25 +289,40 @@ describe('Cursor Cloud integration', () => {
 
       const discoveryConfig = JSON.parse(
         (
-          await runCli([
-            'cloud',
-            'cursor',
-            'config',
-            '--home',
-            fixture.home,
-            '--user',
-            'cloud-user',
-            '--agent-id',
-            'cloud-agent',
-          ])
+          await runCli(
+            ['cloud', 'cursor', 'config', '--home', home, '--user', 'cloud-user', '--agent-id', 'cloud-agent'],
+            {HOME: root},
+            signal,
+          )
         ).stdout,
       );
       expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAM).toBeUndefined();
       expect(discoveryConfig.env.THREADNOTE_CURSOR_CLOUD_TEAMS).toBeUndefined();
       expect(discoveryConfig.env.THREADNOTE_MCP_TOOLSET).toBe('cursor-cloud-personal');
-      const first = await bootstrap(fixture);
+    } finally {
+      await rm(root, {force: true, recursive: true});
+    }
+  });
+
+  it('idempotently bootstraps, verifies and starts a writable share', async () => {
+    const signal = AbortSignal.timeout(25_000);
+    const fixture = await cloudFixture(signal);
+    try {
+      const existingSkillPath = join(fixture.userHome, '.cursor', 'skills', 'threadnote-context', 'SKILL.md');
+      const obsoleteGraphSkillPath = join(fixture.userHome, '.cursor', 'skills', 'threadnote-code-graph', 'SKILL.md');
+      await mkdir(join(fixture.userHome, '.cursor', 'skills', 'threadnote-context'), {recursive: true});
+      await writeFile(
+        existingSkillPath,
+        await readFile(join(process.cwd(), 'config', 'agent-skills', 'threadnote-context', 'SKILL.md'), 'utf8'),
+      );
+      await mkdir(join(fixture.userHome, '.cursor', 'skills', 'threadnote-code-graph'), {recursive: true});
+      await writeFile(
+        obsoleteGraphSkillPath,
+        await readFile(join(process.cwd(), 'config', 'agent-skills', 'threadnote-code-graph', 'SKILL.md'), 'utf8'),
+      );
+      const first = await bootstrap(fixture, undefined, undefined, true, signal);
       const before = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
-      const second = await bootstrap(fixture);
+      const second = await bootstrap(fixture, undefined, undefined, false, signal);
       const after = await readFile(join(fixture.home, 'share', 'teams.json'), 'utf8');
       expect(first.stdout).toContain(
         'Cursor Cloud memory root: threadnote://user/cloud-user/memories/shared/engineering/',
@@ -345,9 +340,68 @@ describe('Cursor Cloud integration', () => {
         user: 'cloud-user',
         version: 1,
       });
+      expect(await readFile(join(fixture.userHome, '.cursor', 'rules', 'threadnote.mdc'), 'utf8')).toContain(
+        'Personal Cursor Cloud',
+      );
+      expect(await readFile(existingSkillPath, 'utf8')).toContain('Threadnote context in Personal Cursor Cloud');
+      const cloudMemorySkill = await readFile(
+        join(fixture.userHome, '.cursor', 'skills', 'threadnote-memory', 'SKILL.md'),
+        'utf8',
+      );
+      expect(cloudMemorySkill).toContain('pass `team`');
+      expect(cloudMemorySkill).not.toContain('Git beta');
+      await expect(access(obsoleteGraphSkillPath)).rejects.toThrow();
+
+      const verified = await runCli(
+        [
+          'cloud',
+          'cursor',
+          'verify',
+          '--home',
+          fixture.home,
+          '--team',
+          'engineering',
+          '--user',
+          'cloud-user',
+          '--agent-id',
+          'cloud-agent',
+          '--cwd',
+          process.cwd(),
+          '--json',
+        ],
+        {HOME: fixture.userHome},
+        signal,
+      );
+      expect(JSON.parse(verified.stdout)).toMatchObject({
+        memoryRoot: 'threadnote://user/cloud-user/memories/shared/engineering',
+        profile: 'shared-read-write',
+        status: 'ok',
+      });
+      const started = await runCli(
+        ['cloud', 'cursor', 'start', '--home', fixture.home, '--cwd', process.cwd(), '--json'],
+        {HOME: fixture.userHome},
+        signal,
+      );
+      expect(JSON.parse(started.stdout)).toMatchObject({status: 'ok', profile: 'shared-read-write'});
+      if (process.platform === 'linux') {
+        const enrollment = await readFile(join(fixture.home, 'dev-skills', 'index.json'), 'utf8');
+        expect(enrollment).toContain('cursor-cloud-personal');
+        expect(enrollment).toContain('"enabled": true');
+      }
+    } finally {
+      await rm(fixture.root, {force: true, recursive: true});
+    }
+  });
+
+  it('uses the saved identity for config and remember and rejects a conflicting bootstrap', async () => {
+    const signal = AbortSignal.timeout(25_000);
+    const fixture = await cloudFixture(signal);
+    try {
+      await bootstrap(fixture, undefined, undefined, false, signal);
       const implicitConfig = await runCli(
         ['cloud', 'cursor', 'config', '--home', fixture.home, '--team', 'engineering'],
         {HOME: fixture.userHome},
+        signal,
       );
       expect(JSON.parse(implicitConfig.stdout)).toMatchObject({
         env: {THREADNOTE_AGENT_ID: 'cloud-agent', THREADNOTE_USER: 'cloud-user'},
@@ -367,6 +421,7 @@ describe('Cursor Cloud integration', () => {
           'The saved Cursor Cloud profile selects the canonical user.',
         ],
         {HOME: fixture.userHome},
+        signal,
       );
       expect(implicitRemember.stdout).toContain('threadnote://user/cloud-user/memories/handoffs/active/');
       await expect(
@@ -387,51 +442,9 @@ describe('Cursor Cloud integration', () => {
             'cloud-agent',
           ],
           {HOME: fixture.userHome},
+          signal,
         ),
       ).rejects.toMatchObject({stderr: expect.stringContaining('already uses user "cloud-user"')});
-      expect(await readFile(join(fixture.userHome, '.cursor', 'rules', 'threadnote.mdc'), 'utf8')).toContain(
-        'Personal Cursor Cloud',
-      );
-      expect(await readFile(existingSkillPath, 'utf8')).toContain('Threadnote context in Personal Cursor Cloud');
-      const cloudMemorySkill = await readFile(
-        join(fixture.userHome, '.cursor', 'skills', 'threadnote-memory', 'SKILL.md'),
-        'utf8',
-      );
-      expect(cloudMemorySkill).toContain('pass `team`');
-      expect(cloudMemorySkill).not.toContain('Git beta');
-      await expect(access(obsoleteGraphSkillPath)).rejects.toThrow();
-
-      const verified = await runCli([
-        'cloud',
-        'cursor',
-        'verify',
-        '--home',
-        fixture.home,
-        '--team',
-        'engineering',
-        '--user',
-        'cloud-user',
-        '--agent-id',
-        'cloud-agent',
-        '--cwd',
-        process.cwd(),
-        '--json',
-      ]);
-      expect(JSON.parse(verified.stdout)).toMatchObject({
-        memoryRoot: 'threadnote://user/cloud-user/memories/shared/engineering',
-        profile: 'shared-read-write',
-        status: 'ok',
-      });
-      const started = await runCli(
-        ['cloud', 'cursor', 'start', '--home', fixture.home, '--cwd', process.cwd(), '--json'],
-        {HOME: fixture.userHome},
-      );
-      expect(JSON.parse(started.stdout)).toMatchObject({status: 'ok', profile: 'shared-read-write'});
-      if (process.platform === 'linux') {
-        const enrollment = await readFile(join(fixture.home, 'dev-skills', 'index.json'), 'utf8');
-        expect(enrollment).toContain('cursor-cloud-personal');
-        expect(enrollment).toContain('"enabled": true');
-      }
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
     }
@@ -1323,37 +1336,48 @@ interface CloudFixture {
   readonly userHome: string;
 }
 
-async function cloudFixture(): Promise<CloudFixture> {
+async function cloudFixture(signal?: AbortSignal): Promise<CloudFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-cursor-cloud-')));
-  const remote = await seedRemote(root, 'memory-share');
-  const home = join(root, 'home');
-  const userHome = join(root, 'user-home');
-  await mkdir(userHome, {recursive: true});
-  return {home, remote, root, userHome};
+  try {
+    const remote = await seedRemote(root, 'memory-share', signal);
+    const home = join(root, 'home');
+    const userHome = join(root, 'user-home');
+    await mkdir(userHome, {recursive: true});
+    return {home, remote, root, userHome};
+  } catch (error) {
+    await rm(root, {force: true, recursive: true});
+    throw error;
+  }
 }
 
-async function seedRemote(root: string, name: string): Promise<string> {
+async function seedRemote(root: string, name: string, signal?: AbortSignal): Promise<string> {
   const remote = join(root, `${name}.git`);
   const source = join(root, `${name}-seed`);
   await mkdir(source, {recursive: true});
   await execFilePromise('git', ['init', '--bare', '--initial-branch=main', remote], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   await execFilePromise('git', ['-C', source, 'init', '--initial-branch=main'], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   await writeFile(join(source, 'README.md'), '# Cursor Cloud memory share\n');
   await execFilePromise('git', ['-C', source, 'add', 'README.md'], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   await execFilePromise('git', ['-C', source, 'commit', '-m', 'seed memory share'], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   await execFilePromise('git', ['-C', source, 'remote', 'add', 'origin', remote], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   await execFilePromise('git', ['-C', source, 'push', '-u', 'origin', 'main'], {
     env: {...process.env, ...gitIdentityEnvironment},
+    ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
   });
   return remote;
 }
@@ -1392,7 +1416,13 @@ function memoryDocument(topic: string, body: string, reference?: string): string
   );
 }
 
-function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture.remote) {
+function bootstrap(
+  fixture: CloudFixture,
+  team = 'engineering',
+  remote = fixture.remote,
+  sync = true,
+  signal?: AbortSignal,
+) {
   return runCli(
     [
       'cloud',
@@ -1408,12 +1438,15 @@ function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture
       'cloud-user',
       '--agent-id',
       'cloud-agent',
+      ...(sync ? [] : ['--no-sync']),
     ],
     {HOME: fixture.userHome},
+    signal,
   );
 }
 
-function runCli(args: readonly string[], environment: Readonly<Record<string, string>> = {}) {
+function runCli(args: readonly string[], environment: Readonly<Record<string, string>> = {}, signal?: AbortSignal) {
+  const started = performance.now();
   return execFilePromise(
     process.execPath,
     [
@@ -1430,8 +1463,18 @@ function runCli(args: readonly string[], environment: Readonly<Record<string, st
     {
       cwd: process.cwd(),
       env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
+      ...(signal ? {signal, timeout: 20_000, killSignal: 'SIGKILL' as const} : {}),
+      maxBuffer: 1_048_576,
     },
-  );
+  ).catch((error: unknown) => {
+    if (signal && error instanceof Error) {
+      const stage = EffectArray.join(args.slice(0, args[0] === 'cloud' ? 3 : 1), ' ');
+      const stderr =
+        'stderr' in error && typeof error.stderr === 'string' ? EffectString.slice(-2048)(error.stderr) : '';
+      error.message = `Cursor Cloud CLI ${stage} failed after ${Math.round(performance.now() - started)}ms.${stderr ? '\n' + stderr : ''}`;
+    }
+    throw error;
+  });
 }
 
 async function prepareCloudReadyFixture(fixture: CloudFixture): Promise<void> {

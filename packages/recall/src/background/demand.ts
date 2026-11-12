@@ -90,7 +90,12 @@ export class RecallEmbeddingDemandUnavailable extends Schema.TaggedError<
 const unavailable = (
   stage: NonNullable<RecallEmbeddingDemandUnavailable['stage']> = 'read',
   reason: NonNullable<RecallEmbeddingDemandUnavailable['reason']> = 'unknown',
-) => RecallEmbeddingDemandUnavailable.make({message: 'Recall embedding demand requires repair.', stage, reason});
+) =>
+  RecallEmbeddingDemandUnavailable.make({
+    message: `Recall embedding demand ${reason === 'guard-timeout' ? 'admission is busy' : 'is unavailable'} [recall-demand:${stage}/${reason}]; no queued receipt is implied.`,
+    stage,
+    reason,
+  });
 const mappedFailure = (stage: NonNullable<RecallEmbeddingDemandUnavailable['stage']>, error: unknown) =>
   Schema.is(RecallEmbeddingDemandUnavailable)(error)
     ? error

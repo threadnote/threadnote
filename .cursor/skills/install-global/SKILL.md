@@ -25,6 +25,7 @@ bun run dev:install-global -- --take-over-global-runtime --terminate-superseded
 ## Success
 
 - Installer prints the exact-HEAD version and doctor verification.
+- After activation and doctor verification, the installer best-effort updates enrolled, enabled workflow targets at `update-available`. It reports every target outcome; a target update failure does not undo the active install.
 - `threadnote --version` matches this HEAD.
 - Cursor MCP sessions stay pinned until reconnect; CLI/new processes see the new binary.
 

@@ -12,13 +12,16 @@ import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
-import {readNativeTaskInspection} from './index.js';
+import {readNativeTaskInspection, runWorkflowAutomation} from './index.js';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {readNativeWatch} from './watch_store.js';
 import {verifyNativeCycleBaseRequalification} from './cycle_git.js';
 import {resolveNativeTaskBaseRef} from './task_action_helpers.js';
+import {currentNativeTaskRef} from './task_action_helpers.js';
+import {decodeJournal} from './closeout_request_schema.js';
+import {readNativeCloseoutJournal} from './closeout_store.js';
 
 const requestSchema = Schema.Struct({
   runId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
@@ -82,7 +85,6 @@ const historicalPhaseProof = (
     item =>
       item.snapshot.phaseId === phaseId &&
       item.snapshot.phaseHash === proof.phaseHash &&
-      item.snapshot.head === proof.head &&
       item.snapshot.tree === proof.tree &&
       item.snapshot.repo === baseline.repo &&
       item.snapshot.baseTree === baseline.tree,
@@ -491,9 +493,38 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
           ),
         )
       : undefined;
+    const uncheckedView = projectNativeTaskView(stored.state, stored.revision, {
+      ...(request.role === undefined ? {} : {role: request.role}),
+      ...(planDrift === undefined ? {} : {planDrift}),
+    });
+    let acceptedSnapshotCurrent = true;
+    if (!authoringBlocked && uncheckedView.next.action === 'validate' && uncheckedView.next.snapshotId) {
+      const head = yield* gitValue(['rev-parse', 'HEAD'], checkout);
+      if (!head) return yield* fail('source-unavailable', 'Could not read the current source head.');
+      const checked = yield* runWorkflowAutomation(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'cycle',
+        command: 'check-phase',
+        runId: stored.state.runId,
+        generation: stored.state.generation,
+        phaseId: uncheckedView.next.phaseId,
+        snapshotId: uncheckedView.next.snapshotId,
+        acceptedHead: head,
+      }).pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => checkout}), Effect.result);
+      if (checked._tag === 'Failure') {
+        if (
+          Schema.is(WorkflowAutomationError)(checked.failure) &&
+          (checked.failure.code === 'review-stale' || checked.failure.code === 'source-drift')
+        )
+          acceptedSnapshotCurrent = false;
+        else return yield* checked.failure;
+      }
+    }
     const projectionOptions = (offset: number) => ({
       ...(request.role === undefined ? {} : {role: request.role}),
       ...(planDrift === undefined ? {} : {planDrift}),
+      ...(acceptedSnapshotCurrent ? {} : {acceptedSnapshotCurrent: false}),
       ...(historicalCandidates.length > 0 ? {historicalWatchCount: historicalCandidates.length} : {}),
       ...(historicalCandidateHash ? {candidateHash: historicalCandidateHash} : {}),
       ...(offset === 0 ? {} : {offset}),
@@ -573,4 +604,46 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
       ...result,
       historicalWatch: historicalTaskRefs(stored, selectedCandidate.value.candidate),
     });
+  });
+
+/** Resolve an explicit reopen target against the current card and terminal closeout state. */
+export const verifyNativeTaskReopen = (
+  config: RuntimeConfig,
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  checkout: string,
+  request: {readonly runId: string; readonly taskRef: string; readonly phaseId: string},
+) =>
+  Effect.gen(function* () {
+    const view = yield* readNativeTaskView(config, {runId: request.runId, callerCwd: checkout});
+    if (
+      ![
+        'implement',
+        'review',
+        'validate',
+        'deliver',
+        'complete',
+        'blocked',
+        'expand-review-budget',
+        'resolve-review-failure',
+      ].includes(view.next.action)
+    )
+      return yield* fail('task-not-ready', 'Resolve the current plan or authoring gate before reopening a phase.');
+    if (!currentNativeTaskRef(request.taskRef, stored.state, stored.revision, request.runId, view.next.action, view))
+      return yield* fail('stale-task-ref', 'Read the current task card before reopening a phase.');
+    const phases = stored.state.cycle?.state.plan.phases ?? [];
+    const selected = EffectArray.filter(phases, phase => phase.id === request.phaseId);
+    const phase = selected.length === 1 ? selected[0] : undefined;
+    const proof = stored.state.cycle?.state.phases[request.phaseId];
+    if (!phase || !proof || !['validated', 'published'].includes(proof.status))
+      return yield* fail('phase-not-reopenable', 'Select one current validated or published phase.');
+    const closeout = yield* readNativeCloseoutJournal(config, request.runId, decodeJournal);
+    if (closeout)
+      return yield* fail(
+        'closeout-in-progress',
+        'The semantic closeout has started; its recorded proof cannot be reopened.',
+      );
+    const branch = yield* gitValue(['branch', '--show-current'], checkout);
+    if (branch !== phase.branch)
+      return yield* fail('wrong-branch', 'Reopen the phase from its bound implementation branch.');
+    return phase.id;
   });

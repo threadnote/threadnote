@@ -154,11 +154,84 @@ describe('owned native ready-read boundary', () => {
         expect(response.binding).toBe(readyRecallReadRequestBinding(f.request));
         expect(response.value).toBeUndefined();
       }
-      expect(EffectArray.some(responses, response => response.maintenanceRequested === true)).toBe(true);
       expect(wakes).toBe(EffectArray.filter(responses, response => response.maintenanceRequested === true).length);
-      expect((yield* readRecallLexicalDemand({...f.request.config, includeInactive: false}))?.revision).toBeDefined();
+      if (EffectArray.some(responses, response => response.maintenanceRequested === true))
+        expect((yield* readRecallLexicalDemand({...f.request.config, includeInactive: false}))?.revision).toBeDefined();
       expect(yield* f.fs.exists(f.path.join(f.home, 'indexes', 'lexical'))).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('an uncontended cold call persists demand and wakes its exact home', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      const homes: string[] = [];
+      const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+        Effect.provideService(CommandExecutor, f.observed),
+        Effect.provideService(RecallEmbeddingWakePort, home =>
+          Effect.sync(() => {
+            homes.push(home);
+          }),
+        ),
+      );
+      const response = yield* boundary.read(f.request);
+      expect(response.outcome).toBe('unavailable');
+      expect(response.binding).toBe(readyRecallReadRequestBinding(f.request));
+      expect(response.value).toBeUndefined();
+      expect(response.maintenanceRequested).toBe(true);
+      expect(homes).toEqual([f.home]);
+      expect((yield* readRecallLexicalDemand({...f.request.config, includeInactive: false}))?.revision).toBeDefined();
+      expect(f.starts).toEqual([]);
+      expect(yield* f.fs.exists(f.path.join(f.home, 'indexes', 'lexical'))).toBe(false);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('cold calls retain unavailability when demand directory creation is denied without false wakes', () =>
+    Effect.gen(function* () {
+      const f = yield* coldFixture;
+      const directory = f.path.join(f.home, 'recall', 'lexical-demand-v1');
+      let denials = 0;
+      let wakes = 0;
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        makeDirectory: (filename, options) =>
+          filename === directory
+            ? Effect.suspend(() => {
+                denials++;
+                return Effect.fail(
+                  PlatformError.systemError({_tag: 'PermissionDenied', module: 'FileSystem', method: 'makeDirectory'}),
+                );
+              })
+            : f.fs.makeDirectory(filename, options),
+      });
+      const responses = yield* Effect.all(
+        Array.from({length: 8}, () =>
+          Effect.gen(function* () {
+            const boundary = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000));
+            return yield* boundary.read(f.request);
+          }),
+        ),
+        {concurrency: 'unbounded'},
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, observed),
+        Effect.provideService(CommandExecutor, f.observed),
+        Effect.provideService(RecallEmbeddingWakePort, () =>
+          Effect.sync(() => {
+            wakes++;
+          }),
+        ),
+      );
+      expect(denials).toBe(8);
+      for (const response of responses) {
+        expect(response.outcome).toBe('unavailable');
+        expect(response.binding).toBe(readyRecallReadRequestBinding(f.request));
+        expect(response.value).toBeUndefined();
+        expect(response.maintenanceRequested).toBe(false);
+      }
+      expect(wakes).toBe(0);
+      expect(yield* readRecallLexicalDemand({...f.request.config, includeInactive: false})).toBeUndefined();
+      expect(f.starts).toEqual([]);
+      expect(yield* f.fs.exists(f.path.join(f.home, 'indexes', 'lexical'))).toBe(false);
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('existing or uncertain storage and invalid logical scope still use the native boundary', () =>

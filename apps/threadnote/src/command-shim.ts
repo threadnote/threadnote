@@ -7,6 +7,7 @@ import type {DoctorCheck} from './types.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {readFileIfExists, removePath, shellQuote} from './utils.js';
 import {toolRoot} from '@threadnote/workspace/installation';
+import {activeInstalledRelease} from './installations.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -202,7 +203,16 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?:
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const paths: string[] = [];
-  for (const mode of yield* requiredCommandLauncherModes(home)) {
+  const modes = yield* requiredCommandLauncherModes(home);
+  const activeRelease = yield* activeInstalledRelease();
+  if (!activeRelease) {
+    return {
+      detail: 'No validated active standalone release; repair will not change command launchers',
+      name: 'threadnote launcher',
+      status: 'warn',
+    } satisfies DoctorCheck;
+  }
+  for (const mode of modes) {
     for (const kind of managedCommandLauncherKinds(system.platform)) {
       const shimPath = yield* managedCommandShimPath(mode, kind);
       if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) {
@@ -227,7 +237,7 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?:
           status: 'warn',
         } satisfies DoctorCheck;
       }
-      if (content !== (yield* renderCommandShim(undefined, mode, kind))) {
+      if (content !== (yield* renderCommandShim(activeRelease.releaseRoot, mode, kind))) {
         return {
           detail: `${shimPath} points at a different standalone release; repair will rewrite it`,
           name: 'threadnote launcher',
@@ -246,8 +256,17 @@ export const installCommandShim = Effect.fn('commandShim.install')(function* (
   home?: string,
 ) {
   const required = new Set(yield* requiredCommandLauncherModes(home));
+  let targetReleaseRoot = releaseRoot;
+  if (targetReleaseRoot === undefined) {
+    const activeRelease = yield* activeInstalledRelease();
+    if (!activeRelease) {
+      yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
+      return;
+    }
+    targetReleaseRoot = activeRelease.releaseRoot;
+  }
   for (const mode of LAUNCHER_MODES) {
-    if (required.has(mode)) yield* installLauncher(mode, dryRun, releaseRoot);
+    if (required.has(mode)) yield* installLauncher(mode, dryRun, targetReleaseRoot);
     else yield* removeUnusedLauncher(mode, dryRun);
   }
   yield* ensureDefaultWindowsBinDirectoryOnUserPath(dryRun);

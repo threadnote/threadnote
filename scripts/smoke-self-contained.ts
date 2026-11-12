@@ -12,6 +12,7 @@ import {
   FixtureProcesses,
   FixtureStdioTransport,
   runFixtureCommand,
+  reconcileFixturePipelineReceipts,
   type FixtureCommandStage,
 } from './fixture-owned-process.js';
 import {fixtureCleanup, fixtureLifecycle, fixtureRemovalDeadline} from './fixture-lifecycle.js';
@@ -20,7 +21,6 @@ import {
   drainRecallEmbeddingWorkerFixture,
 } from '@threadnote/threadnote/recall/embedding_worker_process';
 import {BackgroundWorkerFixtureDrainUnavailable} from '@threadnote/inference/background/worker-control';
-import {fixturePipelineReceiptProvesExit} from '@threadnote/testing/fixture-pipeline-receipt';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
 import {SecureRandom} from 'effect/crypto';
@@ -335,24 +335,47 @@ const readLargeOutputThroughPlatformPipe = Effect.fn('smokeSelfContained.readLar
           deadline: Math.min(options.bodyDeadline, performance.now() + COMMAND_TIMEOUT_MILLISECONDS),
         }),
       catch: cause => scriptError(cause, 'Standalone pipeline failed.'),
-    });
-    for (const [receipt, token, observation] of [
-      [producerReceipt, producerToken, producerObservation],
-      [consumerReceipt, consumerToken, consumerObservation],
-    ] as const) {
-      const text = yield* Effect.tryPromise({
-        try: async () => new TextDecoder().decode(await runtimeReadBoundedStableRegularFile(receipt, 8192)),
-        catch: cause => scriptError(cause, 'Standalone pipeline exit receipt unavailable.'),
-      });
-      if (!fixturePipelineReceiptProvesExit(text, token))
-        return yield* ScriptError.make({message: 'Standalone pipeline exit receipt invalid.'});
-      const decoded: unknown = JSON.parse(text);
-      if (typeof decoded !== 'object' || decoded === null || !('code' in decoded) || decoded.code !== 0)
-        return yield* ScriptError.make({message: 'Standalone pipeline child failed.'});
-      observation.spawned();
-      observation.exited(0, null);
-      observation.closed();
-    }
+    }).pipe(
+      Effect.onExit(() =>
+        Effect.gen(function* () {
+          const receipts = yield* Effect.forEach(
+            [
+              {
+                role: 'producer' as const,
+                receipt: producerReceipt,
+                token: producerToken,
+                observation: producerObservation,
+              },
+              {
+                role: 'consumer' as const,
+                receipt: consumerReceipt,
+                token: consumerToken,
+                observation: consumerObservation,
+              },
+            ],
+            endpoint =>
+              Effect.tryPromise({
+                try: async () =>
+                  new TextDecoder().decode(await runtimeReadBoundedStableRegularFile(endpoint.receipt, 8192)),
+                catch: () => undefined,
+              }).pipe(
+                Effect.result,
+                Effect.map(read => ({...endpoint, text: read._tag === 'Success' ? read.success : undefined})),
+              ),
+          );
+          const outcomes = reconcileFixturePipelineReceipts(receipts);
+          if (
+            EffectArray.some(
+              outcomes,
+              outcome => outcome.state !== 'exited' || outcome.exitCode !== 0 || outcome.signal !== null,
+            )
+          )
+            return yield* ScriptError.make({
+              message: `Standalone pipeline endpoints failed: ${JSON.stringify(outcomes)}`,
+            });
+        }),
+      ),
+    );
     const parsed: unknown = yield* Effect.try({
       try: () => JSON.parse(result.stdout),
       catch: cause => ScriptError.make({message: 'Standalone large-output pipe returned invalid JSON.', cause}),

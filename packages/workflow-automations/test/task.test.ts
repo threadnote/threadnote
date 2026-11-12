@@ -4,9 +4,15 @@ import * as Effect from 'effect';
 import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {initializeNativeCycle, type NativeCyclePlan} from '../src/cycle.js';
+import {
+  initializeNativeCycle,
+  recordNativeCycleDelivery,
+  validateNativeCyclePhase,
+  type NativeCyclePlan,
+} from '../src/cycle.js';
 import type {NativeCycleSnapshot} from '../src/cycle_review.js';
 import type {NativeWorkflowState} from '../src/native.js';
+import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
 import {
   decodeNativeTaskActionRef,
   decodeNativeTaskCursor,
@@ -77,6 +83,17 @@ const state: NativeWorkflowState = {
 };
 
 describe('native task projection', () => {
+  it('preserves old runtime images without a marker and rejects invalidated foreign snapshot IDs', () => {
+    const legacy = decodeNativeCycleRuntime(state.cycle);
+    expect(legacy).toEqual(state.cycle);
+    expect(legacy).not.toHaveProperty('invalidatedThroughSnapshot');
+    expect(() =>
+      decodeNativeCycleRuntime({...state.cycle, invalidatedThroughSnapshot: {'phase-one': 'missing-snapshot'}}),
+    ).toThrow();
+    expect(() =>
+      decodeNativeCycleRuntime({...state.cycle, invalidatedThroughSnapshot: {'other-phase': 'missing-snapshot'}}),
+    ).toThrow();
+  });
   it('accepts canonical run IDs and only task-view action references for task start', () => {
     const taskViewRef = encodeNativeTaskActionRef({
       version: 1,
@@ -123,6 +140,36 @@ describe('native task projection', () => {
         `taskref-v1.${EffectString.replaceAll('=', '')(EffectString.replaceAll('/', '_')(EffectString.replaceAll('+', '-')(withUnknown)))}`,
       ),
     ).toBeUndefined();
+  });
+
+  it('round-trips retained work references and rejects incomplete or mixed reference closures', () => {
+    const ref = {
+      version: 1 as const,
+      kind: 'retained-work' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      watchId: 'watch',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      watchEventId: 'watch:1',
+      workViewDigest: EffectString.repeat(64)('b'),
+      workRowDigest: EffectString.repeat(64)('c'),
+    };
+    expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(ref))).toEqual(ref);
+    for (const key of [
+      'watchId',
+      'consumerId',
+      'wakeupId',
+      'watchEventId',
+      'workViewDigest',
+      'workRowDigest',
+    ] as const) {
+      const incomplete = {...ref, [key]: undefined};
+      expect(() => encodeNativeTaskActionRef(incomplete)).toThrow();
+    }
+    expect(() => encodeNativeTaskActionRef({...ref, watchDeliveryId: 'delivery'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, kind: 'delivery'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, workViewDigest: 'malformed'})).toThrow();
   });
 
   it('is deterministic, bounded, and returns only actionable fields', () => {
@@ -431,6 +478,139 @@ describe('native task projection', () => {
     expect(projectMode(snapshot)).toBe('full');
     expect(projectMode(followup)).toBe('incremental');
     expect(projectMode(requalified)).toBe('full');
+  });
+
+  it('projects accepted review, pending local receipt, and completed delivery in order', () => {
+    const initial = state.cycle!.state;
+    const reviewedHead = EffectString.repeat(40)('a');
+    const acceptedHead = EffectString.repeat(40)('f');
+    const tree = EffectString.repeat(40)('e');
+    const snapshot: NativeCycleSnapshot = {
+      format: 'threadnote-native-cycle-snapshot',
+      version: 1,
+      snapshotId: 'reviewed-one',
+      phaseId: 'phase-one',
+      phaseHash: initial.phases['phase-one'].phaseHash,
+      repo: '/repo',
+      head: reviewedHead,
+      baseTree: EffectString.repeat(40)('b'),
+      scopeBase: EffectString.repeat(40)('c'),
+      declaredBaseHead: EffectString.repeat(40)('d'),
+      scopeFiles: ['src/task.ts'],
+      tree,
+      files: ['src/task.ts'],
+      pinnedRef: 'refs/threadnote/snapshot/reviewed-one',
+    };
+    const runtime = {
+      ...state.cycle!,
+      baselines: {
+        'phase-one': {
+          repo: '/repo',
+          head: EffectString.repeat(40)('b'),
+          tree: EffectString.repeat(40)('c'),
+          preservedFiles: [],
+          pinnedRef: 'refs/heads/main',
+        },
+      },
+      snapshots: [{snapshot, incoming: []}],
+      reviews: [
+        {
+          snapshotId: snapshot.snapshotId,
+          report: {
+            snapshotId: snapshot.snapshotId,
+            phaseHash: snapshot.phaseHash,
+            snapshotTree: tree,
+            status: 'complete' as const,
+            mode: 'full' as const,
+            selected: ['correctness', 'simplicity'],
+            lanes: [
+              {name: 'correctness', status: 'complete' as const},
+              {name: 'simplicity', status: 'complete' as const},
+            ],
+            findings: [],
+          },
+        },
+      ],
+    };
+    const reviewed = projectNativeTaskView({...state, cycle: runtime}, 'review-revision');
+    expect(reviewed).toMatchObject({
+      status: 'ready',
+      next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
+      phase: {snapshot: {snapshotRef: expect.any(String)}},
+    });
+    const blockedReview = projectNativeTaskView(
+      {
+        ...state,
+        cycle: {
+          ...runtime,
+          reviews: [
+            {
+              ...runtime.reviews[0],
+              report: {
+                ...runtime.reviews[0].report,
+                findings: [
+                  {
+                    id: 'blocking-finding',
+                    file: 'src/task.ts',
+                    line: 1,
+                    body: 'The acceptance behavior is incomplete.',
+                    trigger: 'Run the phase check.',
+                    impact: 'The phase cannot be accepted yet.',
+                    evidence: 'The reviewed source still omits the behavior.',
+                    severity: 'important' as const,
+                    category: 'correctness' as const,
+                    confidence: 95,
+                    state: 'new' as const,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      'blocking-revision',
+    );
+    expect(blockedReview).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
+    expect(
+      projectNativeTaskView({...state, cycle: runtime}, 'review-revision', {acceptedSnapshotCurrent: false}),
+    ).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
+    const validation = {
+      snapshotTree: tree,
+      reviewTree: tree,
+      head: acceptedHead,
+      status: 'passed' as const,
+      productState: 'working' as const,
+      checks: [{command: 'focused check', result: 'passed' as const, evidence: 'passed'}],
+      acceptance: [{criterion: plan.phases[0].acceptanceCriteria[0], result: 'passed' as const, evidence: 'passed'}],
+    };
+    const validated = validateNativeCyclePhase(
+      initial,
+      'phase-one',
+      {head: acceptedHead, tree, files: ['src/task.ts']},
+      validation,
+    );
+    expect(
+      projectNativeTaskView({...state, cycle: {...runtime, state: validated}}, 'validation-revision', {
+        acceptedSnapshotCurrent: false,
+      }),
+    ).toMatchObject({
+      status: 'ready',
+      next: {action: 'deliver', phaseId: 'phase-one'},
+    });
+    const delivered = recordNativeCycleDelivery(validated, 'phase-one', {
+      phaseId: 'phase-one',
+      phaseHash: snapshot.phaseHash,
+      delivery: 'local',
+      headSha: acceptedHead,
+      validatedTree: tree,
+    });
+    expect(projectNativeTaskView({...state, cycle: {...runtime, state: delivered}}, 'delivery-revision')).toMatchObject(
+      {
+        status: 'complete',
+        next: {action: 'complete'},
+        taskRef: expect.any(String),
+      },
+    );
   });
 
   it('keeps canonical invalidation blocking ahead of stale snapshot review hints', () => {

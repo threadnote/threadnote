@@ -5,6 +5,8 @@ import {
   readRecallEmbeddingDemand,
   requestRecallEmbeddings,
   RecallEmbeddingDemandUnavailable,
+  RecallEmbeddingWakePort,
+  recallEmbeddingDemandKey,
 } from '@threadnote/recall/background/demand';
 import {stepRecallVectorPreparation} from '@threadnote/recall/background/vector-step';
 import {Array as EffectArray} from 'effect';
@@ -12,9 +14,11 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Option, Path, Ref, Schema} from 'effect';
+import {Cause, Deferred, Effect, Fiber, FileSystem, Option, Path, Ref, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
+import * as LockBoundary from '@threadnote/platform/file/lock';
+import * as RefreshBoundary from '@threadnote/recall/mcp/refresh';
 import {describe, expect, vi} from 'vitest';
 import {EmbeddingFailed} from '@threadnote/inference/engine/errors';
 import {LocalModelRuntime, type LocalEmbeddingError} from '@threadnote/inference/engine/local-model-runtime';
@@ -111,7 +115,17 @@ const concurrentRefreshFixture = (callers: number) =>
         yield* Effect.forEach(Array.from({length: 20}), () => Effect.yieldNow, {discard: true});
         expect(Option.isSome(yield* Deferred.poll(requestsCompleted))).toBe(true);
         expect(results).toHaveLength(callers);
-        expect(EffectArray.every(results, result => result.status === 'unavailable')).toBe(true);
+        const unexpected = EffectArray.map(
+          EffectArray.filter(results, result => result.status !== 'unavailable').slice(0, 5),
+          result => ({
+            status: result.status,
+            warning: EffectString.slice(0, 180)(Option.getOrElse(result.result.warning, () => '')),
+          }),
+        );
+        expect(
+          EffectArray.every(results, result => result.status === 'unavailable'),
+          JSON.stringify(unexpected),
+        ).toBe(true);
         expect(
           EffectArray.every(results, result =>
             Boolean(
@@ -751,6 +765,143 @@ describe('MCP recall background vector refresh', () => {
         );
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('retains lexical fallback without acknowledging demand when the actual enqueue guard times out', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-recall-enqueue-held-'});
+      const config = {account: 'local', agentContextHome: home, user: 'tester'};
+      yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+      yield* requestRecallEmbeddings(config);
+      const before = yield* readRecallEmbeddingDemand(config);
+      const guard = path.join(home, 'recall', 'embedding-demand-v1', recallEmbeddingDemandKey(config) + '.lock');
+      const acquired = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const contended = yield* Deferred.make<void>();
+      const holder = yield* LockBoundary.withExclusiveFileLock(
+        fs,
+        guard,
+        {
+          createParentDirectory: false,
+          retryIntervalMilliseconds: 10,
+          staleAfterMilliseconds: 5000,
+          waitTimeoutMilliseconds: 1000,
+          useCanonicalProcessStartIdentity: true,
+          onAcquired: () => Deferred.succeed(acquired, undefined).pipe(Effect.asVoid),
+        },
+        Deferred.await(release),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(acquired);
+      const original = LockBoundary.withExclusiveFileLock;
+      let wakes = 0;
+      let embeddings = 0;
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(LockBoundary, 'withExclusiveFileLock').mockImplementation((fileSystem, lockPath, options, effect) =>
+            original(
+              fileSystem,
+              lockPath,
+              {
+                ...options,
+                onContention: location =>
+                  Deferred.succeed(contended, undefined).pipe(
+                    Effect.andThen(options.onContention?.(location) ?? Effect.void),
+                  ),
+              },
+              effect,
+            ),
+          ),
+        ),
+        () =>
+          Effect.gen(function* () {
+            const caller = yield* loadMcpRecallSemanticScoresResult(config, 'held enqueue', 5).pipe(
+              Effect.provideService(LocalModelStore, installedModelStore(home)),
+              Effect.provideService(
+                LocalModelRuntime,
+                fakeRuntime((inputs, dimensions) =>
+                  Effect.sync(() => {
+                    embeddings++;
+                    return EffectArray.map(inputs, () => unitVector(dimensions));
+                  }),
+                ),
+              ),
+              Effect.provideService(RecallEmbeddingWakePort, () =>
+                Effect.sync(() => {
+                  wakes++;
+                }),
+              ),
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(contended);
+            yield* TestClock.adjust(1000);
+            const result = yield* Fiber.join(caller);
+            expect(result.status).toBe('failed');
+            expect(Option.isNone(result.result.scores)).toBe(true);
+            expect(Option.isNone(result.result.corpusGeneration)).toBe(true);
+            const warning = Option.getOrElse(result.result.warning, () => '');
+            expect(warning).toContain('[guard/guard-timeout]');
+            expect(warning).toContain('enqueue not confirmed');
+            expect(warning).not.toMatch(/queued|scheduled/u);
+            expect(Buffer.byteLength(warning)).toBeLessThanOrEqual(180);
+            expect(wakes).toBe(0);
+            expect(embeddings).toBe(0);
+            expect(yield* readRecallEmbeddingDemand(config)).toEqual(before);
+          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      yield* Fiber.join(holder);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'preserves unknown defects and mixed enqueue causes instead of flattening cancellation or cleanup',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'mcp-recall-enqueue-cause-'});
+        const config = {account: 'local', agentContextHome: home, user: 'tester'};
+        yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', manifest.id);
+        const unavailable = RecallEmbeddingDemandUnavailable.make({
+          message: 'private unavailable',
+          stage: 'guard',
+          reason: 'guard-timeout',
+        });
+        const causes = [
+          Cause.die(new Error('private unknown defect')),
+          Cause.fromReasons([Cause.makeFailReason(unavailable), Cause.makeInterruptReason(123)]),
+          Cause.fromReasons([Cause.makeFailReason(unavailable), Cause.makeDieReason({reason: 'cleanup-unconfirmed'})]),
+          Cause.fromReasons([Cause.makeFailReason(unavailable), Cause.makeFailReason(unavailable)]),
+        ];
+        for (const cause of causes) {
+          const exit = yield* Effect.acquireUseRelease(
+            Effect.sync(() =>
+              vi
+                .spyOn(RefreshBoundary, 'scheduleMcpRecallBackgroundRefresh')
+                .mockImplementation(() => Effect.failCause(cause)),
+            ),
+            () =>
+              loadMcpRecallSemanticScoresResult(config, 'preserve failed enqueue', 5).pipe(
+                Effect.provideService(LocalModelStore, installedModelStore(home)),
+                Effect.exit,
+              ),
+            spy => Effect.sync(() => spy.mockRestore()),
+          );
+          expect(exit._tag).toBe('Failure');
+          if (exit._tag === 'Failure') {
+            const evidence = (input: Cause.Cause<unknown>) =>
+              EffectArray.map(input.reasons, reason =>
+                Cause.isFailReason(reason)
+                  ? ['Fail', reason.error]
+                  : Cause.isDieReason(reason)
+                    ? ['Die', reason.defect]
+                    : ['Interrupt', reason.fiberId],
+              );
+            expect(evidence(exit.cause)).toEqual(evidence(cause));
+          }
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   fcEffectProp(

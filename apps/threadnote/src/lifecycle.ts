@@ -33,6 +33,7 @@ import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
+  activeInstalledRelease,
   activeInstalledVersion,
   activateStandaloneRelease,
   pruneStandaloneReleases,
@@ -217,6 +218,7 @@ interface RunInstallOptions extends InstallOptions {
 
 interface RunRepairOptions extends RepairOptions {
   readonly skipAgentIntegrations?: boolean;
+  /** Caller already owns the standalone installation lock. */
   readonly skipReleaseLifecycle?: boolean;
 }
 
@@ -422,7 +424,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
       Effect.gen(function* () {
         yield* activateStandaloneRelease(releaseRoot, dryRun);
         yield* applyLegacyInstallationCleanup(legacyCleanup, dryRun);
-        yield* installCommandShim(dryRun, undefined, config.agentContextHome);
+        yield* installCommandShim(dryRun, releaseRoot, config.agentContextHome);
       }),
       dryRun,
     );
@@ -519,9 +521,20 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     printNextSteps: false,
     modelSetup: false,
     skipRecallIndexes: true,
-    skipReleaseLifecycle: options.skipReleaseLifecycle,
+    // Repair restores routing to the installed owner. Only install/update may
+    // activate or prune standalone releases.
+    skipReleaseLifecycle: true,
     start: false,
   });
+  const repairLaunchers = Effect.gen(function* () {
+    const activeRelease = yield* activeInstalledRelease();
+    if (activeRelease) {
+      yield* installCommandShim(dryRun, activeRelease.releaseRoot, config.agentContextHome);
+    } else {
+      yield* Console.warn('WARN no validated active standalone release; command launchers were not changed');
+    }
+  });
+  yield* withStandaloneInstallationLock(repairLaunchers, dryRun || options.skipReleaseLifecycle === true);
   if (!dryRun) {
     const authorizationKey = yield* loadRecallVectorAuthorizationKey(config);
     const selection = yield* readModelSelection(config.agentContextHome);

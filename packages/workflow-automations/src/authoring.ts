@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {Schema, type SchemaIssue} from 'effect';
+import {Predicate, Schema, SchemaIssue} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
 import * as EffectRecord from 'effect/Record';
@@ -39,10 +39,10 @@ const featureId = Schema.String.check(
       : undefined,
   ),
 );
-const relativePath = Schema.String.check(
-  Schema.isMinLength(1),
-  Schema.isMaxLength(4096),
-  Schema.makeFilter(value => {
+const relativePathDescription =
+  'Canonical relative path: non-empty slash-separated segments; no leading or trailing slash, empty, . or .. segments, backslashes, colons, or control characters.';
+const canonicalRelativePathCheck = Schema.makeFilter(
+  (value: string) => {
     if (
       new TextEncoder().encode(value).byteLength > 4096 ||
       Effect.pipe(value, EffectString.startsWith('/')) ||
@@ -56,8 +56,13 @@ const relativePath = Schema.String.check(
     )
       return 'Paths must be canonical relative paths without traversal or platform-specific roots.';
     return undefined;
-  }),
+  },
+  {
+    expected: 'a canonical relative path',
+    toJsonSchema: () => [{description: relativePathDescription, minLength: 1, maxLength: 4096}, true],
+  },
 );
+const relativePath = Schema.String.check(canonicalRelativePathCheck);
 const revision = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const memoryId = Schema.String.check(Schema.isPattern(/^tn_[A-Za-z0-9_-]{1,128}$/u));
 const memoryUri = Schema.String.check(
@@ -79,6 +84,11 @@ const context = Schema.Struct({
   codeRefs: Schema.Array(relativePath).check(Schema.isMaxLength(8)),
   evidenceRefs: Schema.Array(evidenceReference).check(Schema.isMaxLength(16)),
   note: boundedText(4096),
+  // Caller-asserted provenance, never an approval or execution capability.
+  // Adoption verifies the canonical portable reference before binding this field.
+  sharedPlanRef: Schema.optionalKey(
+    boundedText(512, true, true).check(Schema.isPattern(/^portableplan-v1\.[A-Za-z0-9_-]+$/u)),
+  ),
 });
 const requirement = Schema.Struct({id: portableId, behavior: prose});
 const scenario = Schema.Struct({
@@ -315,6 +325,66 @@ const combinedPhasePathsDiagnostic = (
   }
 };
 
+const pathDiagnostic = (issue: SchemaIssue.Issue, path: readonly PropertyKey[] = []): string | undefined => {
+  const validIndex = (value: PropertyKey | undefined) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  const recognized =
+    (path.length === 3 && path[0] === 'context' && path[1] === 'codeRefs' && validIndex(path[2])) ||
+    (path.length === 4 && path[0] === 'source' && path[1] === 'files' && validIndex(path[2]) && path[3] === 'path') ||
+    (path.length === 4 &&
+      path[0] === 'phases' &&
+      validIndex(path[1]) &&
+      (path[2] === 'affectedPaths' || path[2] === 'newPaths') &&
+      validIndex(path[3]));
+  if (
+    path.length > 4 ||
+    (path.length > 0 && !recognized && !(['context', 'source', 'phases'].includes(String(path[0])) && path.length < 4))
+  )
+    return undefined;
+  switch (issue._tag) {
+    case 'Pointer':
+      return pathDiagnostic(issue.issue, [...path, ...issue.path]);
+    case 'AnyOf':
+    case 'Composite':
+      for (const child of issue.issues) {
+        const diagnostic = pathDiagnostic(child, path);
+        if (diagnostic !== undefined) return diagnostic;
+      }
+      return undefined;
+    case 'Filter': {
+      if (issue.filter !== canonicalRelativePathCheck || typeof issue.issue.input !== 'string') return undefined;
+      let rule: string | undefined;
+      const value = issue.issue.input;
+      if (value.length === 0) rule = 'the non-empty path requirement';
+      else if (Effect.pipe(value, EffectString.endsWith('/'))) rule = 'a trailing separator';
+      else if (Effect.pipe(value, EffectString.startsWith('/'))) rule = 'a leading separator';
+      else if (Effect.pipe(value, EffectString.includes('\\'))) rule = 'a backslash';
+      else if (Effect.pipe(value, EffectString.includes(':'))) rule = 'a colon';
+      else if (AUTHORING_CONTROL_CHARACTER.test(value)) rule = 'a control character';
+      else if (EffectArray.some(Effect.pipe(value, EffectString.split('/')), segment => segment.length === 0))
+        rule = 'an empty path segment';
+      else if (EffectArray.some(Effect.pipe(value, EffectString.split('/')), segment => segment === '.'))
+        rule = 'a dot path segment';
+      else if (EffectArray.some(Effect.pipe(value, EffectString.split('/')), segment => segment === '..'))
+        rule = 'a parent path segment';
+      else if (new TextEncoder().encode(value).byteLength > 4096) rule = 'the 4096-byte path limit';
+      if (rule === undefined) return undefined;
+      const location = EffectArray.reduce(path, '', (result, part) =>
+        typeof part === 'number' ? `${result}[${part}]` : result ? `${result}.${String(part)}` : String(part),
+      );
+      const message = `${location} violates ${rule}.`;
+      return new TextEncoder().encode(message).byteLength <= 256 ? message : undefined;
+    }
+    default:
+      return undefined;
+  }
+};
+
+export const nativeAuthoringPathDiagnostic = (error: unknown): string | undefined => {
+  if (!Predicate.isObject(error) || !SchemaIssue.isIssue(error.issue)) return undefined;
+  return pathDiagnostic(error.issue);
+};
+
 export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDocument {
   let document: NativeAuthoringDocument;
   try {
@@ -325,7 +395,11 @@ export function decodeNativeAuthoringDocument(input: unknown): NativeAuthoringDo
     let message = 'The native authoring document is malformed or contains unsupported fields.';
     try {
       if (Schema.isSchemaError(error))
-        message = alternativesDiagnostic(error.issue) ?? combinedPhasePathsDiagnostic(error.issue) ?? message;
+        message =
+          alternativesDiagnostic(error.issue) ??
+          combinedPhasePathsDiagnostic(error.issue) ??
+          pathDiagnostic(error.issue) ??
+          message;
     } catch {
       // Optional diagnostics must preserve the original rejection if projection fails.
     }

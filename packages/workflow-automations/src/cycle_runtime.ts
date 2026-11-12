@@ -69,6 +69,8 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
   reviewLimits: Schema.Record(id, Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 5, maximum: 256}))),
   reviewExpansions: Schema.Array(NativeCycleReviewExpansionSchema).check(Schema.isMaxLength(256)),
   snapshots: Schema.Array(NativeCycleStoredSnapshotSchema).check(Schema.isMaxLength(256)),
+  /** For each invalidated phase, the last snapshot that predates its current repair iteration. */
+  invalidatedThroughSnapshot: Schema.optionalKey(Schema.Record(id, id)),
   reviews: Schema.Array(Schema.Struct({snapshotId: id, report: NativeCycleReviewSchema})).check(
     Schema.isMaxLength(256),
   ),
@@ -103,6 +105,30 @@ export const NativeCycleRuntimeSchema = Schema.Struct({
   ),
 });
 export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
+
+/** A retired snapshot cannot prove the current phase iteration, even when its tree is unchanged. */
+export function nativeCycleSnapshotIsCurrentIteration(
+  runtime: NativeCycleRuntime,
+  phaseId: string,
+  snapshotId: string,
+): boolean {
+  const snapshotIndex = EffectOption.getOrUndefined(
+    EffectArray.findFirstIndex(
+      runtime.snapshots,
+      entry => entry.snapshot.phaseId === phaseId && entry.snapshot.snapshotId === snapshotId,
+    ),
+  );
+  if (snapshotIndex === undefined) return false;
+  const boundaryId = runtime.invalidatedThroughSnapshot?.[phaseId];
+  if (!boundaryId) return true;
+  const retiredIndex = EffectOption.getOrUndefined(
+    EffectArray.findFirstIndex(
+      runtime.snapshots,
+      entry => entry.snapshot.phaseId === phaseId && entry.snapshot.snapshotId === boundaryId,
+    ),
+  );
+  return retiredIndex !== undefined && snapshotIndex > retiredIndex;
+}
 
 /** Counts accepted reports continuously across every snapshot for the phase. */
 export function nativeCyclePhaseReviewUsage(runtime: NativeCycleRuntime, phaseId: string) {
@@ -151,6 +177,10 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     new Set(EffectArray.map(runtime.attempts, attempt => attempt.id)).size !== runtime.attempts.length
   )
     fail('Duplicate cycle evidence identity.');
+  for (const [phaseId, snapshotId] of EffectRecord.toEntries(runtime.invalidatedThroughSnapshot ?? {})) {
+    if (!runtime.state.phases[phaseId] || snapshots.get(snapshotId)?.snapshot.phaseId !== phaseId)
+      fail('Invalidated snapshot boundary does not belong to its canonical phase.');
+  }
   const admissions = runtime.historicalAdmissions ?? [];
   if (
     (runtime.historicalAdmission === undefined) !== (runtime.historicalAdmissions === undefined) ||

@@ -1,19 +1,32 @@
 import {Array as EffectArray, Option as EffectOption, Schema, String as EffectString, pipe as EffectPipe} from 'effect';
-import {nextNativeCycle as cycleNext} from './cycle.js';
+import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js';
 import {NativeCycleDeliverySchema} from './cycle.js';
-import {nativeCyclePhaseReviewUsage} from './cycle_runtime.js';
+import {nativeCyclePhaseReviewUsage, nativeCycleSnapshotIsCurrentIteration} from './cycle_runtime.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
-import {nativeCycleReviewRecordingMode} from './cycle_review.js';
+import {nativeCycleReviewRecordingMode, validateNativeCycleReviewHistory} from './cycle_review.js';
 
-export const NativeTaskStartRequestSchema = Schema.Struct({
-  callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
-  featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-  installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
-  taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
-  intent: NativeCompactIntentSchema,
-});
+export const NativeTaskStartRequestSchema = Schema.Union([
+  Schema.Struct({
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    featureName: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    installationTarget: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+    taskRef: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096))),
+    intent: NativeCompactIntentSchema,
+  }),
+  Schema.Struct({
+    callerCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    sharedPlanRef: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+    installationTarget: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
+    delivery: Schema.Literals(['local', 'commit', 'pr']),
+    bindings: Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+    userResponse: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+    review: Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
+  }),
+]);
 
 export type NativeTaskRole = 'implementation' | 'review' | 'delivery';
 
@@ -101,6 +114,8 @@ export interface NativeTaskProjectionOptions {
   readonly role?: NativeTaskRole;
   readonly offset?: number;
   readonly planDrift?: string;
+  /** Result of the application core's live check-phase for an accepted review. */
+  readonly acceptedSnapshotCurrent?: boolean;
   readonly historicalWatchCount?: number;
   /** Digest of the refreshed external candidate set used by the caller's paged projection. */
   readonly candidateHash?: string;
@@ -108,7 +123,16 @@ export interface NativeTaskProjectionOptions {
 
 export const NativeTaskActionRefSchema = Schema.Struct({
   version: Schema.Literal(1),
-  kind: Schema.Literals(['task', 'work', 'snapshot', 'validation', 'delivery', 'closeout-prepare', 'closeout-finish']),
+  kind: Schema.Literals([
+    'task',
+    'work',
+    'snapshot',
+    'validation',
+    'delivery',
+    'retained-work',
+    'closeout-prepare',
+    'closeout-finish',
+  ]),
   runId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)),
   generationHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   stateRevision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
@@ -136,10 +160,28 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   ),
   watchDeliveryId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(32))),
   watchEventId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(384))),
+  workViewDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  workRowDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   closeoutRevision: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)))),
   transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
-});
+}).check(
+  Schema.makeFilter(ref =>
+    ref.kind === 'retained-work'
+      ? Boolean(
+          ref.watchId &&
+          ref.consumerId &&
+          ref.wakeupId &&
+          ref.watchEventId &&
+          ref.workViewDigest &&
+          ref.workRowDigest &&
+          !ref.watchDeliveryId &&
+          !ref.eventKey &&
+          !ref.watchAttemptId,
+        )
+      : ref.workViewDigest === undefined && ref.workRowDigest === undefined,
+  ),
+);
 export type NativeTaskActionRef = typeof NativeTaskActionRefSchema.Type;
 
 const nativeTaskStartRunIdSchema = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
@@ -409,22 +451,66 @@ export function projectNativeTaskView(
 
   const runtime = state.cycle;
   const canonicalNext = cycleNext(cycle);
-  const openReview = EffectOption.getOrUndefined(
+  const localDelivery =
+    cycle.plan.delivery === 'local'
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            cycle.plan.phases,
+            candidate =>
+              cycle.phases[candidate.id].status === 'validated' &&
+              !cycle.phases[candidate.id].delivery &&
+              nativeCycleParentsReady(cycle, candidate.id),
+          ),
+        )
+      : undefined;
+  const pendingSnapshot = EffectOption.getOrUndefined(
     EffectArray.findFirst(cycle.plan.phases, candidate => {
-      if (canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
+      if (localDelivery || canonicalNext.action !== 'implement' || canonicalNext.phaseId !== candidate.id) return false;
       const phaseSnapshots = EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === candidate.id);
       const latest = phaseSnapshots.at(-1)?.snapshot;
       return Boolean(
         latest &&
         latest.phaseHash === cycle.phases[candidate.id].phaseHash &&
-        !EffectArray.some(runtime.reviews, item => item.snapshotId === latest.snapshotId),
+        nativeCycleSnapshotIsCurrentIteration(runtime, candidate.id, latest.snapshotId),
       );
     }),
   );
-  const reviewSnapshot = openReview
-    ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === openReview.id).at(-1)
+  const latestSnapshot = pendingSnapshot
+    ? EffectArray.filter(runtime.snapshots, entry => entry.snapshot.phaseId === pendingSnapshot.id).at(-1)
     : undefined;
-  const reviewWork = openReview && reviewSnapshot ? {phase: openReview, snapshot: reviewSnapshot} : undefined;
+  const acceptedReview = latestSnapshot
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
+      )
+    : undefined;
+  const predecessorId = latestSnapshot?.snapshot.previous ?? latestSnapshot?.snapshot.supersedes;
+  const predecessor = predecessorId
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
+      )?.snapshot
+    : undefined;
+  const predecessorReview = predecessor
+    ? EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
+      )?.report
+    : undefined;
+  const blockingReview = Boolean(
+    latestSnapshot &&
+    acceptedReview &&
+    validateNativeCycleReviewHistory(
+      latestSnapshot.snapshot,
+      acceptedReview.report,
+      predecessor && predecessorReview ? {snapshot: predecessor, review: predecessorReview} : undefined,
+    ).summary.blockingIssueCount,
+  );
+  const reviewWork =
+    pendingSnapshot && latestSnapshot && !acceptedReview
+      ? {phase: pendingSnapshot, snapshot: latestSnapshot}
+      : undefined;
+  const validationWork =
+    pendingSnapshot && latestSnapshot && acceptedReview && !blockingReview && options.acceptedSnapshotCurrent !== false
+      ? {phase: pendingSnapshot, snapshot: latestSnapshot}
+      : undefined;
   const latestInvalidAttempt = reviewWork
     ? EffectArray.filter(
         runtime.attempts,
@@ -447,14 +533,18 @@ export function projectNativeTaskView(
         snapshotId: reviewWork.snapshot.snapshot.snapshotId,
         ...(latestInvalidAttempt ? {reason: latestInvalidAttempt.message} : {}),
       }
-    : cycleNext(cycle);
+    : validationWork
+      ? {action: 'validate', phaseId: validationWork.phase.id, snapshotId: validationWork.snapshot.snapshot.snapshotId}
+      : localDelivery
+        ? {action: 'deliver', phaseId: localDelivery.id}
+        : canonicalNext;
   const phase = next.phaseId
     ? EffectOption.getOrUndefined(EffectArray.findFirst(cycle.plan.phases, item => item.id === next.phaseId))
     : undefined;
   const scope = phase?.allowedPaths ?? [];
   const acceptance = phase?.acceptanceCriteria ?? [];
   const acceptanceRefs = phase ? EffectArray.map(phase.acceptanceRefs, item => item.id) : [];
-  const snapshot = reviewWork?.snapshot.snapshot;
+  const snapshot = (reviewWork ?? validationWork)?.snapshot.snapshot;
   const snapshotFiles = snapshot?.files ?? [];
   const snapshotScopeFiles = snapshot?.scopeFiles ?? [];
   const counts = {
@@ -491,11 +581,18 @@ export function projectNativeTaskView(
             `A complete independent review for snapshot ${reviewWork.snapshot.snapshot.snapshotId}`,
             'Correctness and simplicity review lanes with complete reports',
           ]
-    : phase
-      ? [...(scope.length ? [] : ['Implementation scope paths']), ...(acceptance.length ? [] : ['Acceptance criteria'])]
-      : next.action === 'complete'
-        ? []
-        : ['An eligible phase'];
+    : validationWork
+      ? [`Passed check and acceptance evidence for snapshot ${validationWork.snapshot.snapshot.snapshotId}`]
+      : localDelivery && next.action === 'deliver'
+        ? ['The validation reference returned by workflow_task_record_validation']
+        : phase
+          ? [
+              ...(scope.length ? [] : ['Implementation scope paths']),
+              ...(acceptance.length ? [] : ['Acceptance criteria']),
+            ]
+          : next.action === 'complete'
+            ? []
+            : ['An eligible phase'];
   const view: NativeTaskView = {
     status:
       next.action === 'complete'
@@ -605,16 +702,12 @@ export function projectNativeTaskView(
   };
   return {
     ...view,
-    ...(next.action === 'complete'
-      ? {}
-      : {
-          taskRef: nativeTaskCardRef(
-            state,
-            revision,
-            next.action,
-            next.phaseId,
-            'snapshotId' in next ? next.snapshotId : undefined,
-          ),
-        }),
+    taskRef: nativeTaskCardRef(
+      state,
+      revision,
+      next.action,
+      next.phaseId,
+      'snapshotId' in next ? next.snapshotId : undefined,
+    ),
   };
 }

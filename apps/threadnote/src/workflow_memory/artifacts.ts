@@ -25,6 +25,7 @@ import {refreshWorkflowRecall, trackPotentialWorkflowMutation} from './recall_re
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
+import {workflowGraphProjectHint} from './graph_scope.js';
 import {
   assertNativeJobLiveSource,
   CurrentNativeJobReadyPromotion,
@@ -399,7 +400,14 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         ? {ok: true as const, citations: admitted.citations}
         : yield* captureMemoryCodeCitationsForMcp(
             config,
-            {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
+            {
+              callerCwd: state.binding.repo,
+              project: yield* workflowGraphProjectHint(config, state.binding),
+              ...(state.binding.graphProject === undefined
+                ? {}
+                : {expectedProjectScope: {kind: 'selected-project' as const, project: state.binding.graphProject}}),
+              refs: request.codeRefs ?? [],
+            },
             'workflow-memory',
           );
     if (!captured.ok) {
@@ -411,6 +419,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
             : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
         );
       if (
+        state.binding.graphProject !== undefined ||
         request.citationPolicy !== 'defer' ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
         !captured.failure.recovery

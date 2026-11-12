@@ -130,7 +130,17 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly deliveryRef?: string;
     readonly phaseId?: string;
     readonly operation:
-      'start' | 'inspect' | 'relay' | 'disposition' | 'ack' | 'work' | 'work-disposition' | 'stop' | 'complete';
+      | 'start'
+      | 'renew'
+      | 'inspect'
+      | 'relay'
+      | 'disposition'
+      | 'ack'
+      | 'work'
+      | 'work-detail'
+      | 'work-disposition'
+      | 'stop'
+      | 'complete';
     readonly host?: 'codex' | 'cursor-cli';
     readonly executable?: string;
     readonly hostReference?: string;
@@ -139,6 +149,11 @@ export function makeNativeTaskPrWatchCommand<E, R>(
     readonly recoverWakeup?: boolean;
     readonly noticeRef?: string;
     readonly watchDeliveryRef?: string;
+    readonly workEventRef?: string;
+    readonly offsetBytes?: number;
+    readonly sourceDigest?: string;
+    readonly workOffset?: number;
+    readonly workViewDigest?: string;
     readonly dispositionEventRefs: readonly string[];
     readonly dispositionStatuses: readonly string[];
     readonly dispositionReasons: readonly string[];
@@ -157,7 +172,19 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       phaseId: optionalString('phase-id', 'Current phase for provisional inspect or stop'),
       operation: requiredChoice(
         'operation',
-        ['start', 'inspect', 'relay', 'disposition', 'ack', 'work', 'work-disposition', 'stop', 'complete'],
+        [
+          'start',
+          'renew',
+          'inspect',
+          'relay',
+          'disposition',
+          'ack',
+          'work',
+          'work-detail',
+          'work-disposition',
+          'stop',
+          'complete',
+        ],
         'Task-bound watch operation',
       ),
       host: optionalChoice('host', ['codex', 'cursor-cli'], 'Registered wakeup host'),
@@ -165,6 +192,11 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
       workspace: optionalString('workspace', 'Cursor workspace path'),
       noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      workEventRef: optionalString('work-event-ref', 'Opaque retained work reference returned by work'),
+      offsetBytes: optional(integerFlag('offset-bytes')),
+      sourceDigest: optionalString('source-digest', 'Canonical work detail digest returned by work'),
+      workOffset: optional(integerFlag('work-offset')),
+      workViewDigest: optionalString('work-view-digest', 'Complete retained work view digest returned by work'),
       watchDeliveryRef: optionalString('watch-delivery-ref', 'Opaque current event delivery returned by relay'),
       takeover: boolean('takeover', 'Explicitly take over an expired task watch consumer'),
       recoverWakeup: boolean('recover-wakeup', 'Explicitly recover the owned ambiguous host wakeup'),
@@ -248,45 +280,57 @@ export function makeNativeTaskPrWatchCommand<E, R>(
 export function makeNativeTaskStartCommand<E, R>(
   handler: (options: {
     readonly callerCwd: string;
-    readonly featureName: string;
+    readonly featureName?: string;
     readonly installationTarget: string;
+    readonly sharedPlanRef?: string;
+    readonly bindingsFile?: string;
+    readonly delivery?: 'local' | 'commit' | 'pr';
+    readonly userResponse?: string;
+    readonly reviewOutcome?: 'accepted';
+    readonly graphProject?: string;
     readonly taskRef?: string;
-    readonly title: string;
-    readonly currentBehavior: string;
-    readonly desiredChange: string;
+    readonly title?: string;
+    readonly currentBehavior?: string;
+    readonly desiredChange?: string;
     readonly affectedPaths: readonly string[];
-    readonly acceptanceCriterion: string;
-    readonly verification: string;
-    readonly eligibilityRationale: string;
-    readonly eligibility: 'eligible' | 'needs-planning';
+    readonly acceptanceCriterion?: string;
+    readonly verification?: string;
+    readonly eligibilityRationale?: string;
+    readonly eligibility?: 'eligible' | 'needs-planning';
     readonly missingDecision?: string;
     readonly evidenceRefs: readonly string[];
     readonly reviewRequired: boolean;
-    readonly reviewReason: string;
+    readonly reviewReason?: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
 ) {
   return Command.make(
     'task-start',
     {
       callerCwd: requiredString('caller-cwd', 'Absolute checkout path for this task'),
-      featureName: requiredString('feature-name', 'Stable feature name used to resume this task'),
+      featureName: optionalString('feature-name', 'Stable feature name used to resume a compact task'),
       installationTarget: requiredString(
         'installation-target',
         'Installed Threadnote host target verified on start or resume',
       ),
       taskRef: optionalString('task-ref', 'Opaque task reference returned by a previous start'),
-      title: requiredString('title', 'Task title'),
-      currentBehavior: requiredString('current-behavior', 'Current behavior'),
-      desiredChange: requiredString('desired-change', 'Desired behavior'),
+      sharedPlanRef: optionalString('shared-plan-ref', 'One verified portable plan reference'),
+      bindingsFile: optionalString('bindings-file', 'Local phase branch/base choices as JSON'),
+      delivery: optionalChoice('delivery', ['local', 'commit', 'pr'], 'Recipient delivery mode'),
+      userResponse: optionalString('response', 'Actual recipient instruction to execute the shared plan'),
+      reviewOutcome: optionalChoice('review-outcome', ['accepted'], 'Actual accepted recipient review'),
+      graphProject: optionalString('graph-project', 'Configured graph project for a new native run'),
+      title: optionalString('title', 'Task title'),
+      currentBehavior: optionalString('current-behavior', 'Current behavior'),
+      desiredChange: optionalString('desired-change', 'Desired behavior'),
       affectedPaths: repeatedString('affected-path', 'Repository-relative source path; repeat for each path'),
-      acceptanceCriterion: requiredString('acceptance', 'Acceptance criterion'),
-      verification: requiredString('verification', 'How the acceptance criterion will be verified'),
-      eligibilityRationale: requiredString('eligibility-rationale', 'Human-authored bounded-fix eligibility rationale'),
-      eligibility: requiredChoice('eligibility', ['eligible', 'needs-planning'], 'Semantic bounded-fix eligibility'),
+      acceptanceCriterion: optionalString('acceptance', 'Acceptance criterion'),
+      verification: optionalString('verification', 'How the acceptance criterion will be verified'),
+      eligibilityRationale: optionalString('eligibility-rationale', 'Human-authored bounded-fix eligibility rationale'),
+      eligibility: optionalChoice('eligibility', ['eligible', 'needs-planning'], 'Semantic bounded-fix eligibility'),
       missingDecision: optionalString('missing-decision', 'Unresolved decision that requires expanded planning'),
       evidenceRefs: repeatedString('evidence-ref', 'Evidence URI for needs-planning; repeat as needed'),
       reviewRequired: boolean('review-required', 'Whether an independent authoring review is required'),
-      reviewReason: requiredString('review-reason', 'Why review is or is not required'),
+      reviewReason: optionalString('review-reason', 'Why review is or is not required'),
     },
     handler,
   ).pipe(Command.withDescription('Start or resume a bounded task from semantic intent'));
@@ -359,10 +403,11 @@ export function makeNativeTaskActionCommands<E, R>(
     readonly reason: string;
   }) => Effect.Effect<void, E | WorkflowAutomationError, R>,
   lifecycleHandler?: (options: {
-    readonly command: 'begin' | 'resume' | 'reconcile' | 'extend-review-budget';
+    readonly command: 'begin' | 'resume' | 'reopen' | 'reconcile' | 'extend-review-budget';
     readonly runId: string;
     readonly callerCwd: string;
     readonly taskRef: string;
+    readonly phaseId?: string;
     readonly reason?: string;
     readonly bindings?: unknown;
     readonly additionalReviews?: number;
@@ -407,6 +452,17 @@ export function makeNativeTaskActionCommands<E, R>(
     },
     options => lifecycle({command: 'resume', ...options}),
   ).pipe(Command.withDescription('Resume the current blocked phase after its dependencies are accepted'));
+  const reopen = Command.make(
+    'reopen',
+    {
+      runId: requiredString('run-id', 'Existing native workflow run identifier'),
+      callerCwd: requiredString('caller-cwd', 'Absolute checkout path bound to this workflow run'),
+      taskRef: requiredString('task-ref', 'Opaque current task card reference from workflow task view'),
+      phaseId: requiredString('phase-id', 'Exact validated or published phase to reopen'),
+      reason: requiredString('reason', 'Observed failure or source-drift reason'),
+    },
+    options => lifecycle({command: 'reopen', ...options}),
+  ).pipe(Command.withDescription('Reopen one validated or published phase and retain its proof history'));
   const reconcile = Command.make(
     'reconcile',
     {
@@ -781,6 +837,7 @@ export function makeNativeTaskActionCommands<E, R>(
       work,
       begin,
       resume,
+      reopen,
       reconcile,
       extendReviewBudget,
       recordSnapshot,

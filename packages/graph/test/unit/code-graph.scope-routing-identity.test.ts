@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Junctions keep directory-link fixtures unprivileged on Windows.
@@ -85,6 +85,29 @@ const observe = (manifest: string, cwd: string) =>
 
 describe('fresh scope routing identity observations', () => {
   effectIt.layer(citationPlatformLayer)(test => {
+    test.effect('tags ambiguous scope without changing its project choices', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.fs.writeFileString(
+          f.manifest,
+          JSON.stringify({
+            version: 1,
+            projects: EffectArray.map(['Alpha', 'Beta'], name => ({
+              name,
+              path: f.root,
+              seed: [],
+              uri: `threadnote://resources/repos/${name}`,
+              graph: {closure: 'dependencies', roots: [name]},
+            })),
+          }),
+        );
+        const result = yield* resolveCodeGraphScopeRoute(f.manifest, f.root).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: 'Failure',
+          failure: {reason: 'ambiguous', projects: [{name: 'Alpha'}, {name: 'Beta'}]},
+        });
+      }).pipe(TestClock.withLive),
+    );
     test.effect('obtains one fresh identity for identical caller and project paths on every invocation', () =>
       Effect.gen(function* () {
         const f = yield* fixture;

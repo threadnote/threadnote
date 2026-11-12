@@ -12,6 +12,20 @@ const RUNTIME_RELATIVE_PATH = 'runtime/web-tree-sitter.wasm';
 const RUNTIME_SHA256 = 'beca80e44cccbf2299ed4d1e3fa6462a9a6fe818aeebf847547a392227ce4acc';
 export const TREE_SITTER_RUNTIME_CACHE_IDENTITY = `web-tree-sitter:0.27.1:${RUNTIME_SHA256}`;
 
+// web-tree-sitter stores its binding and transfer buffer in module globals. Separate
+// runtime layers must share initialization before loading any grammar.
+let parserInitialization: Promise<void> | undefined;
+const initializeParser = (runtimePath: string): Promise<void> => {
+  if (parserInitialization === undefined) {
+    const pending = Parser.init({locateFile: () => runtimePath});
+    parserInitialization = pending;
+    void pending.catch(() => {
+      if (parserInitialization === pending) parserInitialization = undefined;
+    });
+  }
+  return parserInitialization;
+};
+
 export interface ParsedTreeSitterSource {
   readonly language: Language;
   readonly query: (source: string) => Query;
@@ -45,9 +59,7 @@ export class TreeSitterRuntime extends Context.Service<TreeSitterRuntime, TreeSi
       const runtimePath = path.join(assetRoot, RUNTIME_RELATIVE_PATH);
       const initialization = yield* Effect.cached(
         verifyAsset(fs, runtimePath, RUNTIME_SHA256, 'Tree-sitter runtime').pipe(
-          Effect.andThen(
-            fromPromise('initialize tree-sitter parser', () => Parser.init({locateFile: () => runtimePath})),
-          ),
+          Effect.andThen(fromPromise('initialize tree-sitter parser', () => initializeParser(runtimePath))),
           Effect.mapError(cause =>
             Schema.is(TreeSitterRuntimeError)(cause)
               ? cause

@@ -90,6 +90,17 @@ describe('native request schema discovery', () => {
     }
     expect(JSON.parse(text).schema.properties.kind.enum).toEqual([kind]);
     expect(JSON.parse(text).schema.anyOf).toBeUndefined();
+    const schema = JSON.parse(text).schema;
+    const rule = 'Canonical relative path';
+    const pathRule = (field: Record<string, unknown>) =>
+      Effect2.pipe(JSON.stringify(field), EffectString.includes(rule));
+    expect(pathRule(schema.properties.context.properties.codeRefs.items)).toBe(true);
+    expect(pathRule(schema.properties.source.anyOf[0].properties.files.items.properties.path)).toBe(true);
+    if (kind === 'plan') {
+      const phase = schema.properties.phases.items;
+      expect(pathRule(phase.properties.affectedPaths.items)).toBe(true);
+      expect(pathRule(phase.properties.newPaths.items)).toBe(true);
+    }
   });
 
   it('narrows supported commands using their production literal decoder', () => {

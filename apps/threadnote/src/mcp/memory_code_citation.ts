@@ -1,13 +1,22 @@
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Effect, Schema} from 'effect';
-import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {
+  captureMemoryCodeCitations,
+  MemoryCodeCitationCaptureError,
+  type MemoryCodeCitationCaptureScopeExpectationV1,
+} from '@threadnote/context/citation/capture';
 import {mcpErrorResult} from './server/common.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {Array as EffectArray} from 'effect';
 
 export function captureMemoryCodeCitationsForMcp(
   config: RuntimeConfig,
-  input: {readonly callerCwd: string; readonly project?: string; readonly refs: readonly string[]},
+  input: {
+    readonly callerCwd: string;
+    readonly project?: string;
+    readonly expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1;
+    readonly refs: readonly string[];
+  },
   operation: string,
 ) {
   if (input.refs.length === 0) {

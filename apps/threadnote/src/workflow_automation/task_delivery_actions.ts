@@ -2,7 +2,7 @@ import {NativeCycleDeliverySchema, nextNativeCycle} from '@threadnote/workflow-a
 import {decodeNativeTaskActionRef, encodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {Effect, Array as EffectArray, FileSystem, Path, Predicate, Schema} from 'effect';
+import {Effect, Array as EffectArray, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import * as Clock from 'effect/Clock';
 import * as EffectString from 'effect/String';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
@@ -12,6 +12,12 @@ import {runWorkflowAutomation} from './index.js';
 import {readNativeWorkflowState} from './store.js';
 import {readNativeTaskView} from './task.js';
 import {runNativeWatch} from './watch.js';
+import {
+  assertNativeWatchOutput,
+  nativeWatchOutputLimit,
+  nativeWatchWorkDetail,
+  nativeWatchWorkList,
+} from './watch_output.js';
 import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
@@ -78,7 +84,7 @@ export const runNativeTaskCommitDelivery = (
     const validationDigest = proof.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
     if (
       !proof.validation ||
-      proof.head !== ref.sourceHead ||
+      proof.head !== (proof.validation.head ?? ref.sourceHead) ||
       (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
     )
       return yield* fail('stale-validation-ref', 'The reference does not match current canonical phase validation.');
@@ -172,7 +178,7 @@ export const runNativeTaskPrDelivery = (
       !phase ||
       !proof?.validation ||
       proof.phaseHash !== ref.phaseHash ||
-      proof.head !== ref.sourceHead ||
+      proof.head !== (proof.validation.head ?? ref.sourceHead) ||
       proof.tree !== ref.sourceTree ||
       (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
     )
@@ -362,7 +368,6 @@ export const runNativeTaskPrWatch = (
         item =>
           item.snapshot.phaseId === request.phaseId &&
           item.snapshot.phaseHash === phase.phaseHash &&
-          item.snapshot.head === phase.head &&
           item.snapshot.tree === phase.tree &&
           item.snapshot.repo === baseline.repo &&
           item.snapshot.baseTree === baseline.tree,
@@ -462,7 +467,8 @@ export const runNativeTaskPrWatch = (
       sha256HexSync(stableJson(embeddedDelivery)) !== deliveryAction.payloadDigest ||
       embeddedDelivery.delivery !== 'pr' ||
       (embeddedDelivery.pr?.state !== 'open' && embeddedDelivery.pr?.state !== 'merged') ||
-      embeddedDelivery.headSha !== validation.sourceHead ||
+      embeddedDelivery.phaseId !== validation.phaseId ||
+      embeddedDelivery.phaseHash !== validation.phaseHash ||
       embeddedDelivery.validatedTree !== validation.sourceTree
     )
       return yield* fail(
@@ -471,7 +477,36 @@ export const runNativeTaskPrWatch = (
       );
     const runtime = stored.state.cycle;
     if (!runtime) return yield* fail('cycle-not-found', 'This task has no admitted native cycle.');
-    const phase = runtime.state.phases[validation.phaseId];
+    const referencedPr = embeddedDelivery.pr;
+    const currentPhase = runtime.state.phases[validation.phaseId];
+    const maintenance = request.operation !== 'start' && request.operation !== 'complete';
+    const deliveryMatches = (receipt: NonNullable<typeof currentPhase>['delivery']) =>
+      receipt === undefined ||
+      (receipt.delivery === 'pr' &&
+        receipt.pr?.url === referencedPr.url &&
+        receipt.pr?.headSha === referencedPr.headSha &&
+        receipt.pr?.branch === referencedPr.branch &&
+        receipt.pr?.baseBranch === referencedPr.baseBranch &&
+        receipt.commitEvidence === embeddedDelivery.commitEvidence &&
+        stableJson(receipt.publication) === stableJson(embeddedDelivery.publication));
+    // Retained proof authorizes only maintenance of an already-bound watch. It does
+    // not validate the current checkout or admit another delivery at its new HEAD.
+    const phase =
+      maintenance && currentPhase
+        ? Option.getOrUndefined(
+            EffectArray.findFirst(
+              [currentPhase, ...[...(currentPhase.history ?? [])].reverse()],
+              proof =>
+                proof.phaseHash === validation.phaseHash &&
+                proof.tree === validation.sourceTree &&
+                proof.head === embeddedDelivery.headSha &&
+                proof.head === (proof.validation?.head ?? validation.sourceHead) &&
+                proof.validation !== undefined &&
+                sha256HexSync(stableJson(proof.validation)) === validation.payloadDigest &&
+                deliveryMatches(proof.delivery),
+            ),
+          )
+        : currentPhase;
     const matchingSnapshots = EffectArray.filter(
       runtime.snapshots,
       item =>
@@ -485,17 +520,18 @@ export const runNativeTaskPrWatch = (
       return yield* fail('snapshot-ambiguous', 'The watch reference needs one unique canonical reviewed snapshot.');
     if (
       !phase ||
-      phase.head !== validation.sourceHead ||
+      phase.head !== (phase.validation?.head ?? validation.sourceHead) ||
       phase.tree !== validation.sourceTree ||
       phase.phaseHash !== validation.phaseHash ||
-      (phase.delivery !== undefined &&
-        (phase.delivery.delivery !== 'pr' ||
-          phase.delivery.pr?.url !== embeddedDelivery.pr.url ||
-          phase.delivery.pr?.headSha !== embeddedDelivery.pr.headSha ||
-          phase.delivery.pr?.branch !== embeddedDelivery.pr.branch ||
-          phase.delivery.pr?.baseBranch !== embeddedDelivery.pr.baseBranch ||
-          phase.delivery.commitEvidence !== embeddedDelivery.commitEvidence ||
-          stableJson(phase.delivery.publication) !== stableJson(embeddedDelivery.publication)))
+      embeddedDelivery.headSha !== phase.head ||
+      (phase.delivery === undefined &&
+        !EffectArray.some(
+          runtime.state.plan.phases,
+          item => item.id === validation.phaseId && item.branch === embeddedDelivery.pr?.branch,
+        )) ||
+      !phase.validation ||
+      sha256HexSync(stableJson(phase.validation)) !== validation.payloadDigest ||
+      !deliveryMatches(phase.delivery)
     )
       return yield* fail('stale-delivery-ref', 'The validated PR source changed; reload the current task card.');
     const watchIdentity = EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${validation.phaseId}`));
@@ -505,7 +541,24 @@ export const runNativeTaskPrWatch = (
     const wakeupId = `task-${watchIdentity}`;
     const admitProvisionalWatch = () =>
       Effect.gen(function* () {
-        if (phase.delivery !== undefined) return;
+        if (phase.delivery !== undefined) {
+          const ready = unwrapCycle(
+            yield* inCheckout(
+              runWorkflowAutomation(
+                config,
+                cycleRequest(stored, {
+                  command: 'publication-ready',
+                  phaseId: validation.phaseId,
+                  publication: embeddedDelivery.publication,
+                }),
+              ),
+              checkout,
+            ),
+          );
+          if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
+            return yield* fail('source-drift', 'Starting a watch requires its exact clean validated source.');
+          return;
+        }
         if (
           embeddedDelivery.pr?.state !== 'open' ||
           typeof embeddedDelivery.commitEvidence !== 'string' ||
@@ -603,6 +656,8 @@ export const runNativeTaskPrWatch = (
     const consumer = watch.envelope.state.consumer;
     if (!consumer)
       return yield* fail('watch-consumer-required', 'Attach the actual task consumer before using the watch.');
+    if (consumer.id !== consumerId || consumer.wakeupId !== wakeupId)
+      return yield* fail('watch-identity-conflict', 'The stored watch belongs to another task consumer.');
     const terminalEmpty =
       watch.envelope.state.prState !== 'open' &&
       watch.envelope.state.events.length === 0 &&
@@ -614,13 +669,40 @@ export const runNativeTaskPrWatch = (
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')
     )
       return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
-    if (
-      request.operation === 'relay' ||
-      request.operation === 'disposition' ||
-      request.operation === 'ack' ||
-      request.operation === 'work-disposition'
-    )
-      yield* admitProvisionalWatch();
+    if (request.operation === 'renew') {
+      if (request.takeover || request.recoverWakeup)
+        return yield* fail(
+          'invalid-request',
+          'Renewal preserves the exact host and does not allow takeover or wake recovery.',
+        );
+      if (terminalEmpty)
+        return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
+      yield* verifyNativeCycleDeliveryRepository(checkout, embeddedDelivery);
+      if (phase.delivery === undefined) {
+        const approved = EffectArray.filter(runtime.state.plan.phases, item => item.id === validation.phaseId);
+        if (approved.length !== 1 || approved[0].branch !== embeddedDelivery.pr.branch)
+          return yield* fail(
+            'stale-delivery-ref',
+            'Renewal requires the canonical approved phase branch and base binding.',
+          );
+        const {baseRefBinding: _untrustedBinding, ...pr} = embeddedDelivery.pr;
+        yield* bindNativeCycleDeliveryBase(checkout, approved[0].baseBranch, {...embeddedDelivery, pr});
+      }
+      const renewed = yield* runNativeWatch(config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'renew',
+        watchId,
+        pr: embeddedDelivery.pr.url,
+        consumerId,
+        wakeupId,
+        wakeup: request.wakeup ?? watch.envelope.notification?.target,
+        baseBranch: embeddedDelivery.pr.baseBranch,
+        headBranch: embeddedDelivery.pr.branch,
+      });
+      return {status: 'watching', watchId, prUrl: embeddedDelivery.pr.url, consumerId, watch: renewed};
+    }
     if (request.operation === 'complete') {
       const notification = watch.envelope.notification;
       const now = yield* Clock.currentTimeMillis;
@@ -657,9 +739,11 @@ export const runNativeTaskPrWatch = (
         planPhases.length !== 1 ||
         !currentProof ||
         currentProof.phaseHash !== validation.phaseHash ||
-        currentProof.head !== validation.sourceHead ||
+        currentProof.head !== embeddedDelivery.headSha ||
         currentProof.tree !== validation.sourceTree ||
-        currentProof.validation?.snapshotTree !== validation.sourceTree
+        currentProof.validation?.snapshotTree !== validation.sourceTree ||
+        (currentProof.validation.head ?? validation.sourceHead) !== currentProof.head ||
+        sha256HexSync(stableJson(currentProof.validation)) !== validation.payloadDigest
       )
         return yield* fail(
           'stale-delivery-ref',
@@ -690,7 +774,7 @@ export const runNativeTaskPrWatch = (
           canonicalPr?.state === 'open' &&
           (canonicalReceipt.watch?.state !== 'active' ||
             canonicalReceipt.watch.prUrl !== embeddedDelivery.pr.url ||
-            canonicalReceipt.watch.headSha !== validation.sourceHead ||
+            canonicalReceipt.watch.headSha !== embeddedDelivery.headSha ||
             canonicalReceipt.watch.consumerId !== consumer.id)
         )
           return yield* fail('stale-delivery-ref', 'The published phase is bound to another PR watch consumer.');
@@ -768,7 +852,7 @@ export const runNativeTaskPrWatch = (
         if (
           EffectString.trim(branchHead.stderr) ||
           EffectString.trim(branchTree.stderr) ||
-          EffectString.trim(branchHead.stdout) !== validation.sourceHead ||
+          EffectString.trim(branchHead.stdout) !== embeddedDelivery.headSha ||
           EffectString.trim(branchTree.stdout) !== validation.sourceTree
         )
           return yield* fail(
@@ -789,7 +873,7 @@ export const runNativeTaskPrWatch = (
             checkout,
           ),
         );
-        if (ready.head !== validation.sourceHead || ready.tree !== validation.sourceTree)
+        if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
           return yield* fail('source-drift', 'The current source no longer matches the reviewed PR snapshot.');
       }
       const finalReceiptPr = finalReceipt.pr;
@@ -863,9 +947,148 @@ export const runNativeTaskPrWatch = (
         next: recorded.result.next,
       };
     }
-    const notice = request.noticeRef ? decodeNativeTaskActionRef(request.noticeRef) : undefined;
+    const workViewDigest = sha256HexSync(stableJson(watch.envelope.state.work));
+    if (request.operation === 'work-detail') {
+      const ref = request.workEventRef ? decodeNativeTaskActionRef(request.workEventRef) : undefined;
+      const row = ref?.watchEventId
+        ? Option.getOrUndefined(
+            EffectArray.findFirst(watch.envelope.state.work, item => item.eventId === ref.watchEventId),
+          )
+        : undefined;
+      // Like work, detail reads bind the current owner without requiring or renewing its lease.
+      if (
+        !ref ||
+        ref.kind !== 'retained-work' ||
+        ref.runId !== request.runId ||
+        ref.generationHash !== sha256HexSync(stored.state.generation) ||
+        ref.watchId !== watchId ||
+        ref.consumerId !== consumer.id ||
+        ref.wakeupId !== consumer.wakeupId ||
+        ref.workViewDigest !== workViewDigest ||
+        !row ||
+        ref.workRowDigest !== sha256HexSync(stableJson(row))
+      )
+        return yield* fail(
+          'stale-watch-work-ref',
+          'Read retained work detail with a current opaque row reference returned by work.',
+        );
+      const workDetail = yield* Effect.try({
+        try: () =>
+          nativeWatchWorkDetail(watch.envelope.state.work, row.eventId, request.offsetBytes, request.sourceDigest),
+        catch: () =>
+          fail(
+            'invalid-watch-page',
+            'Work detail changed or its UTF-8 cursor or sourceDigest is invalid; reload work.',
+          ),
+      });
+      return assertNativeWatchOutput({
+        status: 'watch-updated',
+        operation: request.operation,
+        watchId,
+        revision: watch.revision,
+        result: {workDetail},
+      });
+    }
+    if (request.operation === 'work') {
+      if ((request.workOffset ?? 0) > 0 && !request.workViewDigest)
+        return yield* fail('stale-watch-work-view', 'Continue work paging with its complete workViewDigest.');
+      if (request.workViewDigest !== undefined && request.workViewDigest !== workViewDigest)
+        return yield* fail('stale-watch-work-view', 'Retained work changed; restart work paging at offset zero.');
+      const page = nativeWatchWorkList(watch.envelope.state.work, request.workOffset ?? 0);
+      const items: Record<string, unknown>[] = EffectArray.map(page.items, item => {
+        if (!Predicate.isObject(item) || typeof item.eventId !== 'string')
+          throw fail('invalid-watch-work', 'A retained work row has no canonical identity.');
+        const row = Option.getOrUndefined(
+          EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === item.eventId),
+        );
+        if (!row) throw fail('invalid-watch-work', 'A retained work row is unavailable.');
+        const eventRef = encodeNativeTaskActionRef({
+          version: 1,
+          kind: 'retained-work',
+          runId: request.runId,
+          generationHash: sha256HexSync(stored.state.generation),
+          watchId,
+          consumerId: consumer.id,
+          wakeupId: consumer.wakeupId,
+          watchEventId: row.eventId,
+          workViewDigest,
+          workRowDigest: sha256HexSync(stableJson(row)),
+        });
+        return {
+          ...item,
+          eventRef,
+          ...('detail' in item
+            ? {
+                detail: {
+                  operation: 'work-detail',
+                  workEventRef: eventRef,
+                  offsetBytes: 0,
+                  sourceDigest: sha256HexSync(stableJson(row)),
+                },
+              }
+            : {}),
+        };
+      });
+      const output = () => ({
+        status: 'watch-updated',
+        operation: request.operation,
+        watchId,
+        prUrl: watch.envelope.state.pr,
+        headSha: watch.envelope.state.head,
+        revision: watch.revision,
+        result: {
+          protocolVersion: 1,
+          executorVersion: 1,
+          status: 'ok',
+          watchId,
+          revision: watch.revision,
+          work: {
+            items,
+            offset: page.offset,
+            nextOffset:
+              page.offset + items.length < watch.envelope.state.work.length ? page.offset + items.length : null,
+            workViewDigest,
+          },
+        },
+      });
+      while (new TextEncoder().encode(JSON.stringify(output())).byteLength > nativeWatchOutputLimit && items.length > 1)
+        items.pop();
+      if (new TextEncoder().encode(JSON.stringify(output())).byteLength > nativeWatchOutputLimit && items[0]) {
+        const item = items[0];
+        const row = Option.getOrUndefined(
+          EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === item.eventId),
+        );
+        items[0] = {
+          eventId: item.eventId,
+          status: item.status,
+          at: item.at,
+          eventRef: item.eventRef,
+          available: false,
+          detail: {
+            operation: 'work-detail',
+            workEventRef: item.eventRef,
+            offsetBytes: 0,
+            sourceDigest: sha256HexSync(stableJson(row)),
+          },
+        };
+      }
+      return assertNativeWatchOutput(output());
+    }
+    const retained =
+      request.operation === 'work-disposition' &&
+      EffectArray.some(
+        request.dispositions ?? [],
+        item => decodeNativeTaskActionRef(item.eventRef)?.kind === 'retained-work',
+      );
+    if (retained && request.watchDeliveryRef)
+      return yield* fail('stale-watch-event-ref', 'Retained work references do not use a relay delivery reference.');
+    const notice =
+      request.operation !== 'work-disposition' && request.noticeRef
+        ? decodeNativeTaskActionRef(request.noticeRef)
+        : undefined;
     const watchDelivery = request.watchDeliveryRef ? decodeNativeTaskActionRef(request.watchDeliveryRef) : undefined;
     if (
+      request.operation !== 'work-disposition' &&
       request.noticeRef &&
       (!notice ||
         notice.kind !== 'delivery' ||
@@ -914,32 +1137,48 @@ export const runNativeTaskPrWatch = (
           'This notice does not belong to the current PR watch consumer and attempt.',
         );
     }
-    const dispositions =
-      request.dispositions === undefined
-        ? undefined
-        : EffectArray.map(request.dispositions, item => {
-            const eventRef = decodeNativeTaskActionRef(item.eventRef);
-            if (
-              !eventRef ||
-              eventRef.runId !== request.runId ||
-              eventRef.generationHash !== sha256HexSync(stored.state.generation) ||
-              eventRef.watchId !== watchId ||
-              eventRef.consumerId !== consumer.id ||
-              eventRef.wakeupId !== consumer.wakeupId ||
-              eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId ||
-              !eventRef.watchEventId
-            )
-              throw fail(
-                'stale-watch-event-ref',
-                'A disposition must use an event from the current opaque watch delivery.',
-              );
-            return {
-              eventId: eventRef.watchEventId,
-              status: item.status,
-              reason: item.reason,
-              evidence: item.evidence,
-            };
-          });
+    const dispositionIds = new Set<string>();
+    const dispositions:
+      | {eventId: string; status: 'open' | 'blocked' | 'resolved' | 'ignored'; reason: string; evidence: string}[]
+      | undefined = request.dispositions === undefined ? undefined : [];
+    for (const item of request.dispositions ?? []) {
+      const eventRef = decodeNativeTaskActionRef(item.eventRef);
+      if (
+        !eventRef ||
+        (retained ? eventRef.kind !== 'retained-work' : eventRef.kind !== 'delivery') ||
+        eventRef.runId !== request.runId ||
+        eventRef.generationHash !== sha256HexSync(stored.state.generation) ||
+        eventRef.watchId !== watchId ||
+        eventRef.consumerId !== consumer.id ||
+        eventRef.wakeupId !== consumer.wakeupId ||
+        (retained
+          ? eventRef.workViewDigest !== workViewDigest ||
+            eventRef.workRowDigest !==
+              sha256HexSync(
+                stableJson(
+                  Option.getOrNull(
+                    EffectArray.findFirst(watch.envelope.state.work, row => row.eventId === eventRef.watchEventId),
+                  ),
+                ),
+              )
+          : eventRef.watchDeliveryId !== watchDelivery?.watchDeliveryId) ||
+        !eventRef.watchEventId ||
+        dispositionIds.has(eventRef.watchEventId)
+      )
+        return yield* fail(
+          'stale-watch-event-ref',
+          retained
+            ? 'Use current retained work references returned by work; reload its complete view.'
+            : 'A disposition must use an event from the current opaque watch delivery.',
+        );
+      dispositionIds.add(eventRef.watchEventId);
+      dispositions?.push({
+        eventId: eventRef.watchEventId,
+        status: item.status,
+        reason: item.reason,
+        evidence: item.evidence,
+      });
+    }
     const result = yield* runNativeWatch(config, {
       protocolVersion: 1,
       executorVersion: 1,

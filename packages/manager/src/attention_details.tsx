@@ -365,6 +365,9 @@ export function HealthDetail(props: {
   const [semanticChecking, setSemanticChecking] = useState(false);
   const [semanticUnavailable, setSemanticUnavailable] = useState('');
   const semanticRequest = useRef<AbortController | undefined>(undefined);
+  const maintenanceRequest = useRef<{key: string; controller: AbortController; followup: boolean} | undefined>(
+    undefined,
+  );
   const reviewFrozen = frozen || semanticChecking;
   const finding = currentFinding;
   const supportsSelectedRefresh =
@@ -546,23 +549,43 @@ export function HealthDetail(props: {
   }
   async function refreshMaintenanceEvidence() {
     if (!finding.caseId) return;
+    const key = JSON.stringify([props.project, finding.caseId]);
+    const active = maintenanceRequest.current;
+    if (active?.key === key && !active.controller.signal.aborted) {
+      active.followup = true;
+      return;
+    }
     semanticRequest.current?.abort();
     const controller = new AbortController();
     semanticRequest.current = controller;
+    const request = {key, controller, followup: false};
+    maintenanceRequest.current = request;
+    const current = () => !controller.signal.aborted && maintenanceRequest.current === request;
     setSemanticChecking(true);
     setFrozen(true);
     try {
-      const result = await retryEvidenceRead(
-        () =>
-          api<ManagerMaintenanceRefreshResultV1>(
-            '/api/attention/context-maintenance',
-            {action: 'refresh-case', project: props.project, caseId: finding.caseId},
-            {signal: controller.signal, timeoutMilliseconds: 30_000},
-            isManagerMaintenanceRefreshResultV1,
-          ),
-        controller.signal,
-      );
-      if (controller.signal.aborted) return;
+      const read = () =>
+        retryEvidenceRead(
+          () =>
+            api<ManagerMaintenanceRefreshResultV1>(
+              '/api/attention/context-maintenance',
+              {action: 'refresh-case', project: props.project, caseId: finding.caseId},
+              {signal: controller.signal, timeoutMilliseconds: 30_000},
+              isManagerMaintenanceRefreshResultV1,
+            ),
+          controller.signal,
+        );
+      let result = await read();
+      if (!current()) return;
+      if (request.followup) {
+        request.followup = false;
+        result = await read();
+        if (!current()) return;
+        if (request.followup) {
+          setError('Evidence changed again during this check. Check current evidence to try again.');
+          return;
+        }
+      }
       if (result.outcome === 'ready' || result.outcome === 'resolved') {
         setFrozen(false);
         setSemanticUnavailable('');
@@ -591,12 +614,15 @@ export function HealthDetail(props: {
         setError('reason' in result ? result.reason : 'Current evidence is unavailable.');
       }
     } catch (cause) {
-      if (controller.signal.aborted) return;
+      if (!current()) return;
       if (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status)) setSemanticEvidence(undefined);
       setSemanticUnavailable(evidenceReadError(cause));
       setError(evidenceReadError(cause));
     } finally {
-      if (!controller.signal.aborted) setSemanticChecking(false);
+      if (current()) {
+        maintenanceRequest.current = undefined;
+        setSemanticChecking(false);
+      }
     }
   }
   useEffect(() => {

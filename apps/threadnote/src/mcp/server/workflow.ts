@@ -23,16 +23,18 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan. References come from this tool. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
+        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan, or share it by current authoringRef and writable team for one portable reference. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
       inputSchema: {
-        command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'job']),
+        command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'share', 'job']),
         callerCwd: McpInput.requiredString('Absolute original checkout'),
         featureName: McpInput.string('Feature name for start'),
         kind: Schema.optionalKey(Schema.Literals(['spec', 'plan'])),
         contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
-        installationTarget: McpInput.string('Installed target selector for start or authoring job resume'),
+        installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
+        graphProject: McpInput.string('Configured graph project for a new authoring task'),
         authoringRef: McpInput.string('Current authoring continuation'),
+        team: McpInput.string('Writable team selected for portable plan sharing'),
         jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
         operation: Schema.optionalKey(Schema.Literals(['status', 'result', 'cancel', 'resume'])),
         specRef: McpInput.string('Approved spec reference for plan start'),
@@ -64,22 +66,50 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         'Start or resume a bounded task from business intent; the runtime verifies installed workflow resources and owns native run metadata.',
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
-        featureName: McpInput.requiredString('Stable feature name used to resume this task'),
+        featureName: McpInput.string('Stable feature name used to resume a compact task'),
         installationTarget: McpInput.requiredString(
           'Installed Threadnote host target, required to verify the current bundle on start or resume',
         ),
         taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
-        intent: NativeCompactIntentSchema,
+        sharedPlanRef: McpInput.string('One verified portable plan reference for recipient start'),
+        graphProject: McpInput.string('Configured graph project for a new native run'),
+        intent: Schema.optionalKey(NativeCompactIntentSchema),
+        delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
+        bindings: Schema.optionalKey(
+          Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
+        ),
+        userResponse: McpInput.string('Actual recipient instruction to execute this shared plan'),
+        review: Schema.optionalKey(
+          Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
+        ),
       },
     },
     Effect.fn('mcp_server.workflowTaskStart')(function* (input) {
-      const {callerCwd, featureName, installationTarget, taskRef, intent} = input;
-      const result = yield* runNativeTaskStart(config, {
+      const {
         callerCwd,
         featureName,
-        ...(installationTarget === undefined ? {} : {installationTarget}),
-        ...(taskRef === undefined ? {} : {taskRef}),
+        installationTarget,
+        taskRef,
+        graphProject,
         intent,
+        sharedPlanRef,
+        delivery,
+        bindings,
+        userResponse,
+        review,
+      } = input;
+      const result = yield* runNativeTaskStart(config, {
+        callerCwd,
+        ...(installationTarget === undefined ? {} : {installationTarget}),
+        ...(featureName === undefined ? {} : {featureName}),
+        ...(taskRef === undefined ? {} : {taskRef}),
+        ...(graphProject === undefined ? {} : {graphProject}),
+        ...(intent === undefined ? {} : {intent}),
+        ...(sharedPlanRef === undefined ? {} : {sharedPlanRef}),
+        ...(delivery === undefined ? {} : {delivery}),
+        ...(bindings === undefined ? {} : {bindings}),
+        ...(userResponse === undefined ? {} : {userResponse}),
+        ...(review === undefined ? {} : {review}),
       });
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};
@@ -181,19 +211,29 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
               tool: 'workflow_task_deliver',
               guidance: 'Choose local, commit, or pr to match the approved plan.',
             }
-          : result.next.action === 'implement'
+          : result.next.action === 'validate'
             ? {
-                tool: 'workflow_task_snapshot',
-                guidance:
-                  'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
+                tool: 'workflow_task_record_validation',
+                guidance: 'Record passed checks and acceptance for the reviewed snapshotRef.',
               }
-            : result.next.action === 'complete'
+            : result.next.action === 'review'
               ? {
-                  tool: 'workflow_task_finish',
-                  guidance:
-                    'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
+                  tool: 'workflow_task_record_review',
+                  guidance: 'Record the independent review for this snapshotRef.',
                 }
-              : undefined;
+              : result.next.action === 'implement'
+                ? {
+                    tool: 'workflow_task_snapshot',
+                    guidance:
+                      'After work, record the source; supersede-unreviewed is only for its eligible latest snapshot.',
+                  }
+                : result.next.action === 'complete'
+                  ? {
+                      tool: 'workflow_task_finish',
+                      guidance:
+                        'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
+                    }
+                  : undefined;
       const response = nextTool ? {...result, next: {...result.next, ...nextTool}} : result;
       const text = JSON.stringify(response);
       return {content: [{type: 'text' as const, text}], structuredContent: response};
@@ -247,20 +287,25 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Use the current task card to begin eligible phases, resume a blocked phase after dependencies are accepted, reconcile this run to its verified ready approved plan with bindings, or extend an exhausted review budget with caller-provided human authority. Actor identity is not independently authenticated.',
+        'Control task phases: begin eligible; reopen validated/published after failure; resume blocked after dependencies are accepted; reconcile to the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is not authenticated.',
       inputSchema: {
-        runId: McpInput.requiredString('Existing workflow run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
-        taskRef: McpInput.requiredString('Current task card reference from workflow_task_view'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
+        taskRef: McpInput.requiredString(),
         control: Schema.Union([
           Schema.Struct({command: Schema.Literal('begin')}),
           Schema.Struct({
             command: Schema.Literal('resume'),
-            reason: McpInput.requiredString('Recovery reason'),
+            reason: McpInput.requiredString(),
+          }),
+          Schema.Struct({
+            command: Schema.Literal('reopen'),
+            phaseId: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('reconcile'),
-            reason: McpInput.requiredString('Reason for approved-plan reconciliation'),
+            reason: McpInput.requiredString(),
             bindings: Schema.optionalKey(
               Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
             ),
@@ -268,9 +313,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('extend-review-budget'),
             additionalReviews: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 251})),
-            reason: McpInput.requiredString('Reason for review-budget increase'),
+            reason: McpInput.requiredString(),
             userAuthority: McpInput.requiredString(
-              'Caller-provided human authority; actor identity is not independently authenticated',
+              'Caller-provided human authority; actor identity is not authenticated',
             ),
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
@@ -282,24 +327,26 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           ? {command: control.command, runId, callerCwd, taskRef}
           : control.command === 'resume'
             ? {command: control.command, runId, callerCwd, taskRef, reason: control.reason}
-            : control.command === 'reconcile'
-              ? {
-                  command: control.command,
-                  runId,
-                  callerCwd,
-                  taskRef,
-                  reason: control.reason,
-                  ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
-                }
-              : {
-                  command: control.command,
-                  runId,
-                  callerCwd,
-                  taskRef,
-                  additionalReviews: control.additionalReviews,
-                  reason: control.reason,
-                  userAuthority: control.userAuthority,
-                };
+            : control.command === 'reopen'
+              ? {command: control.command, runId, callerCwd, taskRef, phaseId: control.phaseId, reason: control.reason}
+              : control.command === 'reconcile'
+                ? {
+                    command: control.command,
+                    runId,
+                    callerCwd,
+                    taskRef,
+                    reason: control.reason,
+                    ...(control.bindings === undefined ? {} : {bindings: control.bindings}),
+                  }
+                : {
+                    command: control.command,
+                    runId,
+                    callerCwd,
+                    taskRef,
+                    additionalReviews: control.additionalReviews,
+                    reason: control.reason,
+                    userAuthority: control.userAuthority,
+                  };
       const result = yield* runNativeTaskAction(config, request);
       return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
     }),

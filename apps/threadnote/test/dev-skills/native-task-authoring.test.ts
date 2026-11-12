@@ -3,6 +3,8 @@ import {
   Array as EffectArray,
   Record as EffectRecord,
   Clock,
+  Deferred,
+  Fiber,
   Cause,
   String as EffectString,
   Effect,
@@ -12,6 +14,8 @@ import {
   Path,
   Ref,
   Schema,
+  Scope,
+  Context,
   Stdio,
   Terminal,
 } from 'effect';
@@ -26,6 +30,8 @@ import {CommandExecutor, commandEnvironment, runCommandEffect} from '@threadnote
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
+import {makeCodeGraphStoreRuntime} from '@threadnote/graph/store/runtime';
 import {SecureRandom} from 'effect/crypto';
 import {
   NativeAuthoringSpecDocumentSchema,
@@ -42,7 +48,9 @@ import {
   encodeNativeAuthoringTaskRef,
   decodeNativeAuthoringTaskRef,
 } from '../../src/workflow_automation/task_authoring.js';
-import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
+import {readNativeWorkflowState, withNativeWorkflowLock} from '../../src/workflow_automation/store.js';
+import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
+import {withWorkflowLock} from '../../src/workflow_memory/journal.js';
 import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {runNativeTaskAction} from '../../src/workflow_automation/task_actions.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
@@ -56,6 +64,7 @@ import {TestClock} from 'effect/testing';
 import {object} from './native-cycle-lifecycle-fixture.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {lstat, readdir, symlink, unlink, rmdir} from '@threadnote/testing/node-fs-promises';
 
 const specBusiness = {
   title: 'Reliable fixture readback',
@@ -131,8 +140,10 @@ const planBusiness = {
   openQuestions: [],
   review: {required: true, reason: 'An independent architecture review is required.'},
 };
-const setup = Effect.gen(function* () {
-  const f = yield* nativeFixture();
+const setupWithCleanup = Effect.fn('test.nativeAuthoring.setup')(function* (
+  cleanupRoot?: (root: string) => Effect.Effect<void>,
+) {
+  const f = yield* nativeFixture({}, cleanupRoot);
   yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
   yield* runCommandEffect('git', [
     '-C',
@@ -164,6 +175,22 @@ const setup = Effect.gen(function* () {
       }),
     );
   return {...f, config, repo, home, scoped, author, mcp};
+});
+
+const setup = setupWithCleanup();
+
+const snapshotAuthoringJobFiles = Effect.fn('test.snapshotAuthoringJobFiles')(function* (
+  f: Effect.Success<typeof setup>,
+  directory: string,
+) {
+  const names = [...(yield* f.fs.readDirectory(directory, {recursive: true}))].sort();
+  const contents: Array<readonly [string, string]> = [];
+  for (const name of names) {
+    const file = f.path.join(directory, name);
+    if ((yield* f.fs.stat(file)).type === 'File')
+      contents.push([name, Buffer.from(yield* f.fs.readFile(file)).toString('base64')]);
+  }
+  return contents;
 });
 
 effectIt.effect(
@@ -300,6 +327,153 @@ effectIt.effect(
       expect(workEnvelope.isError).not.toBe(true);
       expect(object(workEnvelope.structuredContent)).toMatchObject({status: 'ready', phaseId: 'readback'});
     }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('selects a configured graph project on task-author start in an ambiguous checkout', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    yield* f.fs.makeDirectory(f.path.join(f.repo, 'apps', 'alpha'), {recursive: true});
+    yield* f.fs.makeDirectory(f.path.join(f.repo, 'apps', 'beta'), {recursive: true});
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'package.json'),
+      JSON.stringify({private: true, workspaces: ['apps/*']}),
+    );
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'apps', 'alpha', 'package.json'),
+      JSON.stringify({name: '@fixture/alpha'}),
+    );
+    yield* f.fs.writeFileString(
+      f.path.join(f.repo, 'apps', 'beta', 'package.json'),
+      JSON.stringify({name: '@fixture/beta'}),
+    );
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'apps', 'alpha', 'source.ts'), 'export const selected = true;\n');
+    yield* f.fs.writeFileString(f.path.join(f.repo, 'apps', 'beta', 'source.ts'), 'export const other = true;\n');
+    yield* runCommandEffect('git', ['-C', f.repo, 'add', '.']);
+    yield* runCommandEffect('git', [
+      '-C',
+      f.repo,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-m',
+      'Graph projects',
+    ]);
+    const projects = A.map(['Alpha', 'Beta'], name => ({
+      name,
+      path: f.repo,
+      seed: [],
+      uri: `threadnote://resources/repos/${EffectString.toLowerCase(name)}`,
+      graph: {closure: 'dependencies' as const, roots: [`apps/${EffectString.toLowerCase(name)}`]},
+    }));
+    yield* f.fs.writeFileString(f.config.manifestPath, JSON.stringify({version: 1, projects}));
+    const contentFile = f.path.join(f.root, 'graph-spec-business.json');
+    yield* f.fs.writeFileString(
+      contentFile,
+      JSON.stringify({...specBusiness, context: {...specBusiness.context, codeRefs: ['apps/alpha/source.ts']}}),
+    );
+    const request = {
+      command: 'start',
+      callerCwd: f.repo,
+      featureName: 'Graph scope fixture',
+      kind: 'spec',
+      contentFile,
+      installationTarget: 'codex',
+    };
+    const unselected = yield* runNativeTaskAuthoring(f.config, request).pipe(
+      Effect.provideService(SystemInfo, f.scoped),
+      Effect.result,
+    );
+    expect(unselected).toMatchObject({failure: {code: 'graph-scope-required'}});
+    if (unselected._tag !== 'Failure') throw new Error('Expected ambiguous graph scope to block start');
+    expect(unselected.failure.message).toContain('graphProject');
+    expect(unselected.failure.message).toContain('--graph-project');
+    expect(unselected.failure.message).toContain('Alpha');
+    expect(unselected.failure.message).toContain('Beta');
+    expect(unselected.failure.message).not.toContain(f.root);
+    const index = yield* (yield* CodeGraphIndexer).index({cwd: f.repo, threadnoteHome: f.home, project: projects[0]});
+    expect(index.snapshot.state).toBe('ready');
+    const selected = yield* f.author({...request, graphProject: ' alpha '});
+    expect(selected.status).toBe('draft');
+    const state = yield* readNativeWorkflowState(f.config, String(selected.runId));
+    expect(state?.state.graphProject).toBe('Alpha');
+    if (!state) throw new Error('Expected selected run state');
+    const body = 'Outside selected graph.\n';
+    const outside = yield* runWorkflowMemory(f.config, {
+      protocolVersion: 1,
+      action: 'create',
+      bindingId: state.state.bindingId,
+      operationId: 'outside-scope',
+      artifactKey: 'outside',
+      sourceRunId: state.state.runId,
+      role: 'evidence',
+      body,
+      bodySha256: sha256HexSync(body),
+      expectedRevision: null,
+      storageKind: 'durable',
+      codeRefs: ['apps/beta/source.ts'],
+      citationPolicy: 'require-current',
+    }).pipe(Effect.provideService(SystemInfo, f.scoped), Effect.result);
+    expect(outside).toMatchObject({failure: {failureCode: 'outside-project-graph'}});
+  }).pipe(TestClock.withLive, provideNative),
+);
+
+effectIt.effect('reports canonical path failures on task-author start and save without changing state', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const validPlan = {
+      ...planBusiness,
+      requirements: specBusiness.requirements,
+      phases: A.map(planBusiness.phases, phase => ({
+        ...phase,
+        acceptance: A.map(phase.acceptance, item => ({...item, scenarioIds: []})),
+      })),
+    };
+    const invalidPlan = {...validPlan, phases: [{...validPlan.phases[0], affectedPaths: ['src/']}]};
+    const invalidFile = f.path.join(f.root, 'invalid-plan.json');
+    const validFile = f.path.join(f.root, 'valid-plan.json');
+    yield* f.fs.writeFileString(invalidFile, JSON.stringify(invalidPlan));
+    yield* f.fs.writeFileString(validFile, JSON.stringify(validPlan));
+    const invalidStart = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Invalid path plan',
+        kind: 'plan',
+        contentFile: invalidFile,
+        installationTarget: 'codex',
+      })
+      .pipe(Effect.result);
+    expect(invalidStart).toMatchObject({failure: {code: 'invalid-content'}});
+    if (invalidStart._tag !== 'Failure') throw new Error('Invalid plan unexpectedly started.');
+    expect(JSON.stringify(invalidStart)).toContain('phases[0].affectedPaths[0]');
+    expect(JSON.stringify(invalidStart)).toContain('a trailing separator');
+    const invalidRunId =
+      'task-' +
+      EffectString.slice(
+        0,
+        48,
+      )(sha256HexSync(workflowTitleSlug(f.path.basename(f.repo)) + '\n' + workflowTitleSlug('Invalid path plan')));
+    expect(yield* readNativeWorkflowState(f.config, invalidRunId)).toBeUndefined();
+    const draft = yield* f.author({
+      command: 'start',
+      featureName: 'Save path plan',
+      kind: 'plan',
+      contentFile: validFile,
+      installationTarget: 'codex',
+    });
+    expect(draft.runId).toBeTruthy();
+    const statePath = f.statePath(String(draft.runId));
+    const before = yield* f.fs.readFileString(statePath);
+    const invalidSave = yield* f
+      .author({command: 'save', authoringRef: draft.authoringRef, contentFile: invalidFile})
+      .pipe(Effect.result);
+    expect(invalidSave).toMatchObject({failure: {code: 'invalid-content'}});
+    if (invalidSave._tag !== 'Failure') throw new Error('Invalid plan unexpectedly saved.');
+    expect(JSON.stringify(invalidSave)).toContain('phases[0].affectedPaths[0]');
+    expect(JSON.stringify(invalidSave)).toContain('a trailing separator');
+    expect(yield* f.fs.readFileString(statePath)).toBe(before);
+  }).pipe(TestClock.withLive, provideNative),
 );
 
 effectIt.effect('admits commit delivery, recovers an unreviewed snapshot, and delivers reviewed source', () =>
@@ -580,13 +754,7 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
     yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
     const foreignSystem = {...f.scoped, currentDirectory: () => foreignRepo};
     const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-    const snapshotJobFiles = () =>
-      Effect.gen(function* () {
-        const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-        const contents: Array<readonly [string, string]> = [];
-        for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
-        return contents;
-      });
+    const snapshotJobFiles = () => snapshotAuthoringJobFiles(f, jobDirectory);
     const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
     const beforeJobs = yield* snapshotJobFiles();
     const operations = ['status', 'result', 'cancel', 'resume'] as const;
@@ -626,8 +794,79 @@ effectIt.effect('rejects same-basename foreign job continuations without changin
   }).pipe(TestClock.withLive, provideNative),
 );
 
+effectIt.effect('reads accepted authoring job progress while native run and journal writers are held', () =>
+  Effect.gen(function* () {
+    const f = yield* setup;
+    const file = f.path.join(f.root, 'held-run-lock-spec.json');
+    yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+    const accepted = yield* f
+      .author({
+        command: 'start',
+        featureName: 'Held run lock status',
+        kind: 'spec',
+        contentFile: file,
+        installationTarget: 'codex',
+        saveMode: 'background',
+      })
+      .pipe(Effect.provideService(CurrentNativeJobAutoLaunch, false));
+    const runId = String(accepted.runId);
+    const jobRef = String(accepted.jobRef);
+    const status = yield* withNativeWorkflowLock(
+      f.config,
+      runId,
+      false,
+      f.author({command: 'job', jobRef, operation: 'status'}),
+    );
+    expect(status).toMatchObject({status: 'accepted', jobRef});
+    const admitted = yield* readNativeWorkflowState(f.config, runId);
+    if (!admitted) throw new Error('The accepted job has no native run.');
+    const job = object(accepted.job);
+    const receipt = f.path.join(
+      yield* f.fs.realPath(f.home),
+      'workflow-automations',
+      'native-v1',
+      'jobs',
+      runId,
+      String(job.jobId) + '.json',
+    );
+    const progress = {verifiedOperations: 2, rootVerified: false, stage: 'canonical-work', lastProgressAt: 23};
+    yield* f.fs.writeFileString(
+      receipt,
+      JSON.stringify({
+        ...object(JSON.parse(yield* f.fs.readFileString(receipt))),
+        status: 'running',
+        started: true,
+        progress,
+      }),
+    );
+    const beforeReceipt = yield* f.fs.readFileString(receipt);
+    const acquired = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    // Fork from the unlocked caller so readers cannot inherit the writer's reentrant lock capability.
+    const writer = yield* withWorkflowLock(
+      f.config,
+      admitted.state.bindingId,
+      Effect.gen(function* () {
+        yield* Deferred.succeed(acquired, undefined);
+        yield* Deferred.await(release);
+      }),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(acquired).pipe(Effect.timeout('5 seconds'));
+    yield* Effect.gen(function* () {
+      for (const operation of ['status', 'result']) {
+        const response = yield* f.author({command: 'job', jobRef, operation}).pipe(Effect.timeout('5 seconds'));
+        expect(response).toMatchObject({status: 'running', jobRef, job: {progress}});
+        expect(response).not.toHaveProperty('authoring');
+      }
+      expect(Option.isNone(yield* Deferred.poll(release))).toBe(true);
+      expect(yield* f.fs.readFileString(receipt)).toBe(beforeReceipt);
+    }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    yield* Fiber.join(writer);
+  }).pipe(TestClock.withLive, provideNative),
+);
+
 effectIt.effect(
-  'refuses public authoring resume for a valid installed target from a different admitted generation',
+  'resumes an accepted authoring job after its enabled target updates, while rejecting changed retained bytes',
   () =>
     Effect.gen(function* () {
       const f = yield* setup;
@@ -648,13 +887,7 @@ effectIt.effect(
       const admitted = yield* readNativeWorkflowState(f.config, runId);
       if (!admitted) throw new Error('The submitted job has no native run.');
       const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-      const snapshotJobFiles = () =>
-        Effect.gen(function* () {
-          const names = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-          const contents: Array<readonly [string, string]> = [];
-          for (const name of names) contents.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
-          return contents;
-        });
+      const snapshotJobFiles = () => snapshotAuthoringJobFiles(f, jobDirectory);
 
       const sourceRoot = f.path.join(f.root, 'updated-skill-source');
       const currentSource = Bun.fileURLToPath(new URL('../../../../', import.meta.url));
@@ -709,7 +942,6 @@ effectIt.effect(
       });
 
       const beforeResumeRun = yield* f.fs.readFileString(f.statePath(runId));
-      const beforeResumeJobs = yield* snapshotJobFiles();
       const executor = yield* CommandExecutor;
       let spawnCalls = 0;
       const observedExecutor = CommandExecutor.of({
@@ -720,17 +952,38 @@ effectIt.effect(
             return false;
           }),
       });
-      const mismatch = yield* f
+      const resumed = yield* f
         .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
         .pipe(
           Effect.provideService(DevSkillsSource, updatedSource),
           Effect.provideService(CommandExecutor, observedExecutor),
-          Effect.result,
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
         );
-      expect(mismatch).toMatchObject({failure: {code: 'binding-drift'}});
+      expect(resumed).toMatchObject({status: 'accepted', jobRef, job: {stopRequested: false}});
+      const resumedWithUpdateAvailable = yield* f
+        .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
+        .pipe(
+          Effect.provideService(CommandExecutor, observedExecutor),
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
+        );
+      expect(resumedWithUpdateAvailable).toMatchObject({status: 'accepted', jobRef});
       expect(spawnCalls).toBe(0);
       expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeResumeRun);
-      expect(yield* snapshotJobFiles()).toEqual(beforeResumeJobs);
+      const retainedFile = f.path.join(
+        installed.targets[0].target.skillRoot,
+        '.threadnote-dev-skills',
+        'generations',
+        admitted.state.generation,
+        changedSkillPath,
+      );
+      yield* f.fs.writeFileString(retainedFile, 'Changed retained generation.\n');
+      const beforeTamperedResume = yield* snapshotJobFiles();
+      const tampered = yield* f
+        .author({command: 'job', jobRef, operation: 'resume', installationTarget: 'codex'})
+        .pipe(Effect.provideService(DevSkillsSource, updatedSource), Effect.result);
+      expect(tampered).toMatchObject({failure: {code: 'needs-resources'}});
+      expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeResumeRun);
+      expect(yield* snapshotJobFiles()).toEqual(beforeTamperedResume);
     }).pipe(TestClock.withLive, provideNative),
 );
 
@@ -1270,34 +1523,406 @@ effectIt.effect(
     }).pipe(TestClock.withLive, provideNative),
 );
 
-effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () =>
+const cleanupGitKeys = ['core.fsmonitor', 'core.untrackedcache', 'gc.auto', 'maintenance.auto'] as const;
+const parseCleanupGitSettings = (text: string) => {
+  const fields = EffectString.split('\0')(text);
+  const effective = new Map<string, {key: string; value: string; scope: string; origin: string}>();
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const [key, ...rest] = EffectString.split('\n')(fields[index + 2]);
+    if (!EffectArray.some(cleanupGitKeys, known => known === key)) continue;
+    const raw = EffectString.toLowerCase(EffectArray.join(rest, '\n'));
+    const safe = /^(?:true|false|yes|no|on|off|keep|[0-9]{1,9})$/u.test(raw);
+    effective.set(key, {
+      key,
+      value: safe ? raw : 'custom-value-redacted',
+      scope: /^(?:system|global|local|worktree|command)$/u.test(fields[index]) ? fields[index] : 'other',
+      origin: EffectString.startsWith('file:')(fields[index + 1]) ? 'file' : 'other',
+    });
+  }
+  return EffectArray.map(
+    cleanupGitKeys,
+    key => effective.get(key) ?? {key, value: 'unset', scope: 'none', origin: 'none'},
+  );
+};
+type DirtyCleanupContext = {
+  root: string;
+  path: Path.Path;
+  git: ReturnType<typeof parseCleanupGitSettings>;
+  gitStatus: string;
+  gitElapsedMs: number;
+};
+const collectCleanupLeftovers = async (root: string, path: Path.Path, signal: AbortSignal) => {
+  const queue = [root];
+  const entries: Array<{path: string; type: string; size?: number}> = [];
+  let truncated = false;
+  while (queue.length && entries.length < 32 && !signal.aborted) {
+    const before = entries.length;
+    const current = queue.shift()!;
+    try {
+      // lstat does not follow file symlinks or directory junctions; linked directories are never queued.
+      const info = await lstat(current);
+      const relative = path.relative(root, current) || '.';
+      if (relative.length > 128) truncated = true;
+      const type = info.isSymbolicLink()
+        ? 'symlink'
+        : info.isDirectory()
+          ? 'directory'
+          : info.isFile()
+            ? 'file'
+            : 'other';
+      entries.push({path: EffectString.slice(0, 128)(relative), type, ...(type === 'file' ? {size: info.size} : {})});
+      if (type === 'directory')
+        for (const name of (await readdir(current)).sort()) {
+          if (queue.length + entries.length >= 32) {
+            truncated = true;
+            break;
+          }
+          queue.push(path.join(current, name));
+        }
+    } catch {
+      if (entries.length === before)
+        entries.push({path: EffectString.slice(0, 128)(path.relative(root, current) || '.'), type: 'unreadable'});
+      else truncated = true;
+    }
+  }
+  return {entries, truncated: truncated || queue.length > 0, timedOut: signal.aborted};
+};
+const removeFixtureEntrywise = (root: string, path: Path.Path, removeFile: typeof unlink = unlink) => {
+  let operation = 'lstat';
+  let relative = '.';
+  const perform = async <A>(method: string, file: string, action: () => Promise<A>) => {
+    operation = method;
+    relative = EffectString.slice(0, 128)(path.relative(root, file) || '.');
+    return action();
+  };
+  const visit = async (file: string): Promise<void> => {
+    const info = await perform('lstat', file, () => lstat(file));
+    if (info.isDirectory() && !info.isSymbolicLink()) {
+      const names = await perform('readdir', file, () => readdir(file));
+      for (const name of names) await visit(path.join(file, name));
+      await perform('rmdir', file, () => rmdir(file));
+    } else await perform('unlink', file, () => removeFile(file));
+  };
+  return Effect.tryPromise({
+    try: () => visit(root),
+    catch: cause => ({
+      reason: {
+        module: 'FileSystem',
+        method: 'makeTempDirectoryScoped',
+        pathOrDescriptor: root,
+        syscall: operation,
+        relativePath: relative,
+        cause,
+      },
+    }),
+  }).pipe(Effect.orDie);
+};
+const cleanupAfterApplication =
+  (scope: Scope.Scope, cleanup: (root: string) => Effect.Effect<void>) => (root: string) =>
+    Scope.addFinalizer(scope, cleanup(root));
+
+const preserveCleanupCause = <E, R>(cause: Cause.Cause<E>, diagnostic: Effect.Effect<void, unknown, R>) =>
+  diagnostic.pipe(Effect.ignoreCause, Effect.andThen(Effect.failCause(cause)));
+const reportDirtyCleanupFailure = (
+  context: DirtyCleanupContext,
+  cause: Cause.Cause<unknown>,
+  emit: (line: string) => void = line => {
+    process.stdout.write(line);
+  },
+) =>
   Effect.gen(function* () {
-    const f = yield* setup;
-    const file = f.path.join(f.root, 'dirty-background-spec.json');
-    yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
-    yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty";\n');
-    const featureName = 'Dirty background authoring';
-    const project = workflowTitleSlug(f.path.basename(f.repo));
-    const featureId = workflowTitleSlug(featureName);
-    const runId = 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
-    const result = yield* runNativeTaskAuthoring(f.config, {
-      command: 'start',
-      callerCwd: f.repo,
-      featureName,
-      kind: 'spec',
-      contentFile: file,
-      installationTarget: 'codex',
-      saveMode: 'background',
-    }).pipe(
-      Effect.provideService(SystemInfo, f.scoped),
-      Effect.provideService(CurrentNativeJobAutoLaunch, false),
-      Effect.result,
+    const shape = Schema.Struct({
+      reason: Schema.Struct({
+        module: Schema.Literal('FileSystem'),
+        method: Schema.Literal('makeTempDirectoryScoped'),
+        pathOrDescriptor: Schema.String,
+        syscall: Schema.optionalKey(Schema.String),
+        relativePath: Schema.optionalKey(Schema.String),
+        cause: Schema.optionalKey(Schema.Unknown),
+      }),
+    });
+    const failure = EffectArray.findFirst(
+      cause.reasons,
+      reason => reason._tag === 'Die' && Schema.is(shape)(reason.defect),
     );
-    expect(result).toMatchObject({failure: {code: 'evidence-unavailable'}});
-    const state = yield* readNativeWorkflowState(f.config, runId);
-    expect(state).toBeUndefined();
+    if (Option.isNone(failure) || failure.value._tag !== 'Die' || !Schema.is(shape)(failure.value.defect)) return;
+    const reason = failure.value.defect.reason;
+    if (reason.pathOrDescriptor !== context.root) return;
+    const native = Schema.is(Schema.Struct({code: Schema.String, errno: Schema.Finite}))(reason.cause)
+      ? reason.cause
+      : undefined;
+    const remaining = Math.max(0, 2000 - context.gitElapsedMs);
+    let collectionFailed = false;
+    const observed =
+      remaining > 0
+        ? yield* Effect.tryPromise(signal => collectCleanupLeftovers(context.root, context.path, signal)).pipe(
+            Effect.timeoutOption(remaining),
+            Effect.catchCause(() =>
+              Effect.sync(() => {
+                collectionFailed = true;
+                return Option.none();
+              }),
+            ),
+          )
+        : Option.none();
+    const relativeCwd = context.path.relative(context.root, process.cwd());
+    const inside =
+      !context.path.isAbsolute(relativeCwd) &&
+      relativeCwd !== '..' &&
+      !EffectString.startsWith('..' + context.path.sep)(relativeCwd);
+    const summary = {
+      version: 1,
+      role: 'dirty-source-cleanup',
+      selfPid: process.pid,
+      cwdRelation: relativeCwd === '' ? 'fixture-root' : inside ? 'fixture-descendant' : 'outside-fixture',
+      errno: native?.errno,
+      code: native && /^[A-Z0-9_]{1,24}$/u.test(native.code) ? native.code : 'unknown',
+      syscall: ['rm', 'lstat', 'readdir', 'unlink', 'rmdir'].includes(reason.syscall ?? '') ? reason.syscall : 'other',
+      ...(reason.relativePath ? {relativePath: EffectString.slice(0, 128)(reason.relativePath)} : {}),
+      git: context.git,
+      gitStatus: context.gitStatus,
+      gitElapsedMs: context.gitElapsedMs,
+      ownedChildren: [],
+      childCoverage: 'authoring-auto-launch-disabled; internal-descendants-unobserved',
+      ...Option.getOrElse(observed, () => ({entries: [], truncated: true, timedOut: !collectionFailed})),
+      collectionFailed,
+    };
+    while (Buffer.byteLength(JSON.stringify(summary)) > 8000 && summary.entries.length) {
+      summary.entries.pop();
+      summary.truncated = true;
+    }
+    yield* Effect.sync(() => {
+      emit('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS ' + JSON.stringify(summary) + '\n');
+    });
+  });
+
+effectIt.effect('bounds dirty cleanup evidence without following links or replacing the original failure', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-diagnostic-'});
+    const outside = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-outside-'});
+    yield* fs.writeFileString(path.join(outside, 'private-sentinel'), 'Never read or emit this content.');
+    if (process.platform !== 'win32')
+      yield* Effect.tryPromise(() => symlink(outside, path.join(root, '00-link'), 'dir'));
+    for (let index = 0; index < 40; index++)
+      yield* fs.writeFileString(path.join(root, `entry-${index}`), 'private-data');
+    const settings = parseCleanupGitSettings(
+      'global\0file:/private/config\0core.fsmonitor\n/private/hook --secret\0local\0file:/private/local\0gc.auto\n0\0',
+    );
+    expect(settings[0]).toMatchObject({value: 'custom-value-redacted', scope: 'global', origin: 'file'});
+    const cause = Cause.die({
+      reason: {
+        module: 'FileSystem',
+        method: 'makeTempDirectoryScoped',
+        pathOrDescriptor: root,
+        syscall: 'rm',
+        cause: {code: 'EBUSY', errno: -4082},
+      },
+    });
+    const context = {root, path, git: settings, gitStatus: 'complete', gitElapsedMs: 0};
+    const lines: string[] = [];
+    yield* reportDirtyCleanupFailure(context, cause, line => {
+      lines.push(line);
+    });
+    expect(Buffer.byteLength(lines[0])).toBeLessThanOrEqual(8192);
+    expect(lines[0]).not.toContain('private-sentinel');
+    expect(lines[0]).not.toContain('/private/config');
+    expect(lines[0]).not.toContain('private-data');
+    const evidence = object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0])));
+    expect(evidence).toMatchObject({truncated: true, timedOut: false, code: 'EBUSY', errno: -4082, syscall: 'rm'});
+    if (process.platform !== 'win32') expect(evidence.entries).toContainEqual({path: '00-link', type: 'symlink'});
+    lines.length = 0;
+    yield* reportDirtyCleanupFailure({...context, gitElapsedMs: 2000}, cause, line => {
+      lines.push(line);
+    });
+    expect(object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0])))).toMatchObject({
+      timedOut: true,
+      truncated: true,
+      entries: [],
+    });
+    let removedRoot = '';
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* nativeFixture({}, root => removeFixtureEntrywise(root, path));
+        removedRoot = fixture.root;
+        yield* fs.makeDirectory(path.join(fixture.root, 'nested', 'deep'), {recursive: true});
+        yield* fs.writeFileString(path.join(fixture.root, 'nested', 'deep', 'child'), 'fixture');
+        if (process.platform !== 'win32')
+          yield* Effect.tryPromise(() => symlink(outside, path.join(fixture.root, 'outside-link'), 'dir'));
+      }),
+    );
+    expect(yield* fs.exists(removedRoot)).toBe(false);
+    expect(yield* fs.exists(path.join(outside, 'private-sentinel'))).toBe(true);
+    const blockedRoot = yield* fs.makeTempDirectoryScoped({prefix: 'tn-cleanup-blocked-'});
+    const blockedChild = path.join(blockedRoot, 'child');
+    yield* fs.writeFileString(blockedChild, 'fixture');
+    const blocked = yield* Effect.scoped(
+      Effect.acquireRelease(Effect.succeed(blockedRoot), root =>
+        removeFixtureEntrywise(root, path, async () => {
+          throw Object.assign(new Error('Owned child refuses removal'), {code: 'EBUSY', errno: -4082});
+        }),
+      ),
+    ).pipe(Effect.exit);
+    expect(blocked._tag).toBe('Failure');
+    expect(yield* fs.exists(blockedRoot)).toBe(true);
+    expect(yield* fs.exists(blockedChild)).toBe(true);
+    if (blocked._tag === 'Failure') {
+      lines.length = 0;
+      yield* reportDirtyCleanupFailure({...context, root: blockedRoot}, blocked.cause, line => {
+        lines.push(line);
+      });
+      expect(
+        object(JSON.parse(EffectString.slice('NATIVE_DIRTY_CLEANUP_DIAGNOSTICS '.length)(lines[0]))),
+      ).toMatchObject({code: 'EBUSY', errno: -4082, syscall: 'unlink', relativePath: 'child'});
+    }
+    const failed = yield* preserveCleanupCause(cause, Effect.die(new Error('Diagnostic failed'))).pipe(Effect.exit);
+    expect(failed._tag).toBe('Failure');
+    if (failed._tag === 'Failure') expect(failed.cause).toBe(cause);
   }).pipe(TestClock.withLive, provideNative),
 );
+
+effectIt.effect('closes application-owned graph cleanup before strict fixture root removal', () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const released = yield* Deferred.make<void>();
+    let removed = false;
+    class FixtureGraphRuntime extends Context.Service<
+      FixtureGraphRuntime,
+      Effect.Success<typeof makeCodeGraphStoreRuntime>
+    >()('@threadnote/threadnote/test/dev-skills/native-task-authoring.test/FixtureGraphRuntime') {}
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const cleanupScope = yield* Effect.scope;
+        yield* Effect.gen(function* () {
+          // Match the real store's layer-owned scope, rather than a body-owned child fiber.
+          const runtime = Context.get(
+            yield* Layer.build(Layer.effect(FixtureGraphRuntime, makeCodeGraphStoreRuntime)),
+            FixtureGraphRuntime,
+          );
+          const path = yield* Path.Path;
+          const fs = yield* FileSystem.FileSystem;
+          const f = yield* nativeFixture(
+            {},
+            cleanupAfterApplication(cleanupScope, root =>
+              Effect.gen(function* () {
+                expect(yield* Deferred.isDone(released)).toBe(true);
+                yield* removeFixtureEntrywise(root, path);
+                expect(yield* fs.exists(root).pipe(Effect.orDie)).toBe(false);
+                removed = true;
+              }),
+            ),
+          );
+          // Schema initialization does not start the indexer's competing opportunistic collectors.
+          const databasePath = path.join(
+            f.home,
+            'indexes',
+            'code-graph',
+            'repositories',
+            EffectString.repeat(64)('a'),
+            `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
+          );
+          yield* (yield* CodeGraphStore).initialize(databasePath);
+          yield* runtime.startCompletedBuildCleanup(databasePath, undefined, false, {
+            onCompletedBuildCleanupConnection: () =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.interruptible,
+                Effect.ensuring(Deferred.succeed(released, undefined)),
+              ),
+          });
+          yield* Deferred.await(entered);
+        }).pipe(provideNative);
+      }),
+    );
+    expect(removed).toBe(true);
+  }).pipe(TestClock.withLive),
+);
+
+effectIt.effect('dirty-source background preparation refuses without a synchronous authoring save fallback', () => {
+  let cleanup: DirtyCleanupContext | undefined;
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const cleanupScope = yield* Effect.scope;
+      return yield* Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const f = yield* setupWithCleanup(
+          process.platform === 'win32'
+            ? cleanupAfterApplication(cleanupScope, root => removeFixtureEntrywise(root, path))
+            : undefined,
+        );
+        if (process.platform === 'win32') {
+          const started = performance.now();
+          const git = yield* runCommandEffect(
+            'git',
+            [
+              '-C',
+              f.repo,
+              'config',
+              '--null',
+              '--show-origin',
+              '--show-scope',
+              '--get-regexp',
+              '^(core\\.(fsmonitor|untrackedcache)|gc\\.auto|maintenance\\.auto)$',
+            ],
+            {
+              allowFailure: true,
+              maxOutputBytes: 4096,
+              timeoutMs: 400,
+              forceKillAfterMilliseconds: 25,
+              sensitiveOutput: true,
+            },
+          ).pipe(Effect.result);
+          cleanup = {
+            root: f.root,
+            path: f.path,
+            git: git._tag === 'Success' ? parseCleanupGitSettings(git.success.stdout) : parseCleanupGitSettings(''),
+            gitStatus:
+              git._tag === 'Success'
+                ? git.success.exitCode <= 1
+                  ? 'complete'
+                  : 'unavailable'
+                : git.failure._tag === 'CommandTimedOut'
+                  ? 'timed-out'
+                  : git.failure._tag === 'CommandOutputLimitExceeded'
+                    ? 'truncated'
+                    : 'unavailable',
+            gitElapsedMs: Math.ceil(performance.now() - started),
+          };
+        }
+        const file = f.path.join(f.root, 'dirty-background-spec.json');
+        yield* f.fs.writeFileString(file, JSON.stringify(specBusiness));
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "dirty";\n');
+        const featureName = 'Dirty background authoring';
+        const project = workflowTitleSlug(f.path.basename(f.repo));
+        const featureId = workflowTitleSlug(featureName);
+        const runId = 'task-' + EffectString.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
+        const result = yield* runNativeTaskAuthoring(f.config, {
+          command: 'start',
+          callerCwd: f.repo,
+          featureName,
+          kind: 'spec',
+          contentFile: file,
+          installationTarget: 'codex',
+          saveMode: 'background',
+        }).pipe(
+          Effect.provideService(SystemInfo, f.scoped),
+          Effect.provideService(CurrentNativeJobAutoLaunch, false),
+          Effect.result,
+        );
+        expect(result).toMatchObject({failure: {code: 'evidence-unavailable'}});
+        const state = yield* readNativeWorkflowState(f.config, runId);
+        expect(state).toBeUndefined();
+      }).pipe(TestClock.withLive, provideNative);
+    }),
+  ).pipe(
+    Effect.catchCause(cause =>
+      cleanup
+        ? preserveCleanupCause(cause, reportDirtyCleanupFailure(cleanup, cause).pipe(TestClock.withLive))
+        : Effect.failCause(cause),
+    ),
+  );
+});
 
 effectIt.effect('admits an approved standard plan as PR delivery through semantic authoring', () =>
   Effect.gen(function* () {
@@ -2211,9 +2836,7 @@ fcEffectProp(
       yield* runCommandEffect('git', ['init', '--initial-branch=main', foreignRepo]);
       const beforeRun = yield* f.fs.readFileString(f.statePath(runId));
       const jobDirectory = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', runId);
-      const jobNames = [...(yield* f.fs.readDirectory(jobDirectory))].sort();
-      const beforeJobs: Array<readonly [string, string]> = [];
-      for (const name of jobNames) beforeJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      const beforeJobs = yield* snapshotAuthoringJobFiles(f, jobDirectory);
       const result = yield* runNativeJob(
         f.config,
         {
@@ -2229,8 +2852,7 @@ fcEffectProp(
       ).pipe(Effect.provideService(SystemInfo, {...f.scoped, currentDirectory: () => foreignRepo}), Effect.result);
       expect(result).toMatchObject({failure: {code: 'binding-drift'}});
       expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(beforeRun);
-      const afterJobs: Array<readonly [string, string]> = [];
-      for (const name of jobNames) afterJobs.push([name, yield* f.fs.readFileString(f.path.join(jobDirectory, name))]);
+      const afterJobs = yield* snapshotAuthoringJobFiles(f, jobDirectory);
       expect(afterJobs).toEqual(beforeJobs);
     }).pipe(TestClock.withLive, provideNative),
   {fastCheck: {numRuns: 4}},

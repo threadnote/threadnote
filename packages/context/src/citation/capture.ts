@@ -105,6 +105,10 @@ export interface MemoryCodeCitationProjectScopeReceiptV1 {
 export type MemoryCodeCitationProjectScopeExpectationV1 =
   MemoryCodeCitationProjectScopeReceiptV1 | {readonly kind: 'full'};
 
+/** Foreground selected-run fence; deferred anchor receipts retain their original wire shape. */
+export type MemoryCodeCitationCaptureScopeExpectationV1 =
+  MemoryCodeCitationProjectScopeExpectationV1 | {readonly kind: 'selected-project'; readonly project: string};
+
 export function memoryCodeCitationProjectScopeReceipt(
   status: CodeGraphStatus,
 ): MemoryCodeCitationProjectScopeReceiptV1 | undefined {
@@ -120,11 +124,13 @@ export function memoryCodeCitationProjectScopeReceipt(
 
 export function memoryCodeCitationProjectScopeMatches(
   status: CodeGraphStatus,
-  expected: MemoryCodeCitationProjectScopeExpectationV1,
+  expected: MemoryCodeCitationCaptureScopeExpectationV1,
 ): boolean {
   const actual = memoryCodeCitationProjectScopeReceipt(status);
   return 'kind' in expected
-    ? actual === undefined
+    ? expected.kind === 'full'
+      ? actual === undefined
+      : observationFromCodeGraphStatus(status)?.projectScope?.project.name === expected.project
     : actual !== undefined &&
         actual.project === expected.project &&
         actual.scopeKey === expected.scopeKey &&
@@ -185,7 +191,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     readonly callerCwd: string;
     readonly project?: string;
     readonly expectedCallerIdentity?: ExpectedMemoryCodeCitationCallerIdentity;
-    readonly expectedProjectScope?: MemoryCodeCitationProjectScopeExpectationV1;
+    readonly expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1;
     /** Application-internal preview: derive exact deterministic identities without retaining capsules. */
     readonly planOnly?: boolean;
     /** Application-internal fixed capture time from an approved write-ahead intent. */
@@ -361,7 +367,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   cwd: string,
   targets: readonly CaptureTarget[],
   expectedCallerIdentity?: ExpectedMemoryCodeCitationCallerIdentity,
-  expectedProjectScope?: MemoryCodeCitationProjectScopeExpectationV1,
+  expectedProjectScope?: MemoryCodeCitationCaptureScopeExpectationV1,
   omitUnresolved = false,
   project?: string,
   planOnly = false,
@@ -643,11 +649,13 @@ const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpec
 
 const requireExpectedProjectScope = Effect.fn('memoryCodeCitation.requireExpectedProjectScope')(function* (
   status: CodeGraphStatus,
-  expected: MemoryCodeCitationProjectScopeExpectationV1,
+  expected: MemoryCodeCitationCaptureScopeExpectationV1,
 ) {
   if (!memoryCodeCitationProjectScopeMatches(status, expected)) {
     return yield* MemoryCodeCitationCaptureError.of(
-      'The selected project graph changed since deferred code citation capture; replace the memory with current code references.',
+      'kind' in expected && expected.kind === 'selected-project'
+        ? "The run's bound graph project was not observed during code citation capture. Restore its manifest entry, index that graphProject from callerCwd, then retry the same workflow operation. No memory was written."
+        : 'The selected project graph changed since deferred code citation capture; replace the memory with current code references.',
     );
   }
 });

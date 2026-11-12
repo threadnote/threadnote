@@ -67,6 +67,8 @@ Cloud spec and plan drafts stay private to the task. They may be lost when an ep
 
 Each host target has a recorded owner and a verified bundle generation. Shared targets list every consumer affected by an update. Retained generations preserve ownership and recovery records; native workflows execute through Threadnote rather than copied helper scripts.
 
+Generation verification tolerates regular `.DS_Store` metadata files, which macOS may add at a generation root or in a skill directory. Other unexpected files, changed owned files and symbolic links still report a conflict. After a development install activates and doctor-verifies the exact-HEAD executable, it best-effort refreshes each enrolled, enabled target marked `update-available`; target outcomes are reported individually, and a failed refresh does not undo activation.
+
 Manual and automatic Threadnote updates refresh recorded targets across data homes. Workflow refresh runs independently of optional integration repair. An edited or inaccessible target remains pending while other targets can finish. Status distinguishes the active Threadnote version from each workflow target's installed generation and last refresh result. Resolve the reported conflict and run `threadnote update` again, even when the active version is already current.
 
 `threadnote update --check` and `--dry-run` do not write homes, caches, locks or refresh intents. Candidate workflow compatibility remains unchecked until the verified release is available during apply. Known incompatible runtime replacements are rejected before activation; inaccessible ownership remains explicitly unverified and pending.

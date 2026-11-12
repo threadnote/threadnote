@@ -21,6 +21,7 @@ import {
   type WorkflowOperationInspectionRequest,
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
+import {resolveWorkflowGraphScope} from './graph_scope.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
@@ -41,6 +42,7 @@ import * as Effect2 from 'effect';
 
 const WorkflowBindingSchema = Schema.Struct({
   bindingId: Schema.String,
+  graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
   naming: Schema.optionalKey(WorkflowNameFamilySchema),
   workflowRunId: Schema.String,
   profile: Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']),
@@ -322,6 +324,12 @@ export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(funct
       'The workflow binding is unavailable. Its local cloud workspace may have expired; do not create a new binding to reinterpret old receipts.',
     );
   yield* verifyWorkflowBinding(config, state.binding);
+  if (
+    state.binding.graphProject !== undefined &&
+    admissionRequest &&
+    !['read', 'inspect-operation'].includes(admissionRequest.action)
+  )
+    yield* resolveWorkflowGraphScope(config, state.binding);
   // Admission precedes even manifest recovery. Rejected evidence cannot advance
   // a partially committed native transition or reinterpret its pending intent.
   if (admissionRequest) {
@@ -355,6 +363,27 @@ export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')
     ),
   );
   return {state, needsRecovery};
+});
+
+/** Retained job progress grants no artifact read or mutation capability. Validate only the atomic private image. */
+export const readWorkflowProgressBinding = Effect.fn('workflowMemory.progressBinding')(function* (
+  config: RuntimeConfig,
+  bindingId: string,
+) {
+  const state = yield* readJournalFile(config, bindingId);
+  if (!state) return yield* workflowError('task-state-lost', 'The original workflow journal is unavailable.');
+  yield* verifyWorkflowBinding(config, state.binding);
+  const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
+  yield* Effect.try({
+    try: () =>
+      assertWorkflowJournalIntegrity(
+        state,
+        state.manifestCommitted ? state.manifestContent : state.previousManifestContent,
+        sharedRoots,
+      ),
+    catch: () => workflowError('invalid-journal', 'The retained workflow ownership or pending lineage is invalid.'),
+  });
+  return state.binding;
 });
 
 /** Internal capability: one already-held journal lock, never request-supplied. */
@@ -400,6 +429,8 @@ export const withWorkflowJournalSession = <A, E, R>(
                 const state = yield* readJournalFile(config, bindingId);
                 if (!state || stableJson(state.binding) !== stableJson(admission.state.binding))
                   return yield* workflowError('binding-drift', 'The native memory session binding changed.');
+                if (state.binding.graphProject !== undefined && !['read', 'inspect-operation'].includes(request.action))
+                  yield* resolveWorkflowGraphScope(config, state.binding);
                 const evidenceRefs =
                   request.action === 'recover'
                     ? state.operations[request.operationId ?? '']?.request.evidenceRefs

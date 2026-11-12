@@ -73,8 +73,9 @@ automatically; add that directory to `PATH` yourself or use its absolute launche
 On Windows, launchers live in `%LOCALAPPDATA%\Threadnote\bin` (or `THREADNOTE_BIN_DIR`). The installer writes
 `threadnote.cmd` for cmd.exe and PowerShell plus an extensionless `threadnote` for Git Bash and other MSYS shells, and
 the same pair for `threadnote-mcp-server`. Git Bash does not apply PATHEXT, so `threadnote` needs that extensionless
-file. `threadnote repair` recreates a missing managed launcher. After install, open a new terminal if `threadnote` is
-still not found; the installer also prepends the default bin directory to the Windows user `PATH`.
+file. `threadnote repair` recreates a missing managed launcher when a validated active standalone release is
+available; it does not switch launchers to the checkout running repair. After install, open a new terminal if
+`threadnote` is still not found; the installer also prepends the default bin directory to the Windows user `PATH`.
 
 ## Start and stop do not launch a service
 
@@ -429,6 +430,16 @@ A Manager card labeled **Unassociated graph storage** has neither a verified loc
 queryable snapshot. If the repository still exists, run `threadnote graph index --cwd <path>` from that folder and
 refresh Manager. If the database is obsolete, preview and purge it instead; graph databases are derived data and
 purging does not remove repository files or canonical memories.
+
+## A workflow cannot choose a graph scope
+
+If a checkout has several configured graph projects, select one when starting the run. Use `graphProject` on native
+init, `workflow_task_start`, or `workflow_task_author start`; use `--graph-project <configured-name>` with the matching
+CLI start command. The selection is separate from the workflow memory project tag. The error lists configured names;
+choose one of those names, not a graph root alias. For a task that has not created a run, retry the same start with the
+same feature name and the selection. A run already bound to another scope needs a new feature name, or an unambiguous
+graph manifest. A selected run whose project was removed or relocated needs its original manifest entry and checkout
+restored before graph work can continue.
 
 ## MCP does not appear in the agent
 

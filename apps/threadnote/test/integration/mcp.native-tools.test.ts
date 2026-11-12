@@ -708,7 +708,8 @@ describe('Threadnote MCP toolsets', () => {
         const workflowTaskControl = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_control'),
         );
-        expect(workflowTaskControl?.description).toContain('resume a blocked phase after dependencies are accepted');
+        expect(workflowTaskControl?.description).toContain('resume blocked after dependencies are accepted');
+        expect(workflowTaskControl?.description).toContain('Actor identity is not authenticated');
         const controlProperties = decodeJsonObject(decodeJsonObject(workflowTaskControl?.inputSchema).properties);
         const controlVariants = decodeJsonObject(controlProperties.control).anyOf;
         expect(controlVariants instanceof Array).toBe(true);
@@ -724,10 +725,26 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], {properties, required: variant.required}];
           }),
         );
-        expect([...variantsByCommand.keys()]).toEqual(['begin', 'resume', 'reconcile', 'extend-review-budget']);
+        expect([...variantsByCommand.keys()]).toEqual([
+          'begin',
+          'resume',
+          'reopen',
+          'reconcile',
+          'extend-review-budget',
+        ]);
+        for (const field of ['runId', 'callerCwd', 'taskRef'])
+          expect(controlProperties[field]).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('begin')?.required).toEqual(['command']);
         expect(variantsByCommand.get('resume')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('resume')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
+        expect(variantsByCommand.get('reopen')?.required).toEqual(['command', 'phaseId', 'reason']);
+        expect(variantsByCommand.get('reopen')?.properties.phaseId).toMatchObject({type: 'string', minLength: 1});
+        expect(variantsByCommand.get('reopen')?.properties.reason).toMatchObject({type: 'string', minLength: 1});
         expect(variantsByCommand.get('reconcile')?.required).toEqual(['command', 'reason']);
+        expect(variantsByCommand.get('reconcile')?.properties.reason).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
         expect(variantsByCommand.get('reconcile')?.properties.bindings).toBeDefined();
         expect(variantsByCommand.get('extend-review-budget')?.required).toEqual([
           'command',
@@ -735,6 +752,14 @@ describe('Threadnote MCP toolsets', () => {
           'reason',
           'userAuthority',
         ]);
+        expect(variantsByCommand.get('extend-review-budget')?.properties.reason).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
+        expect(variantsByCommand.get('extend-review-budget')?.properties.userAuthority).toMatchObject({
+          type: 'string',
+          minLength: 1,
+        });
 
         const workflowTaskAuthor = EffectOption.getOrUndefined(
           EffectArray.findFirst(tools.tools, tool => tool.name === 'workflow_task_author'),
@@ -4096,7 +4121,17 @@ describe('Threadnote MCP toolsets', () => {
             ),
         );
         expect(automaticMemoryMatches).toHaveLength(1);
-        expect(automaticMemoryMatches[0]).toMatchObject({
+        expect(
+          automaticMemoryMatches[0],
+          Effect.pipe(
+            JSON.stringify({
+              citationReceipts: automaticMemoryMatches[0]?.citationReceipts,
+              citationSummary: automaticMemoryMatches[0]?.citationSummary,
+              coverageGaps: automaticBrief.coverage.gaps,
+            }),
+            EffectString.slice(0, 2_000),
+          ),
+        ).toMatchObject({
           codeRelations: [
             {
               anchorOrdinal: 0,

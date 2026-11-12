@@ -12,11 +12,14 @@ import {
 } from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
   NativeAuthoringSpecDocumentSchema,
   NativeAuthoringPlanDocumentSchema,
   decodeNativeAuthoringDocument,
+  canonicalAuthoringJson,
+  nativeAuthoringPathDiagnostic,
   nativeAuthoringDigest,
   validateNativeAuthoring,
   type NativeAuthoringDocument,
@@ -26,13 +29,14 @@ import {runWorkflowAutomation} from './index.js';
 import {inspectNativeSourcePaths, nativeAuthoringSourceOrigins} from './authoring.js';
 import {readNativeTaskInstalledTarget} from './task_actions.js';
 import {AuthoringRootSchema, decodeAuthoringArtifact} from './authoring_artifacts.js';
-import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
-import {makeWorkflowGraphAdapter} from './graph.js';
+import {validateWorkflowGraphProject} from '../workflow_memory/graph_scope.js';
+import {requireWorkflowGraphReady} from './graph.js';
 import {workflowTitleSlug} from '@threadnote/workflow-automations/naming';
 import {gitValue} from '../utils.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
+import {portableEvidenceBody, publishPortablePlanPayload, type PortablePlanPayload} from './portable_plan.js';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
@@ -113,6 +117,7 @@ const inputSchema = Schema.Union([
     contentFile: text,
     saveMode: Schema.optionalKey(Schema.Literal('background')),
     installationTarget: Schema.optionalKey(text),
+    graphProject: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256))),
     specRef: Schema.optionalKey(text),
   }),
   Schema.Struct({
@@ -120,6 +125,12 @@ const inputSchema = Schema.Union([
     command: Schema.Literal('read'),
     authoringRef: text,
     detail: Schema.optionalKey(Schema.Literals(['summary', 'document'])),
+  }),
+  Schema.Struct({
+    ...scope,
+    command: Schema.Literal('share'),
+    authoringRef: text,
+    team: text,
   }),
   Schema.Struct({
     ...scope,
@@ -204,6 +215,10 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     const reported = yield* gitValue(['rev-parse', '--show-toplevel'], cwd);
     if (!reported) return yield* fail('wrong-checkout', 'Use the original Git checkout.');
     const checkout = yield* fs.realPath(reported);
+    const graphProject =
+      request.command === 'start' && request.graphProject !== undefined
+        ? yield* validateWorkflowGraphProject(config, checkout, request.graphProject)
+        : undefined;
     const system = yield* SystemInfo;
     const inCheckout = <B, E, R>(program: Effect.Effect<B, E, R>) =>
       program.pipe(Effect.provideService(SystemInfo, {...system, currentDirectory: () => checkout}));
@@ -225,6 +240,16 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
     const runId =
       suppliedJob?.runId ?? supplied?.runId ?? 'task-' + S.slice(0, 48)(sha256HexSync(project + '\n' + featureId));
     let stored = yield* readNativeWorkflowState(config, runId);
+    if (
+      request.command === 'start' &&
+      stored &&
+      graphProject !== undefined &&
+      graphProject !== stored.state.graphProject
+    )
+      return yield* fail(
+        'graph-scope-conflict',
+        'This run already has an immutable graph scope. Start a new task with a new feature name and graphProject or --graph-project, or make the manifest unambiguous.',
+      );
     if (stored && (stored.state.project !== project || (featureId && stored.state.featureId !== featureId)))
       return yield* fail('binding-drift', 'The authoring task belongs to another feature or checkout namespace.');
     if (!stored && request.command !== 'start')
@@ -376,13 +401,11 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           );
         return {document, root: referencedRoot, operation: referenced, stored, response: loaded};
       });
-    let existing =
-      stored?.state.authoringSave && supplied && (request.command === 'save' || request.command === 'decide')
-        ? yield* pendingOriginal()
-        : stored
-          ? yield* current()
-          : undefined;
-    const result = (value: NonNullable<typeof existing>, replayed = false, full = false) => ({
+    const result = (
+      value: NonNullable<Effect.Success<ReturnType<typeof current>>>,
+      replayed = false,
+      full = false,
+    ) => ({
       status:
         value.root.readiness === 'ready' && value.root.confirmation?.intentHash === value.root.intentHash
           ? 'ready'
@@ -410,11 +433,16 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (!suppliedJob) return yield* fail('job-not-found', 'Read the current authoring job continuation.');
       if (request.operation === 'resume') {
         if (!stored) return yield* fail('run-not-found', 'The original authoring task is unavailable.');
-        const target = yield* readNativeTaskInstalledTarget(config, request.installationTarget, checkout, [
-          stored.state.profile ?? 'desktop',
-        ]);
-        if (target.installedDigest !== stored.state.generation)
-          return yield* fail('binding-drift', 'Resume only after the original authoring generation is current.');
+        // Validate the immutable job and checkout before asking for an installed
+        // target, so a foreign continuation cannot be masked as missing resources.
+        yield* callJob('status');
+        yield* readNativeTaskInstalledTarget(
+          config,
+          request.installationTarget,
+          checkout,
+          [stored.state.profile ?? 'desktop'],
+          stored.state.generation,
+        );
       }
       const response = object(yield* callJob(request.operation));
       if (request.operation !== 'result' || response.status !== 'completed')
@@ -427,9 +455,124 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
         );
       return {status: 'completed', jobRef: request.jobRef, job: response, authoring: result(completed, false, true)};
     }
+    let existing =
+      stored?.state.authoringSave && supplied && (request.command === 'save' || request.command === 'decide')
+        ? yield* pendingOriginal()
+        : stored
+          ? yield* current()
+          : undefined;
     if (request.command === 'read') {
       if (!existing) return yield* fail('authoring-root-missing', 'Save a standard authoring draft first.');
       return result(existing, false, request.detail === 'document');
+    }
+    if (request.command === 'share') {
+      if (
+        !existing ||
+        !supplied ||
+        !referenced?.artifact ||
+        !stored ||
+        existing.operation.intent.operationId !== supplied.operationId ||
+        stored.revision !== supplied.stateRevision
+      )
+        return yield* fail('stale-authoring-ref', 'Read the exact current approved plan before sharing.');
+      const document = existing.document;
+      const root = existing.root;
+      if (
+        document.kind !== 'plan' ||
+        root.kind !== 'plan' ||
+        root.readiness !== 'ready' ||
+        root.confirmation?.decision !== 'approved' ||
+        root.confirmation.intentHash !== root.intentHash ||
+        root.review?.outcome !== 'accepted' ||
+        root.review.blockingIssueCount !== 0 ||
+        root.review.documentHash !== root.documentHash ||
+        nativeAuthoringDigest(document) !== root.documentHash
+      )
+        return yield* fail(
+          'approval-required',
+          'Share only the exact current ready approved independently reviewed plan.',
+        );
+      if (!document.source)
+        return yield* fail('portable-plan-source', 'Record current source evidence before sharing this plan.');
+      const source = yield* inCheckout(
+        inspectNativeSourcePaths(
+          checkout,
+          A.map(document.source.files, file => file.path),
+          nativeAuthoringSourceOrigins(document),
+        ),
+      ).pipe(Effect.mapError(() => fail('source-drift', 'The plan source cannot be verified for sharing.')));
+      if (stableJson(source) !== stableJson(document.source))
+        return yield* fail('source-drift', 'Refresh and review the plan against the current source before sharing.');
+      let spec: PortablePlanPayload['spec'];
+      let linkedSpecDocument: NativeAuthoringDocument | undefined;
+      if (document.spec) {
+        const loaded = yield* call('load', {uri: document.spec.root.uri, detail: 'document'});
+        const specDocument = decodeNativeAuthoringDocument(loaded.document);
+        if (
+          specDocument.kind !== 'spec' ||
+          !specDocument.source ||
+          stableJson(loaded.root) !== stableJson(document.spec.root) ||
+          nativeAuthoringDigest(specDocument) !== document.spec.documentHash
+        )
+          return yield* fail('portable-plan-conflict', 'The linked ready specification changed.');
+        const specSource = yield* inCheckout(
+          inspectNativeSourcePaths(
+            checkout,
+            A.map(specDocument.source.files, file => file.path),
+            nativeAuthoringSourceOrigins(specDocument),
+          ),
+        ).pipe(
+          Effect.mapError(() =>
+            fail('source-drift', 'The linked specification source cannot be verified for sharing.'),
+          ),
+        );
+        if (stableJson(specSource) !== stableJson(specDocument.source))
+          return yield* fail('source-drift', 'Refresh and review the linked specification source before sharing.');
+        linkedSpecDocument = specDocument;
+        spec = {document: canonicalAuthoringJson(specDocument), documentHash: nativeAuthoringDigest(specDocument)};
+      }
+      const store = yield* ResourceStore;
+      const evidence: PortablePlanPayload['evidence'][number][] = [];
+      const references = new Map<string, (typeof document.context.evidenceRefs)[number]>();
+      for (const reference of [...document.context.evidenceRefs, ...(linkedSpecDocument?.context.evidenceRefs ?? [])]) {
+        const earlier = references.get(reference.uri);
+        if (earlier && stableJson(earlier) !== stableJson(reference))
+          return yield* fail(
+            'portable-plan-conflict',
+            'Linked documents pin different revisions of the same evidence.',
+          );
+        references.set(reference.uri, reference);
+      }
+      for (const reference of references.values()) {
+        const content = yield* store
+          .read({account: config.account, home: config.agentContextHome, user: config.user}, reference.uri)
+          .pipe(Effect.mapError(() => fail('portable-plan-missing', 'Required plan evidence is missing.')));
+        const body = yield* Effect.try({
+          try: () => portableEvidenceBody(reference, content, document.project),
+          catch: nativeWorkflowError,
+        });
+        evidence.push({reference, body, bodyHash: sha256HexSync(body), review: 'approved-durable'});
+      }
+      const payload: PortablePlanPayload = {
+        format: 'threadnote-portable-plan',
+        version: 1,
+        project: document.project,
+        plan: {document: canonicalAuthoringJson(document), documentHash: root.documentHash},
+        ...(spec ? {spec} : {}),
+        evidence,
+        provenance: {
+          root: {
+            uri: referenced.artifact.uri,
+            memoryId: referenced.artifact.memoryId,
+            revision: referenced.artifact.revision,
+          },
+          documentHash: root.documentHash,
+          intentHash: root.intentHash,
+          review: {outcome: 'accepted', blockingIssueCount: 0},
+          approval: 'approved',
+        },
+      };
+      return yield* publishPortablePlanPayload(config, payload, request.team);
     }
     const exactCurrent = () =>
       existing &&
@@ -556,11 +699,13 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
       if (evidenceIssue) return yield* fail('invalid-content', evidenceIssue);
       const content = yield* Schema.decodeUnknownEffect(documentKind === 'spec' ? specContent : planContent, {
         onExcessProperty: 'error',
+        reportInput: true,
       })(raw).pipe(
-        Effect.mapError(() =>
+        Effect.mapError(error =>
           fail(
             'invalid-content',
-            'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
+            nativeAuthoringPathDiagnostic(error) ??
+              'Business content must match spec/plan fields; omit format, id, project, source, spec export and compact-origin metadata.',
           ),
         ),
       );
@@ -680,19 +825,18 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
           'codex-cloud-personal',
           'cursor-cloud-personal',
         ]);
-        const binding = yield* inCheckout(
-          resolveWorkflowBinding(config, {
-            protocolVersion: 1,
-            action: 'bind',
-            workflowRunId: 'native-v1-' + runId,
+        yield* inCheckout(
+          requireWorkflowGraphReady(config, {
+            checkout,
+            runId,
             project,
             featureId,
             generation: target.installedDigest,
             profile: target.target.profile,
+            ...(graphProject === undefined ? {} : {graphProject}),
+            recovery: 'same-task',
           }),
         );
-        const graph = yield* makeWorkflowGraphAdapter(config, binding, {prepare: false});
-        yield* graph.ready(checkout);
         yield* inCheckout(
           runWorkflowAutomation(config, {
             protocolVersion: 1,
@@ -704,6 +848,7 @@ export const runNativeTaskAuthoring = (config: RuntimeConfig, input: unknown) =>
             generation: target.installedDigest,
             profile: target.target.profile,
             title: document.title,
+            ...(graphProject === undefined ? {} : {graphProject}),
           }),
         );
         stored = yield* readNativeWorkflowState(config, runId);

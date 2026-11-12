@@ -191,12 +191,30 @@ describe('development skills lifecycle', () => {
       expect(yield* snapshot(f.root)).toEqual(before);
     }).pipe(testLayer),
   );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'keeps non-regular or other unexpected generation entries conflicting',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const installed = yield* f.run(applyDevSkills(f.config, 'install', selector));
+        const root = generationRoot(f.path, installed.target.skillRoot, installed.bundleDigest);
+        yield* f.fs.writeFileString(f.path.join(root, 'unexpected.txt'), 'unowned');
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('conflict');
+        yield* f.fs.remove(f.path.join(root, 'unexpected.txt'));
+        yield* f.fs.symlink(f.path.join(root, 'dev-cycle', 'SKILL.md'), f.path.join(root, '.DS_Store'));
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('conflict');
+      }).pipe(testLayer),
+  );
   effectIt.effect(
     'shares one generation across homes, pins roots, updates explicitly and tombstones final removal',
     () =>
       Effect.gen(function* () {
         const f = yield* fixture();
         const first = yield* f.run(applyDevSkills(f.config, 'install', selector));
+        const firstGeneration = generationRoot(f.path, first.target.skillRoot, first.bundleDigest);
+        yield* f.fs.writeFileString(f.path.join(firstGeneration, '.DS_Store'), 'macOS metadata');
+        yield* f.fs.writeFileString(f.path.join(firstGeneration, 'dev-plan', '.DS_Store'), 'nested metadata');
+        expect((yield* f.run(statusDevSkills(f.config, selector))).targets[0]?.installationState).toBe('current');
         const secondConfig = {...f.config, agentContextHome: f.path.join(f.root, 'second')};
         yield* f.run(applyDevSkills(secondConfig, 'install', {agent: 'amp'}));
         const secondBefore = yield* f.fs.readFileString(homeIndexPath(f.path, secondConfig.agentContextHome));
