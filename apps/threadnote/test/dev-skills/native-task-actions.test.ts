@@ -1563,8 +1563,8 @@ describe('native task actions', () => {
   effectIt.effect('recovers an unreviewed snapshot through the public task action and requires full review', () =>
     Effect.gen(function* () {
       const affectedPaths = Array.from(
-        {length: 40},
-        (_, index) => `receipt-${index}-${EffectString.repeat(190)('x')}.txt`,
+        {length: 160},
+        (_, index) => `receipt-${index}-abcdefghijklmnopqrstuvwxyz012345.txt`,
       );
       const f = yield* fixture(['one'], 'local', false, false, true, undefined, undefined, {one: affectedPaths});
       for (const path of affectedPaths) yield* f.fs.writeFileString(f.path.join(f.repo, path), 'Admitted text.\n');
