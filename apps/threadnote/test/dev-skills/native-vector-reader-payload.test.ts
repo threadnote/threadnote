@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Context, Effect, Exit, FileSystem, Layer, String as EffectString} from 'effect';
+import {Array as EffectArray, Cause, Context, Effect, Exit, FileSystem, Layer, String as EffectString} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
@@ -83,6 +83,97 @@ if (${args.includes('/EXPORTS')}) {
         const valid = yield* fixture();
         expect(yield* valid(false)).toMatch(/^[a-f0-9]{64}$/u);
       }).pipe(TestClock.withLive),
+    );
+  });
+});
+
+describe('Linux native binary audit failures', () => {
+  const fixture = Effect.fn(function* (elf: string, symbols = '000000000001 T napi_register_module_v1\n') {
+    const native = yield* SystemInfo;
+    const system = SystemInfo.of({...native, platform: 'linux'});
+    const binary = '/private/do-not-publish/reader.node';
+    const command = CommandExecutor.of({
+      execute: (executable, args, bounds) =>
+        Effect.sync(() => {
+          expect(bounds).toEqual({timeoutMs: 30_000, maxOutputBytes: 512 * 1024});
+          expect(args).toEqual(
+            executable === 'readelf'
+              ? ['--file-header', '--dynamic', '--version-info', binary]
+              : ['-D', '--defined-only', binary],
+          );
+          expect(['readelf', 'nm']).toContain(executable);
+          return {exitCode: 0, stdout: executable === 'readelf' ? elf : symbols, stderr: ''};
+        }),
+      executeStreaming: () => Effect.die('Unexpected streaming binary audit'),
+    });
+    return (target = 'bun-linux-arm64-musl', inference = false) =>
+      auditNativeReaderBinary(binary, target, {inference}).pipe(
+        Effect.provideService(SystemInfo, system),
+        Effect.provideService(CommandExecutor, command),
+      );
+  });
+  const diagnostic = (exit: Exit.Exit<unknown, unknown>) => {
+    const message = Exit.isFailure(exit) ? Cause.pretty(exit.cause) : '';
+    const encoded = /Bounded audit: (\{[^\n]+\})/u.exec(message)?.[1] ?? '{}';
+    expect(encoded.length).toBeLessThanOrEqual(4096);
+    expect(message).not.toContain('/private/do-not-publish');
+    expect(message).not.toContain('unrelated audit noise');
+    const value: unknown = JSON.parse(encoded);
+    return value;
+  };
+  effectIt.layer(TestSystemInfoLayer)(layerIt => {
+    layerIt.effect('retains musl rejection and reports capped required versions and library identities', () =>
+      Effect.gen(function* () {
+        const versions = EffectArray.makeBy(40, index => `GLIBC_2.${index + 17}`);
+        const elf =
+          'unrelated audit noise /private/do-not-publish/reader.node\n' +
+          EffectString.repeat(20)(' 0x1 (NEEDED) Shared library: [libc.so.6]\n') +
+          ' 0x1 (NEEDED) Shared library: [/private/do-not-publish/libsecret.so]\n' +
+          "Version needs section '.gnu.version_r' contains 1 entry:\n" +
+          ' 0x0: Version: 1 File: libc.so.6 Cnt: 40\n' +
+          ' 0x0: Version: 1 File: /private/do-not-publish/libsecret.so Cnt: 0\n' +
+          EffectArray.join(
+            EffectArray.map(versions, name => ` 0x1: Name: ${name} Flags: none Version: 2`),
+            '\n',
+          );
+        const audit = yield* fixture(elf);
+        for (const inference of [false, true]) {
+          const exit = yield* audit('bun-linux-arm64-musl', inference).pipe(Effect.exit);
+          expect(diagnostic(exit)).toMatchObject({
+            target: 'bun-linux-arm64-musl',
+            domain: inference ? 'inference' : 'vector-reader',
+            matchedVersions: {count: 40, values: EffectArray.take(versions, 8)},
+            requiredVersions: {count: 40, values: EffectArray.take(versions, 8)},
+            definedVersions: {count: 0, values: []},
+            definedSymbolVersions: {count: 0, values: []},
+            neededLibraries: {count: 1, values: ['libc.so.6']},
+            versionNeedFiles: {count: 1, values: ['libc.so.6']},
+          });
+        }
+      }),
+    );
+    layerIt.effect(
+      'distinguishes definitions and defined symbols while retaining the existing conservative rejection',
+      () =>
+        Effect.gen(function* () {
+          const audit = yield* fixture(
+            "Version definition section '.gnu.version_d' contains 1 entry:\n 0x1: Name: GLIBC_2.17\n",
+            '00000001 A GLIBC_2.18\n',
+          );
+          const exit = yield* audit().pipe(Effect.exit);
+          expect(diagnostic(exit)).toMatchObject({
+            requiredVersions: {count: 0, values: []},
+            definedVersions: {count: 1, values: ['GLIBC_2.17']},
+            definedSymbolVersions: {count: 1, values: ['GLIBC_2.18']},
+          });
+          const musl = yield* fixture(' 0x1 (NEEDED) Shared library: [libc.musl-aarch64.so.1]\n');
+          expect(yield* musl()).toMatch(/^[a-f0-9]{64}$/u);
+          const gnuFloor = yield* fixture('Name: GLIBC_2.17\n');
+          expect(yield* gnuFloor('bun-linux-arm64')).toMatch(/^[a-f0-9]{64}$/u);
+          const newer = yield* fixture('Name: GLIBC_2.18\n');
+          const floor = yield* newer('bun-linux-arm64').pipe(Effect.exit);
+          expect(Exit.isFailure(floor) && Cause.pretty(floor.cause)).toContain('glibc 2.17 floor');
+        }),
     );
   });
 });

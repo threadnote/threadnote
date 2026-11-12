@@ -125,9 +125,13 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
           ]
         : [['dumpbin', ['/HEADERS', '/DEPENDENTS', ...(options.inference ? [] : ['/EXPORTS']), binaryPath]]];
   let output = '';
+  let elfOutput = '';
+  let definedSymbolsOutput = '';
   for (const [command, arguments_] of commands) {
     const result = yield* runCommandEffect(command, arguments_, {timeoutMs: 30_000, maxOutputBytes: 512 * 1024});
     output += result.stdout;
+    if (command === 'readelf') elfOutput = result.stdout;
+    if (command === 'nm') definedSymbolsOutput = result.stdout;
   }
   if (/(?:libsqlite3(?:\.so|\.dylib)|sqlite3\.dll)/iu.test(output))
     throw new Error('Native payload unexpectedly depends on external SQLite.');
@@ -135,8 +139,44 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
     throw new Error('Native vector reader unexpectedly exports private SQLite symbols.');
   if (platform === 'linux') {
     const versions = [...EffectString.matchAll(/\bGLIBC_(\d+)\.(\d+)/gu)(output)];
-    if (EffectString.endsWith('-musl')(bunTarget) && versions.length !== 0)
-      throw new Error('Musl native payload contains GNU libc symbol dependencies.');
+    if (EffectString.endsWith('-musl')(bunTarget) && versions.length !== 0) {
+      const names = (value: string) =>
+        EffectArray.map([...EffectString.matchAll(/\bGLIBC_\d+(?:\.\d+)+\b/gu)(value)], match => match[0]);
+      const sample = (values: readonly string[]) => {
+        const unique = EffectArray.dedupe(values);
+        return {count: unique.length, values: EffectArray.map(EffectArray.take(unique, 8), EffectString.slice(0, 64))};
+      };
+      // Keep version requirements separate from definitions and defined exports without changing rejection policy.
+      const needs =
+        /(?:^|\n)Version needs section[^\n]*\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/u.exec(elfOutput)?.[1] ?? '';
+      const definitions =
+        /(?:^|\n)Version definition section[^\n]*\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/u.exec(elfOutput)?.[1] ??
+        '';
+      const diagnostic = {
+        target: EffectString.slice(0, 128)(bunTarget),
+        domain: options.inference ? 'inference' : 'vector-reader',
+        matchedVersions: sample(names(output)),
+        requiredVersions: sample(names(needs)),
+        definedVersions: sample(names(definitions)),
+        definedSymbolVersions: sample(names(definedSymbolsOutput)),
+        neededLibraries: sample(
+          EffectArray.map(
+            [...EffectString.matchAll(/\(NEEDED\)[^\r\n]*Shared library: \[([A-Za-z0-9_.+-]{1,128})\]/gu)(elfOutput)],
+            match => match[1] ?? '',
+          ),
+        ),
+        versionNeedFiles: sample(
+          EffectArray.map(
+            [...EffectString.matchAll(/\bFile: ([A-Za-z0-9_.+-]{1,128})(?=\s|$)/gu)(needs)],
+            match => match[1] ?? '',
+          ),
+        ),
+      };
+      throw new Error(
+        'Musl native payload contains GNU libc symbol dependencies. Bounded audit: ' +
+          EffectString.slice(0, 4096)(JSON.stringify(diagnostic)),
+      );
+    }
     if (
       !EffectString.endsWith('-musl')(bunTarget) &&
       EffectArray.some(versions, match => Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) > 17))
