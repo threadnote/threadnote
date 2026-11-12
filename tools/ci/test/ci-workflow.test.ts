@@ -109,6 +109,55 @@ function step(job: Job | undefined, name: string): Step | undefined {
   );
 }
 
+it('routes native Bun caches through step-scoped runner paths before the first Bun invocation', () => {
+  const expectedEnvironment = {
+    BUN_INSTALL_CACHE_DIR: '${{ runner.temp }}/threadnote-bun-install',
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: '${{ runner.temp }}/threadnote-bun-transpiler',
+  };
+  const setup = step(releaseJobs.build, 'Route Bun caches outside the source checkout');
+  for (const name of ['build', 'installed-e2e', 'extracted-workflows']) {
+    const job = releaseJobs[name];
+    const caches = step(job, 'Route Bun caches outside the source checkout');
+    const steps = job?.steps ?? [];
+    expect(caches?.env).toEqual(expectedEnvironment);
+    expect(caches?.shell).toBe('bash');
+    expect(caches?.if).toBeUndefined();
+    expect(caches?.run).toBe(setup?.run);
+    const setupIndex = steps.indexOf(caches!);
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
+        () => -1,
+      ),
+    );
+    for (const [index, candidate] of steps.entries()) {
+      if (/(?:^|[\s;&|])bun(?:\s|$)/u.test(candidate.run ?? '')) expect(setupIndex).toBeLessThan(index);
+      if (candidate === caches) continue;
+      expect(candidate.env?.BUN_INSTALL_CACHE_DIR).toBeUndefined();
+      expect(candidate.env?.BUN_RUNTIME_TRANSPILER_CACHE_PATH).toBeUndefined();
+    }
+  }
+
+  // Exercise the exact shell boundary with Windows separators, spaces and a literal dollar sign.
+  const install = 'D:\\runner temp\\$cache/threadnote-bun-install';
+  const transpiler = 'D:\\runner temp\\$cache/threadnote-bun-transpiler';
+  const exported = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', setup?.run ?? 'exit 98'], {
+    encoding: 'utf8',
+    env: {
+      BASH_ENV: '',
+      PATH: '',
+      GITHUB_ENV: '/dev/stdout',
+      BUN_INSTALL_CACHE_DIR: install,
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpiler,
+    },
+    timeout: 2_000,
+  });
+  expect(exported.error).toBeUndefined();
+  expect(exported.status).toBe(0);
+  expect(exported.stdout).toBe(`BUN_INSTALL_CACHE_DIR=${install}\nBUN_RUNTIME_TRANSPILER_CACHE_PATH=${transpiler}\n`);
+});
+
 it('runs affected-target Bazel CI for every maintained pull-request base', () => {
   expect(workflow.on?.pull_request?.branches).toEqual(['main', 'codex/4.0.0', 'release/5.0.0', 'release/5.1.0']);
 });

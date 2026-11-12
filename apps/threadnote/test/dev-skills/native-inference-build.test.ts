@@ -4,6 +4,9 @@ import {
   muslWorkflowRuntimeArguments,
   MUSL_WORKFLOW_BWRAP_SHIM,
   nativeContainerFailureReport,
+  nativeInferenceBuildEnvironment,
+  GNU_INFERENCE_COMPILER_BOOTSTRAP,
+  muslToolchainFetchScript,
 } from '../../../../scripts/assemble-native-inference.js';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
@@ -17,6 +20,22 @@ import {
 } from '../../../../scripts/native-inference-payload.js';
 
 describe('native inference overlay filesystem boundary', () => {
+  it('selects the pinned GNU compiler only for inference without changing vector build inputs', () => {
+    const environment = {
+      CC: '/original/gcc',
+      CXX: '/original/g++',
+      THREADNOTE_NATIVE_INFERENCE_CC: '/opt/clang/bin/clang',
+      THREADNOTE_NATIVE_INFERENCE_CXX: '/opt/clang/bin/clang++',
+    };
+    expect(nativeInferenceBuildEnvironment(environment)).toMatchObject({
+      CC: '/opt/clang/bin/clang',
+      CXX: '/opt/clang/bin/clang++',
+    });
+    expect(environment.CC).toBe('/original/gcc');
+    expect(environment.CXX).toBe('/original/g++');
+    expect(nativeInferenceBuildEnvironment({CC: '/native/cc'})).toEqual({CC: '/native/cc'});
+  });
+
   it('retains build stdout even when Docker pull diagnostics occupy stderr', () => {
     const error = CommandFailed.make({
       args: ['run'],
@@ -73,6 +92,86 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   effectIt.layer(BunServices.layer)(it => {
+    it.effect.skipIf(process.platform === 'win32')(
+      'passes exact APK constraints through world, restores it, and pins the compiler helper arguments',
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({prefix: 'native toolchain shell '});
+          const literal = (value: string) => "'" + EffectString.replaceAll("'", "'\"'\"'")(value) + "'";
+          const world = path.join(directory, 'world');
+          const backup = path.join(directory, 'original-world');
+          const observed = path.join(directory, 'solver-world');
+          const apk = path.join(directory, 'apk');
+          const compiler = path.join(directory, 'manylinux-install-clang');
+          const compilerBin = path.join(directory, 'clang bin');
+          yield* fs.makeDirectory(compilerBin);
+          const originalAr = path.join(directory, 'ar');
+          const compilerAr = path.join(compilerBin, 'ar');
+          yield* fs.writeFileString(world, 'alpine-baselayout\nbusybox\n');
+          yield* fs.writeFileString(apk, `#!/bin/sh\ncp ${literal(world)} ${literal(observed)}\nprintf '%s\\0' "$@"\n`);
+          yield* fs.writeFileString(compiler, `#!/bin/sh\nprintf '%s\\0' "$@"\n`);
+          yield* fs.writeFileString(originalAr, '#!/bin/sh\nexit 0\n');
+          yield* fs.writeFileString(compilerAr, '#!/bin/sh\nexit 99\n');
+          for (const executable of [apk, compiler, originalAr, compilerAr]) yield* fs.chmod(executable, 0o755);
+          const script = EffectString.replaceAll(
+            '/etc/apk/world',
+            literal(world),
+          )(EffectString.replaceAll('/tmp/threadnote-original-world', literal(backup))(muslToolchainFetchScript(true)));
+          const env = {...Bun.env, PATH: `${directory}:${Bun.env.PATH ?? ''}`};
+          const fetched = Bun.spawnSync({cmd: ['sh', '-ec', script], env, stdout: 'pipe', stderr: 'pipe'});
+          expect(fetched.exitCode, fetched.stderr.toString()).toBe(0);
+          expect(EffectString.split(fetched.stdout.toString(), '\0').slice(0, -1)).toEqual([
+            '--cache-dir',
+            '/tmp/threadnote-index',
+            'fetch',
+            '--world',
+            '--recursive',
+            '--output',
+            '/tmp/threadnote-apks',
+          ]);
+          expect(yield* fs.readFileString(world)).toBe('alpine-baselayout\nbusybox\n');
+          const constraints = EffectString.split('\n')(yield* fs.readFileString(observed));
+          expect(constraints).toEqual(
+            expect.arrayContaining([
+              'alpine-baselayout',
+              'busybox',
+              'build-base=0.5-r3',
+              'cmake=3.24.4-r0',
+              'ripgrep=13.0.0-r1',
+              'bubblewrap=0.7.0-r0',
+            ]),
+          );
+          const isolatedBootstrap = EffectString.replace(
+            'threadnote_inference_compiler_bin=/opt/clang/bin',
+            `threadnote_inference_compiler_bin=${literal(compilerBin)}`,
+          )(GNU_INFERENCE_COMPILER_BOOTSTRAP);
+          const originalPath = `${directory}::${Bun.env.PATH ?? ''}`;
+          const installed = Bun.spawnSync({
+            cmd: [
+              'sh',
+              '-ec',
+              `${isolatedBootstrap}printf '%s\\0' "$PATH" "$(command -v ar)" "$THREADNOTE_NATIVE_INFERENCE_CC" "$THREADNOTE_NATIVE_INFERENCE_CXX"`,
+            ],
+            env: {...env, PATH: `${compilerBin}:${originalPath}`},
+            stdout: 'pipe',
+            stderr: 'pipe',
+          });
+          expect(installed.exitCode, installed.stderr.toString()).toBe(0);
+          expect(EffectString.split(installed.stdout.toString(), '\0').slice(0, -1)).toEqual([
+            '-v',
+            'v20.1.8.0',
+            '-c',
+            'a0e42b3a3b8c752e1382d697b98d00bff256a99dc04146de2eb2fb1c0bd908be',
+            originalPath,
+            originalAr,
+            '/opt/clang/bin/clang',
+            '/opt/clang/bin/clang++',
+          ]);
+        }),
+    );
+
     it.effect.skipIf(process.platform === 'win32')(
       'drops all capabilities before forwarding the fixed namespace arguments without shell expansion',
       () =>

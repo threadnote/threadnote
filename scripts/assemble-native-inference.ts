@@ -44,6 +44,38 @@ const PORTABLE_OPTIONS = {
   LLAMA_BUILD_SERVER: 'OFF',
 };
 
+/** Scope the newer GNU compiler to inference; vector assembly keeps the container's original compiler. */
+export function nativeInferenceBuildEnvironment(environment: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    ...(environment.THREADNOTE_NATIVE_INFERENCE_CC ? {CC: environment.THREADNOTE_NATIVE_INFERENCE_CC} : {}),
+    ...(environment.THREADNOTE_NATIVE_INFERENCE_CXX ? {CXX: environment.THREADNOTE_NATIVE_INFERENCE_CXX} : {}),
+  };
+}
+
+// This exact helper and version table are supplied by the digest-pinned manylinux2014 images.
+export const GNU_INFERENCE_COMPILER_BOOTSTRAP = `manylinux-install-clang -v v20.1.8.0 -c a0e42b3a3b8c752e1382d697b98d00bff256a99dc04146de2eb2fb1c0bd908be
+threadnote_inference_compiler_bin=/opt/clang/bin
+threadnote_outer_path=":$PATH:"
+while case "$threadnote_outer_path" in *:"$threadnote_inference_compiler_bin":*) true;; *) false;; esac; do
+  threadnote_outer_prefix="\${threadnote_outer_path%%:"$threadnote_inference_compiler_bin":*}"
+  threadnote_outer_path="$threadnote_outer_prefix:\${threadnote_outer_path#*:"$threadnote_inference_compiler_bin":}"
+done
+threadnote_outer_path="\${threadnote_outer_path#:}"
+export PATH="\${threadnote_outer_path%:}"
+unset threadnote_outer_path threadnote_outer_prefix threadnote_inference_compiler_bin
+export THREADNOTE_NATIVE_INFERENCE_CC=/opt/clang/bin/clang THREADNOTE_NATIVE_INFERENCE_CXX=/opt/clang/bin/clang++
+`;
+
+/** APK2.12 fetch arguments are names; --world feeds parsed exact constraints to its own recursive solver. */
+export function muslToolchainFetchScript(workflowRuntime = false): string {
+  return `cp /etc/apk/world /tmp/threadnote-original-world
+printf '%s\\n' build-base=0.5-r3 cmake=3.24.4-r0 samurai=1.2-r2 nodejs=18.20.1-r0 npm=9.1.2-r0 python3=3.10.15-r0 git=2.39.5-r0 curl=8.9.0-r0 bash=5.2.15-r0 linux-headers=5.19.5-r0${workflowRuntime ? ' ripgrep=13.0.0-r1 bubblewrap=0.7.0-r0' : ''} >> /etc/apk/world
+apk --cache-dir /tmp/threadnote-index fetch --world --recursive --output /tmp/threadnote-apks
+cp /tmp/threadnote-original-world /etc/apk/world
+`;
+}
+
 async function sourceInputs(root: string) {
   const packageRoot = path.join(root, 'node_modules', 'node-llama-cpp');
   const inputs: [string, string][] = [];
@@ -120,7 +152,7 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
   if (portable) {
     const sourceGpu = process.platform === 'darwin' && process.arch === 'arm64' ? 'metal' : false;
     toolchain.buildGpu = String(sourceGpu);
-    let buildEnvironment = {...Bun.env};
+    let buildEnvironment = nativeInferenceBuildEnvironment(Bun.env);
     if (process.platform !== 'win32') {
       const compatibilityBin = path.join(options.root, '.context', 'native-inference-compat');
       yield* filesystem.makeDirectory(compatibilityBin, {recursive: true});
@@ -133,7 +165,7 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       yield* filesystem.chmod(path.join(compatibilityBin, 'node'), 0o755);
       yield* filesystem.chmod(path.join(compatibilityBin, 'npm'), 0o755);
       buildEnvironment = {
-        ...Bun.env,
+        ...buildEnvironment,
         PATH: `${compatibilityBin}:${Bun.env.PATH ?? ''}`,
       };
       toolchain.nodeCompatibilityHost = `bun-${Bun.version}`;
@@ -147,8 +179,8 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
             ['npm', ['--version']],
           ] as const)
         : ([
-            ['cc', ['--version']],
-            ['c++', ['--version']],
+            [buildEnvironment.CC ?? 'cc', ['--version']],
+            [buildEnvironment.CXX ?? 'c++', ['--version']],
           ] as const);
     for (const [name, args] of [
       ['cmake', ['--version']],
@@ -157,6 +189,17 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     ] as const) {
       const result = yield* runCommandEffect(name, [...args], {timeoutMs: 10_000, maxOutputBytes: 16_384});
       toolchain[name] = result.stdout;
+    }
+    if (process.platform !== 'win32') {
+      for (const [field, compiler] of [
+        ['cCompiler', buildEnvironment.CC ?? 'cc'],
+        ['cxxCompiler', buildEnvironment.CXX ?? 'c++'],
+      ]) {
+        const executable = Bun.which(compiler, {PATH: buildEnvironment.PATH});
+        if (!executable) throw new Error(`Native inference compiler is unavailable: ${compiler}`);
+        toolchain[field] = executable;
+        toolchain[`${field}Sha256`] = sha256HexSync(yield* filesystem.readFile(yield* filesystem.realPath(executable)));
+      }
     }
     toolchain.container = Bun.env.THREADNOTE_NATIVE_BUILD_IMAGE ?? 'native-host';
     toolchain.sysroot = Bun.env.THREADNOTE_NATIVE_SYSROOT_IDENTITY ?? 'native-host';
@@ -291,7 +334,7 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       );
       if (process.platform === 'linux') {
         for (const library of ['libstdc++.so.6', 'libgcc_s.so.1']) {
-          const located = yield* runCommandEffect('c++', [`-print-file-name=${library}`], {
+          const located = yield* runCommandEffect(buildEnvironment.CXX ?? 'c++', [`-print-file-name=${library}`], {
             timeoutMs: 10_000,
             maxOutputBytes: 16_384,
           });
@@ -411,7 +454,8 @@ curl --fail --location --silent --show-error 'https://static.rust-lang.org/rustu
 printf '${pins.rustupSha}  /tmp/rustup-init\\n' | sha256sum -c -
 chmod 755 /tmp/rustup-init
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-host '${pins.rust}' --default-toolchain 1.89.0
-git config --global --add safe.directory ${quote(root)}
+stage=inference-compiler-bootstrap
+${GNU_INFERENCE_COMPILER_BOOTSTRAP}git config --global --add safe.directory ${quote(root)}
 cd ${quote(root)}
 stage=frozen-dependency-install
 bun install --frozen-lockfile
@@ -540,10 +584,7 @@ find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /t
 grep -q '^${pins.main} ' /tmp/index-sha256
 grep -q '^${pins.community} ' /tmp/index-sha256
 stage=apk-package-fetch
-apk --cache-dir /tmp/threadnote-index fetch --recursive --output /tmp/threadnote-apks \
- build-base=0.5-r3 cmake=3.24.4-r0 samurai=1.2-r2 nodejs=18.20.1-r0 npm=9.1.2-r0 \
- python3=3.10.15-r0 git=2.39.5-r0 curl=8.9.0-r0 bash=5.2.15-r0 linux-headers=5.19.5-r0${options.workflowRuntime ? ' ripgrep=13.0.0-r1 bubblewrap=0.7.0-r0' : ''}
-find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /tmp/index-after-sha256
+${muslToolchainFetchScript(options.workflowRuntime)}find /tmp/threadnote-index -name 'APKINDEX.*.tar.gz' -exec sha256sum {} \\; > /tmp/index-after-sha256
 cmp /tmp/index-sha256 /tmp/index-after-sha256
 stage=apk-offline-install
 apk --no-network add /tmp/threadnote-apks/*.apk

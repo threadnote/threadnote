@@ -25,6 +25,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -146,6 +154,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -223,6 +239,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
+      - name: Route Bun caches outside the source checkout
+        shell: bash
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/threadnote-bun-install
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: ${{ runner.temp }}/threadnote-bun-transpiler
+        run: |
+          printf '%s\n' "BUN_INSTALL_CACHE_DIR=$BUN_INSTALL_CACHE_DIR" >> "$GITHUB_ENV"
+          printf '%s\n' "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$BUN_RUNTIME_TRANSPILER_CACHE_PATH" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
