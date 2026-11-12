@@ -467,6 +467,8 @@ export const runNativeTaskPrWatch = (
       sha256HexSync(stableJson(embeddedDelivery)) !== deliveryAction.payloadDigest ||
       embeddedDelivery.delivery !== 'pr' ||
       (embeddedDelivery.pr?.state !== 'open' && embeddedDelivery.pr?.state !== 'merged') ||
+      embeddedDelivery.phaseId !== validation.phaseId ||
+      embeddedDelivery.phaseHash !== validation.phaseHash ||
       embeddedDelivery.validatedTree !== validation.sourceTree
     )
       return yield* fail(
@@ -475,7 +477,36 @@ export const runNativeTaskPrWatch = (
       );
     const runtime = stored.state.cycle;
     if (!runtime) return yield* fail('cycle-not-found', 'This task has no admitted native cycle.');
-    const phase = runtime.state.phases[validation.phaseId];
+    const referencedPr = embeddedDelivery.pr;
+    const currentPhase = runtime.state.phases[validation.phaseId];
+    const maintenance = request.operation !== 'start' && request.operation !== 'complete';
+    const deliveryMatches = (receipt: NonNullable<typeof currentPhase>['delivery']) =>
+      receipt === undefined ||
+      (receipt.delivery === 'pr' &&
+        receipt.pr?.url === referencedPr.url &&
+        receipt.pr?.headSha === referencedPr.headSha &&
+        receipt.pr?.branch === referencedPr.branch &&
+        receipt.pr?.baseBranch === referencedPr.baseBranch &&
+        receipt.commitEvidence === embeddedDelivery.commitEvidence &&
+        stableJson(receipt.publication) === stableJson(embeddedDelivery.publication));
+    // Retained proof authorizes only maintenance of an already-bound watch. It does
+    // not validate the current checkout or admit another delivery at its new HEAD.
+    const phase =
+      maintenance && currentPhase
+        ? Option.getOrUndefined(
+            EffectArray.findFirst(
+              [currentPhase, ...[...(currentPhase.history ?? [])].reverse()],
+              proof =>
+                proof.phaseHash === validation.phaseHash &&
+                proof.tree === validation.sourceTree &&
+                proof.head === embeddedDelivery.headSha &&
+                proof.head === (proof.validation?.head ?? validation.sourceHead) &&
+                proof.validation !== undefined &&
+                sha256HexSync(stableJson(proof.validation)) === validation.payloadDigest &&
+                deliveryMatches(proof.delivery),
+            ),
+          )
+        : currentPhase;
     const matchingSnapshots = EffectArray.filter(
       runtime.snapshots,
       item =>
@@ -493,16 +524,14 @@ export const runNativeTaskPrWatch = (
       phase.tree !== validation.sourceTree ||
       phase.phaseHash !== validation.phaseHash ||
       embeddedDelivery.headSha !== phase.head ||
+      (phase.delivery === undefined &&
+        !EffectArray.some(
+          runtime.state.plan.phases,
+          item => item.id === validation.phaseId && item.branch === embeddedDelivery.pr?.branch,
+        )) ||
       !phase.validation ||
       sha256HexSync(stableJson(phase.validation)) !== validation.payloadDigest ||
-      (phase.delivery !== undefined &&
-        (phase.delivery.delivery !== 'pr' ||
-          phase.delivery.pr?.url !== embeddedDelivery.pr.url ||
-          phase.delivery.pr?.headSha !== embeddedDelivery.pr.headSha ||
-          phase.delivery.pr?.branch !== embeddedDelivery.pr.branch ||
-          phase.delivery.pr?.baseBranch !== embeddedDelivery.pr.baseBranch ||
-          phase.delivery.commitEvidence !== embeddedDelivery.commitEvidence ||
-          stableJson(phase.delivery.publication) !== stableJson(embeddedDelivery.publication)))
+      !deliveryMatches(phase.delivery)
     )
       return yield* fail('stale-delivery-ref', 'The validated PR source changed; reload the current task card.');
     const watchIdentity = EffectString.slice(0, 48)(sha256HexSync(`${request.runId}\n${validation.phaseId}`));
@@ -512,7 +541,24 @@ export const runNativeTaskPrWatch = (
     const wakeupId = `task-${watchIdentity}`;
     const admitProvisionalWatch = () =>
       Effect.gen(function* () {
-        if (phase.delivery !== undefined) return;
+        if (phase.delivery !== undefined) {
+          const ready = unwrapCycle(
+            yield* inCheckout(
+              runWorkflowAutomation(
+                config,
+                cycleRequest(stored, {
+                  command: 'publication-ready',
+                  phaseId: validation.phaseId,
+                  publication: embeddedDelivery.publication,
+                }),
+              ),
+              checkout,
+            ),
+          );
+          if (ready.head !== embeddedDelivery.headSha || ready.tree !== validation.sourceTree)
+            return yield* fail('source-drift', 'Starting a watch requires its exact clean validated source.');
+          return;
+        }
         if (
           embeddedDelivery.pr?.state !== 'open' ||
           typeof embeddedDelivery.commitEvidence !== 'string' ||
@@ -610,6 +656,8 @@ export const runNativeTaskPrWatch = (
     const consumer = watch.envelope.state.consumer;
     if (!consumer)
       return yield* fail('watch-consumer-required', 'Attach the actual task consumer before using the watch.');
+    if (consumer.id !== consumerId || consumer.wakeupId !== wakeupId)
+      return yield* fail('watch-identity-conflict', 'The stored watch belongs to another task consumer.');
     const terminalEmpty =
       watch.envelope.state.prState !== 'open' &&
       watch.envelope.state.events.length === 0 &&
@@ -621,13 +669,6 @@ export const runNativeTaskPrWatch = (
       (request.operation === 'relay' || request.operation === 'ack' || request.operation === 'disposition')
     )
       return {status: 'terminal-empty', watchId, prUrl: watch.envelope.state.pr, revision: watch.revision};
-    if (
-      request.operation === 'relay' ||
-      request.operation === 'disposition' ||
-      request.operation === 'ack' ||
-      request.operation === 'work-disposition'
-    )
-      yield* admitProvisionalWatch();
     if (request.operation === 'complete') {
       const notification = watch.envelope.notification;
       const now = yield* Clock.currentTimeMillis;

@@ -3087,7 +3087,7 @@ describe('native task actions', () => {
     }).pipe(run),
   );
 
-  effectIt.effect('prepares and records only an exact approved PR receipt, returning a watch card for open PRs', () =>
+  const prReceiptCase = (maintenance: boolean) =>
     Effect.gen(function* () {
       const f = yield* fixture(['one'], 'pr');
       yield* f.mutate('begin-phase', {phaseId: 'one'});
@@ -3186,6 +3186,150 @@ describe('native task actions', () => {
         'native-watch-v1',
         watchId + '.json',
       );
+      if (maintenance) {
+        yield* f.git(['remote', 'add', 'origin', 'https://github.com/example/repo.git']);
+        // CI edits must not revoke the existing watch route or manufacture validation of the new source.
+        const watch = yield* startSimulatedTaskWatch(
+          f,
+          'native-run',
+          'one',
+          validationRef,
+          String(watchCard.deliveryRef),
+          openPr.url,
+        );
+        yield* writeSimulatedTaskWatch(f, watch.startedWatch, watch, openPr.url, headSha, false);
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "CI maintenance";\n');
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', 'CI maintenance after validated delivery']);
+        for (const operation of ['start', 'complete'] as const) {
+          expect(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              operation,
+              runId: 'native-run',
+              callerCwd: f.repo,
+              validationRef,
+              deliveryRef: String(watchCard.deliveryRef),
+              ...(operation === 'start' ? {wakeup: watch.wakeup} : {}),
+            }).pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'source-drift'}});
+        }
+
+        yield* f.mutate('invalidate', {phaseId: 'one', reason: 'CI follow-up source needs separate validation.'});
+        const maintenanceRunBytes = yield* f.fs.readFileString(f.statePath());
+        const watchRequest = {
+          runId: 'native-run',
+          callerCwd: f.repo,
+          validationRef,
+          deliveryRef: String(watchCard.deliveryRef),
+        };
+        for (const operation of ['start', 'complete'] as const) {
+          expect(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              operation,
+              ...watchRequest,
+              ...(operation === 'start' ? {wakeup: watch.wakeup} : {}),
+            }).pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'stale-delivery-ref'}});
+        }
+        const historicalWatchBytes = yield* f.fs.readFileString(watchPath);
+        const decodedValidation = decodeNativeTaskActionRef(validationRef);
+        if (!decodedValidation) throw new Error('Expected the canonical validation reference.');
+        const foreignValidation = encodeNativeTaskActionRef({
+          ...decodedValidation,
+          generationHash: EffectString.repeat(64)('f'),
+        });
+        expect(
+          yield* runNativeTaskAction(f.config, {
+            command: 'watch-pr',
+            operation: 'inspect',
+            ...watchRequest,
+            validationRef: foreignValidation,
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'invalid-delivery-ref'}});
+        expect(
+          yield* runNativeTaskAction(f.config, {
+            command: 'watch-pr',
+            operation: 'relay',
+            ...watchRequest,
+            deliveryRef: forgedDeliveryRef,
+          }).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'watch-identity-conflict'}});
+        expect(yield* f.fs.readFileString(watchPath)).toBe(historicalWatchBytes);
+        expect(
+          object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest})),
+        ).toMatchObject({status: 'watch-updated'});
+        const relayed = object(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'relay', ...watchRequest}),
+        );
+        const eventRefs = relayed.eventRefs;
+        if (!EffectArray.isArray(eventRefs) || !eventRefs.length)
+          throw new Error('Expected the queued historical event.');
+        const watchDeliveryRef = String(relayed.watchDeliveryRef);
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'disposition',
+          ...watchRequest,
+          watchDeliveryRef,
+          dispositions: [
+            {
+              eventRef: String(eventRefs[0]),
+              status: 'blocked',
+              reason: 'CI repair remains open.',
+              evidence: 'Retained event proof.',
+            },
+          ],
+        });
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'ack',
+          ...watchRequest,
+          watchDeliveryRef,
+        });
+        const retainedWork = object(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'work', ...watchRequest}),
+        );
+        const rows = object(object(retainedWork.result).work).items;
+        if (!EffectArray.isArray(rows) || rows.length !== 1)
+          throw new Error('Expected one retained historical work row.');
+        const eventRef = String(object(rows[0]).eventRef);
+        expect(
+          object(
+            yield* runNativeTaskAction(f.config, {
+              command: 'watch-pr',
+              operation: 'work-detail',
+              ...watchRequest,
+              workEventRef: eventRef,
+              offsetBytes: 0,
+            }),
+          ),
+        ).toMatchObject({status: 'watch-updated'});
+        yield* runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          operation: 'work-disposition',
+          ...watchRequest,
+          dispositions: [
+            {eventRef, status: 'resolved', reason: 'CI repair completed.', evidence: 'Owning check passed.'},
+          ],
+        });
+        const maintained = yield* readNativeWatch(f.config, watch.watchId);
+        expect(maintained?.envelope.state.consumer).toMatchObject({id: watch.consumerId, wakeupId: watch.wakeupId});
+        expect(maintained?.envelope.state.events).toHaveLength(0);
+        expect(maintained?.envelope.state.work[0]?.status).toBe('resolved');
+        expect(yield* f.fs.readFileString(f.statePath())).toBe(maintenanceRunBytes);
+        expect(
+          object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'stop', ...watchRequest})),
+        ).toMatchObject({status: 'watch-updated'});
+        yield* f.fs.remove(watchPath);
+        expect(
+          yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', ...watchRequest}).pipe(
+            Effect.result,
+          ),
+        ).toMatchObject({failure: {code: 'watch-not-found'}});
+        expect(yield* f.fs.exists(watchPath)).toBe(false);
+        return;
+      }
       const forgedStart = yield* attemptSimulatedTaskWatch(
         f,
         'native-run',
@@ -3271,8 +3415,11 @@ describe('native task actions', () => {
       }).pipe(Effect.result);
       expect(changedAuthority).toMatchObject({failure: {code: 'delivery-conflict'}});
       expect(yield* f.fs.readFileString(f.statePath())).toBe(afterDelivery);
-    }).pipe(run),
+    }).pipe(run);
+  effectIt.effect('prepares and records only an exact approved PR receipt, returning a watch card for open PRs', () =>
+    prReceiptCase(false),
   );
+  effectIt.effect('maintains an existing PR watch through unvalidated CI source changes', () => prReceiptCase(true));
 
   effectIt.effect('refuses provisional watches for a local plan or a phase without validation', () =>
     Effect.gen(function* () {
@@ -3824,15 +3971,12 @@ describe('native task actions', () => {
         f.path.join(f.repo, 'source.ts'),
         `${originalSource}\n// provisional source was revoked before canonical delivery\n`,
       );
-      const refusedProvisionalRelay = yield* runNativeTaskAction(f.config, {
-        command: 'watch-pr',
-        operation: 'relay',
-        runId: 'native-run',
-        callerCwd: f.repo,
-        validationRef: publishedP1.validationRef,
-        deliveryRef: publishedP1.deliveryRef,
-      }).pipe(Effect.result);
-      expect(refusedProvisionalRelay).toMatchObject({failure: {code: 'source-drift'}});
+      const refusedProvisionalStart = yield* attemptSimulatedTaskWatch(f, 'native-run', 'one', publishedP1.validationRef, publishedP1.deliveryRef, publishedP1.pr.url);
+      expect(refusedProvisionalStart.result).toMatchObject({ok: false, failure: {code: 'source-drift'}});
+      expect(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'complete', runId: 'native-run', callerCwd: f.repo,
+        validationRef: publishedP1.validationRef, deliveryRef: publishedP1.deliveryRef}).pipe(Effect.result)).toMatchObject({failure: {code: 'source-drift'}});
+      expect(object(yield* runNativeTaskAction(f.config, {command: 'watch-pr', operation: 'inspect', runId: 'native-run', callerCwd: f.repo,
+        validationRef: publishedP1.validationRef, deliveryRef: publishedP1.deliveryRef}))).toMatchObject({status: 'watch-updated'});
       expect(yield* f.fs.readFileString(provisionalWatchPath)).toBe(provisionalWatchBytes);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(provisionalWorkflowBytes);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), originalSource);
