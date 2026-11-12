@@ -44,6 +44,7 @@ import {
 } from './closeout_request_schema.js';
 import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
 import * as EffectString from 'effect/String';
+import * as EffectRecord from 'effect/Record';
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const retryableContention = (error: unknown): error is WorkflowAutomationError =>
   Schema.is(WorkflowAutomationError)(error) &&
@@ -55,6 +56,12 @@ const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,12
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const witnessLimit = 4 * 1024 * 1024;
+// Existing authoring source bounds, plus eight citation-only files and the commit/tree.
+const maximumSourceFiles = 128;
+const maximumCitationFiles = 8;
+const sourceFileLimit = 1_000_000;
+const maximumRetainedObjects = maximumSourceFiles + maximumCitationFiles + 2;
+const maximumRetainedBytes = maximumSourceFiles * sourceFileLimit + (maximumCitationFiles + 2) * witnessLimit;
 const receiptLimit = 64 * 1024;
 const workerLockOptions = {
   category: 'native-worker',
@@ -175,6 +182,57 @@ const NativeJobSourceViewSchema = Schema.Struct({
     }),
   ),
 });
+const StoredObjectSchema = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literals(['commit', 'tree', 'blob']),
+  sha256: hash,
+  size: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: witnessLimit})),
+});
+const StoredWitnessSchema = Schema.Struct({
+  ...NativeJobSourceViewSchema.fields,
+  commitObject: StoredObjectSchema,
+  treeObject: StoredObjectSchema,
+  files: Schema.Array(Schema.Struct({path: Schema.String, object: StoredObjectSchema})),
+});
+const storedInputSchema = Schema.Struct({
+  format: Schema.Literal('threadnote-native-job-input'),
+  version: Schema.Literal(2),
+  jobId: id,
+  runId: id,
+  generation: Schema.String,
+  bindingId: hash,
+  work: Schema.Unknown,
+  witness: StoredWitnessSchema,
+});
+type StoredInput = typeof storedInputSchema.Type;
+type StoredObject = typeof StoredObjectSchema.Type;
+// The canonical hash is unchanged, but never build a second aggregate base64 JSON string.
+function sourceWitnessDigest(value: unknown): string {
+  const hasher = new Bun.CryptoHasher('sha256');
+  const visit = (item: unknown): void => {
+    if (EffectArray.isArray(item)) {
+      hasher.update('[');
+      EffectArray.forEach(item, (entry, index) => {
+        if (index) hasher.update(',');
+        visit(entry);
+      });
+      hasher.update(']');
+    } else if (item !== null && typeof item === 'object') {
+      hasher.update('{');
+      const entries = EffectArray.filter(EffectRecord.toEntries(item), ([, entry]) => entry !== undefined).sort(
+        ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+      );
+      EffectArray.forEach(entries, ([key, entry], index) => {
+        if (index) hasher.update(',');
+        hasher.update(JSON.stringify(key) + ':');
+        visit(entry);
+      });
+      hasher.update('}');
+    } else hasher.update(JSON.stringify(item));
+  };
+  visit(value);
+  return hasher.digest('hex');
+}
 export const CurrentNativeJobSourceView = Context.Reference<NativeJobSourceView | undefined>(
   'threadnote/NativeJobSourceView',
   {defaultValue: () => undefined},
@@ -305,7 +363,7 @@ const decodeInput = (value: unknown, receipt: Envelope): JobInput => {
     input.generation !== receipt.generation ||
     input.bindingId !== receipt.bindingId ||
     sha256HexSync(stableJson(input.work)) !== receipt.intentDigest ||
-    sha256HexSync(stableJson(input.witness)) !== receipt.witnessDigest ||
+    sourceWitnessDigest(input.witness) !== receipt.witnessDigest ||
     !validWitness(input.witness, receipt.bindingId)
   )
     throw fail('invalid-job-state', 'The exact private job request or source witness changed.');
@@ -525,6 +583,132 @@ export const inspectNativeJobsForRun = Effect.fn('nativeJobs.inspectRun')(functi
   }
   return observed;
 });
+/** Validate every expanded role and size before opening a retained object. */
+function validateStoredInput(input: StoredInput): readonly StoredObject[] {
+  const work = parseWork(input.work, input.runId, input.generation);
+  const source = work.action === 'authoring' ? decodeNativeAuthoringDocument(work.document).source : undefined;
+  const sourceFiles = new Map(EffectArray.map(source?.files ?? [], file => [file.path, file.sha256] as const));
+  const witness = input.witness;
+  const objects = [witness.commitObject, witness.treeObject, ...EffectArray.map(witness.files, file => file.object)];
+  const paths = new Set(EffectArray.map(witness.files, file => file.path));
+  const citationPaths = new Set(EffectArray.map(witness.citations, citation => citation.path));
+  let expandedBytes = 0;
+  let encodedBytes = 0;
+  if (
+    witness.bindingId !== input.bindingId ||
+    (source && source.head !== witness.head) ||
+    objects.length > maximumRetainedObjects ||
+    sourceFiles.size > maximumSourceFiles ||
+    witness.citations.length > maximumCitationFiles ||
+    witness.citationRefs.length > maximumCitationFiles ||
+    paths.size !== witness.files.length ||
+    citationPaths.size > maximumCitationFiles ||
+    witness.commitObject.type !== 'commit' ||
+    witness.treeObject.type !== 'tree' ||
+    witness.commitObject.id !== witness.head ||
+    witness.treeObject.id !== witness.tree ||
+    !objectId.test(witness.head) ||
+    !objectId.test(witness.tree) ||
+    EffectArray.some([...sourceFiles.keys()], path => !paths.has(path)) ||
+    EffectArray.some([...citationPaths], path => !paths.has(path)) ||
+    EffectArray.some(
+      witness.files,
+      file =>
+        !nativeCycleRelativePath(file.path) ||
+        file.object.type !== 'blob' ||
+        (!sourceFiles.has(file.path) && !citationPaths.has(file.path)) ||
+        (sourceFiles.has(file.path) &&
+          (file.object.size > sourceFileLimit || file.object.sha256 !== sourceFiles.get(file.path))),
+    )
+  )
+    throw fail('invalid-job-state', 'The retained object manifest exceeds its admitted source scope.');
+  for (const object of objects) {
+    if (
+      !objectId.test(object.id) ||
+      object.id.length !== (witness.objectFormat === 'sha1' ? 40 : 64) ||
+      object.size < 0 ||
+      object.size > witnessLimit
+    )
+      throw fail('invalid-job-state', 'A retained object has an invalid identity or byte bound.');
+    expandedBytes += object.size;
+    encodedBytes += 4 * Math.ceil(object.size / 3);
+  }
+  // Bound logical expansion, including repeated references, rather than only deduplicated disk bytes.
+  if (
+    expandedBytes > maximumRetainedBytes ||
+    encodedBytes > 4 * Math.ceil(maximumRetainedBytes / 3) + 4 * maximumRetainedObjects
+  )
+    throw fail('invalid-job-state', 'The retained source exceeds its expanded byte bounds.');
+  return objects;
+}
+function storedInput(input: JobInput): StoredInput {
+  const witness = Schema.decodeUnknownSync(NativeJobSourceViewSchema)(input.witness);
+  const object = ({bytes, ...metadata}: RetainedObject): StoredObject => ({
+    ...metadata,
+    size: Buffer.from(bytes, 'base64').length,
+  });
+  const stored: StoredInput = {
+    ...input,
+    version: 2,
+    witness: {
+      ...witness,
+      commitObject: object(witness.commitObject),
+      treeObject: object(witness.treeObject),
+      files: EffectArray.map(witness.files, file => ({path: file.path, object: object(file.object)})),
+    },
+  };
+  validateStoredInput(stored);
+  return stored;
+}
+const objectDirectory = Effect.fn('nativeJobs.objectDirectory')(function* (file: string, create: boolean) {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = file + '.objects';
+  if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+    return yield* fail('unsafe-job-state', 'Retained object directories cannot be symbolic links.');
+  if (!(yield* fs.exists(directory))) {
+    if (!create) return yield* fail('invalid-job-state', 'The retained object directory is missing.');
+    yield* fs.makeDirectory(directory, {mode: 0o700});
+  }
+  if ((yield* fs.stat(directory)).type !== 'Directory' || (yield* fs.realPath(directory)) !== directory)
+    return yield* fail('unsafe-job-state', 'Retained objects must remain in their original private directory.');
+  return directory;
+});
+const readObject = Effect.fn('nativeJobs.readObject')(function* (
+  directory: string,
+  object: StoredObject,
+  objectFormat: 'sha1' | 'sha256',
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(directory, object.sha256);
+  if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)) || !(yield* fs.exists(file)))
+    return yield* fail('invalid-job-state', 'A retained source object is missing or unsafe.');
+  const stat = yield* fs.stat(file);
+  if (
+    stat.type !== 'File' ||
+    Number(stat.size) !== object.size ||
+    Number(stat.size) > witnessLimit ||
+    (yield* fs.realPath(directory)) !== directory ||
+    (yield* fs.realPath(file)) !== file
+  )
+    return yield* fail('invalid-job-state', 'A retained source object has an unsafe path or size.');
+  const bytes = yield* fs.readFile(file);
+  if (
+    Option.isSome(yield* fs.readLink(file).pipe(Effect.option)) ||
+    (yield* fs.realPath(directory)) !== directory ||
+    (yield* fs.realPath(file)) !== file ||
+    Number((yield* fs.stat(file)).size) !== object.size
+  )
+    return yield* fail('invalid-job-state', 'A retained source object changed during readback.');
+  if (
+    bytes.length !== object.size ||
+    sha256HexSync(bytes) !== object.sha256 ||
+    new Bun.CryptoHasher(objectFormat).update(`${object.type} ${bytes.length}\0`).update(bytes).digest('hex') !==
+      object.id
+  )
+    return yield* fail('invalid-job-state', 'A retained source object failed independent identity verification.');
+  return bytes;
+});
 const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeConfig, receipt: Envelope) {
   const file = yield* jobPath(config, receipt.runId, receipt.jobId);
   if (!file) return yield* fail('job-not-found', 'The original job input is missing.');
@@ -538,8 +722,49 @@ const readInput = Effect.fn('nativeJobs.readInput')(function* (config: RuntimeCo
   const bytes = yield* fs.readFileString(inputFile);
   if (Buffer.byteLength(bytes) > witnessLimit)
     return yield* fail('invalid-job-state', 'The immutable admitted input exceeds its 4 MiB limit.');
+  const parsed = yield* Effect.try({
+    try: () => JSON.parse(bytes) as unknown,
+    catch: () => fail('invalid-job-state', 'The admitted input is malformed.'),
+  });
+  const stored = Schema.is(Schema.Struct({version: Schema.Literal(2)}))(parsed)
+    ? yield* Schema.decodeUnknownEffect(storedInputSchema, {onExcessProperty: 'error'})(parsed).pipe(
+        Effect.mapError(() => fail('invalid-job-state', 'The retained object manifest is malformed.')),
+      )
+    : undefined;
+  let input = parsed;
+  if (stored) {
+    yield* Effect.try({
+      try: () => {
+        if (
+          stored.jobId !== receipt.jobId ||
+          stored.runId !== receipt.runId ||
+          stored.generation !== receipt.generation ||
+          stored.bindingId !== receipt.bindingId ||
+          sha256HexSync(stableJson(stored.work)) !== receipt.intentDigest
+        )
+          throw fail('invalid-job-state', 'The retained object manifest changed its admitted request.');
+        validateStoredInput(stored);
+      },
+      catch: () => fail('invalid-job-state', 'The retained object manifest failed scope verification.'),
+    });
+    const directory = yield* objectDirectory(file, false);
+    const materialize = (object: StoredObject) =>
+      readObject(directory, object, stored.witness.objectFormat).pipe(
+        Effect.map(bytes => ({
+          id: object.id,
+          type: object.type,
+          sha256: object.sha256,
+          bytes: Buffer.from(bytes).toString('base64'),
+        })),
+      );
+    const commitObject = yield* materialize(stored.witness.commitObject);
+    const treeObject = yield* materialize(stored.witness.treeObject);
+    const files: RetainedFile[] = [];
+    for (const entry of stored.witness.files) files.push({path: entry.path, object: yield* materialize(entry.object)});
+    input = {...stored, version: 1, witness: {...stored.witness, commitObject, treeObject, files}};
+  }
   return yield* Effect.try({
-    try: () => decodeInput(JSON.parse(bytes) as unknown, receipt),
+    try: () => decodeInput(input, receipt),
     catch: () => fail('invalid-job-state', 'The exact admitted input failed independent readback.'),
   });
 });
@@ -549,16 +774,47 @@ const writeInput = Effect.fn('nativeJobs.writeInput')(function* (
   input: JobInput,
 ) {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const file = (yield* jobPath(config, receipt.runId, receipt.jobId, true))!;
   const inputFile = file + '.input.json';
-  const serialized = stableJson(decodeInput(input, receipt)) + '\n';
+  const manifest = yield* Effect.try({
+    try: () => storedInput(decodeInput(input, receipt)),
+    catch: () => fail('job-capability', 'The exact request and source exceed the bounded background object contract.'),
+  });
+  const serialized = stableJson(manifest) + '\n';
   if (Buffer.byteLength(serialized) > witnessLimit)
-    return yield* fail('job-capability', 'The exact request and source witness exceed the 4 MiB background limit.');
+    return yield* fail('job-capability', 'The exact request and source manifest exceed the 4 MiB background limit.');
   if (yield* fs.exists(inputFile)) {
-    const old = yield* readInput(config, receipt);
-    if (stableJson(old) !== stableJson(input))
-      return yield* fail('job-intent-conflict', 'This job identity already retains different immutable input.');
+    yield* readInput(config, receipt);
     return;
+  }
+  const directory = yield* objectDirectory(file, true);
+  const view = yield* Schema.decodeUnknownEffect(NativeJobSourceViewSchema)(input.witness).pipe(
+    Effect.mapError(() => fail('invalid-job-state', 'The source view is malformed.')),
+  );
+  for (const object of [view.commitObject, view.treeObject, ...EffectArray.map(view.files, entry => entry.object)]) {
+    const destination = path.join(directory, object.sha256);
+    const metadata: StoredObject = {
+      id: object.id,
+      type: object.type,
+      sha256: object.sha256,
+      size: Buffer.from(object.bytes, 'base64').length,
+    };
+    if (!(yield* fs.exists(destination)) && Option.isNone(yield* fs.readLink(destination).pipe(Effect.option))) {
+      const temporary = destination + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
+      yield* Effect.gen(function* () {
+        yield* fs.writeFile(temporary, Buffer.from(object.bytes, 'base64'), {mode: 0o600, flag: 'wx'});
+        if (
+          (yield* jobPath(config, receipt.runId, receipt.jobId)) !== file ||
+          (yield* objectDirectory(file, false)) !== directory ||
+          (yield* fs.exists(destination)) ||
+          Option.isSome(yield* fs.readLink(destination).pipe(Effect.option))
+        )
+          return yield* fail('job-conflict', 'Retained source path changed before durable admission.');
+        yield* fs.rename(temporary, destination);
+      }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
+    }
+    yield* readObject(directory, metadata, view.objectFormat);
   }
   const temporary = inputFile + '.' + (yield* (yield* SecureRandom.SecureRandom).uuidV4()) + '.tmp';
   yield* Effect.gen(function* () {
@@ -634,10 +890,11 @@ const retainObject = Effect.fn('nativeJobs.retainObject')(function* (
   repo: string,
   type: RetainedObject['type'],
   id: string,
+  maximumBytes = witnessLimit,
 ) {
   const binary = yield* runBinaryCommandEffect('git', ['--no-optional-locks', '-C', repo, 'cat-file', type, id], {
     timeoutMs: 30_000,
-    maxOutputBytes: witnessLimit,
+    maxOutputBytes: maximumBytes,
   });
   const actual = yield* runBinaryCommandEffect(
     'git',
@@ -734,6 +991,8 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     : undefined;
   const codeRefs =
     work.action === 'authoring' ? document!.context.codeRefs : (closeout?.codeRefs ?? proposalCodeRefs ?? []);
+  if (codeRefs.length > maximumCitationFiles)
+    return yield* fail('job-capability', 'Background admission supports at most eight local citation references.');
   if (EffectArray.some(codeRefs, ref => Effect2.pipe(ref, EffectString.startsWith('cgr_'))))
     return yield* fail(
       'job-capability',
@@ -782,6 +1041,12 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
       ...EffectArray.map(citations, citation => citation.path),
     ]),
   ];
+  if (
+    paths.length > maximumSourceFiles + maximumCitationFiles ||
+    citations.length > maximumCitationFiles ||
+    codeRefs.length > maximumCitationFiles
+  )
+    return yield* fail('job-capability', 'The retained source exceeds its admitted object count.');
   const files: RetainedFile[] = [];
   for (const path of paths) {
     if (!nativeCycleRelativePath(path))
@@ -789,14 +1054,14 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     const entry = yield* readNativeCycleTreeEntry(root, tree, path);
     if (!['100644', '100755'].includes(entry.mode) || !objectId.test(entry.blob))
       return yield* fail('job-capability', 'Background source requires committed regular files.');
-    const object = yield* retainObject(root, 'blob', entry.blob);
-    const bytes = Buffer.from(object.bytes, 'base64');
     const expected = document?.source
       ? Option.getOrElse(
           EffectArray.findFirst(document.source.files, file => file.path === path),
           () => undefined,
         )
       : undefined;
+    const object = yield* retainObject(root, 'blob', entry.blob, expected ? sourceFileLimit : witnessLimit);
+    const bytes = Buffer.from(object.bytes, 'base64');
     if (
       (expected && expected.sha256 !== sha256HexSync(bytes)) ||
       EffectArray.some(
@@ -839,8 +1104,6 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
         }
       : {}),
   };
-  if (Buffer.byteLength(stableJson(witness)) > witnessLimit)
-    return yield* fail('job-capability', 'The exact source and citation witness exceeds the 4 MiB background limit.');
   yield* assertNativeJobLiveSource(witness);
   return witness;
 });
@@ -1203,7 +1466,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       generation: request.generation,
       bindingId: stored.state.bindingId,
       intentDigest: digest,
-      witnessDigest: sha256HexSync(stableJson(witness)),
+      witnessDigest: sourceWitnessDigest(witness),
       status: 'accepted',
       stopRequested: false,
       started: false,
