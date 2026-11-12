@@ -3,6 +3,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   assembleNativeInference,
+  copyNativeInferenceCompilerRuntimes,
   muslWorkflowRuntimeArguments,
   MUSL_WORKFLOW_BWRAP_SHIM,
   nativeContainerFailureReport,
@@ -147,6 +148,70 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect('binds compiler-resolved runtime copies and enrolls only the captured ARM musl libgcc provider', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'compiler-runtime-copy-'});
+        const compilerRoot = path.join(root, 'compiler');
+        const destination = path.join(root, 'Release');
+        yield* fs.makeDirectory(compilerRoot);
+        yield* fs.makeDirectory(destination);
+        yield* fs.writeFileString(path.join(compilerRoot, 'libstdc++.so.6'), 'compiler C++ runtime bytes');
+        yield* fs.writeFileString(path.join(compilerRoot, 'libgcc_s.so.1'), 'compiler libgcc bytes');
+        const environment = {PATH: '/selected/compiler/bin', CAPTURE_FIXTURE: 'preserved'};
+        const command = CommandExecutor.of({
+          execute: (compiler, args, bounds) => {
+            expect(compiler).toBe('/selected/compiler/c++');
+            expect(bounds).toEqual({env: environment, timeoutMs: 10_000, maxOutputBytes: 16_384});
+            const library = args[0] === '-print-file-name=libstdc++.so.6' ? 'libstdc++.so.6' : 'libgcc_s.so.1';
+            expect(args).toEqual([`-print-file-name=${library}`]);
+            return Effect.succeed({exitCode: 0, stdout: path.join(compilerRoot, library) + '\n', stderr: ''});
+          },
+          executeStreaming: () => Effect.die('Unexpected streaming compiler lookup'),
+        });
+        const capture = (bunTarget: string) =>
+          copyNativeInferenceCompilerRuntimes({
+            compiler: '/selected/compiler/c++',
+            environment,
+            destination,
+            bunTarget,
+          }).pipe(Effect.provideService(CommandExecutor, command));
+        const copies = yield* capture('bun-linux-arm64-musl');
+        const sourcePath = yield* fs.realPath(path.join(compilerRoot, 'libgcc_s.so.1'));
+        const sha256 = sha256HexSync('compiler libgcc bytes');
+        expect(copies[0]?.compilerLibgccProvider).toBeUndefined();
+        expect(copies[1]).toMatchObject({
+          library: 'libgcc_s.so.1',
+          sourcePath,
+          sha256,
+          compilerLibgccProvider: {sourcePath, sha256},
+        });
+        expect(yield* fs.readFileString(path.join(destination, 'libgcc_s.so.1'))).toBe('compiler libgcc bytes');
+        expect(yield* fs.readFileString(path.join(destination, 'libstdc++.so.6'))).toBe('compiler C++ runtime bytes');
+        expect(
+          EffectArray.every(yield* capture('bun-linux-arm64'), copy => copy.compilerLibgccProvider === undefined),
+        ).toBe(true);
+        const unresolved = yield* copyNativeInferenceCompilerRuntimes({
+          compiler: '/selected/compiler/c++',
+          environment,
+          destination,
+          bunTarget: 'bun-linux-arm64-musl',
+        }).pipe(
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              execute: () => Effect.succeed({exitCode: 0, stdout: 'libgcc_s.so.1\n', stderr: ''}),
+              executeStreaming: () => Effect.die('Unexpected streaming compiler lookup'),
+            }),
+          ),
+          Effect.exit,
+        );
+        expect(Exit.isFailure(unresolved) && Cause.pretty(unresolved.cause)).toContain(
+          'pinned compiler did not resolve',
+        );
+      }),
+    );
     it.effect(
       'probes each optional SME variant with selected target C/C++ compilers and discloses only rejected variants',
       () =>

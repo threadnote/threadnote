@@ -7,7 +7,7 @@ import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer} from './effect/errors.js';
-import {auditNativeReaderBinary, nativeReaderGit} from './native-vector-reader-payload.js';
+import {auditNativeReaderBinary, nativeReaderGit, type CompilerLibgccProvider} from './native-vector-reader-payload.js';
 import {
   NATIVE_INFERENCE_BUNDLE_SHA256,
   NATIVE_INFERENCE_LLAMA_COMMIT,
@@ -327,6 +327,43 @@ ${body}
 }
 
 /** CI/build-time only. Runtime always uses build:never and skipDownload:true. */
+/** Capture bytes from the selected compiler's runtime lookup before enrolling any provider audit role. */
+export const copyNativeInferenceCompilerRuntimes = Effect.fn('nativeInference.copyCompilerRuntimes')(
+  function* (options: {
+    readonly compiler: string;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly destination: string;
+    readonly bunTarget: string;
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const copies = [];
+    for (const library of ['libstdc++.so.6', 'libgcc_s.so.1']) {
+      const located = yield* runCommandEffect(options.compiler, [`-print-file-name=${library}`], {
+        env: options.environment,
+        timeoutMs: 10_000,
+        maxOutputBytes: 16_384,
+      });
+      const locatedPath = EffectString.trim(located.stdout);
+      if (!path.isAbsolute(locatedPath))
+        throw new Error(`The pinned compiler did not resolve required runtime ${library}.`);
+      const sourcePath = yield* fs.realPath(locatedPath);
+      const bytes = yield* fs.readFile(sourcePath);
+      const sha256 = sha256HexSync(bytes);
+      const destination = path.join(options.destination, library);
+      yield* fs.writeFile(destination, bytes);
+      if (
+        sha256HexSync(yield* fs.readFile(sourcePath)) !== sha256 ||
+        sha256HexSync(yield* fs.readFile(destination)) !== sha256
+      )
+        throw new Error('Compiler runtime source/copy changed while capturing its bytes.');
+      const compilerLibgccProvider: CompilerLibgccProvider | undefined =
+        options.bunTarget === 'bun-linux-arm64-musl' && library === 'libgcc_s.so.1' ? {sourcePath, sha256} : undefined;
+      copies.push({library, sourcePath, destination, sha256, compilerLibgccProvider});
+    }
+    return copies;
+  },
+);
+
 export const assembleNativeInference = Effect.fn('assembleNativeInference')(function* (options: {
   readonly root: string;
   readonly distributionRoot: string;
@@ -340,6 +377,8 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
     throw new Error('Native inference assembly rejects ambient compiler/linker flags.');
   const before = yield* Effect.promise(() => sourceInputs(options.root));
   const toolchain: Record<string, string> = {bun: Bun.version};
+  const compilerLibgccProviders: Record<string, CompilerLibgccProvider> = {};
+  const compilerRuntimeCopies: Array<{path: string; sourcePath: string; sha256: string; auditRole: string}> = [];
   let muslArmSourceIdentity: {originalSha256: string; adaptedSha256: string; patchSha256: string} | undefined;
   let includedMuslArmVariants: readonly string[] | undefined;
   const portable =
@@ -570,16 +609,23 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
         path.join(destination, 'buildDone.status'),
       );
       if (process.platform === 'linux') {
-        for (const library of ['libstdc++.so.6', 'libgcc_s.so.1']) {
-          const located = yield* runCommandEffect(buildEnvironment.CXX ?? 'c++', [`-print-file-name=${library}`], {
-            timeoutMs: 10_000,
-            maxOutputBytes: 16_384,
+        for (const copy of yield* copyNativeInferenceCompilerRuntimes({
+          compiler: buildEnvironment.CXX ?? 'c++',
+          environment: buildEnvironment,
+          destination: path.join(destination, 'Release'),
+          bunTarget: options.bunTarget,
+        })) {
+          const relative = EffectArray.join(
+            EffectString.split(path.relative(options.distributionRoot, copy.destination), path.sep),
+            '/',
+          );
+          if (copy.compilerLibgccProvider) compilerLibgccProviders[relative] = copy.compilerLibgccProvider;
+          compilerRuntimeCopies.push({
+            path: relative,
+            sourcePath: copy.sourcePath,
+            sha256: copy.sha256,
+            auditRole: copy.compilerLibgccProvider ? 'compiler-libgcc' : 'inference',
           });
-          const sourceLibrary = EffectString.trim(located.stdout);
-          if (!path.isAbsolute(sourceLibrary))
-            throw new Error(`The pinned compiler did not resolve required runtime ${library}.`);
-          const actualLibrary = yield* filesystem.realPath(sourceLibrary);
-          yield* filesystem.copyFile(actualLibrary, path.join(destination, 'Release', library));
         }
       }
     }
@@ -594,9 +640,10 @@ export const assembleNativeInference = Effect.fn('assembleNativeInference')(func
       audits[file.path] = yield* auditNativeReaderBinary(
         path.join(options.distributionRoot, file.path),
         options.bunTarget,
-        {inference: true},
+        {inference: true, compilerLibgccProvider: compilerLibgccProviders[file.path]},
       );
   }
+  if (compilerRuntimeCopies.length !== 0) toolchain.compilerRuntimeCopies = JSON.stringify(compilerRuntimeCopies);
   toolchain.binaryAudit = JSON.stringify(audits);
   const after = yield* Effect.promise(() => sourceInputs(options.root));
   if (before.sourceInputDigest !== after.sourceInputDigest)

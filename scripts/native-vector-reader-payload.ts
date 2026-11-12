@@ -1,4 +1,4 @@
-import {Effect, Array as EffectArray, String as EffectString} from 'effect';
+import {Effect, FileSystem, Array as EffectArray, String as EffectString} from 'effect';
 import {
   nativeVectorReaderSourceSha256,
   nativeVectorReaderTarget,
@@ -173,13 +173,154 @@ function isMuslLibgccCompatibility(elf: string, definedSymbols: string, target: 
   return !/\bGLIBC_/u.test(EffectString.replace(section[0], '')(EffectString.replace(symbolSection[0], '')(elf)));
 }
 
+/** Created only when inference assembly captures the selected compiler's resolved runtime bytes. */
+export interface CompilerLibgccProvider {
+  readonly sourcePath: string;
+  readonly sha256: string;
+}
+
+function isMuslLibgccProvider(elf: string, definedSymbols: string): boolean {
+  if (
+    [...EffectString.matchAll(/\(NEEDED\)/gu)(elf)].length !== 1 ||
+    !/^\s*0x[0-9a-f]+\s+\(NEEDED\)\s+Shared library: \[libc\.musl-aarch64\.so\.1\]\s*$/mu.test(elf) ||
+    [...EffectString.matchAll(/\(SONAME\)/gu)(elf)].length !== 1 ||
+    !/^\s*0x[0-9a-f]+\s+\(SONAME\)\s+Library soname: \[libgcc_s\.so\.1\]\s*$/mu.test(elf) ||
+    /Version needs section/u.test(elf)
+  )
+    return false;
+  const definitions = [
+    ...EffectString.matchAll(
+      /(?:^|\n)Version definition section '\.gnu\.version_d' contains (\d+) entr(?:y|ies):\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/gu,
+    )(elf),
+  ];
+  const symbols = [
+    ...EffectString.matchAll(
+      /(?:^|\n)Version symbols section '\.gnu\.version'[^\n]*\n([\s\S]*?)(?=\nVersion [^\n]+ section|$)/gu,
+    )(elf),
+  ];
+  const section = definitions[0];
+  const symbolSection = symbols[0];
+  if (definitions.length !== 1 || symbols.length !== 1 || !section || !symbolSection) return false;
+  let remaining = 0;
+  let parentNumber = 1;
+  let compatibilityIndex = 0;
+  let bases = 0;
+  const names: string[] = [];
+  const indices: number[] = [];
+  const parents: string[] = [];
+  for (const line of EffectString.split(/\r?\n/)(section[2] ?? '')) {
+    if (/^\s*$/u.test(line)) continue;
+    if (/^\s*Addr: 0x[0-9a-f]+\s+Offset: 0x[0-9a-f]+\s+Link: \d+ \(\.dynstr\)\s*$/u.test(line)) continue;
+    const entry =
+      /^\s*(?:0x)?[0-9a-f]+:\s+Rev: 1\s+Flags: (BASE|WEAK|none)\s+Index: (\d+)\s+Cnt: (\d+)\s+Name: ([A-Za-z0-9_.+-]+)\s*$/u.exec(
+        line,
+      );
+    if (entry) {
+      const name = entry[4] ?? '';
+      const index = Number(entry[2]);
+      if (
+        remaining !== 0 ||
+        Number(entry[3]) < 1 ||
+        index < 1 ||
+        index > 0x7fff ||
+        indices.includes(index) ||
+        names.includes(name)
+      )
+        return false;
+      if (entry[1] === 'BASE') {
+        if (name !== 'libgcc_s.so.1' || index !== 1 || Number(entry[3]) !== 1) return false;
+        bases++;
+      } else if (name === 'GLIBC_2.0') {
+        if (entry[1] !== 'none' || index < 2 || Number(entry[3]) !== 1) return false;
+        compatibilityIndex = index;
+      } else if (!/^GCC_\d+(?:\.\d+)+$/u.test(name) || index < 2) return false;
+      names.push(name);
+      indices.push(index);
+      remaining = Number(entry[3]) - 1;
+      parentNumber = 1;
+      continue;
+    }
+    const parent = /^\s*(?:0x)?[0-9a-f]+:\s+Parent (\d+): ([A-Za-z0-9_.+-]+)\s*$/u.exec(line);
+    if (!parent || remaining < 1 || Number(parent[1]) !== parentNumber++) return false;
+    parents.push(parent[2] ?? '');
+    remaining--;
+  }
+  if (
+    remaining !== 0 ||
+    bases !== 1 ||
+    compatibilityIndex === 0 ||
+    names.length !== Number(section[1]) ||
+    EffectArray.some(parents, name => !names.includes(name))
+  )
+    return false;
+  const symbolPattern = /\b([0-9a-f]+)h?\s+\(GLIBC_2\.0\)/gu;
+  const references = [...EffectString.matchAll(symbolPattern)(symbolSection[1] ?? '')];
+  if (
+    references.length === 0 ||
+    EffectArray.some(references, match => Number.parseInt(match[1] ?? '', 16) !== compatibilityIndex)
+  )
+    return false;
+  if (/\bGLIBC_/u.test(EffectString.replaceAll(symbolPattern, '')(symbolSection[1] ?? ''))) return false;
+  if (/\bGLIBC_/u.test(EffectString.replace(section[0], '')(EffectString.replace(symbolSection[0], '')(elf))))
+    return false;
+  // Exact exports from pinned GCC config/libgcc-glibc.ver; ordinary consumers never receive this rule.
+  const allowed = [
+    '__divdi3',
+    '__moddi3',
+    '__udivdi3',
+    '__umoddi3',
+    '__register_frame',
+    '__register_frame_table',
+    '__deregister_frame',
+    '__register_frame_info',
+    '__deregister_frame_info',
+    '__frame_state_for',
+    '__register_frame_info_table',
+  ];
+  let namespace = 0;
+  const exports: string[] = [];
+  for (const line of EffectString.split(/\r?\n/)(definedSymbols)) {
+    if (!/\bGLIBC_/u.test(line)) continue;
+    if (/^\s*[0-9a-f]+\s+A\s+GLIBC_2\.0\s*$/u.test(line)) {
+      namespace++;
+      continue;
+    }
+    const symbol = /^\s*[0-9a-f]+\s+[TW]\s+([A-Za-z0-9_]+)@@GLIBC_2\.0\s*$/u.exec(line)?.[1];
+    if (!symbol || !allowed.includes(symbol) || exports.includes(symbol)) return false;
+    exports.push(symbol);
+  }
+  return namespace === 1 && exports.length > 0;
+}
+
 /** Inspect the actual native artifact, including dependencies hidden from source metadata. */
 export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(function* (
   binaryPath: string,
   bunTarget: string,
-  options: {readonly inference?: boolean} = {},
+  options: {readonly inference?: boolean; readonly compilerLibgccProvider?: CompilerLibgccProvider} = {},
 ) {
   const {platform} = yield* SystemInfo;
+  if (options.compilerLibgccProvider) {
+    const fs = yield* FileSystem.FileSystem;
+    const provider = options.compilerLibgccProvider;
+    if (
+      platform !== 'linux' ||
+      !options.inference ||
+      bunTarget !== 'bun-linux-arm64-musl' ||
+      path.basename(binaryPath) !== 'libgcc_s.so.1' ||
+      !/^[a-f0-9]{64}$/u.test(provider.sha256) ||
+      !path.isAbsolute(provider.sourcePath) ||
+      path.basename(provider.sourcePath) !== 'libgcc_s.so.1'
+    )
+      throw new Error('Invalid compiler libgcc provider audit role.');
+    const source = yield* fs.realPath(provider.sourcePath);
+    if (
+      source !== provider.sourcePath ||
+      source === (yield* fs.realPath(binaryPath)) ||
+      sha256HexSync(yield* fs.readFile(source)) !== provider.sha256 ||
+      sha256HexSync(yield* fs.readFile(binaryPath)) !== provider.sha256
+    )
+      throw new Error('Compiler libgcc provider source/copy identity differs from its captured bytes.');
+  }
   // Windows inference permits upstream C++ exports; only the reader checks private SQLite export leakage.
   const commands: readonly (readonly [string, readonly string[]])[] =
     platform === 'linux'
@@ -212,7 +353,9 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
     if (
       EffectString.endsWith('-musl')(bunTarget) &&
       /\bGLIBC_/u.test(output) &&
-      !isMuslLibgccCompatibility(elfOutput, definedSymbolsOutput, bunTarget)
+      !(options.compilerLibgccProvider
+        ? isMuslLibgccProvider(elfOutput, definedSymbolsOutput)
+        : isMuslLibgccCompatibility(elfOutput, definedSymbolsOutput, bunTarget))
     ) {
       const names = (value: string) =>
         EffectArray.map([...EffectString.matchAll(/\bGLIBC_[A-Za-z0-9_.]+/gu)(value)], match => match[0]);
@@ -251,6 +394,8 @@ export const auditNativeReaderBinary = Effect.fn('nativeReader.auditBinary')(fun
           EffectString.slice(0, 4096)(JSON.stringify(diagnostic)),
       );
     }
+    if (options.compilerLibgccProvider && !/\bGLIBC_/u.test(output))
+      throw new Error('Compiler libgcc provider is missing its required compatibility namespace.');
     if (
       !EffectString.endsWith('-musl')(bunTarget) &&
       EffectArray.some(versions, match => Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) > 17))

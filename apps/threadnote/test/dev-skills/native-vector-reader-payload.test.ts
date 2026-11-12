@@ -11,7 +11,10 @@ import {
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {auditNativeReaderBinary} from '../../../../scripts/native-vector-reader-payload.js';
+import {
+  auditNativeReaderBinary,
+  type CompilerLibgccProvider,
+} from '../../../../scripts/native-vector-reader-payload.js';
 import {ScriptCommandExecutorLayer} from '../../../../scripts/effect/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
@@ -88,6 +91,24 @@ if (${args.includes('/EXPORTS')}) {
 });
 
 describe('Linux native binary audit failures', () => {
+  const providerElf = `
+ELF Header:
+  Machine: AArch64
+Dynamic section:
+ 0x0001 (NEEDED) Shared library: [libc.musl-aarch64.so.1]
+ 0x000e (SONAME) Library soname: [libgcc_s.so.1]
+Version symbols section '.gnu.version' contains 4 entries:
+ Addr: 0x400  Offset: 0x400  Link: 3 (.dynsym)
+  000:   0 (*local*)   1 (*global*)   2 (GLIBC_2.0)   3 (GCC_3.0)
+Version definition section '.gnu.version_d' contains 3 entries:
+ Addr: 0x500  Offset: 0x500  Link: 4 (.dynstr)
+  000000: Rev: 1 Flags: BASE Index: 1 Cnt: 1 Name: libgcc_s.so.1
+  0x001c: Rev: 1 Flags: none Index: 2 Cnt: 1 Name: GLIBC_2.0
+  0x0038: Rev: 1 Flags: none Index: 3 Cnt: 2 Name: GCC_3.0
+  0x0054: Parent 1: GLIBC_2.0
+`;
+  const providerSymbols =
+    '00000000 A GLIBC_2.0\n00001000 T __register_frame@@GLIBC_2.0\n00002000 T __deregister_frame@@GLIBC_2.0\n';
   // GCC12 config/libgcc-glibc.ver assigns frame registration helpers GLIBC_2.0 in libgcc itself.
   const libgccMusl = `
 ELF Header:
@@ -104,10 +125,13 @@ Version needs section '.gnu.version_r' contains 1 entry:
   0x0010:   Name: GCC_3.0  Flags: none  Version: 2
   0x0020:   Name: GLIBC_2.0  Flags: none  Version: 3
 `;
-  const fixture = Effect.fn(function* (elf: string, symbols = '000000000001 T napi_register_module_v1\n') {
+  const fixture = Effect.fn(function* (
+    elf: string,
+    symbols = '000000000001 T napi_register_module_v1\n',
+    binary = '/private/do-not-publish/reader.node',
+  ) {
     const native = yield* SystemInfo;
     const system = SystemInfo.of({...native, platform: 'linux'});
-    const binary = '/private/do-not-publish/reader.node';
     const command = CommandExecutor.of({
       execute: (executable, args, bounds) =>
         Effect.sync(() => {
@@ -122,8 +146,8 @@ Version needs section '.gnu.version_r' contains 1 entry:
         }),
       executeStreaming: () => Effect.die('Unexpected streaming binary audit'),
     });
-    return (target = 'bun-linux-arm64-musl', inference = false) =>
-      auditNativeReaderBinary(binary, target, {inference}).pipe(
+    return (target = 'bun-linux-arm64-musl', inference = false, compilerLibgccProvider?: CompilerLibgccProvider) =>
+      auditNativeReaderBinary(binary, target, {inference, compilerLibgccProvider}).pipe(
         Effect.provideService(SystemInfo, system),
         Effect.provideService(CommandExecutor, command),
       );
@@ -137,7 +161,54 @@ Version needs section '.gnu.version_r' contains 1 entry:
     const value: unknown = JSON.parse(encoded);
     return value;
   };
-  effectIt.layer(TestSystemInfoLayer)(layerIt => {
+  effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(layerIt => {
+    layerIt.effect('audits only a source-and-copy-bound inference compiler provider under its separate ABI role', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = platformPathFor(process.platform);
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'compiler-provider-'});
+        yield* fs.makeDirectory(path.join(root, 'compiler'));
+        yield* fs.makeDirectory(path.join(root, 'release'));
+        const source = path.join(root, 'compiler', 'libgcc_s.so.1');
+        const binary = path.join(root, 'release', 'libgcc_s.so.1');
+        yield* fs.writeFileString(source, 'captured compiler runtime');
+        yield* fs.writeFileString(binary, 'captured compiler runtime');
+        const proof = {sourcePath: yield* fs.realPath(source), sha256: sha256HexSync('captured compiler runtime')};
+        const audit = yield* fixture(providerElf, providerSymbols, binary);
+        expect(yield* audit('bun-linux-arm64-musl', true, proof)).toMatch(/^[a-f0-9]{64}$/u);
+        expect(Exit.isFailure(yield* audit('bun-linux-arm64-musl', true).pipe(Effect.exit))).toBe(true);
+        for (const [target, inference, identity] of [
+          ['bun-linux-arm64-musl', false, proof],
+          ['bun-linux-x64-baseline-musl', true, proof],
+          ['bun-linux-arm64-musl', true, {...proof, sha256: EffectString.repeat(64)('0')}],
+          ['bun-linux-arm64-musl', true, {...proof, sourcePath: yield* fs.realPath(binary)}],
+        ] as const)
+          expect(Exit.isFailure(yield* audit(target, inference, identity).pipe(Effect.exit))).toBe(true);
+        yield* fs.writeFileString(binary, 'fake provider bytes');
+        expect(Exit.isFailure(yield* audit('bun-linux-arm64-musl', true, proof).pipe(Effect.exit))).toBe(true);
+        yield* fs.writeFileString(binary, 'captured compiler runtime');
+        const reader = path.join(root, 'release', 'reader.node');
+        yield* fs.writeFileString(reader, 'captured compiler runtime');
+        const lookalike = yield* fixture(providerElf, providerSymbols, reader);
+        expect(Exit.isFailure(yield* lookalike('bun-linux-arm64-musl', true, proof).pipe(Effect.exit))).toBe(true);
+        for (const [elf, symbols] of [
+          [EffectString.replaceAll('libc.musl-aarch64.so.1', 'libc.so.6')(providerElf), providerSymbols],
+          [
+            EffectString.replaceAll('GLIBC_2.0', 'GLIBC_2.17')(providerElf),
+            EffectString.replaceAll('GLIBC_2.0', 'GLIBC_2.17')(providerSymbols),
+          ],
+          [EffectString.replace('contains 3 entries:', 'contains 4 entries:')(providerElf), providerSymbols],
+          [EffectString.replace('Index: 2 Cnt: 1', 'Index: 2 Cnt: 2')(providerElf), providerSymbols],
+          [EffectString.replace('2 (GLIBC_2.0)', '5 (GLIBC_2.0)')(providerElf), providerSymbols],
+          [providerElf + "\nVersion needs section '.gnu.version_r' contains 1 entry:\n", providerSymbols],
+          [providerElf, providerSymbols + '00003000 T execve@@GLIBC_2.0\n'],
+          [providerElf, providerSymbols + '00000000 A GLIBC_PRIVATE\n'],
+        ]) {
+          const rejected = yield* fixture(elf, symbols, binary);
+          expect(Exit.isFailure(yield* rejected('bun-linux-arm64-musl', true, proof).pipe(Effect.exit))).toBe(true);
+        }
+      }),
+    );
     layerIt.effect('accepts the pinned ARM musl libgcc compatibility namespace with complete ownership', () =>
       Effect.gen(function* () {
         const audit = yield* fixture(libgccMusl);
