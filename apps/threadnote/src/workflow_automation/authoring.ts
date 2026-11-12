@@ -57,6 +57,7 @@ import {
   AuthoringReferenceSchema,
   AuthoringRootSchema,
   artifactReference,
+  rootSummary,
   decodeAuthoringArtifact,
   encodeAuthoringArtifact,
   encodeAuthoringDocument,
@@ -442,19 +443,6 @@ const asArtifact = (value: unknown): WorkflowArtifact => {
   }
   return value.artifact;
 };
-const rootSummary = (root: AuthoringRoot, artifact: WorkflowArtifact) => ({
-  root: artifactReference(artifact),
-  kind: root.kind,
-  featureId: root.featureId,
-  documentHash: root.documentHash,
-  intentHash: root.intentHash,
-  readiness: root.readiness,
-  ...(root.confirmation ? {confirmation: root.confirmation} : {}),
-  data: root.data,
-  documents: root.documents,
-  previous: root.previous,
-});
-
 const acceptancePacket = (
   document: NativeAuthoringDocument,
   validation: ReturnType<typeof validateNativeAuthoring>,

@@ -188,6 +188,17 @@ export const unwrapCycle = (result: unknown): Record<string, unknown> => {
   return result.cycle;
 };
 
+export const unwrapAuthoring = (result: unknown): Record<string, unknown> => {
+  if (!Predicate.isObject(result) || result.status !== 'ok' || !Predicate.isObject(result.authoring))
+    throw fail(
+      Predicate.isObject(result) && typeof result.code === 'string' ? result.code : 'task-action-failed',
+      Predicate.isObject(result) && Predicate.isObject(result.authoring) && typeof result.authoring.message === 'string'
+        ? result.authoring.message
+        : 'The native authoring action did not return a verified result.',
+    );
+  return result.authoring;
+};
+
 export const isCurrentTaskTargetForRequalification = (
   view: {
     readonly status: string;

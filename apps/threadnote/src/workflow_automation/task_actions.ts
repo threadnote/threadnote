@@ -73,6 +73,7 @@ import {
   snapshotRefMatchesBaseline,
   taskActionSnapshotRef,
   unwrapCycle,
+  unwrapAuthoring,
   verifyRequalificationWitness,
 } from './task_action_helpers.js';
 import {runNativeTaskFinish} from './task_closeout_action.js';
@@ -587,17 +588,6 @@ const authoringRequest = (
   generation: stored.state.generation,
   ...fields,
 });
-
-const unwrapAuthoring = (result: unknown): Record<string, unknown> => {
-  if (!Predicate.isObject(result) || result.status !== 'ok' || !Predicate.isObject(result.authoring))
-    throw fail(
-      Predicate.isObject(result) && typeof result.code === 'string' ? result.code : 'task-action-failed',
-      Predicate.isObject(result) && Predicate.isObject(result.authoring) && typeof result.authoring.message === 'string'
-        ? result.authoring.message
-        : 'The native authoring action did not return a verified result.',
-    );
-  return result.authoring;
-};
 
 const requireEffectValue = <A>(value: A | undefined, message: string): A => {
   if (value === undefined) throw fail('invalid-state', message);

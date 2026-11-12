@@ -794,6 +794,7 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
+        expect(snapshotVariants).toHaveLength(4);
         expect([...snapshotByCommand.keys()]).toEqual([
           'record',
           'supersede-unreviewed',
@@ -940,15 +941,47 @@ describe('Threadnote MCP toolsets', () => {
           tools.tools,
           tool => !EffectArray.some(semanticNames, name => name === tool.name),
         );
-        // Preserve main's catalog contract independently of these separately bounded additions.
-        expect(nonsemanticCatalog.length).toBeGreaterThan(0);
-        expect(Buffer.byteLength(JSON.stringify(nonsemanticCatalog))).toBeLessThanOrEqual(65_000);
-        // Each added descriptor contributes one comma to the nonempty compact JSON array.
+        const baselineSnapshotVariants = EffectArray.filter(snapshotVariants, value => {
+          const command = decodeJsonObject(decodeJsonObject(decodeJsonObject(value).properties).command).enum;
+          return !(command instanceof Array && command[0] === 'integrate-same-label-base');
+        });
+        expect(baselineSnapshotVariants).toHaveLength(3);
+        const baselineSnapshot = {
+          ...workflowTaskSnapshot,
+          inputSchema: {
+            ...decodeJsonObject(workflowTaskSnapshot?.inputSchema),
+            properties: {
+              ...snapshotProperties,
+              snapshot: {...decodeJsonObject(snapshotProperties.snapshot), anyOf: baselineSnapshotVariants},
+            },
+          },
+        };
+        expect(EffectArray.filter(nonsemanticCatalog, tool => tool.name === 'workflow_task_snapshot')).toHaveLength(1);
+        const baselineCatalog = EffectArray.map(nonsemanticCatalog, tool =>
+          tool.name === 'workflow_task_snapshot' ? baselineSnapshot : tool,
+        );
+        // Remove only the new named schema branch; preserve every other received descriptor field.
+        const baselineCatalogBytes = Buffer.byteLength(JSON.stringify(baselineCatalog));
+        expect(baselineCatalog.length).toBeGreaterThan(0);
+        expect(baselineCatalogBytes).toBeLessThanOrEqual(65_000);
+        const snapshotBytes = Buffer.byteLength(JSON.stringify(workflowTaskSnapshot));
+        const sameLabelBranchBytes = snapshotBytes - Buffer.byteLength(JSON.stringify(baselineSnapshot));
+        expect(sameLabelBranchBytes).toBeGreaterThan(0);
+        expect(sameLabelBranchBytes).toBeLessThan(snapshotBytes);
+        // The unchanged 2,500-byte full snapshot guard above bounds this exact delta, including its comma.
+        // Each added semantic descriptor contributes one comma to the nonempty compact JSON array.
         const composedCatalogLimit =
           65_000 +
+          sameLabelBranchBytes +
           EffectArray.reduce(semanticDescriptorBudgets, 0, (total, [, maximum]) => total + maximum) +
           semanticDescriptorBudgets.length;
-        expect(Buffer.byteLength(JSON.stringify(tools.tools))).toBeLessThanOrEqual(composedCatalogLimit);
+        const fullCatalogBytes = Buffer.byteLength(JSON.stringify(tools.tools));
+        expect(fullCatalogBytes).toBeLessThanOrEqual(composedCatalogLimit);
+        // Published D57 already includes this branch and retains the stronger whole-catalog bound.
+        expect(fullCatalogBytes).toBeLessThanOrEqual(70_192);
+        process.stdout.write(
+          `MCP_CATALOG_COMPOSITION ${JSON.stringify({baselineCatalogBytes, sameLabelBranchBytes, snapshotBytes, composedCatalogLimit, fullCatalogBytes})}\n`,
+        );
         expect(
           EffectOption.getOrUndefined(EffectArray.findFirst(tools.tools, tool => tool.name === 'recall_context'))
             ?.description,

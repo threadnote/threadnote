@@ -1,3 +1,6 @@
+import {dlopen} from 'bun:ffi';
+import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
+import {windowsProviderCommandLine} from '../../src/writer-system/provider-windows.js';
 import * as EffectString from 'effect/String';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -75,6 +78,43 @@ async function stop(provider: RuntimeOwnedProviderProcess): Promise<void> {
   runtimeCloseOwnedProviderTree(provider.handle);
 }
 
+// Fixed test-only wire command. Its emitted function is the same decoder exercised below.
+function fixtureExitCommand(progress: number, bytes: Uint8Array): number {
+  const command = [101, 120, 105, 116, 10];
+  if (
+    !Number.isSafeInteger(progress) ||
+    progress < 0 ||
+    progress >= command.length ||
+    bytes.length === 0 ||
+    progress + bytes.length > command.length
+  )
+    throw new Error('Invalid bounded fixture exit command.');
+  for (const byte of bytes) {
+    if (byte !== command[progress]) throw new Error('Invalid bounded fixture exit command.');
+    progress++;
+  }
+  return progress;
+}
+it('decodes the fixed exit command once across every byte partition and refuses malformed input', () => {
+  const command = new TextEncoder().encode('exit\n');
+  expect(fixtureExitCommand(fixtureExitCommand(0, command.subarray(0, 1)), command.subarray(1))).toBe(5);
+  // Four boundaries give exactly sixteen partitions, independent of operating-system chunking.
+  for (let mask = 0; mask < 16; mask++) {
+    let start = 0,
+      progress = 0;
+    for (let end = 1; end <= command.length; end++) {
+      if (end !== command.length && (mask & (1 << (end - 1))) === 0) continue;
+      progress = fixtureExitCommand(progress, command.subarray(start, end));
+      expect(progress === 5).toBe(end === command.length);
+      start = end;
+    }
+    expect(progress).toBe(5);
+    expect(() => fixtureExitCommand(progress, command)).toThrow();
+  }
+  for (const invalid of ['', 'x', 'exat', 'exit\r', 'exit\nextra'])
+    expect(() => fixtureExitCommand(0, new TextEncoder().encode(invalid))).toThrow();
+});
+
 // These exercise the synchronous native spawn / Promise stdio boundary, rather than an Effect program.
 it.skipIf(!supported)(
   'binds actual stdio and refuses close until whole-group zero, EOF and accepted writes settle',
@@ -113,9 +153,55 @@ it.skipIf(!supported)(
   'retains original group authority after leader exit and terminates its actual surviving descendant',
   async () => {
     const childSource = `process.stdout.write('descendant-ready'+String.fromCharCode(10));setInterval(()=>{},1000);`;
-    const provider = spawn(
-      `Bun.spawn([process.execPath,'-e',${JSON.stringify(childSource)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});setTimeout(()=>process.exit(7),100);`,
-    );
+    // Windows uses native creation: Bun.spawn teardown must not decide whether the fixture child survives.
+    const windows = process.platform === 'win32';
+    const windowsLeader = windows
+      ? `
+      import {dlopen} from 'bun:ffi';
+      const k=dlopen('kernel32.dll',{
+        CreateProcessW:{args:['buffer','buffer','ptr','ptr','i32','u32','ptr','ptr','buffer','buffer'],returns:'i32'},
+        GetStdHandle:{args:['u32'],returns:'u64'},
+        GetProcessTimes:{args:['u64','buffer','buffer','buffer','buffer'],returns:'i32'},
+        ResumeThread:{args:['u64'],returns:'u32'},CloseHandle:{args:['u64'],returns:'i32'}
+      });
+      const wide=s=>{const b=new Uint16Array(s.length+1);for(let i=0;i<s.length;i++)b[i]=s.charCodeAt(i);return b;};
+      const startup=new BigUint64Array(13), v=new DataView(startup.buffer), info=new BigUint64Array(3);
+      v.setUint32(0,104,true);v.setUint32(60,0x100,true);
+      startup[10]=k.symbols.GetStdHandle(0xfffffff6);startup[11]=k.symbols.GetStdHandle(0xfffffff5);startup[12]=k.symbols.GetStdHandle(0xfffffff4);
+      if(k.symbols.CreateProcessW(wide(${JSON.stringify(process.execPath)}),wide(${JSON.stringify(windowsProviderCommandLine(process.execPath, ['-e', childSource]))}),null,null,1,0x08000004,null,null,startup,info)!==1)throw new Error('Native fixture creation failed.');
+      try {
+        const creation=new BigUint64Array(1), exit=new BigUint64Array(1), kernel=new BigUint64Array(1), user=new BigUint64Array(1);
+        if(k.symbols.GetProcessTimes(info[0],creation,exit,kernel,user)!==1||creation[0]===0n)throw new Error('Native fixture identity unavailable.');
+        await Bun.write(Bun.stdout,JSON.stringify({childPid:new DataView(info.buffer).getUint32(16,true),childIdentity:'win32:'+(creation[0]+504911232000000000n)})+String.fromCharCode(10));
+        if(k.symbols.ResumeThread(info[1])!==1)throw new Error('Native fixture resume failed.');
+        const decodeExitCommand=${fixtureExitCommand.toString()};
+        let commandBytes=0;
+        for await(const bytes of Bun.stdin.stream()) {commandBytes=decodeExitCommand(commandBytes,bytes);if(commandBytes===5)break;}
+        if(commandBytes!==5)throw new Error('Incomplete fixture exit command.');
+      } finally {k.symbols.CloseHandle(info[1]);k.symbols.CloseHandle(info[0]);k.close();}
+      process.exit(7);
+    `
+      : '';
+    const kernel = windows
+      ? dlopen('kernel32.dll', {
+          OpenProcess: {args: ['u32', 'i32', 'u32'], returns: 'u64'},
+          WaitForSingleObject: {args: ['u64', 'u32'], returns: 'u32'},
+          CloseHandle: {args: ['u64'], returns: 'i32'},
+        })
+      : undefined;
+    const provider = (() => {
+      try {
+        return spawn(
+          windows
+            ? windowsLeader
+            : `Bun.spawn([process.execPath,'-e',${JSON.stringify(childSource)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});setTimeout(()=>process.exit(7),100);`,
+        );
+      } catch (error) {
+        kernel?.close();
+        throw error;
+      }
+    })();
+    let childHandle = 0n;
     const reader = provider.stdout.getReader();
     let output = '';
     const collect = (async () => {
@@ -131,10 +217,43 @@ it.skipIf(!supported)(
         () => output,
         text => EffectString.includes('descendant-ready')(text),
       );
+      if (kernel) {
+        const record = await until(
+          () => {
+            for (const line of EffectString.split(output, '\n')) {
+              if (!EffectString.startsWith('{')(line) || !EffectString.endsWith('}')(line)) continue;
+              const value: unknown = JSON.parse(line);
+              if (
+                typeof value === 'object' &&
+                value !== null &&
+                'childPid' in value &&
+                typeof value.childPid === 'number' &&
+                Number.isSafeInteger(value.childPid) &&
+                value.childPid > 0 &&
+                value.childPid <= 0xffffffff &&
+                'childIdentity' in value &&
+                typeof value.childIdentity === 'string' &&
+                /^win32:[0-9]+$/u.test(value.childIdentity)
+              )
+                return {pid: value.childPid, identity: value.childIdentity};
+            }
+            return undefined;
+          },
+          value => value !== undefined,
+        );
+        if (!record) throw new Error('Native child identity was not observed.');
+        childHandle = kernel.symbols.OpenProcess(0x00101000, 0, record.pid);
+        expect(childHandle !== 0n && childHandle !== 0xffffffffffffffffn).toBe(true);
+        expect(windowsProcessIdentity(childHandle, record.pid) === record.identity).toBe(true);
+        expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(258);
+        await provider.write(new TextEncoder().encode('exit\n'));
+      }
       const leaderExited = await until(
         () => runtimeObserveOwnedProviderTree(provider.handle),
         o => o.leaderExitCode === 7,
       );
+      // Query the same retained creation-authenticated HANDLE after leader exit, before backend-state assertions.
+      if (kernel) expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(258);
       expect(leaderExited.state).toBe('running');
       expect(leaderExited.stdioClosed).toBe(false);
       runtimeTerminateOwnedProviderTree(provider.handle, 'kill');
@@ -146,8 +265,17 @@ it.skipIf(!supported)(
         o => o.state === 'drained',
       );
       expect(final.leaderExitCode).toBe(7);
+      if (kernel) expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(0);
     } finally {
-      await stop(provider);
+      try {
+        await stop(provider);
+      } finally {
+        if (kernel) {
+          if (childHandle !== 0n && childHandle !== 0xffffffffffffffffn)
+            expect(kernel.symbols.CloseHandle(childHandle)).toBe(1);
+          kernel.close();
+        }
+      }
     }
   },
 );

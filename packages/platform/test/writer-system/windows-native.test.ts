@@ -1,11 +1,67 @@
-import {dlopen} from 'bun:ffi';
-import {Array as EffectArray, String as EffectString} from 'effect';
-import {expect, it} from 'vitest';
+import {dlopen, toArrayBuffer, type FFIFunction} from 'bun:ffi';
+import {Array as EffectArray, String as EffectString, Schema} from 'effect';
+import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {assertWindowsDaclBytes} from '../../src/writer-system/windows-files.js';
+import {RuntimeWriterFault} from '../../src/writer-system/fault.js';
 import {runtimeAssertPrivateProviderPath, runtimeNativePlatformSupport} from '../../src/system.js';
-import {windowsTokenPrincipal, windowsWide} from '../../src/writer-system/windows-native.js';
+import {
+  windowsAddress,
+  windowsSystemLibrary,
+  windowsTokenPrincipal,
+  windowsWide,
+} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine} from '../../src/writer-system/provider-windows.js';
+
+// Observe the actual security record while the production call still owns it; never reopen a substitute.
+const securitySample = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        incomplete: boolean;
+        security(code: number, owner: BigUint64Array, dacl: BigUint64Array, descriptor: BigUint64Array): void;
+        length(descriptor: bigint, bytes: number): void;
+      }
+    | undefined,
+}));
+vi.mock('bun:ffi', async importOriginal => {
+  const real = await importOriginal<typeof import('bun:ffi')>();
+  return {
+    ...real,
+    dlopen: <Fns extends Record<string, FFIFunction>>(name: Parameters<typeof real.dlopen>[0], symbols: Fns) => {
+      const library = real.dlopen(name, symbols);
+      return {
+        ...library,
+        symbols: new Proxy(library.symbols, {
+          get(target, key, receiver) {
+            const original: unknown = Reflect.get(target, key, receiver);
+            if (typeof original !== 'function' || (key !== 'GetSecurityInfo' && key !== 'GetSecurityDescriptorLength'))
+              return original;
+            return (...args: unknown[]) => {
+              const result: unknown = Reflect.apply(original, undefined, args);
+              const active = securitySample.active;
+              if (active && typeof result === 'number') {
+                try {
+                  if (
+                    key === 'GetSecurityInfo' &&
+                    args[3] instanceof BigUint64Array &&
+                    args[5] instanceof BigUint64Array &&
+                    args[7] instanceof BigUint64Array
+                  )
+                    active.security(result, args[3], args[5], args[7]);
+                  if (key === 'GetSecurityDescriptorLength' && typeof args[0] === 'bigint')
+                    active.length(args[0], result);
+                } catch {
+                  active.incomplete = true;
+                }
+              }
+              return result;
+            };
+          },
+        }),
+      };
+    },
+  };
+});
 
 const native = process.getBuiltinModule('fs'),
   path = process.getBuiltinModule('path'),
@@ -76,53 +132,246 @@ it('quotes fixed Windows argv boundaries and rejects NUL and unpaired UTF-16 bef
 it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun metadata on one owned NTFS tree', () =>
   fixture(directory => {
     const principal = windowsTokenPrincipal();
-    expect(principal.sid).toMatch(/^S-1-[0-9]+(?:-[0-9]+)+$/u);
-    const file = path.join(directory, 'identity.txt');
-    native.writeFileSync(file, 'owned fixture');
-    const k = dlopen('kernel32.dll', {
-      CreateFileW: {args: ['buffer', 'u32', 'u32', 'ptr', 'u32', 'u32', 'u64'], returns: 'u64'},
-      CloseHandle: {args: ['u64'], returns: 'i32'},
-      GetFileInformationByHandle: {args: ['u64', 'buffer'], returns: 'i32'},
-      GetFileInformationByHandleEx: {args: ['u64', 'u32', 'buffer', 'u32'], returns: 'i32'},
+    expect(/^S-1-[0-9]+(?:-[0-9]+)+$/u.test(principal.sid)).toBe(true);
+    const security = windowsSystemLibrary('advapi32.dll', {
+      ConvertStringSidToSidW: {args: ['buffer', 'buffer'], returns: 'i32'},
+      EqualSid: {args: ['u64', 'u64'], returns: 'i32'},
+      IsValidSid: {args: ['u64'], returns: 'i32'},
+      GetLengthSid: {args: ['u64'], returns: 'u32'},
+      OpenProcessToken: {args: ['u64', 'u32', 'buffer'], returns: 'i32'},
+      GetTokenInformation: {args: ['u64', 'u32', 'buffer', 'u32', 'buffer'], returns: 'i32'},
+      ConvertStringSecurityDescriptorToSecurityDescriptorW: {args: ['buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
     });
-    const handle = k.symbols.CreateFileW(windowsWide(file), 0x80000000, 7, null, 3, 0x00200000, 0n);
-    expect(handle !== 0n && handle !== invalid).toBe(true);
+    const setup = dlopen('kernel32.dll', {
+      GetCurrentProcess: {args: [], returns: 'u64'},
+      CloseHandle: {args: ['u64'], returns: 'i32'},
+      LocalFree: {args: ['u64'], returns: 'u64'},
+      CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
+      CreateFileW: {args: ['buffer', 'u32', 'u32', 'buffer', 'u32', 'u32', 'u64'], returns: 'u64'},
+    });
+    const sids = [new BigUint64Array(1), new BigUint64Array(1), new BigUint64Array(1)];
+    let token = 0n,
+      privateDirectory: string | undefined,
+      privateDirectoryCreated = false;
+    const prior = securitySample.active;
     try {
-      const info = new Uint8Array(84),
-        id = new Uint8Array(56),
-        basic = new Uint8Array(72);
-      info.fill(0xa5);
-      id.fill(0xa5);
-      basic.fill(0xa5);
-      expect(k.symbols.GetFileInformationByHandle(handle, info.subarray(0, 52))).toBe(1);
-      expect(k.symbols.GetFileInformationByHandleEx(handle, 18, id.subarray(0, 24), 24)).toBe(1);
-      expect(k.symbols.GetFileInformationByHandleEx(handle, 0, basic.subarray(0, 40), 40)).toBe(1);
-      expect(
-        info.subarray(52).every(v => v === 0xa5) &&
-          id.subarray(24).every(v => v === 0xa5) &&
-          basic.subarray(40).every(v => v === 0xa5),
-      ).toBe(true);
-      const b = native.statSync(file, {bigint: true}),
-        v = new DataView(info.buffer),
-        t = new DataView(basic.buffer),
-        full = new DataView(id.buffer);
-      const ino = (BigInt(v.getUint32(44, true)) << 32n) | BigInt(v.getUint32(48, true)),
-        epoch = 116_444_736_000_000_000n;
-      expect(b.dev).toBe(BigInt(v.getUint32(28, true)));
-      expect(b.ino).toBe(ino);
-      expect(full.getBigUint64(8, true)).toBe(ino);
-      expect(full.getBigUint64(16, true)).toBe(0n);
-      expect(b.birthtimeNs).toBe((t.getBigInt64(0, true) - epoch) * 100n);
-      expect(b.mtimeNs).toBe((t.getBigInt64(16, true) - epoch) * 100n);
-      expect(b.ctimeNs).toBe((t.getBigInt64(24, true) - epoch) * 100n);
-      expect(runtimeNativePlatformSupport().writer).toBe(false);
-      runtimeAssertPrivateProviderPath(directory, {kind: 'directory'});
-      runtimeAssertPrivateProviderPath(file, {kind: 'file'});
-      native.linkSync(file, path.join(directory, 'alias.txt'));
-      expect(() => runtimeAssertPrivateProviderPath(file, {kind: 'file'})).toThrow();
+      for (const [index, value] of [principal.sid, 'S-1-5-18', 'S-1-5-32-544'].entries())
+        expect(security.symbols.ConvertStringSidToSidW(windowsWide(value), sids[index])).toBe(1);
+      const tokenOut = new BigUint64Array(1);
+      expect(security.symbols.OpenProcessToken(setup.symbols.GetCurrentProcess(), 8, tokenOut)).toBe(1);
+      token = tokenOut[0];
+      // TOKEN_OWNER contains an absolute SID pointer. Materialize and retain every backing/view before native writes.
+      const ownerBuffer = new ArrayBuffer(1024 + 32),
+        owner = new Uint8Array(ownerBuffer),
+        ownerView = new DataView(ownerBuffer),
+        ownerCanary = owner.subarray(1024),
+        ownerLength = new Uint32Array(1),
+        ownerStart = windowsAddress(owner);
+      owner.fill(0xa5);
+      expect(security.symbols.GetTokenInformation(token, 4, owner, 1024, ownerLength)).toBe(1);
+      if (ownerLength[0] < 16 || ownerLength[0] > 1024 || !ownerCanary.every(value => value === 0xa5))
+        throw new Error('Native token owner record is incomplete.');
+      const ownerSid = ownerView.getBigUint64(0, true),
+        ownerEnd = ownerStart + BigInt(ownerLength[0]);
+      if (ownerSid < ownerStart + 8n || ownerSid + 8n > ownerEnd)
+        throw new Error('Native token owner SID is outside its retained record.');
+      const ownerOffset = Number(ownerSid - ownerStart),
+        ownerSidBytes = 8 + owner[ownerOffset + 1] * 4;
+      if (owner[ownerOffset] !== 1 || owner[ownerOffset + 1] > 15 || ownerSid + BigInt(ownerSidBytes) > ownerEnd)
+        throw new Error('Native token owner SID span is incomplete.');
+      if (security.symbols.IsValidSid(ownerSid) === 0 || security.symbols.GetLengthSid(ownerSid) !== ownerSidBytes)
+        throw new Error('Native token owner SID validity is unproved.');
+      const defaultOwnerIsUser = security.symbols.EqualSid(ownerSid, sids[0][0]) !== 0;
+      type Sample = {
+        edge: number;
+        role: 'root' | 'ancestor' | 'final';
+        owner: 'current' | 'SYSTEM' | 'builtin-admins' | 'other' | 'unknown';
+        privateObject: boolean;
+        nativeStage: 'security' | 'descriptor';
+        nativeCode: number;
+        privateAccepted?: boolean;
+      };
+      const inspect = (value: string, kind: 'file' | 'directory') => {
+        const samples: Sample[] = [],
+          expectedEdges = EffectString.split(EffectString.slice(3)(value), '\\').length + 1;
+        let record: {owner: bigint; dacl: bigint; descriptor: bigint} | undefined;
+        const observation: NonNullable<typeof securitySample.active> = {
+          incomplete: false,
+          security(code, owner, dacl, descriptor) {
+            if (samples.length >= 64) {
+              observation.incomplete = true;
+              record = undefined;
+              return;
+            }
+            const edge = samples.length;
+            samples.push({
+              edge,
+              role: edge === 0 ? 'root' : edge === expectedEdges - 1 ? 'final' : 'ancestor',
+              owner: 'unknown',
+              privateObject: edge === expectedEdges - 1,
+              nativeStage: 'security',
+              nativeCode: code,
+            });
+            record = code === 0 ? {owner: owner[0], dacl: dacl[0], descriptor: descriptor[0]} : undefined;
+          },
+          length(descriptor, length) {
+            if (
+              !record ||
+              descriptor !== record.descriptor ||
+              length < 20 ||
+              length > 65536 ||
+              record.owner < descriptor ||
+              record.owner + 8n > descriptor + BigInt(length) ||
+              record.dacl < descriptor ||
+              record.dacl + 8n > descriptor + BigInt(length)
+            ) {
+              observation.incomplete = true;
+              return;
+            }
+            const sample = samples[samples.length - 1];
+            sample.nativeStage = 'descriptor';
+            sample.owner =
+              security.symbols.EqualSid(record.owner, sids[0][0]) !== 0
+                ? 'current'
+                : security.symbols.EqualSid(record.owner, sids[1][0]) !== 0
+                  ? 'SYSTEM'
+                  : security.symbols.EqualSid(record.owner, sids[2][0]) !== 0
+                    ? 'builtin-admins'
+                    : 'other';
+            const bytes = new Uint8Array(toArrayBuffer(descriptor, 0, length)).slice();
+            try {
+              assertWindowsDaclBytes(
+                bytes,
+                Number(record.owner - descriptor),
+                Number(record.dacl - descriptor),
+                principal.sid,
+                true,
+              );
+              sample.privateAccepted = true;
+            } catch (error) {
+              if (Schema.is(RuntimeWriterFault)(error) && error.reason === 'private-storage')
+                sample.privateAccepted = false;
+              else observation.incomplete = true;
+            }
+          },
+        };
+        securitySample.active = observation;
+        let outcome: {samples: Sample[]; failed: false} | {samples: Sample[]; failed: true; error: unknown};
+        try {
+          runtimeAssertPrivateProviderPath(value, {kind});
+          outcome = {samples, failed: false};
+        } catch (error) {
+          outcome = {samples, failed: true, error};
+        } finally {
+          securitySample.active = prior;
+        }
+        // The real operation has finalized every native descriptor before secondary observation can fail the test.
+        if (outcome.failed || observation.incomplete)
+          process.stdout.write(
+            'WINDOWS_PRIVATE_SAMPLE ' +
+              JSON.stringify({defaultOwnerIsUser, incomplete: observation.incomplete, samples}) +
+              String.fromCharCode(10),
+          );
+        if (observation.incomplete) {
+          if (outcome.failed) throw outcome.error;
+          throw new Error('Native security observation is incomplete.');
+        }
+        return outcome;
+      };
+      let ownedDirectory = directory,
+        file = path.join(directory, 'identity.txt');
+      native.writeFileSync(file, 'owned fixture');
+      const initialDirectory = inspect(directory, 'directory');
+      const initial = initialDirectory.failed ? initialDirectory : inspect(file, 'file');
+      if (initial.failed) {
+        const final = initial.samples.at(-1);
+        if (!final?.privateObject || final.nativeStage !== 'descriptor' || final.privateAccepted !== false)
+          throw initial.error;
+        // Repair only this owned fixture's proven final-object premise; ancestors and production policy stay unchanged.
+        privateDirectory = directory + '-explicit-private';
+        const sd = new BigUint64Array(1);
+        expect(
+          security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            windowsWide(`O:${principal.sid}D:P(A;OICI;FA;;;${principal.sid})`),
+            1,
+            sd,
+            null,
+          ),
+        ).toBe(1);
+        try {
+          const attributes = new BigUint64Array(3);
+          new DataView(attributes.buffer).setUint32(0, 24, true);
+          attributes[1] = sd[0];
+          expect(setup.symbols.CreateDirectoryW(windowsWide(privateDirectory), attributes)).toBe(1);
+          privateDirectoryCreated = true;
+          ownedDirectory = native.realpathSync(privateDirectory);
+          file = path.join(ownedDirectory, 'identity.txt');
+          const created = setup.symbols.CreateFileW(windowsWide(file), 0x40000000, 0, attributes, 1, 0x80, 0n);
+          expect(created !== 0n && created !== invalid).toBe(true);
+          expect(setup.symbols.CloseHandle(created)).toBe(1);
+        } finally {
+          if (sd[0] !== 0n) setup.symbols.LocalFree(sd[0]);
+        }
+        native.writeFileSync(file, 'owned fixture');
+      }
+      const directoryProof = inspect(ownedDirectory, 'directory');
+      if (directoryProof.failed) throw directoryProof.error;
+      const fileProof = inspect(file, 'file');
+      if (fileProof.failed) throw fileProof.error;
+      expect(directoryProof.samples.at(-1)?.owner).toBe('current');
+      expect(fileProof.samples.at(-1)?.owner).toBe('current');
+      const k = dlopen('kernel32.dll', {
+        CreateFileW: {args: ['buffer', 'u32', 'u32', 'ptr', 'u32', 'u32', 'u64'], returns: 'u64'},
+        CloseHandle: {args: ['u64'], returns: 'i32'},
+        GetFileInformationByHandle: {args: ['u64', 'buffer'], returns: 'i32'},
+        GetFileInformationByHandleEx: {args: ['u64', 'u32', 'buffer', 'u32'], returns: 'i32'},
+      });
+      const handle = k.symbols.CreateFileW(windowsWide(file), 0x80000000, 7, null, 3, 0x00200000, 0n);
+      expect(handle !== 0n && handle !== invalid).toBe(true);
+      try {
+        const info = new Uint8Array(84),
+          id = new Uint8Array(56),
+          basic = new Uint8Array(72);
+        info.fill(0xa5);
+        id.fill(0xa5);
+        basic.fill(0xa5);
+        expect(k.symbols.GetFileInformationByHandle(handle, info.subarray(0, 52))).toBe(1);
+        expect(k.symbols.GetFileInformationByHandleEx(handle, 18, id.subarray(0, 24), 24)).toBe(1);
+        expect(k.symbols.GetFileInformationByHandleEx(handle, 0, basic.subarray(0, 40), 40)).toBe(1);
+        expect(
+          info.subarray(52).every(v => v === 0xa5) &&
+            id.subarray(24).every(v => v === 0xa5) &&
+            basic.subarray(40).every(v => v === 0xa5),
+        ).toBe(true);
+        const b = native.statSync(file, {bigint: true}),
+          v = new DataView(info.buffer),
+          t = new DataView(basic.buffer),
+          full = new DataView(id.buffer);
+        const ino = (BigInt(v.getUint32(44, true)) << 32n) | BigInt(v.getUint32(48, true)),
+          epoch = 116_444_736_000_000_000n;
+        expect(b.dev).toBe(BigInt(v.getUint32(28, true)));
+        expect(b.ino).toBe(ino);
+        expect(full.getBigUint64(8, true)).toBe(ino);
+        expect(full.getBigUint64(16, true)).toBe(0n);
+        expect(b.birthtimeNs).toBe((t.getBigInt64(0, true) - epoch) * 100n);
+        expect(b.mtimeNs).toBe((t.getBigInt64(16, true) - epoch) * 100n);
+        expect(b.ctimeNs).toBe((t.getBigInt64(24, true) - epoch) * 100n);
+        expect(runtimeNativePlatformSupport().writer).toBe(false);
+        runtimeAssertPrivateProviderPath(ownedDirectory, {kind: 'directory'});
+        runtimeAssertPrivateProviderPath(file, {kind: 'file'});
+        native.linkSync(file, path.join(ownedDirectory, 'alias.txt'));
+        expect(() => runtimeAssertPrivateProviderPath(file, {kind: 'file'})).toThrow();
+      } finally {
+        expect(k.symbols.CloseHandle(handle)).toBe(1);
+        k.close();
+      }
     } finally {
-      expect(k.symbols.CloseHandle(handle)).toBe(1);
-      k.close();
+      securitySample.active = prior;
+      if (token !== 0n) setup.symbols.CloseHandle(token);
+      for (const sid of sids) if (sid[0] !== 0n) setup.symbols.LocalFree(sid[0]);
+      security.close();
+      setup.close();
+      if (privateDirectoryCreated && privateDirectory) native.rmSync(privateDirectory, {recursive: true, force: true});
     }
   }),
 );
