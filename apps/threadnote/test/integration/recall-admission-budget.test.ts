@@ -456,6 +456,7 @@ describe('production recall caller admission', () => {
       () =>
         Effect.gen(function* () {
           const f = yield* fixture(true);
+          const path = yield* Path.Path;
           yield* f.fs.writeFileString(f.filename, `${yield* f.fs.readFileString(f.filename)}\nchanged generation\n`);
           yield* loadRecallIndexData(f.config, {includeInactive: false, forceRefresh: true});
           const commands = yield* selectorCompositionCommands(f.system);
@@ -469,7 +470,11 @@ describe('production recall caller admission', () => {
               f.fs.open(...args).pipe(
                 Effect.flatMap(file =>
                   Effect.gen(function* () {
-                    if (!delayedMetadata || !first || args[0] !== `${f.config.agentContextHome}/models/selection.json`)
+                    if (
+                      !delayedMetadata ||
+                      !first ||
+                      args[0] !== path.join(f.config.agentContextHome, 'models', 'selection.json')
+                    )
                       return file;
                     first = false;
                     const readAlloc = file.readAlloc.bind(file);

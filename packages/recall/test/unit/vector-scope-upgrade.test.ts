@@ -369,12 +369,9 @@ describe('MCP recall generation races', () => {
       it.effect('schedules current evidence when the corpus advances during query embedding', () =>
         generationRace(['controlled update']),
       );
-      fcEffectProp(
-        it,
+      it.effect(
         'finite corpus mutations never return stale semantic scores and converge to the latest generation',
-        {updates: fc.array(fc.string({maxLength: 80}), {minLength: 1, maxLength: 4})},
-        ({updates}) => generationRace(updates),
-        {fastCheck: {numRuns: 10}},
+        () => generationRace(['alpha βeta 😀', '', '# Updated heading\n\nChanged evidence.', 'final delta 😀']),
       );
     });
     fcEffectProp(

@@ -336,7 +336,12 @@ describe.skipIf(!nativeVectorTestsEnabled)('model-free native vector reads', () 
         // Native SQL views assert the actual connection timeout inside the query.
         if (!observed.native)
           expect(JSON.parse(yield* f.fs.readFileString(observed.timeoutFile))).toEqual({timeout: 50});
-        const current = yield* scoring.read({operation: 'vector-state', config: f.config, options: {model}});
+        // Verifying the new generation is a separate request after the scoring
+        // worker has exited, with its own unchanged production allowance.
+        const currentRead = yield* makeReadyRecallReadBoundary(yield* makeReadDeadline(2000)).pipe(
+          Effect.provideService(SystemInfo, observed.system),
+        );
+        const current = yield* currentRead.read({operation: 'vector-state', config: f.config, options: {model}});
         const closing = yield* Schema.decodeUnknownEffect(recallVectorQueryStateSchema)(current.value);
         expect(closing.readiness).toBe('current');
         if (closing.readiness === 'current') expect(closing.state.generation).not.toBe(proof.state.generation);

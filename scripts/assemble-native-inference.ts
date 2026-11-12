@@ -772,7 +772,7 @@ for (const field of ['CapEff', 'CapPrm', 'CapAmb']) {
 process.stdout.write(JSON.stringify({pid: process.pid, capabilities}) + '\n');
 `;
 
-/** Only the extracted-workflow harness needs nested mount/network namespaces and these two inputs. */
+/** The outer harness needs mount and loopback setup; the inner bwrap command drops all capabilities. */
 export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.ProcessEnv>): readonly string[] {
   const archive = environment.THREADNOTE_RELEASE_ARCHIVE;
   const profile = environment.THREADNOTE_RELEASE_PROFILE;
@@ -786,6 +786,8 @@ export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.Proces
   return [
     '--cap-add',
     'SYS_ADMIN',
+    '--cap-add',
+    'NET_ADMIN',
     '--security-opt',
     'apparmor=unconfined',
     '--env',

@@ -119,7 +119,7 @@ describe('native inference overlay filesystem boundary', () => {
     });
   });
 
-  it('runs the extracted musl harness with only its explicit archive/profile environment', () => {
+  it('grants namespace setup capabilities to the outer musl harness and forwards only its archive/profile', () => {
     const arguments_ = muslWorkflowRuntimeArguments({
       THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-arm64-musl.tar.gz',
       THREADNOTE_RELEASE_PROFILE: 'all',
@@ -128,6 +128,8 @@ describe('native inference overlay filesystem boundary', () => {
     expect(arguments_).toEqual([
       '--cap-add',
       'SYS_ADMIN',
+      '--cap-add',
+      'NET_ADMIN',
       '--security-opt',
       'apparmor=unconfined',
       '--env',

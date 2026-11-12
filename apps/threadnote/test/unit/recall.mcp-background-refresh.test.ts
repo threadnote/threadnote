@@ -65,7 +65,7 @@ const manifest = Option.getOrUndefined(
 )!;
 
 // Same existing private concurrent fixture; execution needs separate admission.
-const concurrentRefreshFixture = (callers: number) =>
+const concurrentRefreshFixture = (callers: number, failOneEnqueue = false) =>
   Effect.scoped(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -106,6 +106,27 @@ const concurrentRefreshFixture = (callers: number) =>
           reason: 'canonical documents changed; run `threadnote repair`',
         });
 
+        if (failOneEnqueue) {
+          const original = RefreshBoundary.scheduleMcpRecallBackgroundRefresh;
+          let first = true;
+          yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              vi.spyOn(RefreshBoundary, 'scheduleMcpRecallBackgroundRefresh').mockImplementation((...args) => {
+                if (!first) return original(...args);
+                first = false;
+                return Effect.fail(
+                  RecallEmbeddingDemandUnavailable.make({
+                    message: 'Synthetic enqueue guard failure.',
+                    stage: 'guard',
+                    reason: 'io',
+                  }),
+                );
+              }),
+            ),
+            spy => Effect.sync(() => spy.mockRestore()),
+          );
+        }
+
         const requests = yield* Effect.all(
           Array.from({length: callers}, () => loadMcpRecallSemanticScoresResult(config, 'changed semantic content', 5)),
           {concurrency: 'unbounded'},
@@ -121,38 +142,29 @@ const concurrentRefreshFixture = (callers: number) =>
             warning: EffectString.slice(0, 180)(Option.getOrElse(result.result.warning, () => '')),
           }),
         );
+        // Concurrent callers may fail the bounded enqueue guard without
+        // acknowledging demand. At least one caller must actually enqueue;
+        // every fallback remains scoreless and reports its own outcome.
         expect(
-          EffectArray.every(results, result => result.status === 'unavailable'),
+          EffectArray.some(results, result => result.status === 'unavailable'),
           JSON.stringify(unexpected),
         ).toBe(true);
-        expect(
-          EffectArray.every(results, result =>
-            Boolean(
-              Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
-                effectOptionalString == null
-                  ? undefined
-                  : Effect2.pipe(effectOptionalString, EffectString.includes('background refresh')),
-              ),
-            ),
-          ),
-        ).toBe(true);
-        expect(
-          EffectArray.every(results, result =>
-            Boolean(
-              Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
-                effectOptionalString == null
-                  ? undefined
-                  : Effect2.pipe(effectOptionalString, EffectString.includes('without waiting')),
-              ),
-            ),
-          ),
-        ).toBe(true);
-        expect(
-          EffectArray.every(
-            results,
-            result => new TextEncoder().encode(Option.getOrUndefined(result.result.warning) ?? '').byteLength <= 180,
-          ),
-        ).toBe(true);
+        if (failOneEnqueue) expect(EffectArray.some(results, result => result.status === 'failed')).toBe(true);
+        for (const result of results) {
+          const warning = Option.getOrElse(result.result.warning, () => '');
+          expect(Option.isNone(result.result.scores)).toBe(true);
+          expect(Option.isNone(result.result.corpusGeneration)).toBe(true);
+          expect(warning).toContain('background refresh');
+          if (result.status === 'failed') {
+            expect(warning).toMatch(/\[guard\/(?:io|guard-timeout)\]/u);
+            expect(warning).toContain('enqueue not confirmed');
+            expect(warning).not.toMatch(/queued|scheduled/u);
+          } else {
+            expect(result.status).toBe('unavailable');
+            expect(warning).toContain('without waiting');
+          }
+          expect(new TextEncoder().encode(warning).byteLength).toBeLessThanOrEqual(180);
+        }
         expect(yield* Ref.get(calls)).toBe(1);
         expect((yield* readRecallEmbeddingDemand(config))?.desired).toBeDefined();
         const worker = yield* finishQueuedRecall(config).pipe(Effect.forkScoped);
@@ -908,8 +920,8 @@ describe('MCP recall background vector refresh', () => {
     // separately so each real-SQLite fixture keeps the ordinary test deadline.
     for (const callers of [2, 24])
       effectIt.effect(
-        `returns promptly and single-flights ${callers} concurrent refreshes for one canonical home`,
-        () => concurrentRefreshFixture(callers),
+        `returns promptly and single-flights ${callers} concurrent refreshes for one canonical home${callers === 24 ? ' with a failed enqueue' : ''}`,
+        () => concurrentRefreshFixture(callers, callers === 24),
       );
     effectIt.effect('fixed20 concurrent refresh diagnostic fixture preserves durable intent', () =>
       concurrentRefreshFixture(20),
