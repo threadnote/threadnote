@@ -132,6 +132,39 @@ const FIXTURE_COMMAND_STAGES = [
   'git-commit',
 ] as const;
 export type FixtureCommandStage = (typeof FIXTURE_COMMAND_STAGES)[number];
+const REPAIR_PROGRESS_MARKERS = [
+  ['started', /^Repairing the self-contained Threadnote home\.$/m],
+  ['lexical-started', /^Preparing lexical recall from canonical documents\.$/m],
+  ['lexical-prepared', /^Lexical recall prepared: /m],
+  ['embedding-started', /^Embedding \d+ canonical document\(s\) with /m],
+  ['vectors-activated', /^Activated vector generation /m],
+  ['recall-ready', /^Lexical and vector recall indexes are ready for /m],
+  ['integrations-skipped', /^Skipping host instructions, hooks, and MCP client repair \(--core-only\)\.$/m],
+  ['doctor-started', /^Running Threadnote doctor checks\.$/m],
+] as const;
+const REPAIR_ERROR_MARKERS = [
+  ['recall-index', /Recall index repair failed:/u],
+  ['code-graph', /Native code graph repair failed:/u],
+  ['sqlite-busy', /\b(?:SQLITE_BUSY|database is locked)\b/u],
+  ['sqlite-io', /\b(?:SQLITE_IOERR|SQLITE_CANTOPEN|SQLITE_READONLY)\b/u],
+  ['native-runtime', /\b(?:UnsupportedNativeRuntime|NativeRuntimeUnavailable)\b|Native vector reader /u],
+  ['model-load', /\b(?:ModelLoadFailed|ModelNotInstalled|ModelChecksumMismatch|InsufficientMemory)\b/u],
+  ['embedding', /\b(?:EmbeddingFailed|InvalidModelOutput)\b/u],
+  ['corpus-changed', /\bVectorCorpusGenerationChanged\b/u],
+  ['output-drain', /\bCliOutputError\b/u],
+] as const;
+
+const repairFailureMarkers = (stdout: string, stderr: string) => {
+  const milestones = EffectArray.map(
+    EffectArray.filter(REPAIR_PROGRESS_MARKERS, ([, pattern]) => pattern.test(stdout)),
+    ([name]) => name,
+  );
+  const errors = EffectArray.map(
+    EffectArray.filter(REPAIR_ERROR_MARKERS, ([, pattern]) => pattern.test(stderr)),
+    ([name]) => name,
+  );
+  return {milestones, errorCategories: errors.length > 0 ? errors : ['unknown']};
+};
 const FIXTURE_DIAGNOSTIC_SIGNALS: readonly NodeJS.Signals[] = [
   'SIGINT',
   'SIGTERM',
@@ -275,6 +308,9 @@ export async function runFixtureCommand(
         totalBytes: size,
         maxOutputBytes: options.maxOutputBytes,
         overflow,
+        ...(!failed && !overflow && signal === null && code !== null && code !== 0 && stage === 'repair'
+          ? {repair: repairFailureMarkers(stdout, stderr)}
+          : {}),
       })}`,
     );
   }

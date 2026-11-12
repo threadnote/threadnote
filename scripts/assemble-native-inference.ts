@@ -807,6 +807,21 @@ const MUSL_PINS = {
 
 // The trusted harness supplies fixed namespace arguments and no capability-restoring options.
 export const MUSL_WORKFLOW_BWRAP_SHIM = '#!/bin/sh\nexec /usr/bin/bwrap --cap-drop ALL "$@"\n';
+// Moby v28.0.4 (Apache-2.0), commit 6430e49a55babd9b8f4d08e70ecb2b68900770fe,
+// profiles/seccomp/default.json plus only a CAP_SYS_ADMIN-conditioned pivot_root allow.
+// Upstream bytes SHA256: 9c1025c88ccaa517b648da571961838744ea2137f176bfe6a48b21294cae9c76.
+export const prepareMuslWorkflowSeccomp = Effect.fn('nativeInference.muslWorkflowSeccomp')(function* (
+  root: string,
+  scratch: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const profile = yield* fs.readFile(path.join(root, 'scripts/native-inference-workflow-seccomp.json'));
+  if (sha256HexSync(profile) !== '1506b0a486a0d12b79b90111e94e0cc309bf41d70b8562292d0d66186f09605d')
+    throw new Error('Pinned musl workflow seccomp profile changed.');
+  const destination = path.join(scratch, 'workflow-seccomp.json');
+  yield* fs.writeFile(destination, profile);
+  return destination;
+});
 const MUSL_WORKFLOW_CAPABILITY_PROBE = String.raw`
 const status = await Bun.file('/proc/self/status').text();
 const capabilities = {};
@@ -820,7 +835,10 @@ process.stdout.write(JSON.stringify({pid: process.pid, capabilities}) + '\n');
 `;
 
 /** The outer harness needs mount and loopback setup; the inner bwrap command drops all capabilities. */
-export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.ProcessEnv>): readonly string[] {
+export function muslWorkflowRuntimeArguments(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  seccompProfile: string,
+): readonly string[] {
   const archive = environment.THREADNOTE_RELEASE_ARCHIVE;
   const profile = environment.THREADNOTE_RELEASE_PROFILE;
   if (
@@ -830,6 +848,7 @@ export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.Proces
     !/^[a-z][a-z0-9-]*$/u.test(profile)
   )
     throw new Error('Musl workflow execution requires its extracted release archive and profile.');
+  if (!path.isAbsolute(seccompProfile)) throw new Error('Musl workflow seccomp profile must have an absolute path.');
   return [
     '--cap-add',
     'SYS_ADMIN',
@@ -837,6 +856,8 @@ export function muslWorkflowRuntimeArguments(environment: Readonly<NodeJS.Proces
     'NET_ADMIN',
     '--security-opt',
     'apparmor=unconfined',
+    '--security-opt',
+    `seccomp=${seccompProfile}`,
     '--env',
     `THREADNOTE_RELEASE_ARCHIVE=${archive}`,
     '--env',
@@ -851,7 +872,6 @@ export const runMuslBuildContainer = Effect.fn('nativeInference.muslContainer')(
   options: {readonly workflowRuntime?: boolean} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const workflowArguments = options.workflowRuntime ? muslWorkflowRuntimeArguments(Bun.env) : [];
   if (process.platform !== 'linux' || (process.arch !== 'x64' && process.arch !== 'arm64'))
     throw new Error('Musl CI builds require a native Linux x64 or ARM64 Docker host.');
   const checkoutRoot = yield* nativeContainerCheckoutRoot(root);
@@ -859,6 +879,9 @@ export const runMuslBuildContainer = Effect.fn('nativeInference.muslContainer')(
   const target = process.arch === 'x64' ? 'bun-linux-x64-baseline-musl' : 'bun-linux-arm64-musl';
   const scratch = path.join(checkoutRoot, '.context', 'native-inference-container');
   yield* fs.makeDirectory(scratch, {recursive: true});
+  const workflowArguments = options.workflowRuntime
+    ? muslWorkflowRuntimeArguments(Bun.env, yield* prepareMuslWorkflowSeccomp(checkoutRoot, scratch))
+    : [];
   const driver = path.join(scratch, 'run.mjs');
   yield* fs.writeFileString(
     driver,

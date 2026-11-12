@@ -36,11 +36,13 @@ it.each(['nonzero-exit', 'missing-exit-code', 'signal', 'child-error', 'spawn-er
   'reports %s only after the owned command closes',
   async scenario => {
     const reason = scenario === 'spawn-error' ? 'child-error' : scenario;
+    const stage =
+      scenario === 'nonzero-exit' || scenario === 'signal' || scenario === 'output-overflow' ? 'repair' : 'recall';
     const child = commandChild();
     const processes = new FixtureProcesses(() => child);
     let settled = false;
     const command = runFixtureCommand(processes, 'PRIVATE_COMMAND', ['PRIVATE_ARGUMENT'], {
-      stage: 'recall',
+      stage,
       cwd: 'PRIVATE_PATH',
       env: {PRIVATE_ENV: 'PRIVATE_VALUE'},
       deadline: performance.now() + 1000,
@@ -61,7 +63,7 @@ it.each(['nonzero-exit', 'missing-exit-code', 'signal', 'child-error', 'spawn-er
     child.emit('close');
     const details = commandFailureDetails(await command);
     expect(details).toEqual({
-      stage: 'recall',
+      stage,
       observed: 'owned-close',
       reason,
       spawned: scenario !== 'spawn-error',
@@ -74,10 +76,59 @@ it.each(['nonzero-exit', 'missing-exit-code', 'signal', 'child-error', 'spawn-er
       totalBytes: reason === 'output-overflow' ? 5 : 3,
       maxOutputBytes: 4,
       overflow: reason === 'output-overflow',
+      ...(reason === 'nonzero-exit' ? {repair: {milestones: [], errorCategories: ['unknown']}} : {}),
     });
     expect(JSON.stringify(details)).not.toContain('PRIVATE_');
   },
 );
+
+it.each(['recognized', 'unknown'] as const)('reports only closed repair markers for %s output', async scenario => {
+  const child = commandChild();
+  const processes = new FixtureProcesses(() => child);
+  let settled = false;
+  const command = runFixtureCommand(processes, 'PRIVATE_COMMAND', ['PRIVATE_ARGUMENT'], {
+    stage: 'repair',
+    cwd: 'PRIVATE_PATH',
+    env: {PRIVATE_ENV: 'PRIVATE_VALUE'},
+    deadline: performance.now() + 1000,
+    maxOutputBytes: 1024,
+  })
+    .catch((cause: unknown) => cause)
+    .finally(() => {
+      settled = true;
+    });
+  child.emit('spawn');
+  child.stdout.write(
+    scenario === 'recognized'
+      ? 'Repairing the self-contained Threadnote home.\nPreparing lexical recall from canonical documents.\n' +
+          'Lexical recall prepared: 1 canonical document(s).\nEmbedding 1 canonical document(s) with PRIVATE_MODEL.\nPRIVATE_BODY'
+      : 'PRIVATE_BODY ModelLoadFailed_PRIVATE',
+  );
+  child.stderr.write(
+    scenario === 'recognized'
+      ? 'Recall index repair failed: ModelLoadFailed PRIVATE_ERROR PRIVATE_PATH PRIVATE_TOKEN'
+      : 'PRIVATE_ERROR ModelLoadFailed_PRIVATE',
+  );
+  child.emit('exit', 7, null);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  child.emit('close');
+  const details = commandFailureDetails(await command);
+  expect(details).toMatchObject({
+    stage: 'repair',
+    observed: 'owned-close',
+    reason: 'nonzero-exit',
+    exitCode: 7,
+    overflow: false,
+    repair: {
+      milestones:
+        scenario === 'recognized' ? ['started', 'lexical-started', 'lexical-prepared', 'embedding-started'] : [],
+      errorCategories: scenario === 'recognized' ? ['recall-index', 'model-load'] : ['unknown'],
+    },
+  });
+  expect(JSON.stringify(details)).not.toContain('PRIVATE_');
+  expect(JSON.stringify(details).length).toBeLessThan(700);
+});
 
 it('preserves deadline failure without claiming an observed close', async () => {
   const child = commandChild();

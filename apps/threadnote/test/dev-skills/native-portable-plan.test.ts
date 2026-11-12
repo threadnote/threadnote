@@ -562,70 +562,73 @@ effectIt.effect.each([
           team: 'default',
         }),
       );
-      expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
-        published,
-      );
-      const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
-      registerWorkflowTaskTool(donorMcp, donorConfig);
-      const mcpShared = yield* donorMcp
-        .invokeTool('workflow_task_author', {
-          command: 'share',
-          callerCwd: donor.repo,
-          authoringRef: readyPlan.authoringRef,
-          team: 'default',
-        })
-        .pipe(Effect.provideService(SystemInfo, donorSystem));
-      expect(
-        (yield* Schema.decodeUnknownEffect(shareResult)(
-          (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpShared))
-            .structuredContent,
-        )).sharedPlanRef,
-      ).toBe(published.sharedPlanRef);
-      const authorCli = Command.make('threadnote').pipe(
-        Command.withSubcommands([makeNativeTaskAuthoringCommand(program => program(donorConfig))]),
-      );
-      yield* Command.runWith(authorCli, {version: 'fixture'})([
-        'task-author',
-        '--operation',
-        'share',
-        '--caller-cwd',
-        donor.repo,
-        '--authoring-ref',
-        readyPlan.authoringRef,
-        '--team',
-        'default',
-      ]).pipe(Effect.provideService(SystemInfo, donorSystem));
       const standalone = system.environment().THREADNOTE_STANDALONE_SMOKE;
-      if (standalone) {
-        const result = yield* runCommandEffect(
-          standalone,
-          [
-            'workflow-automation',
-            'task-author',
-            '--operation',
-            'share',
-            '--caller-cwd',
-            donor.repo,
-            '--authoring-ref',
-            readyPlan.authoringRef,
-            '--team',
-            'default',
-          ],
-          {
-            cwd: donor.repo,
-            env: {
-              ...system.environment(),
-              THREADNOTE_HOME: donor.home,
-              THREADNOTE_ACCOUNT: donorConfig.account,
-              THREADNOTE_USER: donorConfig.user,
-              THREADNOTE_AGENT_ID: donorConfig.agentId,
-            },
-            timeoutMs: 30_000,
-            maxOutputBytes: 16_000,
-          },
+      // Cover adapters and replay once; the other direction exercises the full evidence transfer.
+      if (!direction.fullEvidence) {
+        expect(yield* donorAuthor({command: 'share', authoringRef: readyPlan.authoringRef, team: 'default'})).toEqual(
+          published,
         );
-        expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({sharedPlanRef: published.sharedPlanRef});
+        const donorMcp = new EffectMcpServerAdapter('portable-test', '1', 'fixture');
+        registerWorkflowTaskTool(donorMcp, donorConfig);
+        const mcpShared = yield* donorMcp
+          .invokeTool('workflow_task_author', {
+            command: 'share',
+            callerCwd: donor.repo,
+            authoringRef: readyPlan.authoringRef,
+            team: 'default',
+          })
+          .pipe(Effect.provideService(SystemInfo, donorSystem));
+        expect(
+          (yield* Schema.decodeUnknownEffect(shareResult)(
+            (yield* Schema.decodeUnknownEffect(Schema.Struct({structuredContent: Schema.Unknown}))(mcpShared))
+              .structuredContent,
+          )).sharedPlanRef,
+        ).toBe(published.sharedPlanRef);
+        const authorCli = Command.make('threadnote').pipe(
+          Command.withSubcommands([makeNativeTaskAuthoringCommand(program => program(donorConfig))]),
+        );
+        yield* Command.runWith(authorCli, {version: 'fixture'})([
+          'task-author',
+          '--operation',
+          'share',
+          '--caller-cwd',
+          donor.repo,
+          '--authoring-ref',
+          readyPlan.authoringRef,
+          '--team',
+          'default',
+        ]).pipe(Effect.provideService(SystemInfo, donorSystem));
+        if (standalone) {
+          const result = yield* runCommandEffect(
+            standalone,
+            [
+              'workflow-automation',
+              'task-author',
+              '--operation',
+              'share',
+              '--caller-cwd',
+              donor.repo,
+              '--authoring-ref',
+              readyPlan.authoringRef,
+              '--team',
+              'default',
+            ],
+            {
+              cwd: donor.repo,
+              env: {
+                ...system.environment(),
+                THREADNOTE_HOME: donor.home,
+                THREADNOTE_ACCOUNT: donorConfig.account,
+                THREADNOTE_USER: donorConfig.user,
+                THREADNOTE_AGENT_ID: donorConfig.agentId,
+              },
+              timeoutMs: 30_000,
+              maxOutputBytes: 16_000,
+            },
+          );
+          expect(result.exitCode).toBe(0);
+          expect(JSON.parse(result.stdout)).toMatchObject({sharedPlanRef: published.sharedPlanRef});
+        }
       }
       const donorPlanRead = yield* donorAuthor({
         command: 'read',
@@ -765,6 +768,7 @@ effectIt.effect.each([
       }
       const donorSpecReference = yield* Schema.decodeUnknownEffect(Schema.Struct({uri: Schema.String}))(readySpec.root);
       expect(localPlanDocument.spec?.root.uri).not.toBe(donorSpecReference.uri);
+      if (direction.fullEvidence) return;
       expect(
         yield* runNativeTaskStart(recipientConfig, recipientStart).pipe(
           Effect.provideService(SystemInfo, recipientSystem),

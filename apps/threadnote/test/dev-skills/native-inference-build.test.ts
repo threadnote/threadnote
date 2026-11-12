@@ -5,6 +5,7 @@ import {
   assembleNativeInference,
   copyNativeInferenceCompilerRuntimes,
   muslWorkflowRuntimeArguments,
+  prepareMuslWorkflowSeccomp,
   MUSL_WORKFLOW_BWRAP_SHIM,
   nativeContainerFailureReport,
   nativeInferenceBuildEnvironment,
@@ -30,6 +31,7 @@ import {
   FileSystem,
   Layer,
   Path,
+  Schema,
   String as EffectString,
 } from 'effect';
 import {TestClock} from 'effect/testing';
@@ -121,11 +123,14 @@ describe('native inference overlay filesystem boundary', () => {
   });
 
   it('grants namespace setup capabilities to the outer musl harness and forwards only its archive/profile', () => {
-    const arguments_ = muslWorkflowRuntimeArguments({
-      THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-arm64-musl.tar.gz',
-      THREADNOTE_RELEASE_PROFILE: 'all',
-      GH_TOKEN: 'must-not-forward',
-    });
+    const arguments_ = muslWorkflowRuntimeArguments(
+      {
+        THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-arm64-musl.tar.gz',
+        THREADNOTE_RELEASE_PROFILE: 'all',
+        GH_TOKEN: 'must-not-forward',
+      },
+      '/owned-scratch/workflow-seccomp.json',
+    );
     expect(arguments_).toEqual([
       '--cap-add',
       'SYS_ADMIN',
@@ -133,6 +138,8 @@ describe('native inference overlay filesystem boundary', () => {
       'NET_ADMIN',
       '--security-opt',
       'apparmor=unconfined',
+      '--security-opt',
+      'seccomp=/owned-scratch/workflow-seccomp.json',
       '--env',
       'THREADNOTE_RELEASE_ARCHIVE=artifacts/threadnote-linux-arm64-musl.tar.gz',
       '--env',
@@ -144,10 +151,71 @@ describe('native inference overlay filesystem boundary', () => {
       {THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-x64.tar.gz', THREADNOTE_RELEASE_PROFILE: 'all'},
       {THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-x64-musl.tar.gz'},
     ])
-      expect(() => muslWorkflowRuntimeArguments(environment)).toThrow('extracted release archive and profile');
+      expect(() => muslWorkflowRuntimeArguments(environment, '/owned-scratch/workflow-seccomp.json')).toThrow(
+        'extracted release archive and profile',
+      );
+    expect(() =>
+      muslWorkflowRuntimeArguments(
+        {
+          THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-linux-x64-musl.tar.gz',
+          THREADNOTE_RELEASE_PROFILE: 'all',
+        },
+        'relative-profile.json',
+      ),
+    ).toThrow('absolute path');
   });
 
   effectIt.layer(Layer.merge(BunServices.layer, TestSystemInfoLayer))(it => {
+    it.effect('pins the Docker default policy plus only pivot_root and snapshots its verified bytes', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const bytes = yield* fs.readFile('scripts/native-inference-workflow-seccomp.json');
+        const policy: unknown = JSON.parse(new TextDecoder().decode(bytes));
+        if (
+          !Schema.is(
+            Schema.Struct({
+              defaultAction: Schema.String,
+              defaultErrnoRet: Schema.Finite,
+              archMap: Schema.Array(Schema.Struct({architecture: Schema.String})),
+              syscalls: Schema.Array(Schema.Unknown),
+            }),
+          )(policy)
+        )
+          throw new Error('Invalid pinned seccomp test input.');
+        expect(policy.defaultAction).toBe('SCMP_ACT_ERRNO');
+        expect(policy.defaultErrnoRet).toBe(1);
+        expect(EffectArray.map(policy.archMap, entry => entry.architecture)).toEqual(
+          expect.arrayContaining(['SCMP_ARCH_X86_64', 'SCMP_ARCH_AARCH64']),
+        );
+        expect(policy.syscalls.at(-1)).toEqual({
+          names: ['pivot_root'],
+          action: 'SCMP_ACT_ALLOW',
+          includes: {caps: ['CAP_SYS_ADMIN']},
+        });
+        // Upstream serialization uses tabs and no final newline. This independently binds every original rule.
+        expect(sha256HexSync(JSON.stringify({...policy, syscalls: policy.syscalls.slice(0, -1)}, null, '\t'))).toBe(
+          '9c1025c88ccaa517b648da571961838744ea2137f176bfe6a48b21294cae9c76',
+        );
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'musl-seccomp-policy-'});
+        const scratch = path.join(root, 'scratch');
+        const resource = path.join(root, 'scripts', 'native-inference-workflow-seccomp.json');
+        yield* fs.makeDirectory(path.dirname(resource));
+        yield* fs.makeDirectory(scratch);
+        yield* fs.writeFile(resource, bytes);
+        const prepared = yield* prepareMuslWorkflowSeccomp(root, scratch);
+        expect(prepared).toBe(path.join(scratch, 'workflow-seccomp.json'));
+        expect(yield* fs.readFile(prepared)).toEqual(bytes);
+        yield* fs.remove(prepared);
+        yield* fs.writeFileString(resource, new TextDecoder().decode(bytes) + ' ');
+        expect((yield* Effect.exit(prepareMuslWorkflowSeccomp(root, scratch)))._tag).toBe('Failure');
+        expect(yield* fs.exists(prepared)).toBe(false);
+        yield* fs.remove(resource);
+        expect((yield* Effect.exit(prepareMuslWorkflowSeccomp(root, scratch)))._tag).toBe('Failure');
+        expect(yield* fs.exists(prepared)).toBe(false);
+      }),
+    );
+
     it.effect('binds compiler-resolved runtime copies and enrolls only the captured ARM musl libgcc provider', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
