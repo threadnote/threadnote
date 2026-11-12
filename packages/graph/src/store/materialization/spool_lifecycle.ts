@@ -101,6 +101,8 @@ export const appendPersistentMaterializationSpoolFactBatches = Effect.fn(
           batch.edges,
           full.boundedReferences,
           batch.monikers ?? [],
+          batch.bodyDiscovery,
+          full.symbolTerms,
         ),
         batchIndex: batch.batchIndex,
         candidateCount: EffectArray.reduce(spool.references, 0, (total, reference) => total + reference.candidateCount),

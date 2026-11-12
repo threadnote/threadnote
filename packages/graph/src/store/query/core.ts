@@ -15,6 +15,277 @@ import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
 
+/** Direct-column octet_length/typeof use SQLite record metadata before loading an admitted text payload. */
+export const taskBoundedText = (column: string, bytes: number) =>
+  `CASE WHEN typeof(${column}) = 'text' AND octet_length(${column}) <= ${bytes} THEN ${column} ELSE NULL END`;
+
+/** All input scalars are bounded first; an exact native JSON guard also covers escaping overhead. */
+export function taskTransferBounded(
+  statement: CodeGraphSqlQueryStatement,
+  columns: readonly string[],
+  maximumBytes: number,
+): CodeGraphSqlQueryStatement {
+  const json = `json_object(${EffectArray.join(
+    EffectArray.map(columns, column => `'${column}', ${column}`),
+    ', ',
+  )})`;
+  return {
+    parameters: statement.parameters,
+    text: `WITH task_rows AS MATERIALIZED (${statement.text}),
+    task_sized AS MATERIALIZED (SELECT task_rows.*, length(CAST(${json} AS BLOB)) <= ${maximumBytes - 1024} AS transfer_valid FROM task_rows)
+    SELECT ${EffectArray.join(
+      EffectArray.map(columns, column => `CASE WHEN transfer_valid THEN ${column} ELSE NULL END AS ${column}`),
+      ', ',
+    )}, transfer_valid FROM task_sized`,
+  };
+}
+
+export function taskHeaderStatement(snapshotId: string): CodeGraphSqlQueryStatement {
+  const fields = ['repository_id', 'worktree_id', 'commit_id', 'base_snapshot_id'];
+  return taskTransferBounded(
+    {
+      parameters: [snapshotId],
+      text: `SELECT
+    ${EffectArray.join(
+      EffectArray.map(fields, field => `${taskBoundedText(field, 128)} AS ${field}`),
+      ', ',
+    )}, dirty,
+    EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id = snapshots.id AND format.format_version = 1) AS compact_current,
+    EXISTS (SELECT 1 FROM lexical_storage_formats AS format WHERE format.snapshot_id = ${taskBoundedText('base_snapshot_id', 128)} AND format.format_version = 1) AS compact_base,
+    (${EffectArray.join(
+      EffectArray.map(fields, field =>
+        field === 'base_snapshot_id'
+          ? `(typeof(${field}) = 'null' OR ${taskBoundedText(field, 128)} IS NOT NULL)`
+          : `${taskBoundedText(field, 128)} IS NOT NULL`,
+      ),
+      ' AND ',
+    )}) AS row_valid
+    FROM snapshots WHERE id = ? AND state = 'ready' LIMIT 1`,
+    },
+    [...fields, 'dirty', 'compact_current', 'compact_base', 'row_valid'],
+    4096,
+  );
+}
+
+export function taskNodeStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  ids: readonly string[],
+): CodeGraphSqlQueryStatement {
+  const marks = EffectArray.join(
+    EffectArray.map(ids, () => '?'),
+    ', ',
+  );
+  const required = [
+    ['id', 128],
+    ['content_hash', 64],
+    ['kind', 128],
+    ['language', 128],
+    ['name', 512],
+    ['qualified_name', 1024],
+    ['path', 4096],
+    ['span_json', 256],
+  ] as const;
+  const optional = [
+    ['package_name', 256],
+    ['resolution_domain', 128],
+    ['resolution_scope_id', 256],
+  ] as const;
+  const textFields = [...required, ...optional];
+  const arityValid = `(CASE typeof(s.arity) WHEN 'null' THEN 1 WHEN 'integer' THEN s.arity BETWEEN 0 AND 9007199254740991 ELSE 0 END)`;
+  const columns = `${EffectArray.join(
+    EffectArray.map(textFields, ([column, bytes]) => `${taskBoundedText('s.' + column, bytes)} AS ${column}`),
+    ', ',
+  )},
+    CASE WHEN ${arityValid} THEN s.arity ELSE NULL END AS arity, s.exported, NULL AS signature, NULL AS documentation, '[]' AS lookup_keys_json,
+    (${arityValid} AND ${EffectArray.join(
+      EffectArray.map(required, ([column, bytes]) => `${taskBoundedText('s.' + column, bytes)} IS NOT NULL`),
+      ' AND ',
+    )}
+      AND ${EffectArray.join(
+        EffectArray.map(
+          optional,
+          ([column, bytes]) => `(typeof(s.${column}) = 'null' OR ${taskBoundedText('s.' + column, bytes)} IS NOT NULL)`,
+        ),
+        ' AND ',
+      )}) AS row_valid`;
+  const statement = {
+    parameters: [snapshotId, ...ids, baseSnapshotId ?? '', ...ids, snapshotId, snapshotId],
+    text: `SELECT ${columns} FROM symbols AS s WHERE s.snapshot_id = ? AND s.id IN (${marks})
+    UNION ALL SELECT ${columns} FROM symbols AS s WHERE s.snapshot_id = ? AND s.id IN (${marks})
+      AND NOT EXISTS (SELECT 1 FROM symbols AS replacement WHERE replacement.snapshot_id = ? AND replacement.id = s.id)
+      AND NOT EXISTS (SELECT 1 FROM snapshot_symbol_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.symbol_id = s.id)`,
+  };
+  return taskTransferBounded(
+    statement,
+    [
+      ...EffectArray.map(textFields, ([column]) => column),
+      'arity',
+      'exported',
+      'signature',
+      'documentation',
+      'lookup_keys_json',
+      'row_valid',
+    ],
+    32768,
+  );
+}
+
+/**
+ * Task-only compact lane: admit raw keys before optional dictionary mapping or ranking.
+ * Legacy REAL weights cannot be inspected using metadata-only Column operations; the
+ * charged header capability check reports that contributor unsupported instead.
+ */
+export function taskPostingStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  terms: readonly string[],
+  limit: number,
+): CodeGraphSqlQueryStatement {
+  const keys = [...new Set(terms)].slice(0, 32);
+  const marks = EffectArray.join(
+    EffectArray.map(keys, () => '?'),
+    ', ',
+  );
+  const weight = (column: string) =>
+    `CASE WHEN typeof(${column}) IN ('integer','real') THEN CASE WHEN ${column} > 0 AND ${column} <= 5 THEN ${column} ELSE NULL END ELSE NULL END`;
+  const branches: string[] = [];
+  const parameters: (string | number)[] = [];
+  for (const id of [snapshotId, baseSnapshotId ?? '']) {
+    // No dictionary join here: even missing/mismatched/invalid keys consume the raw LIMIT.
+    branches.push(`SELECT ${taskBoundedText('compact.snapshot_id', 128)} AS snapshot_id,
+      compact.snapshot_key, CASE WHEN typeof(posting.symbol_key) = 'integer' THEN posting.symbol_key ELSE NULL END AS symbol_key,
+      ${taskBoundedText('terms.term', 256)} AS term, ${weight('posting.weight')} AS weight
+      FROM lexical_compact_snapshots AS compact
+      JOIN lexical_storage_formats AS format ON format.snapshot_id = compact.snapshot_id AND format.format_version = 1
+      JOIN lexical_compact_terms AS terms INDEXED BY sqlite_autoindex_lexical_compact_terms_1
+        ON terms.snapshot_key = compact.snapshot_key
+      CROSS JOIN lexical_compact_postings AS posting
+      WHERE compact.snapshot_id = ? AND terms.term IN (${marks || "''"})
+        AND posting.snapshot_key = compact.snapshot_key AND posting.term_key = terms.term_key`);
+    parameters.push(id, ...keys);
+  }
+  parameters.push(
+    Math.max(0, Math.min(128, Math.floor(limit))),
+    snapshotId,
+    snapshotId,
+    snapshotId,
+    snapshotId,
+    baseSnapshotId ?? '',
+    snapshotId,
+    snapshotId,
+  );
+  return taskTransferBounded(
+    {
+      parameters,
+      text: `WITH raw AS MATERIALIZED (${EffectArray.join(branches, ' UNION ALL ')} LIMIT ?),
+    mapped AS MATERIALIZED (
+      SELECT raw.snapshot_id, ${taskBoundedText('dictionary.symbol_id', 128)} AS symbol_id,
+        raw.term, raw.weight FROM raw LEFT JOIN lexical_compact_symbols AS dictionary
+        ON dictionary.symbol_key = raw.symbol_key AND dictionary.snapshot_key = raw.snapshot_key)
+    SELECT mapped.symbol_id AS id, mapped.term, mapped.weight,
+      ${taskBoundedText('symbol.path', 4096)} AS path,
+      ${taskBoundedText('symbol.package_name', 256)} AS package_name,
+      ${taskBoundedText('symbol.content_hash', 64)} AS content_hash,
+      (mapped.symbol_id IS NOT NULL AND mapped.term IS NOT NULL AND mapped.weight IS NOT NULL
+        AND ${taskBoundedText('symbol.path', 4096)} IS NOT NULL AND ${taskBoundedText('symbol.content_hash', 64)} IS NOT NULL
+        AND (typeof(symbol.package_name) = 'null' OR ${taskBoundedText('symbol.package_name', 256)} IS NOT NULL)) AS row_valid,
+      CASE WHEN ${taskBoundedText('symbol.path', 4096)} IS NOT NULL AND ${taskBoundedText('symbol.content_hash', 64)} IS NOT NULL THEN
+      (symbol.id IS NOT NULL AND (mapped.snapshot_id = ? OR
+        (NOT EXISTS (SELECT 1 FROM symbols AS replacement WHERE replacement.snapshot_id = ? AND replacement.id = mapped.symbol_id)
+         AND NOT EXISTS (SELECT 1 FROM snapshot_symbol_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.symbol_id = mapped.symbol_id)))
+       AND (EXISTS (SELECT 1 FROM snapshot_files AS file WHERE file.snapshot_id = ? AND file.path = symbol.path AND file.content_hash = symbol.content_hash)
+        OR EXISTS (SELECT 1 FROM snapshot_files AS file WHERE file.snapshot_id = ? AND file.path = symbol.path AND file.content_hash = symbol.content_hash
+          AND NOT EXISTS (SELECT 1 FROM snapshot_files AS replacement WHERE replacement.snapshot_id = ? AND replacement.path = file.path)
+          AND NOT EXISTS (SELECT 1 FROM snapshot_file_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.path = file.path))))
+      ELSE 0 END AS eligible
+    FROM mapped LEFT JOIN symbols AS symbol ON symbol.snapshot_id = mapped.snapshot_id AND symbol.id = mapped.symbol_id`,
+    },
+    ['id', 'term', 'weight', 'path', 'package_name', 'content_hash', 'row_valid', 'eligible'],
+    32768,
+  );
+}
+
+/** Seek relation-keyed adjacency. Even suppressed/unresolved rows consume the one raw edge allowance. */
+export function taskExpansionStatement(
+  snapshotId: string,
+  baseSnapshotId: string | undefined,
+  ids: readonly string[],
+  limit: number,
+): CodeGraphSqlQueryStatement {
+  const branches: string[] = [];
+  const parameters: (string | number)[] = [];
+  const snapshots = baseSnapshotId === undefined ? [snapshotId] : [snapshotId, baseSnapshotId];
+  for (const relation of ['calls', 'tests', 'imports', 'exports', 'reexports', 'contains']) {
+    for (const axis of ['target_id', 'source_id'] as const) {
+      for (const id of ids) {
+        for (const [origin, snapshot] of snapshots.entries()) {
+          branches.push(`SELECT ${origin} AS origin, ${taskBoundedText('edge.id', 128)} AS id
+            FROM edges AS edge INDEXED BY ${axis === 'target_id' ? 'edges_target_resolved' : 'edges_source'}
+            WHERE edge.snapshot_id = ? AND edge.${axis} = ? AND edge.${axis} IS NOT NULL AND edge.relation = ?`);
+          parameters.push(snapshot, id, relation);
+        }
+      }
+    }
+  }
+  parameters.push(Math.max(0, Math.min(128, Math.floor(limit))), ...snapshots, snapshotId, snapshotId, snapshotId);
+  const originSnapshot = baseSnapshotId === undefined ? '?' : 'CASE raw_keys.origin WHEN 0 THEN ? ELSE ? END';
+  // Enum membership reads only the admitted, materialized value, never the persisted payload.
+  const provenance = `CASE WHEN raw.provenance IN ('declared','resolved','syntactic','heuristic','model') THEN raw.provenance ELSE NULL END`;
+  const admittedColumns = [
+    'snapshot_id',
+    'id',
+    'confidence',
+    'relation',
+    'source_id',
+    'target_id',
+    'evidence_path',
+    'source_name',
+    'target_name',
+    'evidence_span_json',
+  ];
+  return taskTransferBounded(
+    {
+      parameters,
+      text: `WITH raw_keys AS MATERIALIZED (${EffectArray.join(branches, ' UNION ALL ')} LIMIT ?),
+    admitted_keys AS MATERIALIZED (SELECT raw_keys.id, ${originSnapshot} AS snapshot_id FROM raw_keys),
+    raw AS MATERIALIZED (
+      SELECT keys.snapshot_id, keys.id, edge.confidence,
+        ${taskBoundedText('edge.provenance', 32)} AS provenance,
+        ${taskBoundedText('edge.relation', 128)} AS relation,
+        ((typeof(edge.source_id) = 'null' OR ${taskBoundedText('edge.source_id', 128)} IS NOT NULL) AND (typeof(edge.target_id) = 'null' OR ${taskBoundedText('edge.target_id', 128)} IS NOT NULL)) AS scalar_valid,
+        ${taskBoundedText('edge.source_id', 128)} AS source_id, ${taskBoundedText('edge.target_id', 128)} AS target_id,
+        ${taskBoundedText('edge.evidence_path', 4096)} AS evidence_path,
+        ${taskBoundedText('edge.source_name', 128)} AS source_name, ${taskBoundedText('edge.target_name', 128)} AS target_name,
+        ${taskBoundedText('edge.evidence_span_json', 256)} AS evidence_span_json
+      FROM admitted_keys AS keys LEFT JOIN edges AS edge ON edge.snapshot_id = keys.snapshot_id AND edge.id = keys.id)
+    SELECT ${EffectArray.join(
+      EffectArray.map(admittedColumns, column => 'raw.' + column),
+      ', ',
+    )}, ${provenance} AS provenance, (raw.scalar_valid = 1 AND raw.id IS NOT NULL AND (${provenance}) IS NOT NULL AND raw.source_name IS NOT NULL AND raw.target_name IS NOT NULL AND raw.evidence_path IS NOT NULL AND raw.evidence_span_json IS NOT NULL) AS row_valid, (raw.snapshot_id = ? OR
+      (NOT EXISTS (SELECT 1 FROM edges AS replacement WHERE replacement.snapshot_id = ? AND replacement.id = raw.id)
+       AND NOT EXISTS (SELECT 1 FROM snapshot_edge_deletions AS deletion WHERE deletion.snapshot_id = ? AND deletion.edge_id = raw.id))) AS eligible
+    FROM raw`,
+    },
+    [
+      'snapshot_id',
+      'id',
+      'confidence',
+      'provenance',
+      'relation',
+      'source_id',
+      'target_id',
+      'evidence_path',
+      'source_name',
+      'target_name',
+      'evidence_span_json',
+      'row_valid',
+      'eligible',
+    ],
+    32768,
+  );
+}
+
 function selectFileBlobMetadataBatch(
   sql: SqlClient.SqlClient,
   files: readonly CodeGraphBlobReuseFile[],

@@ -18,6 +18,7 @@ import {
   finalCodeGraphFactBatches,
 } from '@threadnote/graph/indexer';
 import {CODE_GRAPH_PARSER_FACTS_VERSION, packCacheIdentity} from '@threadnote/graph/languages/registry';
+import {BODY_DISCOVERY_POLICY} from '@threadnote/graph/languages/body_discovery';
 import type {CodeGraphCapability, CodeGraphLanguagePack} from '@threadnote/graph/languages/types';
 import {augmentRationaleFacts, CODE_GRAPH_RATIONALE_INPUT_VERSION} from '@threadnote/graph/rationale';
 import type {
@@ -673,6 +674,7 @@ function testPackCacheIdentity(pack: CodeGraphLanguagePack, parserFactsVersion: 
         'code-graph-language-pack-v3',
         parserFactsVersion,
         `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
+        `body-discovery:${BODY_DISCOVERY_POLICY}`,
         `id:${pack.id}`,
         `extractor:${pack.extractor.version}`,
         'parser-runtime:pack-owned',

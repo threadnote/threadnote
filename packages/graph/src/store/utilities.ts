@@ -1,4 +1,11 @@
 import {Array as EffectArray} from 'effect';
+import {
+  BODY_DISCOVERY_PREFIX,
+  closeBodyDiscovery,
+  discoveryTerms,
+  validateBodyDiscovery,
+} from '../languages/body_discovery.js';
+import type {CodeGraphBodyDiscovery, CodeGraphFileFacts} from '../types.js';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -51,22 +58,40 @@ function addTerms(target: Map<string, number>, value: string, weight: number): v
 }
 
 export function normalizedTerms(value: string): readonly string[] {
-  const expanded = Effect2.pipe(
-    value,
-    EffectString.normalize('NFKC'),
-    EffectString.replace(/([a-z0-9])([A-Z])/g, '$1 $2'),
-    EffectString.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2'),
-    EffectString.toLowerCase,
+  return discoveryTerms(value);
+}
+
+/** Finite private projection shared by full, spool and incremental materialization. */
+export function preparedSymbolTerms(
+  symbols: readonly CodeGraphSymbol[],
+  bodies: readonly CodeGraphBodyDiscovery[] = [],
+): ReadonlyMap<CodeGraphSymbol, readonly (readonly [string, number])[]> {
+  const extra = new Map<string, readonly string[]>();
+  const ownerIndex = new Map(EffectArray.map(symbols, symbol => [symbol.id, symbol]));
+  for (const input of bodies) {
+    const body = validateBodyDiscovery(closeBodyDiscovery(input, symbols, ownerIndex), input.path, symbols, ownerIndex);
+    for (const record of body.records) {
+      if (extra.has(record.ownerId)) throw new Error('Duplicate private body owner contribution.');
+      extra.set(record.ownerId, record.terms);
+    }
+  }
+  return new Map(
+    EffectArray.map(symbols, symbol => [
+      symbol,
+      [
+        ...symbolTerms(symbol),
+        ...EffectArray.map(extra.get(symbol.id) ?? [], term => [BODY_DISCOVERY_PREFIX + term, 1] as const),
+      ],
+    ]),
   );
-  return [
-    ...new Set(
-      Effect2.pipe(
-        expanded,
-        EffectString.match(/[\p{L}\p{N}_$.-]{2,}/gu),
-        Effect2.Option.getOrElse(() => null),
-      ) ?? [],
-    ),
-  ].slice(0, 32);
+}
+
+export function factBodyDiscovery(facts: readonly CodeGraphFileFacts[]): readonly CodeGraphBodyDiscovery[] {
+  return EffectArray.flatMap(facts, fact =>
+    fact.derivationInputs?.bodyDiscovery === undefined
+      ? []
+      : [closeBodyDiscovery(fact.derivationInputs.bodyDiscovery, fact.symbols)],
+  );
 }
 
 /** Preserve explicit code identities embedded in a longer natural-language query. */

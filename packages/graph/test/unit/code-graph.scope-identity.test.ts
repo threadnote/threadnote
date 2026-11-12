@@ -65,7 +65,7 @@ describe('scope-bound graph identities', () => {
       content: 'cgc_12b506b3abbfbc2188ca3719e3aaad36bf45cc5e',
       sparseSnapshot: 'cgsn_9f2d7685baa60d382ff6e1c8718b0bcfebd21307',
       sparseContent: 'cgc_c30b1bbfb3e0a77e420d5fcd18afce1f03ac91d4',
-      request: '7817768e0af4988100a0590bbafc59d5a0bf0fff75d38dc558ec6da967f6d7b9',
+      request: '9c33b39648cace30e17611f9685ac564a1a233a026d55c3dbd3be7e30164f027',
     };
     expect(identities()).toEqual(expected);
     expect(identities(full)).toEqual(expected);

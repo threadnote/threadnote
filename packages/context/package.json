@@ -27,7 +27,8 @@
     "./navigation/model": "./src/navigation/model.ts",
     "./navigation/assemble": "./src/navigation/assemble.ts",
     "./navigation/structural": "./src/navigation/structural.ts",
-    "./navigation/project": "./src/navigation/project.ts"
+    "./navigation/project": "./src/navigation/project.ts",
+    "./navigation/discovery": "./src/navigation/discovery.ts"
   },
   "dependencies": {
     "@threadnote/semantic": "workspace:*",

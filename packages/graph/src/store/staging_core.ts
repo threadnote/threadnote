@@ -691,10 +691,12 @@ const persistedFullBatchFingerprint = Effect.fn('codeGraph.persistedFullBatchFin
   edges: readonly CodeGraphEdge[],
   references: readonly CodeGraphReference[],
   monikers: readonly CodeGraphMonikerV1[] = [],
+  bodyDiscovery: readonly import('../types.js').CodeGraphBodyDiscovery[] = [],
+  preparedTerms?: ReadonlyMap<CodeGraphSymbol, readonly (readonly [string, number])[]>,
 ) {
   const digest = new Bun.CryptoHasher('sha256');
   let rows = 0;
-  const update = (kind: 'edge' | 'moniker' | 'reference' | 'symbol', value: readonly unknown[]) => {
+  const update = (kind: 'edge' | 'moniker' | 'reference' | 'symbol' | 'body-v1', value: readonly unknown[]) => {
     digest.update(kind);
     digest.update('\0');
     digest.update(JSON.stringify(value));
@@ -751,6 +753,33 @@ const persistedFullBatchFingerprint = Effect.fn('codeGraph.persistedFullBatchFin
       symbol.span,
     ]);
     if ((rows += 1) % 1_024 === 0) yield* Effect.yieldNow;
+  }
+  if (bodyDiscovery.length > 0) {
+    for (const body of [...bodyDiscovery].sort((a, b) => compareCodeUnits(a.path, b.path))) {
+      update('body-v1', [
+        body.version,
+        body.policy,
+        body.path,
+        body.contentHash,
+        body.workBytes,
+        [...body.omissions].sort(),
+        EffectArray.map(
+          [...body.records].sort((a, b) => compareCodeUnits(a.ownerId, b.ownerId)),
+          record => [
+            record.ownerId,
+            [record.ownerSpan.line, record.ownerSpan.column, record.ownerSpan.endLine, record.ownerSpan.endColumn],
+            [record.window.line, record.window.column, record.window.endLine, record.window.endColumn],
+            [...record.terms].sort(),
+          ],
+        ),
+      ]);
+    }
+    for (const symbol of sortedBy(symbols, symbol => symbol.id)) {
+      update('body-v1', [
+        symbol.id,
+        [...(preparedTerms?.get(symbol) ?? [])].sort(([a], [b]) => compareCodeUnits(a, b)),
+      ]);
+    }
   }
   return digest.digest('hex');
 });
