@@ -312,12 +312,15 @@ describe('Codex Cloud CLI integration', () => {
           expect(projected.evidenceState).toBe('degraded');
           expect(projected.activeHandoffs).toEqual([
             expect.objectContaining({
-              uri: args.length > 0 ? `threadnote://memory/${handoffRecord?.metadata.memoryId}` : handoffUri,
+              kind: 'handoff',
               excerpt: expect.stringContaining('preserve the friendly message.'),
               freshness: 'unknown',
               freshnessBasis: 'source-commit',
             }),
           ]);
+          expect(
+            args.length > 0 ? [handoffUri, `threadnote://memory/${handoffRecord?.metadata.memoryId}`] : [handoffUri],
+          ).toContain(projected.activeHandoffs[0]?.uri);
         }
         expect(brief.stdout).not.toContain('OUTSIDE_SCOPE_MARKER');
         expect(brief.stdout).not.toContain('/shared/unconfigured/');

@@ -640,6 +640,7 @@ class LocalModelWorkerPool {
 
 class LocalModelWorkerConnection {
   private closed = false;
+  private retireAfterRequest = false;
   private pending = Option.none<PendingResponse>();
   private pendingWrite: Promise<void> | undefined;
   private pendingCompletion: ((reason: WorkerFailureReason) => void) | undefined;
@@ -660,7 +661,12 @@ class LocalModelWorkerConnection {
     this.stdoutClosed = this.consumeStdout();
     this.stderrClosed = this.consumeStderr();
     void process.exited.then(
-      () => this.fail('exit'),
+      code => {
+        if (code !== 0 || this.pendingCompletion === undefined) return this.fail('exit');
+        // Process exit can precede delivery of already-buffered pipe data.
+        this.retireAfterRequest = true;
+        void this.stdoutClosed.then(() => this.retireAfterResponse());
+      },
       () => this.fail('exit'),
     );
   }
@@ -749,6 +755,7 @@ class LocalModelWorkerConnection {
       this.pendingCompletion = undefined;
       if (timeout !== undefined) clearTimeout(timeout);
       removeAbortListener();
+      if (this.retireAfterRequest) this.fail('exit');
     });
   }
 
@@ -789,10 +796,17 @@ class LocalModelWorkerConnection {
       this.stdoutBuffer += this.decoder.decode();
       this.consumeStdoutLines();
       if (Effect2.pipe(this.stdoutBuffer, EffectString.trim)) this.fail('protocol');
-      else this.fail('exit');
+      else this.retireAfterResponse();
     } catch {
       this.fail('exit');
     }
+  }
+
+  private retireAfterResponse(): void {
+    this.retireAfterRequest = true;
+    // A decoded reply still has to finish its write. Timeout/cancellation must
+    // remain active until that happens; EOF must not win against its result.
+    if (Option.isSome(this.pending) || this.pendingCompletion === undefined) this.fail('exit');
   }
 
   private consumeStdoutLines(): void {
