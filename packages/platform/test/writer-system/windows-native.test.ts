@@ -140,10 +140,16 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
       GetLengthSid: {args: ['u64'], returns: 'u32'},
       OpenProcessToken: {args: ['u64', 'u32', 'buffer'], returns: 'i32'},
       GetTokenInformation: {args: ['u64', 'u32', 'buffer', 'u32', 'buffer'], returns: 'i32'},
+      LookupAccountNameW: {
+        args: ['buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer', 'buffer'],
+        returns: 'i32',
+      },
       ConvertStringSecurityDescriptorToSecurityDescriptorW: {args: ['buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
     });
     const setup = dlopen('kernel32.dll', {
       GetCurrentProcess: {args: [], returns: 'u64'},
+      GetComputerNameW: {args: ['buffer', 'buffer'], returns: 'i32'},
+      GetLastError: {args: [], returns: 'u32'},
       CloseHandle: {args: ['u64'], returns: 'i32'},
       LocalFree: {args: ['u64'], returns: 'u64'},
       CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
@@ -182,10 +188,50 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
       if (security.symbols.IsValidSid(ownerSid) === 0 || security.symbols.GetLengthSid(ownerSid) !== ownerSidBytes)
         throw new Error('Native token owner SID validity is unproved.');
       const defaultOwnerIsUser = security.symbols.EqualSid(ownerSid, sids[0][0]) !== 0;
+      // Resolve only the fixed service on this actual computer; this observation grants no storage authority.
+      const computer = new Uint16Array(256),
+        computerLength = new Uint32Array([computer.length]),
+        serviceStorage = new ArrayBuffer(68 + 32),
+        serviceSid = new Uint8Array(serviceStorage, 0, 68),
+        serviceCanary = new Uint8Array(serviceStorage, 68),
+        serviceSidLength = new Uint32Array([serviceSid.length]),
+        serviceDomain = new Uint16Array(256),
+        serviceDomainLength = new Uint32Array([serviceDomain.length]),
+        serviceKind = new Uint32Array(1),
+        serviceAddress = windowsAddress(serviceSid);
+      serviceCanary.fill(0xa5);
+      let serviceResolved = false,
+        serviceLookupCode = 0;
+      if (setup.symbols.GetComputerNameW(computer, computerLength) === 0)
+        serviceLookupCode = setup.symbols.GetLastError();
+      else if (computerLength[0] > 0 && computerLength[0] < computer.length && computer[computerLength[0]] === 0) {
+        if (
+          security.symbols.LookupAccountNameW(
+            computer,
+            windowsWide('NT SERVICE\\TrustedInstaller'),
+            serviceSid,
+            serviceSidLength,
+            serviceDomain,
+            serviceDomainLength,
+            serviceKind,
+          ) === 0
+        )
+          serviceLookupCode = setup.symbols.GetLastError();
+        else
+          serviceResolved =
+            serviceCanary.every(value => value === 0xa5) &&
+            serviceSidLength[0] >= 8 &&
+            serviceSidLength[0] <= serviceSid.length &&
+            serviceSid[0] === 1 &&
+            serviceSid[1] <= 15 &&
+            serviceSidLength[0] === 8 + serviceSid[1] * 4 &&
+            security.symbols.IsValidSid(serviceAddress) !== 0 &&
+            security.symbols.GetLengthSid(serviceAddress) === serviceSidLength[0];
+      }
       type Sample = {
         edge: number;
         role: 'root' | 'ancestor' | 'final';
-        owner: 'current' | 'SYSTEM' | 'builtin-admins' | 'other' | 'unknown';
+        owner: 'current' | 'SYSTEM' | 'builtin-admins' | 'trusted-installer' | 'other' | 'unknown';
         privateObject: boolean;
         nativeStage: 'security' | 'descriptor';
         nativeCode: number;
@@ -237,7 +283,9 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
                   ? 'SYSTEM'
                   : security.symbols.EqualSid(record.owner, sids[2][0]) !== 0
                     ? 'builtin-admins'
-                    : 'other';
+                    : serviceResolved && security.symbols.EqualSid(record.owner, serviceAddress) !== 0
+                      ? 'trusted-installer'
+                      : 'other';
             const bytes = new Uint8Array(toArrayBuffer(descriptor, 0, length)).slice();
             try {
               assertWindowsDaclBytes(
@@ -269,7 +317,13 @@ it.skipIf(!windows)('checks actual native SID/DACL, full file ID and exact Bun m
         if (outcome.failed || observation.incomplete)
           process.stdout.write(
             'WINDOWS_PRIVATE_SAMPLE ' +
-              JSON.stringify({defaultOwnerIsUser, incomplete: observation.incomplete, samples}) +
+              JSON.stringify({
+                defaultOwnerIsUser,
+                serviceResolved,
+                serviceLookupCode,
+                incomplete: observation.incomplete,
+                samples,
+              }) +
               String.fromCharCode(10),
           );
         if (observation.incomplete) {

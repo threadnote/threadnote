@@ -2,6 +2,7 @@ import {dlopen} from 'bun:ffi';
 import {windowsProcessIdentity} from '../../src/writer-system/windows-native.js';
 import {windowsProviderCommandLine} from '../../src/writer-system/provider-windows.js';
 import * as EffectString from 'effect/String';
+import * as EffectArray from 'effect/Array';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {decodeUnreapedPosixExitStatus} from '../../src/writer-system/provider-posix.js';
@@ -157,28 +158,64 @@ it.skipIf(!supported)(
     const windows = process.platform === 'win32';
     const windowsLeader = windows
       ? `
-      import {dlopen} from 'bun:ffi';
+      import {dlopen,ptr} from 'bun:ffi';
       const k=dlopen('kernel32.dll',{
         CreateProcessW:{args:['buffer','buffer','ptr','ptr','i32','u32','ptr','ptr','buffer','buffer'],returns:'i32'},
         GetStdHandle:{args:['u32'],returns:'u64'},
+        GetCurrentProcess:{args:[],returns:'u64'},GetLastError:{args:[],returns:'u32'},
+        DuplicateHandle:{args:['u64','u64','u64','buffer','u32','i32','u32'],returns:'i32'},
+        GetHandleInformation:{args:['u64','buffer'],returns:'i32'},
+        InitializeProcThreadAttributeList:{args:['ptr','u32','u32','buffer'],returns:'i32'},
+        UpdateProcThreadAttribute:{args:['buffer','u32','u64','buffer','u64','ptr','ptr'],returns:'i32'},
+        DeleteProcThreadAttributeList:{args:['buffer'],returns:'void'},
         GetProcessTimes:{args:['u64','buffer','buffer','buffer','buffer'],returns:'i32'},
         ResumeThread:{args:['u64'],returns:'u32'},CloseHandle:{args:['u64'],returns:'i32'}
       });
       const wide=s=>{const b=new Uint16Array(s.length+1);for(let i=0;i<s.length;i++)b[i]=s.charCodeAt(i);return b;};
-      const startup=new BigUint64Array(13), v=new DataView(startup.buffer), info=new BigUint64Array(3);
-      v.setUint32(0,104,true);v.setUint32(60,0x100,true);
-      startup[10]=k.symbols.GetStdHandle(0xfffffff6);startup[11]=k.symbols.GetStdHandle(0xfffffff5);startup[12]=k.symbols.GetStdHandle(0xfffffff4);
-      if(k.symbols.CreateProcessW(wide(${JSON.stringify(process.execPath)}),wide(${JSON.stringify(windowsProviderCommandLine(process.execPath, ['-e', childSource]))}),null,null,1,0x08000004,null,null,startup,info)!==1)throw new Error('Native fixture creation failed.');
+      const failed=(stage,code)=>{throw new Error('Native fixture '+stage+' failed: '+code);};
+      const startup=new BigUint64Array(14), v=new DataView(startup.buffer), info=new BigUint64Array(3),
+        handles=new BigUint64Array(new ArrayBuffer(24)), attributeSize=new BigUint64Array(1);
+      let attributes,attributesReady=false;
       try {
+        const current=k.symbols.GetCurrentProcess();
+        for(let i=0;i<3;i++) {
+          const source=k.symbols.GetStdHandle(0xfffffff6-i), duplicate=new BigUint64Array(1), flags=new Uint32Array(1);
+          if(source===0n||source===0xffffffffffffffffn)failed('std-handles',0);
+          if(k.symbols.DuplicateHandle(current,source,current,duplicate,0,1,2)!==1)failed('std-handles',k.symbols.GetLastError());
+          handles[i]=duplicate[0];
+          if(k.symbols.GetHandleInformation(handles[i],flags)!==1)failed('std-handles',k.symbols.GetLastError());
+          if((flags[0]&1)!==1)failed('std-handles',0);
+        }
+        if(k.symbols.InitializeProcThreadAttributeList(null,1,0,attributeSize)!==0)failed('attributes',0);
+        const sizeError=k.symbols.GetLastError();
+        if(sizeError!==122||attributeSize[0]===0n||attributeSize[0]>65536n)failed('attributes',sizeError);
+        const attributeBuffer=new ArrayBuffer(Number(attributeSize[0]));
+        attributes=new Uint8Array(attributeBuffer);
+        const attributeAddress=ptr(attributes);
+        if(k.symbols.InitializeProcThreadAttributeList(attributeAddress,1,0,attributeSize)!==1)failed('attributes',k.symbols.GetLastError());
+        attributesReady=true;
+        if(k.symbols.UpdateProcThreadAttribute(attributes,0,0x00020002n,handles,24n,null,null)!==1)failed('attributes',k.symbols.GetLastError());
+        v.setUint32(0,112,true);v.setUint32(60,0x100,true);
+        startup[10]=handles[0];startup[11]=handles[1];startup[12]=handles[2];startup[13]=BigInt(attributeAddress);
+        // No breakaway/new Job: this suspended child inherits the leader's original native Job.
+        if(k.symbols.CreateProcessW(wide(${JSON.stringify(process.execPath)}),wide(${JSON.stringify(windowsProviderCommandLine(process.execPath, ['-e', childSource]))}),null,null,1,0x08080004,null,null,startup,info)!==1)failed('create',k.symbols.GetLastError());
         const creation=new BigUint64Array(1), exit=new BigUint64Array(1), kernel=new BigUint64Array(1), user=new BigUint64Array(1);
-        if(k.symbols.GetProcessTimes(info[0],creation,exit,kernel,user)!==1||creation[0]===0n)throw new Error('Native fixture identity unavailable.');
+        if(k.symbols.GetProcessTimes(info[0],creation,exit,kernel,user)!==1)failed('identity',k.symbols.GetLastError());
+        if(creation[0]===0n)failed('identity',0);
         await Bun.write(Bun.stdout,JSON.stringify({childPid:new DataView(info.buffer).getUint32(16,true),childIdentity:'win32:'+(creation[0]+504911232000000000n)})+String.fromCharCode(10));
-        if(k.symbols.ResumeThread(info[1])!==1)throw new Error('Native fixture resume failed.');
+        if(k.symbols.ResumeThread(info[1])!==1)failed('resume',k.symbols.GetLastError());
         const decodeExitCommand=${fixtureExitCommand.toString()};
         let commandBytes=0;
         for await(const bytes of Bun.stdin.stream()) {commandBytes=decodeExitCommand(commandBytes,bytes);if(commandBytes===5)break;}
         if(commandBytes!==5)throw new Error('Incomplete fixture exit command.');
-      } finally {k.symbols.CloseHandle(info[1]);k.symbols.CloseHandle(info[0]);k.close();}
+      } finally {
+        let closed=true;
+        if(attributesReady)k.symbols.DeleteProcThreadAttributeList(attributes);
+        for(const handle of handles)if(handle!==0n&&k.symbols.CloseHandle(handle)!==1)closed=false;
+        for(const handle of [info[1],info[0]])if(handle!==0n&&k.symbols.CloseHandle(handle)!==1)closed=false;
+        k.close();
+        if(!closed)failed('cleanup',0);
+      }
       process.exit(7);
     `
       : '';
@@ -212,6 +249,7 @@ it.skipIf(!supported)(
       }
     })();
     const errors = new Response(provider.stderr).text();
+    let passed = false;
     try {
       await until(
         () => output,
@@ -266,9 +304,31 @@ it.skipIf(!supported)(
       );
       expect(final.leaderExitCode).toBe(7);
       if (kernel) expect(kernel.symbols.WaitForSingleObject(childHandle, 0)).toBe(0);
+      passed = true;
     } finally {
       try {
         await stop(provider);
+        if (windows && !passed) {
+          const settled = await Promise.allSettled([collect, errors]),
+            stderr = settled[1].status === 'fulfilled' ? settled[1].value : '',
+            failure =
+              /Native fixture (std-handles|attributes|create|identity|resume|cleanup) failed: ([0-9]{1,10})/u.exec(
+                stderr,
+              );
+          process.stdout.write(
+            'WINDOWS_CHILD_SAMPLE ' +
+              JSON.stringify({
+                nativeStage: failure?.[1] ?? 'unobserved',
+                nativeCode: failure ? Number(failure[2]) : null,
+                receiptObserved: /"childIdentity":"win32:[0-9]+"/u.test(output),
+                childReadyObserved: EffectString.includes('descendant-ready')(output),
+                stdoutBytes: new TextEncoder().encode(output).length,
+                stderrBytes: new TextEncoder().encode(stderr).length,
+                streamReadFailed: EffectArray.some(settled, result => result.status === 'rejected'),
+              }) +
+              String.fromCharCode(10),
+          );
+        }
       } finally {
         if (kernel) {
           if (childHandle !== 0n && childHandle !== 0xffffffffffffffffn)
