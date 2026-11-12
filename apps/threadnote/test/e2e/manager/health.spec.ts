@@ -32,6 +32,34 @@ test('S12 Context Health exposes current evidence and maintenance controls witho
   await expect(controls.getByRole('button', {name: 'Pause automatic maintenance', exact: true})).toBeVisible();
   expect(await manager.api('/api/attention/context-maintenance?view=controls')).toMatchObject({paused: false});
   await page.getByRole('tab', {name: 'Automatic recovery', exact: true}).click();
+  // Enabling maintenance resumes the existing 30-second scheduler; await its first scan.
+  await expect
+    .poll(
+      async () => {
+        const status = await manager.api('/api/attention/context-maintenance?project=alpha');
+        if (
+          status.paused !== false ||
+          status.state === 'failed' ||
+          status.state === 'running' ||
+          status.error ||
+          !EffectArray.isArray(status.projects)
+        )
+          return false;
+        return EffectArray.some(
+          status.projects,
+          project =>
+            isJsonObject(project) &&
+            project.project === 'alpha' &&
+            typeof project.checked === 'number' &&
+            project.checked > 0 &&
+            project.state !== 'running' &&
+            project.state !== 'failed',
+        );
+      },
+      {timeout: 50_000},
+    )
+    .toBe(true);
+  await expect(page.getByRole('button', {name: 'Run maintenance now', exact: true})).toBeEnabled();
   const running = page.waitForResponse(
     response =>
       new URL(response.url()).pathname === '/api/attention/context-maintenance' &&
