@@ -295,10 +295,15 @@ it.skipIf(process.platform !== 'win32')(
             modified: observed.mtimeNs === (t.getBigInt64(16, true) - epoch) * 100n,
             changed: observed.ctimeNs === (t.getBigInt64(24, true) - epoch) * 100n,
           };
+          const volumeRelations = {
+            nativeVolume64EqualsLegacySerial32: f.getBigUint64(0, true) === BigInt(l.getUint32(28, true)),
+            legacySerial32EqualsBunBigintDev: BigInt(l.getUint32(28, true)) === observed.dev,
+            nativeVolume64EqualsBunBigintDev: f.getBigUint64(0, true) === observed.dev,
+          };
           representable = EffectArray.every(EffectRecord.values(projection), Boolean);
           process.stdout.write(
             'WINDOWS_WRITER_PROJECTION ' +
-              JSON.stringify({projection, representable, qualified: false}) +
+              JSON.stringify({projection, volumeRelations, representable, qualified: false}) +
               String.fromCharCode(10),
           );
         } finally {
