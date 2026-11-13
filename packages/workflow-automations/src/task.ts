@@ -5,7 +5,11 @@ import {nativeCyclePhaseReviewUsage, nativeCycleSnapshotIsCurrentIteration} from
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {NativeWorkflowState} from './native.js';
 import {NativeCompactIntentSchema} from './authoring.js';
-import {nativeCycleReviewRecordingMode, validateNativeCycleReviewHistory} from './cycle_review.js';
+import {
+  nativeCycleReviewBasis,
+  nativeCycleReviewRecordingMode,
+  validateNativeCycleReviewHistory,
+} from './cycle_review.js';
 
 export const NativeTaskStartRequestSchema = Schema.Union([
   Schema.Struct({
@@ -496,24 +500,22 @@ export function projectNativeTaskView(
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
       )
     : undefined;
-  const predecessorId = latestSnapshot?.snapshot.previous ?? latestSnapshot?.snapshot.supersedes;
-  const predecessor = predecessorId
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
-      )?.snapshot
-    : undefined;
-  const predecessorReview = predecessor
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
-      )?.report
-    : undefined;
+  const reviewBasis =
+    latestSnapshot && acceptedReview
+      ? nativeCycleReviewBasis(
+          latestSnapshot.snapshot,
+          EffectArray.map(runtime.snapshots, entry => entry.snapshot),
+          runtime.reviews,
+        )
+      : undefined;
   const blockingReview = Boolean(
     latestSnapshot &&
     acceptedReview &&
     validateNativeCycleReviewHistory(
       latestSnapshot.snapshot,
       acceptedReview.report,
-      predecessor && predecessorReview ? {snapshot: predecessor, review: predecessorReview} : undefined,
+      reviewBasis?.previous,
+      reviewBasis?.findingBasis,
     ).summary.blockingIssueCount,
   );
   const reviewWork =

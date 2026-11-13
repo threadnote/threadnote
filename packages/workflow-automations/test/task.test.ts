@@ -522,7 +522,7 @@ describe('native task projection', () => {
         'phase-one': {
           repo: '/repo',
           head: EffectString.repeat(40)('b'),
-          tree: EffectString.repeat(40)('c'),
+          tree: snapshot.baseTree,
           preservedFiles: [],
           pinnedRef: 'refs/heads/main',
         },
@@ -553,6 +553,19 @@ describe('native task projection', () => {
       next: {action: 'validate', phaseId: 'phase-one', snapshotId: 'reviewed-one'},
       phase: {snapshot: {snapshotRef: expect.any(String)}},
     });
+    const blockingFinding = {
+      id: 'blocking-finding',
+      file: 'src/task.ts',
+      line: 1,
+      body: 'The acceptance behavior is incomplete.',
+      trigger: 'Run the phase check.',
+      impact: 'The phase cannot be accepted yet.',
+      evidence: 'The reviewed source still omits the behavior.',
+      severity: 'important' as const,
+      category: 'correctness' as const,
+      confidence: 95,
+      state: 'new' as const,
+    };
     const blockedReview = projectNativeTaskView(
       {
         ...state,
@@ -563,21 +576,7 @@ describe('native task projection', () => {
               ...runtime.reviews[0],
               report: {
                 ...runtime.reviews[0].report,
-                findings: [
-                  {
-                    id: 'blocking-finding',
-                    file: 'src/task.ts',
-                    line: 1,
-                    body: 'The acceptance behavior is incomplete.',
-                    trigger: 'Run the phase check.',
-                    impact: 'The phase cannot be accepted yet.',
-                    evidence: 'The reviewed source still omits the behavior.',
-                    severity: 'important' as const,
-                    category: 'correctness' as const,
-                    confidence: 95,
-                    state: 'new' as const,
-                  },
-                ],
+                findings: [blockingFinding],
               },
             },
           ],
@@ -589,6 +588,62 @@ describe('native task projection', () => {
     expect(
       projectNativeTaskView({...state, cycle: runtime}, 'review-revision', {acceptedSnapshotCurrent: false}),
     ).toMatchObject({status: 'ready', next: {action: 'implement', phaseId: 'phase-one'}});
+    const ancestorReview = {
+      ...runtime.reviews[0],
+      report: {...runtime.reviews[0].report, findings: [blockingFinding]},
+    };
+    const pending: NativeCycleSnapshot = {
+      ...snapshot,
+      snapshotId: 'unreviewed-successor',
+      previous: snapshot.snapshotId,
+      previousTree: snapshot.tree,
+      tree: EffectString.repeat(40)('1'),
+      pinnedRef: 'refs/threadnote/snapshot/unreviewed-successor',
+    };
+    const supersession: NativeCycleSnapshot = {
+      ...snapshot,
+      snapshotId: 'reviewed-supersession',
+      supersedes: pending.snapshotId,
+      unreviewedSupersession: {reason: 'Correct the unreviewed source.'},
+      tree: EffectString.repeat(40)('2'),
+      pinnedRef: 'refs/threadnote/snapshot/reviewed-supersession',
+    };
+    const supersessionRuntime = {
+      ...runtime,
+      snapshots: [...runtime.snapshots, {snapshot: pending, incoming: []}, {snapshot: supersession, incoming: []}],
+      reviews: [
+        ancestorReview,
+        {
+          snapshotId: supersession.snapshotId,
+          report: {
+            ...ancestorReview.report,
+            snapshotId: supersession.snapshotId,
+            snapshotTree: supersession.tree,
+            findings: EffectArray.map(ancestorReview.report.findings, finding => ({
+              ...finding,
+              state: 'resolved' as const,
+              reason: 'Verified the corrected acceptance behavior.',
+            })),
+          },
+        },
+      ],
+    };
+    const retainedBefore = JSON.stringify(supersessionRuntime);
+    const canonical = decodeNativeCycleRuntime(supersessionRuntime);
+    const superseded = projectNativeTaskView({...state, cycle: canonical}, 'supersession-revision');
+    expect(superseded).toMatchObject({
+      status: 'ready',
+      next: {action: 'validate', phaseId: 'phase-one', snapshotId: supersession.snapshotId},
+      phase: {status: 'pending', snapshot: {snapshotId: supersession.snapshotId, snapshotRef: expect.any(String)}},
+    });
+    expect(decodeNativeTaskActionRef(superseded.phase!.snapshot!.snapshotRef)).toMatchObject({
+      kind: 'snapshot',
+      snapshotId: supersession.snapshotId,
+      sourceHead: supersession.head,
+      sourceTree: supersession.tree,
+      baselineTree: snapshot.baseTree,
+    });
+    expect(JSON.stringify(supersessionRuntime)).toBe(retainedBefore);
     const validation = {
       snapshotTree: tree,
       reviewTree: tree,
