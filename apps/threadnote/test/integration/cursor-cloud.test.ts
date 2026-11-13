@@ -461,12 +461,23 @@ describe('Cursor Cloud integration', () => {
           arguments: {
             callerCwd: process.cwd(),
             query: 'bootstrap race sentinel',
+            budgetTokens: 700,
             responseFormat: 'dual',
           },
         });
         expect(recall.isError).not.toBe(true);
         expectColdUnavailableWarnings(recall.structuredContent);
-        expect(JSON.stringify(recall)).toContain('Automatic synchronization is queued in the background');
+        expect(recall.structuredContent).toMatchObject({
+          memoryScope: {
+            type: 'threadnote-memory-scope',
+            version: 2,
+            mode: 'shared-read-write',
+            memoryRoots: ['memories/shared/docs', 'memories/shared/engineering'],
+            teams: ['docs', 'engineering'],
+          },
+          nextAction: {tool: 'read_context', uris: []},
+          output: {budgetTokens: 700, returnedResults: 0, totalResults: 0, truncated: false},
+        });
         await expect(
           client.readResource({
             uri: 'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/bootstrap.md',
