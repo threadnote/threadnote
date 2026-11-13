@@ -47,6 +47,8 @@ import {readNativeTaskView} from '../../src/workflow_automation/task.js';
 import {
   makeNativeTaskActionCommands,
   makeNativeTaskPrWatchCommand,
+  makeNativeTaskSupplementalCommand,
+  makeNativeTaskInvalidTailCommand,
   makeNativeTaskStartCommand,
   makeNativeTaskViewCommand,
 } from '../../src/effect/workflow_cli.js';
@@ -9226,3 +9228,113 @@ describe('native task actions', () => {
     {arbitrary: {runs: 4}},
   );
 });
+
+effectIt.effect('routes distinct semantic proof inputs through CLI adapters', () =>
+  Effect.gen(function* () {
+    const captured: object[] = [];
+    const record = (options: object) =>
+      Effect.sync(() => {
+        captured.push(options);
+      });
+    const cli = Command.make('workflow-automation').pipe(
+      Command.withSubcommands([
+        makeNativeTaskSupplementalCommand(record),
+        makeNativeTaskInvalidTailCommand(record),
+        makeNativeTaskPrWatchCommand(record),
+      ]),
+    );
+    const invoke = Command.runWith(cli, {version: 'fixture'});
+    yield* invoke([
+      'publish-local',
+      '--run-id',
+      'run',
+      '--caller-cwd',
+      '/repo',
+      '--task-ref',
+      'complete-ref',
+      '--phase-id',
+      'one',
+      '--pr',
+      '{"url":"https://github.com/example/repo/pull/1"}',
+      '--user-authority',
+      'Attach this existing PR.',
+    ]);
+    yield* invoke([
+      'requalify-invalid-tail',
+      '--run-id',
+      'run',
+      '--caller-cwd',
+      '/repo',
+      '--task-ref',
+      'tail-task',
+      '--predecessor-ref',
+      'tail-source',
+      '--reason',
+      'Prepared normal merge.',
+      '--user-authority',
+      'Authorize qualification.',
+      '--phase-owned-paths',
+      '[{"phaseId":"one","paths":["source.ts"]}]',
+    ]);
+    yield* invoke([
+      'watch-pr',
+      '--run-id',
+      'run',
+      '--caller-cwd',
+      '/repo',
+      '--operation',
+      'start',
+      '--snapshot-ref',
+      'immutable-source',
+      '--pr',
+      'https://github.com/example/repo/pull/1',
+    ]);
+    expect(captured[0]).toMatchObject({
+      taskRef: 'complete-ref',
+      phaseId: 'one',
+      pr: {url: 'https://github.com/example/repo/pull/1'},
+      userAuthority: 'Attach this existing PR.',
+    });
+    expect(captured[1]).toMatchObject({
+      taskRef: 'tail-task',
+      predecessorRef: 'tail-source',
+      phaseOwnedPaths: [{phaseId: 'one', paths: ['source.ts']}],
+    });
+    expect(captured[2]).toMatchObject({
+      snapshotRef: 'immutable-source',
+      operation: 'start',
+      pr: 'https://github.com/example/repo/pull/1',
+    });
+  }).pipe(provideTestLayer(cliTestLayer)),
+);
+
+effectIt.effect(
+  'rejects mixed watch proof routes and candidate completion without mutating canonical state',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(['one'], 'local');
+      const before = yield* f.fs.readFileString(f.statePath());
+      const invoke = (fields: object) =>
+        runNativeTaskAction(f.config, {
+          command: 'watch-pr',
+          runId: 'native-run',
+          callerCwd: f.repo,
+          operation: 'inspect',
+          ...fields,
+        }).pipe(Effect.result);
+      expect(yield* invoke({candidateWatchRef: 'candidate', supplementalRef: 'publication'})).toMatchObject({
+        failure: {code: 'watch-proof-conflict'},
+      });
+      expect(
+        yield* invoke({snapshotRef: 'candidate', validationRef: 'validation', deliveryRef: 'delivery'}),
+      ).toMatchObject({failure: {code: 'watch-proof-conflict'}});
+      expect(yield* invoke({candidateWatchRef: 'candidate', operation: 'complete'})).toMatchObject({
+        failure: {code: 'candidate-diagnostic-only'},
+      });
+      expect(yield* invoke({supplementalRef: 'candidate'})).toMatchObject({
+        failure: {code: 'invalid-supplemental-ref'},
+      });
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
+    }).pipe(run),
+  windowsRealGitFixtureTimeout,
+);

@@ -179,6 +179,65 @@ describe('native task projection', () => {
     expect(() => encodeNativeTaskActionRef({...ref, workViewDigest: 'malformed'})).toThrow();
   });
 
+  it('keeps candidate and supplemental opaque closures distinct and complete', () => {
+    const ref = {
+      version: 1 as const,
+      kind: 'candidate-watch' as const,
+      runId: 'run',
+      generationHash: EffectString.repeat(64)('a'),
+      phaseId: 'phase-one',
+      phaseHash: EffectString.repeat(64)('b'),
+      snapshotId: 'source',
+      sourceHead: EffectString.repeat(40)('c'),
+      sourceTree: EffectString.repeat(40)('d'),
+      baselineHead: EffectString.repeat(40)('e'),
+      baselineTree: EffectString.repeat(40)('f'),
+      baselineRef: 'refs/heads/main',
+      watchId: 'candidate-watch',
+      consumerId: 'consumer',
+      wakeupId: 'wakeup',
+      payloadDigest: EffectString.repeat(64)('a'),
+    };
+    const candidateRefs = [
+      ref,
+      {...ref, kind: 'candidate-notice' as const, eventKey: 'wakeup:1:1'},
+      {...ref, kind: 'candidate-delivery' as const, watchDeliveryId: 'delivery'},
+      {...ref, kind: 'candidate-event' as const, watchDeliveryId: 'delivery', watchEventId: 'event'},
+      {
+        ...ref,
+        kind: 'candidate-work' as const,
+        watchEventId: 'event',
+        workViewDigest: EffectString.repeat(64)('a'),
+        workRowDigest: EffectString.repeat(64)('b'),
+      },
+    ];
+    for (const candidate of candidateRefs) {
+      expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(candidate))).toEqual(candidate);
+      expect(() => encodeNativeTaskActionRef({...candidate, sourceHead: undefined})).toThrow();
+      expect(() => encodeNativeTaskActionRef({...candidate, publicationId: EffectString.repeat(64)('c')})).toThrow();
+    }
+    expect(() => encodeNativeTaskActionRef({...ref, eventKey: 'wakeup:1:1'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...ref, kind: 'candidate-event', watchEventId: 'event'})).toThrow();
+    const publication = {
+      version: 1 as const,
+      kind: 'supplemental-publication' as const,
+      runId: 'run',
+      generationHash: ref.generationHash,
+      stateRevision: EffectString.repeat(64)('f'),
+      phaseId: ref.phaseId,
+      phaseHash: ref.phaseHash,
+      snapshotId: ref.snapshotId,
+      sourceHead: ref.sourceHead,
+      sourceTree: ref.sourceTree,
+      publicationId: EffectString.repeat(64)('d'),
+      publicationRef: EffectString.repeat(64)('e'),
+    };
+    expect(decodeNativeTaskActionRef(encodeNativeTaskActionRef(publication))).toEqual(publication);
+    expect(() => encodeNativeTaskActionRef({...publication, kind: 'validation'})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, stateRevision: undefined})).toThrow();
+    expect(() => encodeNativeTaskActionRef({...publication, watchId: 'candidate-watch'})).toThrow();
+  });
+
   it('is deterministic, bounded, and returns only actionable fields', () => {
     const revision = Effect.pipe('f', EffectString.repeat(64));
     const view = projectNativeTaskView(state, revision);

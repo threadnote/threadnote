@@ -224,6 +224,60 @@ export const verifyNativeWatchRenewalPr = Effect.fn('nativeWatch.verifyRenewalPr
     return yield* fail('watch-identity-conflict');
 });
 
+/** Exact existing-PR observation. This receipt never authorizes an external mutation. */
+export const verifyNativeWatchBoundPr = Effect.fn('nativeWatch.verifyBoundPr')(function* (
+  pr: string,
+  expected: {
+    readonly head: string;
+    readonly baseBranch: string;
+    readonly headBranch: string;
+    readonly state?: 'open' | 'closed' | 'merged';
+  },
+) {
+  const target = yield* Effect.try({try: () => nativeWatchPullRequest(pr), catch: () => fail('invalid-pr')});
+  const response = yield* runCommandEffect(
+    'gh',
+    [
+      'api',
+      '--hostname',
+      'github.com',
+      '--method',
+      'GET',
+      `repos/${target.owner}/${target.repo}/pulls/${target.number}`,
+      '--jq',
+      '{number, url: .html_url, baseRepository: .base.repo.full_name, baseBranch: .base.ref, headBranch: .head.ref, headSha: .head.sha, state, merged, mergeCommit: .merge_commit_sha}',
+    ],
+    {timeoutMs: 15_000, maxOutputBytes: 16_384, sensitiveOutput: true},
+  ).pipe(Effect.mapError(() => fail('provider-transport', true)));
+  const raw = yield* Effect.try({try: () => object(JSON.parse(response.stdout)), catch: () => fail('provider-shape')});
+  const state =
+    raw.merged === true ? 'merged' : raw.state === 'open' ? 'open' : raw.state === 'closed' ? 'closed' : undefined;
+  if (
+    !state ||
+    raw.number !== target.number ||
+    raw.url !== pr ||
+    typeof raw.baseRepository !== 'string' ||
+    EffectString.toLowerCase(raw.baseRepository) !== EffectString.toLowerCase(`${target.owner}/${target.repo}`) ||
+    raw.headSha !== expected.head ||
+    raw.baseBranch !== expected.baseBranch ||
+    raw.headBranch !== expected.headBranch ||
+    (expected.state !== undefined && state !== expected.state)
+  )
+    return yield* fail('watch-binding-drift');
+  const mergeCommit =
+    state === 'merged'
+      ? yield* Effect.try({try: () => sha(raw.mergeCommit), catch: () => fail('provider-shape')})
+      : undefined;
+  return {
+    url: pr,
+    headSha: expected.head,
+    baseBranch: expected.baseBranch,
+    headBranch: expected.headBranch,
+    state,
+    ...(mergeCommit ? {mergeCommit} : {}),
+  };
+});
+
 /** Parse only the selected response headers; raw headers/bodies never enter watch state. */
 export function nativeWatchHttpResponse(stdout: string) {
   const boundary = /\r?\n\r?\n/u.exec(stdout);

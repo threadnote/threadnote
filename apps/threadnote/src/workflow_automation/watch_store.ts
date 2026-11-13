@@ -10,11 +10,15 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
+  nativeWatchEventLimit,
   decodeNativeWatchState,
   decodeNativeWatchSweep,
   type NativeWatchState,
 } from '@threadnote/workflow-automations/watch';
-import type {NativeWatchProviderCache} from './watch_provider.js';
+import {verifyNativeWatchBoundPr, type NativeWatchProviderCache} from './watch_provider.js';
+import {readNativeWorkflowState} from './store.js';
+import {decodeNativeTaskActionRef} from '@threadnote/workflow-automations/task';
+import {gitValue} from '../utils.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
@@ -30,6 +34,8 @@ export interface NativeWatchEnvelope {
   format: 'threadnote-native-watch-runtime';
   version: 1;
   state: NativeWatchState;
+  owner?: NativeWatchOwner;
+  invalidation?: {readonly kind: 'candidate_invalidated'; readonly reason: string; readonly at: number};
   provider: NativeWatchProviderCache;
   collector: null | {
     token: string;
@@ -72,10 +78,149 @@ const text = (max: number) =>
         : undefined,
     ),
   );
+const ownerHash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+const ownerSha = Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u));
+export const nativeWatchOwnerSchema = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal('candidate-pr'),
+    runId: text(128),
+    generationHash: ownerHash,
+    phaseId: text(128),
+    phaseHash: ownerHash,
+    snapshotRef: text(4096),
+    snapshotId: text(128),
+    snapshotDigest: ownerHash,
+    baselineHead: ownerSha,
+    baselineTree: ownerSha,
+    baselineRef: text(512),
+    callerCwd: text(4096),
+    head: ownerSha,
+    tree: ownerSha,
+    branch: text(512),
+    scopeDigest: ownerHash,
+    prUrl: text(2048),
+    baseBranch: text(512),
+    headBranch: text(512),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal('supplemental-publication'),
+    runId: text(128),
+    generationHash: ownerHash,
+    publicationId: text(128),
+    head: ownerSha,
+    tree: ownerSha,
+    phaseId: text(128),
+    prUrl: text(2048),
+  }),
+]);
+export type NativeWatchOwner = typeof nativeWatchOwnerSchema.Type;
+export type NativeCandidateWatchOwner = Extract<NativeWatchOwner, {kind: 'candidate-pr'}>;
+export const nativeWatchOwnerDigest = (owner: NativeWatchOwner) => sha256HexSync(stableJson(owner));
+
+/** Recheck immutable domain evidence and live clean Git/provider bindings; never adopt new source. */
+export const verifyNativeCandidateWatchOwner = Effect.fn('workflowWatch.verifyCandidateOwner')(function* (
+  config: RuntimeConfig,
+  owner: NativeCandidateWatchOwner,
+) {
+  const stored = yield* readNativeWorkflowState(config, owner.runId);
+  const runtime = stored?.state.cycle;
+  const phase = runtime
+    ? Option.getOrUndefined(EffectArray.findFirst(runtime.state.plan.phases, item => item.id === owner.phaseId))
+    : undefined;
+  const proof = runtime?.state.phases[owner.phaseId];
+  const baseline = runtime?.baselines[owner.phaseId];
+  const snapshots = runtime
+    ? EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === owner.phaseId)
+    : [];
+  const snapshot = snapshots.at(-1)?.snapshot;
+  const ref = decodeNativeTaskActionRef(owner.snapshotRef);
+  if (
+    !stored ||
+    !runtime ||
+    !phase ||
+    !proof ||
+    !baseline ||
+    !snapshot ||
+    sha256HexSync(stored.state.generation) !== owner.generationHash ||
+    proof.phaseHash !== owner.phaseHash ||
+    snapshot.snapshotId !== owner.snapshotId ||
+    snapshot.phaseHash !== owner.phaseHash ||
+    snapshot.head !== owner.head ||
+    snapshot.tree !== owner.tree ||
+    sha256HexSync(stableJson(snapshot)) !== owner.snapshotDigest ||
+    sha256HexSync(
+      stableJson({
+        phase,
+        files: snapshot.files,
+        scopeFiles: snapshot.scopeFiles,
+        scopeBase: snapshot.scopeBase,
+        declaredBaseHead: snapshot.declaredBaseHead,
+      }),
+    ) !== owner.scopeDigest ||
+    baseline.head !== owner.baselineHead ||
+    baseline.tree !== owner.baselineTree ||
+    baseline.pinnedRef !== owner.baselineRef ||
+    baseline.repo !== owner.callerCwd ||
+    phase.branch !== owner.branch ||
+    phase.baseBranch !== owner.baseBranch ||
+    !ref ||
+    ref.kind !== 'snapshot' ||
+    ref.runId !== owner.runId ||
+    ref.generationHash !== owner.generationHash ||
+    ref.phaseId !== owner.phaseId ||
+    ref.phaseHash !== owner.phaseHash ||
+    ref.snapshotId !== owner.snapshotId ||
+    ref.sourceHead !== owner.head ||
+    ref.sourceTree !== owner.tree ||
+    ref.baselineHead !== owner.baselineHead ||
+    ref.baselineTree !== owner.baselineTree ||
+    ref.baselineRef !== owner.baselineRef
+  )
+    return yield* issue('candidate-binding-drift', 'The candidate immutable source binding changed.');
+  const head = yield* gitValue(['rev-parse', '--verify', 'HEAD'], owner.callerCwd);
+  const tree = yield* gitValue(['rev-parse', '--verify', 'HEAD^{tree}'], owner.callerCwd);
+  const branch = yield* gitValue(['symbolic-ref', '--short', 'HEAD'], owner.callerCwd);
+  const status = yield* gitValue(
+    ['status', '--porcelain=v2', '--untracked-files=all', '--ignore-submodules=none'],
+    owner.callerCwd,
+  );
+  const pinned = yield* gitValue(
+    ['rev-parse', '--verify', '--end-of-options', owner.baselineRef + '^{tree}'],
+    owner.callerCwd,
+  );
+  if (
+    head !== owner.head ||
+    tree !== owner.tree ||
+    branch !== owner.branch ||
+    status !== '' ||
+    pinned !== owner.baselineTree
+  )
+    return yield* issue(
+      'candidate-source-drift',
+      'The candidate requires its exact clean committed source and branch.',
+    );
+  yield* verifyNativeWatchBoundPr(owner.prUrl, {
+    head: owner.head,
+    baseBranch: owner.baseBranch,
+    headBranch: owner.headBranch,
+  });
+  const closingHead = yield* gitValue(['rev-parse', '--verify', 'HEAD'], owner.callerCwd);
+  const closingBranch = yield* gitValue(['symbolic-ref', '--short', 'HEAD'], owner.callerCwd);
+  const closingStatus = yield* gitValue(
+    ['status', '--porcelain=v2', '--untracked-files=all', '--ignore-submodules=none'],
+    owner.callerCwd,
+  );
+  if (closingHead !== owner.head || closingBranch !== owner.branch || closingStatus !== '')
+    return yield* issue('candidate-source-drift', 'The candidate source changed during provider observation.');
+});
 const envelopeSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-watch-runtime'),
   version: Schema.Literal(1),
   state: Schema.Unknown,
+  owner: Schema.optionalKey(nativeWatchOwnerSchema),
+  invalidation: Schema.optionalKey(
+    Schema.Struct({kind: Schema.Literal('candidate_invalidated'), reason: text(64), at: integer}),
+  ),
   provider: Schema.Struct({
     pages: Schema.Array(
       Schema.Struct({
@@ -129,6 +274,33 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
     const envelope = Schema.decodeUnknownSync(envelopeSchema, {onExcessProperty: 'error'})(value);
     const state = decodeNativeWatchState(envelope.state);
     checkRunId(state.watchId);
+    if (envelope.owner) {
+      checkRunId(envelope.owner.runId);
+      if (
+        (state.head !== undefined && state.head !== envelope.owner.head) ||
+        envelope.owner.prUrl !== state.pr ||
+        (envelope.owner.kind === 'candidate-pr' && !EffectString.startsWith('candidate-')(state.watchId)) ||
+        (envelope.owner.kind === 'supplemental-publication' && !EffectString.startsWith('sup-')(state.watchId))
+      )
+        throw new Error('Owner identity');
+    } else if (EffectString.startsWith('candidate-')(state.watchId) || EffectString.startsWith('sup-')(state.watchId)) {
+      throw new Error('Missing typed owner');
+    }
+    if (
+      envelope.owner?.kind === 'candidate-pr' &&
+      !envelope.invalidation &&
+      state.events.length >= nativeWatchEventLimit
+    )
+      throw new Error('Candidate invalidation sequence must remain available');
+    if (
+      envelope.invalidation &&
+      (envelope.owner?.kind !== 'candidate-pr' ||
+        !envelope.stopRequested ||
+        state.events.at(-1)?.kind !== 'candidate_invalidated' ||
+        state.events.at(-1)?.key !== envelope.invalidation.reason ||
+        state.events.at(-1)?.at !== envelope.invalidation.at)
+    )
+      throw new Error('Invalid candidate invalidation');
     if (envelope.notification) validateNativeWatchNotification(envelope.notification, state);
     if (new Set(EffectArray.map(envelope.provider.pages, page => page.key)).size !== envelope.provider.pages.length)
       throw new Error('Duplicate page');
@@ -291,7 +463,16 @@ export const writeNativeWatch = Effect.fn('workflowAutomation.writeState')(funct
         'state-conflict',
         'Native run state changed after it was read. Retry from its current receipt.',
       );
-    if (previous !== undefined) yield* readNativeWatch(config, state.state.watchId);
+    if (previous !== undefined) {
+      const prior = yield* readNativeWatch(config, state.state.watchId);
+      if (stableJson(prior?.envelope.owner) !== stableJson(validated.owner))
+        return yield* issue('watch-owner-conflict', 'An existing watch cannot replace its immutable owner.');
+      if (
+        prior?.envelope.invalidation &&
+        stableJson(prior.envelope.invalidation) !== stableJson(validated.invalidation)
+      )
+        return yield* issue('candidate-invalidated', 'Candidate invalidation is immutable; start a fresh candidate.');
+    }
     yield* statePath(config, state.state.watchId);
     const immediate = yield* stateBytes(file);
     if ((immediate === undefined ? null : sha256HexSync(immediate)) !== expectedRevision)

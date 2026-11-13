@@ -3,6 +3,7 @@ import {nativeCycleParentsReady, nextNativeCycle as cycleNext} from './cycle.js'
 import {NativeCycleDeliverySchema} from './cycle.js';
 import {
   nativeCyclePhaseReviewUsage,
+  nativeCycleReviewBasis,
   nativeCycleSnapshotIsCurrentIteration,
   nativeCycleSupplementalRef,
   nativeCycleSupplementalRevision,
@@ -99,6 +100,7 @@ export interface NativeTaskView {
     readonly phaseId: string;
     readonly prUrl: string;
     readonly publicationRef: string;
+    readonly supplementalRef?: string;
     readonly revision: string;
     readonly completed: boolean;
     readonly watch?: {
@@ -130,6 +132,14 @@ export interface NativeTaskView {
     readonly fromBaseBranch: string;
     readonly toBaseBranch: string;
   };
+  readonly invalidTailRequalification?: {
+    readonly action: 'requalify-invalid-tail';
+    readonly taskRef: string;
+    readonly phaseId: string;
+    readonly predecessorRef: string;
+    readonly liveBaseHead: string;
+    readonly basisSnapshotId: string;
+  };
   readonly historicalWatch?: {
     readonly action: 'watch-pr';
     readonly phaseId: string;
@@ -160,6 +170,12 @@ export const NativeTaskActionRefSchema = Schema.Struct({
     'validation',
     'delivery',
     'retained-work',
+    'candidate-watch',
+    'candidate-notice',
+    'candidate-delivery',
+    'candidate-event',
+    'candidate-work',
+    'supplemental-publication',
     'closeout-prepare',
     'closeout-finish',
   ]),
@@ -179,6 +195,8 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   previousAttemptId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   payloadDigest: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   delivery: Schema.optionalKey(NativeCycleDeliverySchema),
+  publicationId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+  publicationRef: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   watchId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   consumerId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
   wakeupId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
@@ -196,8 +214,80 @@ export const NativeTaskActionRefSchema = Schema.Struct({
   transactionId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   jobId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u))),
 }).check(
+  Schema.makeFilter(ref => {
+    if (ref.kind === 'supplemental-publication')
+      return Boolean(
+        ref.phaseId &&
+        ref.phaseHash &&
+        ref.snapshotId &&
+        ref.sourceHead &&
+        ref.sourceTree &&
+        ref.publicationId &&
+        ref.publicationRef &&
+        ref.stateRevision &&
+        !ref.watchId &&
+        !ref.consumerId &&
+        !ref.wakeupId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchDeliveryId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    if (!EffectString.startsWith('candidate-')(ref.kind))
+      return ref.publicationId === undefined && ref.publicationRef === undefined;
+    if (!(
+      ref.phaseId &&
+      ref.phaseHash &&
+      ref.snapshotId &&
+      ref.sourceHead &&
+      ref.sourceTree &&
+      ref.baselineHead &&
+      ref.baselineTree &&
+      ref.baselineRef &&
+      ref.watchId &&
+      ref.consumerId &&
+      ref.wakeupId &&
+      ref.payloadDigest
+    ))
+      return false;
+    if (ref.publicationId !== undefined || ref.publicationRef !== undefined) return false;
+    if (ref.kind === 'candidate-watch')
+      return (
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchDeliveryId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest
+      );
+    if (ref.kind === 'candidate-notice')
+      return Boolean(
+        ref.eventKey && !ref.watchDeliveryId && !ref.watchEventId && !ref.workViewDigest && !ref.workRowDigest,
+      );
+    if (ref.kind === 'candidate-delivery')
+      return Boolean(
+        ref.watchDeliveryId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.watchEventId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    if (ref.kind === 'candidate-event')
+      return Boolean(
+        ref.watchDeliveryId &&
+        ref.watchEventId &&
+        !ref.eventKey &&
+        !ref.watchAttemptId &&
+        !ref.workViewDigest &&
+        !ref.workRowDigest,
+      );
+    return ref.kind === 'candidate-work';
+  }),
   Schema.makeFilter(ref =>
-    ref.kind === 'retained-work'
+    ref.kind === 'retained-work' || ref.kind === 'candidate-work'
       ? Boolean(
           ref.watchId &&
           ref.consumerId &&
@@ -513,25 +603,12 @@ export function projectNativeTaskView(
         EffectArray.findFirst(runtime.reviews, item => item.snapshotId === latestSnapshot.snapshot.snapshotId),
       )
     : undefined;
-  const predecessorId = latestSnapshot?.snapshot.previous ?? latestSnapshot?.snapshot.supersedes;
-  const predecessor = predecessorId
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.snapshots, item => item.snapshot.snapshotId === predecessorId),
-      )?.snapshot
-    : undefined;
-  const predecessorReview = predecessor
-    ? EffectOption.getOrUndefined(
-        EffectArray.findFirst(runtime.reviews, item => item.snapshotId === predecessor.snapshotId),
-      )?.report
-    : undefined;
+  const reviewBasis = latestSnapshot ? nativeCycleReviewBasis(runtime, latestSnapshot.snapshot) : undefined;
   const blockingReview = Boolean(
     latestSnapshot &&
     acceptedReview &&
-    validateNativeCycleReviewHistory(
-      latestSnapshot.snapshot,
-      acceptedReview.report,
-      predecessor && predecessorReview ? {snapshot: predecessor, review: predecessorReview} : undefined,
-    ).summary.blockingIssueCount,
+    validateNativeCycleReviewHistory(latestSnapshot.snapshot, acceptedReview.report, reviewBasis).summary
+      .blockingIssueCount,
   );
   const reviewWork =
     pendingSnapshot && latestSnapshot && !acceptedReview
@@ -783,6 +860,25 @@ export function projectNativeTaskView(
                 prUrl: publication.initialization.pr.url,
                 publicationRef: nativeCycleSupplementalRef(publication),
                 revision: supplementalRevision!,
+                ...(/^[a-f0-9]{64}$/u.test(revision)
+                  ? {
+                      supplementalRef: encodeNativeTaskActionRef({
+                        version: 1,
+                        kind: 'supplemental-publication',
+                        runId: state.runId,
+                        generationHash: sha256HexSync(state.generation),
+                        stateRevision: revision,
+                        phaseId: publication.initialization.phaseId,
+                        phaseHash: publication.initialization.phaseHash,
+                        snapshotId: publication.initialization.snapshotId,
+                        sourceHead: publication.initialization.head,
+                        sourceTree: publication.initialization.tree,
+                        publicationId: publication.publicationId,
+                        publicationRef: nativeCycleSupplementalRef(publication),
+                        payloadDigest: supplementalRevision!,
+                      }),
+                    }
+                  : {}),
                 completed: EffectArray.some(publication.records, record => record.event.kind === 'completed'),
                 ...(watchEvent?.kind === 'watch'
                   ? {

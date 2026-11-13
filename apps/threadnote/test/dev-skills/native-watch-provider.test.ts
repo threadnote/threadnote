@@ -12,6 +12,7 @@ import {
 import {initializeNativeWatch, reconcileNativeWatch} from '@threadnote/workflow-automations/watch';
 import {
   collectNativeWatchGitHub,
+  verifyNativeWatchBoundPr,
   NativeWatchProviderNow,
   type NativeWatchProviderCache,
   verifyNativeWatchPullIdentity,
@@ -893,3 +894,63 @@ describe('native pull mergeability projection', () => {
     );
   }
 });
+
+effectIt.effect('binds an existing PR receipt to exact source, destination and state without provider mutation', () =>
+  Effect.gen(function* () {
+    const original = {
+      number: 7,
+      url: pr,
+      baseRepository: 'example/project',
+      baseBranch: 'main',
+      headBranch: 'feature/work',
+      headSha: head,
+      state: 'open',
+      merged: false,
+      mergeCommit: null,
+    };
+    let raw: Record<string, unknown> = original;
+    let calls = 0;
+    const command = CommandExecutor.of({
+      execute: (executable, args, options) => {
+        expect(executable).toBe('gh');
+        expect(args).toContain('GET');
+        expect(args).not.toContain('POST');
+        expect(options?.maxOutputBytes).toBe(16_384);
+        calls++;
+        return Effect.succeed({exitCode: 0, stderr: '', stdout: JSON.stringify(raw)});
+      },
+      executeStreaming: () => Effect.die('Unexpected streaming'),
+    });
+    const expected = {head, baseBranch: 'main', headBranch: 'feature/work'};
+    const observe = () => verifyNativeWatchBoundPr(pr, expected).pipe(Effect.provideService(CommandExecutor, command));
+    expect(yield* observe()).toEqual({
+      url: pr,
+      headSha: head,
+      baseBranch: 'main',
+      headBranch: 'feature/work',
+      state: 'open',
+    });
+    for (const drift of [
+      {headSha: pushedHead},
+      {baseBranch: 'other'},
+      {headBranch: 'other'},
+      {baseRepository: 'foreign/project'},
+      {url: 'https://github.com/foreign/project/pull/7'},
+      {number: 8},
+    ]) {
+      raw = {...original, ...drift};
+      const result = yield* observe().pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') expect(result.failure.code).toBe('watch-binding-drift');
+    }
+    raw = {...original, state: 'closed', merged: true, mergeCommit: pushedHead};
+    expect(yield* observe()).toMatchObject({state: 'merged', mergeCommit: pushedHead});
+    expect(
+      (yield* verifyNativeWatchBoundPr(pr, {...expected, state: 'open'}).pipe(
+        Effect.provideService(CommandExecutor, command),
+        Effect.result,
+      ))._tag,
+    ).toBe('Failure');
+    expect(calls).toBe(9);
+  }),
+);

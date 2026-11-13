@@ -29,6 +29,8 @@ import {readNativeWatch, withNativeWatchControlLock} from './watch_store.js';
 import type {NativeTaskCycleRuntime, NativeTaskStoredState} from './task_action_helpers.js';
 import {cycleRequest, fail, inCheckout, unwrapCycle} from './task_action_helpers.js';
 import type {NativeTaskActionRequest} from './task_actions.js';
+import {runNativeTaskCandidateWatch} from './task_candidate_watch.js';
+import {runNativeTaskSupplementalPublication} from './task_supplemental_publication.js';
 
 export const runNativeTaskCommitDelivery = (
   config: RuntimeConfig,
@@ -1348,4 +1350,139 @@ export const runNativeTaskPrWatch = (
       ...(eventRefs.length ? {eventRefs} : {}),
       ...(noticeRef ? {noticeRef} : {}),
     };
+  });
+
+export const runNativeTaskLocalDelivery = (
+  config: RuntimeConfig,
+  request: Extract<NativeTaskActionRequest, {command: 'deliver-local'}>,
+  stored: NativeTaskStoredState,
+  checkout: string,
+  runtime: NativeTaskCycleRuntime,
+) =>
+  Effect.gen(function* () {
+    const state = runtime.state;
+    const ref = decodeNativeTaskActionRef(request.validationRef);
+    if (
+      !ref ||
+      (ref.kind !== 'validation' && ref.kind !== 'delivery') ||
+      ref.runId !== request.runId ||
+      ref.generationHash !== sha256HexSync(stored.state.generation) ||
+      !ref.phaseId ||
+      !ref.phaseHash ||
+      !ref.snapshotId ||
+      !ref.sourceHead ||
+      !ref.sourceTree ||
+      !ref.payloadDigest
+    )
+      return yield* fail(
+        'invalid-validation-ref',
+        'Use the current canonical validation reference for local delivery.',
+      );
+    if (state.plan.delivery !== 'local')
+      return yield* fail('delivery-scope', 'This task operation supports local delivery only.');
+    const proof = state.phases[ref.phaseId];
+    const validationDigest = proof?.validation ? sha256HexSync(stableJson(proof.validation)) : undefined;
+    if (
+      !proof?.validation ||
+      proof.phaseHash !== ref.phaseHash ||
+      proof.head !== (proof.validation.head ?? ref.sourceHead) ||
+      proof.tree !== ref.sourceTree ||
+      (ref.kind === 'validation' && validationDigest !== ref.payloadDigest)
+    )
+      return yield* fail('stale-validation-ref', 'The reference does not match current canonical phase validation.');
+    const snapshots = EffectArray.filter(
+      runtime.snapshots,
+      item =>
+        item.snapshot.snapshotId === ref.snapshotId &&
+        item.snapshot.phaseId === ref.phaseId &&
+        item.snapshot.phaseHash === ref.phaseHash &&
+        item.snapshot.head === ref.sourceHead &&
+        item.snapshot.tree === ref.sourceTree,
+    );
+    if (snapshots.length !== 1)
+      return yield* fail('snapshot-ambiguous', 'Local delivery needs one unique canonical source snapshot.');
+    const receipt = {
+      phaseId: ref.phaseId,
+      phaseHash: ref.phaseHash,
+      delivery: 'local' as const,
+      headSha: proof.head,
+      validatedTree: proof.tree,
+    };
+    const deliveryDigest = sha256HexSync(stableJson(receipt));
+    if (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
+      return yield* fail('delivery-conflict', 'The delivery reference is bound to different receipt content.');
+    const deliveryRef = encodeNativeTaskActionRef({...ref, kind: 'delivery', payloadDigest: deliveryDigest});
+    if (proof.delivery) {
+      if (
+        stableJson(proof.delivery) !== stableJson(receipt) ||
+        (ref.kind === 'delivery' && ref.payloadDigest !== deliveryDigest)
+      )
+        return yield* fail('delivery-conflict', 'The phase already has a different canonical delivery receipt.');
+      return {status: 'delivered', replayed: true, deliveryRef, receipt: proof.delivery};
+    }
+    if (ref.kind === 'delivery')
+      return yield* fail('stale-delivery-ref', 'This delivery reference has no matching canonical receipt.');
+    unwrapCycle(
+      yield* inCheckout(
+        runWorkflowAutomation(
+          config,
+          cycleRequest(stored, {
+            command: 'record-delivery',
+            phaseId: ref.phaseId,
+            delivery: receipt,
+            expectedRevision: stored.revision,
+          }),
+        ),
+        checkout,
+      ),
+    );
+    const latest = yield* readNativeWorkflowState(config, request.runId);
+    const persisted = latest?.state.cycle?.state.phases[ref.phaseId]?.delivery;
+    if (!persisted || stableJson(persisted) !== stableJson(receipt))
+      return yield* fail('delivery-not-recorded', 'The canonical local delivery receipt was not persisted.');
+    return {status: 'delivered', replayed: false, deliveryRef, receipt: persisted};
+  });
+
+/** Keep watch proof selection separate from the canonical PR receipt lifecycle. */
+export const runNativeTaskWatchAction = (
+  config: RuntimeConfig,
+  request: Extract<NativeTaskActionRequest, {command: 'watch-pr'}>,
+  stored: NativeTaskStoredState,
+  checkout: string,
+  runtime: NativeTaskCycleRuntime,
+) =>
+  Effect.gen(function* () {
+    const candidate =
+      request.snapshotRef !== undefined || request.candidateWatchRef !== undefined || request.pr !== undefined;
+    if (
+      (candidate && request.supplementalRef) ||
+      ((candidate || request.supplementalRef) && (request.validationRef || request.deliveryRef))
+    )
+      return yield* fail(
+        'watch-proof-conflict',
+        'Choose exactly one canonical, candidate or supplemental proof route.',
+      );
+    if (candidate) {
+      if (request.operation === 'renew' || request.operation === 'complete')
+        return yield* fail(
+          'candidate-diagnostic-only',
+          'Candidate watch supports diagnostics, never canonical completion or renewal.',
+        );
+      return yield* runNativeTaskCandidateWatch(
+        config,
+        {...request, operation: request.operation, command: 'watch-candidate-pr'},
+        stored,
+        checkout,
+        runtime,
+      );
+    }
+    if (request.supplementalRef)
+      return yield* runNativeTaskSupplementalPublication(
+        config,
+        {...request, command: 'supplemental-publication', pr: undefined},
+        stored,
+        checkout,
+        runtime,
+      );
+    return yield* runNativeTaskPrWatch(config, request, stored, checkout);
   });

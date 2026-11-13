@@ -787,6 +787,7 @@ describe('Threadnote MCP toolsets', () => {
           'supersede-unreviewed',
           'recover-unreviewed-rebase',
           'requalify-base',
+          'requalify-invalid-tail',
         ]);
         expect(snapshotByCommand.get('record')?.required).toEqual(['command', 'workRef']);
         expect(snapshotByCommand.get('supersede-unreviewed')?.required).toEqual(['command', 'snapshotRef', 'reason']);
@@ -819,7 +820,22 @@ describe('Threadnote MCP toolsets', () => {
             return [command[0], variant];
           }),
         );
-        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr']);
+        expect([...deliveryByCommand.keys()]).toEqual(['local', 'commit', 'pr', 'supplemental']);
+        expect(deliveryByCommand.get('supplemental')?.required).toEqual([
+          'command',
+          'taskRef',
+          'phaseId',
+          'pr',
+          'userAuthority',
+        ]);
+        expect(snapshotByCommand.get('requalify-invalid-tail')?.required).toEqual([
+          'command',
+          'taskRef',
+          'predecessorRef',
+          'reason',
+          'userAuthority',
+          'phaseOwnedPaths',
+        ]);
         expect(deliveryByCommand.get('local')?.required).toEqual(['command', 'validationRef']);
         expect(deliveryByCommand.get('commit')?.required).toEqual(['command', 'validationRef', 'commitEvidence']);
         expect(deliveryByCommand.get('pr')?.required).toEqual([

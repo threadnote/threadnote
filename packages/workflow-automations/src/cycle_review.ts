@@ -4,7 +4,7 @@ import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {nativeCycleHasControl} from './cycle.js';
-import {NativeCycleOrdinaryMergeReceiptSchema} from './cycle_merge.js';
+import {NativeCycleInvalidTailMergeReceiptSchema, NativeCycleOrdinaryMergeReceiptSchema} from './cycle_merge.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -12,11 +12,18 @@ import {Option as EffectOption} from 'effect';
 
 export {
   NativeCycleOrdinaryMergeInputSchema,
+  NativeCycleInvalidTailMergeReceiptSchema,
+  nativeCycleInvalidTailMergeReceiptDigest,
+  validateNativeCycleInvalidTailMergeReceipt,
   nativeCycleMergeReceiptDigest,
   validateNativeCycleMergeOwners,
   validateNativeCycleMergeReceipt,
 } from './cycle_merge.js';
-export type {NativeCycleOrdinaryMergeInput, NativeCycleOrdinaryMergeReceipt} from './cycle_merge.js';
+export type {
+  NativeCycleInvalidTailMergeReceipt,
+  NativeCycleOrdinaryMergeInput,
+  NativeCycleOrdinaryMergeReceipt,
+} from './cycle_merge.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const text = (maximum = 4096) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum));
@@ -69,7 +76,7 @@ const unreviewedRebaseRecovery = Schema.Struct({
 
 export const NativeCycleSnapshotSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle-snapshot'),
-  version: Schema.Literals([1, 2]),
+  version: Schema.Literals([1, 2, 3]),
   snapshotId: id,
   phaseId: id,
   phaseHash: digest,
@@ -93,13 +100,22 @@ export const NativeCycleSnapshotSchema = Schema.Struct({
   acceptedHead: Schema.optionalKey(gitObject),
   baseRequalification: Schema.optionalKey(baseRequalificationReceipt),
   ordinaryMergeQualificationV1: Schema.optionalKey(NativeCycleOrdinaryMergeReceiptSchema),
+  invalidTailMergeQualificationV1: Schema.optionalKey(NativeCycleInvalidTailMergeReceiptSchema),
   files: Schema.Array(text()).check(Schema.isMaxLength(8192)),
   pinnedRef: text(),
 }).check(
   Schema.makeFilter(snapshot =>
+    (snapshot.version === 3) !== !!snapshot.invalidTailMergeQualificationV1 ||
+    (snapshot.invalidTailMergeQualificationV1 &&
+      (snapshot.baseRequalification ||
+        snapshot.ordinaryMergeQualificationV1 ||
+        snapshot.unreviewedSupersession ||
+        !snapshot.previous ||
+        !snapshot.previousTree ||
+        snapshot.supersedes !== undefined)) ||
     (snapshot.version === 2) !== !!snapshot.ordinaryMergeQualificationV1 ||
     (snapshot.ordinaryMergeQualificationV1 && snapshot.baseRequalification)
-      ? 'Version2 requires only the ordinary merge qualification.'
+      ? 'Snapshot version must match its single dedicated qualification proof.'
       : snapshot.unreviewedSupersession &&
           (!snapshot.supersedes ||
             snapshot.previous !== undefined ||
@@ -216,7 +232,12 @@ export type NativeCycleReview = typeof NativeCycleReviewSchema.Type;
 
 /** Review recording mode follows snapshot lineage; it never limits independent review scope. */
 export const nativeCycleReviewRecordingMode = (snapshot: NativeCycleSnapshot): 'full' | 'incremental' =>
-  snapshot.previous && !snapshot.baseRequalification && !snapshot.ordinaryMergeQualificationV1 ? 'incremental' : 'full';
+  snapshot.previous &&
+  !snapshot.baseRequalification &&
+  !snapshot.ordinaryMergeQualificationV1 &&
+  !snapshot.invalidTailMergeQualificationV1
+    ? 'incremental'
+    : 'full';
 
 const blocking = (finding: NativeCycleReview['findings'][number]) =>
   ['critical', 'important'].includes(finding.severity) && ['new', 'carried'].includes(finding.state);
@@ -285,8 +306,11 @@ export function validateNativeCycleReviewHistory(
   if (snapshot.previous && snapshot.supersedes) fail('A snapshot has one source predecessor.');
   if (
     previous &&
-    ((snapshot.previous ?? snapshot.supersedes) !== previous.snapshot.snapshotId ||
-      (snapshot.previous && snapshot.previousTree !== previous.snapshot.tree) ||
+    ((snapshot.invalidTailMergeQualificationV1?.basisSnapshotId ?? snapshot.previous ?? snapshot.supersedes) !==
+      previous.snapshot.snapshotId ||
+      (snapshot.previous &&
+        !snapshot.invalidTailMergeQualificationV1 &&
+        snapshot.previousTree !== previous.snapshot.tree) ||
       snapshot.phaseId !== previous.snapshot.phaseId ||
       (snapshot.previous
         ? snapshot.phaseHash !== previous.snapshot.phaseHash

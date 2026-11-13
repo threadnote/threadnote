@@ -258,6 +258,7 @@ export const NativeCycleSupplementalInitSchema = Schema.Struct({
   snapshotId: id,
   validationDigest: digest,
   localReceiptDigest: digest,
+  taskRefDigest: Schema.optionalKey(digest),
   head: gitObject,
   tree: gitObject,
   pr: prSchema,

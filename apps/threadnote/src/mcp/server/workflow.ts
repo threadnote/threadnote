@@ -4,6 +4,8 @@ import {McpInput} from '../../effect/ai/mcp.js';
 import {readNativeTaskView} from '../../workflow_automation/task.js';
 import {
   NativeTaskPrDeliveryFieldsSchema,
+  NativeTaskSupplementalAttachFieldsSchema,
+  NativeTaskInvalidTailFieldsSchema,
   NativeTaskPrWatchFieldsSchema,
   NativeTaskCloseoutProposalSchema,
   runNativeTaskAction,
@@ -32,15 +34,15 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         contentFile: McpInput.string('Business JSON file; omit format/id/project/source/spec/compactOrigin metadata'),
         saveMode: Schema.optionalKey(Schema.Literal('background')),
         installationTarget: McpInput.string('Required for start; installed target for authoring job resume'),
-        graphProject: McpInput.string('Configured graph project for a new authoring task'),
+        graphProject: McpInput.string('New task graph project'),
         authoringRef: McpInput.string('Current authoring continuation'),
-        team: McpInput.string('Writable team selected for portable plan sharing'),
-        jobRef: McpInput.string('Opaque accepted semantic authoring job continuation'),
+        team: McpInput.string('Writable sharing team'),
+        jobRef: McpInput.string('Accepted authoring job ref'),
         operation: Schema.optionalKey(Schema.Literals(['status', 'result', 'cancel', 'resume'])),
         specRef: McpInput.string('Approved spec reference for plan start'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'document'])),
         userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
-        userResponse: McpInput.string('Caller-provided response to the full current document'),
+        userResponse: McpInput.string('Actual full-document response'),
         delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
         review: Schema.optionalKey(
           Schema.Struct({
@@ -66,19 +68,19 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         'Start/resume bounded business intent after verifying installed workflow resources; runtime owns native run metadata.',
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
-        featureName: McpInput.string('Stable feature name used to resume a compact task'),
+        featureName: McpInput.string('Stable compact-task name'),
         installationTarget: McpInput.requiredString(
           'Installed Threadnote host target, required to verify the current bundle on start or resume',
         ),
-        taskRef: McpInput.string('Optional opaque task reference returned by a previous start'),
-        sharedPlanRef: McpInput.string('One verified portable plan reference for recipient start'),
-        graphProject: McpInput.string('Configured graph project for a new native run'),
+        taskRef: McpInput.string('Prior start task ref'),
+        sharedPlanRef: McpInput.string('Verified portable plan ref'),
+        graphProject: McpInput.string('New run graph project'),
         intent: Schema.optionalKey(NativeCompactIntentSchema),
         delivery: Schema.optionalKey(Schema.Literals(['local', 'commit', 'pr'])),
         bindings: Schema.optionalKey(
           Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
         ),
-        userResponse: McpInput.string('Actual recipient instruction to execute this shared plan'),
+        userResponse: McpInput.string('Actual shared-plan execution authority'),
         review: Schema.optionalKey(
           Schema.Struct({outcome: Schema.Literal('accepted'), blockingIssueCount: Schema.Literal(0)}),
         ),
@@ -121,8 +123,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Save a bounded compact task intent as a draft and return its exact approval packet.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         intent: NativeCompactIntentSchema,
       },
     },
@@ -138,8 +140,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Prepare an expanded native plan on the same compact-origin authoring root.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         document: Schema.Unknown,
       },
     },
@@ -155,13 +157,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Record an actual user response to the exact intent; admit or reconcile the same run.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
-        presentedIntentHash: McpInput.requiredString('Exact intent hash from the complete approval packet'),
-        userResponse: McpInput.string('Caller-provided response to the displayed exact-intent packet'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
+        presentedIntentHash: McpInput.requiredString('Complete approval packet intent hash'),
+        userResponse: McpInput.string('Actual displayed exact-intent response'),
         userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
         baseBranch: McpInput.string('Exact base branch for a new local cycle'),
-        reconcileReason: McpInput.string('Concrete reason for reconciling an existing cycle'),
+        reconcileReason: McpInput.string('Reconciliation reason'),
         bindings: Schema.optionalKey(
           Schema.Record(Schema.String, Schema.Struct({branch: Schema.String, baseBranch: Schema.String})),
         ),
@@ -186,13 +188,13 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: true, destructiveHint: false},
       description: 'Read a task summary or packet (detail=packet).',
       inputSchema: {
-        runId: McpInput.requiredString('Run ID'),
+        runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute path'),
         role: McpInput.string('Role'),
         cursor: McpInput.string('Cursor'),
         phaseId: McpInput.string('Listed historical phase ID for its PR watch'),
         detail: Schema.optionalKey(Schema.Literals(['summary', 'packet'])),
-        outputKey: McpInput.string('One listed verified closeout body key; requires packet detail'),
+        outputKey: McpInput.string('Listed closeout body key; detail=packet'),
       },
     },
     Effect.fn('mcp_server.workflowTaskView')(function* ({runId, callerCwd, role, cursor, phaseId, detail, outputKey}) {
@@ -245,8 +247,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Prepare a source-checked implementation packet for the current native phase.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         capacity: NativeCyclePacketOptionsSchema.fields.capacity,
         anchors: Schema.Array(NativeTaskAnchorSchema).check(Schema.isBetweenLength(1, 128)),
         ownership: NativeCyclePacketOptionsSchema.fields.ownership,
@@ -356,32 +358,36 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record source; supersede only the latest unreviewed snapshot; recover an authorized rebase; or requalify an approved reviewed-base transition. Preserve history; recovery requires full review and validation.',
+        'Current opaque refs; keep history. Record; supersede latest unreviewed only; recover authorized rebase; requalify reviewed base or prepared normal-merge invalid tail. Fresh full review/validation required.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         snapshot: Schema.Union([
           Schema.Struct({
             command: Schema.Literal('record'),
-            workRef: McpInput.requiredString('Current workflow_task_work reference'),
-            reason: McpInput.string('Reason for source iteration'),
+            workRef: McpInput.requiredString('Current work ref'),
+            reason: McpInput.string('Iteration reason'),
           }),
           Schema.Struct({
             command: Schema.Literal('supersede-unreviewed'),
-            snapshotRef: McpInput.requiredString('Exact unreviewed snapshot reference'),
-            reason: McpInput.requiredString('Concrete supersession reason'),
+            snapshotRef: McpInput.requiredString('Unreviewed snapshot ref'),
+            reason: McpInput.requiredString('Supersession reason'),
           }),
           Schema.Struct({
             command: Schema.Literal('recover-unreviewed-rebase'),
-            snapshotRef: McpInput.requiredString('Latest unreviewed snapshot reference'),
-            reason: McpInput.requiredString('Concrete recovery reason'),
-            userAuthority: McpInput.requiredString('Actual existing user authority; caller asserted'),
+            snapshotRef: McpInput.requiredString(),
+            reason: McpInput.requiredString(),
+            userAuthority: McpInput.requiredString(),
           }),
           Schema.Struct({
             command: Schema.Literal('requalify-base'),
-            snapshotRef: McpInput.requiredString('Current reviewed predecessor reference'),
-            reason: McpInput.requiredString('Reason for requalification on the approved base'),
-            userAuthority: McpInput.requiredString('Existing human authority for this base change; caller asserted'),
+            snapshotRef: McpInput.requiredString('Reviewed predecessor ref'),
+            reason: McpInput.requiredString('New-base reason'),
+            userAuthority: McpInput.requiredString('Actual base-change authority; caller-asserted, unauthenticated'),
+          }),
+          Schema.Struct({
+            command: Schema.Literal('requalify-invalid-tail'),
+            ...NativeTaskInvalidTailFieldsSchema.fields,
           }),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
@@ -413,6 +419,8 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                   snapshotRef: snapshot.snapshotRef,
                   reason: snapshot.reason,
                 }
+            : snapshot.command === 'requalify-invalid-tail'
+              ? {...snapshot, runId, callerCwd}
               : {
                   command: 'requalify-base-snapshot',
                   runId,
@@ -432,7 +440,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Record an independent review for a snapshot.',
       inputSchema: {
-        runId: McpInput.requiredString('Run ID'),
+        runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString('Absolute bound checkout'),
         snapshotRef: McpInput.requiredString('Snapshot ref'),
         taskRef: McpInput.string('Blocked recovery taskRef'),
@@ -473,9 +481,9 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Record passed check and acceptance evidence against the reviewed task snapshot.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
-        snapshotRef: McpInput.requiredString('Opaque snapshot reference returned by review recording'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
+        snapshotRef: McpInput.requiredString('Reviewed snapshot ref'),
         checks: NativeCycleValidationSchema.fields.checks,
         acceptance: NativeCycleValidationSchema.fields.acceptance,
       },
@@ -503,10 +511,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record approved local/commit delivery or verify an existing PR with exact review/validation, actual userAuthority and separate publication proof. Watching requires host registration.',
+        'Record approved local/commit/PR delivery with exact review/validation, actual userAuthority and separate publication evidence; open PRs need a watch. Supplemental attaches an existing authorized PR to unchanged completed local proof, preserving original delivery.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         delivery: Schema.Union([
           Schema.Struct({
             command: Schema.Literal('local'),
@@ -515,15 +523,14 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
           Schema.Struct({
             command: Schema.Literal('commit'),
             validationRef: McpInput.requiredString('Current validation ref'),
-            commitEvidence: McpInput.requiredString('Commit evidence to retain with the canonical receipt').check(
-              Schema.isMaxLength(2048),
-            ),
+            commitEvidence: McpInput.requiredString('Canonical commit evidence').check(Schema.isMaxLength(2048)),
           }),
           Schema.Struct({
             command: Schema.Literal('pr'),
             validationRef: McpInput.requiredString('Current validation ref'),
             ...NativeTaskPrDeliveryFieldsSchema.fields,
           }),
+          Schema.Struct({command: Schema.Literal('supplemental'), ...NativeTaskSupplementalAttachFieldsSchema.fields}),
         ]).pipe(Schema.toTaggedUnion('command')),
       },
     },
@@ -539,16 +546,18 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
                 validationRef: delivery.validationRef,
                 commitEvidence: delivery.commitEvidence,
               }
-            : {
-                command: 'deliver-pr',
-                runId,
-                callerCwd,
-                validationRef: delivery.validationRef,
-                commitEvidence: delivery.commitEvidence,
-                pr: delivery.pr,
-                publication: delivery.publication,
-                ...(delivery.userAuthority === undefined ? {} : {userAuthority: delivery.userAuthority}),
-              };
+            : delivery.command === 'supplemental'
+              ? {...delivery, command: 'supplemental-publication', operation: 'attach', runId, callerCwd}
+              : {
+                  command: 'deliver-pr',
+                  runId,
+                  callerCwd,
+                  validationRef: delivery.validationRef,
+                  commitEvidence: delivery.commitEvidence,
+                  pr: delivery.pr,
+                  publication: delivery.publication,
+                  ...(delivery.userAuthority === undefined ? {} : {userAuthority: delivery.userAuthority}),
+                };
       const result = yield* runNativeTaskAction(config, request);
       const text = JSON.stringify(result);
       return {content: [{type: 'text' as const, text}], structuredContent: result};
@@ -559,7 +568,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate the exact current task PR watch: relay noticeRefs only; persist each event disposition before ACK with current refs; complete delivery from readback.',
+        'Operate canonical, candidate diagnostic, or supplemental PR watch with its distinct proof. Relay noticeRefs only; persist dispositions before ACK with current refs; complete from readback.',
       inputSchema: {
         runId: McpInput.requiredString('Native run'),
         callerCwd: McpInput.requiredString('Bound checkout'),
@@ -569,6 +578,10 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         noticeRef: McpInput.string(
           'Relay this noticeRef only; record its returned event disposition; ACK with current refs.',
         ),
+        snapshotRef: McpInput.string('Candidate immutable snapshot; diagnostics only'),
+        candidateWatchRef: McpInput.string('Candidate continuation'),
+        supplementalRef: McpInput.string('Completed-local publication owner'),
+        pr: McpInput.string('Candidate existing PR URL'),
       },
     },
     Effect.fn('mcp_server.workflowTaskWatchPr')(function* ({runId, callerCwd, validationRef, deliveryRef, ...watch}) {
@@ -590,12 +603,12 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
       annotations: {readOnlyHint: false, destructiveHint: false},
       description: 'Finish an eligible completed cycle; PR delivery requires a merged, source-complete terminal watch.',
       inputSchema: {
-        runId: McpInput.requiredString('Native run ID'),
-        callerCwd: McpInput.requiredString('Absolute bound checkout'),
+        runId: McpInput.requiredString(),
+        callerCwd: McpInput.requiredString(),
         proposal: Schema.optionalKey(NativeTaskCloseoutProposalSchema),
-        prepareRef: McpInput.string('Opaque preparation reference returned by an earlier finish call'),
-        finishRef: McpInput.string('Opaque finish reference returned by an earlier finish call'),
-        resume: McpInput.boolean('Explicitly continue a canonical closeout job using the same opaque reference'),
+        prepareRef: McpInput.string('Prior prepare ref'),
+        finishRef: McpInput.string('Prior finish ref'),
+        resume: McpInput.boolean('Resume the same closeout ref'),
       },
     },
     Effect.fn('mcp_server.workflowTaskFinish')(function* ({runId, callerCwd, proposal, prepareRef, finishRef, resume}) {

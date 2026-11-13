@@ -17,7 +17,10 @@ import {
   encodeNativeTaskActionRef,
 } from '@threadnote/workflow-automations/task';
 import {nativeCyclePhaseHash} from '@threadnote/workflow-automations/cycle';
-import {nativeCycleHasBasePlanTransition} from '@threadnote/workflow-automations/cycle-runtime';
+import {
+  nativeCycleHasBasePlanTransition,
+  nativeCycleInvalidTailBasis,
+} from '@threadnote/workflow-automations/cycle-runtime';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readNativeWorkflowState} from './store.js';
@@ -369,6 +372,67 @@ const baseRequalificationRoute = (
     };
   });
 
+const invalidTailRequalificationRoute = (
+  stored: NonNullable<Effect.Success<ReturnType<typeof readNativeWorkflowState>>>,
+  checkout: string,
+  view: ReturnType<typeof projectNativeTaskView>,
+) =>
+  Effect.gen(function* () {
+    const runtime = stored.state.cycle;
+    const phaseId = view.next.phaseId;
+    if (
+      !runtime ||
+      !phaseId ||
+      !['review', 'resolve-review-failure', 'expand-review-budget'].includes(view.next.action)
+    )
+      return undefined;
+    const selected = nativeCycleInvalidTailBasis(runtime, phaseId);
+    const phase = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.state.plan.phases, item => item.id === phaseId),
+    );
+    const baseline = runtime.baselines[phaseId];
+    if (
+      !selected ||
+      !phase ||
+      !baseline ||
+      !['active', 'pending'].includes(runtime.state.phases[phaseId]?.status ?? '')
+    )
+      return undefined;
+    const observed = yield* resolveNativeTaskBaseRef(checkout, phase.baseBranch).pipe(Effect.option);
+    if (observed._tag === 'None' || !observed.value || observed.value.commit === selected.leaf.declaredBaseHead)
+      return undefined;
+    const liveBaseHead = observed.value.commit;
+    return {
+      action: 'requalify-invalid-tail' as const,
+      phaseId,
+      liveBaseHead,
+      basisSnapshotId: selected.basis.snapshot.snapshotId,
+      taskRef: nativeTaskCardRef(
+        stored.state,
+        stored.revision,
+        'requalify-invalid-tail',
+        phaseId,
+        selected.leaf.snapshotId,
+        sha256HexSync(stableJson([selected.leaf.snapshotId, selected.basis.snapshot.snapshotId, liveBaseHead])),
+      ),
+      predecessorRef: encodeNativeTaskActionRef({
+        version: 1,
+        kind: 'snapshot',
+        runId: stored.state.runId,
+        generationHash: sha256HexSync(stored.state.generation),
+        stateRevision: stored.revision,
+        phaseId,
+        phaseHash: selected.leaf.phaseHash,
+        snapshotId: selected.leaf.snapshotId,
+        sourceHead: selected.leaf.head,
+        sourceTree: selected.leaf.tree,
+        baselineHead: baseline.head,
+        baselineTree: baseline.tree,
+        baselineRef: baseline.pinnedRef,
+      }),
+    };
+  });
+
 /** Read the canonical run, then use the guarded native inspection path before projecting a task. */
 export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
   Effect.gen(function* () {
@@ -617,6 +681,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
     const withBaseRequalification = (view: ReturnType<typeof projectNativeTaskView>) =>
       Effect.gen(function* () {
         const route = yield* baseRequalificationRoute(config, stored, checkout, view);
+        const invalid = yield* invalidTailRequalificationRoute(stored, checkout, view);
         const runtime = stored.state.cycle;
         const snapshotRef = view.phase?.snapshot?.snapshotRef;
         const prior = runtime
@@ -636,6 +701,7 @@ export const readNativeTaskView = (config: RuntimeConfig, input: unknown) =>
         return {
           ...view,
           ...(route ? {baseRequalification: route} : {}),
+          ...(invalid ? {invalidTailRequalification: invalid} : {}),
           ...(recovery?._tag === 'Success'
             ? {
                 unreviewedRebaseRecovery: {
