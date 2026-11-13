@@ -902,20 +902,19 @@ export const runNativeCycle = <R>(
               version: 1,
               baseBranch: selected.baseBranch,
               baseTree: EffectString.trim(yield* git(repo, ['rev-parse', scope.declaredBaseHead + '^{tree}'])),
-              sourceRef: yield* pinNativeCycleCommit(
-                repo,
-                stored.state.bindingId,
-                snapshotId,
-                captured.head,
-                'snapshot-head',
-              ),
-              baseRef: yield* pinNativeCycleCommit(
-                repo,
-                stored.state.bindingId,
-                snapshotId,
-                scope.declaredBaseHead,
-                'snapshot-base',
-              ),
+              // Ordinary merges retain these same commits inside their fenced ref/state transaction.
+              sourceRef:
+                merge?.proof.currentHeadRef ??
+                (yield* pinNativeCycleCommit(repo, stored.state.bindingId, snapshotId, captured.head, 'snapshot-head')),
+              baseRef:
+                merge?.proof.currentBaseRef ??
+                (yield* pinNativeCycleCommit(
+                  repo,
+                  stored.state.bindingId,
+                  snapshotId,
+                  scope.declaredBaseHead,
+                  'snapshot-base',
+                )),
             },
             ...(prior
               ? request.supersedeUnreviewed

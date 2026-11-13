@@ -48,7 +48,7 @@ const baseRequalificationReceipt = Schema.Struct({
 });
 
 const retainedCommitRef = Schema.String.check(
-  Schema.isPattern(/^refs\/threadnote\/cycles\/(?:snapshot-head|snapshot-base)\/[a-f0-9]{64}$/u),
+  Schema.isPattern(/^refs\/threadnote\/cycles\/(?:snapshot-head|snapshot-base|merge-head|merge-base)\/[a-f0-9]{64}$/u),
 );
 const comparisonEvidence = Schema.Struct({
   version: Schema.Literal(1),
