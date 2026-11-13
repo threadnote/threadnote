@@ -15,6 +15,7 @@ import {
 } from './cycle.js';
 import {
   NativeCycleSnapshotSchema,
+  nativeCycleUnreviewedRecoveryDigest,
   NativeCycleReviewSchema,
   validateNativeCycleReviewHistory,
   nativeCycleBaseRequalificationReceiptDigest,
@@ -258,12 +259,36 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
         latestSnapshotByPhase.get(snapshot.phaseId) !== prior.snapshot.snapshotId ||
         prior.snapshot.phaseId !== snapshot.phaseId ||
         prior.snapshot.phaseHash !== snapshot.phaseHash ||
-        prior.snapshot.tree === snapshot.tree ||
+        (prior.snapshot.tree === snapshot.tree && !snapshot.unreviewedSupersession.rebaseRecovery) ||
         prior.snapshot.baseTree !== snapshot.baseTree ||
         reviews.has(prior.snapshot.snapshotId) ||
         !Effect.pipe(snapshot.unreviewedSupersession.reason, EffectString.trim)
       )
-        fail('Unreviewed supersession must retain the latest changed-source snapshot without an accepted review.');
+        fail('Unreviewed supersession must retain the latest source snapshot without an accepted review.');
+      const recovery = snapshot.unreviewedSupersession.rebaseRecovery;
+      if (
+        recovery &&
+        (!snapshot.comparisonEvidence ||
+          recovery.priorHead !== prior.snapshot.head ||
+          recovery.priorBaseHead !== prior.snapshot.declaredBaseHead ||
+          snapshot.head === recovery.priorHead ||
+          snapshot.declaredBaseHead === recovery.priorBaseHead ||
+          snapshot.acceptedHead !== snapshot.head ||
+          !EffectString.trim(recovery.authority) ||
+          recovery.toBaseBranch !== snapshot.comparisonEvidence.baseBranch ||
+          (prior.snapshot.comparisonEvidence &&
+            recovery.fromBaseBranch !== prior.snapshot.comparisonEvidence.baseBranch) ||
+          (recovery.fromBaseBranch !== recovery.toBaseBranch &&
+            !nativeCycleHasBasePlanTransition(
+              runtime.plans,
+              prior.snapshot,
+              snapshot.phaseHash,
+              recovery.fromBaseBranch,
+              recovery.toBaseBranch,
+            )) ||
+          recovery.receiptDigest !== nativeCycleUnreviewedRecoveryDigest(snapshot))
+      )
+        fail('Unreviewed rebase recovery lost its exact predecessor, authority or immutable evidence.');
     }
     if (snapshot.baseRequalification) {
       const receipt = snapshot.baseRequalification;

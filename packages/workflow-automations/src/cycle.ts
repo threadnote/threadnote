@@ -163,6 +163,16 @@ export const NativeCyclePublicationAuthoritySchema = Schema.Union([
     evidence: publicationText(4096),
   }),
 ]);
+const providerIdentitySchema = Schema.Struct({
+  url: text(2048),
+  number: Schema.Finite.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  baseRepository: text(256),
+  headRepository: text(256),
+  baseBranch: text(256),
+  headBranch: text(256),
+  headSha: gitObject,
+  state: Schema.Literals(['open', 'merged']),
+});
 export const NativeCycleDeliverySchema = Schema.Struct({
   phaseId: id,
   phaseHash: digest,
@@ -173,7 +183,31 @@ export const NativeCycleDeliverySchema = Schema.Struct({
   pr: Schema.optionalKey(prSchema),
   watch: Schema.optionalKey(watchSchema),
   publication: Schema.optionalKey(NativeCyclePublicationAuthoritySchema),
-});
+  userAuthority: Schema.optionalKey(text()),
+  providerIdentity: Schema.optionalKey(providerIdentitySchema),
+}).check(
+  Schema.makeFilter(delivery => {
+    const identity = delivery.providerIdentity;
+    if (!!identity !== !!delivery.userAuthority) return 'Retain both caller authority and provider identity.';
+    if (!identity) return undefined;
+    const pr = delivery.pr;
+    const target = pr
+      ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/u.exec(pr.url)
+      : undefined;
+    return delivery.delivery === 'pr' &&
+      pr &&
+      target &&
+      identity.url === pr.url &&
+      identity.number === Number(target[3]) &&
+      EffectString.toLowerCase(identity.baseRepository) === EffectString.toLowerCase(`${target[1]}/${target[2]}`) &&
+      EffectString.toLowerCase(identity.headRepository) === EffectString.toLowerCase(identity.baseRepository) &&
+      identity.baseBranch === pr.baseBranch &&
+      identity.headBranch === pr.branch &&
+      identity.headSha === pr.headSha
+      ? undefined
+      : 'Provider identity does not match this exact same-repository PR receipt.';
+  }),
+);
 export type NativeCycleDelivery = typeof NativeCycleDeliverySchema.Type;
 const deliverySchema = NativeCycleDeliverySchema;
 
