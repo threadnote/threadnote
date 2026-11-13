@@ -1,4 +1,5 @@
-import {Array as EffectArray, Schema, String as EffectString} from 'effect';
+import {sha256HexSync} from '../sha256.js';
+import {Array as EffectArray, Option, Schema, String as EffectString} from 'effect';
 import {runtimeNativeDescriptorOperations} from '../system.js';
 import type {RuntimeGuardedDiskObservation, RuntimeWriterIdentity} from '../writer_system.js';
 import {RuntimeWriterFault, writerFail as fail} from './fault.js';
@@ -299,7 +300,14 @@ function projected(path: string, id: NativeFileIdentity, directory: boolean): Ru
   }
   return info; // Actual compatibility observations only; UID/GID/mode never supply native authority.
 }
-function capture(resources: Resources, resource: HandleResource, name: string, path: string, directory: boolean): Edge {
+function capture(
+  resources: Resources,
+  resource: HandleResource,
+  name: string,
+  path: string,
+  directory: boolean,
+  compatibility = true,
+): Edge {
   const identity = windowsFileIdentity(resources.kernel, resource.handle);
   if (
     ((identity.attributes & 0x10) !== 0) !== directory ||
@@ -309,7 +317,7 @@ function capture(resources: Resources, resource: HandleResource, name: string, p
   const security = resources.securityOf(resource.handle, directory ? resources.servicingOwner : undefined);
   const after = windowsFileIdentity(resources.kernel, resource.handle);
   if (!stable(identity, after)) return fail('source-changed');
-  projected(path, after, directory);
+  if (compatibility) projected(path, after, directory);
   return {resource, identity: after, security, name, path};
 }
 function checkEdge(resources: Resources, edge: Edge, parent: Edge | undefined, directory: boolean): void {
@@ -347,6 +355,8 @@ export interface WindowsWriterRoot {
 }
 export interface WindowsWriterTarget {
   inspect(): RuntimeGuardedDiskObservation;
+  matchesSourceWitness(earlier: WindowsSourceWitness): boolean;
+  observesSourceObject(earlier: WindowsSourceWitness): boolean;
   commit(input: {
     readonly before: RuntimeGuardedDiskObservation;
     readonly afterBytes: Uint8Array;
@@ -360,27 +370,13 @@ function checkRoot(root: RootState): void {
   for (let index = 0; index < root.chain.length; index++)
     checkEdge(root.resources, root.chain[index], root.chain[index - 1], true);
 }
-export function openWindowsWriterRoot(
-  path: string,
-  expected: {readonly dev: bigint; readonly ino: bigint},
-): WindowsWriterRoot {
-  const state = openRootState(path, expected);
-  return {
-    path,
-    close() {
-      state.active = false;
-      state.resources.close();
-    },
-    openTarget: (segments, physical, bound) => openTarget(state, segments, physical, bound),
-  };
-}
 class WindowsPrivateMissing extends Schema.TaggedError<WindowsPrivateMissing, {readonly brand: unique symbol}>()(
   'WindowsPrivateMissing',
   {},
 ) {}
 function openRootState(
   path: string,
-  expected: {readonly dev: bigint; readonly ino: bigint},
+  expected?: {readonly dev: bigint; readonly ino: bigint},
   privateWritable = false,
 ): RootState {
   assertAcquisitionAvailable();
@@ -401,7 +397,7 @@ function openRootState(
       0x02000000 | 0x00200000,
       0n,
     );
-    const chain: Edge[] = [capture(resources, resources.own(raw), drive, drive, true)];
+    const chain: Edge[] = [capture(resources, resources.own(raw), drive, drive, true, expected !== undefined)];
     let prefix = drive;
     for (const name of names) {
       prefix += (prefix.length === 3 ? '' : '\\') + name;
@@ -412,18 +408,171 @@ function openRootState(
           name,
           prefix,
           true,
+          expected !== undefined,
         ),
       );
     }
-    const final = chain[chain.length - 1],
-      info = projected(path, final.identity, true);
-    if (info.dev !== expected.dev || info.ino !== expected.ino) return fail('path');
+    if (expected) {
+      const info = projected(path, chain[chain.length - 1].identity, true);
+      if (info.dev !== expected.dev || info.ino !== expected.ino) return fail('path');
+    }
     const state: RootState = {resources, chain, path, active: true};
     checkRoot(state);
     return state;
   } catch (error) {
     resources.close();
     throw error;
+  }
+}
+export function openWindowsWriterRoot(
+  path: string,
+  expected: {readonly dev: bigint; readonly ino: bigint},
+): WindowsWriterRoot {
+  const state = openRootState(path, expected);
+  return {
+    path,
+    close() {
+      state.active = false;
+      state.resources.close();
+    },
+    openTarget: (segments, physical, bound) => openTarget(state, segments, physical, bound),
+  };
+}
+const sourceEvidenceBrand: unique symbol = Symbol('windows-source-evidence');
+/** Host-private evidence data. It owns no native resource and is never a writer grant. */
+export interface WindowsSourceEvidence {
+  readonly [sourceEvidenceBrand]: true;
+}
+/** Historical comparison data, not an authenticated certificate or a writer grant.
+ * Persisted callers must authenticate their complete private envelope before using this value.
+ */
+export interface WindowsSourceWitness {
+  readonly object: string;
+  readonly snapshot: string;
+}
+const sourceWitnesses = new WeakMap<WindowsSourceEvidence, WindowsSourceWitness>();
+const encodeWitness = (value: unknown) =>
+  JSON.stringify(value, (_, item) => (typeof item === 'bigint' ? String(item) : item));
+function witnessEdge(edge: Edge, metadata: boolean) {
+  const id = edge.identity;
+  return [
+    edge.name,
+    edge.path,
+    id.volumeId,
+    id.fileId,
+    id.birthtime,
+    metadata ? id : id.attributes & ~0x20,
+    edge.security.owner,
+    Array.from(edge.security.bytes),
+  ];
+}
+function sourceWitness(principal: string, edges: readonly Edge[], bytes: Uint8Array): WindowsSourceWitness {
+  return Object.freeze({
+    object: encodeWitness([principal, EffectArray.map(edges, edge => witnessEdge(edge, false))]),
+    snapshot: encodeWitness([principal, EffectArray.map(edges, edge => witnessEdge(edge, true)), sha256HexSync(bytes)]),
+  });
+}
+/** Only the original issuer object can export its immutable, already captured historical data. */
+export function exportWindowsSourceWitness(evidence: WindowsSourceEvidence): WindowsSourceWitness {
+  const witness = sourceWitnesses.get(evidence);
+  if (!witness) return fail('identity');
+  return Object.freeze({object: witness.object, snapshot: witness.snapshot});
+}
+export function sameWindowsSourceEvidence(
+  a: WindowsSourceEvidence,
+  b: WindowsSourceEvidence,
+  snapshot: boolean,
+): boolean {
+  const first = sourceWitnesses.get(a),
+    second = sourceWitnesses.get(b);
+  return (
+    first !== undefined &&
+    second !== undefined &&
+    (snapshot ? first.snapshot === second.snapshot : first.object === second.object)
+  );
+}
+/** One bounded read through retained native ancestry. Source is opened read-only, with no mutation capability. */
+export function captureWindowsSource(
+  path: string,
+  segments: readonly string[],
+  bound: number,
+): {
+  readonly bytes: Uint8Array;
+  readonly physicalIdentity: string;
+  readonly evidence: WindowsSourceEvidence;
+} {
+  if (
+    !segments.length ||
+    segments.length > maximumComponents ||
+    !Number.isSafeInteger(bound) ||
+    bound < 0 ||
+    bound > maximumBytes
+  )
+    return fail('path');
+  for (const name of segments) windowsPathComponent(name);
+  const root = openRootState(path),
+    resources = root.resources;
+  try {
+    const edges = [...root.chain];
+    let parent = edges[edges.length - 1],
+      targetPath = path;
+    for (const [index, name] of segments.entries()) {
+      targetPath = childPath(targetPath, name);
+      const directory = index < segments.length - 1;
+      const edge = capture(
+        resources,
+        resources.openAt(parent.resource, name, directory),
+        name,
+        targetPath,
+        directory,
+        false,
+      );
+      if (edge.identity.volumeId !== parent.identity.volumeId) return fail('path');
+      edges.push(edge);
+      parent = edge;
+    }
+    const target = edges[edges.length - 1];
+    const check = () => {
+      checkRoot(root);
+      for (const edge of edges)
+        if (!stable(edge.identity, windowsFileIdentity(resources.kernel, edge.resource.handle)))
+          return fail('source-changed');
+      for (let index = root.chain.length; index < edges.length; index++)
+        checkEdge(resources, edges[index], edges[index - 1], index < edges.length - 1);
+      const current = windowsFileIdentity(resources.kernel, target.resource.handle);
+      if (!stable(target.identity, current)) return fail('source-changed');
+    };
+    check();
+    if (target.identity.links !== 1 || target.identity.size < 0n || target.identity.size > BigInt(bound))
+      return fail('path');
+    const bytes = new Uint8Array(Number(target.identity.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const part = bytes.subarray(offset),
+        count = new Uint32Array(9),
+        backing = [bytes, part, count];
+      count.fill(0xa5a5a5a5);
+      resources.pendingBacking.add(backing);
+      const ok = resources.kernel.symbols.ReadFile(target.resource.handle, part, part.length, count, null);
+      const error = ok === 0 ? resources.kernel.symbols.GetLastError() : 0;
+      if (!count.subarray(1).every(value => value === 0xa5a5a5a5) || (ok === 0 && error === 997))
+        resources.uncertain(backing);
+      resources.pendingBacking.delete(backing);
+      if (ok === 0) return fail('io');
+      if (!count[0] || count[0] > part.length) return fail('source-changed');
+      offset += count[0];
+    }
+    check();
+    // Compatibility metadata is observed only; full native IDs above remain the authority.
+    const compatibility = native.lstatSync(targetPath, {bigint: true});
+    if (!compatibility.isFile() || compatibility.isSymbolicLink()) return fail('path');
+    check();
+    const evidence: WindowsSourceEvidence = Object.freeze({[sourceEvidenceBrand]: true as const});
+    sourceWitnesses.set(evidence, sourceWitness(resources.principal, edges, bytes));
+    return {bytes, evidence, physicalIdentity: JSON.stringify([String(compatibility.dev), String(compatibility.ino)])};
+  } finally {
+    root.active = false;
+    resources.close();
   }
 }
 function openTarget(
@@ -536,8 +685,43 @@ function openTarget(
       snapshots.set(observation, after);
       return observation;
     };
+    const compareWitness = (earlier: WindowsSourceWitness, exact: boolean) => {
+      // Read historical inputs before touching native state: even a reentrant getter cannot close
+      // this owner after our active checks and then turn a stale capability into a positive match.
+      const {object, snapshot} = earlier;
+      if (typeof object !== 'string' || typeof snapshot !== 'string') return false;
+      check();
+      const retained = [...root.chain, ...parents, edge],
+        opening = EffectArray.map(retained, (current, index) => {
+          const before = windowsFileIdentity(resources.kernel, current.resource.handle),
+            security = resources.securityOf(
+              current.resource.handle,
+              index < retained.length - 1 ? resources.servicingOwner : undefined,
+            ),
+            after = windowsFileIdentity(resources.kernel, current.resource.handle);
+          if (!stable(before, after)) return fail('source-changed');
+          return {...current, identity: after, security};
+        }),
+        observed = inspect();
+      for (const [index, current] of opening.entries()) {
+        const security = resources.securityOf(
+            current.resource.handle,
+            index < opening.length - 1 ? resources.servicingOwner : undefined,
+          ),
+          after = windowsFileIdentity(resources.kernel, current.resource.handle);
+        if (!stable(current.identity, after) || !sameSecurity(current.security, security))
+          return fail('source-changed');
+      }
+      check();
+      const current = sourceWitness(resources.principal, opening, observed.bytes);
+      // Compare the same retained root/target, never a fresh replacement capture. A match changes
+      // no eligibility state; journal-classified own-write recovery is a separate host boundary.
+      return object === current.object && (!exact || snapshot === current.snapshot);
+    };
     const target: WindowsWriterTarget = {
       inspect,
+      matchesSourceWitness: earlier => compareWitness(earlier, true),
+      observesSourceObject: earlier => compareWitness(earlier, false),
       commit(input) {
         const result = commitWriterTransaction(input, () => {
           check();
@@ -627,7 +811,7 @@ export function openWindowsPrivateDirectory(path: string): WindowsPrivateDirecto
   const expected = native.lstatSync(path, {bigint: true});
   return privateDirectory(openRootState(path, expected, true), true);
 }
-export function openWindowsPrivateAuthority(accountHome: string, principal: string): WindowsPrivateDirectory {
+function openWindowsAccountHome(accountHome: string, principal: string): WindowsPrivateDirectory {
   const current = windowsTokenPrincipal();
   if (current.sid !== principal || current.accountHome !== accountHome) return fail('identity');
   const expected = native.lstatSync(accountHome, {bigint: true});
@@ -636,11 +820,61 @@ export function openWindowsPrivateAuthority(accountHome: string, principal: stri
   try {
     if (state.resources.principal !== principal || state.chain[state.chain.length - 1].security.owner !== principal)
       return fail('identity');
+    return home;
+  } catch (error) {
+    home.close();
+    throw error;
+  }
+}
+export function openWindowsPrivateAuthority(accountHome: string, principal: string): WindowsPrivateDirectory {
+  const home = openWindowsAccountHome(accountHome, principal);
+  try {
     return home.child('.threadnote-writer-authority', true);
   } finally {
     home.close();
   }
 }
+/** Explicit setup: only the actual account home may supply nonprivate ancestor authority. */
+export function provisionWindowsPrivateDirectory(path: string): WindowsPrivateDirectory {
+  if (!/^[A-Za-z]:\\/u.test(path) || /[\p{Cc}]/u.test(path)) return fail('path');
+  const names = EffectString.split(EffectString.slice(3)(path), '\\');
+  if (names.length > maximumComponents) return fail('path');
+  for (const name of names) windowsPathComponent(name);
+  const missing: string[] = [];
+  let parent = path;
+  while (true) {
+    try {
+      native.lstatSync(parent, {bigint: true});
+      break;
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
+      const boundary = Option.getOrElse(EffectString.lastIndexOf('\\')(parent), () => -1);
+      if (boundary < 2 || parent.length === 3) return fail('path');
+      missing.unshift(EffectString.slice(boundary + 1)(parent));
+      parent = EffectString.slice(0, boundary === 2 ? 3 : boundary)(parent);
+    }
+  }
+  // An existing requested object always remains a strict private final object, including the account home.
+  if (!missing.length) return openWindowsPrivateDirectory(path);
+  const current = windowsTokenPrincipal();
+  let retained =
+    parent === current.accountHome
+      ? openWindowsAccountHome(current.accountHome, current.sid)
+      : openWindowsPrivateDirectory(parent);
+  try {
+    for (const name of missing) {
+      const child = retained.child(name, true);
+      retained.close();
+      retained = child;
+    }
+    if (retained.path !== path) return fail('path');
+    return retained;
+  } catch (error) {
+    retained.close();
+    throw error;
+  }
+}
+
 function privateDirectory(root: RootState, strict: boolean): WindowsPrivateDirectory {
   const resources = root.resources,
     parent = root.chain[root.chain.length - 1];

@@ -1,7 +1,15 @@
 import {Array as EffectArray, Clock, Effect, FileSystem, Option, Path, Schema, String as EffectString} from 'effect';
 import {SecureRandom} from 'effect/crypto';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {withExclusiveFileLock, withExclusiveFileLockLease} from '@threadnote/platform/file/lock';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
+import {hmacSha256Hex, constantTimeHexEqual} from '@threadnote/platform/hmac';
+import * as Native from '@threadnote/platform/system';
+import {
+  WindowsProofClosure,
+  WindowsSourceProof,
+  windowsProofDigest,
+  assertWindowsProofTargets,
+} from './source_evidence.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   runtimeDirectoryNamePage,
@@ -41,6 +49,52 @@ const blobSchema = Schema.Struct({
   expiresAt: timestamp,
   proposal: Schema.Unknown,
 });
+export const WindowsRetainedProof = Schema.Struct({
+  version: Schema.Literal(2),
+  id: hex,
+  proposalDigest: hex,
+  capabilityHash: hex,
+  binding: hex,
+  namespace: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+  createdAt: timestamp,
+  expiresAt: timestamp,
+  proof: WindowsProofClosure,
+  proofDigest: hex,
+});
+export type WindowsRetainedProof = typeof WindowsRetainedProof.Type;
+const windowsBlob = Schema.Struct({...WindowsRetainedProof.fields, proposal: Schema.Unknown});
+const windowsVerifier = (capability: string, entry: WindowsRetainedProof) =>
+  hmacSha256Hex(
+    capability,
+    JSON.stringify([
+      'threadnote-semantic-preview-windows-v2',
+      entry.id,
+      entry.proposalDigest,
+      entry.binding,
+      entry.namespace,
+      entry.createdAt,
+      entry.expiresAt,
+      entry.proofDigest,
+    ]),
+  );
+/** Authenticates historical data only. Caller still checks current scope, namespace and eligibility. */
+export function authenticateWindowsRetainedProof(
+  handle: SemanticProposalHandle,
+  binding: string,
+  raw: unknown,
+): WindowsRetainedProof {
+  const entry = Schema.decodeUnknownSync(WindowsRetainedProof, {onExcessProperty: 'error'})(raw);
+  if (
+    entry.id !== handle.id ||
+    entry.proposalDigest !== handle.digest ||
+    entry.binding !== binding ||
+    entry.expiresAt !== entry.createdAt + semanticProposalStoreLimits.ttlMilliseconds ||
+    entry.proofDigest !== windowsProofDigest(entry.proof) ||
+    !constantTimeHexEqual(entry.capabilityHash, windowsVerifier(handle.capability, entry))
+  )
+    throw reject();
+  return entry;
+}
 const imagesSchema = Schema.Struct({
   digest: hex,
   targets: Schema.Array(Schema.Struct({afterText: Schema.String})).check(Schema.isMaxLength(1000)),
@@ -100,6 +154,7 @@ const buildSemanticProposalStore = Effect.fn('semantic.makeProposalStore')(funct
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
   const system = yield* SystemInfo;
+  if (Native.runtimePlatform === 'win32') return yield* buildWindowsProposalStore(options);
   const directory = path.resolve(options.directory);
   const namespace = options.namespace;
   if (
@@ -264,7 +319,7 @@ const buildSemanticProposalStore = Effect.fn('semantic.makeProposalStore')(funct
       ),
       Effect.mapError(error => (Schema.is(LspFault)(error) ? error : reject())),
     );
-  const retain = (proposal: SemanticProposal, binding: string) =>
+  const retain = (proposal: SemanticProposal, binding: string, _proof?: WindowsSourceProof) =>
     locked(
       Effect.gen(function* () {
         if (!Schema.is(hex)(binding)) return yield* reject();
@@ -332,6 +387,7 @@ const buildSemanticProposalStore = Effect.fn('semantic.makeProposalStore')(funct
           createdAt: entry.createdAt,
           expiresAt: entry.expiresAt,
           stale: entry.namespace !== namespace,
+          windows: undefined as WindowsRetainedProof | undefined,
         };
       }),
     );
@@ -364,3 +420,213 @@ const buildSemanticProposalStore = Effect.fn('semantic.makeProposalStore')(funct
 
 export const makeSemanticProposalStore = (options: {readonly directory: string; readonly namespace: string}) =>
   buildSemanticProposalStore(options).pipe(Effect.mapError(() => reject()));
+
+const buildWindowsProposalStore = Effect.fn('semantic.makeWindowsProposalStore')(function* (options: {
+  directory: string;
+  namespace: string;
+}) {
+  const fs = yield* FileSystem.FileSystem,
+    path = yield* Path.Path,
+    random = yield* SecureRandom.SecureRandom;
+  if (path.resolve(options.directory) !== options.directory || !options.namespace || options.namespace.length > 512)
+    return yield* reject();
+  const nativeSync = <A>(operation: () => A) => Effect.try({try: operation, catch: reject});
+  const own = (operation: () => Native.RuntimePrivateWriterDirectory) =>
+    Effect.acquireRelease(nativeSync(operation), directory =>
+      Effect.sync(() => Native.runtimeClosePrivateWriterDirectory(directory)),
+    );
+  const directory = yield* own(() => Native.runtimeProvisionPrivateWriterDirectory(options.directory));
+  const current = () => Native.runtimeAssertPrivateWriterDirectoryCurrent(directory);
+  const token = () => random.randomBytes(32).pipe(Effect.map(tokenText));
+  const read = (name: string, maximum: number) =>
+    nativeSync(() => Native.runtimeReadPrivateWriterFile(directory, name, maximum));
+  const names = Effect.gen(function* () {
+    yield* nativeSync(current);
+    const page = yield* native(() => runtimeDirectoryNamePage(directory.path, 72));
+    yield* nativeSync(current);
+    if (page.overflow) return yield* capacity();
+    return yield* validate(() =>
+      EffectArray.map(page.names, bytes => new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
+    );
+  });
+  let lastNow = 0;
+  const locked = <A, E, R>(use: (assertCurrent: () => void) => Effect.Effect<A, E, R>) =>
+    withExclusiveFileLockLease(
+      fs,
+      path.join(directory.path, 'store.lock'),
+      {
+        privateDirectory: directory,
+        createParentDirectory: false,
+        allowUnverifiedStaleRecovery: false,
+        retryIntervalMilliseconds: 10,
+        waitTimeoutMilliseconds: 2000,
+        staleAfterMilliseconds: 60000,
+        useCanonicalProcessStartIdentity: true,
+        assertParentCurrent: current,
+      },
+      lease =>
+        Effect.uninterruptible(
+          use(() => {
+            current();
+            lease.assertCurrentSync();
+          }),
+        ),
+    );
+  const publish = (name: string, value: unknown, mode: 'exclusive' | 'replace', assertCurrent: () => void) =>
+    Effect.gen(function* () {
+      const encoded = new TextEncoder().encode(JSON.stringify(value));
+      if (encoded.length > semanticProposalStoreLimits.maxBlobBytes) return yield* capacity();
+      const nonce = yield* token();
+      const result = yield* nativeSync(() =>
+        Native.runtimePublishPrivateWriterFile(directory, name, encoded, {
+          mode,
+          nonce,
+          assertCurrentSync: assertCurrent,
+        }),
+      );
+      if (result.status !== 'published') return yield* reject();
+    });
+  const remove = (name: string, assertCurrent: () => void) =>
+    Effect.gen(function* () {
+      const file = yield* read(name, semanticProposalStoreLimits.maxBlobBytes);
+      if (!file) return yield* reject();
+      yield* nativeSync(() => Native.runtimeRemovePrivateWriterFile(directory, name, file.identity, assertCurrent));
+    });
+  const readBlob = (id: string) =>
+    Effect.gen(function* () {
+      const file = yield* read(id + '.json', semanticProposalStoreLimits.maxBlobBytes);
+      if (!file) return yield* reject();
+      const entry = yield* validate(() =>
+        Schema.decodeUnknownSync(windowsBlob, {onExcessProperty: 'error'})(decodeText(file.bytes)),
+      );
+      if (
+        entry.id !== id ||
+        entry.expiresAt !== entry.createdAt + semanticProposalStoreLimits.ttlMilliseconds ||
+        entry.proofDigest !== windowsProofDigest(entry.proof)
+      )
+        return yield* reject();
+      return entry;
+    });
+  const nowChecked = (assertCurrent: () => void) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      if (!Schema.is(timestamp)(now)) return yield* reject();
+      const previous = yield* read('clock.json', 128);
+      const recorded = previous
+        ? (yield* validate(() =>
+            Schema.decodeUnknownSync(clockSchema, {onExcessProperty: 'error'})(decodeText(previous.bytes)),
+          )).now
+        : 0;
+      if (!previous && EffectArray.some(yield* names, name => /^[a-f0-9]{64}\.json$/u.test(name)))
+        return yield* reject();
+      if (now < lastNow || now < recorded) return yield* reject();
+      yield* publish('clock.json', {version: 1, now}, previous ? 'replace' : 'exclusive', assertCurrent);
+      lastNow = now;
+      return now;
+    });
+  const pruneAt = (now: number, assertCurrent: () => void) =>
+    Effect.gen(function* () {
+      let bytes = 0,
+        count = 0;
+      for (const name of yield* names) {
+        if (name === 'clock.json' || name === 'store.lock') continue;
+        // A retained native UNKNOWN temporary is quarantined, never assumed to be an owned POSIX hardlink.
+        if (!/^[a-f0-9]{64}\.json$/u.test(name)) return yield* reject();
+        const entry = yield* readBlob(EffectString.slice(0, -5)(name));
+        if (now >= entry.expiresAt || now < entry.createdAt) yield* remove(name, assertCurrent);
+        else {
+          const file = yield* read(name, semanticProposalStoreLimits.maxBlobBytes);
+          bytes += file?.bytes.length ?? 0;
+          count++;
+        }
+      }
+      if (bytes > semanticProposalStoreLimits.maxRetainedBytes || count > semanticProposalStoreLimits.maxProposals)
+        return yield* capacity();
+      return {bytes, count};
+    });
+  return {
+    retain: (proposal: SemanticProposal, binding: string, proof?: WindowsSourceProof) =>
+      locked(assertCurrent =>
+        Effect.gen(function* () {
+          if (!Schema.is(hex)(binding)) return yield* reject();
+          const verified = yield* validate(() => verifyProposal(proposal));
+          const closure: WindowsProofClosure =
+            proof === undefined
+              ? {kind: 'absent'}
+              : {
+                  kind: 'complete',
+                  proof: yield* validate(() =>
+                    Schema.decodeSync(WindowsSourceProof, {onExcessProperty: 'error'})(proof),
+                  ),
+                };
+          if (closure.kind === 'complete') yield* validate(() => assertWindowsProofTargets(closure.proof, verified));
+          const proofDigest = yield* validate(() => windowsProofDigest(closure));
+          const now = yield* nowChecked(assertCurrent),
+            quota = yield* pruneAt(now, assertCurrent),
+            id = yield* token(),
+            capability = yield* token();
+          const entry: WindowsRetainedProof = {
+            version: 2,
+            id,
+            proposalDigest: verified.digest,
+            binding,
+            namespace: options.namespace,
+            createdAt: now,
+            expiresAt: now + semanticProposalStoreLimits.ttlMilliseconds,
+            proof: closure,
+            proofDigest,
+            capabilityHash: '',
+          };
+          const envelope = {...entry, capabilityHash: windowsVerifier(capability, entry), proposal: verified};
+          const size = new TextEncoder().encode(JSON.stringify(envelope)).length;
+          if (
+            size > semanticProposalStoreLimits.maxBlobBytes ||
+            quota.bytes + size > semanticProposalStoreLimits.maxRetainedBytes ||
+            quota.count >= semanticProposalStoreLimits.maxProposals
+          )
+            return yield* capacity();
+          yield* publish(id + '.json', envelope, 'exclusive', assertCurrent);
+          return {handle: {id, digest: verified.digest, capability}, createdAt: now, expiresAt: entry.expiresAt};
+        }),
+      ),
+    get: (handle: SemanticProposalHandle, binding: string) =>
+      locked(assertCurrent =>
+        Effect.gen(function* () {
+          yield* validate(() => Schema.decodeSync(handleSchema, {onExcessProperty: 'error'})(handle));
+          const now = yield* nowChecked(assertCurrent);
+          yield* pruneAt(now, assertCurrent);
+          const raw = yield* readBlob(handle.id);
+          const {proposal: data, ...sealed} = raw;
+          const entry = yield* validate(() => authenticateWindowsRetainedProof(handle, binding, sealed));
+          const proposal = yield* validate(() => verifyProposal(data));
+          if (proposal.digest !== handle.digest || now < entry.createdAt || now >= entry.expiresAt)
+            return yield* reject();
+          const closure = entry.proof;
+          if (closure.kind === 'complete') yield* validate(() => assertWindowsProofTargets(closure.proof, proposal));
+          if ((yield* nowChecked(assertCurrent)) >= entry.expiresAt) return yield* reject();
+          return {
+            proposal,
+            createdAt: entry.createdAt,
+            expiresAt: entry.expiresAt,
+            stale: entry.namespace !== options.namespace,
+            windows: entry,
+          };
+        }),
+      ),
+    discard: (handle: SemanticProposalHandle, binding: string) =>
+      locked(assertCurrent =>
+        Effect.gen(function* () {
+          const {proposal: _proposal, ...sealed} = yield* readBlob(handle.id);
+          const entry = yield* validate(() => authenticateWindowsRetainedProof(handle, binding, sealed));
+          if (entry.namespace !== options.namespace) return yield* reject();
+          yield* remove(handle.id + '.json', assertCurrent);
+        }),
+      ),
+    prune: () =>
+      locked(assertCurrent =>
+        Effect.gen(function* () {
+          yield* pruneAt(yield* nowChecked(assertCurrent), assertCurrent);
+        }),
+      ),
+  };
+});

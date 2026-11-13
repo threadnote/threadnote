@@ -1,4 +1,5 @@
 /* oxlint-disable effecttsgo/strict-effect-provide -- Each test is a scoped native filesystem/authority entrypoint with one narrow layer. */
+import {dlopen} from 'bun:ffi';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {
@@ -8,10 +9,12 @@ import {
   Deferred,
   Fiber,
   Effect,
+  Exit,
   FileSystem,
   Layer,
   Path,
   Predicate,
+  Option,
   Record as EffectRecord,
   Schema,
   String as EffectString,
@@ -19,6 +22,7 @@ import {
 import {TestClock} from 'effect/testing';
 import {describe, expect, vi} from 'vitest';
 import {cryptoLayer} from '@threadnote/platform/crypto';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import * as Native from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -28,13 +32,32 @@ import {
   runtimeClosePrivateWriterDirectory,
   runtimePublishPrivateWriterFile,
 } from '@threadnote/platform/system';
+import {observationKey, type QueryOutcome} from '@threadnote/semantic/contracts';
+import {makeSemanticProposalStore} from '../../src/semantic/proposal_store.js';
+import {
+  WindowsSourceProof,
+  makeWindowsSemanticSources,
+  takeSemanticPrepared,
+  SemanticSessionFault,
+} from '../../src/semantic/source_evidence.js';
+import {
+  prepareSemanticEndpointDirectory,
+  withSemanticEndpointLock,
+  readSemanticEndpointBootstrap,
+  publishSemanticEndpointBootstrap,
+} from '../../src/semantic/admission.js';
 import {createSemanticProposal} from '@threadnote/semantic/proposals';
 import {restoreApplyJournal} from '@threadnote/semantic/journal';
 import {makeSemanticWriterAuthorityFromDirectory} from '../../src/semantic/writer_authority.js';
 import {makeSemanticHostWriterFromAuthority} from '../../src/semantic/writer.js';
-import {semanticHostProfileName} from '../../src/semantic/host_profile.js';
+import {
+  semanticHostProfileName,
+  writeSemanticHostProfile,
+  inspectSemanticHostProfile,
+} from '../../src/semantic/host_profile.js';
+import {makeSemanticAgentChanges} from '../../src/semantic/agent_changes.js';
 import type {SemanticRequest} from '../../src/semantic/coordinator.js';
-import {SemanticWriterAdmissionRequest} from '../../src/semantic/agent_change_protocol.js';
+import {SemanticWriterAdmissionRequest, SemanticWriterProposal} from '../../src/semantic/agent_change_protocol.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, cryptoLayer);
@@ -53,16 +76,72 @@ const reorderObjectKeys = (value: unknown, shifts: readonly number[], depth = 0)
     ]),
   );
 };
+const protectedFixtureRoot = (parent: string): string => {
+  const kernel = dlopen('kernel32.dll', {
+    GetSystemDirectoryW: {args: ['buffer', 'u32'], returns: 'u32'},
+    CreateDirectoryW: {args: ['buffer', 'buffer'], returns: 'i32'},
+    LocalFree: {args: ['u64'], returns: 'u64'},
+  });
+  const wide = (text: string) => {
+    const result = new Uint16Array(text.length + 1);
+    for (let index = 0; index < text.length; index++)
+      result[index] = Option.getOrElse(EffectString.charCodeAt(index)(text), () => 0);
+    return result;
+  };
+  const system = new Uint16Array(32768),
+    count = kernel.symbols.GetSystemDirectoryW(system, system.length);
+  expect(count > 2 && count < system.length).toBe(true);
+  const systemPath = new TextDecoder('utf-16le').decode(new Uint8Array(system.buffer, 0, count * 2));
+  const security = dlopen(systemPath + '\\advapi32.dll', {
+    ConvertStringSecurityDescriptorToSecurityDescriptorW: {args: ['buffer', 'u32', 'buffer', 'ptr'], returns: 'i32'},
+  });
+  const descriptor = new BigUint64Array(1),
+    path = parent + '\\protected';
+  try {
+    const principal = Native.runtimeReadStableOsUserIdentity().userId;
+    expect(
+      security.symbols.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        wide(`O:${principal}D:P(A;;FA;;;${principal})`),
+        1,
+        descriptor,
+        null,
+      ),
+    ).toBe(1);
+    const attributes = new BigUint64Array(3);
+    new DataView(attributes.buffer).setUint32(0, 24, true);
+    attributes[1] = descriptor[0];
+    expect(kernel.symbols.CreateDirectoryW(wide(path), attributes)).toBe(1);
+    return process.getBuiltinModule('fs').realpathSync(path);
+  } finally {
+    if (descriptor[0] !== 0n) expect(kernel.symbols.LocalFree(descriptor[0])).toBe(0n);
+    security.close();
+    kernel.close();
+  }
+};
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const directory = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-real-writer-'}));
+  const temporaryDirectory = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-real-writer-'}));
+  const directory =
+    Native.runtimePlatform === 'win32'
+      ? yield* Effect.sync(() => protectedFixtureRoot(temporaryDirectory))
+      : temporaryDirectory;
   const root = path.join(directory, 'repository');
   const sourceRoot = path.join(root, 'project');
   const home = path.join(directory, 'private');
   const authorityHome = path.join(directory, 'authority');
-  for (const folder of [root, sourceRoot, home, authorityHome]) yield* fs.makeDirectory(folder, {mode: 0o700});
+  if (Native.runtimePlatform === 'win32') {
+    const base = yield* Effect.acquireRelease(
+      Effect.sync(() => Native.runtimeOpenPrivateWriterDirectory(directory)),
+      value => Effect.sync(() => Native.runtimeClosePrivateWriterDirectory(value)),
+    );
+    for (const name of ['private', 'authority']) {
+      const child = Native.runtimeOpenPrivateWriterChild(base, name, true);
+      Native.runtimeClosePrivateWriterDirectory(child);
+    }
+    for (const folder of [root, sourceRoot]) yield* fs.makeDirectory(folder, {mode: 0o700});
+  } else for (const folder of [root, sourceRoot, home, authorityHome]) yield* fs.makeDirectory(folder, {mode: 0o700});
   const worktree = (yield* path.toFileUrl(root)).href;
   const config = {
     account: 'local',
@@ -73,8 +152,12 @@ const fixture = Effect.gen(function* () {
   };
   const principal = EffectString.slice(0, -5)(semanticHostProfileName(config, worktree));
   const profile = JSON.stringify({version: 1, enabled: true, worktree, catalog: {}});
-  yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
-  yield* fs.writeFileString(path.join(home, 'semantic', 'profiles', principal + '.json'), profile, {mode: 0o600});
+  if (Native.runtimePlatform === 'win32') {
+    yield* writeSemanticHostProfile(config, worktree, {version: 1, enabled: true, worktree, catalog: {}});
+  } else {
+    yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
+    yield* fs.writeFileString(path.join(home, 'semantic', 'profiles', principal + '.json'), profile, {mode: 0o600});
+  }
   const sources = ['export const old = 1;\r\n', 'export const old = 2;\n'];
   const targets = [];
   for (const [index, beforeText] of sources.entries()) {
@@ -135,9 +218,15 @@ const fixture = Effect.gen(function* () {
     boot: sha256HexSync('fixture-boot'),
     runtimeIdentity: sha256HexSync('fixture-runtime'),
   };
-  const handle = {id: sha256HexSync('preview'), digest: proposal.digest, capability: sha256HexSync('read-capability')};
+  let handle = {id: sha256HexSync('preview'), digest: proposal.digest, capability: sha256HexSync('read-capability')};
   const scope = {root, worktree, home, principal};
-  const resolved = {
+  const resolved: {
+    proposal: typeof proposal;
+    session: typeof session;
+    profile: string;
+    expiresAt: number;
+    windows?: import('../../src/semantic/proposal_store.js').WindowsRetainedProof;
+  } = {
     proposal,
     session,
     profile: sha256HexSync(profile),
@@ -149,6 +238,45 @@ const fixture = Effect.gen(function* () {
   );
   const authority = yield* makeSemanticWriterAuthorityFromDirectory(guardedDirectory);
   const writer = yield* makeSemanticHostWriterFromAuthority(authority);
+  if (Native.runtimePlatform === 'win32') {
+    const proof: WindowsSourceProof = {
+      version: 1,
+      platform: 'win32',
+      targets: EffectArray.map(proposal.targets, (target, ordinal) => {
+        const captured = Native.runtimeCaptureWindowsSource(root, ['project', `${ordinal}.ts`], 4 * 1024 * 1024);
+        return {
+          ordinal,
+          uri: target.observation.uri,
+          rawDigest: sha256HexSync(captured.bytes),
+          observationKey: observationKey(target.observation),
+          ...Native.runtimeExportWindowsSourceWitness(captured.evidence),
+        };
+      }),
+    };
+    const store = yield* makeSemanticProposalStore({directory: path.join(home, 'proposals'), namespace: session.boot});
+    const binding = sha256HexSync(JSON.stringify([worktree, principal, resolved.profile, session.runtimeIdentity]));
+    const retained = yield* store.retain(proposal, binding, proof);
+    handle = retained.handle;
+    const historical = yield* store.get(handle, binding);
+    const transferred = yield* Schema.decodeUnknownEffect(SemanticWriterProposal, {onExcessProperty: 'error'})(
+      JSON.parse(
+        JSON.stringify({
+          version: 2,
+          status: 'writer-proposal',
+          worktree,
+          principal,
+          profile: resolved.profile,
+          proposal: historical.proposal,
+          session,
+          expiresAt: historical.expiresAt,
+          windows: historical.windows,
+        }),
+      ),
+    );
+    if (transferred.version !== 2) return yield* Effect.die('Windows private resolve version missing');
+    resolved.windows = transferred.windows;
+    resolved.expiresAt = transferred.expiresAt;
+  }
   const admissionRequest = {
     version: 1 as const,
     callerCwd: root,
@@ -997,4 +1125,345 @@ effectIt.effect.skipIf(!supported)(
       }),
     ).pipe(Effect.provide(layer)),
   10000,
+);
+
+// Exact owning Windows private store→Admission→retained source mutation→lost-ack recovery boundary.
+// It uses synthetic provider edits and real native source history; it is not provider/platform GA evidence.
+effectIt.effect.skipIf(process.platform !== 'win32')(
+  'retains Windows v2 native history and reconciles lost result acknowledgement without replaying later edits',
+  () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        expect(Native.runtimeNativePlatformSupport().writer).toBe(false);
+        expect(f.resolved.windows?.proof.kind).toBe('complete');
+        const handle = yield* f.admit(),
+          record = yield* f.writer.resolve(f.scope, handle);
+        expect(record.version).toBe(2);
+        let withheld = false;
+        const original = Native.runtimePublishPrivateWriterFile;
+        const publish = vi
+          .spyOn(Native, 'runtimePublishPrivateWriterFile')
+          .mockImplementation((directory, name, bytes, input) => {
+            const result = original(directory, name, bytes, input);
+            if (
+              !withheld &&
+              result.status === 'published' &&
+              EffectString.endsWith('.journal.json')(name) &&
+              EffectString.includes('"state":"applied"')(new TextDecoder().decode(bytes))
+            ) {
+              withheld = true;
+              throw new Error('Fixture lost result acknowledgement');
+            }
+            return result;
+          });
+        const mutate = vi.spyOn(Native, 'runtimeCommitGuardedDiskTarget');
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            publish.mockRestore();
+            mutate.mockRestore();
+          }),
+        );
+        yield* f.writer.apply(f.scope, handle, record, f.refresh);
+        expect(withheld).toBe(true);
+        expect(mutate).toHaveBeenCalledTimes(1);
+        yield* f.fs.writeFileString(f.path.join(f.sourceRoot, '0.ts'), 'later Windows edit');
+        const recovered = yield* f.writer.recover(f.scope, handle, record);
+        expect(recovered.targets[0].observed).toBe('diverged');
+        yield* f.writer.apply(f.scope, handle, record, () => Effect.die('Existing operation must not refresh'));
+        expect(mutate).toHaveBeenCalledTimes(1);
+        expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, '0.ts'))).toBe('later Windows edit');
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+// Exact native bootstrap boundary, without spawning any provider or coordinator child.
+effectIt.effect.skipIf(process.platform !== 'win32')(
+  'authenticates the endpoint directory and lease before native bootstrap publication and preserves occupied bytes',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const directory = f.path.join(f.home, 'semantic', 'endpoint-fixture');
+      const retained = yield* prepareSemanticEndpointDirectory(directory);
+      const value = '{"version":1,"bootstrap":"private fixture"}';
+      yield* withSemanticEndpointLock(directory, retained, 'startup.lock', 250, assertCurrentSync =>
+        publishSemanticEndpointBootstrap(directory, retained, value, assertCurrentSync),
+      );
+      expect(yield* readSemanticEndpointBootstrap(f.path.join(directory, 'host.json'))).toBe(value);
+      const occupied = Native.runtimeReadPrivateWriterFile(retained!, 'host.json', 16 * 1024)!;
+      expect(
+        (yield* withSemanticEndpointLock(directory, retained, 'startup.lock', 250, assertCurrentSync =>
+          publishSemanticEndpointBootstrap(directory, retained, 'foreign replacement', assertCurrentSync),
+        ).pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      // Failed publication conserves its one-shot capability; a separate reader only observes the occupied value.
+      const inspection = yield* prepareSemanticEndpointDirectory(directory, false);
+      const after = Native.runtimeReadPrivateWriterFile(inspection!, 'host.json', 16 * 1024)!;
+      expect(after.bytes).toEqual(occupied.bytes);
+      expect(after.identity).toEqual(occupied.identity);
+      const failedDirectory = f.path.join(f.home, 'semantic', 'endpoint-lost-lease');
+      const failed = yield* prepareSemanticEndpointDirectory(failedDirectory);
+      expect(
+        (yield* publishSemanticEndpointBootstrap(failedDirectory, failed, value, () => {
+          throw new Error('Fixture lease lost before mutation');
+        }).pipe(Effect.result))._tag,
+      ).toBe('Failure');
+      expect(yield* f.fs.exists(f.path.join(failedDirectory, 'host.json'))).toBe(false);
+    }).pipe(TestClock.withLive, Effect.provide(layer)),
+);
+
+// Setup may provision missing protected children beneath the actual OS account home, never repair that home's ACL.
+effectIt.effect.skipIf(process.platform !== 'win32')(
+  'cold Windows setup creates its private home from the actual account-home owner while inspection stays read-only',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const account = Native.runtimeReadStableOsUserIdentity();
+      const nativeFs = process.getBuiltinModule('fs');
+      for (const failAfterSetup of [false, true]) {
+        const home = f.path.join(
+          account.accountHome,
+          '.threadnote-host-setup-test-' +
+            EffectString.slice(0, 24)(sha256HexSync(f.directory)) +
+            (failAfterSetup ? '-failure' : '-success'),
+        );
+        expect(yield* f.fs.exists(home)).toBe(false);
+        const config = {
+          account: 'local',
+          user: 'writer-test',
+          agentId: 'test',
+          agentContextHome: home,
+          manifestPath: f.path.join(home, 'manifest.json'),
+        };
+        const profile = {version: 1, enabled: true, worktree: f.scope.worktree, catalog: {}};
+        const name = semanticHostProfileName(config, f.scope.worktree);
+        const result = yield* Effect.scoped(
+          Effect.gen(function* () {
+            let attempted = false,
+              pending = false;
+            let root: Native.RuntimePrivateWriterDirectory | undefined;
+            let semantic: Native.RuntimePrivateWriterDirectory | undefined;
+            let profiles: Native.RuntimePrivateWriterDirectory | undefined;
+            let profileIdentity: Native.RuntimeWriterIdentity | undefined;
+            let occupiedIdentity: Native.RuntimeWriterIdentity | undefined;
+            // Register before setup can create anything outside the scoped temporary fixture.
+            yield* Effect.addFinalizer(exit =>
+              Effect.gen(function* () {
+                const cleanup = yield* Effect.try(() => {
+                  if (!attempted) return;
+                  if (pending || !root || !semantic || !profiles || !profileIdentity)
+                    throw new Error('Cold setup ownership or I/O is unconfirmed');
+                  const assertOwned = () => {
+                    Native.runtimeAssertPrivateWriterDirectoryCurrent(root!);
+                    Native.runtimeAssertPrivateWriterDirectoryCurrent(semantic!);
+                    Native.runtimeAssertPrivateWriterDirectoryCurrent(profiles!);
+                  };
+                  assertOwned();
+                  // Exact known tree only: any foreign entry or pending publication conserves the whole fixture.
+                  expect(nativeFs.readdirSync(home).sort()).toEqual(
+                    occupiedIdentity ? ['semantic', 'unsafe-existing'] : ['semantic'],
+                  );
+                  expect(nativeFs.readdirSync(semantic.path)).toEqual(['profiles']);
+                  expect(nativeFs.readdirSync(profiles.path)).toEqual([name]);
+                  Native.runtimeRemovePrivateWriterFile(profiles, name, profileIdentity, assertOwned);
+                  if (occupiedIdentity)
+                    Native.runtimeRemovePrivateWriterFile(root, 'unsafe-existing', occupiedIdentity, assertOwned);
+                  // Empty-directory removal is synchronous and immediately preceded by retained native identity/security proof.
+                  Native.runtimeAssertPrivateWriterDirectoryCurrent(profiles);
+                  nativeFs.rmdirSync(profiles.path);
+                  Native.runtimeClosePrivateWriterDirectory(profiles);
+                  profiles = undefined;
+                  Native.runtimeAssertPrivateWriterDirectoryCurrent(semantic);
+                  nativeFs.rmdirSync(semantic.path);
+                  Native.runtimeClosePrivateWriterDirectory(semantic);
+                  semantic = undefined;
+                  Native.runtimeAssertPrivateWriterDirectoryCurrent(root);
+                  nativeFs.rmdirSync(home);
+                  Native.runtimeClosePrivateWriterDirectory(root);
+                  root = undefined;
+                }).pipe(Effect.result);
+                if (cleanup._tag === 'Failure') {
+                  // Never retry/delete/close a foreign, uncertain or pending-I/O tree; preserve the original test failure.
+                  yield* Effect.logError(
+                    'Retained cold Windows setup fixture: ownership or I/O cleanup remains unconfirmed',
+                  );
+                  if (Exit.isSuccess(exit))
+                    return yield* Effect.die(new Error('Cold Windows fixture retained for inspection'));
+                }
+              }),
+            );
+            expect((yield* inspectSemanticHostProfile(config, f.scope.worktree).pipe(Effect.result))._tag).toBe(
+              'Failure',
+            );
+            expect(yield* f.fs.exists(home)).toBe(false);
+            // Setup and its ownership receipt form one uninterruptible acquisition cut, with release already registered.
+            yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                attempted = true;
+                pending = true;
+                yield* writeSemanticHostProfile(config, f.scope.worktree, profile);
+                yield* Effect.sync(() => {
+                  root = Native.runtimeOpenPrivateWriterDirectory(home);
+                  semantic = Native.runtimeOpenPrivateWriterChild(root, 'semantic', false);
+                  profiles = Native.runtimeOpenPrivateWriterChild(semantic, 'profiles', false);
+                  const file = Native.runtimeReadPrivateWriterFile(profiles, name, 16 * 1024);
+                  expect(file?.bytes).toEqual(new TextEncoder().encode(JSON.stringify(profile)));
+                  profileIdentity = file!.identity;
+                  pending = false;
+                });
+              }),
+            );
+            if (failAfterSetup) return yield* Effect.fail('Controlled failure after owned cold setup');
+            expect((yield* inspectSemanticHostProfile(config, f.scope.worktree)).profile).toEqual(profile);
+            const occupied = f.path.join(home, 'unsafe-existing');
+            yield* Effect.sync(() => {
+              pending = true;
+              const published = Native.runtimePublishPrivateWriterFile(
+                root!,
+                'unsafe-existing',
+                new TextEncoder().encode('FOREIGN_OCCUPIED_FIXTURE'),
+                {
+                  mode: 'exclusive',
+                  nonce: sha256HexSync('owned-cold-setup-sentinel'),
+                  assertCurrentSync: () => Native.runtimeAssertPrivateWriterDirectoryCurrent(root!),
+                },
+              );
+              expect(published.status).toBe('published');
+              if (published.status !== 'published') throw new Error('Fixture sentinel publication unconfirmed');
+              occupiedIdentity = published.identity;
+              pending = false;
+            });
+            const before = yield* f.fs.stat(occupied);
+            expect(() => Native.runtimeProvisionPrivateWriterDirectory(occupied)).toThrow();
+            expect(yield* f.fs.readFileString(occupied)).toBe('FOREIGN_OCCUPIED_FIXTURE');
+            const after = yield* f.fs.stat(occupied);
+            expect(after.ino).toEqual(before.ino);
+            expect(after.dev).toEqual(before.dev);
+            expect(after.birthtime).toEqual(before.birthtime);
+          }),
+        ).pipe(Effect.result);
+        if (failAfterSetup)
+          expect(result).toMatchObject({_tag: 'Failure', failure: 'Controlled failure after owned cold setup'});
+        else if (result._tag === 'Failure') return yield* Effect.fail(result.failure);
+        expect(yield* f.fs.exists(home)).toBe(false);
+      }
+    }).pipe(TestClock.withLive, Effect.provide(layer)),
+);
+
+// Synthetic provider result, genuine issuer FIRST capture and native protected store/publication path.
+effectIt.effect.skipIf(process.platform !== 'win32')(
+  'publishes only complete issued Windows FIRST proof and applies the final view fence before returning a preview',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const target = f.proposal.targets[0],
+        observed = target.observation,
+        text = f.sources[0];
+      const sources = yield* makeWindowsSemanticSources(f.root, observed, text);
+      const first = yield* sources.capture(observed.uri);
+      yield* sources.port.beforeUpsert(first, undefined);
+      yield* sources.port.bind(first, observed);
+      let missing = true,
+        rejectPublication = false,
+        assertions = 0;
+      const changes = yield* makeSemanticAgentChanges(
+        {
+          attach: () => Effect.succeed({observation: observed}),
+          use: () => Effect.die('Unexpected provider execution'),
+          usePrepared: () =>
+            Effect.gen(function* () {
+              const result: QueryOutcome = {
+                version: 1,
+                status: 'ok',
+                evidence: {
+                  basis: 'semantic',
+                  observation: observed,
+                  scope: 'project',
+                  completeness: 'complete',
+                  limitations: [],
+                },
+                items: [
+                  {
+                    kind: 'prepared-edit',
+                    operation: 'rename',
+                    sourceBasis: 'pre-request-synchronized-text-v1',
+                    files: [
+                      {
+                        uri: observed.uri,
+                        content: first.content,
+                        source: 'disk',
+                        observation: observed,
+                        beforeText: text,
+                        edits: [
+                          {range: {start: {line: 0, character: 13}, end: {line: 0, character: 16}}, newText: 'fresh'},
+                        ],
+                        precondition: {
+                          sourceKind: 'disk',
+                          rawDigest: observed.content,
+                          encoding: 'utf-8',
+                          physicalIdentity: target.precondition.physicalIdentity!,
+                          owner: observed.view.owner,
+                          documentVersion: null,
+                        },
+                      },
+                    ],
+                  },
+                ],
+              };
+              yield* sources.port.prepared(result, [{capture: first, observation: observed}]);
+              const taken = takeSemanticPrepared(result, sources, () => true);
+              if (taken.kind !== 'writer-prepared') return yield* Effect.die('Genuine FIRST fixture not issued');
+              return {
+                ...taken,
+                ...(missing ? {privateSourceProof: undefined} : {}),
+                assertCurrentSync: () => {
+                  assertions++;
+                  taken.assertCurrentSync();
+                  if (rejectPublication) throw SemanticSessionFault.make({reason: 'stale'});
+                },
+              };
+            }),
+          observe: () => Effect.succeed(observed),
+        },
+        {
+          directory: f.path.join(f.home, 'native-publication-fixture'),
+          profileHome: f.home,
+          worktree: f.scope.worktree,
+          runtimeIdentity: f.resolved.session.runtimeIdentity,
+        },
+      );
+      const request = {
+        version: 1 as const,
+        action: 'prepare' as const,
+        worktree: f.scope.worktree,
+        principal: f.scope.principal,
+        profile: f.resolved.profile,
+        project: observed.project,
+        uri: observed.uri,
+        language: 'typescript' as const,
+        operation: 'rename' as const,
+        position: {line: 0, character: 14},
+        newName: 'fresh',
+        milliseconds: 10000,
+        maxBytes: 65536,
+      };
+      expect(yield* changes.execute(request, observed)).toMatchObject({status: 'stale'});
+      expect(assertions).toBe(0);
+      missing = false;
+      rejectPublication = true;
+      expect(yield* changes.execute(request, observed)).toMatchObject({status: 'stale'});
+      expect(assertions).toBe(1);
+      rejectPublication = false;
+      const prepared = yield* changes.execute(request, observed);
+      expect(prepared).toMatchObject({status: 'ok', applicable: false, writerAuthorityRequired: true});
+      expect(assertions).toBe(2);
+      expect(JSON.stringify(prepared)).not.toMatch(
+        /privateSourceProof|fileId|volumeId|snapshot|native-publication-fixture/u,
+      );
+      expect(yield* f.fs.readFileString(f.path.join(f.sourceRoot, '0.ts'))).toBe(text);
+    }).pipe(
+      TestClock.withLive,
+      Effect.provideService(ChildEnvironmentPolicy, {sanitizeExternal: env => env, preserveIntendedChild: env => env}),
+      Effect.provide(layer),
+    ),
 );

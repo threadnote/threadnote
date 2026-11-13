@@ -19,7 +19,12 @@ import {sha256FileHex} from '@threadnote/platform/digest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import * as composedGoTransport from '../../src/semantic/lsp_transport.js';
 import {LspFault, makeLspClient, spawnLspWire, type LspClient} from '../../src/semantic/lsp_transport.js';
-import {makeSemanticNotifications, SemanticSessionFault, SemanticSetupFault} from '../../src/semantic/provider.js';
+import {
+  SemanticPrivateSourceEvidence,
+  makeSemanticNotifications,
+  SemanticSessionFault,
+  SemanticSetupFault,
+} from '../../src/semantic/provider.js';
 import {semanticSdkDigest, semanticTreeDigest} from '../../src/semantic/fingerprint.js';
 import {
   ensureSemanticEndpoint,
@@ -2569,4 +2574,68 @@ effectIt.effect('composes owned Go rename source closure and publication through
     }),
     Effect.provide(Layer.mergeAll(io, TestSystemInfoLayer)),
   ),
+);
+
+effectIt.effect(
+  'checks saved native source evidence before common-adapter reuse and keeps the original prepared object',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* goView;
+      const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+      const events: string[] = [];
+      let stale = false,
+        capturedResult: unknown;
+      const source = {uri: f.uri, text: f.text, content: basis.content, identity: 'same-pair'};
+      const client = goClient(method =>
+        method === 'textDocument/rename'
+          ? Effect.succeed({
+              documentChanges: [
+                {
+                  textDocument: {uri: f.uri, version: 1},
+                  edits: [{range: {start: {line: 1, character: 4}, end: {line: 1, character: 9}}, newText: 'next'}],
+                },
+              ],
+            })
+          : Effect.succeed(null),
+      );
+      const session = yield* makeGoSession(client, {
+        ...f.options,
+        basis,
+        captureEditSource: () =>
+          Effect.sync(() => {
+            events.push('capture');
+            return source;
+          }),
+      }).pipe(
+        Effect.provideService(SemanticPrivateSourceEvidence, {
+          beforeUpsert: (_capture, previous) =>
+            Effect.gen(function* () {
+              events.push(previous ? 'before-reuse' : 'before-first');
+              if (stale) return yield* SemanticSessionFault.make({reason: 'stale'});
+            }),
+          bind: (_capture, actual) =>
+            Effect.sync(() => {
+              events.push('bind:' + actual.projectEpoch);
+            }),
+          prepared: (result, rows) =>
+            Effect.sync(() => {
+              capturedResult = result;
+              expect(rows).toHaveLength(1);
+              expect(rows[0].capture).toBe(source);
+            }),
+        }),
+      );
+      const actual = yield* session.upsert(basis, f.text, 'go', 1000);
+      events.length = 0;
+      const reused = yield* session.upsert({...actual, projectEpoch: 999}, f.text, 'go', 1000);
+      expect(events).toEqual(['capture', 'before-reuse', 'bind:' + actual.projectEpoch]);
+      expect(reused.projectEpoch).toBe(actual.projectEpoch);
+      const result = yield* session.prepare('rename', actual, {line: 1, character: 5}, 'next', 1000);
+      expect(result.status).toBe('ok');
+      expect(capturedResult).toBe(result);
+      expect(events.slice(-2)).toEqual(['capture', 'bind:' + actual.projectEpoch]);
+      stale = true;
+      expect((yield* session.upsert(actual, f.text, 'go', 1000).pipe(Effect.exit))._tag).toBe('Failure');
+      expect(yield* session.available).toBe(false);
+    }).pipe(Effect.provide(io)),
 );

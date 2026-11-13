@@ -68,11 +68,18 @@ const native = <A>(operation: () => A) =>
           ),
   });
 
-const profileLocation = Effect.fn('semantic.profileLocation')(function* (config: RuntimeConfig, worktree: string) {
+const profileLocation = Effect.fn('semantic.profileLocation')(function* (
+  config: RuntimeConfig,
+  worktree: string,
+  create = false,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   if (!Schema.is(FileUri)(worktree)) return yield* reject('invalid');
-  const home = yield* fs.realPath(config.agentContextHome);
+  const home =
+    create && Native.runtimePlatform === 'win32' && !(yield* fs.exists(config.agentContextHome))
+      ? path.resolve(config.agentContextHome)
+      : yield* fs.realPath(config.agentContextHome);
   const root = yield* path.fromFileUrl(new URL(worktree));
   if (
     home !== path.resolve(config.agentContextHome) ||
@@ -90,14 +97,19 @@ const profileLocation = Effect.fn('semantic.profileLocation')(function* (config:
 /** Descriptor traversal proves ownership, identity and ACL privacy before any private bytes are read or created. */
 const openProfiles = Effect.fn('semantic.openProfiles')(function* (home: string, create: boolean) {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const own = (operation: () => Native.RuntimePrivateWriterDirectory) =>
     Effect.acquireRelease(native(operation), directory =>
       Effect.sync(() => Native.runtimeClosePrivateWriterDirectory(directory)),
     );
-  let directory = yield* own(() => Native.runtimeOpenPrivateWriterDirectory(home));
+  let directory = yield* own(() =>
+    create && Native.runtimePlatform === 'win32'
+      ? Native.runtimeProvisionPrivateWriterDirectory(home)
+      : Native.runtimeOpenPrivateWriterDirectory(home),
+  );
   for (const name of ['semantic', 'profiles']) {
     const parent = directory;
-    if (!create && !(yield* fs.exists(parent.path + '/' + name))) return yield* reject('missing');
+    if (!create && !(yield* fs.exists(path.join(parent.path, name)))) return yield* reject('missing');
     directory = yield* own(() => Native.runtimeOpenPrivateWriterChild(parent, name, create));
   }
   return directory;
@@ -160,7 +172,7 @@ const publishSemanticHostProfile = Effect.fn('semantic.publishHostProfile')(func
         Effect.mapError(() => reject('invalid')),
       );
       if (profile.worktree !== worktree) return yield* reject('incompatible');
-      const location = yield* profileLocation(config, worktree);
+      const location = yield* profileLocation(config, worktree, true);
       const text = JSON.stringify(profile);
       const bytes = new TextEncoder().encode(text);
       if (bytes.length > 16 * 1024) return yield* reject('invalid');
@@ -168,7 +180,7 @@ const publishSemanticHostProfile = Effect.fn('semantic.publishHostProfile')(func
       const assertParentCurrent = () => Native.runtimeAssertPrivateWriterDirectoryCurrent(directory);
       return yield* withExclusiveFileLockLease(
         fs,
-        location.directory + '/setup.lock',
+        (yield* Path.Path).join(location.directory, 'setup.lock'),
         {
           createParentDirectory: false,
           allowUnverifiedStaleRecovery: false,
@@ -179,6 +191,7 @@ const publishSemanticHostProfile = Effect.fn('semantic.publishHostProfile')(func
           staleAfterMilliseconds: 30000,
           heartbeatIntervalMilliseconds: 1000,
           assertParentCurrent,
+          privateDirectory: directory,
         },
         lease =>
           Effect.gen(function* () {
@@ -246,3 +259,17 @@ export const writeSemanticJavaImportPolicy = Effect.fn('semantic.writeJavaImport
   const updated = {...base, javaImport: policy};
   return yield* publishSemanticHostProfile(config, worktree, updated, expectedDigest, true);
 });
+
+/** Existing host profile, authenticated through its actual private directory; never creates setup. */
+export const readSemanticPrivateProfile = (home: string, principal: string, worktree: string) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      if (!/^[a-f0-9]{64}$/u.test(principal)) return yield* reject('invalid');
+      const directory = yield* openProfiles(home, false);
+      const file = yield* native(() => Native.runtimeReadPrivateWriterFile(directory, principal + '.json', 16384));
+      if (!file) return yield* reject('missing');
+      const selected = yield* decodeProfile(file.bytes, worktree);
+      if (!selected.profile.enabled) return yield* reject('disabled');
+      return selected;
+    }),
+  );

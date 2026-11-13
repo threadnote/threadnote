@@ -7,7 +7,21 @@ import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {cryptoLayer} from '@threadnote/platform/crypto';
-import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path, Queue, Schedule, Schema, Stream} from 'effect';
+import {
+  Cause,
+  Clock,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Queue,
+  Schedule,
+  Schema,
+  Semaphore,
+  Stream,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
@@ -23,6 +37,10 @@ import {Observation, type QueryOutcome} from '@threadnote/semantic/contracts';
 import {makeSemanticReadinessJobs, runSemanticSelectedVerification} from '../../src/semantic/readiness_jobs.js';
 import {makeReadDeadline} from '@threadnote/platform/read_deadline';
 import {
+  makeWindowsSemanticSources,
+  takeSemanticPrepared,
+  SemanticPrivateSourceEvidence,
+  SemanticSessionFault,
   SemanticJavaRuntimeVerifier,
   SemanticSetupFault,
   type SemanticSession,
@@ -171,6 +189,7 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     afterCommit: Effect.Effect<void, unknown>;
     blockUpsert: boolean;
     terminations: number;
+    beforeSourceCapture: Effect.Effect<void>;
   } = {
     failAfterPid: false,
     rejectSdk: false,
@@ -180,6 +199,7 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
     afterCommit: Effect.void,
     blockUpsert: false,
     terminations: 0,
+    beforeSourceCapture: Effect.void,
   };
   const constructions: {options: javaProvider.JavaAnalysisOptions; isActive: () => boolean}[] = [];
   let finishes = 0;
@@ -207,81 +227,101 @@ const javaCoordinatorFixture = Effect.fn('test.javaCoordinatorFixture')(function
           });
     }),
   );
-  const factory = vi.spyOn(javaProvider, 'makeJavaAnalysis').mockImplementation((options, started, active) =>
-    Effect.gen(function* () {
-      yield* Schema.decodeEffect(Observation)(options.basis);
-      const startup = yield* SemanticWireStartup;
-      startup?.termination(
-        Effect.gen(function* () {
-          control.terminations++;
-          yield* Deferred.succeed(terminated, undefined);
-        }),
-      );
-      const isActive = active ?? (() => true);
-      constructions.push({options: structuredClone(options), isActive});
-      let ended = false;
-      const finish = Effect.sync(() => {
-        if (!ended) finishes++;
-        ended = true;
-        startup?.cleanup('drained');
-        return {code: 0, drained: true, stdioClosed: true, forced: false, fault: undefined};
-      });
-      yield* started(process.pid, finish);
-      events.push('pid-bound');
-      if (control.failAfterPid) return yield* LspFault.make({code: 'protocol'});
-      const documents = new Map<string, Observation>();
-      const outcome = (observation: Observation): QueryOutcome => ({
-        version: 1,
-        status: 'ok',
-        items: [],
-        evidence: {basis: 'semantic', observation, scope: 'project:fixture', completeness: 'partial', limitations: []},
-      });
-      const api = {
-        upsert: (observation: Observation, _text: string, language: string) =>
+  const factory = vi
+    .spyOn(javaProvider, 'makeJavaAnalysis')
+    .mockImplementation((options, started, active, captureEditSource) =>
+      Effect.gen(function* () {
+        yield* Schema.decodeEffect(Observation)(options.basis);
+        const startup = yield* SemanticWireStartup;
+        const sourceEvidence = yield* SemanticPrivateSourceEvidence;
+        const mutations = yield* Semaphore.make(1);
+        startup?.termination(
           Effect.gen(function* () {
-            if (control.blockUpsert) {
-              yield* Deferred.succeed(upsertStarted, undefined);
-              return yield* Effect.never.pipe(Effect.ensuring(Deferred.await(terminated)));
-            }
-            expect(language).toBe('java');
-            documents.set(observation.uri, structuredClone(observation));
-            return observation;
+            control.terminations++;
+            yield* Deferred.succeed(terminated, undefined);
           }),
-        query: (_operation: Parameters<SemanticSession['query']>[0], observation: Observation) =>
-          Effect.suspend(() => {
-            if (control.crash) return LspFault.make({code: 'exit'});
-            if (control.rejectSdk) {
-              control.available = false;
-              return LspFault.make({code: 'prerequisite'});
-            }
-            return Effect.succeed(outcome(observation));
+        );
+        const isActive = active ?? (() => true);
+        constructions.push({options: structuredClone(options), isActive});
+        let ended = false;
+        const finish = Effect.sync(() => {
+          if (!ended) finishes++;
+          ended = true;
+          startup?.cleanup('drained');
+          return {code: 0, drained: true, stdioClosed: true, forced: false, fault: undefined};
+        });
+        yield* started(process.pid, finish);
+        events.push('pid-bound');
+        if (control.failAfterPid) return yield* LspFault.make({code: 'protocol'});
+        const documents = new Map<string, Observation>();
+        const outcome = (observation: Observation): QueryOutcome => ({
+          version: 1,
+          status: 'ok',
+          items: [],
+          evidence: {
+            basis: 'semantic',
+            observation,
+            scope: 'project:fixture',
+            completeness: 'partial',
+            limitations: [],
+          },
+        });
+        const api = {
+          upsert: (observation: Observation, _text: string, language: string) =>
+            mutations.withPermit(
+              Effect.gen(function* () {
+                if (control.blockUpsert) {
+                  yield* Deferred.succeed(upsertStarted, undefined);
+                  return yield* Effect.never.pipe(Effect.ensuring(Deferred.await(terminated)));
+                }
+                expect(language).toBe('java');
+                if (sourceEvidence && observation.documentVersion === null) {
+                  if (!captureEditSource) return yield* SemanticSessionFault.make({reason: 'stale'});
+                  yield* control.beforeSourceCapture;
+                  const captured = yield* captureEditSource(observation.uri);
+                  yield* sourceEvidence.beforeUpsert(captured, documents.get(observation.uri));
+                  yield* sourceEvidence.bind(captured, observation);
+                }
+                documents.set(observation.uri, structuredClone(observation));
+                return observation;
+              }),
+            ),
+          query: (_operation: Parameters<SemanticSession['query']>[0], observation: Observation) =>
+            Effect.suspend(() => {
+              if (control.crash) return LspFault.make({code: 'exit'});
+              if (control.rejectSdk) {
+                control.available = false;
+                return LspFault.make({code: 'prerequisite'});
+              }
+              return Effect.succeed(outcome(observation));
+            }),
+          diagnostics: (observation: Observation) =>
+            Effect.gen(function* () {
+              if (!isActive()) return yield* LspFault.make({code: 'closing'});
+              events.push('diagnostic-committed');
+              const delta: DiagnosticDelta = {observation, items: [], added: [], remaining: [], resolved: []};
+              yield* control.afterCommit;
+              return delta;
+            }),
+          prepare: (_operation: Parameters<NonNullable<SemanticSession['prepare']>>[0], observation: Observation) =>
+            Effect.succeed(outcome(observation)),
+          observation: (uri: string) => Effect.succeed(documents.get(uri)),
+          project: () =>
+            Effect.succeed({
+              configuration: options.basis.configuration,
+              profile: {kind: 'prepared-java', build: 'maven'},
+            }),
+          available: Effect.sync(() => !ended && control.available),
+          invalidate: Effect.gen(function* () {
+            expect((yield* mutations.withPermitsIfAvailable(1)(Effect.void))._tag).toBe('Some');
+            expect(isActive()).toBe(false);
+            events.push('invalidate');
           }),
-        diagnostics: (observation: Observation) =>
-          Effect.gen(function* () {
-            if (!isActive()) return yield* LspFault.make({code: 'closing'});
-            events.push('diagnostic-committed');
-            const delta: DiagnosticDelta = {observation, items: [], added: [], remaining: [], resolved: []};
-            yield* control.afterCommit;
-            return delta;
-          }),
-        prepare: (_operation: Parameters<NonNullable<SemanticSession['prepare']>>[0], observation: Observation) =>
-          Effect.succeed(outcome(observation)),
-        observation: (uri: string) => Effect.succeed(documents.get(uri)),
-        project: () =>
-          Effect.succeed({
-            configuration: options.basis.configuration,
-            profile: {kind: 'prepared-java', build: 'maven'},
-          }),
-        available: Effect.sync(() => !ended && control.available),
-        invalidate: Effect.sync(() => {
-          expect(isActive()).toBe(false);
-          events.push('invalidate');
-        }),
-        close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: control.graceful}))),
-      };
-      return {pid: process.pid, api};
-    }),
-  );
+          close: finish.pipe(Effect.map(receipt => ({...receipt, graceful: control.graceful}))),
+        };
+        return {pid: process.pid, api};
+      }),
+    );
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       sdk.mockRestore();
@@ -487,6 +527,184 @@ describe.skipIf(process.platform === 'win32')('Java coordinator registration', (
         );
         expect(f.finishes()).toBe(1);
         expect(yield* coordinator.status).toMatchObject({providers: 0, queued: 0, quarantined: 0});
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('old generations cannot poison or retire a healthy replacement source session', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const native = yield* privateNativeSourceOracle(f.text);
+        const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
+        yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
+        const coordinator = yield* f.make();
+        const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+        const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        yield* coordinator.closeView(previous.observation);
+        const current = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        expect(current.observation.provider.generation).toBeGreaterThan(previous.observation.provider.generation);
+        const captures = native.capture.mock.calls.length;
+        expect(yield* Effect.flip(coordinator.use(previous.observation, 1000, () => Effect.void))).toMatchObject({
+          _tag: 'SemanticSessionFault',
+          reason: 'stale',
+        });
+        expect(native.capture.mock.calls.length).toBe(captures);
+        expect(f.finishes()).toBe(1);
+        expect(f.constructions[1].isActive()).toBe(true);
+        expect(
+          yield* coordinator.use(current.observation, 1000, api =>
+            api.query('symbols', current.observation, undefined, 1000),
+          ),
+        ).toMatchObject({status: 'ok'});
+        expect(yield* coordinator.status).toMatchObject({providers: 1, quarantined: 0, failures: []});
+        yield* coordinator.closeView(current.observation);
+        expect(f.finishes()).toBe(2);
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('an in-flight prepared result cannot poison a replacement source issuer', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const native = yield* privateNativeSourceOracle(f.text);
+        const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
+        yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
+        const original = f.factory.getMockImplementation();
+        if (!original) throw new Error('Missing owned provider fixture');
+        f.factory.mockImplementation((options, started, active, capture) =>
+          Effect.gen(function* () {
+            const source = yield* SemanticPrivateSourceEvidence;
+            const managed = yield* original(options, started, active, capture);
+            return {
+              ...managed,
+              api: {
+                ...managed.api,
+                prepare: (_operation, observation) =>
+                  Effect.gen(function* () {
+                    if (!source || !capture) return yield* SemanticSessionFault.make({reason: 'stale'});
+                    const captured = yield* capture(observation.uri);
+                    const outcome: QueryOutcome = {
+                      version: 1,
+                      status: 'ok',
+                      evidence: {
+                        basis: 'semantic',
+                        observation,
+                        scope: 'project',
+                        completeness: 'complete',
+                        limitations: [],
+                      },
+                      items: [
+                        {
+                          kind: 'prepared-edit',
+                          operation: 'rename',
+                          sourceBasis: 'pre-request-synchronized-text-v1',
+                          files: [{uri: observation.uri, content: observation.content, source: 'disk', observation}],
+                        },
+                      ],
+                    };
+                    yield* source.prepared(outcome, [{capture: captured, observation}]);
+                    return outcome;
+                  }),
+              },
+            };
+          }),
+        );
+        const coordinator = yield* f.make();
+        const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+        const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        let replacement: Observation | undefined;
+        let beforeJoin = 0;
+        const refused = yield* coordinator
+          .usePrepared(previous.observation, 1000, api =>
+            Effect.gen(function* () {
+              if (!api.prepare) return yield* SemanticSessionFault.make({reason: 'stale'});
+              const produced = yield* api.prepare(
+                'rename',
+                previous.observation,
+                {line: 0, character: 0},
+                'Next',
+                1000,
+              );
+              // The producing adapter has returned. Retire/install while the old host query is still in flight.
+              yield* coordinator.closeView(previous.observation);
+              replacement = (yield* coordinator.attach(basis, f.text, 'java', 'prepared-main')).observation;
+              beforeJoin = native.capture.mock.calls.length;
+              return produced;
+            }),
+          )
+          .pipe(Effect.flip);
+        expect(refused).toMatchObject({_tag: 'SemanticSessionFault', reason: 'stale'});
+        expect(native.capture.mock.calls.length).toBe(beforeJoin);
+        expect(f.finishes()).toBe(1);
+        expect(f.factory).toHaveBeenCalledTimes(2);
+        expect(f.constructions[1].isActive()).toBe(true);
+        if (!replacement) throw new Error('Missing replacement observation');
+        const current = replacement;
+        const prepared = yield* coordinator.usePrepared(current, 1000, api => {
+          if (!api.prepare) return SemanticSessionFault.make({reason: 'stale'});
+          return api.prepare('rename', current, {line: 0, character: 0}, 'Next', 1000);
+        });
+        if (prepared.kind !== 'writer-prepared') throw new Error('Expected current issuer proof');
+        prepared.assertCurrentSync();
+        expect(yield* coordinator.status).toMatchObject({providers: 1, quarantined: 0, failures: []});
+        expect(f.finishes()).toBe(1);
+        yield* coordinator.closeView(current);
+        expect(f.finishes()).toBe(2);
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('two initial source races keep stale classification and leave a stable attach available', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const native = yield* privateNativeSourceOracle(f.text);
+        const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
+        yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
+        const coordinator = yield* f.make();
+        const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+        native.text(f.text + '\n');
+        expect(yield* Effect.flip(coordinator.attach(basis, f.text, 'java', 'prepared-main'))).toMatchObject({
+          _tag: 'SemanticSessionFault',
+          reason: 'stale',
+        });
+        expect(f.factory).not.toHaveBeenCalled();
+        expect(yield* coordinator.status).toMatchObject({providers: 0, quarantined: 0, failures: []});
+        native.text(f.text);
+        f.control.beforeSourceCapture = Effect.sync(() => native.text(f.text + '\n'));
+        expect(yield* Effect.flip(coordinator.attach(basis, f.text, 'java', 'prepared-main'))).toMatchObject({
+          _tag: 'SemanticSessionFault',
+          reason: 'stale',
+        });
+        expect(f.factory).toHaveBeenCalledOnce();
+        expect(f.finishes()).toBe(1); // The post-launch race released only after the original owned finish.
+        expect(yield* coordinator.status).toMatchObject({providers: 0, quarantined: 0, failures: []});
+        native.text(f.text);
+        f.control.beforeSourceCapture = Effect.void;
+        const stable = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        expect(stable.observation.provider.generation).toBe(2);
+        expect(f.factory).toHaveBeenCalledTimes(2);
+        expect(yield* coordinator.status).toMatchObject({providers: 1, quarantined: 0, failures: []});
+        yield* coordinator.closeView(stable.observation);
+        expect(f.finishes()).toBe(2);
+      }).pipe(TestClock.withLive),
+    );
+    layerIt.effect('a current native mismatch retires only after the adapter mutation permit unwinds', () =>
+      Effect.gen(function* () {
+        const f = yield* javaCoordinatorFixture();
+        const native = yield* privateNativeSourceOracle(f.text);
+        const platform = vi.spyOn(platformSystem, 'runtimePlatform', 'get').mockReturnValue('win32');
+        yield* Effect.addFinalizer(() => Effect.sync(() => platform.mockRestore()));
+        const coordinator = yield* f.make();
+        const basis = {...f.basis, view: {...f.basis.view, kind: 'disk' as const}, documentVersion: null};
+        const previous = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        native.change('replaced-native-object', 0);
+        expect(yield* Effect.flip(coordinator.attach(basis, f.text, 'java', 'prepared-main'))).toMatchObject({
+          _tag: 'SemanticSessionFault',
+          reason: 'stale',
+        });
+        expect(f.events).toContain('invalidate'); // invalidate independently reacquires the actual test semaphore.
+        expect(f.constructions[0].isActive()).toBe(false);
+        expect(f.finishes()).toBe(1);
+        expect(yield* coordinator.status).toMatchObject({providers: 0, quarantined: 0, failures: []});
+        native.change('original', 0);
+        const next = yield* coordinator.attach(basis, f.text, 'java', 'prepared-main');
+        expect(next.observation.provider.generation).toBeGreaterThan(previous.observation.provider.generation);
+        expect(f.constructions[1].isActive()).toBe(true);
+        yield* coordinator.closeView(next.observation);
       }).pipe(TestClock.withLive),
     );
     layerIt.effect(
@@ -2004,3 +2222,216 @@ setTimeout(()=>{},6000);
     );
   });
 });
+
+// Native identity is an independent fixture oracle here; actual HANDLE/security capture is exercised on Windows.
+const privateNativeSourceOracle = Effect.fn('test.privateNativeSourceOracle')(function* (text: string) {
+  const ids = new WeakMap<
+    platformSystem.RuntimeWindowsSourceEvidence,
+    {object: string; snapshot: number; content: string}
+  >();
+  let object = 'original',
+    snapshot = 0,
+    capturedText = text;
+  const capture = vi.spyOn(platformSystem, 'runtimeCaptureWindowsSource').mockImplementation(() => {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Isolated native-capture token oracle; actual HANDLE authenticity is tested on Windows.
+    const evidence = Object.freeze({}) as platformSystem.RuntimeWindowsSourceEvidence;
+    ids.set(evidence, {object, snapshot, content: sha256HexSync(capturedText)});
+    return {bytes: new TextEncoder().encode(capturedText), physicalIdentity: '["same","pair"]', evidence};
+  });
+  const compare = vi.spyOn(platformSystem, 'runtimeSameWindowsSourceEvidence').mockImplementation((a, b, exact) => {
+    const first = ids.get(a),
+      second = ids.get(b);
+    return (
+      !!first &&
+      !!second &&
+      first.object === second.object &&
+      (!exact || (first.snapshot === second.snapshot && first.content === second.content))
+    );
+  });
+  const exported = vi.spyOn(platformSystem, 'runtimeExportWindowsSourceWitness').mockImplementation(evidence => {
+    const first = ids.get(evidence);
+    if (!first) throw new Error('Unissued oracle evidence');
+    return Object.freeze({object: first.object, snapshot: JSON.stringify([first.snapshot, first.content])});
+  });
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      capture.mockRestore();
+      compare.mockRestore();
+      exported.mockRestore();
+    }),
+  );
+  return {
+    capture,
+    change: (nextObject: string, nextSnapshot: number) => {
+      object = nextObject;
+      snapshot = nextSnapshot;
+    },
+    text: (next: string) => {
+      capturedText = next;
+    },
+  };
+});
+
+// These oracle-only paths intentionally use a POSIX Path layer on every host. Native Windows coverage is separate.
+const privateSourceFixture = Effect.gen(function* () {
+  const text = 'const target = 1;';
+  const seed: Observation = {
+    version: 1,
+    repository: 'source-proof',
+    worktree: 'file:///test',
+    project: 'file:///test',
+    configuration: sha256HexSync('config'),
+    toolchain: sha256HexSync('tools'),
+    provider: {id: 'typescript-language-server', version: '6.0.2', generation: 7},
+    view: {kind: 'disk', id: 'disk', owner: 'host', epoch: 0},
+    uri: 'file:///test/a.ts',
+    content: sha256HexSync(text),
+    documentVersion: null,
+    projectEpoch: 7,
+  };
+  const oracle = yield* privateNativeSourceOracle(text);
+  const sources = yield* makeWindowsSemanticSources('/test', seed, text);
+  const firstUpsert = yield* sources.capture(seed.uri);
+  yield* sources.port.beforeUpsert(firstUpsert, undefined);
+  yield* sources.port.bind(firstUpsert, seed);
+  const outcome = (observation: Observation = seed): QueryOutcome => ({
+    version: 1,
+    status: 'ok',
+    evidence: {
+      basis: 'semantic',
+      observation,
+      scope: 'project',
+      completeness: 'complete',
+      limitations: [],
+    },
+    items: [
+      {
+        kind: 'prepared-edit',
+        operation: 'rename',
+        sourceBasis: 'pre-request-synchronized-text-v1',
+        files: [{uri: observation.uri, content: observation.content, source: 'disk', observation}],
+      },
+    ],
+  });
+  return {
+    seed,
+    text,
+    sources,
+    firstUpsert,
+    outcome,
+    capture: oracle.capture,
+    change: oracle.change,
+  };
+});
+effectIt.effect(
+  'joins only the original prepared result, retains FIRST evidence, and keeps ordinary results proofless',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* privateSourceFixture;
+      const listed: QueryOutcome = {
+        version: 1,
+        status: 'ok',
+        evidence: {basis: 'semantic', observation: f.seed, scope: 'project', completeness: 'complete', limitations: []},
+        items: [{kind: 'action-choice'}],
+      };
+      expect(f.sources.take(listed)).toEqual({kind: 'ordinary', outcome: listed});
+      const closing = yield* f.sources.capture(f.seed.uri);
+      yield* f.sources.port.bind(closing, f.seed);
+      const result = f.outcome();
+      yield* f.sources.port.prepared(result, [{capture: f.firstUpsert, observation: f.seed}]);
+      const taken = takeSemanticPrepared(result, f.sources, () => true);
+      expect(taken.kind).toBe('writer-prepared');
+      if (taken.kind !== 'writer-prepared') throw new Error('Missing private proof');
+      expect(taken.outcome).toBe(result);
+      expect(taken.privateSourceRows[0].capture).not.toBe(f.firstUpsert);
+      expect(taken.privateSourceRows[0].capture).not.toBe(closing);
+      expect(JSON.stringify(result)).not.toMatch(/privateSource|certificate|volumeId|fileId/u);
+      taken.assertCurrentSync();
+      expect(() => takeSemanticPrepared(structuredClone(result), f.sources, () => true)).toThrow();
+      expect(() => taken.assertCurrentSync()).toThrow();
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped host evidence boundary test provides only Path.
+      Effect.provide(BunPath.layerPosix),
+    ),
+);
+effectIt.effect.prop(
+  'superseded prepared rows and observations refuse without changing a healthy newer source epoch',
+  [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 16}))],
+  ([advance]) =>
+    Effect.gen(function* () {
+      const f = yield* privateSourceFixture;
+      const oldResult = f.outcome();
+      yield* f.sources.port.prepared(oldResult, [{capture: f.firstUpsert, observation: f.seed}]);
+      const old = takeSemanticPrepared(oldResult, f.sources, () => true);
+      if (old.kind !== 'writer-prepared') throw new Error('Expected retained private rows');
+      const next = {...f.seed, projectEpoch: f.seed.projectEpoch + advance};
+      yield* f.sources.port.bind(f.firstUpsert, next);
+      // A validation begun at the old epoch can reach this atomic bind after a newer upsert.
+      expect((yield* f.sources.port.bind(f.firstUpsert, f.seed).pipe(Effect.exit))._tag).toBe('Failure');
+      expect(f.sources.poisoned()).toBe(false);
+      expect(() => old.assertCurrentSync()).toThrow(SemanticSessionFault);
+      expect(() => f.sources.assertObservation(f.seed)).toThrow(SemanticSessionFault);
+      expect(
+        (yield* f.sources.port.prepared(f.outcome(), [{capture: f.firstUpsert, observation: f.seed}]).pipe(Effect.exit))
+          ._tag,
+      ).toBe('Failure');
+      expect(f.sources.poisoned()).toBe(false);
+      f.sources.assertObservation(next);
+      const result = f.outcome(next);
+      yield* f.sources.port.prepared(result, [{capture: f.firstUpsert, observation: next}]);
+      const current = takeSemanticPrepared(result, f.sources, () => true);
+      if (current.kind !== 'writer-prepared') throw new Error('Expected current private rows');
+      current.assertCurrentSync();
+      expect(current.privateSourceRows[0].observation.projectEpoch).toBe(next.projectEpoch);
+      expect(f.sources.poisoned()).toBe(false);
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped source-state property provides only Path.
+      Effect.provide(BunPath.layerPosix),
+    ),
+);
+effectIt.effect.prop(
+  'same-byte compatibility collisions cannot upgrade native object or same-key metadata evidence',
+  [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 32})), Schema.Boolean],
+  ([highBit, metadataOnly]) =>
+    Effect.gen(function* () {
+      const f = yield* privateSourceFixture;
+      f.change(metadataOnly ? 'original' : String(1n << BigInt(64 + highBit)), metadataOnly ? 1 : 0);
+      const changed = yield* f.sources.capture(f.seed.uri);
+      const failed = metadataOnly ? f.sources.port.bind(changed, f.seed) : f.sources.port.beforeUpsert(changed, f.seed);
+      expect((yield* failed.pipe(Effect.exit))._tag).toBe('Failure');
+      f.change('original', 0);
+      const restored = yield* f.sources.capture(f.seed.uri);
+      expect((yield* f.sources.port.bind(restored, {...f.seed, projectEpoch: 8}).pipe(Effect.exit))._tag).toBe(
+        'Failure',
+      );
+      expect(f.sources.poisoned()).toBe(true);
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped host evidence boundary test provides only Path.
+      Effect.provide(BunPath.layerPosix),
+    ),
+);
+effectIt.effect('rejects forged capture objects, mixed prepared batches, and foreign session generations', () =>
+  Effect.gen(function* () {
+    for (const failure of ['capture', 'mixed', 'generation'])
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* privateSourceFixture;
+          if (failure === 'mixed') {
+            const result = f.outcome();
+            if (result.status !== 'ok') throw new Error('Expected prepared fixture');
+            expect(() => f.sources.take({...result, items: [...result.items, {kind: 'action-choice'}]})).toThrow();
+          } else {
+            const effect =
+              failure === 'capture'
+                ? f.sources.port.bind({...f.firstUpsert}, f.seed)
+                : f.sources.port.bind(f.firstUpsert, {...f.seed, provider: {...f.seed.provider, generation: 8}});
+            expect((yield* effect.pipe(Effect.exit))._tag).toBe('Failure');
+          }
+          expect(f.sources.poisoned()).toBe(true);
+        }),
+      );
+  }).pipe(
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Scoped host evidence boundary test provides only Path.
+    Effect.provide(BunPath.layerPosix),
+  ),
+);

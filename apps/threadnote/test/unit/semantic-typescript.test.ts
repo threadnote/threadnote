@@ -1,3 +1,4 @@
+import {SemanticPrivateSourceEvidence, SemanticSessionFault} from '../../src/semantic/provider.js';
 import * as HostProfile from '../../src/semantic/host_profile.js';
 import {makeSemanticAgentChanges, runSemanticAgentChangeWith} from '../../src/semantic/agent_changes.js';
 import * as EffectArray from 'effect/Array';
@@ -26,7 +27,10 @@ import {
   typeScriptPolicyCommand,
   typeScriptPolicyVersion,
 } from '../../src/semantic/providers/typescript_runtime.js';
-import {makeTypeScriptSession, validTextPosition} from '../../src/semantic/providers/typescript.js';
+import {
+  makeTypeScriptSession as makeTypeScriptSessionWithPath,
+  validTextPosition,
+} from '../../src/semantic/providers/typescript.js';
 import {
   makeSemanticCoordinator,
   semanticCandidateKey,
@@ -109,6 +113,12 @@ const trustProtocolProfile = (config: RuntimeConfig, worktree: string) =>
       }),
   );
 
+// Synthetic /test and /host protocol models have a fixed POSIX domain; Windows path coverage uses layerWin32 below.
+const makeTypeScriptSession = (...args: Parameters<typeof makeTypeScriptSessionWithPath>) =>
+  makeTypeScriptSessionWithPath(...args).pipe(
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Fixed path domain for synthetic session oracles only.
+    Effect.provide(BunPath.layerPosix),
+  );
 const observation = (text: string, overrides: Partial<Observation> = {}): Observation => ({
   version: 1,
   repository: 'test-repository',
@@ -134,7 +144,15 @@ const options = (basis: Observation) => ({
   maxMemoryMb: 256,
   startupMilliseconds: 1000,
 });
-const fakeClient = (request: (method: string, params: Schema.Json | undefined) => Effect.Effect<Schema.Json>) =>
+const fakeClient = (
+  request: (method: string, params: Schema.Json | undefined) => Effect.Effect<Schema.Json>,
+  paths: {tsserver: string; compiler: string; configuration: string; files: readonly string[]} = {
+    tsserver: '/host/typescript/tsserver.js',
+    compiler: '/host/typescript/typescript.js',
+    configuration: '/test/tsconfig.json',
+    files: [],
+  },
+) =>
   ({
     pid: 1,
     request: (method: string, params?: Schema.Json, _milliseconds?: number): Effect.Effect<Schema.Json> => {
@@ -154,8 +172,8 @@ const fakeClient = (request: (method: string, params: Schema.Json | undefined) =
           success: true,
           body: {
             policy: typeScriptPolicyVersion,
-            launcher: '/host/typescript/tsserver.js',
-            compiler: '/host/typescript/typescript.js',
+            launcher: paths.tsserver,
+            compiler: paths.compiler,
             version: '6.0.3',
             pid: 2,
             instance: sha256HexSync('test-instance'),
@@ -172,7 +190,7 @@ const fakeClient = (request: (method: string, params: Schema.Json | undefined) =
         EffectArray.isArray(params.arguments) &&
         params.arguments[0] === 'projectInfo'
       )
-        return Effect.succeed({success: true, body: {configFileName: '/test/tsconfig.json', fileNames: []}});
+        return Effect.succeed({success: true, body: {configFileName: paths.configuration, fileNames: paths.files}});
       return request(method, params);
     },
     notify: () => Effect.void,
@@ -2032,3 +2050,203 @@ describe('qualified TypeScript action selection', () => {
     }),
   );
 });
+
+effectIt.effect(
+  'checks saved native source evidence before the TypeScript same-text return and preserves actual epochs',
+  () =>
+    Effect.gen(function* () {
+      const text = 'const target = 1;';
+      const basis = observation(text, {
+        documentVersion: null,
+        view: {kind: 'disk', id: 'disk', owner: 'host', epoch: 0},
+      });
+      const events: string[] = [];
+      let stale = false;
+      const session = yield* makeTypeScriptSession(
+        fakeClient(() => Effect.succeed(null)),
+        {
+          ...options(basis),
+          captureEditSource: uri =>
+            Effect.sync(() => {
+              events.push('capture');
+              return {uri, text, content: sha256HexSync(text), identity: 'same-pair'};
+            }),
+        },
+      ).pipe(
+        Effect.provideService(SemanticPrivateSourceEvidence, {
+          beforeUpsert: (_capture, previous) =>
+            Effect.gen(function* () {
+              events.push(previous ? 'before-reuse' : 'before-first');
+              if (stale) return yield* SemanticSessionFault.make({reason: 'stale'});
+            }),
+          bind: (_capture, actual) =>
+            Effect.sync(() => {
+              events.push('bind:' + actual.projectEpoch);
+            }),
+          prepared: () => Effect.void,
+        }),
+      );
+      const actual = yield* session.upsert(basis, text, 'typescript', 1000);
+      events.length = 0;
+      const reused = yield* session.upsert({...actual, projectEpoch: 999}, text, 'typescript', 1000);
+      expect(events).toEqual(['capture', 'before-reuse', 'bind:' + actual.projectEpoch]);
+      expect(reused.projectEpoch).toBe(actual.projectEpoch);
+      stale = true;
+      expect((yield* session.upsert(actual, text, 'typescript', 1000).pipe(Effect.exit))._tag).toBe('Failure');
+      expect(yield* session.available).toBe(false);
+    }),
+);
+
+effectIt.effect(
+  'compares the authentic TypeScript closing capture before associating the original prepared result',
+  () =>
+    Effect.gen(function* () {
+      for (const rejectClosing of [false, true]) {
+        const text = 'const target = 1;';
+        const basis = observation(text, {
+          documentVersion: null,
+          view: {kind: 'disk', id: 'disk', owner: 'host', epoch: 0},
+        });
+        const captures: object[] = [];
+        let associated: unknown;
+        const base = fakeClient(method =>
+          method === 'textDocument/rename'
+            ? Effect.succeed({
+                changes: {
+                  [basis.uri]: [
+                    {range: {start: {line: 0, character: 6}, end: {line: 0, character: 12}}, newText: 'renamed'},
+                  ],
+                },
+              })
+            : Effect.succeed(null),
+        );
+        const session = yield* makeTypeScriptSession(
+          {
+            ...base,
+            request: (method, params, milliseconds) => {
+              if (
+                method === 'workspace/executeCommand' &&
+                Schema.is(
+                  Schema.Struct({arguments: Schema.Tuple([Schema.Literal('projectInfo'), Schema.Json, Schema.Json])}),
+                )(params)
+              )
+                return Effect.succeed({
+                  success: true,
+                  body: {
+                    configFileName: '/test/tsconfig.json',
+                    fileNames: ['/test/example.ts'],
+                  },
+                });
+              return base.request(method, params, milliseconds);
+            },
+          },
+          {
+            ...options(basis),
+            captureEditSource: uri =>
+              Effect.sync(() => {
+                const captured = {uri, text, content: basis.content, identity: 'same-pair'};
+                captures.push(captured);
+                return captured;
+              }),
+          },
+        ).pipe(
+          Effect.provideService(SemanticPrivateSourceEvidence, {
+            beforeUpsert: () => Effect.void,
+            bind: captured =>
+              rejectClosing && captures.length === 3 && captured === captures[2]
+                ? Effect.fail(SemanticSessionFault.make({reason: 'stale'}))
+                : Effect.void,
+            prepared: (result, rows) =>
+              Effect.sync(() => {
+                associated = result;
+                expect(rows[0].capture).toBe(captures[0]);
+              }),
+          }),
+        );
+        const actual = yield* session.upsert(basis, text, 'typescript', 1000);
+        const result = yield* session
+          .prepare('rename', actual, {line: 0, character: 7}, 'renamed', 1000)
+          .pipe(Effect.exit);
+        expect(captures).toHaveLength(3);
+        if (rejectClosing) {
+          expect(result._tag).toBe('Failure');
+          expect(associated).toBeUndefined();
+          expect(yield* session.available).toBe(false);
+        } else {
+          expect(result._tag).toBe('Success');
+          if (result._tag === 'Success') expect(result.value).toBe(associated);
+        }
+      }
+    }),
+);
+
+effectIt.effect.prop(
+  'uses Windows absolute paths and decoded URI project membership while refusing drive-relative and sibling paths',
+  [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 24})), Schema.Boolean],
+  ([suffix, foreign]) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const root = `C:\\workspace ${suffix}`;
+      const file = path.join(root, 'target é.ts');
+      const uri = (yield* path.toFileUrl(file)).href;
+      const worktree = (yield* path.toFileUrl(root)).href;
+      expect(yield* path.fromFileUrl(new URL(uri))).toBe(file);
+      const text = 'const target = 1;';
+      const basis = observation(text, {
+        worktree,
+        project: worktree,
+        uri,
+        documentVersion: null,
+        view: {kind: 'disk', id: 'disk', owner: 'host', epoch: 0},
+      });
+      const selectedFile = foreign ? path.join(root + '-neighbor', 'target é.ts') : file;
+      const qualified = {
+        tsserver: 'C:\\SDK\\typescript\\tsserver.js',
+        compiler: 'C:\\SDK\\typescript\\typescript.js',
+        configuration: EffectString.replaceAll('\\', '/')(path.join(root, 'tsconfig.json')),
+        files: [EffectString.replaceAll('\\', '/')(selectedFile)],
+      };
+      const client = fakeClient(
+        method =>
+          method === 'textDocument/rename'
+            ? Effect.succeed({
+                changes: {
+                  [uri]: [{range: {start: {line: 0, character: 6}, end: {line: 0, character: 12}}, newText: 'renamed'}],
+                },
+              })
+            : Effect.succeed(null),
+        qualified,
+      );
+      const input = {
+        ...options(basis),
+        ...qualified,
+        sourceRoot: 'C:\\SDK\\typescript',
+        captureEditSource: () =>
+          Effect.succeed({uri, text, content: basis.content, identity: 'synthetic-windows-path-model'}),
+      };
+      let policyCalls = 0;
+      const invalid = yield* makeTypeScriptSessionWithPath(client, {
+        ...input,
+        tsserver: 'C:relative\\tsserver.js',
+        verifyPolicy: Effect.sync(() => {
+          policyCalls++;
+        }),
+      }).pipe(Effect.result);
+      expect(invalid._tag).toBe('Failure');
+      expect(policyCalls).toBe(0);
+      const session = yield* makeTypeScriptSessionWithPath(client, input);
+      const opened = yield* session.upsert(basis, text, 'typescript', 1000).pipe(Effect.result);
+      expect(opened._tag).toBe(foreign ? 'Failure' : 'Success');
+      if (opened._tag === 'Success') {
+        const prepared = yield* session.prepare('rename', opened.success, {line: 0, character: 7}, 'renamed', 1000);
+        expect(prepared).toMatchObject({
+          status: 'ok',
+          items: [{kind: 'prepared-edit', sourceBasis: 'pre-request-synchronized-text-v1'}],
+        });
+      }
+    }).pipe(
+      // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Explicit Win32 path-only model, no OS/provider execution.
+      Effect.provide(BunPath.layerWin32),
+    ),
+  {arbitrary: {runs: 24}},
+);

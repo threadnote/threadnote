@@ -13,14 +13,16 @@ import {
   type ApplyPlan,
   type ApplyTarget,
 } from '@threadnote/semantic/journal';
+import {WindowsRetainedProof, authenticateWindowsRetainedProof} from './proposal_store.js';
+import {assertWindowsProofTargets, windowsResourceIdentity} from './source_evidence.js';
 import {OwnedView} from '@threadnote/semantic/views';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {constantTimeHexEqual} from '@threadnote/platform/hmac';
+import {constantTimeHexEqual, hmacSha256Hex} from '@threadnote/platform/hmac';
 import * as Native from '@threadnote/platform/system';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {SemanticAgentQueryHost} from './agent_queries.js';
-import {readSemanticHostProfile, semanticHostProfileName} from './host_profile.js';
+import {readSemanticHostProfile, semanticHostProfileName, readSemanticPrivateProfile} from './host_profile.js';
 import {
   SemanticWriterAdmissionRequest,
   SemanticWriterRequest,
@@ -122,7 +124,31 @@ const resolveCurrent = <R>(
       resolved.session.runtimeIdentity !== runtimeIdentity
     )
       return yield* reject('identity-conflict');
+    if ((Native.runtimePlatform === 'win32') !== (resolved.version === 2)) return yield* reject('identity-conflict');
+    const windows =
+      resolved.version === 2
+        ? yield* attempt(() =>
+            authenticateWindowsRetainedProof(
+              handle,
+              sha256HexSync(JSON.stringify([scope.worktree, scope.principal, selected.digest, runtimeIdentity])),
+              resolved.windows,
+            ),
+          )
+        : undefined;
+    if (
+      windows &&
+      (windows.proof.kind !== 'complete' ||
+        windows.namespace !== resolved.session.boot ||
+        windows.expiresAt !== resolved.expiresAt ||
+        (yield* Clock.currentTimeMillis) < windows.createdAt ||
+        (yield* Clock.currentTimeMillis) >= windows.expiresAt)
+    )
+      return yield* reject('identity-conflict');
     const proposal = yield* attempt(() => createSemanticProposal(resolved.proposal, sha256HexSync));
+    if (windows?.proof.kind === 'complete') {
+      const proof = windows.proof.proof;
+      yield* attempt(() => assertWindowsProofTargets(proof, proposal));
+    }
     if (proposal.digest !== handle.digest) return yield* reject('identity-conflict');
     const closing = yield* readSemanticHostProfile(config, scope.worktree);
     if (closing.digest !== selected.digest) return yield* reject('unauthorized');
@@ -131,6 +157,7 @@ const resolveCurrent = <R>(
       session: resolved.session,
       profile: selected.digest,
       expiresAt: resolved.expiresAt,
+      ...(windows ? {windows} : {}),
       endpoint,
       request,
     };
@@ -235,7 +262,8 @@ export const runSemanticWriterRequestWith = <R>(
 
 const Claim = Schema.Struct({canonicalUri: FileUri, authority: Identifier, fence: Counter, owner: Identifier});
 const Admission = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
+  windows: Schema.optionalKey(WindowsRetainedProof),
   operation: Digest,
   principal: Digest,
   worktree: FileUri,
@@ -260,12 +288,14 @@ type Resolved = {
   session: SemanticWriterSession;
   profile: string;
   expiresAt: number;
+  windows?: WindowsRetainedProof;
 };
 const admissionName = (operation: string) => operation + '.admission.json';
 const journalName = (operation: string) => operation + '.journal.json';
 const startName = (operation: string) => operation + '.started.json';
 const Tombstone = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
+  nativeProofDigest: Schema.optionalKey(Digest),
   operation: Digest,
   kind: Schema.Literals(['terminal', 'discarded']),
   claims: Schema.Array(Claim),
@@ -278,51 +308,70 @@ const Tombstone = Schema.Struct({
   capabilityVerifier: Digest,
 });
 type Tombstone = typeof Tombstone.Type;
-const retirementVerifier = (capability: string, record: Tombstone) =>
-  sha256HexSync(
-    JSON.stringify([
-      'threadnote-writer-retirement-v1',
-      capability,
-      record.operation,
-      record.kind,
-      record.claims,
-      record.principal,
-      record.worktree,
-      record.home,
-      record.taskAuthorization,
-      record.journalDigest,
-      record.journalRevision,
-    ]),
-  );
-const verifier = (capability: string, record: Admission, proposal: SemanticProposal) =>
-  sha256HexSync(
-    JSON.stringify([
-      // This value encoding replaces the unqualified preview's object-order binding.
-      // Existing stored verifiers are retained; no legacy write-authority fallback is accepted.
-      'threadnote-writer-admission-values-v1',
-      capability,
-      record.operation,
-      record.principal,
-      record.worktree,
-      record.home,
-      record.profile,
-      record.createdAt,
-      record.expiresAt,
-      [record.rootIdentity.dev, record.rootIdentity.ino],
-      [record.handle.id, record.handle.digest, record.handle.capability],
-      [
-        record.session.processId,
-        record.session.processStartIdentity,
-        record.session.boot,
-        record.session.runtimeIdentity,
-      ],
-      record.taskAuthorization,
-      record.diskOwnership,
-      proposal.digest,
-      EffectArray.map(record.claims, claim => [claim.canonicalUri, claim.authority, claim.fence, claim.owner]),
-      EffectArray.map(record.owners, owner => [observationKey(owner.observation), owner.authority, owner.fence]),
-    ]),
-  );
+const retirementVerifier = (capability: string, record: Tombstone) => {
+  const values: unknown[] = [
+    record.version === 2 ? 'threadnote-writer-retirement-windows-v2' : 'threadnote-writer-retirement-v1',
+    capability,
+    record.operation,
+    record.kind,
+    record.claims,
+    record.principal,
+    record.worktree,
+    record.home,
+    record.taskAuthorization,
+    record.journalDigest,
+    record.journalRevision,
+  ];
+  if (record.version === 2) {
+    if (!record.nativeProofDigest) throw reject('invalid-journal');
+    values.push(record.nativeProofDigest);
+    return hmacSha256Hex(capability, JSON.stringify(values));
+  }
+  return sha256HexSync(JSON.stringify(values));
+};
+const verifier = (capability: string, record: Admission, proposal: SemanticProposal) => {
+  const values: unknown[] = [
+    // This value encoding replaces the unqualified preview's object-order binding.
+    // Existing stored verifiers are retained; no legacy write-authority fallback is accepted.
+    record.version === 2 ? 'threadnote-writer-admission-values-windows-v2' : 'threadnote-writer-admission-values-v1',
+    capability,
+    record.operation,
+    record.principal,
+    record.worktree,
+    record.home,
+    record.profile,
+    record.createdAt,
+    record.expiresAt,
+    [record.rootIdentity.dev, record.rootIdentity.ino],
+    [record.handle.id, record.handle.digest, record.handle.capability],
+    [
+      record.session.processId,
+      record.session.processStartIdentity,
+      record.session.boot,
+      record.session.runtimeIdentity,
+    ],
+    record.taskAuthorization,
+    record.diskOwnership,
+    proposal.digest,
+    EffectArray.map(record.claims, claim => [claim.canonicalUri, claim.authority, claim.fence, claim.owner]),
+    EffectArray.map(record.owners, owner => [observationKey(owner.observation), owner.authority, owner.fence]),
+  ];
+  if (record.version === 2) {
+    const original = record.windows;
+    if (!original) throw reject('invalid-journal');
+    values.push([
+      original.id,
+      original.binding,
+      original.namespace,
+      original.createdAt,
+      original.expiresAt,
+      original.proofDigest,
+      original.capabilityHash,
+    ]);
+    return hmacSha256Hex(capability, JSON.stringify(values));
+  }
+  return sha256HexSync(JSON.stringify(values));
+};
 const binding = (record: Admission): ApplyBinding => ({
   operation: record.operation,
   principal: record.principal,
@@ -434,6 +483,27 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
       const record = Schema.decodeUnknownSync(Admission, {onExcessProperty: 'error'})(raw);
       const proposal = createSemanticProposal(record.proposal, sha256HexSync);
       if (
+        (Native.runtimePlatform === 'win32') !== (record.version === 2) ||
+        (record.version === 1 && record.windows !== undefined)
+      )
+        throw reject('invalid-journal');
+      if (record.version === 2) {
+        const sealed = authenticateWindowsRetainedProof(
+          record.handle,
+          sha256HexSync(
+            JSON.stringify([record.worktree, record.principal, record.profile, record.session.runtimeIdentity]),
+          ),
+          record.windows,
+        );
+        if (
+          sealed.proof.kind !== 'complete' ||
+          sealed.namespace !== record.session.boot ||
+          sealed.expiresAt !== record.expiresAt
+        )
+          throw reject('invalid-journal');
+        assertWindowsProofTargets(sealed.proof.proof, proposal);
+      }
+      if (
         record.handle.digest !== proposal.digest ||
         record.claims.length !== proposal.targets.length ||
         record.owners.length !== proposal.targets.length
@@ -469,10 +539,33 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
         return yield* reject('unauthorized');
       return record;
     });
+  const assertNativeTarget = (
+    record: Admission,
+    target: ApplyTarget,
+    disk: Native.RuntimeGuardedDiskTarget,
+    recovery: boolean,
+  ) => {
+    if (Native.runtimePlatform !== 'win32') return;
+    if (record.version !== 2 || record.windows?.proof.kind !== 'complete') throw reject('identity-conflict');
+    const row = Option.getOrUndefined(
+      EffectArray.findFirst(record.windows.proof.proof.targets, value => value.uri === target.before.observation.uri),
+    );
+    if (
+      !row ||
+      row.rawDigest !== target.before.observation.content ||
+      row.observationKey !== observationKey(target.before.observation)
+    )
+      throw reject('identity-conflict');
+    const matches = recovery
+      ? Native.runtimeGuardedDiskTargetObservesWindowsSourceObject(disk, row)
+      : Native.runtimeGuardedDiskTargetMatchesWindowsSourceWitness(disk, row);
+    if (!matches) throw reject('identity-conflict');
+  };
   const withDisk = <A, E, R>(
     record: Admission,
     target: ApplyTarget,
     use: (handle: Native.RuntimeGuardedDiskTarget) => Effect.Effect<A, E, R>,
+    recovery = false,
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -506,6 +599,7 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
           ),
           value => Effect.sync(() => Native.runtimeCloseGuardedDiskTarget(value)),
         );
+        yield* attempt(() => assertNativeTarget(record, target, opened, recovery));
         return yield* use(opened);
       }),
     );
@@ -522,6 +616,14 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
         !system.isProcessRunning(record.session.processId)
       )
         return false;
+      if (Native.runtimePlatform === 'win32') {
+        const selected = yield* readSemanticPrivateProfile(
+          yield* path.fromFileUrl(new URL(record.home)),
+          record.principal,
+          record.worktree,
+        );
+        return selected.digest === record.profile;
+      }
       const profile = path.join(
         yield* path.fromFileUrl(new URL(record.home)),
         'semantic',
@@ -537,7 +639,11 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
       )
         return false;
       return sha256HexSync(yield* fs.readFile(profile)) === record.profile;
-    }).pipe(Effect.orElseSucceed(() => false));
+    }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.orElseSucceed(() => false),
+    );
   const portsFor = (
     scope: WriterScope,
     handle: SemanticWriterHandle,
@@ -557,20 +663,24 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
         )
       ];
     const inspect = (target: ApplyTarget) =>
-      withDisk(record, target, disk =>
-        Effect.gen(function* () {
-          const resource = yield* authority.observeResource(target.before.observation.uri);
-          if (!resource) return null;
-          return yield* attempt(() => {
-            const observed = Native.runtimeInspectGuardedDiskTarget(disk);
-            return {
-              ...target.before,
-              authority: resource.claim.authority,
-              fence: resource.claim.fence,
-              observation: {...target.before.observation, content: sha256HexSync(observed.bytes)},
-            };
-          });
-        }),
+      withDisk(
+        record,
+        target,
+        disk =>
+          Effect.gen(function* () {
+            const resource = yield* authority.observeResource(target.before.observation.uri);
+            if (!resource) return null;
+            return yield* attempt(() => {
+              const observed = Native.runtimeInspectGuardedDiskTarget(disk);
+              return {
+                ...target.before,
+                authority: resource.claim.authority,
+                fence: resource.claim.fence,
+                observation: {...target.before.observation, content: sha256HexSync(observed.bytes)},
+              };
+            });
+          }),
+        true,
       );
     const check = (target: ApplyTarget) =>
       Effect.gen(function* () {
@@ -578,7 +688,8 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
         if ((yield* fs.realPath(file)) !== file) return {status: 'conflict', reason: 'path'} as const;
         const info = yield* fs.stat(file);
         if (info.type !== 'File') return {status: 'conflict', reason: 'path'} as const;
-        if ((info.mode & 0o222) === 0) return {status: 'conflict', reason: 'readonly'} as const;
+        if (Native.runtimePlatform !== 'win32' && (info.mode & 0o222) === 0)
+          return {status: 'conflict', reason: 'readonly'} as const;
         const inspected = active
           ? yield* attempt(() => Native.runtimeInspectGuardedDiskTarget(active!.disk))
           : undefined;
@@ -658,10 +769,17 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
       check,
       mutate: (target, afterText) =>
         Effect.gen(function* () {
-          if (!active || active.claim.canonicalUri !== target.before.observation.uri || !(yield* currentTask(record)))
+          if (
+            recovery ||
+            maintenance ||
+            !active ||
+            active.claim.canonicalUri !== target.before.observation.uri ||
+            !(yield* currentTask(record))
+          )
             return {status: 'conflict', reason: 'authorization'} as const;
           const selected = active;
           const result = yield* attempt(() => {
+            assertNativeTarget(record, target, selected.disk, false);
             const before = Native.runtimeInspectGuardedDiskTarget(selected.disk);
             if (sha256HexSync(before.bytes) !== target.before.observation.content)
               return {status: 'conflict', reason: 'source-changed'} as const;
@@ -727,6 +845,8 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
             tombstone = yield* Schema.decodeEffect(Tombstone, {onExcessProperty: 'error'})(raw);
             const home = canonicalFileUri((yield* path.toFileUrl(scope.home)).href);
             if (
+              (Native.runtimePlatform === 'win32') !== (tombstone.version === 2) ||
+              (tombstone.version === 1 && tombstone.nativeProofDigest !== undefined) ||
               tombstone.operation !== handle.operation ||
               tombstone.principal !== scope.principal ||
               tombstone.worktree !== scope.worktree ||
@@ -751,7 +871,8 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
               revision = journal.revision;
             } else if (disposition === 'terminal') return yield* reject('invalid-journal');
             const unsigned: Tombstone = {
-              version: 1,
+              version: record.version,
+              ...(record.windows ? {nativeProofDigest: record.windows.proofDigest} : {}),
               operation: handle.operation,
               kind: disposition,
               claims: record.claims,
@@ -798,6 +919,25 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
     admit: (scope: WriterScope, request: typeof SemanticWriterAdmissionRequest.Type, resolved: Resolved) =>
       Effect.gen(function* () {
         const proposal = createSemanticProposal(resolved.proposal, sha256HexSync);
+        if (Native.runtimePlatform === 'win32') {
+          const sealed = yield* attempt(() =>
+            authenticateWindowsRetainedProof(
+              request.handle,
+              sha256HexSync(
+                JSON.stringify([scope.worktree, scope.principal, resolved.profile, resolved.session.runtimeIdentity]),
+              ),
+              resolved.windows,
+            ),
+          );
+          if (
+            sealed.proof.kind !== 'complete' ||
+            sealed.namespace !== resolved.session.boot ||
+            sealed.expiresAt !== resolved.expiresAt
+          )
+            return yield* reject('identity-conflict');
+          const proof = sealed.proof.proof;
+          yield* attempt(() => assertWindowsProofTargets(proof, proposal));
+        }
         if (
           proposal.targets.length === 0 ||
           (proposal.version === 2 && proposal.qualification !== 'qualified-text-only') ||
@@ -903,7 +1043,8 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
             const rootIdentity = {dev: String(info.dev), ino: String(info.ino.value)};
             // Qualified source inspection precedes enrollment; no trial write is performed.
             const temporary: Admission = {
-              version: 1,
+              version: Native.runtimePlatform === 'win32' ? 2 : 1,
+              ...(Native.runtimePlatform === 'win32' ? {windows: resolved.windows} : {}),
               operation,
               principal: scope.principal,
               worktree: scope.worktree,
@@ -928,7 +1069,7 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
               if (Option.isNone(real) || real.value !== file)
                 return {version: 1, status: 'conflict', applicable: false, conflicts: [{index, reason: 'path'}]};
               const writable = yield* fs.stat(file);
-              if ((writable.mode & 0o222) === 0)
+              if (Native.runtimePlatform !== 'win32' && (writable.mode & 0o222) === 0)
                 return {version: 1, status: 'conflict', applicable: false, conflicts: [{index, reason: 'readonly'}]};
               const before = {observation: target.observation, authority: 'inspection', fence: 0};
               const verified = yield* withDisk(
@@ -956,9 +1097,12 @@ export const makeSemanticHostWriterFromAuthority = Effect.fn('semantic.makeHostW
             }
             const claims = yield* authority.enrollResources(
               resolved.session,
-              EffectArray.map(proposal.targets, target => ({
+              EffectArray.map(proposal.targets, (target, index) => ({
                 canonicalUri: target.observation.uri,
                 physicalIdentity: target.precondition.physicalIdentity!,
+                ...(resolved.windows?.proof.kind === 'complete'
+                  ? {nativeIdentity: windowsResourceIdentity(resolved.windows.proof.proof.targets[index])}
+                  : {}),
               })),
               operation,
             );

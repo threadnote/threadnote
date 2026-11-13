@@ -1,10 +1,15 @@
 import {dlopen, type FFIFunction} from 'bun:ffi';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {Array as EffectArray, Record as EffectRecord, Schema} from 'effect';
+import {Array as EffectArray, Record as EffectRecord, Schema, String as EffectString} from 'effect';
 import {commitWriterTransaction, type WriterTransactionTarget} from '../../src/writer-system/writer-transaction.js';
 import {RuntimeWriterFault, writerFail} from '../../src/writer-system/fault.js';
 import {
+  runtimeCaptureWindowsSource,
+  runtimeSameWindowsSourceEvidence,
+  runtimeExportWindowsSourceWitness,
+  runtimeGuardedDiskTargetMatchesWindowsSourceWitness,
+  runtimeGuardedDiskTargetObservesWindowsSourceObject,
   runtimeOpenWriterRoot,
   runtimeCloseWriterRoot,
   runtimeOpenGuardedDiskTarget,
@@ -13,6 +18,7 @@ import {
   runtimeCloseGuardedDiskTarget,
   type RuntimeGuardedDiskTarget,
   type RuntimeWriterRoot,
+  type RuntimeWindowsSourceWitness,
 } from '../../src/writer_system.js';
 import {runtimeNativePlatformSupport} from '../../src/system.js';
 import {windowsTokenPrincipal, windowsSystemLibrary, windowsWide} from '../../src/writer-system/windows-native.js';
@@ -231,6 +237,60 @@ it('keeps pre-mutation conflicts intact and refuses invalid counts or late failu
   expect(late.read()).toEqual(new Uint8Array([8]));
 });
 
+it('refuses caller-created evidence exports and forged targets without native acquisition', () => {
+  const acquisitions = releaseControl.libraries;
+  fc.assert(
+    fc.property(fc.jsonValue({maxDepth: 2}), value => {
+      expect(() => Reflect.apply(runtimeExportWindowsSourceWitness, undefined, [value])).toThrow(RuntimeWriterFault);
+      expect(() =>
+        Reflect.apply(runtimeGuardedDiskTargetMatchesWindowsSourceWitness, undefined, [
+          value,
+          {object: '', snapshot: ''},
+        ]),
+      ).toThrow(RuntimeWriterFault);
+      expect(releaseControl.libraries).toBe(acquisitions);
+    }),
+    {numRuns: 24},
+  );
+});
+
+// Alter earlier full-native bits while retaining its other fields and public compatibility identity.
+// The oracle is a comparison against independently observed retained native objects, not a copied encoder.
+function changedNativeWitness(
+  earlier: RuntimeWindowsSourceWitness,
+  field: 'volume' | 'file',
+  bit: number,
+): RuntimeWindowsSourceWitness {
+  const changed = {...earlier};
+  for (const key of ['object', 'snapshot'] as const) {
+    const parsed: unknown = JSON.parse(changed[key]);
+    if (!EffectArray.isArray(parsed) || !EffectArray.isArray(parsed[1])) throw new Error('Invalid fixture witness');
+    const edges = parsed[1],
+      last: unknown = edges[edges.length - 1];
+    if (!EffectArray.isArray(last) || typeof last[2] !== 'string' || typeof last[3] !== 'string')
+      throw new Error('Invalid fixture target witness');
+    let next: string;
+    if (field === 'volume') next = String(BigInt(last[2]) ^ (1n << BigInt(32 + (bit % 32))));
+    else {
+      const bytes = EffectArray.map(EffectString.split(last[3], ','), byte => Number(byte)),
+        index = 8 + Math.floor(bit / 8);
+      if (bytes.length !== 16) throw new Error('Invalid fixture file identity');
+      bytes[index] ^= 1 << (bit % 8);
+      next = EffectArray.join(EffectArray.map(bytes, String), ',');
+    }
+    last[field === 'volume' ? 2 : 3] = next;
+    if (key === 'snapshot') {
+      const metadata: unknown = last[5];
+      if (typeof metadata !== 'object' || metadata === null) throw new Error('Invalid fixture metadata');
+      if (field === 'volume' && 'volumeId' in metadata) metadata.volumeId = next;
+      else if (field === 'file' && 'fileId' in metadata) metadata.fileId = next;
+      else throw new Error('Invalid fixture native field');
+    }
+    changed[key] = JSON.stringify(parsed);
+  }
+  return changed;
+}
+
 const fs = process.getBuiltinModule('fs'),
   path = process.getBuiltinModule('path'),
   os = process.getBuiltinModule('os');
@@ -299,6 +359,25 @@ it.skipIf(process.platform !== 'win32')(
         new DataView(attributes.buffer).setUint32(0, 24, true);
         attributes[1] = sd[0];
         expect(setup.symbols.CreateDirectoryW(windowsWide(directory), attributes)).toBe(1);
+        fs.writeFileSync(file, 'old source');
+        const firstSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
+        const closingSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
+        expect(new TextDecoder().decode(firstSource.bytes)).toBe('old source');
+        expect(runtimeSameWindowsSourceEvidence(firstSource.evidence, closingSource.evidence, true)).toBe(true);
+        expect(runtimeSameWindowsSourceEvidence(firstSource.evidence, {...firstSource.evidence}, true)).toBe(false);
+        const firstWitness = runtimeExportWindowsSourceWitness(firstSource.evidence),
+          exportedAgain = runtimeExportWindowsSourceWitness(firstSource.evidence),
+          closingWitness = runtimeExportWindowsSourceWitness(closingSource.evidence);
+        expect(Object.isFrozen(firstWitness)).toBe(true);
+        expect(firstWitness === exportedAgain).toBe(false);
+        expect(JSON.stringify(firstWitness) === JSON.stringify(exportedAgain)).toBe(true);
+        expect(JSON.stringify(firstWitness) === JSON.stringify(closingWitness)).toBe(true);
+        expect(() => runtimeExportWindowsSourceWitness({...firstSource.evidence})).toThrow(RuntimeWriterFault);
+        expect(releaseControl.writable).toBe(0n); // Read-only evidence never requested the writable source mask.
+        fs.writeFileSync(file, 'new source');
+        const editedSource = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024);
+        expect(runtimeSameWindowsSourceEvidence(firstSource.evidence, editedSource.evidence, false)).toBe(true);
+        expect(runtimeSameWindowsSourceEvidence(firstSource.evidence, editedSource.evidence, true)).toBe(false);
         fs.writeFileSync(file, 'old source');
         const probe = setup.symbols.CreateFileW(windowsWide(file), 0x80000000, 7, null, 3, 0x00200000, 0n);
         expect(probe !== 0n && probe !== invalid).toBe(true);
@@ -392,7 +471,31 @@ it.skipIf(process.platform !== 'win32')(
           }
           expect(fs.readFileSync(file, 'utf8')).toBe('old source');
         }
+        const sourceBasis = runtimeCaptureWindowsSource(fs.realpathSync(directory), ['source.txt'], 1024),
+          earlier = runtimeExportWindowsSourceWitness(sourceBasis.evidence),
+          earlierJson = JSON.stringify(earlier),
+          restored = Schema.decodeUnknownSync(Schema.Struct({object: Schema.String, snapshot: Schema.String}))(
+            JSON.parse(earlierJson),
+          );
         target = runtimeOpenGuardedDiskTarget(root, ['source.txt'], physical(), 1024);
+        expect(runtimeGuardedDiskTargetMatchesWindowsSourceWitness(target, earlier)).toBe(true);
+        // Historical data survives private serialization; equality itself neither authenticates nor grants authority.
+        expect(runtimeGuardedDiskTargetMatchesWindowsSourceWitness(target, restored)).toBe(true);
+        const retained = target;
+        fc.assert(
+          fc.property(
+            fc.constantFrom('volume' as const, 'file' as const),
+            fc.integer({min: 0, max: 63}),
+            (field, bit) => {
+              const altered = changedNativeWitness(restored, field, bit);
+              expect(runtimeGuardedDiskTargetMatchesWindowsSourceWitness(retained, altered)).toBe(false);
+              expect(JSON.stringify(earlier) === earlierJson).toBe(true);
+              expect(new TextDecoder().decode(runtimeInspectGuardedDiskTarget(retained).bytes)).toBe('old source');
+            },
+          ),
+          {numRuns: 16},
+        );
+        expect(runtimeGuardedDiskTargetMatchesWindowsSourceWitness(target, earlier)).toBe(true);
         for (const access of [0xc0000000, 0x10000]) {
           const foreign = setup.symbols.CreateFileW(windowsWide(file), access, 7, null, 3, 0x80, 0n),
             error = setup.symbols.GetLastError();
@@ -423,7 +526,13 @@ it.skipIf(process.platform !== 'win32')(
         ).toBe('applied');
         expect(assertions).toBeGreaterThanOrEqual(4);
         expect(fs.readFileSync(file, 'utf8')).toBe('new');
+        expect(runtimeGuardedDiskTargetMatchesWindowsSourceWitness(target, earlier)).toBe(false);
+        expect(runtimeGuardedDiskTargetObservesWindowsSourceObject(target, earlier)).toBe(true);
+        expect(JSON.stringify(runtimeExportWindowsSourceWitness(sourceBasis.evidence)) === earlierJson).toBe(true);
+        const completed = target;
         runtimeCloseGuardedDiskTarget(target);
+        expect(() => runtimeGuardedDiskTargetMatchesWindowsSourceWitness(completed, earlier)).toThrow();
+        expect(() => runtimeGuardedDiskTargetObservesWindowsSourceObject(completed, earlier)).toThrow();
         target = undefined;
         const attributesBefore = setup.symbols.GetFileAttributesW(windowsWide(file));
         expect(attributesBefore).not.toBe(0xffffffff);

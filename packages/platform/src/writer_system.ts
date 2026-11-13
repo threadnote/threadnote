@@ -8,10 +8,12 @@ import {
   openWindowsWriterRoot,
   openWindowsPrivateDirectory,
   openWindowsPrivateAuthority,
+  provisionWindowsPrivateDirectory,
   type WindowsPrivateDirectory,
   type WindowsPrivateLease,
   type WindowsWriterRoot,
   type WindowsWriterTarget,
+  type WindowsSourceWitness,
 } from './writer-system/windows-writer.js';
 import {
   posixWriterLibrary as library,
@@ -422,6 +424,17 @@ export function runtimeInspectGuardedDiskTarget(handle: RuntimeGuardedDiskTarget
   targetState(handle);
   return {...result, physicalIdentity: physical(result.identity)};
 }
+/** Compares historical data only; it neither authenticates an envelope nor enrolls a writer.
+ * Exact snapshot/before bytes are required here. Recovery cannot opt out of them through this API.
+ */
+export function runtimeGuardedDiskTargetMatchesWindowsSourceWitness(
+  handle: RuntimeGuardedDiskTarget,
+  earlier: WindowsSourceWitness,
+): boolean {
+  const windows = windowsTargets.get(handle);
+  if (!windows) return fail('identity');
+  return windows.matchesSourceWitness(earlier);
+}
 export type RuntimeGuardedDiskWriteResult =
   | {readonly status: 'applied'; readonly current: RuntimeGuardedDiskObservation}
   | {readonly status: 'conflict'; readonly reason: 'path' | 'readonly' | 'source-changed'}
@@ -497,6 +510,14 @@ export function runtimeOpenPrivateWriterDirectory(canonicalPath: string): Runtim
     runtimeClosePrivateWriterDirectory(handle);
     throw error;
   }
+}
+/** Explicit setup only: missing Windows private children need a strict private parent or the actual account home. */
+export function runtimeProvisionPrivateWriterDirectory(canonicalPath: string): RuntimePrivateWriterDirectory {
+  if (runtimeCurrentPlatform() !== 'win32') return runtimeOpenPrivateWriterDirectory(canonicalPath);
+  const windows = provisionWindowsPrivateDirectory(canonicalPath);
+  const handle: RuntimePrivateWriterDirectory = Object.freeze({[privateBrand]: true as const, path: windows.path});
+  windowsDirectories.set(handle, windows);
+  return handle;
 }
 export function runtimeOpenPrivateWriterChild(
   directory: RuntimePrivateWriterDirectory,
@@ -787,4 +808,22 @@ export function runtimeAcquirePrivateWriterLease(
   const prefix = windows.path + '\\';
   if (!EffectString.startsWith(prefix)(path)) return fail('path');
   return windows.acquireLease(EffectString.slice(prefix.length)(path), token);
+}
+// Host-only read evidence is exported through the platform facade, never a writable target.
+export {
+  captureWindowsSource as runtimeCaptureWindowsSource,
+  sameWindowsSourceEvidence as runtimeSameWindowsSourceEvidence,
+  exportWindowsSourceWitness as runtimeExportWindowsSourceWitness,
+  type WindowsSourceEvidence as RuntimeWindowsSourceEvidence,
+  type WindowsSourceWitness as RuntimeWindowsSourceWitness,
+} from './writer-system/windows-writer.js';
+
+/** Historical object comparison for authenticated journal observation only; never initial write eligibility. */
+export function runtimeGuardedDiskTargetObservesWindowsSourceObject(
+  handle: RuntimeGuardedDiskTarget,
+  earlier: WindowsSourceWitness,
+): boolean {
+  const windows = windowsTargets.get(handle);
+  if (!windows) return fail('identity');
+  return windows.observesSourceObject(earlier);
 }

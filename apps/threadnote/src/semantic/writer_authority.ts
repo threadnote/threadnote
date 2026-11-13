@@ -11,6 +11,7 @@ import {
   Schema,
 } from 'effect';
 import {SecureRandom} from 'effect/crypto';
+import {isWindowsResourceIdentity} from './source_evidence.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {
   runtimeReadStableOsUserIdentity,
@@ -21,6 +22,7 @@ import {
   runtimePublishPrivateWriterFile,
   runtimeReadWriterProcessIdentity,
   SystemInfo,
+  runtimePlatform,
   type RuntimePrivateWriterDirectory,
 } from '@threadnote/platform/system';
 import {withExclusiveFileLockLease, type ExclusiveFileLockLease} from '@threadnote/platform/file/lock';
@@ -67,6 +69,7 @@ export type WriterSessionWitness = typeof WriterSessionWitness.Type;
 export interface WriterResourceInput {
   readonly canonicalUri: string;
   readonly physicalIdentity: string;
+  readonly nativeIdentity?: string;
 }
 export const WriterResourceClaim = Schema.Struct({canonicalUri: text, authority: text, fence: counter, owner: text});
 export type WriterResourceClaim = typeof WriterResourceClaim.Type;
@@ -81,6 +84,7 @@ export type WriterOperationRef = typeof WriterOperationRef.Type;
 const Resource = Schema.Struct({
   claim: WriterResourceClaim,
   physicalIdentity: text,
+  nativeIdentity: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8 * 1024 * 1024))),
   session: WriterSessionWitness,
   nativeStart: text,
   revoked: Schema.Boolean,
@@ -88,8 +92,8 @@ const Resource = Schema.Struct({
   blocks: Schema.Array(digest).check(Schema.isMaxLength(1000)),
 });
 const Registry = Schema.Struct({
-  version: Schema.Literal(1),
-  protocol: Schema.Literal('threadnote-writer-v1'),
+  version: Schema.Literals([1, 2]),
+  protocol: Schema.Literals(['threadnote-writer-v1', 'threadnote-writer-windows-v2']),
   authority: text,
   revision: counter,
   resources: Schema.Array(Resource).check(Schema.isMaxLength(1000)),
@@ -190,6 +194,7 @@ export const makeSemanticWriterAuthority = Effect.gen(function* () {
 export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePrivateWriterDirectory) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const system = yield* SystemInfo;
     const random = yield* SecureRandom.SecureRandom;
     const dependencies = yield* Effect.context<Needs>();
@@ -212,6 +217,7 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
       retryIntervalMilliseconds: 20,
       waitTimeoutMilliseconds: 2_000,
       assertParentCurrent: () => runtimeAssertPrivateWriterDirectoryCurrent(directory),
+      privateDirectory: directory,
     } as const;
     const read = (): Registry | undefined => {
       const file = runtimeReadPrivateWriterFile(directory, 'authority.json', 16 * 1024 * 1024);
@@ -219,6 +225,16 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
       try {
         const raw: unknown = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(file.bytes));
         const value = Schema.decodeUnknownSync(Registry, {onExcessProperty: 'error'})(raw);
+        if (
+          runtimePlatform === 'win32'
+            ? value.version !== 2 ||
+              value.protocol !== 'threadnote-writer-windows-v2' ||
+              EffectArray.some(value.resources, resource => !isWindowsResourceIdentity(resource.nativeIdentity ?? ''))
+            : value.version !== 1 ||
+              value.protocol !== 'threadnote-writer-v1' ||
+              EffectArray.some(value.resources, resource => resource.nativeIdentity !== undefined)
+        )
+          unavailable('incompatible');
         if (
           new Set(EffectArray.map(value.resources, resource => resource.claim.canonicalUri)).size !==
             value.resources.length ||
@@ -287,13 +303,13 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
         ),
       );
     const withMutation = <A, E, R>(scope: GateScope, effect: Effect.Effect<A, E, R>) =>
-      withExclusiveFileLockLease(fs, `${directory.path}/mutation.lock`, policy, lease =>
+      withExclusiveFileLockLease(fs, path.join(directory.path, 'mutation.lock'), policy, lease =>
         inScope({...scope, mutationLease: lease, active: true}, effect),
       ).pipe(Effect.provide(dependencies));
     const withOperation = <A, E, R>(operation: string, admission: boolean, effect: Effect.Effect<A, E, R>) =>
       Effect.gen(function* () {
         if (yield* Gate) return yield* WriterAuthorityFault.make({reason: 'lock-order'});
-        return yield* withExclusiveFileLockLease(fs, `${directory.path}/operation.lock`, policy, lease => {
+        return yield* withExclusiveFileLockLease(fs, path.join(directory.path, 'operation.lock'), policy, lease => {
           const scope: GateScope = {authority: identity, operation, operationLease: lease, admission, active: true};
           const checked = Effect.gen(function* () {
             if (!admission) {
@@ -417,6 +433,12 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
           for (const resource of resources) {
             yield* attempt(() => {
               if (canonicalFileUri(resource.canonicalUri) !== resource.canonicalUri) unavailable('identity');
+              if (
+                runtimePlatform === 'win32'
+                  ? !isWindowsResourceIdentity(resource.nativeIdentity ?? '')
+                  : resource.nativeIdentity !== undefined
+              )
+                unavailable('identity');
               const physical: unknown = JSON.parse(resource.physicalIdentity);
               if (
                 !EffectArray.isArray(physical) ||
@@ -447,7 +469,9 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
               EffectArray.some(
                 next,
                 value =>
-                  value.physicalIdentity === resource.physicalIdentity &&
+                  (runtimePlatform === 'win32'
+                    ? value.nativeIdentity === resource.nativeIdentity
+                    : value.physicalIdentity === resource.physicalIdentity) &&
                   value.claim.canonicalUri !== resource.canonicalUri,
               )
             )
@@ -463,7 +487,8 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
               (previous.revoked ||
                 previous.blocks.length ||
                 JSON.stringify(previous.session) !== JSON.stringify(verified) ||
-                previous.nativeStart !== nativeStart)
+                previous.nativeStart !== nativeStart ||
+                (runtimePlatform === 'win32' && previous.nativeIdentity !== resource.nativeIdentity))
             )
               return yield* WriterAuthorityFault.make({reason: 'ownership'});
             const claim: WriterResourceClaim = {
@@ -475,6 +500,7 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
             const entry = {
               claim,
               physicalIdentity: resource.physicalIdentity,
+              ...(runtimePlatform === 'win32' ? {nativeIdentity: resource.nativeIdentity} : {}),
               session: verified,
               nativeStart,
               revoked: false,
@@ -541,7 +567,8 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
           const record = yield* attempt(() =>
             Schema.decodeUnknownSync(
               Schema.Struct({
-                version: Schema.Literal(1),
+                version: Schema.Literals([1, 2]),
+                nativeProofDigest: Schema.optionalKey(digest),
                 operation: digest,
                 kind: Schema.Literals(['terminal', 'discarded']),
                 claims: Schema.Array(WriterResourceClaim).check(Schema.isMinLength(1), Schema.isMaxLength(1000)),
@@ -550,7 +577,12 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
               }),
             )(JSON.parse(new TextDecoder().decode(file.bytes))),
           );
-          if (record.operation !== operation || JSON.stringify(record.claims) !== JSON.stringify(claims))
+          if (
+            (runtimePlatform === 'win32') !== (record.version === 2) ||
+            (record.version === 2 ? !record.nativeProofDigest : record.nativeProofDigest !== undefined) ||
+            record.operation !== operation ||
+            JSON.stringify(record.claims) !== JSON.stringify(claims)
+          )
             return yield* WriterAuthorityFault.make({reason: 'identity'});
           const ref = Option.getOrUndefined(
             EffectArray.findFirst(registry.operations, value => value.operation === operation),
@@ -601,7 +633,7 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
       revokeResources: claims =>
         Effect.gen(function* () {
           if (yield* Gate) return yield* WriterAuthorityFault.make({reason: 'lock-order'});
-          return yield* withExclusiveFileLockLease(fs, `${directory.path}/mutation.lock`, policy, lease =>
+          return yield* withExclusiveFileLockLease(fs, path.join(directory.path, 'mutation.lock'), policy, lease =>
             inScope(
               {authority: identity, operation: '', mutationLease: lease, active: true},
               Effect.gen(function* () {
@@ -717,8 +749,8 @@ export const makeSemanticWriterAuthorityFromDirectory = (directory: RuntimePriva
           return yield* WriterAuthorityFault.make({reason: 'incompatible'});
         const id = yield* random.uuidV4();
         yield* publish({
-          version: 1,
-          protocol: 'threadnote-writer-v1',
+          version: runtimePlatform === 'win32' ? 2 : 1,
+          protocol: runtimePlatform === 'win32' ? 'threadnote-writer-windows-v2' : 'threadnote-writer-v1',
           authority: id,
           revision: 0,
           resources: [],
