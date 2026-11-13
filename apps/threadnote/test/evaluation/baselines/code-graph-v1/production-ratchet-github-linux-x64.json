@@ -443,8 +443,8 @@
     "cold-lexical-term-rows": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 1654329,
-      "minimum": 1654329
+      "maximum": 2714348,
+      "minimum": 2714348
     },
     "cold-materialization": {
       "samplesMinimum": 1,
@@ -718,8 +718,8 @@
     "cold-materialized-lexical-term-rows": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 1654329,
-      "minimum": 1654329
+      "maximum": 2714348,
+      "minimum": 2714348
     },
     "cold-materialized-lookup-key-rows-n1": {
       "samplesMinimum": 1,
@@ -934,7 +934,7 @@
     "cold-sqlite-durable-database-pages-high-water-n1": {
       "samplesMinimum": 1,
       "unit": "bytes",
-      "p95Maximum": 48035840
+      "p95Maximum": 76625920
     },
     "cold-sqlite-journal-peak-observed": {
       "samplesMinimum": 1,
@@ -1454,8 +1454,8 @@
     "one-file-reindex-activation-copying-terms-rows-n1": {
       "samplesMinimum": 1,
       "unit": "count",
-      "maximum": 533,
-      "minimum": 533
+      "maximum": 883,
+      "minimum": 883
     },
     "one-file-reindex-activation-copying-workspace-duration-n1": {
       "samplesMinimum": 1,
@@ -2701,7 +2701,7 @@
     "same-overlay-reference-sqlite-durable-database-pages-high-water-n1": {
       "samplesMinimum": 1,
       "unit": "bytes",
-      "p95Maximum": 48209920
+      "p95Maximum": 76759040
     },
     "same-overlay-reference-sqlite-journal-peak-observed": {
       "samplesMinimum": 1,
