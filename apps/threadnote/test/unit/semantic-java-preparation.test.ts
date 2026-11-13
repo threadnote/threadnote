@@ -397,7 +397,12 @@ const preparationCompositionLayer = Layer.merge(
     preserveIntendedChild: environment => environment,
   }),
 );
-const preparationCompositionFixture = Effect.fn('test.javaPreparationCompositionFixture')(function* () {
+const preparationCompositionFixture = Effect.fn('test.javaPreparationCompositionFixture')(function* (
+  control: {
+    readonly beforeCapture?: Effect.Effect<void, LspFault>;
+    readonly afterCapture?: Effect.Effect<void, LspFault>;
+  } = {},
+) {
   const fixture = yield* modelFixture({
     deferImport: true,
     passiveProject: true,
@@ -417,6 +422,13 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
     build: 'maven' as const,
   };
   const host: JavaPreparationHost = {
+    beforePreparationLaunch: () => {
+      events.push('before-launch');
+    },
+    capturePreparationProvider: (_pid, finish) => {
+      expect(finish).toBe(fixture.wire.finish);
+      events.push('capture-finish');
+    },
     verifySetup: mark('authorize'),
     onProviderStarted: pid =>
       Effect.sync(() => expect(pid).toBe(fixture.runtime.pid)).pipe(Effect.andThen(mark('admit'))),
@@ -476,6 +488,9 @@ const preparationCompositionFixture = Effect.fn('test.javaPreparationComposition
             ).pipe(Effect.andThen(Effect.sync(() => void (drained = true))), Effect.orDie),
           );
           yield* mark('spawn');
+          if (control.beforeCapture) yield* control.beforeCapture;
+          launch.capturePreparationProvider(fixture.wire.pid, fixture.wire.finish);
+          if (control.afterCapture) yield* control.afterCapture;
           return fixture.runtime;
         }),
     }),
@@ -526,6 +541,8 @@ describe('Java preparation composition', () => {
       const descriptor = yield* makeJavaPreparation(input, host);
       expect(Object.isFrozen(descriptor)).toBe(true);
       expect(f.drained()).toBe(true);
+      expect(f.events.indexOf('before-launch')).toBeLessThan(f.events.indexOf('spawn'));
+      expect(f.events.indexOf('capture-finish')).toBeLessThan(f.events.indexOf('admit'));
       expect(f.events.indexOf('admit')).toBeLessThan(f.events.indexOf('initialize'));
       expect(f.events.indexOf('cache')).toBeLessThan(f.events.indexOf('initialize'));
       expect(f.events.indexOf('stop-provider')).toBeLessThan(f.events.indexOf('drain-build'));
@@ -558,13 +575,74 @@ describe('Java preparation composition', () => {
     }).pipe(Effect.provide(preparationCompositionLayer)),
   );
 
+  effectIt.effect(
+    'captures the original finish before post-spawn verification failure and never reaches later bind',
+    () =>
+      Effect.gen(function* () {
+        const captured = yield* Deferred.make<void>();
+        const failVerification = yield* Deferred.make<void>();
+        const f = yield* preparationCompositionFixture({
+          afterCapture: Deferred.succeed(captured, undefined).pipe(
+            Effect.andThen(Deferred.await(failVerification)),
+            Effect.andThen(LspFault.make({code: 'prerequisite'})),
+          ),
+        });
+        let originalFinish: Effect.Effect<import('../../src/semantic/lsp_transport.js').WireStop> | undefined;
+        const operation = yield* Effect.forkChild(
+          makeJavaPreparation(f.options, {
+            ...f.host,
+            capturePreparationProvider: (_pid, finish) => {
+              originalFinish = finish;
+            },
+          }),
+        );
+        yield* Deferred.await(captured);
+        expect(originalFinish).toBe(f.wire.finish);
+        expect(f.events).toContain('before-launch');
+        expect(f.events).not.toContain('admit');
+        yield* Deferred.succeed(failVerification, undefined);
+        expect(Exit.isFailure(yield* Fiber.await(operation))).toBe(true);
+        expect(f.drained()).toBe(true);
+        expect(originalFinish && (yield* originalFinish)).toMatchObject({drained: true, stdioClosed: true});
+        expect(f.events).not.toContain('cache');
+        expect(f.load).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
+  effectIt.effect('keeps launch uncertainty when interrupted inside preparation before a finish reaches the host', () =>
+    Effect.gen(function* () {
+      const spawned = yield* Deferred.make<void>();
+      const f = yield* preparationCompositionFixture({
+        beforeCapture: Deferred.succeed(spawned, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      let finishCaptured = false;
+      const operation = yield* Effect.forkChild(
+        makeJavaPreparation(f.options, {
+          ...f.host,
+          capturePreparationProvider: () => {
+            finishCaptured = true;
+          },
+        }),
+      );
+      yield* Deferred.await(spawned);
+      yield* Fiber.interrupt(operation);
+      expect(f.events).toContain('before-launch');
+      expect(f.events).not.toContain('admit');
+      expect(finishCaptured).toBe(false);
+      expect(f.load).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(preparationCompositionLayer)),
+  );
+
   effectIt.effect('registration refusal drains before any cache provisioning or import', () =>
     Effect.gen(function* () {
       const f = yield* preparationCompositionFixture();
       const result = yield* Effect.exit(
         makeJavaPreparation(f.options, {
           ...f.host,
-          onProviderStarted: () => LspFault.make({code: 'capacity'}),
+          onProviderStarted: () =>
+            Effect.sync(() => expect(f.events).toContain('capture-finish')).pipe(
+              Effect.andThen(LspFault.make({code: 'capacity'})),
+            ),
         }),
       );
       expect(Exit.isFailure(result)).toBe(true);

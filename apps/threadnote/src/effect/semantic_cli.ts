@@ -25,6 +25,7 @@ import {Identifier} from '@threadnote/semantic/contracts';
 import {runtimePlatform, runtimeArchitecture, runtimeNativePlatformSupport} from '@threadnote/platform/system';
 import {boolean, optionalString} from './cli/flags.js';
 import {runSemanticDoctor} from '../semantic/doctor.js';
+import {runSemanticJavaImport} from '../semantic/java_import.js';
 
 const CapabilityRequest = Schema.Struct({language: Schema.optionalKey(Identifier)});
 
@@ -80,6 +81,7 @@ export function semanticCapabilities(input: unknown = {}) {
         limits: semanticReadinessLimits,
       },
       ownedBufferStartup: 'unimplemented' as const,
+      // Policy controls alone do not make positive import ready; preserve the public readiness contract.
       authorizedJvmImport: 'unimplemented' as const,
     },
     readSurface: {
@@ -306,6 +308,34 @@ export function makeSemanticCommand(withRuntime: CliRuntimeRunner) {
             'Inspect or explicitly configure a private pinned host profile using version:1 JSON on stdin; never downloads or starts an analysis provider',
           ),
         ),
+      ),
+      Command.make('import').pipe(
+        Command.withSubcommands([
+          ...EffectArray.map(['preview', 'apply', 'revoke', 'run'] as const, action =>
+            Command.make(
+              action,
+              {
+                json: boolean('json', 'Print local import policy or result JSON'),
+                authorizeImport: boolean(
+                  'authorize-import',
+                  'Assert local host intent for this exact finite import policy; no human authentication or writer grant',
+                ),
+              },
+              ({authorizeImport}) =>
+                withRuntime(config =>
+                  Effect.gen(function* () {
+                    const result = yield* runSemanticJavaImport(
+                      config,
+                      yield* readSemanticAgentQueryInput,
+                      action,
+                      authorizeImport,
+                    );
+                    return yield* Console.log(JSON.stringify(result));
+                  }),
+                ),
+            ),
+          ),
+        ]),
       ),
       capabilities,
       query,

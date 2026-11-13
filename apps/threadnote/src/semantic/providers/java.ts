@@ -81,6 +81,8 @@ export type JavaPreparationOptions = typeof JavaPreparationOptions.Type;
 export interface JavaPreparationHost {
   /** Existing host authorization must cover the build code's OS authority throughout setup. This is not a sandbox. */
   readonly verifySetup: Effect.Effect<void, unknown>;
+  readonly beforePreparationLaunch: () => void;
+  readonly capturePreparationProvider: (pid: number, finish: Effect.Effect<WireStop>) => void;
   readonly onProviderStarted: (pid: number) => Effect.Effect<void, unknown>;
   readonly provisionOfflineCache: (context: JavaPreparationDrainContext) => Effect.Effect<void, unknown>;
   readonly drainBuildProcesses: (
@@ -91,7 +93,14 @@ export interface JavaPreparationHost {
 /** Host-only setup composition. A model is exposed only after the owned provider and build processes have drained. */
 export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
   function* (options: JavaPreparationOptions, host: JavaPreparationHost) {
-    const {verifySetup, onProviderStarted, provisionOfflineCache, drainBuildProcesses} = host;
+    const {
+      verifySetup,
+      beforePreparationLaunch,
+      capturePreparationProvider,
+      onProviderStarted,
+      provisionOfflineCache,
+      drainBuildProcesses,
+    } = host;
     const captured = yield* Effect.try({
       try: () => structuredClone(options),
       catch: () => LspFault.make({code: 'prerequisite'}),
@@ -101,6 +110,8 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
     );
     if (
       !Effect.isEffect(verifySetup) ||
+      typeof beforePreparationLaunch !== 'function' ||
+      typeof capturePreparationProvider !== 'function' ||
       typeof onProviderStarted !== 'function' ||
       typeof provisionOfflineCache !== 'function' ||
       typeof drainBuildProcesses !== 'function' ||
@@ -149,7 +160,9 @@ export const makeJavaPreparation = Effect.fn('semantic.makeJavaPreparation')(
           workspace,
         });
         yield* verifySetup;
+        beforePreparationLaunch();
         const launched = yield* runtime.preparation({
+          capturePreparationProvider,
           workspace,
           project: inputs.copiedProject,
           worktree: captured.worktree,

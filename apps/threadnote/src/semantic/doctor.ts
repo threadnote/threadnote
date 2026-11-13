@@ -60,6 +60,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
   input: unknown,
   action: 'doctor' | 'status' | 'setup' | 'disable' = 'doctor',
 ) {
+  let javaImportPolicy = 'not-assessed';
   const result = (state: string, nextAction: string, details: object = {}) => ({
     version: 1 as const,
     action,
@@ -71,6 +72,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
     policy: {
       automaticDownload: false,
       repositoryBuildPermission: false,
+      javaImport: {state: javaImportPolicy, execution: 'independent-pinned-importer-enforcement-required'},
       sourceReplay: false,
       productionQualified: false,
     },
@@ -109,9 +111,15 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
     )
       return yield* existing.failure;
     const selected = existing._tag === 'Success' ? existing.success : undefined;
+    javaImportPolicy = selected?.profile.javaImport ? (selected.profile.enabled ? 'configured' : 'disabled') : 'absent';
     const profile = action === 'setup' ? (request.profile ?? selected?.profile) : selected?.profile;
     if (!profile) return result('missing', actions.missing);
     if (profile.worktree !== worktree) return result('incompatible', actions.incompatible);
+    if (action === 'setup' && JSON.stringify(profile.javaImport) !== JSON.stringify(selected?.profile.javaImport))
+      return result(
+        'incompatible',
+        'Use explicit local semantic import policy controls to establish, change or revoke Java import policy',
+      );
     if (action === 'disable') {
       if (!request.apply)
         return result(
@@ -121,6 +129,7 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
         );
       if (!selected || request.expectedDigest !== selected.digest) return result('incompatible', actions.incompatible);
       const written = yield* writeSemanticHostProfile(config, worktree, {...profile, enabled: false}, selected.digest);
+      javaImportPolicy = profile.javaImport ? 'disabled' : 'absent';
       return result('disabled', actions.disabled, {profileDigest: written.digest, changed: written.changed});
     }
     if (!profile.enabled && action !== 'setup')
@@ -173,7 +182,17 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
         productionQualified: false,
       });
     }
-    if (checks.length === 0 || (request.language && providers.length === 0))
+    // Reactivate only an existing, exact-preserved policy-only bootstrap. Nonempty catalogs still need verification.
+    const policyOnlyReactivation =
+      action === 'setup' &&
+      request.language === undefined &&
+      request.profile !== undefined &&
+      selected?.profile.javaImport !== undefined &&
+      !selected.profile.enabled &&
+      profile.enabled &&
+      JSON.stringify(selected.profile.catalog) === '{}' &&
+      JSON.stringify(catalog) === '{}';
+    if ((checks.length === 0 && !policyOnlyReactivation) || (request.language && providers.length === 0))
       return result('missing', actions.missing, {providers});
     if (EffectArray.some(providers, provider => provider.state === 'unavailable'))
       return result('unavailable', 'Correct the pinned host artifacts and retry; prior configuration is retained', {
@@ -188,10 +207,13 @@ export const runSemanticDoctor = Effect.fn('semantic.doctor')(function* (
           {providers, profileDigest: selected?.digest},
         );
       const written = yield* writeSemanticHostProfile(config, worktree, profile, request.expectedDigest);
+      javaImportPolicy = profile.javaImport ? (profile.enabled ? 'configured' : 'disabled') : 'absent';
       return result(
         profile.enabled ? 'configured' : 'disabled',
         profile.enabled
-          ? 'Start an explicit semantic query; no analysis process was started by setup'
+          ? policyOnlyReactivation
+            ? 'Java import policy re-enabled; positive import still requires independently established pinned-importer enforcement'
+            : 'Start an explicit semantic query; no analysis process was started by setup'
           : actions.disabled,
         {providers, profileDigest: written.digest, changed: written.changed},
       );

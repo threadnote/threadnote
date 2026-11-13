@@ -1,5 +1,7 @@
 import {Effect, FileSystem, Path, Schema, String as EffectString} from 'effect';
 import {SecureRandom} from 'effect/crypto';
+import {Digest} from '@threadnote/semantic/contracts';
+import {JavaRuntimeCandidate} from './providers/java_runtime.js';
 import {FileUri} from '@threadnote/semantic/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import * as Native from '@threadnote/platform/system';
@@ -7,11 +9,32 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SemanticHostCatalog} from './host_catalog.js';
 import {withExclusiveFileLockLease} from '@threadnote/platform/file/lock';
 
+/** Policy data selects a finite local operation; it is never a serialized execution capability. */
+export const JavaImportPolicy = Schema.Struct({
+  version: Schema.Literal(1),
+  mode: Schema.Literal('maven21-dependency-free-v1'),
+  project: FileUri,
+  sourceDigest: Digest,
+  candidate: JavaRuntimeCandidate,
+  permissions: Schema.Struct({
+    importer: Schema.Literal(true),
+    repositoryCommands: Schema.Literal(false),
+    sourceExecution: Schema.Literal(false),
+    network: Schema.Literal(false),
+    dependencies: Schema.Literal(false),
+    plugins: Schema.Literal(false),
+    annotationProcessors: Schema.Literal(false),
+    gradle: Schema.Literal(false),
+  }),
+});
+export type JavaImportPolicy = typeof JavaImportPolicy.Type;
+
 export const SemanticHostProfile = Schema.Struct({
   version: Schema.Literal(1),
   enabled: Schema.Boolean,
   worktree: FileUri,
   catalog: SemanticHostCatalog,
+  javaImport: Schema.optional(JavaImportPolicy),
 });
 export class SemanticHostProfileFault extends Schema.TaggedError<
   SemanticHostProfileFault,
@@ -122,11 +145,12 @@ export const readSemanticHostProfile = Effect.fn('semantic.readHostProfile')(fun
 });
 
 /** Explicit local setup only. Unknown configuration is never migrated, replaced or removed. */
-export const writeSemanticHostProfile = Effect.fn('semantic.writeHostProfile')(function* (
+const publishSemanticHostProfile = Effect.fn('semantic.publishHostProfile')(function* (
   config: RuntimeConfig,
   worktree: string,
   input: unknown,
-  expectedDigest?: string,
+  expectedDigest: string | undefined,
+  policyMutation: boolean,
 ) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -162,6 +186,10 @@ export const writeSemanticHostProfile = Effect.fn('semantic.writeHostProfile')(f
             const previousFile = yield* native(read);
             const previous = previousFile ? yield* decodeProfile(previousFile.bytes, worktree) : undefined;
             yield* lease.assertCurrent;
+            // The preserve-only guard runs under the same lease/CAS as the actual publication.
+            if (!policyMutation && JSON.stringify(previous?.profile.javaImport) !== JSON.stringify(profile.javaImport))
+              return yield* reject('incompatible');
+            if (policyMutation && expectedDigest !== previous?.digest) return yield* reject('incompatible');
             if (previous && JSON.stringify(previous.profile) === text) return {digest: previous.digest, changed: false};
             if (expectedDigest !== previous?.digest) return yield* reject('incompatible');
             const nonce = EffectString.replaceAll('-', '')(yield* random.uuidV4());
@@ -190,4 +218,31 @@ export const writeSemanticHostProfile = Effect.fn('semantic.writeHostProfile')(f
       );
     }),
   );
+});
+
+/** Generic setup can preserve a policy, but cannot establish, widen or revoke one. */
+export const writeSemanticHostProfile = (
+  config: RuntimeConfig,
+  worktree: string,
+  input: unknown,
+  expectedDigest?: string,
+) => publishSemanticHostProfile(config, worktree, input, expectedDigest, false);
+
+/** Dedicated same-user local CLI policy operation; caller intent is asserted, not human authentication. */
+export const writeSemanticJavaImportPolicy = Effect.fn('semantic.writeJavaImportPolicy')(function* (
+  config: RuntimeConfig,
+  worktree: string,
+  policy: JavaImportPolicy | undefined,
+  expectedDigest: string | undefined,
+) {
+  const existing = yield* inspectSemanticHostProfile(config, worktree).pipe(
+    Effect.catchTag('SemanticHostProfileFault', fault =>
+      fault.reason === 'missing' ? Effect.void : Effect.fail(fault),
+    ),
+  );
+  if (existing?.digest !== expectedDigest) return yield* reject('incompatible');
+  if (!existing && !policy) return yield* reject('missing');
+  const base = existing?.profile ?? {version: 1 as const, enabled: true, worktree, catalog: {}};
+  const updated = {...base, javaImport: policy};
+  return yield* publishSemanticHostProfile(config, worktree, updated, expectedDigest, true);
 });
