@@ -48,6 +48,7 @@ import {
   spawnLspWire,
   SemanticWireStartup,
   type LspWire,
+  type WireStop,
 } from '../../src/semantic/lsp_transport.js';
 type Message = Parameters<LspWire['send']>[0];
 const fakeWire = Effect.gen(function* () {
@@ -1596,6 +1597,201 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
     'observes actual owned process cleanup for $mode',
     ({mode, graceful}) =>
       Effect.gen(function* () {
+        let failureEvidence: ((stop: WireStop & {graceful: boolean}) => string) | undefined;
+        if (mode === 'panic-on-exit') {
+          const observe = platformSystem.runtimeObserveOwnedProviderTree;
+          const terminate = platformSystem.runtimeTerminateOwnedProviderTree;
+          const close = platformSystem.runtimeCloseOwnedProviderTree;
+          const faultReason = Schema.Literals([
+            'unsupported-platform',
+            'identity',
+            'path',
+            'readonly',
+            'source-changed',
+            'private-storage',
+            'io',
+          ]);
+          const state = Schema.Literals(['running', 'drained', 'unknown']);
+          const own = (value: object, key: string): unknown => Object.getOwnPropertyDescriptor(value, key)?.value;
+          const exitCode = (value: unknown): number | null | 'unavailable' =>
+            value === null
+              ? null
+              : typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255
+                ? value
+                : 'unavailable';
+          type ErrorCode = typeof faultReason.Type | 'not-thrown' | 'unavailable';
+          const reason = (error: unknown): ErrorCode => {
+            const value = error !== null && typeof error === 'object' ? own(error, 'reason') : undefined;
+            return Schema.is(faultReason)(value) ? value : 'unavailable';
+          };
+          type Sample = {
+            state: 'running' | 'drained' | 'unknown' | 'unavailable';
+            code: ReturnType<typeof exitCode>;
+            stdioClosed: boolean | 'unavailable';
+          };
+          let first: Sample | undefined, last: Sample | undefined;
+          type Call =
+            | 'observe-returned'
+            | 'observe-threw'
+            | 'terminate-returned'
+            | 'terminate-threw'
+            | 'kill-returned'
+            | 'kill-threw'
+            | 'close-returned'
+            | 'close-threw';
+          const changes: Sample[] = [],
+            order: Call[] = [];
+          const trace: {
+            observeCalls: number;
+            terminateCalls: number;
+            closeCalls: number;
+            changesTruncated: boolean;
+            orderTruncated: boolean;
+            observerIncomplete: boolean;
+            observeError: ErrorCode;
+            terminateError: ErrorCode;
+            closeError: ErrorCode;
+            closeOutcome: 'not-called' | 'returned' | 'threw';
+          } = {
+            observeCalls: 0,
+            terminateCalls: 0,
+            closeCalls: 0,
+            changesTruncated: false,
+            orderTruncated: false,
+            observerIncomplete: false,
+            observeError: 'not-thrown',
+            terminateError: 'not-thrown',
+            closeOutcome: 'not-called',
+            closeError: 'not-thrown',
+          };
+          // Observation failure must never replace a native result/exception or suppress its real cleanup.
+          const capture = (record: () => void) => {
+            try {
+              record();
+            } catch {
+              trace.observerIncomplete = true;
+            }
+          };
+          const recordOrder = (event: Call) => {
+            if (order.length < 16) order.push(event);
+            else {
+              order[15] = event;
+              trace.orderTruncated = true;
+            }
+          };
+          const mocks = [
+            vi.spyOn(platformSystem, 'runtimeObserveOwnedProviderTree').mockImplementation(handle => {
+              try {
+                const result = observe(handle);
+                capture(() => {
+                  trace.observeCalls++;
+                  recordOrder('observe-returned');
+                  const nativeState = own(result, 'state'),
+                    stdio = own(result, 'stdioClosed');
+                  const sample: Sample = {
+                    state: Schema.is(state)(nativeState) ? nativeState : 'unavailable',
+                    code: exitCode(own(result, 'leaderExitCode')),
+                    stdioClosed: typeof stdio === 'boolean' ? stdio : 'unavailable',
+                  };
+                  if (
+                    sample.state === 'unavailable' ||
+                    sample.code === 'unavailable' ||
+                    sample.stdioClosed === 'unavailable'
+                  )
+                    trace.observerIncomplete = true;
+                  first ??= sample;
+                  if (
+                    !last ||
+                    last.state !== sample.state ||
+                    last.code !== sample.code ||
+                    last.stdioClosed !== sample.stdioClosed
+                  ) {
+                    if (changes.length < 8) changes.push(sample);
+                    else trace.changesTruncated = true;
+                  }
+                  last = sample;
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.observeCalls++;
+                  trace.observeError = reason(error);
+                  recordOrder('observe-threw');
+                });
+                throw error;
+              }
+            }),
+            vi.spyOn(platformSystem, 'runtimeTerminateOwnedProviderTree').mockImplementation((handle, signal) => {
+              try {
+                const result = terminate(handle, signal);
+                capture(() => {
+                  trace.terminateCalls++;
+                  recordOrder(signal === 'kill' ? 'kill-returned' : 'terminate-returned');
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.terminateCalls++;
+                  trace.terminateError = reason(error);
+                  recordOrder(signal === 'kill' ? 'kill-threw' : 'terminate-threw');
+                });
+                throw error;
+              }
+            }),
+            vi.spyOn(platformSystem, 'runtimeCloseOwnedProviderTree').mockImplementation(handle => {
+              try {
+                const result = close(handle);
+                capture(() => {
+                  trace.closeCalls++;
+                  trace.closeOutcome = 'returned';
+                  recordOrder('close-returned');
+                });
+                return result;
+              } catch (error) {
+                capture(() => {
+                  trace.closeCalls++;
+                  trace.closeOutcome = 'threw';
+                  trace.closeError = reason(error);
+                  recordOrder('close-threw');
+                });
+                throw error;
+              }
+            }),
+          ];
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (const mock of mocks) mock.mockRestore();
+            }),
+          );
+          failureEvidence = stop => {
+            try {
+              const fault = own(stop, 'fault');
+              const faultCode = fault !== null && typeof fault === 'object' ? own(fault, 'code') : undefined;
+              const boolean = (key: string) => {
+                const value = own(stop, key);
+                return typeof value === 'boolean' ? value : 'unavailable';
+              };
+              return JSON.stringify({
+                stop: {
+                  graceful: boolean('graceful'),
+                  drained: boolean('drained'),
+                  stdioClosed: boolean('stdioClosed'),
+                  forced: boolean('forced'),
+                  code: exitCode(own(stop, 'code')),
+                  faultCode:
+                    fault === undefined ? null : Schema.is(LspFault.fields.code)(faultCode) ? faultCode : 'unavailable',
+                },
+                first,
+                changes,
+                last,
+                order,
+                ...trace,
+              });
+            } catch {
+              return '{"observerIncomplete":true}';
+            }
+          };
+        }
         const wire = yield* spawnLspWire({
           command: process.execPath,
           args: ['apps/threadnote/test/fixtures/semantic/fake-provider.ts', mode],
@@ -1605,9 +1801,10 @@ describe.skipIf(process.platform === 'win32')('semantic real process transport',
         const client = yield* makeLspClient(wire);
         expect(yield* client.request('echo', {text: '🧵\r\n'}, 1000)).toEqual({text: '🧵\r\n'});
         const stopped = yield* client.close;
-        expect(stopped.graceful).toBe(graceful);
-        expect(stopped.drained).toBe(true);
-        expect(stopped.stdioClosed).toBe(true);
+        const evidence = failureEvidence?.(stopped);
+        expect(stopped.graceful, evidence).toBe(graceful);
+        expect(stopped.drained, evidence).toBe(true);
+        expect(stopped.stdioClosed, evidence).toBe(true);
       }).pipe(
         TestClock.withLive,
         Effect.provideService(ChildEnvironmentPolicy, {

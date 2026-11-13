@@ -3,6 +3,19 @@ import {dlopen, ptr, read, type FFIFunction} from 'bun:ffi';
 import {String as EffectString, Option} from 'effect';
 import {writerFail as fail} from './fault.js';
 
+/** Package-private sink used by retained native operations; not an authority or operation-table input. */
+export type WindowsNativeResourceOwner = (release: () => boolean) => () => void;
+function ownRelease(release: () => boolean, owner?: WindowsNativeResourceOwner): () => void {
+  if (owner) return owner(release);
+  let state: 'owned' | 'closed' | 'unknown' = 'owned';
+  return () => {
+    if (state === 'closed') return;
+    if (state === 'unknown') return fail('io');
+    state = 'unknown';
+    if (!release()) return fail('io');
+    state = 'closed';
+  };
+}
 export const windowsInvalidHandle = 0xffffffffffffffffn;
 export function requireWindowsNative(): void {
   if (runtimeCurrentPlatform() !== 'win32' || (process.arch !== 'arm64' && process.arch !== 'x64'))
@@ -24,9 +37,9 @@ export function windowsHandle(handle: bigint): bigint {
   if (handle === 0n || handle === windowsInvalidHandle) return fail('io');
   return handle;
 }
-export function windowsKernel() {
+export function windowsKernel(owner?: WindowsNativeResourceOwner) {
   requireWindowsNative();
-  return dlopen('kernel32.dll', {
+  const library = dlopen('kernel32.dll', {
     CloseHandle: {args: ['u64'], returns: 'i32'},
     GetLastError: {args: [], returns: 'u32'},
     GetCurrentProcess: {args: [], returns: 'u64'},
@@ -37,6 +50,11 @@ export function windowsKernel() {
     WaitForSingleObject: {args: ['u64', 'u32'], returns: 'u32'},
     LocalFree: {args: ['u64'], returns: 'u64'},
   });
+  const close = ownRelease(() => {
+    library.close();
+    return true;
+  }, owner);
+  return {symbols: library.symbols, close};
 }
 export function windowsProcessIdentity(handle: bigint, expectedPid: number): string {
   const lib = windowsKernel();
@@ -59,32 +77,45 @@ export function windowsProcessIdentity(handle: bigint, expectedPid: number): str
 }
 
 /** Exact native token SID. Usernames and numeric/folded SID hashes are never principal identities. */
-export function windowsTokenPrincipal(processHandle?: bigint): {readonly sid: string; readonly accountHome: string} {
-  const kernel = windowsKernel();
-  const security = windowsSystemLibrary('advapi32.dll', {
-    OpenProcessToken: {args: ['u64', 'u32', 'buffer'], returns: 'i32'},
-    OpenThreadToken: {args: ['u64', 'u32', 'i32', 'buffer'], returns: 'i32'},
-    GetTokenInformation: {args: ['u64', 'u32', 'ptr', 'u32', 'buffer'], returns: 'i32'},
-    IsValidSid: {args: ['u64'], returns: 'i32'},
-    GetLengthSid: {args: ['u64'], returns: 'u32'},
-    ConvertSidToStringSidW: {args: ['u64', 'buffer'], returns: 'i32'},
-  });
-  const userenv = windowsSystemLibrary('userenv.dll', {
-    GetUserProfileDirectoryW: {args: ['u64', 'ptr', 'buffer'], returns: 'i32'},
-  });
-  let token = 0n,
-    sidText = 0n;
+export function windowsTokenPrincipal(
+  processHandle?: bigint,
+  owner?: WindowsNativeResourceOwner,
+): {readonly sid: string; readonly accountHome: string} {
+  const kernel = windowsKernel(owner);
+  const security = windowsSystemLibrary(
+    'advapi32.dll',
+    {
+      OpenProcessToken: {args: ['u64', 'u32', 'buffer'], returns: 'i32'},
+      OpenThreadToken: {args: ['u64', 'u32', 'i32', 'buffer'], returns: 'i32'},
+      GetTokenInformation: {args: ['u64', 'u32', 'ptr', 'u32', 'buffer'], returns: 'i32'},
+      IsValidSid: {args: ['u64'], returns: 'i32'},
+      GetLengthSid: {args: ['u64'], returns: 'u32'},
+      ConvertSidToStringSidW: {args: ['u64', 'buffer'], returns: 'i32'},
+    },
+    owner,
+  );
+  const userenv = windowsSystemLibrary(
+    'userenv.dll',
+    {
+      GetUserProfileDirectoryW: {args: ['u64', 'ptr', 'buffer'], returns: 'i32'},
+    },
+    owner,
+  );
+  let releaseToken: (() => void) | undefined, releaseSidText: (() => void) | undefined;
   try {
     const threadToken = new BigUint64Array(1);
     if (security.symbols.OpenThreadToken(kernel.symbols.GetCurrentThread(), 8, 1, threadToken) !== 0) {
-      kernel.symbols.CloseHandle(threadToken[0]);
+      const handle = windowsHandle(threadToken[0]);
+      ownRelease(() => kernel.symbols.CloseHandle(handle) !== 0, owner)();
       return fail('identity');
     }
     if (kernel.symbols.GetLastError() !== 1008) return fail('identity');
     const output = new BigUint64Array(1);
     if (security.symbols.OpenProcessToken(processHandle ?? kernel.symbols.GetCurrentProcess(), 8, output) === 0)
       fail('identity');
-    token = windowsHandle(output[0]);
+    const token = windowsHandle(output[0]),
+      heldToken = token;
+    releaseToken = ownRelease(() => kernel.symbols.CloseHandle(heldToken) !== 0, owner);
     const required = new Uint32Array(1);
     if (
       security.symbols.GetTokenInformation(token, 1, null, 0, required) !== 0 ||
@@ -113,7 +144,9 @@ export function windowsTokenPrincipal(processHandle?: bigint): {readonly sid: st
     if (sidLength < 8 || sidLength > 68 || sid + BigInt(sidLength) > start + BigInt(length)) fail('identity');
     const stringOutput = new BigUint64Array(1);
     if (security.symbols.ConvertSidToStringSidW(sid, stringOutput) === 0) fail('identity');
-    sidText = windowsHandle(stringOutput[0]);
+    const sidText = windowsHandle(stringOutput[0]),
+      heldSidText = sidText;
+    releaseSidText = ownRelease(() => kernel.symbols.LocalFree(heldSidText) === 0n, owner);
     let text = '';
     for (let index = 0; index < 256; index++) {
       const unit = read.u16(sidText + BigInt(index * 2));
@@ -157,11 +190,23 @@ export function windowsTokenPrincipal(processHandle?: bigint): {readonly sid: st
       fail('identity');
     return {sid: text, accountHome};
   } finally {
-    if (sidText !== 0n) kernel.symbols.LocalFree(sidText);
-    if (token !== 0n) kernel.symbols.CloseHandle(token);
-    userenv.close();
-    security.close();
-    kernel.close();
+    try {
+      releaseSidText?.();
+    } finally {
+      try {
+        releaseToken?.();
+      } finally {
+        try {
+          userenv.close();
+        } finally {
+          try {
+            security.close();
+          } finally {
+            kernel.close();
+          }
+        }
+      }
+    }
   }
 }
 
@@ -178,8 +223,9 @@ export function windowsWellFormed(value: string): boolean {
 
 /** Pin secondary system DLLs and their dependencies to the native system directory, independent of cwd/PATH. */
 export function windowsSystemLibrary<const Fns extends Record<string, FFIFunction>>(
-  name: 'advapi32.dll' | 'userenv.dll',
+  name: 'advapi32.dll' | 'userenv.dll' | 'ntdll.dll',
   functions: Fns,
+  owner?: WindowsNativeResourceOwner,
 ) {
   requireWindowsNative();
   const loader = dlopen('kernel32.dll', {
@@ -188,6 +234,13 @@ export function windowsSystemLibrary<const Fns extends Record<string, FFIFunctio
     FreeLibrary: {args: ['u64'], returns: 'i32'},
   });
   let module = 0n;
+  let releaseLibrary: (() => void) | undefined;
+  const close = ownRelease(() => {
+    releaseLibrary?.();
+    if (module !== 0n && loader.symbols.FreeLibrary(module) === 0) return false;
+    loader.close();
+    return true;
+  }, owner);
   try {
     const directory = new Uint16Array(32768),
       length = loader.symbols.GetSystemDirectoryW(directory, directory.length);
@@ -196,19 +249,13 @@ export function windowsSystemLibrary<const Fns extends Record<string, FFIFunctio
     for (const unit of directory.subarray(0, length)) path += String.fromCharCode(unit);
     if (!/^[A-Za-z]:\\/u.test(path) || /[\p{Cc}]/u.test(path)) return fail('unsupported-platform');
     const absolute = `${path}\\${name}`;
-    module = windowsHandle(loader.symbols.LoadLibraryExW(windowsWide(absolute), 0n, 0x00000800));
+    module = loader.symbols.LoadLibraryExW(windowsWide(absolute), 0n, 0x00000800);
+    windowsHandle(module);
     const library = dlopen(absolute, functions);
-    return {
-      symbols: library.symbols,
-      close() {
-        library.close();
-        loader.symbols.FreeLibrary(module);
-        loader.close();
-      },
-    };
+    releaseLibrary = () => library.close();
+    return {symbols: library.symbols, close};
   } catch (error) {
-    if (module !== 0n) loader.symbols.FreeLibrary(module);
-    loader.close();
+    close();
     throw error;
   }
 }

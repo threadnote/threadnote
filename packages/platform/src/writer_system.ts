@@ -3,6 +3,12 @@ import {Array as EffectArray, Schema, String as EffectString} from 'effect';
 
 export {RuntimeWriterFault} from './writer-system/fault.js';
 import {RuntimeWriterFault, writerFail as fail} from './writer-system/fault.js';
+import {commitWriterTransaction} from './writer-system/writer-transaction.js';
+import {
+  openWindowsWriterRoot,
+  type WindowsWriterRoot,
+  type WindowsWriterTarget,
+} from './writer-system/windows-writer.js';
 import {
   posixWriterLibrary as library,
   requirePosixWriterPlatform as supported,
@@ -137,6 +143,8 @@ interface TargetState {
 const roots = new WeakMap<RuntimeWriterRoot, DirectoryState>();
 const directories = new WeakMap<RuntimePrivateWriterDirectory, DirectoryState>();
 const targets = new WeakMap<RuntimeGuardedDiskTarget, TargetState>();
+const windowsRoots = new WeakMap<RuntimeWriterRoot, WindowsWriterRoot>();
+const windowsTargets = new WeakMap<RuntimeGuardedDiskTarget, WindowsWriterTarget>();
 const last = (state: DirectoryState) => state.chain[state.chain.length - 1];
 function closeEdges(edges: readonly Edge[]) {
   let failed = false;
@@ -228,7 +236,24 @@ function assertPrivateDirectoryAcl(edge: Edge, parent: Edge | undefined, private
       after = stat(edge.fd);
     if (!sameCritical(after) || !sameCritical(namedAfter)) fail('private-storage');
     if (stable(before, namedBefore) && stable(before, namedAfter) && stable(before, after)) return;
-    if (attempt !== 0) fail('private-storage');
+    if (attempt !== 0) {
+      const error = RuntimeWriterFault.make({reason: 'private-storage'});
+      try {
+        // Use only these already captured samples. No new native observation or metadata value escapes.
+        const changed: string[] = [];
+        for (const [name, sample] of [
+          ['named-before', namedBefore],
+          ['named-after', namedAfter],
+          ['retained-after', after],
+        ] as const)
+          for (const field of ['nlink', 'size', 'ctimeNs', 'mtimeNs'] as const)
+            if (before[field] !== sample[field]) changed.push(`${name}.${field}`);
+        error.message = `directory-coherence:${EffectArray.join(changed, ',')}`;
+      } catch {
+        // Diagnostic projection must never replace the original conservative fault.
+      }
+      throw error;
+    }
   }
 }
 function directoryState(directory: RuntimePrivateWriterDirectory) {
@@ -281,6 +306,12 @@ export function runtimeOpenWriterRoot(
   canonicalRoot: string,
   expected: {readonly dev: bigint; readonly ino: bigint},
 ): RuntimeWriterRoot {
+  if (runtimeCurrentPlatform() === 'win32') {
+    const state = openWindowsWriterRoot(canonicalRoot, expected);
+    const handle: RuntimeWriterRoot = Object.freeze({[rootBrand]: true as const, path: canonicalRoot});
+    windowsRoots.set(handle, state);
+    return handle;
+  }
   const state = openDirectory(canonicalRoot);
   if (last(state).identity.dev !== expected.dev || last(state).identity.ino !== expected.ino) {
     closeEdges(state.chain);
@@ -291,6 +322,8 @@ export function runtimeOpenWriterRoot(
   return handle;
 }
 export function runtimeCloseWriterRoot(root: RuntimeWriterRoot): void {
+  const windows = windowsRoots.get(root);
+  if (windows) return windows.close();
   const state = roots.get(root);
   if (!state || state.closed) return;
   state.closed = true;
@@ -302,6 +335,14 @@ export function runtimeOpenGuardedDiskTarget(
   expectedPhysicalIdentity: string,
   maximumBytes: number,
 ): RuntimeGuardedDiskTarget {
+  const windows = windowsRoots.get(root);
+  if (windows) {
+    checkBound(maximumBytes);
+    const state = windows.openTarget(relativeSegments, expectedPhysicalIdentity, maximumBytes);
+    const handle: RuntimeGuardedDiskTarget = Object.freeze({[targetBrand]: true as const});
+    windowsTargets.set(handle, state);
+    return handle;
+  }
   const state = roots.get(root);
   if (!state || relativeSegments.length === 0 || relativeSegments.length > 256) return fail('path');
   checkBound(maximumBytes);
@@ -369,6 +410,8 @@ export interface RuntimeGuardedDiskObservation {
   readonly bytes: Uint8Array;
 }
 export function runtimeInspectGuardedDiskTarget(handle: RuntimeGuardedDiskTarget): RuntimeGuardedDiskObservation {
+  const windows = windowsTargets.get(handle);
+  if (windows) return windows.inspect();
   const state = targetState(handle);
   const result = readFd(state.fd, state.maximumBytes);
   targetState(handle);
@@ -396,45 +439,32 @@ export function runtimeCommitGuardedDiskTarget(
     readonly assertCurrentSync: () => void;
   },
 ): RuntimeGuardedDiskWriteResult {
-  let changed = false;
-  try {
-    checkBound(input.afterBytes.byteLength);
-    input.assertCurrentSync();
+  const windows = windowsTargets.get(handle);
+  if (windows) return windows.commit(input);
+  return commitWriterTransaction(input, () => {
     const state = targetState(handle);
-    if (input.afterBytes.byteLength > state.maximumBytes) fail('io');
-    if (state.attempted) fail('source-changed');
-    const current = runtimeInspectGuardedDiskTarget(handle);
-    if (!stable(current.identity, input.before.identity) || !equalBytes(current.bytes, input.before.bytes))
-      return {status: 'conflict', reason: 'source-changed'};
-    state.attempted = true;
-    let offset = 0;
-    while (offset < input.afterBytes.length) {
-      input.assertCurrentSync();
-      changed = true;
-      const count = native.writeSync(state.fd, input.afterBytes, offset, input.afterBytes.length - offset, offset);
-      if (count <= 0 || count > input.afterBytes.length - offset) fail('io');
-      offset += count;
-    }
-    input.assertCurrentSync();
-    changed = true;
-    native.ftruncateSync(state.fd, input.afterBytes.length);
-    syncFile(state.fd);
-    state.baseline = stat(state.fd);
-    const observed = runtimeInspectGuardedDiskTarget(handle);
-    if (!equalBytes(observed.bytes, input.afterBytes)) return {status: 'unknown'};
-    input.assertCurrentSync();
-    return {status: 'applied', current: observed};
-  } catch (error) {
-    if (changed) return {status: 'unknown'};
-    if (
-      Schema.is(RuntimeWriterFault)(error) &&
-      (error.reason === 'path' || error.reason === 'readonly' || error.reason === 'source-changed')
-    )
-      return {status: 'conflict', reason: error.reason};
-    throw error;
-  }
+    return {
+      maximumBytes: state.maximumBytes,
+      get attempted() {
+        return state.attempted;
+      },
+      inspect: () => runtimeInspectGuardedDiskTarget(handle),
+      sameIdentity: (current, before) => stable(current.identity, before.identity),
+      beginAttempt() {
+        state.attempted = true;
+      },
+      writeAt: (bytes, offset) => native.writeSync(state.fd, bytes, offset, bytes.length - offset, offset),
+      truncate: length => native.ftruncateSync(state.fd, length),
+      flush: () => syncFile(state.fd),
+      refreshBaseline() {
+        state.baseline = stat(state.fd);
+      },
+    };
+  });
 }
 export function runtimeCloseGuardedDiskTarget(handle: RuntimeGuardedDiskTarget): void {
+  const windows = windowsTargets.get(handle);
+  if (windows) return windows.close();
   const state = targets.get(handle);
   if (!state || state.closed) return;
   state.closed = true;
