@@ -23,7 +23,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Standard spec/plan business authoring. Start/save from business JSON without native metadata; read full content; record a caller-provided human response and independent review; admit an approved local, commit, or PR plan, or share it by current authoringRef and writable team for one portable reference. Actor identity is caller-asserted, not independently authenticated. Read is nonmutating.',
+        'Author specs/plans from business JSON: start/save, read full content, record caller responses and independent reviews, admit approved local/commit/PR plans, or share by current authoringRef and writable team for a portable reference. Actor identity is caller-asserted, not authenticated; reads are nonmutating.',
       inputSchema: {
         command: Schema.Literals(['start', 'read', 'save', 'decide', 'admit', 'share', 'job']),
         callerCwd: McpInput.requiredString('Absolute original checkout'),
@@ -63,7 +63,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Start or resume a bounded task from business intent; the runtime verifies installed workflow resources and owns native run metadata.',
+        'Start/resume bounded business intent after verifying installed workflow resources; runtime owns native run metadata.',
       inputSchema: {
         callerCwd: McpInput.requiredString('Absolute checkout path for this task'),
         featureName: McpInput.string('Stable feature name used to resume a compact task'),
@@ -153,7 +153,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     'workflow_task_compact_confirm',
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
-      description: 'Record an actual exact-intent user response, then admit or reconcile the same canonical run.',
+      description: 'Record an actual user response to the exact intent; admit or reconcile the same run.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -287,7 +287,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Control task phases: begin eligible; reopen validated/published after failure; resume blocked after dependencies are accepted; reconcile to the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is not authenticated.',
+        'Control phases: begin eligible; reopen validated/published after failure; resume blocked after accepted dependencies; reconcile the verified ready approved plan with bindings; extend exhausted review budget with caller authority. Actor identity is unauthenticated.',
       inputSchema: {
         runId: McpInput.requiredString(),
         callerCwd: McpInput.requiredString(),
@@ -356,7 +356,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record a source snapshot, supersede only the latest unreviewed snapshot, or requalify an exact reviewed predecessor after an approved base-branch transition. Requalification retains history and requires a new full review.',
+        'Record source; supersede only the latest unreviewed snapshot; or requalify an exact reviewed predecessor after an approved base change. Requalification keeps history and requires a new full review.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -490,7 +490,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record canonical local or commit delivery for the current validated phase, or verify PR delivery. Choose the operation matching the approved plan; PR receipts require the supplied typed PR and publication evidence and may return a watch card.',
+        'Record canonical local/commit delivery for the validated phase or verify PR delivery. Match the approved plan; PR requires typed PR and publication evidence and may return a watch card.',
       inputSchema: {
         runId: McpInput.requiredString('Existing native workflow run identifier'),
         callerCwd: McpInput.requiredString('Absolute checkout path bound to this workflow run'),
@@ -545,7 +545,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Operate the exact current task PR watch. Relay current notice refs, record each returned event disposition, then ACK with current refs. Persist dispositions before ACK and complete delivery from readback.',
+        'Operate the exact current task PR watch: relay noticeRefs only; persist each event disposition before ACK with current refs; complete delivery from readback.',
       inputSchema: {
         runId: McpInput.requiredString('Native run'),
         callerCwd: McpInput.requiredString('Bound checkout'),
@@ -553,7 +553,7 @@ export function registerWorkflowTaskTool(server: EffectMcpServerAdapter, config:
         deliveryRef: McpInput.string('Opaque open PR delivery reference; omit only for provisional inspect or stop'),
         ...Struct.omit(NativeTaskPrWatchFieldsSchema.fields, ['noticeRef']),
         noticeRef: McpInput.string(
-          'Current notice route: relay it, record the returned event disposition, then ACK with current refs.',
+          'Relay this noticeRef only; record its returned event disposition; ACK with current refs.',
         ),
       },
     },
