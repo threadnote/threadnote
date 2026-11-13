@@ -100,7 +100,52 @@ function kernel() {
     GetExitCodeProcess: {args: ['u64', 'buffer'], returns: 'i32'},
     WaitForSingleObject: {args: ['u64', 'u32'], returns: 'u32'},
     IsProcessInJob: {args: ['u64', 'u64', 'buffer'], returns: 'i32'},
+    GetCurrentThreadId: {args: [], returns: 'u32'},
+    GetCurrentProcess: {args: [], returns: 'u64'},
+    DuplicateHandle: {args: ['u64', 'u64', 'u64', 'buffer', 'u32', 'i32', 'u32'], returns: 'i32'},
+    GetThreadId: {args: ['u64'], returns: 'u32'},
+    GetProcessIdOfThread: {args: ['u64'], returns: 'u32'},
+    WaitForDebugEvent: {args: ['buffer', 'u32'], returns: 'i32'},
+    ContinueDebugEvent: {args: ['u32', 'u32', 'u32'], returns: 'i32'},
+    DebugSetProcessKillOnExit: {args: ['i32'], returns: 'i32'},
+    ResumeThread: {args: ['u64'], returns: 'u32'},
   });
+}
+/** CompareObjectHandles is documented in Kernelbase, pinned to the native system directory. */
+function objectComparison() {
+  const loader = dlopen('kernel32.dll', {
+    GetSystemDirectoryW: {args: ['buffer', 'u32'], returns: 'u32'},
+    LoadLibraryExW: {args: ['buffer', 'u64', 'u32'], returns: 'u64'},
+    FreeLibrary: {args: ['u64'], returns: 'i32'},
+  });
+  let module = 0n,
+    releaseLibrary: (() => void) | undefined,
+    state: 'owned' | 'closed' | 'unknown' = 'owned';
+  const close = () => {
+    if (state === 'closed') return;
+    if (state === 'unknown') return fail('io');
+    state = 'unknown';
+    releaseLibrary?.();
+    if (module !== 0n && loader.symbols.FreeLibrary(module) === 0) return fail('io');
+    loader.close();
+    state = 'closed';
+  };
+  try {
+    const directory = new Uint16Array(32768),
+      length = loader.symbols.GetSystemDirectoryW(directory, directory.length);
+    if (length < 3 || length >= directory.length) fail('unsupported-platform');
+    let path = '';
+    for (const unit of directory.subarray(0, length)) path += String.fromCharCode(unit);
+    if (!/^[A-Za-z]:\\/u.test(path) || /[\p{Cc}]/u.test(path)) fail('unsupported-platform');
+    const absolute = `${path}\\kernelbase.dll`;
+    module = windowsHandle(loader.symbols.LoadLibraryExW(windowsWide(absolute), 0n, 0x00000800));
+    const library = dlopen(absolute, {CompareObjectHandles: {args: ['u64', 'u64'], returns: 'i32'}});
+    releaseLibrary = () => library.close();
+    return {symbols: library.symbols, close};
+  } catch (error) {
+    close();
+    throw error;
+  }
 }
 type Kernel = ReturnType<typeof kernel>;
 interface Pipe {
@@ -119,13 +164,546 @@ function close(kernel: Kernel, handle: bigint): void {
   if (kernel.symbols.CloseHandle(handle) === 0) fail('io');
 }
 
-/** Atomic Job assignment and a restrictive handle allowlist are both creation attributes, never a post-spawn fixup. */
-let quarantinedLaunch: (() => boolean) | undefined;
-export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): OwnedProviderBackend {
-  if (quarantinedLaunch) {
-    if (!quarantinedLaunch()) return fail('identity');
-    quarantinedLaunch = undefined;
+/** Data-only accounting. Call exit transitions only AFTER successful native continuation. */
+export class WindowsDebugThreadLedger {
+  private readonly entries = new Map<object, Set<number>>();
+  private primaryReserved = true;
+  private piReserved = true;
+  private count = 1;
+  constructor(
+    private readonly shared: {threads: number; pi: number},
+    private readonly jobLimit = 1024,
+    private readonly sharedLimit = 8192,
+    private readonly piLimit = 64,
+  ) {
+    if (jobLimit < 1 || shared.threads >= sharedLimit || shared.pi >= piLimit) fail('identity');
+    shared.threads++;
+    shared.pi++;
   }
+  get live(): number {
+    return this.count;
+  }
+  create(member: object, tid: number, primary = false): void {
+    const prior = this.entries.get(member);
+    if (!Number.isSafeInteger(tid) || tid <= 0 || tid > 0xffffffff || prior?.has(tid)) fail('identity');
+    if (primary ? !this.primaryReserved : this.count >= this.jobLimit || this.shared.threads >= this.sharedLimit)
+      fail('identity');
+    if (primary) this.primaryReserved = false;
+    else {
+      this.count++;
+      this.shared.threads++;
+    }
+    const threads = prior ?? new Set<number>();
+    threads.add(tid);
+    this.entries.set(member, threads);
+  }
+  has(member: object, tid: number): boolean {
+    return this.entries.get(member)?.has(tid) === true;
+  }
+  exitThread(member: object, tid: number): void {
+    const threads = this.entries.get(member);
+    if (!threads?.has(tid) || this.count < 1 || this.shared.threads < 1) return fail('identity');
+    threads.delete(tid);
+    this.count--;
+    this.shared.threads--;
+    if (threads.size === 0) this.entries.delete(member);
+  }
+  exitProcess(member: object): void {
+    const threads = this.entries.get(member);
+    if (!threads || threads.size > this.count || threads.size > this.shared.threads) return fail('identity');
+    this.count -= threads.size;
+    this.shared.threads -= threads.size;
+    this.entries.delete(member);
+  }
+  releasePi(): void {
+    if (!this.piReserved || this.shared.pi < 1) fail('identity');
+    this.piReserved = false;
+    this.shared.pi--;
+  }
+  cancelUnattempted(): void {
+    if (!this.primaryReserved || this.entries.size !== 0 || this.count !== 1) fail('identity');
+    this.primaryReserved = false;
+    this.count--;
+    this.shared.threads--;
+    this.releasePi();
+  }
+}
+interface DebugMember {
+  readonly pid: number;
+  readonly identity: string;
+  readonly completion: bigint; // owned duplicate, never the borrowed debug-event handle
+  readonly primaryTid: number;
+  created: boolean;
+  startup: boolean;
+  exitContinued: boolean;
+  exitCode: number | null;
+}
+interface DebugJob {
+  readonly lib: Kernel;
+  readonly handle: bigint;
+  readonly sid: string;
+  readonly pipes: readonly Pipe[];
+  usable: boolean;
+  readonly threads: WindowsDebugThreadLedger;
+  readonly members: DebugMember[];
+  readonly live: Map<number, DebugMember>;
+  readonly pi: BigUint64Array;
+  root?: DebugMember;
+  piProcess: bigint;
+  piThread: bigint;
+  attempted: boolean;
+  launchAllowed: boolean;
+  state: 'active' | 'closing' | 'quarantined' | 'closed';
+  unknown: boolean;
+  deadline: number;
+  total: number;
+  generation: number;
+  quarantineEvents: number;
+}
+let debugDispatcher: WindowsDebugDispatcher | undefined;
+/** One creator-thread queue; never poll a separate debugger queue for each Job. */
+class WindowsDebugDispatcher {
+  readonly lib = kernel();
+  private readonly objects: ReturnType<typeof objectComparison>;
+  private readonly creator = this.lib.symbols.GetCurrentThreadId();
+  private readonly jobs = new Set<DebugJob>();
+  private readonly resources = {threads: 0, pi: 0};
+  private readonly event = new Uint8Array(176 + 32);
+  private readonly view = new DataView(this.event.buffer);
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private pending = false;
+  private pumping = false;
+  private poisoned = false;
+  private processSlots = 0;
+  private quarantineEvents = 0;
+  constructor() {
+    try {
+      if (!this.creator || (process.arch !== 'x64' && process.arch !== 'arm64')) fail('unsupported-platform');
+      this.objects = objectComparison();
+    } catch (error) {
+      this.lib.close();
+      throw error;
+    }
+  }
+  private affinity(): void {
+    if (this.lib.symbols.GetCurrentThreadId() !== this.creator) {
+      this.poison();
+      fail('identity');
+    }
+  }
+  private poison(): void {
+    if (this.poisoned) return;
+    this.poisoned = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    // Stop capabilities remain valid even when evidence of completion is lost.
+    for (const job of this.jobs) {
+      job.unknown = true;
+      if (job.usable) job.lib.symbols.TerminateJobObject(job.handle, 1);
+    }
+  }
+  reserve(lib: Kernel, handle: bigint, sid: string, pipes: readonly Pipe[]): DebugJob {
+    // A poisoned singleton may retain a library whose close result is uncertain.
+    if (this.poisoned) return fail('identity');
+    this.affinity();
+    if (
+      this.pending ||
+      this.jobs.size >= 64 ||
+      this.processSlots >= 4096 ||
+      EffectArray.some([...this.jobs], job => job.unknown || job.state === 'quarantined')
+    )
+      fail('identity');
+    const job: DebugJob = {
+      lib,
+      handle,
+      sid,
+      pipes,
+      usable: true,
+      threads: new WindowsDebugThreadLedger(this.resources),
+      members: [],
+      live: new Map(),
+      pi: new BigUint64Array(3),
+      piProcess: 0n,
+      piThread: 0n,
+      attempted: false,
+      launchAllowed: false,
+      state: 'active',
+      unknown: false,
+      deadline: 0,
+      total: 0,
+      generation: 0,
+      quarantineEvents: 0,
+    };
+    this.processSlots++;
+    this.jobs.add(job);
+    return job;
+  }
+  beforeCreate(job: DebugJob): void {
+    this.affinity();
+    job.attempted = true;
+  }
+  private duplicate(handle: bigint): bigint {
+    const current = this.lib.symbols.GetCurrentProcess(),
+      output = new BigUint64Array(1);
+    // Only SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION; never inheritable.
+    if (this.lib.symbols.DuplicateHandle(current, handle, current, output, 0x00101000, 0, 0) === 0) fail('identity');
+    return windowsHandle(output[0]);
+  }
+  registerRoot(job: DebugJob): DebugMember {
+    // Retain actual PI output and ownership BEFORE any fallible identity helper or yield.
+    job.piProcess = windowsHandle(job.pi[0]);
+    job.piThread = windowsHandle(job.pi[1]);
+    const pid = new DataView(job.pi.buffer).getUint32(16, true),
+      tid = new DataView(job.pi.buffer).getUint32(20, true),
+      completion = this.duplicate(job.piProcess);
+    const member: DebugMember = {
+      pid,
+      primaryTid: tid,
+      completion,
+      identity: '',
+      created: false,
+      startup: true,
+      exitContinued: false,
+      exitCode: null,
+    };
+    job.members.push(member);
+    job.root = member;
+    // Registration retains the duplicate even if the following native authentication refuses.
+    const identity = windowsProcessIdentity(completion, pid);
+    this.authenticate(job, completion, pid);
+    if (
+      !tid ||
+      this.lib.symbols.GetThreadId(job.piThread) !== tid ||
+      this.lib.symbols.GetProcessIdOfThread(job.piThread) !== pid
+    )
+      fail('identity');
+    const authenticated = {...member, identity};
+    job.members[0] = authenticated;
+    job.root = authenticated;
+    job.live.set(pid, authenticated);
+    this.affinity();
+    this.schedule();
+    return authenticated;
+  }
+  private authenticate(job: DebugJob, process: bigint, pid: number): string {
+    const member = new Int32Array(1);
+    if (
+      job.lib.symbols.IsProcessInJob(process, job.handle, member) === 0 ||
+      member[0] !== 1 ||
+      windowsTokenPrincipal(process).sid !== job.sid
+    )
+      fail('identity');
+    return windowsProcessIdentity(process, pid);
+  }
+  failed(job: DebugJob): void {
+    job.launchAllowed = false;
+    job.unknown = true;
+    job.state = 'closing';
+    job.deadline = performance.now() + 2000;
+    if (!job.usable || job.lib.symbols.TerminateJobObject(job.handle, 1) === 0) this.poison();
+    this.schedule();
+  }
+  stop(job: DebugJob, final: boolean): void {
+    this.affinity();
+    if (job.state === 'closed') return;
+    if (!job.usable || job.lib.symbols.TerminateJobObject(job.handle, 1) === 0) {
+      job.unknown = true;
+      fail('identity');
+    }
+    if (job.state === 'active') job.state = 'closing';
+    // The caller's final-kill window is 2s; repeated stops do not restart it.
+    if (final && job.deadline === 0) job.deadline = performance.now() + 2000;
+    this.schedule();
+  }
+  quarantine(job: DebugJob): void {
+    job.unknown = true;
+    job.state = 'quarantined';
+    this.schedule();
+  }
+  private expire(): void {
+    for (const job of this.jobs)
+      if (job.state === 'closing' && job.deadline > 0 && performance.now() >= job.deadline) {
+        job.state = 'quarantined';
+        job.unknown = true;
+      }
+  }
+  private schedule(): void {
+    this.expire();
+    if (this.poisoned || !EffectArray.some([...this.jobs], job => job.state === 'active' || job.state === 'closing')) {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = undefined;
+      return;
+    }
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.pump();
+      this.schedule();
+    }, 1);
+  }
+  private hasDebugLifetimes(): boolean {
+    return EffectArray.some(
+      [...this.jobs],
+      job =>
+        job.attempted && (job.members.length === 0 || EffectArray.some(job.members, member => !member.exitContinued)),
+    );
+  }
+  pump(): void {
+    if (this.poisoned || this.pumping) return;
+    this.expire();
+    if (!EffectArray.some([...this.jobs], job => job.state === 'active' || job.state === 'closing')) return;
+    this.pumping = true;
+    try {
+      this.affinity();
+      const start = performance.now();
+      for (let count = 0; count < 32 && performance.now() - start < 2 && this.hasDebugLifetimes(); count++) {
+        if (
+          this.quarantineEvents >= 16384 ||
+          EffectArray.some([...this.jobs], job => job.state === 'quarantined' && job.quarantineEvents >= 4096)
+        )
+          fail('identity');
+        this.event.fill(0xa5);
+        if (this.lib.symbols.WaitForDebugEvent(this.event.subarray(0, 176), 0) === 0) {
+          const error = this.lib.symbols.GetLastError();
+          // ABI-specific qualification must establish this exact zero-poll result; no generic false-as-empty.
+          if (error !== 121) fail('identity');
+          break;
+        }
+        this.pending = true;
+        this.affinity();
+        if (!this.event.subarray(176).every(value => value === 0xa5)) fail('identity');
+        this.dispatch();
+      }
+    } catch {
+      this.poison();
+    } finally {
+      this.pumping = false;
+    }
+  }
+  private dispatch(): void {
+    const kind = this.view.getUint32(0, true),
+      pid = this.view.getUint32(4, true),
+      tid = this.view.getUint32(8, true);
+    if (!pid || !tid || kind < 1 || kind > 8) fail('identity');
+    let job: DebugJob | undefined, member: DebugMember | undefined;
+    if (kind === 3) {
+      const borrowed = windowsHandle(this.view.getBigUint64(24, true));
+      // Actual HANDLE membership, never an OpenProcess of an event-supplied PID.
+      for (const candidate of this.jobs) {
+        if (!candidate.usable) continue;
+        const result = new Int32Array(1);
+        if (candidate.lib.symbols.IsProcessInJob(borrowed, candidate.handle, result) === 0) fail('identity');
+        if (result[0] === 1) {
+          if (job) fail('identity');
+          job = candidate;
+        }
+      }
+      if (!job) return fail('identity');
+      const identity = this.authenticate(job, borrowed, pid),
+        root = job.root;
+      if (root?.pid === pid && !root.created) {
+        if (
+          identity !== root.identity ||
+          tid !== root.primaryTid ||
+          this.objects.symbols.CompareObjectHandles(borrowed, root.completion) !== 1 ||
+          this.objects.symbols.CompareObjectHandles(borrowed, job.piProcess) !== 1
+        )
+          fail('identity');
+        member = root;
+      } else {
+        if (
+          job.live.has(pid) ||
+          job.members.length >= 256 ||
+          this.processSlots >= 4096 ||
+          EffectArray.some(job.members, prior => prior.pid === pid && prior.identity === identity)
+        )
+          fail('identity');
+        const completion = this.duplicate(borrowed);
+        member = {
+          pid,
+          identity,
+          completion,
+          primaryTid: tid,
+          created: false,
+          startup: true,
+          exitContinued: false,
+          exitCode: null,
+        };
+        job.members.push(member);
+        this.processSlots++;
+        if (
+          windowsProcessIdentity(completion, pid) !== identity ||
+          this.objects.symbols.CompareObjectHandles(borrowed, completion) !== 1
+        )
+          fail('identity');
+        job.live.set(pid, member);
+      }
+      const borrowedThread = windowsHandle(this.view.getBigUint64(32, true));
+      if (
+        this.lib.symbols.GetThreadId(borrowedThread) !== tid ||
+        this.lib.symbols.GetProcessIdOfThread(borrowedThread) !== pid
+      )
+        fail('identity');
+      job.threads.create(member, tid, member === root);
+      member.created = true;
+      if (member === root) {
+        // A same-value PI role transfers to system lifetime. Distinct PI roles are explicitly closed once.
+        if (job.piProcess !== borrowed) close(job.lib, job.piProcess);
+        job.piProcess = 0n;
+        if (job.launchAllowed && !job.unknown && job.state === 'active') {
+          this.affinity();
+          if (this.lib.symbols.ResumeThread(job.piThread) !== 1) fail('identity');
+          this.affinity();
+        } else if (job.lib.symbols.TerminateJobObject(job.handle, 1) === 0) fail('identity');
+        if (job.piThread !== borrowedThread) close(job.lib, job.piThread);
+        job.piThread = 0n;
+        job.threads.releasePi();
+      }
+      if (this.lib.symbols.DebugSetProcessKillOnExit(1) === 0) fail('identity');
+      this.closeImage(job);
+    } else {
+      for (const candidate of this.jobs) {
+        const found = candidate.live.get(pid);
+        if (found) {
+          if (job || !found.created || found.exitContinued) fail('identity');
+          job = candidate;
+          member = found;
+        }
+      }
+      if (!job || !member || !job.threads.has(member, tid)) {
+        // CREATE_THREAD introduces a new TID, authenticated below from its actual borrowed thread handle.
+        if (kind !== 2 || !job || !member) fail('identity');
+      }
+    }
+    if (!job || !member) return fail('identity');
+    if (job.state === 'quarantined') {
+      if (job.quarantineEvents >= 4096 || this.quarantineEvents >= 16384) fail('identity');
+      job.quarantineEvents++;
+      this.quarantineEvents++;
+      if (job.lib.symbols.TerminateJobObject(job.handle, 1) === 0) fail('identity');
+    }
+    let status = 0x00010002;
+    if (kind === 1) {
+      const exception = this.view.getUint32(16, true),
+        first = this.view.getUint32(168, true);
+      if (first !== 0 && first !== 1) fail('identity');
+      if (member.startup) {
+        if (exception !== 0x80000003 || first !== 1 || tid !== member.primaryTid) fail('identity');
+        member.startup = false;
+      } else status = 0x80010001; // genuine exceptions are never swallowed
+    } else if (kind === 2) {
+      const borrowed = windowsHandle(this.view.getBigUint64(16, true));
+      if (this.lib.symbols.GetThreadId(borrowed) !== tid || this.lib.symbols.GetProcessIdOfThread(borrowed) !== pid)
+        fail('identity');
+      job.threads.create(member, tid);
+    } else if (kind === 6) this.closeImage(job);
+    else if (kind === 5) member.exitCode = this.view.getUint32(16, true);
+    this.affinity();
+    if (this.lib.symbols.ContinueDebugEvent(pid, tid, status) === 0) fail('identity');
+    this.pending = false;
+    this.affinity();
+    // Only successful continuation retires borrowed system handles/bookkeeping.
+    if (kind === 4) job.threads.exitThread(member, tid);
+    if (kind === 5) {
+      member.exitContinued = true;
+      job.threads.exitProcess(member);
+      job.live.delete(pid);
+    }
+    job.generation++;
+  }
+  private closeImage(job: DebugJob): void {
+    const image = this.view.getBigUint64(16, true);
+    if (image !== 0n) close(job.lib, windowsHandle(image));
+  }
+  private accounting(job: DebugJob): {active: number; total: number} {
+    const bytes = new Uint8Array(48 + 32),
+      length = new Uint32Array(1);
+    bytes.fill(0xa5);
+    if (
+      job.lib.symbols.QueryInformationJobObject(job.handle, 1, bytes.subarray(0, 48), 48, length) === 0 ||
+      length[0] !== 48 ||
+      !bytes.subarray(48).every(value => value === 0xa5)
+    )
+      fail('identity');
+    const view = new DataView(bytes.buffer),
+      total = view.getUint32(36, true),
+      active = view.getUint32(40, true);
+    if (total < job.total || total > 256 || active > total) fail('identity');
+    job.total = total;
+    return {active, total};
+  }
+  proof(job: DebugJob): 'running' | 'drained' | 'unknown' {
+    if (this.poisoned || job.unknown || job.state === 'quarantined') return 'unknown';
+    this.pump();
+    if (this.poisoned || job.unknown) return 'unknown';
+    try {
+      this.affinity();
+      const first = this.accounting(job),
+        generation = job.generation;
+      if (first.active !== 0) return 'running';
+      if (
+        first.total !== job.members.length ||
+        !job.root ||
+        this.pending ||
+        job.piProcess !== 0n ||
+        job.piThread !== 0n ||
+        job.threads.live !== 0 ||
+        EffectArray.some(job.members, member => !member.created || !member.exitContinued)
+      ) {
+        // Queued CREATE/EXIT may still fill a real capture gap. Counts alone can never repair it.
+        if (!this.hasDebugLifetimes()) this.quarantine(job);
+        return job.unknown ? 'unknown' : 'running';
+      }
+      for (const member of job.members) {
+        if (windowsProcessIdentity(member.completion, member.pid) !== member.identity) fail('identity');
+        const wait = job.lib.symbols.WaitForSingleObject(member.completion, 0);
+        if (wait === 258) return 'running';
+        if (wait !== 0) fail('identity');
+      }
+      const second = this.accounting(job);
+      return second.active === 0 && second.total === first.total && generation === job.generation
+        ? 'drained'
+        : 'running';
+    } catch {
+      this.quarantine(job);
+      return 'unknown';
+    }
+  }
+  abandonUnattempted(job: DebugJob): void {
+    if (job.attempted) fail('identity');
+    job.threads.cancelUnattempted();
+    this.processSlots--;
+    this.jobs.delete(job);
+    this.disposeIdle();
+  }
+  released(job: DebugJob): void {
+    job.state = 'closed';
+    this.processSlots -= job.members.length;
+    this.jobs.delete(job);
+    this.schedule();
+    this.disposeIdle();
+  }
+  private disposeIdle(): void {
+    if (this.jobs.size || this.pending || this.poisoned) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    try {
+      this.objects.close();
+      this.lib.close();
+      debugDispatcher = undefined;
+    } catch {
+      this.poison();
+      fail('io');
+    }
+  }
+}
+function dispatcher(): WindowsDebugDispatcher {
+  return (debugDispatcher ??= new WindowsDebugDispatcher());
+}
+
+/** Atomic Job assignment and restricted inheritance precede all debuggee user execution. */
+export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): OwnedProviderBackend {
+  const debug = dispatcher();
   const principal = windowsTokenPrincipal();
   const lib = kernel();
   const security = windowsSystemLibrary('advapi32.dll', {
@@ -134,10 +712,9 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
   const base = windowsKernel();
   let descriptor = 0n,
     job = 0n,
-    processHandle = 0n,
-    thread = 0n,
     attributesReady = false,
     transferred = false;
+  let debugJob: DebugJob | undefined;
   const pipes: Pipe[] = [];
   const creationBuffers: ArrayBufferView[] = [];
   const releaseArguments = retainNativeArguments(creationBuffers);
@@ -170,6 +747,7 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
       view.setUint32(16, inherit, true);
     }
     job = windowsHandle(lib.symbols.CreateJobObjectW(null, null));
+    debugJob = debug.reserve(lib, job, principal.sid, pipes);
     const limits = new BigUint64Array(18);
     new DataView(limits.buffer).setUint32(16, 0x00002000, true); // KILL_ON_JOB_CLOSE, no breakaway flags.
     if (lib.symbols.SetInformationJobObject(job, 9, limits, 144) === 0) fail('unsupported-platform');
@@ -201,8 +779,8 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
     view.setBigUint64(88, pipes[1].child, true);
     view.setBigUint64(96, pipes[2].child, true);
     view.setBigUint64(104, windowsAddress(attributes), true);
-    const output = new BigUint64Array(3),
-      outputView = new DataView(output.buffer);
+    const output = debugJob.pi;
+    debug.beforeCreate(debugJob);
     if (
       lib.symbols.CreateProcessW(
         windowsWide(options.command),
@@ -210,7 +788,7 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
         null,
         null,
         1,
-        0x00080000 | 0x00000400 | 0x08000000,
+        0x00080000 | 0x00000400 | 0x08000000 | 0x00000001 | 0x00000004,
         environmentBlock(options.environment),
         windowsWide(options.cwd),
         startup,
@@ -218,20 +796,13 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
       ) === 0
     )
       fail('io');
-    processHandle = windowsHandle(output[0]);
-    thread = windowsHandle(output[1]);
-    const pid = outputView.getUint32(16, true),
-      inJob = new Int32Array(1);
-    if (pid <= 0 || lib.symbols.IsProcessInJob(processHandle, job, inJob) === 0 || inJob[0] !== 1) fail('identity');
-    const identity = windowsProcessIdentity(processHandle, pid);
-    if (windowsTokenPrincipal(processHandle).sid !== principal.sid) fail('identity');
-    close(lib, thread);
-    thread = 0n;
+    const root = debug.registerRoot(debugJob);
     for (const pipe of pipes) {
       close(lib, pipe.child);
       pipe.childOpen = false;
     }
-    const owned = makeOwnedWindows({lib, job, processHandle, pid, identity, pipes});
+    const owned = makeOwnedWindows({lib, job, pid: root.pid, identity: root.identity, pipes, debug, debugJob});
+    debugJob.launchAllowed = true;
     transferred = true;
     return owned;
   } finally {
@@ -241,50 +812,50 @@ export function spawnWindowsProvider(options: RuntimeOwnedProviderLaunch): Owned
     security.close();
     base.close();
     if (!transferred) {
-      // Retain native references until the owned Job is actually empty and pending connection IO has settled.
-      // A failed launch cannot release hidden processes into the next admission attempt.
-      if (job !== 0n) lib.symbols.TerminateJobObject(job, 1);
-      if (thread !== 0n) lib.symbols.CloseHandle(thread);
-      for (const pipe of pipes)
-        if (pipe.childOpen) {
-          lib.symbols.CloseHandle(pipe.child);
-          pipe.childOpen = false;
-        }
-      const cleanup = () => {
-        let complete = true;
-        for (const pipe of pipes)
+      if (debugJob?.attempted) {
+        // No count-zero cleanup after a creation attempt. Retain PI backing, pipes and DLL references.
+        // A failed suspended launch is stopped through its exact Job; never resume it into user code.
+        debug.failed(debugJob);
+      } else {
+        let settled = true;
+        for (const pipe of pipes) {
           if (pipe.connectionPending) {
             const count = new Uint32Array(1);
             lib.symbols.CancelIoEx(pipe.parent, pipe.overlapped);
-            if (lib.symbols.GetOverlappedResult(pipe.parent, pipe.overlapped, count, 0) !== 0)
-              pipe.connectionPending = false;
-            else {
+            if (lib.symbols.GetOverlappedResult(pipe.parent, pipe.overlapped, count, 0) === 0) {
               const error = lib.symbols.GetLastError();
-              if (error === 995 || error === 109 || error === 232) pipe.connectionPending = false;
-              else complete = false;
+              if (error !== 995 && error !== 109 && error !== 232) settled = false;
             }
           }
-        if (job !== 0n) {
-          const info = new Uint8Array(48),
-            length = new Uint32Array(1);
-          if (
-            lib.symbols.QueryInformationJobObject(job, 1, info, 48, length) === 0 ||
-            length[0] !== 48 ||
-            new DataView(info.buffer).getUint32(40, true) !== 0
-          )
-            complete = false;
         }
-        if (!complete) return false;
-        for (const pipe of pipes) {
-          if (!pipe.closed) lib.symbols.CloseHandle(pipe.parent);
-          lib.symbols.CloseHandle(pipe.event);
+        if (!settled) {
+          // Keep hidden failed pipe ownership in the same bounded native domain.
+          debugJob ??= debug.reserve(lib, job, principal.sid, pipes);
+          debug.failed(debugJob);
+        } else {
+          try {
+            for (const pipe of pipes) {
+              if (pipe.childOpen) {
+                pipe.childOpen = false;
+                close(lib, pipe.child);
+              }
+              if (!pipe.closed) {
+                pipe.closed = true;
+                close(lib, pipe.parent);
+              }
+              close(lib, pipe.event);
+            }
+            if (job !== 0n) {
+              if (debugJob) debugJob.usable = false;
+              close(lib, job);
+            }
+            if (debugJob) debug.abandonUnattempted(debugJob);
+            lib.close();
+          } catch {
+            if (debugJob) debug.failed(debugJob);
+          }
         }
-        if (processHandle !== 0n) lib.symbols.CloseHandle(processHandle);
-        if (job !== 0n) lib.symbols.CloseHandle(job);
-        lib.close();
-        return true;
-      };
-      if (!cleanup()) quarantinedLaunch = cleanup;
+      }
     }
   }
 }
@@ -421,12 +992,13 @@ async function pipeOperation(
 function makeOwnedWindows(input: {
   lib: Kernel;
   job: bigint;
-  processHandle: bigint;
   pid: number;
   identity: string;
   pipes: readonly Pipe[];
+  debug: WindowsDebugDispatcher;
+  debugJob: DebugJob;
 }): OwnedProviderBackend {
-  const {lib, job, processHandle, pid, identity, pipes} = input;
+  const {lib, job, pid, identity, pipes, debug, debugJob} = input;
   let closed = false,
     unknown = false,
     closing = false,
@@ -479,34 +1051,19 @@ function makeOwnedWindows(input: {
     const stdioClosed = EffectArray.every(eof, Boolean) && writes === 0;
     if (closed) return {state: 'drained' as const, leaderExitCode, stdioClosed};
     if (closing) return {state: 'unknown' as const, leaderExitCode, stdioClosed};
-    let active: number | undefined;
-    try {
-      if (windowsProcessIdentity(processHandle, pid) !== identity) unknown = true;
-      const status = lib.symbols.WaitForSingleObject(processHandle, 0);
-      if (status === 0) {
-        const code = new Uint32Array(1);
-        if (lib.symbols.GetExitCodeProcess(processHandle, code) === 0) unknown = true;
-        else leaderExitCode = code[0];
-      } else if (status !== 258) unknown = true;
-      const info = new BigUint64Array(10),
-        bytes = new Uint8Array(info.buffer);
-      bytes.fill(0xa5);
-      const length = new Uint32Array(1);
-      if (
-        lib.symbols.QueryInformationJobObject(job, 1, bytes.subarray(0, 48), 48, length) === 0 ||
-        length[0] !== 48 ||
-        !bytes.subarray(48).every(v => v === 0xa5)
-      )
-        unknown = true;
-      else active = new DataView(info.buffer).getUint32(40, true);
-    } catch {
+    const native = debug.proof(debugJob);
+    leaderExitCode = debugJob.root?.exitCode ?? leaderExitCode;
+    if (ioUnknown || EffectArray.some(pipes, pipe => pipe.uncertain)) {
       unknown = true;
+      debug.quarantine(debugJob);
     }
     return {
       state:
-        unknown || ioUnknown || EffectArray.some(pipes, pipe => pipe.uncertain) || active === undefined
+        unknown || native === 'unknown'
           ? ('unknown' as const)
-          : active === 0 && stdioClosed
+          : native === 'drained' &&
+              stdioClosed &&
+              EffectArray.every(pipes, pipe => !pipe.busy && !pipe.connectionPending)
             ? ('drained' as const)
             : ('running' as const),
       leaderExitCode,
@@ -567,11 +1124,9 @@ function makeOwnedWindows(input: {
     terminate(mode) {
       if (mode !== 'terminate' && mode !== 'kill') return fail('identity');
       if (closed) return;
-      if (closing || unknown || windowsProcessIdentity(processHandle, pid) !== identity) return fail('identity');
-      if (lib.symbols.TerminateJobObject(job, 1) === 0) {
-        unknown = true;
-        fail('identity');
-      }
+      if (closing) return fail('identity');
+      // Completion uncertainty does not erase this exact retained Job's stop capability.
+      debug.stop(debugJob, mode === 'kill');
     },
     close() {
       if (closed) return;
@@ -592,14 +1147,17 @@ function makeOwnedWindows(input: {
         }
         release(pipe.event);
       }
-      release(processHandle);
+      for (const member of debugJob.members) release(member.completion);
+      debugJob.usable = false;
       release(job);
       if (failed) {
         unknown = true;
+        debug.quarantine(debugJob);
         return fail('io');
       }
-      closed = true;
+      debug.released(debugJob);
       lib.close();
+      closed = true;
     },
   };
 }
