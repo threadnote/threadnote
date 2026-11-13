@@ -83,6 +83,7 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     readonly encodingDigest?: string;
     readonly passiveProject?: boolean;
     readonly noFilters?: boolean;
+    readonly minimalBuildInputs?: boolean;
     readonly separateWorkspaceParent?: boolean;
     readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
   } = {},
@@ -108,7 +109,11 @@ const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
     );
   }
   yield* fs.writeFileString(path.join(project, 'pom.xml'), '<project>captured build configuration</project>');
-  for (const relative of ['settings.gradle', 'build.gradle', 'gradle.properties', '.mvn/maven.config', '.project']) {
+  // Payload properties need the real Maven/source boundary, not unrelated build-tool inputs.
+  const extraBuildInputs = control.minimalBuildInputs
+    ? []
+    : ['settings.gradle', 'build.gradle', 'gradle.properties', '.mvn/maven.config', '.project'];
+  for (const relative of extraBuildInputs) {
     yield* fs.makeDirectory(path.dirname(path.join(project, relative)), {recursive: true});
     yield* fs.writeFileString(path.join(project, relative), 'captured input: ' + relative);
   }
@@ -839,41 +844,52 @@ describe('Java qualified JRE container spelling', () => {
     }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 
-  effectIt.effect.prop(
-    'accepts only the two exact qualified spellings, not other containers or nested paths',
-    [Schema.String.check(Schema.isMaxLength(12))],
-    ([suffix]) =>
-      Effect.gen(function* () {
-        const f = yield* modelFixture({passiveProject: true});
-        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
-        const jre =
-          'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
-        const bindings = yield* Effect.forEach(
-          EffectArray.filter(sealed.model.rawClasspath, entry => entry.kind === 3),
-          entry =>
-            f.path
-              .toFileUrl(f.path.join(f.project, entry.path))
-              .pipe(Effect.map(url => ({path: entry.path, uri: url.href}))),
-        );
-        for (const extra of [suffix, '//', '/other', '-other']) {
-          const model = {
-            ...sealed.model,
-            rawClasspath: EffectArray.map(sealed.model.rawClasspath, entry =>
-              entry.path === jre ? {...entry, path: jre + extra} : entry,
-            ),
-          };
-          const projection = () => javaPreparedProjection(model, bindings, 'file:///threadnote-test-documentation/');
-          if (extra === '' || extra === '/') expect(projection).not.toThrow();
-          else expect(projection).toThrow();
-        }
-      }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
-    {arbitrary: {runs: 16}},
+  effectIt.effect('accepts only the two exact qualified spellings, not other containers or nested paths', () =>
+    Effect.gen(function* () {
+      // Only projection varies: keep one genuinely observed and sealed immutable model alive for all suffixes.
+      const f = yield* modelFixture({passiveProject: true});
+      const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+      const jre =
+        'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+      const bindings = yield* Effect.forEach(
+        EffectArray.filter(sealed.model.rawClasspath, entry => entry.kind === 3),
+        entry =>
+          f.path
+            .toFileUrl(f.path.join(f.project, entry.path))
+            .pipe(Effect.map(url => ({path: entry.path, uri: url.href}))),
+      );
+      const result = yield* Arbitrary.checkEffect(
+        Arbitrary.schema(Schema.String.check(Schema.isMaxLength(12))),
+        suffix =>
+          Effect.try(() => {
+            for (const extra of [suffix, '//', '/other', '-other']) {
+              const model = {
+                ...sealed.model,
+                rawClasspath: EffectArray.map(sealed.model.rawClasspath, entry =>
+                  entry.path === jre ? {...entry, path: jre + extra} : entry,
+                ),
+              };
+              const projection = () =>
+                javaPreparedProjection(model, bindings, 'file:///threadnote-test-documentation/');
+              if (extra === '' || extra === '/') expect(projection).not.toThrow();
+              else expect(projection).toThrow();
+            }
+            return true;
+          }),
+        {runs: 16},
+      );
+      expect(Arbitrary.formatCheckFailure(result)).toBeUndefined();
+    }).pipe(Effect.provide(Layer.merge(BunServices.layer, cryptoLayer))),
   );
 });
 
 describe('Java passive prepared project', () => {
-  const fixture = Effect.fn('test.javaPassiveProject')(function* (noFilters = false, jarText?: string) {
-    const f = yield* modelFixture({passiveProject: true, noFilters, jarText});
+  const fixture = Effect.fn('test.javaPassiveProject')(function* (
+    noFilters = false,
+    jarText?: string,
+    minimalBuildInputs = false,
+  ) {
+    const f = yield* modelFixture({passiveProject: true, noFilters, jarText, minimalBuildInputs});
     const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
     const privateDirectory = f.path.join(f.artifactDirectory, 'analysis');
     yield* f.fs.makeDirectory(privateDirectory, {mode: 0o700});
@@ -1006,7 +1022,7 @@ describe('Java passive prepared project', () => {
     },
     ({payload}) =>
       Effect.gen(function* () {
-        const f = yield* fixture(false, payload);
+        const f = yield* fixture(false, payload, true);
         const original = yield* f.fs.readFileString(f.sealed.metadataFile);
         const first = yield* makeJavaPreparedProject(f.materializerOptions);
         const second = yield* makeJavaPreparedProject(f.materializerOptions);
@@ -1226,7 +1242,7 @@ describe('Java prepared model sealing', () => {
     },
     ({payload}) =>
       Effect.gen(function* () {
-        const f = yield* modelFixture({jarText: payload});
+        const f = yield* modelFixture({jarText: payload, minimalBuildInputs: true});
         const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
         const loaded = yield* loadJavaPreparedModel({
           metadataFile: sealed.metadataFile,

@@ -284,8 +284,7 @@ it.skipIf(process.platform !== 'win32')(
             index = BigInt(l.getUint32(44, true)) * 0x100000000n + BigInt(l.getUint32(48, true)),
             epoch = 116_444_736_000_000_000n;
           const projection = {
-            volume:
-              f.getBigUint64(0, true) === BigInt(l.getUint32(28, true)) && observed.dev === f.getBigUint64(0, true),
+            volume: f.getUint32(0, true) === l.getUint32(28, true) && observed.dev === BigInt(l.getUint32(28, true)),
             fileId:
               f.getBigUint64(16, true) === 0n &&
               f.getBigUint64(8, true) === index &&
@@ -299,11 +298,14 @@ it.skipIf(process.platform !== 'win32')(
             nativeVolume64EqualsLegacySerial32: f.getBigUint64(0, true) === BigInt(l.getUint32(28, true)),
             legacySerial32EqualsBunBigintDev: BigInt(l.getUint32(28, true)) === observed.dev,
             nativeVolume64EqualsBunBigintDev: f.getBigUint64(0, true) === observed.dev,
+            nativeVolume64Low32EqualsLegacySerial32: f.getUint32(0, true) === l.getUint32(28, true),
           };
+          const previousVolumeProjection =
+            volumeRelations.nativeVolume64EqualsLegacySerial32 && volumeRelations.nativeVolume64EqualsBunBigintDev;
           representable = EffectArray.every(EffectRecord.values(projection), Boolean);
           process.stdout.write(
             'WINDOWS_WRITER_PROJECTION ' +
-              JSON.stringify({projection, volumeRelations, representable, qualified: false}) +
+              JSON.stringify({projection, volumeRelations, previousVolumeProjection, representable, qualified: false}) +
               String.fromCharCode(10),
           );
         } finally {
@@ -340,6 +342,7 @@ it.skipIf(process.platform !== 'win32')(
           expect(error).toBe(32);
         }
         const before = runtimeInspectGuardedDiskTarget(target);
+        expect(before.identity).toEqual(fs.lstatSync(file, {bigint: true}));
         expect(new TextDecoder().decode(before.bytes)).toBe('old source');
         const forged = {...before, bytes: before.bytes.slice()};
         expect(

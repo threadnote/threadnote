@@ -2,8 +2,13 @@ import * as HostProfile from '../../src/semantic/host_profile.js';
 import {isJsonObject} from '@threadnote/platform/json';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {cryptoLayer} from '@threadnote/platform/crypto';
+import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   Array as EffectArray,
+  Context,
+  Layer,
   Effect,
   FileSystem,
   Path,
@@ -198,7 +203,7 @@ const citationFailureEvidence = (candidate: unknown, gaps: unknown, nativeReads:
 };
 
 // Prepare the actual standalone dispatch before native reads allocate their shared deadline.
-// The setup command owns Bun.build's uncancellable Promise; the fixture scope owns every output.
+// The setup command owns Bun.build's uncancellable Promise; the file layer owns every immutable output.
 const bundledContextWorker = (root: string, home: string) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
@@ -229,8 +234,24 @@ if (!result.success || !result.outputs.some(output => output.path === ${JSON.str
         verifyOwnedProcessExit: system.platform === 'win32' ? 'leader' : 'group',
       },
     );
-    return {...system, developmentEntrypoint: bundled};
+    return bundled;
   });
+
+class ContextWorkerBundle extends Context.Service<ContextWorkerBundle, string>()(
+  '@threadnote/threadnote/test/unit/semantic-mcp-cli.test/ContextWorkerBundle',
+) {}
+const contextWorkerIo = Layer.mergeAll(BunServices.layer, cryptoLayer, TestSystemInfoLayer);
+const contextWorkerBundleLayer = Layer.effect(
+  ContextWorkerBundle,
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-context-worker-bundle-'}));
+    const home = path.join(root, 'home');
+    yield* fs.makeDirectory(home, {mode: 0o700});
+    return yield* bundledContextWorker(root, home);
+  }).pipe(TestClock.withLive),
+).pipe(Layer.provide(Layer.merge(contextWorkerIo, TestCommandExecutorLayer.pipe(Layer.provide(contextWorkerIo)))));
 
 /** Actual graph, canonical memory reads and citation validation; only the provider RPC is a stable fixture. */
 const memoryContextFixture = Effect.gen(function* () {
@@ -263,7 +284,7 @@ const memoryContextFixture = Effect.gen(function* () {
   yield* fs.makeDirectory(repository);
   yield* fs.makeDirectory(path.join(home, 'semantic', 'profiles'), {recursive: true, mode: 0o700});
   const contextSystem = Option.isSome(yield* Effect.serviceOption(ReadyRecallReadWorkerAdmission))
-    ? yield* bundledContextWorker(root, home)
+    ? {...(yield* SystemInfo), developmentEntrypoint: yield* ContextWorkerBundle}
     : yield* SystemInfo;
   const file = path.join(repository, 'main.ts');
   const source = (value: number) => `export class Alpha {\n  run() { return ${value}; }\n  other() { return 7; }\n}\n`;
@@ -656,8 +677,8 @@ const memoryContextFixture = Effect.gen(function* () {
   };
 });
 
-describe('semantic context with canonical citation-backed memory', () => {
-  effectIt.effect(
+effectIt.layer(contextWorkerBundleLayer)('semantic context with canonical citation-backed memory', layerIt => {
+  layerIt.effect(
     'invalidates pre-rename reads while keeping old citations visibly unresolved without rewriting memory',
     () =>
       Effect.gen(function* () {
@@ -741,7 +762,7 @@ describe('semantic context with canonical citation-backed memory', () => {
     {timeout: 20000},
   );
 
-  effectIt.effect(
+  layerIt.effect(
     'selects the exact current constraint, labels stale decisions and excludes another method',
     () =>
       Effect.gen(function* () {
@@ -805,7 +826,7 @@ describe('semantic context with canonical citation-backed memory', () => {
     {timeout: 20000},
   );
 
-  effectIt.effect(
+  layerIt.effect(
     'keeps code useful without memory and never promotes inferred guidance to approved',
     () =>
       Effect.gen(function* () {
