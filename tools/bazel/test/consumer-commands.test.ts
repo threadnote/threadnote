@@ -76,10 +76,37 @@ it('prepares graph commands before executable dispatch and skips graph-independe
   }
 });
 
+it('parses selector help and invalid arguments before preparation or output creation', async () => {
+  const root = await fixture();
+  try {
+    const output = join(root, 'custom-selection');
+    const help = await run(root, 'tools/ci/bazel-select.mjs', ['--help', '--output', output]);
+    expect(help.code, help.stderr).toBe(0);
+    expect(help.stdout).toContain('Usage:');
+    expect(await Bun.file(join(root, 'prepared')).exists()).toBe(false);
+    expect(await Bun.file(output).exists()).toBe(false);
+    for (const args of [
+      ['--unknown', '--output', output],
+      ['--base', '--output', output],
+      ['--base', 'origin/main', '--output', ''],
+      ['--head', 'HEAD', '--output', output],
+      ['--base', 'origin/main', '--head', '--output', output],
+    ]) {
+      const result = await run(root, 'tools/ci/bazel-select.mjs', args);
+      expect(result.code).not.toBe(0);
+      expect(await Bun.file(output).exists()).toBe(false);
+      expect(await Bun.file(join(root, 'prepared')).exists()).toBe(false);
+    }
+    expect(await Bun.file(join(root, '.context/bazel-selection')).exists()).toBe(false);
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
 it('rejects an invalid current head before writing a fallback selection', async () => {
   const root = await fixture();
   try {
-    const result = await run(root, 'tools/ci/bazel-select.mjs', [], {FAIL_PREPARE: '1'});
+    const result = await run(root, 'tools/ci/bazel-select.mjs', ['--base', 'origin/main'], {FAIL_PREPARE: '1'});
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain('invalid current head');
     expect(await Bun.file(join(root, '.context/bazel-selection/selection.json')).exists()).toBe(false);
@@ -192,7 +219,7 @@ const i=process.argv.indexOf('-o'); if(i>=0) await Bun.write(process.argv[i+1], 
       expect(await chmod.exited).toBe(0);
       await Bun.write(join(root, '.context/bazel-selection/base-generation-receipt.json'), '{"stale":true}');
       await Bun.write(join(root, '.context/bazel-selection/base-inventory.json'), '{"stale":true}');
-      const result = await run(root, 'tools/ci/bazel-select.mjs', ['--base', revision], {
+      const result = await run(root, 'tools/ci/bazel-select.mjs', ['--base', 'previous-base', '--base', revision], {
         EVENT_LOG: join(root, 'events'),
         DIFF_EXECUTABLE: executable,
       });
@@ -202,6 +229,7 @@ const i=process.argv.indexOf('-o'); if(i>=0) await Bun.write(process.argv[i+1], 
       );
       const selection = await Bun.file(join(root, '.context/bazel-selection/selection.json')).json();
       expect(selection.mode).toBe('selective');
+      expect(selection.base).toBe(revision);
       expect(selection.changedFiles).not.toContain('tools/bazel/targets.json');
       expect(selection.changedFiles).toContain('deleted.ts');
       expect(selection.generation).toEqual(generation);

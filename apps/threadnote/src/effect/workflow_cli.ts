@@ -199,7 +199,10 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       executable: optionalString('host-executable', 'Absolute registered host executable'),
       hostReference: optionalString('host-reference', 'Codex thread ID or Cursor session ID'),
       workspace: optionalString('workspace', 'Cursor workspace path'),
-      noticeRef: optionalString('notice-ref', 'Opaque notice route returned by the current watch'),
+      noticeRef: optionalString(
+        'notice-ref',
+        'Relay this current notice route, record its disposition, then ACK using the returned current refs',
+      ),
       workEventRef: optionalString('work-event-ref', 'Opaque retained work reference returned by work'),
       offsetBytes: optional(integerFlag('offset-bytes')),
       sourceDigest: optionalString('source-digest', 'Canonical work detail digest returned by work'),
@@ -263,14 +266,18 @@ export function makeNativeTaskPrWatchCommand<E, R>(
       }
       return handler({
         ...options,
-        ...(options.host && options.executable && options.hostReference
+        ...(options.host && options.hostReference && (options.host === 'codex' || options.executable)
           ? {
               wakeup:
                 options.host === 'codex'
-                  ? {host: 'codex' as const, executable: options.executable, threadId: options.hostReference}
+                  ? {
+                      host: 'codex' as const,
+                      ...(options.executable === undefined ? {} : {executable: options.executable}),
+                      threadId: options.hostReference,
+                    }
                   : {
                       host: 'cursor-cli' as const,
-                      executable: options.executable,
+                      executable: options.executable!,
                       sessionId: options.hostReference,
                       workspace: options.workspace ?? '',
                       exclusiveSession: true as const,

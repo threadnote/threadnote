@@ -2,6 +2,8 @@ import {SecureRandom} from 'effect/crypto';
 import * as Clock from 'effect/Clock';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
+import * as FileSystem from 'effect/FileSystem';
+import * as Path from 'effect/Path';
 import * as Exit from 'effect/Exit';
 import * as Option from 'effect/Option';
 import * as EffectString from 'effect/String';
@@ -22,6 +24,20 @@ import {
   type NativeWatchHostClaim,
 } from './watch_host_session.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+
+export const nativeWatchCodexCandidatePaths = (platform: NodeJS.Platform, homeDirectory: string): readonly string[] => {
+  const macBundle = 'Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
+  if (platform === 'darwin')
+    return [
+      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex',
+      homeDirectory + '/' + macBundle,
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+      homeDirectory + '/.local/bin/codex',
+    ];
+  if (platform === 'linux') return [homeDirectory + '/.local/bin/codex', '/usr/local/bin/codex', '/usr/bin/codex'];
+  return [];
+};
 
 /** Read-only capability admission for an explicitly selected executable; never queue a probe message. */
 export const preflightNativeWatchCodexQueue = Effect.fn('nativeWatch.preflightCodexQueue')(function* (
@@ -48,6 +64,36 @@ export const preflightNativeWatchCodexQueue = Effect.fn('nativeWatch.preflightCo
     !/^\s+(?:-\w,\s+)?--message\s+<[^>\r\n]+>/mu.test(help)
   )
     return yield* incompatible();
+});
+
+export const discoverNativeWatchCodexExecutable = Effect.fn('nativeWatch.discoverCodexExecutable')(function* () {
+  const system = yield* SystemInfo;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const canonicalCandidates = new Set<string>();
+  for (const candidate of nativeWatchCodexCandidatePaths(system.platform, system.homeDirectory)) {
+    const resolved = yield* Effect.result(fs.realPath(candidate));
+    if (
+      resolved._tag === 'Success' &&
+      path.isAbsolute(resolved.success) &&
+      /[/\\]codex(?:\.exe)?$/iu.test(resolved.success)
+    )
+      canonicalCandidates.add(resolved.success);
+  }
+  const compatible: string[] = [];
+  for (const executable of canonicalCandidates) {
+    const result = yield* Effect.result(preflightNativeWatchCodexQueue(executable));
+    if (result._tag === 'Success') compatible.push(executable);
+  }
+  if (compatible.length !== 1)
+    return yield* WorkflowAutomationError.make({
+      code: 'host-queue-incompatible',
+      message:
+        compatible.length === 0
+          ? 'No known installed Codex executable passed the bounded queue capability check. Supply an explicit absolute executable; no watch target was changed.'
+          : 'More than one known installed Codex executable passed the bounded queue capability check. Supply an explicit absolute executable; no watch target was changed.',
+    });
+  return compatible[0];
 });
 
 function cursorCompletionReceipt(stdout: string, sessionId: string): string | undefined {

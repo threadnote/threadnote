@@ -40,12 +40,15 @@ import {
   withNativeWatchControlLock,
 } from '../../src/workflow_automation/watch_store.js';
 import {
+  discoverNativeWatchCodexExecutable,
   makeNativeWatchNotifier,
   maintainNativeWatchSubscription,
+  nativeWatchCodexCandidatePaths,
 } from '../../src/workflow_automation/watch_notification.js';
 import {
   matchesTerminalNativeWatchArrival,
   nativeWatchNotice,
+  nativeWatchWakeupRequestSchema,
   nativeWatchWakeupSchema,
   stageNativeWatchNotification,
   consumeNativeWatchNotification,
@@ -187,6 +190,66 @@ const provide = <A, E, R>(body: Effect.Effect<A, E, R>) =>
     }),
     provideTestLayer(Layer.mergeAll(BunServices.layer, SystemInfo.layer)),
   );
+effectIt.effect('discovers only a unique capability-verified canonical Codex candidate', () =>
+  Effect.gen(function* () {
+    const system = yield* SystemInfo;
+    const fs = yield* FileSystem.FileSystem;
+    const home = '/home/operator';
+    const candidates = nativeWatchCodexCandidatePaths('darwin', home);
+    expect(candidates).toEqual([
+      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex',
+      home + '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex',
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+      home + '/.local/bin/codex',
+    ]);
+    expect(nativeWatchCodexCandidatePaths('win32', home)).toEqual([]);
+    const first = '/canonical/ChatGPT/codex';
+    const second = '/canonical/homebrew/codex';
+    const resolved = new Map<string, string>([
+      [candidates[0], first],
+      [candidates[1], first],
+      [candidates[2], second],
+      [candidates[3], '/missing/not-an-executable'],
+      [candidates[4], '/missing/not-an-executable'],
+    ]);
+    const mappedFileSystem = {
+      ...fs,
+      realPath: (candidate: string) => Effect.succeed(resolved.get(candidate) ?? '/missing/not-an-executable'),
+    };
+    const testSystem = {...system, platform: 'darwin' as const, homeDirectory: home};
+    const runDiscovery = (compatible: ReadonlySet<string>) => {
+      const probes: string[] = [];
+      const program = discoverNativeWatchCodexExecutable().pipe(
+        Effect.provideService(FileSystem.FileSystem, mappedFileSystem),
+        Effect.provideService(SystemInfo, testSystem),
+        Effect.provideService(CommandExecutor, {
+          execute: (executable, args, options) => {
+            probes.push(executable);
+            expect(args).toEqual(['queue', '--help']);
+            expect(options).toEqual({allowFailure: true, timeoutMs: 5000, maxOutputBytes: 16384});
+            return Effect.succeed(
+              compatible.has(executable) ? capable : {exitCode: 1, stderr: 'unsupported', stdout: ''},
+            );
+          },
+          executeStreaming: () => Effect.die(new Error('Unexpected streaming command')),
+        }),
+      );
+      return Effect.map(program, value => ({value, probes}));
+    };
+    const selected = yield* runDiscovery(new Set([first]));
+    expect(selected.value).toBe(first);
+    expect(selected.probes).toEqual([first, second]);
+    const ambiguous = yield* runDiscovery(new Set([first, second])).pipe(Effect.result);
+    expect(ambiguous).toMatchObject({
+      failure: {
+        code: 'host-queue-incompatible',
+        message: expect.stringContaining('More than one known installed'),
+      },
+    });
+  }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, SystemInfo.layer))),
+);
+
 const withStoppedFixtureCollector = <A, E, R>(body: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const system = yield* SystemInfo;
@@ -399,6 +462,15 @@ effectIt.effect('refuses a skipped-probe binding that changed concurrently befor
 );
 
 describe('native watch notification transport', () => {
+  it('allows omitted Codex executables only on request input, never in persisted watch state', () => {
+    const request = {
+      host: 'codex',
+      threadId: 'cccccccc-cccc-4ccc-cccc-cccccccccccc',
+    };
+    expect(Schema.decodeUnknownSync(nativeWatchWakeupRequestSchema)(request)).toEqual(request);
+    expect(() => Schema.decodeUnknownSync(nativeWatchWakeupSchema)(request)).toThrow();
+  });
+
   it('bounds ID-only messages and rejects executable injection configuration', () => {
     for (const executable of ['codex', '/bin/sh', '/tmp/codex.cmd', '/tmp/codex\n']) {
       const input: unknown = {...target, executable};
