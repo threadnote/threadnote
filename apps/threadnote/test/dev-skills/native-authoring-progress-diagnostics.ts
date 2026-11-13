@@ -16,6 +16,15 @@ export const nativeProgressBoundaries = [
   'fixture-state-read',
 ] as const;
 export type NativeProgressBoundary = (typeof nativeProgressBoundaries)[number];
+export const nativeProgressPhases = [
+  'fixture-git-setup',
+  'install-index-share-setup',
+  'full-evidence-donor-authoring',
+  'donor-publication-and-admission',
+  'recipient-start-and-ownership',
+  'negative-integrity-cases',
+] as const;
+export type NativeProgressPhase = (typeof nativeProgressPhases)[number];
 export const nativeProgressSpanLabels = [
   ...EffectArray.map(nativeProgressBoundaries, label => `native.progress.${label}`),
   'workflowAutomation.run',
@@ -68,6 +77,7 @@ type BoundaryRecord = {
 type SpanRecord = {label: string; sequence: number; startedMs: number};
 type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
 type Counts = {started: number; succeeded: number; failed: number};
+type PhaseDuration = {name: NativeProgressPhase; elapsedMs: number};
 
 export const classifyNativeProgress = (input: unknown): NativeProgressBoundary => {
   try {
@@ -132,12 +142,15 @@ export const makeNativeProgressDiagnostics = (
   let recentDropped = 0;
   let historyReadsSucceeded = 0;
   let lastBoundary: BoundaryRecord | undefined;
+  const seenPhases = new Set<NativeProgressPhase>();
+  const completedPhases: PhaseDuration[] = [];
+  let currentPhase: {name: NativeProgressPhase; startedMs: number} | undefined;
   let bodyEntered = false;
   let bodyExited = false;
   let bodyStartedMs = 0;
   let bodyEndedMs = 0;
   let reported = false;
-  const progress = () => ({
+  const progress = (at = elapsed()) => ({
     counters: EffectRecord.fromEntries(
       EffectArray.map(nativeProgressBoundaries, label => [label, {...counters[label]}]),
     ),
@@ -146,6 +159,11 @@ export const makeNativeProgressDiagnostics = (
     historyReadsSucceeded,
     historyRule: 'inferred-from-fixture-boundaries-after-first-successful-state-read',
     lastBoundary: lastBoundary && {...lastBoundary},
+    completedPhases: EffectArray.map(completedPhases, phase => ({...phase})),
+    currentPhase: currentPhase && {
+      name: currentPhase.name,
+      elapsedMs: bounded(at - currentPhase.startedMs),
+    },
   });
   let bodyExitSnapshot: ReturnType<typeof progress> | undefined;
   const tracer = Tracer.make({
@@ -187,6 +205,19 @@ export const makeNativeProgressDiagnostics = (
   });
   const observer = {
     tracer,
+    enterPhase(name: NativeProgressPhase) {
+      safely(() => {
+        if (!nativeProgressPhases.includes(name) || seenPhases.has(name)) return;
+        const startedMs = elapsed();
+        if (currentPhase)
+          completedPhases.push({
+            name: currentPhase.name,
+            elapsedMs: bounded(startedMs - currentPhase.startedMs),
+          });
+        seenPhases.add(name);
+        currentPhase = {name, startedMs};
+      });
+    },
     start(label: NativeProgressBoundary) {
       counters[label].started = bounded(counters[label].started + 1);
       const entry: BoundaryRecord = {
@@ -217,7 +248,7 @@ export const makeNativeProgressDiagnostics = (
     exitBody() {
       bodyExited = true;
       bodyEndedMs = elapsed();
-      bodyExitSnapshot = progress();
+      bodyExitSnapshot = progress(bodyEndedMs);
     },
     snapshot() {
       const at = elapsed();
@@ -245,6 +276,8 @@ export const makeNativeProgressDiagnostics = (
             ]),
           ),
           lastBoundary: bodyExitSnapshot.lastBoundary && {...bodyExitSnapshot.lastBoundary},
+          completedPhases: EffectArray.map(bodyExitSnapshot.completedPhases, phase => ({...phase})),
+          currentPhase: bodyExitSnapshot.currentPhase && {...bodyExitSnapshot.currentPhase},
         },
         totals: EffectRecord.fromEntries(
           EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
